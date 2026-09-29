@@ -1,0 +1,14 @@
+{
+  "name": "@subset/workspace",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "npm@10.8.2",
+  "engines": { "node": ">=20.19.0" },
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "dev": "npm run build --workspace=@subset/catalog && npm run dev --workspace=@subset/directory",
+    "check": "node scripts/check-workspaces.mjs && npm run build --workspace=@subset/catalog && npm run check --workspace=@subset/directory",
+    "build": "npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/directory"
+  }
+}
