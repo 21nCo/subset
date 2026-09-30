@@ -1,4 +1,5 @@
 @testable import CaptureCore
+import ApplicationServices
 import XCTest
 
 private final class DeliveryCount: @unchecked Sendable {
@@ -52,14 +53,50 @@ final class CaptureCoreTests: XCTestCase {
                                                          document: nil, focusedElement: 50, selectedTabs: [71], webAreas: [90])
         let changedPage = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
                                                           document: nil, focusedElement: 50, selectedTabs: [70], webAreas: [91])
-        for current in [changedWindow, changedTab, changedPage] {
+        let addedDocument = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
+                                                            document: "file:///fixture", focusedElement: 50,
+                                                            selectedTabs: [70], webAreas: [90])
+        for current in [changedWindow, changedTab, changedPage, addedDocument] {
             let result = CaptureCollector.checkedSource(text, initial: original, current: current)
             XCTAssertEqual(result.state, .readFailed)
             XCTAssertNil(result.text)
             XCTAssertNil(result.windowTitle)
         }
+        let missingFocus = CaptureCollector.checkedSource(text, initial: original, current: nil)
+        XCTAssertEqual(missingFocus.state, .readFailed)
+        XCTAssertNil(missingFocus.text)
+        XCTAssertNil(missingFocus.windowTitle)
+        let lostDocument = CaptureCollector.checkedSource(text, initial: addedDocument, current: original)
+        XCTAssertEqual(lostDocument.state, .readFailed)
+        XCTAssertNil(lostDocument.text)
         XCTAssertEqual(CaptureCollector.checkedSource(text, initial: original, current: original).text,
                        "prior tab private text")
+    }
+
+    func testUnavailableFocusedWindowNeverFallsBackToBackgroundWindowsOrApplicationRoot() {
+        let background = AXUIElementCreateApplication(43)
+        let otherBackground = AXUIElementCreateApplication(44)
+        let windows: CFArray = [background, otherBackground] as CFArray
+        var requestedWindows = false
+        let unavailable = CaptureCollector.verifiedFocusedWindow { name in
+            if name == (kAXWindowsAttribute as String) {
+                requestedWindows = true
+                return windows
+            }
+            return nil
+        }
+        XCTAssertNil(unavailable)
+        XCTAssertFalse(requestedWindows)
+
+        let invalid = CaptureCollector.verifiedFocusedWindow { name in
+            name == (kAXFocusedWindowAttribute as String) ? "not an AX window" as CFString : nil
+        }
+        XCTAssertNil(invalid)
+        let focused = CaptureCollector.verifiedFocusedWindow { name in
+            name == (kAXFocusedWindowAttribute as String) ? background : nil
+        }
+        XCTAssertNotNil(focused)
+        XCTAssertEqual(CFHash(focused!), CFHash(background))
     }
 
     func testMenuRunnerReturnsOnDeadlineWithoutPublishingLateText() {

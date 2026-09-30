@@ -207,7 +207,9 @@ public enum CaptureCollector {
             return failed(app, "Accessibility request timed out")
         }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
-        let target = captureWindow(root, deadline: deadline)
+        guard let target = captureWindow(root, deadline: deadline) else {
+            return failed(app, "Focused Accessibility window unavailable")
+        }
         let title = stringAttribute(target, kAXTitleAttribute as String, deadline: deadline)
         let document = stringAttribute(target, kAXDocumentAttribute as String, deadline: deadline)
         let source = sourceIdentity(root: root, target: target, app: app, title: title,
@@ -216,10 +218,12 @@ public enum CaptureCollector {
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let currentWindow = captureWindow(root, deadline: deadline)
-        let current = sourceIdentity(root: root, target: currentWindow, app: app,
-                                     title: stringAttribute(currentWindow, kAXTitleAttribute as String, deadline: deadline),
-                                     document: stringAttribute(currentWindow, kAXDocumentAttribute as String, deadline: deadline),
-                                     deadline: deadline)
+        let current = currentWindow.map { window in
+            sourceIdentity(root: root, target: window, app: app,
+                           title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
+                           document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
+                           deadline: deadline)
+        }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let state = stateForText(extraction.text)
         let result = CaptureResult(state: state, applicationName: app.name, bundleIdentifier: app.bundleID,
@@ -230,8 +234,8 @@ public enum CaptureCollector {
     }
 
     static func checkedSource(_ result: CaptureResult, initial: SourceIdentity,
-                              current: SourceIdentity) -> CaptureResult {
-        guard initial == current else {
+                              current: SourceIdentity?) -> CaptureResult {
+        guard let current, initial == current else {
             return CaptureResult(state: .readFailed, applicationName: result.applicationName,
                                  bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier,
                                  error: "Foreground window or tab changed during capture")
@@ -256,12 +260,15 @@ public enum CaptureCollector {
         attribute(element, name, deadline: deadline) as? String
     }
 
-    private static func captureWindow(_ root: AXUIElement, deadline: Deadline) -> AXUIElement {
-        if let focused = attribute(root, kAXFocusedWindowAttribute as String, deadline: deadline),
-           CFGetTypeID(focused) == AXUIElementGetTypeID() {
-            return focused as! AXUIElement
-        }
-        return (attribute(root, kAXWindowsAttribute as String, deadline: deadline) as? [AXUIElement])?.first ?? root
+    private static func captureWindow(_ root: AXUIElement, deadline: Deadline) -> AXUIElement? {
+        verifiedFocusedWindow { attribute(root, $0, deadline: deadline) }
+    }
+
+    // AXWindows contains background windows and its order does not identify the foreground source.
+    static func verifiedFocusedWindow(_ readAttribute: (String) -> CFTypeRef?) -> AXUIElement? {
+        guard let focused = readAttribute(kAXFocusedWindowAttribute as String),
+              CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        return (focused as! AXUIElement)
     }
 
     private static func sourceIdentity(root: AXUIElement, target: AXUIElement, app: Foreground,
