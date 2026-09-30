@@ -57,20 +57,49 @@ final class CaptureCoreTests: XCTestCase {
                                                             document: "file:///fixture", focusedElement: 50,
                                                             selectedTabs: [70], webAreas: [90])
         for current in [changedWindow, changedTab, changedPage, addedDocument] {
-            let result = CaptureCollector.checkedSource(text, initial: original, current: current)
+            let result = CaptureCollector.checkedCapture(text, initial: original, current: current,
+                                                         confirmation: text.text, final: current)
             XCTAssertEqual(result.state, .readFailed)
             XCTAssertNil(result.text)
             XCTAssertNil(result.windowTitle)
         }
-        let missingFocus = CaptureCollector.checkedSource(text, initial: original, current: nil)
+        let missingFocus = CaptureCollector.checkedCapture(text, initial: original, current: nil,
+                                                           confirmation: text.text, final: nil)
         XCTAssertEqual(missingFocus.state, .readFailed)
         XCTAssertNil(missingFocus.text)
         XCTAssertNil(missingFocus.windowTitle)
-        let lostDocument = CaptureCollector.checkedSource(text, initial: addedDocument, current: original)
+        let lostDocument = CaptureCollector.checkedCapture(text, initial: addedDocument, current: original,
+                                                           confirmation: text.text, final: original)
         XCTAssertEqual(lostDocument.state, .readFailed)
         XCTAssertNil(lostDocument.text)
-        XCTAssertEqual(CaptureCollector.checkedSource(text, initial: original, current: original).text,
+        XCTAssertEqual(CaptureCollector.checkedCapture(text, initial: original, current: original,
+                                                       confirmation: text.text, final: original).text,
                        "prior tab private text")
+    }
+
+    func testUnavailableMetadataSameWindowNavigationRejectsPriorPageText() {
+        let sameOpaqueSource = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: nil,
+                                                               document: nil, focusedElement: nil,
+                                                               selectedTabs: [], webAreas: [])
+        let priorPage = CaptureResult(state: .available, applicationName: "Browser",
+                                      bundleIdentifier: "example.browser", processIdentifier: 42,
+                                      text: "prior page private text")
+        let changed = CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
+                                                      current: sameOpaqueSource,
+                                                      confirmation: "new page text", final: sameOpaqueSource)
+        XCTAssertEqual(changed.state, .readFailed)
+        XCTAssertNil(changed.text)
+        XCTAssertNil(changed.windowTitle)
+
+        let unreadable = CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
+                                                         current: sameOpaqueSource,
+                                                         confirmation: nil, final: sameOpaqueSource)
+        XCTAssertEqual(unreadable.state, .readFailed)
+        XCTAssertNil(unreadable.text)
+        XCTAssertEqual(CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
+                                                       current: sameOpaqueSource,
+                                                       confirmation: priorPage.text, final: sameOpaqueSource).state,
+                       .available)
     }
 
     func testUnavailableFocusedWindowNeverFallsBackToBackgroundWindowsOrApplicationRoot() {

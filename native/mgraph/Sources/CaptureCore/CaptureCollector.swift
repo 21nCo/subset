@@ -224,21 +224,36 @@ public enum CaptureCollector {
                            document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
                            deadline: deadline)
         }
+        // AX can reuse a window, tab, and web-area element across a navigation.
+        // Read the current focused window again so missing source attributes cannot
+        // make text from the preceding page look current.
+        let confirmation = currentWindow.map { extractText(from: $0, deadline: deadline).text }
+        let finalWindow = captureWindow(root, deadline: deadline)
+        let final = finalWindow.map { window in
+            sourceIdentity(root: root, target: window, app: app,
+                           title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
+                           document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
+                           deadline: deadline)
+        }
+        if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let state = stateForText(extraction.text)
         let result = CaptureResult(state: state, applicationName: app.name, bundleIdentifier: app.bundleID,
                                    processIdentifier: app.pid, windowTitle: title, documentURL: document,
                                    text: extraction.text.isEmpty ? nil : extraction.text,
                                    error: extraction.text.isEmpty ? "No readable text in the Accessibility tree" : nil)
-        return checkedSource(result, initial: source, current: current)
+        return checkedCapture(result, initial: source, current: current,
+                              confirmation: confirmation, final: final)
     }
 
-    static func checkedSource(_ result: CaptureResult, initial: SourceIdentity,
-                              current: SourceIdentity?) -> CaptureResult {
-        guard let current, initial == current else {
+    static func checkedCapture(_ result: CaptureResult, initial: SourceIdentity,
+                               current: SourceIdentity?, confirmation: String?,
+                               final: SourceIdentity?) -> CaptureResult {
+        guard let current, let final, initial == current, initial == final,
+              let confirmation, result.text == (confirmation.isEmpty ? nil : confirmation) else {
             return CaptureResult(state: .readFailed, applicationName: result.applicationName,
                                  bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier,
-                                 error: "Foreground window or tab changed during capture")
+                                 error: "Foreground source or content changed during capture")
         }
         return result
     }
