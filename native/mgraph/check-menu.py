@@ -15,6 +15,17 @@ binary = bundle / "Contents/MacOS/MGraphCapture"
 marker = "MGRAPH MENU FIXTURE Delta Echo Foxtrot"
 
 
+try:
+    automation = subprocess.run(
+        ["osascript", "-e", 'tell application "System Events" to get count of menu bar items of menu bar 1 of process "Finder"'],
+        capture_output=True, text=True, timeout=10,
+    )
+except subprocess.TimeoutExpired:
+    sys.exit("System Events access timed out before opening menu fixture")
+if automation.returncode:
+    sys.exit(f"System Events access required before opening menu fixture: {automation.stderr.strip()}")
+
+
 with tempfile.TemporaryDirectory(prefix="mgraph-menu-check-") as temporary:
     fixture = pathlib.Path(temporary) / f"MGraph Menu Fixture {uuid.uuid4().hex[:8]}.txt"
     fixture.write_text(marker + "\n")

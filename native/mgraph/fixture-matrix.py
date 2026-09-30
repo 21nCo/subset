@@ -44,6 +44,17 @@ return "not-focused"'''
     return result.returncode == 0 and result.stdout.strip() == "closed"
 
 
+try:
+    automation = subprocess.run(
+        ["osascript", "-e", 'tell application "System Events" to get count of menu bar items of menu bar 1 of process "Finder"'],
+        capture_output=True, text=True, timeout=10,
+    )
+except subprocess.TimeoutExpired:
+    sys.exit("System Events access timed out before opening fixtures")
+if automation.returncode:
+    sys.exit(f"System Events access required before opening fixtures: {automation.stderr.strip()}")
+
+
 with tempfile.TemporaryDirectory(prefix="mgraph-fixtures-") as temporary:
     folder = pathlib.Path(temporary)
     fixture_id = uuid.uuid4().hex[:8]
