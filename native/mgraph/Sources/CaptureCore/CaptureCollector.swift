@@ -37,6 +37,28 @@ public struct CaptureResult: Codable, Sendable {
     }
 }
 
+// The menu can cancel a worker without stopping an AX call already in progress.
+// Only the most recent live request may present a result.
+@MainActor public final class CaptureRequestGate {
+    private var current: UUID?
+
+    public init() {}
+
+    public func begin() -> UUID {
+        let token = UUID()
+        current = token
+        return token
+    }
+
+    public func cancel() { current = nil }
+
+    public func finish(_ token: UUID) -> Bool {
+        guard current == token else { return false }
+        current = nil
+        return true
+    }
+}
+
 public enum CaptureCollector {
     public static let captureTimeout: TimeInterval = 4
     private static let captureQueue = DispatchQueue(label: "dev.subset.mgraph.ax-capture", qos: .userInitiated)

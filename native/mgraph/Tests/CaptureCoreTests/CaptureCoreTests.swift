@@ -14,6 +14,16 @@ private final class DeliveryCount: @unchecked Sendable {
 }
 
 final class CaptureCoreTests: XCTestCase {
+    @MainActor func testCancelledMenuCaptureCannotPresentLateResultOrReplaceNewCapture() {
+        let requests = CaptureRequestGate()
+        let cancelled = requests.begin()
+        requests.cancel() // Request Accessibility Access interrupts the worker.
+        let replacement = requests.begin()
+        XCTAssertFalse(requests.finish(cancelled))
+        XCTAssertTrue(requests.finish(replacement))
+        XCTAssertFalse(requests.finish(replacement))
+    }
+
     func testProtectedRolesAreExcluded() {
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXTextField", subrole: "AXSecureTextField"))
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXPasswordField", subrole: ""))

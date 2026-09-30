@@ -42,6 +42,7 @@ if let command = arguments.first {
         private var statusItem: NSMenuItem!
         private var captureItem: NSMenuItem!
         private var captureDeadline: CaptureCollector.Deadline?
+        private let captureRequests = CaptureRequestGate()
 
         func applicationDidFinishLaunching(_ notification: Notification) {
             item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -65,16 +66,21 @@ if let command = arguments.first {
         }
 
         @objc private func request() {
+            captureRequests.cancel()
             captureDeadline?.cancel()
+            captureDeadline = nil
+            captureItem.isEnabled = true
             CaptureCollector.requestAccess()
             refresh()
         }
 
         @objc private func capture() {
+            guard captureItem.isEnabled else { return }
+            let token = captureRequests.begin()
             captureItem.isEnabled = false
             statusItem.title = "Capturing foreground…"
             captureDeadline = CaptureCollector.captureForeground { [weak self] result in
-                guard let self else { return }
+                guard let self, self.captureRequests.finish(token) else { return }
                 self.captureDeadline = nil
                 self.captureItem.isEnabled = true
                 NSApplication.shared.activate(ignoringOtherApps: true)
@@ -89,6 +95,7 @@ if let command = arguments.first {
         }
 
         @objc private func quit() {
+            captureRequests.cancel()
             captureDeadline?.cancel()
             NSApplication.shared.terminate(nil)
         }
