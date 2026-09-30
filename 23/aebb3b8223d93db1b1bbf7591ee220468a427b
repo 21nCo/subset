@@ -1,0 +1,33 @@
+README.md
+  s_db4f86e03ac2c7::t_2c4bf0181a0013 59
+native/mgraph/.gitignore
+  s_db4f86e03ac2c7::t_2617a843b61a86 1-2
+native/mgraph/Info.plist
+  s_db4f86e03ac2c7::t_063d52f6c03734 1-15
+native/mgraph/Package.swift
+  s_db4f86e03ac2c7::t_85f0a45396c0d1 1-13
+native/mgraph/Sources/CaptureCore/CaptureCollector.swift
+  s_db4f86e03ac2c7::t_bedbe20132b5c4 1-141
+native/mgraph/Sources/MGraphCapture/main.swift
+  s_db4f86e03ac2c7::t_2c16a9e7bc752e 1-83
+native/mgraph/Tests/CaptureCoreTests/CaptureCoreTests.swift
+  s_db4f86e03ac2c7::t_52171fb3e1a625 1-15
+native/mgraph/check-menu.py
+  s_db4f86e03ac2c7::t_72d7b3f73614ba 1-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "23aebb3b8223d93db1b1bbf7591ee220468a427b",
+  "prompts": {},
+  "sessions": {
+    "s_db4f86e03ac2c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ed67-dc02-7682-8353-3dda992d0ce0",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
