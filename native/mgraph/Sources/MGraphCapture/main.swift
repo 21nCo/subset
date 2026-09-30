@@ -10,7 +10,13 @@ private func printJSON(_ result: CaptureResult) {
     print(line)
 }
 
-let arguments = Array(CommandLine.arguments.dropFirst())
+var arguments = Array(CommandLine.arguments.dropFirst())
+// LaunchServices checks tag only their own process so a timeout cannot kill an
+// unrelated, preexisting M Graph instance.
+if arguments.count >= 2, arguments[arguments.count - 2] == "--invocation-id",
+   UUID(uuidString: arguments.last!) != nil {
+    arguments.removeLast(2)
+}
 if let command = arguments.first {
     guard arguments.count == 1 else {
         fputs("Usage: MGraphCapture [status|request-access|capture]\n", stderr)
@@ -34,6 +40,8 @@ if let command = arguments.first {
     @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
         private var item: NSStatusItem!
         private var statusItem: NSMenuItem!
+        private var captureItem: NSMenuItem!
+        private var captureDeadline: CaptureCollector.Deadline?
 
         func applicationDidFinishLaunching(_ notification: Notification) {
             item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -42,7 +50,8 @@ if let command = arguments.first {
             statusItem = NSMenuItem(title: "Checking Accessibility…", action: nil, keyEquivalent: "")
             menu.addItem(statusItem)
             menu.addItem(NSMenuItem(title: "Request Accessibility Access", action: #selector(request), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Capture Foreground", action: #selector(capture), keyEquivalent: ""))
+            captureItem = NSMenuItem(title: "Capture Foreground", action: #selector(capture), keyEquivalent: "")
+            menu.addItem(captureItem)
             menu.addItem(.separator())
             menu.addItem(NSMenuItem(title: "Quit M Graph", action: #selector(quit), keyEquivalent: "q"))
             for entry in menu.items { entry.target = self }
@@ -56,23 +65,33 @@ if let command = arguments.first {
         }
 
         @objc private func request() {
+            captureDeadline?.cancel()
             CaptureCollector.requestAccess()
             refresh()
         }
 
         @objc private func capture() {
-            let result = CaptureCollector.captureForeground()
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = result.applicationName.map { "\($0) — \(result.state.rawValue)" } ?? result.state.rawValue
-            alert.informativeText = [result.windowTitle, result.documentURL, result.text, result.error]
-                .compactMap { $0 }.joined(separator: "\n\n")
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            refresh()
+            captureItem.isEnabled = false
+            statusItem.title = "Capturing foreground…"
+            captureDeadline = CaptureCollector.captureForeground { [weak self] result in
+                guard let self else { return }
+                self.captureDeadline = nil
+                self.captureItem.isEnabled = true
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = result.applicationName.map { "\($0) — \(result.state.rawValue)" } ?? result.state.rawValue
+                alert.informativeText = [result.windowTitle, result.documentURL, result.text, result.error]
+                    .compactMap { $0 }.joined(separator: "\n\n")
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                self.refresh()
+            }
         }
 
-        @objc private func quit() { NSApplication.shared.terminate(nil) }
+        @objc private func quit() {
+            captureDeadline?.cancel()
+            NSApplication.shared.terminate(nil)
+        }
     }
 
     let application = NSApplication.shared

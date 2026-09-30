@@ -4,11 +4,11 @@
 import argparse
 import json
 import pathlib
-import signal
 import subprocess
 import sys
 import tempfile
 import time
+from bundle_process import launched_bundle, owned_pids, wait_for_owned_pid
 
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -25,20 +25,18 @@ subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], chec
 links = subprocess.run(["otool", "-L", str(binary)], check=True, capture_output=True, text=True).stdout.splitlines()[1:]
 assert all(line.strip().startswith(("/System/Library/", "/usr/lib/")) for line in links), "Non-system runtime dependency"
 print("signature=valid runtime=system-only")
+malformed = subprocess.run([str(binary), "capture", "--invocation-id", "invalid"],
+                           capture_output=True, text=True, timeout=5)
+assert malformed.returncode == 64 and not malformed.stdout, "Malformed command was accepted"
 
 
 def bundled_command(command, folder):
     output = folder / f"{command}.json"
-    subprocess.run(["open", "-n", "-W", "-o", str(output), str(bundle), "--args", command],
-                   capture_output=True, text=True, timeout=20)
+    with launched_bundle(bundle, (command,), output=output, allowed_returncodes=(0, 1, 2)):
+        pass
     if not output.exists():
         raise RuntimeError(f"LaunchServices produced no output for {command}")
     return json.loads(output.read_text())
-
-
-def running_pids():
-    process = subprocess.run(["pgrep", "-f", str(binary)], capture_output=True, text=True)
-    return {int(pid) for pid in process.stdout.split()}
 
 
 with tempfile.TemporaryDirectory(prefix="mgraph-native-check-") as temporary:
@@ -49,23 +47,11 @@ with tempfile.TemporaryDirectory(prefix="mgraph-native-check-") as temporary:
         assert status["state"] == args.expect_state, f"Expected {args.expect_state}, got {status['state']}"
     print(f"bundle_permission={status['state']}")
 
-    before = running_pids()
-    subprocess.run(["open", "-n", str(bundle)], check=True, capture_output=True)
-    time.sleep(2)
-    launched = running_pids() - before
-    assert len(launched) == 1, f"Expected one new app process, got {launched}"
-    pid = launched.pop()
-    try:
-        subprocess.run(["kill", "-TERM", str(pid)], check=True)
-        for _ in range(30):
-            if pid not in running_pids():
-                break
-            time.sleep(0.1)
-        else:
-            raise AssertionError("App did not stop")
-    finally:
-        if pid in running_pids():
-            subprocess.run(["kill", "-KILL", str(pid)], check=False)
+    with launched_bundle(bundle, wait=False) as invocation:
+        pid = wait_for_owned_pid(bundle, invocation)
+        assert pid in owned_pids(binary, invocation)
+        time.sleep(0.5)
+    assert pid not in owned_pids(binary, invocation), "App did not stop"
     print("bundle_startup_shutdown=passed")
 
     capture = bundled_command("capture", folder)
