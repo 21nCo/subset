@@ -47,6 +47,18 @@ public enum CaptureCollector {
         let bundleID: String?
     }
 
+    // AX window elements identify separate windows even when their titles match.
+    // Selected tabs and focused elements distinguish sources inside one window.
+    struct SourceIdentity: Equatable {
+        let pid: pid_t
+        let window: CFHashCode
+        let title: String?
+        let document: String?
+        let focusedElement: CFHashCode?
+        let selectedTabs: [CFHashCode]
+        let webAreas: [CFHashCode]
+    }
+
     // The lock also prevents a late AX reply from publishing text after a deadline.
     public final class Deadline: @unchecked Sendable {
         private let lock = NSLock()
@@ -195,20 +207,36 @@ public enum CaptureCollector {
             return failed(app, "Accessibility request timed out")
         }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
-        let focused = attribute(root, kAXFocusedWindowAttribute as String, deadline: deadline)
-        let windows = attribute(root, kAXWindowsAttribute as String, deadline: deadline) as? [AXUIElement]
-        let focusedElement = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
-        let target = focusedElement ?? windows?.first ?? root
+        let target = captureWindow(root, deadline: deadline)
         let title = stringAttribute(target, kAXTitleAttribute as String, deadline: deadline)
         let document = stringAttribute(target, kAXDocumentAttribute as String, deadline: deadline)
+        let source = sourceIdentity(root: root, target: target, app: app, title: title,
+                                    document: document, deadline: deadline)
         let extraction = extractText(from: target, deadline: deadline)
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
+        let currentWindow = captureWindow(root, deadline: deadline)
+        let current = sourceIdentity(root: root, target: currentWindow, app: app,
+                                     title: stringAttribute(currentWindow, kAXTitleAttribute as String, deadline: deadline),
+                                     document: stringAttribute(currentWindow, kAXDocumentAttribute as String, deadline: deadline),
+                                     deadline: deadline)
+        if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let state = stateForText(extraction.text)
-        return CaptureResult(state: state, applicationName: app.name, bundleIdentifier: app.bundleID,
-                             processIdentifier: app.pid, windowTitle: title, documentURL: document,
-                             text: extraction.text.isEmpty ? nil : extraction.text,
-                             error: extraction.text.isEmpty ? "No readable text in the Accessibility tree" : nil)
+        let result = CaptureResult(state: state, applicationName: app.name, bundleIdentifier: app.bundleID,
+                                   processIdentifier: app.pid, windowTitle: title, documentURL: document,
+                                   text: extraction.text.isEmpty ? nil : extraction.text,
+                                   error: extraction.text.isEmpty ? "No readable text in the Accessibility tree" : nil)
+        return checkedSource(result, initial: source, current: current)
+    }
+
+    static func checkedSource(_ result: CaptureResult, initial: SourceIdentity,
+                              current: SourceIdentity) -> CaptureResult {
+        guard initial == current else {
+            return CaptureResult(state: .readFailed, applicationName: result.applicationName,
+                                 bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier,
+                                 error: "Foreground window or tab changed during capture")
+        }
+        return result
     }
 
     static func stateForText(_ text: String) -> CaptureState {
@@ -226,6 +254,47 @@ public enum CaptureCollector {
 
     private static func stringAttribute(_ element: AXUIElement, _ name: String, deadline: Deadline) -> String? {
         attribute(element, name, deadline: deadline) as? String
+    }
+
+    private static func captureWindow(_ root: AXUIElement, deadline: Deadline) -> AXUIElement {
+        if let focused = attribute(root, kAXFocusedWindowAttribute as String, deadline: deadline),
+           CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            return focused as! AXUIElement
+        }
+        return (attribute(root, kAXWindowsAttribute as String, deadline: deadline) as? [AXUIElement])?.first ?? root
+    }
+
+    private static func sourceIdentity(root: AXUIElement, target: AXUIElement, app: Foreground,
+                                       title: String?, document: String?, deadline: Deadline) -> SourceIdentity {
+        let focused = attribute(root, kAXFocusedUIElementAttribute as String, deadline: deadline)
+        let focusedID = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? CFHash($0) : nil }
+        let content = activeContent(in: target, deadline: deadline)
+        return SourceIdentity(pid: app.pid, window: CFHash(target), title: title, document: document,
+                              focusedElement: focusedID, selectedTabs: content.tabs, webAreas: content.webAreas)
+    }
+
+    private static func activeContent(in root: AXUIElement, deadline: Deadline) -> (tabs: [CFHashCode], webAreas: [CFHashCode]) {
+        var pending: [(AXUIElement, Int)] = [(root, 0)]
+        var index = 0
+        var seen = Set<CFHashCode>()
+        var selected: [CFHashCode] = []
+        var webAreas: [CFHashCode] = []
+        while index < pending.count && index < 80 && !deadline.expired {
+            let (element, depth) = pending[index]
+            index += 1
+            guard seen.insert(CFHash(element)).inserted else { continue }
+            let role = stringAttribute(element, kAXRoleAttribute as String, deadline: deadline)
+            if role == (kAXTabGroupRole as String) {
+                if let tabs = attribute(element, kAXSelectedChildrenAttribute as String, deadline: deadline) as? [AXUIElement] {
+                    selected.append(contentsOf: tabs.map(CFHash))
+                }
+            }
+            if role == "AXWebArea" { webAreas.append(CFHash(element)) }
+            if depth < 5, let children = attribute(element, kAXChildrenAttribute as String, deadline: deadline) as? [AXUIElement] {
+                pending.append(contentsOf: children.prefix(30).map { ($0, depth + 1) })
+            }
+        }
+        return (selected, webAreas)
     }
 
     private static func extractText(from root: AXUIElement, deadline: Deadline) -> (text: String, visited: Int) {
