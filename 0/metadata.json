@@ -1,0 +1,99 @@
+{
+  "cli_version": "0.11.3",
+  "checkpoint_id": "01M3QZZGJ45DCER5TRDP8NVM1Z",
+  "session_id": "01a0ed67-dc02-7682-8353-3dda992d0ce0",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-30T01:48:31.88653Z",
+  "branch": "linear/set-4",
+  "checkpoints_count": 4,
+  "save_step_count": 4,
+  "files_touched": [
+    "README.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-sol",
+  "turn_id": "510e74d23e25",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 600326,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 31830528,
+    "output_tokens": 113013,
+    "api_call_count": 254,
+    "subagent_tokens_complete": true
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-30T01:48:31.801883Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 593,
+    "human_modified": 4,
+    "human_removed": 0,
+    "total_committed": 593,
+    "total_lines_changed": 597,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 581,
+      "user_lines_removed": 9,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "README.md": 2,
+        "apps/directory/src/App.svelte": 1,
+        "apps/usage/index.html": 2,
+        "apps/usage/package.json": 14,
+        "apps/usage/server.mjs": 68,
+        "apps/usage/src/App.svelte": 42,
+        "apps/usage/src/main.ts": 4,
+        "apps/usage/tsconfig.json": 4,
+        "apps/usage/vite.config.ts": 4,
+        "docs/architecture.md": 3,
+        "package-lock.json": 50,
+        "package.json": 2,
+        "packages/catalog/src/index.ts": 1,
+        "packages/usage/README.md": 32,
+        "packages/usage/package.json": 18,
+        "packages/usage/src/UsageDashboard.svelte": 81,
+        "packages/usage/src/codex.ts": 118,
+        "packages/usage/src/index.ts": 55,
+        "packages/usage/test/codex.test.mjs": 66,
+        "packages/usage/tsconfig.json": 14
+      },
+      "user_removed_per_file": {
+        "README.md": 2,
+        "apps/directory/src/App.svelte": 1,
+        "docs/architecture.md": 3,
+        "package.json": 2,
+        "packages/catalog/src/index.ts": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 581,
+      "agent_lines_removed": 9
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 581,
+      "agent_lines_removed": 9
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 581,
+      "agent_lines_removed": 9
+    }
+  ]
+}

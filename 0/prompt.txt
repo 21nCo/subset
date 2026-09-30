@@ -1,0 +1,47 @@
+$use-skillplane work linear issue SET-1
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"OpenRouter credits (Recommended)","question":"SET-1 source: should the first live connector use OpenRouter account credits via its documented management API, with a separately authorized management key held by the local runtime? Its balance is prepaid API credit, not a coding-agent subscription quota. If you prefer another provider, name it and the approved credential path.","questionItemId":"[\"request_user_input_async\",\"call_k3PyCZYJSgp0vp1UMpjxZlW7\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"Outright agent host (Recommended)","question":"Which 21n agent host should validate the registered interactive view first?","questionItemId":"[\"request_user_input_async\",\"call_k3PyCZYJSgp0vp1UMpjxZlW7\",1]"}]
+</send_user_message_question_reply>
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"Use clean worktree (Recommended)","question":"Outright's current checkout has unrelated dirty changes. May I create an isolated clean worktree for the SET-1 Outright embedding, while leaving that checkout untouched?","questionItemId":"[\"request_user_input_async\",\"call_k3PyCZYJSgp0vp1UMpjxZlW7\",2]"}]
+</send_user_message_question_reply>
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"OpenRouter key status (Recommended)","question":"Correction to the source choice: may SET-1 use OpenRouter’s documented GET /api/v1/key with a separately authorized ordinary API key held by the local runtime? This reports key usage and any configured spending limit; it does not report coding-agent subscription quota. If you want a different source, name it and its approved credential path.","questionItemId":"[\"request_user_input_async\",\"call_SuoyJsgqQLijLLdZEEymnbXn\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+no no no.. sorry I answered it wrong... why open router as first provider dude... we need codex (chatgpt sub)  with multiple accounts support as first provider for usage tracking
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"not yet","question":"For the live two-account check, do you already have two separate Codex home directories signed in to different ChatGPT accounts? Please give only their directory paths or say “not yet”; do not send tokens or auth files.","questionItemId":"[\"request_user_input_async\",\"REDACTED\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+How can I test it locally?
+
+---
+
+dude... I am asking as a user how can I test? not from the repo man
+
+---
+
+how to connect multiple chatgpt accounts and see usage? is this not built yet?
