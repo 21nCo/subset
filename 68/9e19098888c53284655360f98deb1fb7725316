@@ -1,0 +1,19 @@
+native/mgraph/README.md
+  s_ee5d9d808851a0::t_f3bd67c5f7fe20 41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "689e19098888c53284655360f98deb1fb7725316",
+  "prompts": {},
+  "sessions": {
+    "s_ee5d9d808851a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f1e3-16d3-72f2-af1e-998d62994d47",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
