@@ -1,0 +1,59 @@
+"""Contract checks for slow native alerts and fixture cleanup."""
+
+import contextlib
+import importlib.util
+import io
+import pathlib
+import subprocess
+import unittest
+from unittest.mock import patch
+
+
+SCRIPT = pathlib.Path(__file__).parent / "check-menu.py"
+spec = importlib.util.spec_from_file_location("check_menu", SCRIPT)
+check_menu = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check_menu)
+
+
+class MenuCheckTests(unittest.TestCase):
+    def test_alert_can_arrive_after_old_half_second_wait(self):
+        now = [0.0]
+
+        def read_alert():
+            text = "no-alert" if now[0] < 4.1 else check_menu.MARKER
+            return subprocess.CompletedProcess([], 0, text, "")
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        self.assertIn(check_menu.MARKER, check_menu.wait_for_capture_alert(
+            read_alert, clock=lambda: now[0], sleep=sleep))
+
+    def test_failed_fixture_close_makes_whole_menu_check_fail(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+
+        def apple_script(script):
+            text = check_menu.MARKER if "get value of every static text" in script else ""
+            return subprocess.CompletedProcess([], 0, text, "")
+
+        with patch.object(check_menu.subprocess, "run", return_value=success), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
+             patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
+             patch.object(check_menu, "owned_pids", return_value=set()), \
+             patch.object(check_menu, "apple_script", side_effect=apple_script), \
+             patch.object(check_menu, "close_fixture_window", return_value=False) as close, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(AssertionError, "fixture window was not closed"):
+                check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+            close.assert_called_once()
+
+    def test_close_requires_window_readback(self):
+        with patch.object(check_menu, "apple_script", return_value=subprocess.CompletedProcess(
+                [], 0, "still-open\n", "")) as run:
+            self.assertFalse(check_menu.close_fixture_window("MGraph Menu Fixture abc123"))
+            self.assertIn('if exists (first window whose name contains "MGraph Menu Fixture abc123")',
+                          run.call_args.args[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
