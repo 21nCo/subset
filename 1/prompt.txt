@@ -1,0 +1,36 @@
+what do you understand of https://www.hemory.com/, https://littlebird.ai/, https://goldfish.sh/
+
+How they read user screen, data etc and form memory graph, answer questions etc?
+
+Also check does any of these support bring your own model via chatgpt sub or openrouter etc
+
+---
+
+we want to build m graph - similar to little bird, goldfish - using accessibility APIs and creating a graph
+
+we want to use this core in memotron desktop app as well (see /Users/serro/Documents/dev/n/nucleus, /Users/serro/Documents/dev/n/agent/experiments/mgraph)
+
+we dont need an in built chat UI etc for m graph - we need to read and form the graph - and clusters, cluster groups etc similar to /Users/serro/Documents/dev/n/agent/experiments/mgraph
+
+
+and then expose the data via local MCP for now - to be used by any local agents user uses
+
+We should support bring your own model with open router as the starting point and then expand to use chatGPT subscription etc similar to aside.com
+
+How should we approach? any questions?
+
+---
+
+what do you mean by memotron entries as later source adaptor? memotron desktop app should pack the m graph service dude... not the other way around... and also in your plan is the m graph service packaged alongside memotron desktop app? cause we should ask memotron users to install another service just to access a feature... basically memotron will provide a feature to auto record memories
+
+---
+
+alright, we can figure out memotron bundling later - now how should we build m graph standalone service which should also be usable via memotron bundled?
+
+---
+
+alright $use-skillplane linear-backlog-architect
+
+---
+
+give me the url of linear issue... I am unable to find it in my linear
