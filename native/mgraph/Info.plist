@@ -3,6 +3,7 @@
 <plist version="1.0"><dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>MGraphCapture</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundleIdentifier</key><string>dev.subset.mgraph.capture</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>M Graph Capture</string>
@@ -11,5 +12,5 @@
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSAccessibilityUsageDescription</key><string>Read text from the foreground app when you choose Capture Foreground.</string>
+  <key>NSAccessibilityUsageDescription</key><string>Read text from the foreground app when you choose Capture Foreground or explicitly run the capture command.</string>
 </dict></plist>

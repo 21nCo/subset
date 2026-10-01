@@ -8,12 +8,21 @@ import subprocess
 import sys
 import tempfile
 import time
-from bundle_process import launched_bundle, owned_pids, wait_for_owned_pid
+from bundle_process import approve_cli_capture, launched_bundle, owned_pids, wait_for_owned_pid
 
 
-def bundled_command(bundle, command, folder):
+def canonical_bundle(path):
+    bundle = pathlib.Path(path).expanduser().resolve()
+    if bundle.name != "MGraphCapture.app":
+        raise ValueError("Expected a MGraphCapture.app bundle")
+    return bundle
+
+
+def bundled_command(bundle, command, folder, *, approve=False):
     output = folder / f"{command}.json"
-    with launched_bundle(bundle, (command,), output=output, allowed_returncodes=(0, 1, 2)):
+    output.unlink(missing_ok=True)
+    with launched_bundle(bundle, (command,), output=output, allowed_returncodes=(0, 1, 2),
+                         before_wait=approve_cli_capture if approve else None):
         pass
     if not output.exists():
         raise RuntimeError(f"LaunchServices produced no output for {command}")
@@ -35,10 +44,14 @@ def main():
                         default=pathlib.Path(__file__).parent / "dist/MGraphCapture.app")
     parser.add_argument("--expect-state", choices=("available", "permissionRequired"))
     args = parser.parse_args()
-    bundle = args.bundle
+    bundle = canonical_bundle(args.bundle)
     binary = bundle / "Contents/MacOS/MGraphCapture"
     if not binary.is_file():
         sys.exit(f"Build the app first: {pathlib.Path(__file__).parent / 'build-app.sh'}")
+    assert (bundle / "Contents/Resources/AppIcon.icns").is_file(), "Bundle icon missing"
+    icon = subprocess.run(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleIconFile",
+                           str(bundle / "Contents/Info.plist")], check=True, capture_output=True, text=True)
+    assert icon.stdout.strip() == "AppIcon.icns", "Bundle icon is not declared"
 
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
     links = subprocess.run(["otool", "-L", str(binary)], check=True, capture_output=True, text=True).stdout.splitlines()[1:]
@@ -63,7 +76,13 @@ def main():
         assert pid not in owned_pids(binary, invocation), "App did not stop"
         print("bundle_startup_shutdown=passed")
 
-        capture = bundled_command(bundle, "capture", folder)
+        if status["state"] == "available":
+            unapproved = bundled_command(bundle, "capture", folder)
+            assert unapproved["state"] == "readFailed" and not unapproved.get("text"), \
+                "CLI capture without fresh approval exposed text"
+            print("unapproved_cli_capture=denied")
+
+        capture = bundled_command(bundle, "capture", folder, approve=status["state"] == "available")
         validate_capture_state(capture, args.expect_state)
         print(f"capture_state={capture['state']} app={capture.get('bundleIdentifier')} characters={len(capture.get('text') or '')}")
 

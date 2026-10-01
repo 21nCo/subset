@@ -44,6 +44,44 @@ class BundleProcessTests(unittest.TestCase):
             run.return_value.stdout = output
             self.assertEqual(bundle_process.owned_pids(
                 pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"), "123"), {101})
+            self.assertEqual(run.call_args.kwargs["timeout"], 1)
+
+    def test_stalled_process_lookup_fails_within_cleanup_deadline(self):
+        with patch.object(bundle_process.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 1)) as run, \
+             patch.object(bundle_process.os, "kill") as kill:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                bundle_process.terminate_owned(pathlib.Path("/tmp/MGraphCapture"), "owned")
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.kwargs["timeout"], 1)
+            kill.assert_not_called()
+
+    def test_option_shaped_bundle_and_output_are_absolute_operands(self):
+        launcher = FakeLauncher(None)
+        launcher.communicate = lambda timeout: ("", "")
+        launcher.returncode = 0
+        with patch.object(bundle_process.subprocess, "Popen", return_value=launcher) as popen, \
+             patch.object(bundle_process, "terminate_owned"):
+            with bundle_process.launched_bundle(pathlib.Path("-bundle.app"), output=pathlib.Path("-output.json")):
+                pass
+        command = popen.call_args.args[0]
+        self.assertTrue(pathlib.Path(command[command.index("-o") + 1]).is_absolute())
+        self.assertTrue(pathlib.Path(command[command.index("--args") - 1]).is_absolute())
+
+    def test_consent_click_targets_only_the_owned_process(self):
+        with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+             patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 [], 0, "approved\n", "")) as run:
+            bundle_process.approve_cli_capture("invocation", pathlib.Path(
+                "/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"))
+        self.assertIn("unix id is 4242", run.call_args.args[0][2])
+
+    def test_revoked_capture_exits_before_consent_without_masking_json(self):
+        with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+             patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 [], 0, "no-consent-alert\n", "")), \
+             patch.object(bundle_process, "owned_pids", return_value=set()):
+            bundle_process.approve_cli_capture("invocation", pathlib.Path(
+                "/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"))
 
     def test_timeout_and_interruption_terminate_only_invocation(self):
         for error in (subprocess.TimeoutExpired("open", 0.01), KeyboardInterrupt(), "sigterm"):
@@ -59,7 +97,7 @@ class BundleProcessTests(unittest.TestCase):
                     self.assertTrue(launcher.terminated)
                     marker = popen.call_args.args[0][-1]
                     terminate.assert_called_once_with(
-                        pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"), marker)
+                        pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture").resolve(), marker)
 
     def test_real_cleanup_preserves_preexisting_instance(self):
         with tempfile.TemporaryDirectory() as temporary:

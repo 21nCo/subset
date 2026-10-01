@@ -39,9 +39,11 @@ tell application "System Events"
     tell process "TextEdit"
         if name of front window does not contain "{title}" then return "not-focused"
         keystroke "w" using command down
-        delay 0.1
-        if exists (first window whose name contains "{title}") then return "still-open"
-        return "closed"
+        repeat 20 times
+            if not (exists (first window whose name contains "{title}")) then return "closed"
+            delay 0.1
+        end repeat
+        return "still-open"
     end tell
 end tell'''
     result = apple_script(script)

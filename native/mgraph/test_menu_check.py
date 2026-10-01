@@ -29,6 +29,18 @@ class MenuCheckTests(unittest.TestCase):
         self.assertIn(check_menu.MARKER, check_menu.wait_for_capture_alert(
             read_alert, clock=lambda: now[0], sleep=sleep))
 
+    def test_alert_timeout_fails_closed(self):
+        now = [0.0]
+        with self.assertRaisesRegex(TimeoutError, "did not appear"):
+            check_menu.wait_for_capture_alert(
+                lambda: subprocess.CompletedProcess([], 0, "no-alert", ""),
+                clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def test_alert_read_error_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "Menu alert read failed: denied"):
+            check_menu.wait_for_capture_alert(
+                lambda: subprocess.CompletedProcess([], 1, "", "denied"))
+
     def test_failed_fixture_close_makes_whole_menu_check_fail(self):
         success = subprocess.CompletedProcess([], 0, "", "")
 
@@ -51,7 +63,8 @@ class MenuCheckTests(unittest.TestCase):
         with patch.object(check_menu, "apple_script", return_value=subprocess.CompletedProcess(
                 [], 0, "still-open\n", "")) as run:
             self.assertFalse(check_menu.close_fixture_window("MGraph Menu Fixture abc123"))
-            self.assertIn('if exists (first window whose name contains "MGraph Menu Fixture abc123")',
+            self.assertIn('repeat 20 times', run.call_args.args[0])
+            self.assertIn('if not (exists (first window whose name contains "MGraph Menu Fixture abc123"))',
                           run.call_args.args[0])
 
 

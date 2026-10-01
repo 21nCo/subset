@@ -10,6 +10,15 @@ private func printJSON(_ result: CaptureResult) {
     print(line)
 }
 
+@MainActor private final class ConsentTimeout: NSObject {
+    let alert: NSAlert
+    init(alert: NSAlert) { self.alert = alert }
+    @objc func expire() {
+        NSApplication.shared.abortModal()
+        alert.window.orderOut(nil)
+    }
+}
+
 var arguments = Array(CommandLine.arguments.dropFirst())
 // LaunchServices checks tag only their own process so a timeout cannot kill an
 // unrelated, preexisting M Graph instance.
@@ -29,7 +38,36 @@ if let command = arguments.first {
         CaptureCollector.requestAccess()
         printJSON(CaptureCollector.status())
     case "capture":
-        let result = CaptureCollector.captureForeground()
+        // A TCC grant applies to the whole signed app, including CLI launches.
+        // Require a fresh local confirmation so another process cannot silently
+        // launch the granted executable to read foreground text.
+        guard CaptureCollector.isTrusted() else {
+            printJSON(CaptureCollector.status())
+            exit(2)
+        }
+        let foreground = NSWorkspace.shared.frontmostApplication
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        application.finishLaunching()
+        application.activate(ignoringOtherApps: true)
+        let consent = NSAlert()
+        consent.messageText = "Allow foreground capture?"
+        consent.informativeText = "M Graph Capture will read the current foreground app once and write its result to the command output."
+        consent.addButton(withTitle: "Allow Capture")
+        consent.addButton(withTitle: "Cancel")
+        let timeout = ConsentTimeout(alert: consent)
+        let timer = Timer.scheduledTimer(timeInterval: 5, target: timeout,
+                                         selector: #selector(ConsentTimeout.expire), userInfo: nil, repeats: false)
+        RunLoop.main.add(timer, forMode: .modalPanel)
+        let approved = consent.runModal() == .alertFirstButtonReturn
+        timer.invalidate()
+        guard approved, let foreground else {
+            printJSON(CaptureResult(state: .readFailed, error: "Command capture was not approved"))
+            exit(2)
+        }
+        foreground.activate()
+        Thread.sleep(forTimeInterval: 0.15)
+        let result = CaptureCollector.captureForeground(expectedProcessIdentifier: foreground.processIdentifier)
         printJSON(result)
         if result.state != .available { exit(2) }
     default:

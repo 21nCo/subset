@@ -183,10 +183,13 @@ public enum CaptureCollector {
                              error: trusted ? nil : "Grant Accessibility access in System Settings > Privacy & Security > Accessibility.")
     }
 
-    public static func captureForeground() -> CaptureResult {
+    public static func captureForeground(expectedProcessIdentifier: pid_t? = nil) -> CaptureResult {
         guard isTrusted() else { return status() }
         guard let app = foreground() else {
             return CaptureResult(state: .noForegroundApplication, error: "No foreground application")
+        }
+        if let expectedProcessIdentifier, app.pid != expectedProcessIdentifier {
+            return failed(app, "Foreground application changed before capture")
         }
         let deadline = Deadline(seconds: captureTimeout)
         let result = runBounded(deadline: deadline, seconds: captureTimeout) {
@@ -236,11 +239,13 @@ public enum CaptureCollector {
         let document = stringAttribute(target, kAXDocumentAttribute as String, deadline: deadline)
         let source = sourceIdentity(root: root, target: target, app: app, title: title,
                                     document: document, deadline: deadline)
-        let extraction = extractText(from: target, deadline: deadline)
+        guard let source, let extraction = extractText(from: target, deadline: deadline) else {
+            return failed(app, "Accessibility tree exceeded the capture limit")
+        }
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let currentWindow = captureWindow(root, deadline: deadline)
-        let current = currentWindow.map { window in
+        let current = currentWindow.flatMap { window in
             sourceIdentity(root: root, target: window, app: app,
                            title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
                            document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
@@ -249,9 +254,9 @@ public enum CaptureCollector {
         // AX can reuse a window, tab, and web-area element across a navigation.
         // Read the current focused window again so missing source attributes cannot
         // make text from the preceding page look current.
-        let confirmation = currentWindow.map { extractText(from: $0, deadline: deadline).text }
+        let confirmation = currentWindow.flatMap { extractText(from: $0, deadline: deadline)?.text }
         let finalWindow = captureWindow(root, deadline: deadline)
-        let final = finalWindow.map { window in
+        let final = finalWindow.flatMap { window in
             sourceIdentity(root: root, target: window, app: app,
                            title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
                            document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
@@ -294,7 +299,41 @@ public enum CaptureCollector {
     }
 
     private static func stringAttribute(_ element: AXUIElement, _ name: String, deadline: Deadline) -> String? {
-        attribute(element, name, deadline: deadline) as? String
+        // AX has a range API for some text controls, but not for arbitrary
+        // scalar attributes (notably Chrome static text). Check the length
+        // immediately after the provider reply, before normalizing or copying.
+        guard let raw = attribute(element, name, deadline: deadline) as? String else { return nil }
+        if raw.utf16.count > 6000 {
+            deadline.cancel()
+            return nil
+        }
+        return raw
+    }
+
+    private static func textValue(_ element: AXUIElement, remaining: Int, deadline: Deadline) -> String? {
+        guard remaining > 0, !deadline.expired else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        var characterCount: CFTypeRef?
+        let countError = AXUIElementCopyAttributeValue(element,
+            kAXNumberOfCharactersAttribute as CFString, &characterCount)
+        let reportedCount = countError == .success ? (characterCount as? NSNumber)?.intValue : nil
+        // TextEdit can report a length; Safari and Firefox static text accept
+        // a bounded range without one. Chrome static text currently supports
+        // neither and requires the scalar fallback below.
+        let requested = min(remaining, max(0, reportedCount ?? remaining))
+        if requested > 0 {
+            var range = CFRange(location: 0, length: requested)
+            if let axRange = AXValueCreate(.cfRange, &range) {
+                var value: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(element,
+                    kAXStringForRangeParameterizedAttribute as CFString,
+                    axRange, &value) == .success, !deadline.expired,
+                    let text = value as? String, text.utf16.count <= remaining {
+                    return text
+                }
+            }
+        }
+        return stringAttribute(element, kAXValueAttribute as String, deadline: deadline)
     }
 
     private static func captureWindow(_ root: AXUIElement, deadline: Deadline) -> AXUIElement? {
@@ -309,15 +348,48 @@ public enum CaptureCollector {
     }
 
     private static func sourceIdentity(root: AXUIElement, target: AXUIElement, app: Foreground,
-                                       title: String?, document: String?, deadline: Deadline) -> SourceIdentity {
+                                       title: String?, document: String?, deadline: Deadline) -> SourceIdentity? {
         let focused = attribute(root, kAXFocusedUIElementAttribute as String, deadline: deadline)
         let focusedID = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? CFHash($0) : nil }
-        let content = activeContent(in: target, deadline: deadline)
+        guard let content = activeContent(in: target, deadline: deadline) else { return nil }
         return SourceIdentity(pid: app.pid, window: CFHash(target), title: title, document: document,
                               focusedElement: focusedID, selectedTabs: content.tabs, webAreas: content.webAreas)
     }
 
-    private static func activeContent(in root: AXUIElement, deadline: Deadline) -> (tabs: [CFHashCode], webAreas: [CFHashCode]) {
+    // AXUIElementCopyAttributeValue materializes an entire child array. Query its
+    // count first, then request only a bounded range. An oversized array fails
+    // closed because a source hidden after the range could invalidate identity.
+    private static func elements(_ element: AXUIElement, _ name: String, maxCount: Int,
+                                 deadline: Deadline) -> [AXUIElement]? {
+        guard !deadline.expired else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        return boundedElements(maxCount: maxCount, count: {
+            var count: CFIndex = 0
+            let error = AXUIElementGetAttributeValueCount(element, name as CFString, &count)
+            if error == .attributeUnsupported || error == .noValue { return 0 }
+            guard error == .success, !deadline.expired else { return nil }
+            return count
+        }, readRange: { requested in
+            var values: CFArray?
+            guard AXUIElementCopyAttributeValues(element, name as CFString, 0, requested, &values) == .success,
+                  !deadline.expired, let values else { return nil }
+            let array = values as [AnyObject]
+            guard array.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else { return nil }
+            return array.map { $0 as! AXUIElement }
+        })
+    }
+
+    // The injected count/range seam proves that a large provider array is
+    // rejected without invoking its potentially expensive range read.
+    static func boundedElements<T>(maxCount: Int, count: () -> Int?,
+                                   readRange: (Int) -> [T]?) -> [T]? {
+        guard let length = count(), length >= 0, length <= maxCount else { return nil }
+        guard length > 0 else { return [] }
+        guard let result = readRange(length), result.count == length else { return nil }
+        return result
+    }
+
+    private static func activeContent(in root: AXUIElement, deadline: Deadline) -> (tabs: [CFHashCode], webAreas: [CFHashCode])? {
         var pending: [(AXUIElement, Int)] = [(root, 0)]
         var index = 0
         var seen = Set<CFHashCode>()
@@ -329,19 +401,21 @@ public enum CaptureCollector {
             guard seen.insert(CFHash(element)).inserted else { continue }
             let role = stringAttribute(element, kAXRoleAttribute as String, deadline: deadline)
             if role == (kAXTabGroupRole as String) {
-                if let tabs = attribute(element, kAXSelectedChildrenAttribute as String, deadline: deadline) as? [AXUIElement] {
-                    selected.append(contentsOf: tabs.map(CFHash))
-                }
+                guard let tabs = elements(element, kAXSelectedChildrenAttribute as String,
+                                          maxCount: 30, deadline: deadline) else { return nil }
+                selected.append(contentsOf: tabs.map(CFHash))
             }
             if role == "AXWebArea" { webAreas.append(CFHash(element)) }
-            if depth < 5, let children = attribute(element, kAXChildrenAttribute as String, deadline: deadline) as? [AXUIElement] {
-                pending.append(contentsOf: children.prefix(30).map { ($0, depth + 1) })
+            if depth < 5 {
+                guard let children = elements(element, kAXChildrenAttribute as String,
+                                              maxCount: min(30, 80 - pending.count), deadline: deadline) else { return nil }
+                pending.append(contentsOf: children.map { ($0, depth + 1) })
             }
         }
         return (selected, webAreas)
     }
 
-    private static func extractText(from root: AXUIElement, deadline: Deadline) -> (text: String, visited: Int) {
+    private static func extractText(from root: AXUIElement, deadline: Deadline) -> (text: String, visited: Int)? {
         var queue: [(AXUIElement, Int)] = [(root, 0)]
         var index = 0
         var visited = Set<CFHashCode>()
@@ -362,15 +436,20 @@ public enum CaptureCollector {
             if shouldSkip(role: role, subrole: subrole) { continue }
 
             for key in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXValueAttribute as String] {
-                guard let raw = stringAttribute(element, key, deadline: deadline) else { continue }
+                let raw = key == (kAXValueAttribute as String)
+                    ? textValue(element, remaining: 6000 - length, deadline: deadline)
+                    : stringAttribute(element, key, deadline: deadline)
+                guard let raw else { continue }
                 let snippet = normalize(raw, remaining: 6000 - length)
                 if !snippet.isEmpty && seenText.insert(snippet).inserted {
                     snippets.append(snippet)
                     length += snippet.count
                 }
             }
-            if depth < 12, let children = attribute(element, kAXChildrenAttribute as String, deadline: deadline) as? [AXUIElement] {
-                queue.append(contentsOf: children.prefix(100).map { ($0, depth + 1) })
+            if depth < 12 {
+                guard let children = elements(element, kAXChildrenAttribute as String,
+                                              maxCount: min(100, 600 - queue.count), deadline: deadline) else { return nil }
+                queue.append(contentsOf: children.map { ($0, depth + 1) })
             }
         }
         return (String(snippets.joined(separator: "\n").prefix(6000)), count)
@@ -383,7 +462,24 @@ public enum CaptureCollector {
 
     public static func normalize(_ raw: String, remaining: Int) -> String {
         guard remaining > 0 else { return "" }
-        let compact = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        return String(compact.prefix(remaining)).trimmingCharacters(in: .whitespacesAndNewlines)
+        var compact = ""
+        var count = 0
+        var pendingSpace = false
+        for character in raw {
+            if character.isWhitespace {
+                if !compact.isEmpty { pendingSpace = true }
+                continue
+            }
+            if pendingSpace {
+                if count == remaining { break }
+                compact.append(" ")
+                count += 1
+                pendingSpace = false
+            }
+            if count == remaining { break }
+            compact.append(character)
+            count += 1
+        }
+        return compact
     }
 }

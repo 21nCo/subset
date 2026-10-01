@@ -18,6 +18,14 @@ def load_script(name, module_name):
 
 
 class CaptureBoundaryTests(unittest.TestCase):
+    def test_option_shaped_check_bundle_becomes_absolute_operand(self):
+        native = load_script("check-native.py", "check_native_option")
+        bundle = native.canonical_bundle(pathlib.Path("-option/MGraphCapture.app"))
+        self.assertTrue(bundle.is_absolute())
+        self.assertEqual(bundle.name, "MGraphCapture.app")
+        with self.assertRaisesRegex(ValueError, "Expected a MGraphCapture.app"):
+            native.canonical_bundle(pathlib.Path("-option.app"))
+
     def test_grant_revoked_between_status_and_capture_fails(self):
         native = load_script("check-native.py", "check_native")
         with self.assertRaisesRegex(AssertionError, "Grant was revoked"):
@@ -27,15 +35,12 @@ class CaptureBoundaryTests(unittest.TestCase):
     def test_dropped_matrix_close_does_not_report_closed(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix")
 
-        def dropped_close(command, **_kwargs):
-            script = command[2]
-            # The fixture still exists after Command-W. An unchecked command
-            # would claim success; readback must detect this state.
-            state = "still-open" if "exists (first window whose name contains" in script else "closed"
-            return subprocess.CompletedProcess(command, 0, state + "\n", "")
-
-        with patch.object(matrix.subprocess, "run", side_effect=dropped_close):
+        # The mock is the observed state after Command-W, independent of the
+        # AppleScript source text; a dropped close must fail the verdict.
+        with patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "still-open\n", "")) as run:
             self.assertFalse(matrix.close_fixture_window("TextEdit", "MGraph TextEdit Fixture test"))
+            self.assertIn('repeat 20 times', run.call_args.args[0][2])
 
 
 if __name__ == "__main__":

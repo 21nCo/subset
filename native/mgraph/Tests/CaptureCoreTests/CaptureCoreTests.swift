@@ -33,6 +33,20 @@ final class CaptureCoreTests: XCTestCase {
     func testTextNormalizationHasStrictLimit() {
         XCTAssertEqual(CaptureCollector.normalize("  Hello\n\tworld  ", remaining: 8), "Hello wo")
         XCTAssertEqual(CaptureCollector.normalize("secret", remaining: 0), "")
+        XCTAssertEqual(CaptureCollector.normalize(String(repeating: "x", count: 1_000_000), remaining: 3), "xxx")
+    }
+
+    func testOversizedAXArraysAreRejectedBeforeRangeRead() {
+        for limit in [30, 100] { // Identity and text traversals.
+            var read = false
+            let result: [Int]? = CaptureCollector.boundedElements(maxCount: limit, count: { limit + 1 },
+                                                                   readRange: { _ in read = true; return [1] })
+            XCTAssertNil(result)
+            XCTAssertFalse(read)
+        }
+        let shortRead: [Int]? = CaptureCollector.boundedElements(maxCount: 100, count: { 2 },
+                                                                 readRange: { _ in [1] })
+        XCTAssertNil(shortRead)
     }
 
     func testSlowCaptureIsBoundedAndLateTextIsDiscarded() {
