@@ -22,20 +22,37 @@ def bundled_command(bundle, command, folder, *, approve=False):
     output = folder / f"{command}.json"
     output.unlink(missing_ok=True)
     with launched_bundle(bundle, (command,), output=output, allowed_returncodes=(0, 1, 2),
-                         before_wait=approve_cli_capture if approve else None):
-        pass
+                         before_wait=approve_cli_capture if approve else None) as invocation:
+        if not invocation:
+            raise RuntimeError("LaunchServices invocation identity missing")
     if not output.exists():
         raise RuntimeError(f"LaunchServices produced no output for {command}")
-    return json.loads(output.read_text())
+    try:
+        result = json.loads(output.read_text())
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise RuntimeError(f"LaunchServices produced malformed {command} output") from error
+    if not isinstance(result, dict):
+        raise RuntimeError(f"LaunchServices produced non-object {command} output")
+    return result
 
 
 def validate_capture_state(capture, expected):
-    assert capture["state"] in ("available", "permissionRequired", "noForegroundApplication", "unsupportedApplication", "readFailed")
-    assert capture["state"] != "permissionRequired" or not capture.get("text"), "Denied capture exposed text"
+    require(isinstance(capture, dict), "Invalid capture result")
+    require(capture.get("state") in ("available", "permissionRequired", "noForegroundApplication",
+                                      "unsupportedApplication", "readFailed"), "Invalid capture state")
+    require(capture["state"] != "permissionRequired" or not capture.get("text"), "Denied capture exposed text")
+    require(capture["state"] == "available" or not capture.get("text"), "Failed capture exposed text")
     if expected == "permissionRequired":
-        assert capture["state"] == "permissionRequired", f"Denied capture returned {capture['state']}"
+        require(capture["state"] == "permissionRequired", f"Denied capture returned {capture['state']}")
     if expected == "available":
-        assert capture["state"] != "permissionRequired", "Grant was revoked before capture"
+        require(capture["state"] != "permissionRequired", "Grant was revoked before capture")
+        require(capture["state"] == "available" and bool(capture.get("text")),
+                f"Approved capture unavailable (state={capture['state']})")
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
 
 
 def main():
@@ -48,38 +65,39 @@ def main():
     binary = bundle / "Contents/MacOS/MGraphCapture"
     if not binary.is_file():
         sys.exit(f"Build the app first: {pathlib.Path(__file__).parent / 'build-app.sh'}")
-    assert (bundle / "Contents/Resources/AppIcon.icns").is_file(), "Bundle icon missing"
+    require((bundle / "Contents/Resources/AppIcon.icns").is_file(), "Bundle icon missing")
     icon = subprocess.run(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleIconFile",
                            str(bundle / "Contents/Info.plist")], check=True, capture_output=True, text=True)
-    assert icon.stdout.strip() == "AppIcon.icns", "Bundle icon is not declared"
+    require(icon.stdout.strip() == "AppIcon.icns", "Bundle icon is not declared")
 
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
     links = subprocess.run(["otool", "-L", str(binary)], check=True, capture_output=True, text=True).stdout.splitlines()[1:]
-    assert all(line.strip().startswith(("/System/Library/", "/usr/lib/")) for line in links), "Non-system runtime dependency"
+    require(all(line.strip().startswith(("/System/Library/", "/usr/lib/")) for line in links),
+            "Non-system runtime dependency")
     print("signature=valid runtime=system-only")
     malformed = subprocess.run([str(binary), "capture", "--invocation-id", "invalid"],
                                capture_output=True, text=True, timeout=5)
-    assert malformed.returncode == 64 and not malformed.stdout, "Malformed command was accepted"
+    require(malformed.returncode == 64 and not malformed.stdout, "Malformed command was accepted")
 
     with tempfile.TemporaryDirectory(prefix="mgraph-native-check-") as temporary:
         folder = pathlib.Path(temporary)
         status = bundled_command(bundle, "status", folder)
-        assert status["state"] in ("available", "permissionRequired")
+        require(status.get("state") in ("available", "permissionRequired"), "Invalid bundle permission state")
         if args.expect_state:
-            assert status["state"] == args.expect_state, f"Expected {args.expect_state}, got {status['state']}"
+            require(status["state"] == args.expect_state, f"Expected {args.expect_state}, got {status['state']}")
         print(f"bundle_permission={status['state']}")
 
         with launched_bundle(bundle, wait=False) as invocation:
             pid = wait_for_owned_pid(bundle, invocation)
-            assert pid in owned_pids(binary, invocation)
+            require(pid in owned_pids(binary, invocation), "Owned app process disappeared during startup")
             time.sleep(0.5)
-        assert pid not in owned_pids(binary, invocation), "App did not stop"
+        require(pid not in owned_pids(binary, invocation), "App did not stop")
         print("bundle_startup_shutdown=passed")
 
         if status["state"] == "available":
             unapproved = bundled_command(bundle, "capture", folder)
-            assert unapproved["state"] == "readFailed" and not unapproved.get("text"), \
-                "CLI capture without fresh approval exposed text"
+            require(unapproved.get("state") == "readFailed" and not unapproved.get("text"),
+                    "CLI capture without fresh approval exposed text")
             print("unapproved_cli_capture=denied")
 
         capture = bundled_command(bundle, "capture", folder, approve=status["state"] == "available")

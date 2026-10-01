@@ -1,6 +1,7 @@
 """Distinguish permission and fixture-cleanup transitions from false passes."""
 
 import importlib.util
+import contextlib
 import pathlib
 import subprocess
 import tempfile
@@ -32,7 +33,14 @@ class CaptureBoundaryTests(unittest.TestCase):
         native = load_script("check-native.py", "check_native")
         with self.assertRaisesRegex(AssertionError, "Grant was revoked"):
             native.validate_capture_state({"state": "permissionRequired", "text": None}, "available")
-        native.validate_capture_state({"state": "readFailed", "text": None}, "available")
+        with self.assertRaisesRegex(AssertionError, "Approved capture unavailable"):
+            native.validate_capture_state({"state": "readFailed", "text": None}, "available")
+        with self.assertRaisesRegex(AssertionError, "Denied capture exposed text"):
+            native.validate_capture_state({"state": "permissionRequired", "text": "exposed"},
+                                          "permissionRequired")
+        with self.assertRaisesRegex(AssertionError, "Failed capture exposed text"):
+            native.validate_capture_state({"state": "readFailed", "text": "exposed"}, "available")
+        native.validate_capture_state({"state": "available", "text": "fixture"}, "available")
 
     def test_dropped_matrix_close_does_not_report_closed(self):
         # The mock is the observed state after Command-W, independent of the
@@ -40,7 +48,47 @@ class CaptureBoundaryTests(unittest.TestCase):
         with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(
                 [], 0, "still-open\n", "")) as run:
             self.assertFalse(fixture_windows.close_fixture_window("TextEdit", "MGraph TextEdit Fixture abcdef12"))
-            self.assertIn('repeat 20 times', run.call_args.args[0][2])
+            self.assertIn('repeat 50 times', run.call_args.args[0][2])
+
+    def test_browser_selection_does_not_change_nonmatching_tabs(self):
+        with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "focused\n", "")) as run:
+            self.assertTrue(fixture_windows.focus_fixture_window(
+                "Google Chrome", "MGraph Capture Fixture abcdef12"))
+        script = run.call_args.args[0][2]
+        self.assertIn('if name of child contains fixtureTitle', script)
+        self.assertNotIn('keystroke "9"', script)
+
+    def test_browser_close_readback_checks_hidden_fixture_tab(self):
+        # A browser can switch to another tab after Command-W while the fixture
+        # tab remains. Window-title-only readback would incorrectly pass.
+        outcomes = ["closed\n", "exists\n", "closed\n", "exists\n"]
+        def hidden_tab(_command, **_kwargs):
+            return subprocess.CompletedProcess([], 0, outcomes.pop(0), "")
+        with patch.object(fixture_windows.subprocess, "run", side_effect=hidden_tab) as run:
+            self.assertFalse(fixture_windows.close_fixture_window(
+                "Google Chrome", "MGraph Capture Fixture abcdef12"))
+        self.assertEqual(run.call_count, 4)
+        script = run.call_args_list[0].args[0][2]
+        self.assertIn('get entire contents of remainingWindow', script)
+        self.assertIn('if name of child contains fixtureTitle then set fixtureStillOpen to true', script)
+        self.assertIn('return "read-error"', script)
+
+    def test_chrome_hidden_tab_can_be_found_when_ax_omits_it(self):
+        outcomes = ["absent\n", "exists\n"]
+        def hidden_tab(_command, **_kwargs):
+            return subprocess.CompletedProcess([], 0, outcomes.pop(0), "")
+        with patch.object(fixture_windows.subprocess, "run", side_effect=hidden_tab):
+            self.assertTrue(fixture_windows.fixture_window_exists(
+                "Google Chrome", "MGraph Capture Fixture abcdef12"))
+
+    def test_chrome_hidden_fixture_can_be_selected_without_touching_other_tabs(self):
+        title = "MGraph Capture Fixture abcdef12"
+        with patch.object(fixture_windows, "run_window_action", side_effect=[False, True]) as ax, \
+             patch.object(fixture_windows, "chrome_tab_action", return_value="selected") as chrome:
+            self.assertTrue(fixture_windows.focus_fixture_window("Google Chrome", title))
+        self.assertEqual(ax.call_count, 2)
+        chrome.assert_called_once_with(title, "select")
 
     def test_background_fixture_never_launches_capture_until_selected(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_background")
@@ -48,12 +96,59 @@ class CaptureBoundaryTests(unittest.TestCase):
              patch.object(matrix, "focus_fixture_window", return_value=False) as focus, \
              patch.object(matrix, "launched_bundle") as launch, \
              patch.object(matrix.time, "sleep"):
-            result = matrix.capture_fixture(pathlib.Path("bundle"), pathlib.Path(temporary),
-                                            "Google Chrome", "com.google.Chrome",
-                                            "MGraph Capture Fixture abcdef12")
-        self.assertIsNone(result)
+            with self.assertRaisesRegex(RuntimeError, "could not be focused"):
+                matrix.capture_fixture(pathlib.Path("bundle"), pathlib.Path(temporary),
+                                       "Google Chrome", "com.google.Chrome",
+                                       "MGraph Capture Fixture abcdef12")
         self.assertEqual(focus.call_count, 5)
         launch.assert_not_called()
+
+    def test_failed_open_does_not_claim_fixture_cleanup_failure(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_failed_open")
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 [], 1, "", "app unavailable")), \
+             patch.object(matrix, "fixture_window_exists", return_value=False), \
+             patch.object(matrix, "close_fixture_window") as close:
+            folder = pathlib.Path(temporary)
+            failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
+                                      folder / "fixture.txt", folder / "fixture.html",
+                                      "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
+        self.assertEqual(len(failures), 1)
+        self.assertIn("app unavailable", failures[0])
+        close.assert_not_called()
+
+    def test_partial_open_and_stalled_cleanup_report_both_failures(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_partial_open")
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix.subprocess, "run", side_effect=subprocess.TimeoutExpired("open", 20)), \
+             patch.object(matrix, "fixture_window_exists", return_value=True), \
+             patch.object(matrix, "close_fixture_window", side_effect=subprocess.TimeoutExpired("osascript", 5)):
+            folder = pathlib.Path(temporary)
+            failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
+                                      folder / "fixture.txt", folder / "fixture.html",
+                                      "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
+        self.assertEqual(len(failures), 2)
+        self.assertIn("transition or capture failed", failures[0])
+        self.assertIn("cleanup failed", failures[1])
+
+    def test_malformed_capture_output_is_a_per_app_failure(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_malformed")
+        def malformed(_bundle, _args, *, output, **_kwargs):
+            output.write_text("{")
+            return contextlib.nullcontext("owned")
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             patch.object(matrix, "focus_fixture_window", return_value=True), \
+             patch.object(matrix, "close_fixture_window", return_value=True), \
+             patch.object(matrix, "launched_bundle", side_effect=malformed), \
+             patch.object(matrix.time, "sleep"):
+            folder = pathlib.Path(temporary)
+            failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
+                                      folder / "fixture.txt", folder / "fixture.html",
+                                      "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
+        self.assertEqual(len(failures), 1)
+        self.assertIn("bundle output was malformed", failures[0])
 
 
 if __name__ == "__main__":

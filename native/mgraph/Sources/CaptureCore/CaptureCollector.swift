@@ -63,6 +63,10 @@ public enum CaptureCollector {
     public static let captureTimeout: TimeInterval = 4
     private static let captureQueue = DispatchQueue(label: "dev.subset.mgraph.ax-capture", qos: .userInitiated)
 
+    @MainActor public static func afterCaptureWorkerDrains(_ completion: @escaping @MainActor @Sendable () -> Void) {
+        captureQueue.async { DispatchQueue.main.async(execute: completion) }
+    }
+
     private struct Foreground: Sendable {
         let pid: pid_t
         let name: String?
@@ -262,6 +266,7 @@ public enum CaptureCollector {
                            document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
                            deadline: deadline)
         }
+        let finalText = finalWindow.flatMap { extractText(from: $0, deadline: deadline)?.text }
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let state = stateForText(extraction.text)
@@ -270,14 +275,16 @@ public enum CaptureCollector {
                                    text: extraction.text.isEmpty ? nil : extraction.text,
                                    error: extraction.text.isEmpty ? "No readable text in the Accessibility tree" : nil)
         return checkedCapture(result, initial: source, current: current,
-                              confirmation: confirmation, final: final)
+                              confirmation: confirmation, final: final, finalText: finalText)
     }
 
     static func checkedCapture(_ result: CaptureResult, initial: SourceIdentity,
                                current: SourceIdentity?, confirmation: String?,
-                               final: SourceIdentity?) -> CaptureResult {
+                               final: SourceIdentity?, finalText: String?) -> CaptureResult {
         guard let current, let final, initial == current, initial == final,
-              let confirmation, result.text == (confirmation.isEmpty ? nil : confirmation) else {
+              let confirmation, let finalText,
+              result.text == (confirmation.isEmpty ? nil : confirmation),
+              result.text == (finalText.isEmpty ? nil : finalText) else {
             return CaptureResult(state: .readFailed, applicationName: result.applicationName,
                                  bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier,
                                  error: "Foreground source or content changed during capture")
@@ -303,7 +310,7 @@ public enum CaptureCollector {
         // scalar attributes (notably Chrome static text). Check the length
         // immediately after the provider reply, before normalizing or copying.
         guard let raw = attribute(element, name, deadline: deadline) as? String else { return nil }
-        if raw.utf16.count > 6000 {
+        if (raw as NSString).length > 6000 {
             deadline.cancel()
             return nil
         }
@@ -328,7 +335,7 @@ public enum CaptureCollector {
                 if AXUIElementCopyParameterizedAttributeValue(element,
                     kAXStringForRangeParameterizedAttribute as CFString,
                     axRange, &value) == .success, !deadline.expired,
-                    let text = value as? String, text.utf16.count <= remaining {
+                    let text = value as? String, (text as NSString).length <= remaining {
                     return text
                 }
             }
@@ -431,7 +438,9 @@ public enum CaptureCollector {
             let identity = CFHash(element)
             guard visited.insert(identity).inserted else { continue }
             count += 1
-            let role = stringAttribute(element, kAXRoleAttribute as String, deadline: deadline) ?? ""
+            guard let role = roleForExtraction({
+                stringAttribute(element, kAXRoleAttribute as String, deadline: deadline)
+            }) else { continue }
             let subrole = stringAttribute(element, kAXSubroleAttribute as String, deadline: deadline) ?? ""
             if shouldSkip(role: role, subrole: subrole) { continue }
 
@@ -458,6 +467,12 @@ public enum CaptureCollector {
     public static func shouldSkip(role: String, subrole: String) -> Bool {
         let combined = "\(role) \(subrole)".lowercased()
         return combined.contains("secure") || combined.contains("password")
+    }
+
+    // A failed role read cannot establish that a value is not protected.
+    static func roleForExtraction(_ read: () -> String?) -> String? {
+        guard let role = read(), !role.isEmpty, !shouldSkip(role: role, subrole: "") else { return nil }
+        return role
     }
 
     public static func normalize(_ raw: String, remaining: Int) -> String {

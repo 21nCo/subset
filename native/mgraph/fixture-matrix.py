@@ -10,7 +10,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import LaunchInterrupted, approve_cli_capture, launched_bundle
-from fixture_windows import close_fixture_window, focus_fixture_window
+from fixture_windows import close_fixture_window, fixture_window_exists, focus_fixture_window
 
 
 bundle = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).parent / "dist/MGraphCapture.app"
@@ -53,20 +53,32 @@ def write_fixtures(folder):
 def capture_fixture(bundle, folder, app, bundle_id, title):
     output = folder / (app.replace(" ", "-") + ".json")
     result = None
+    focused = False
     for _ in range(5):
         output.unlink(missing_ok=True)
         if not focus_fixture_window(app, title):
             time.sleep(0.5)
             continue
+        focused = True
         time.sleep(0.5)
         with launched_bundle(bundle, ("capture",), output=output, allowed_returncodes=(0, 1, 2),
-                             before_wait=approve_cli_capture):
-            pass
-        result = json.loads(output.read_text()) if output.exists() else None
+                             before_wait=approve_cli_capture) as invocation:
+            if not invocation:
+                raise RuntimeError("LaunchServices invocation identity missing")
+        if not output.exists():
+            raise RuntimeError("bundle produced no output")
+        try:
+            result = json.loads(output.read_text())
+        except (json.JSONDecodeError, UnicodeError) as error:
+            raise RuntimeError("bundle output was malformed") from error
+        if not isinstance(result, dict):
+            raise RuntimeError("bundle output was not an object")
         if (result is not None and result.get("bundleIdentifier") == bundle_id
                 and result.get("state") == "available" and marker in (result.get("text") or "")):
             break
         time.sleep(0.5)
+    if not focused:
+        raise RuntimeError("fixture could not be focused")
     return result
 
 
@@ -92,24 +104,27 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
     fixture = plain if app == "TextEdit" else html
     failures = []
     opened_fixture = False
+    attempted_open = False
     try:
-        opened_fixture = True
+        attempted_open = True
         opened = subprocess.run(["open", "-a", app, str(fixture)], capture_output=True,
                                 text=True, timeout=20)
         if opened.returncode:
             failures.append(f"{app}: unavailable ({opened.stderr.strip()})")
         else:
+            opened_fixture = True
             time.sleep(1)
             failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, TimeoutError) as error:
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, TimeoutError, RuntimeError,
+            OSError, ValueError) as error:
         failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:
-        if opened_fixture:
-            try:
+        try:
+            if opened_fixture or (attempted_open and fixture_window_exists(app, title)):
                 if not close_fixture_window(app, title):
                     failures.append(f"{app}: fixture window was not closed")
-            except subprocess.TimeoutExpired:
-                failures.append(f"{app}: fixture close timed out")
+        except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+            failures.append(f"{app}: fixture cleanup failed ({error})")
     return failures
 
 

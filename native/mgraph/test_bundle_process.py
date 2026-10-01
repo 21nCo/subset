@@ -3,6 +3,7 @@
 import pathlib
 import os
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -40,19 +41,22 @@ class BundleProcessTests(unittest.TestCase):
 101 /tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture capture --invocation-id 123
 102 /tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture capture --invocation-id 456
 """
-        with patch.object(bundle_process.subprocess, "run") as run:
+        with patch.object(bundle_process.subprocess, "run") as run, \
+             patch.object(bundle_process, "process_identity", side_effect=lambda pid: (
+                 "/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture", 1, 0) if pid == 101 else None):
             run.return_value.stdout = output
             self.assertEqual(bundle_process.owned_pids(
                 pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"), "123"), {101})
-            self.assertEqual(run.call_args.kwargs["timeout"], 1)
+            self.assertLessEqual(run.call_args.kwargs["timeout"], 1)
 
     def test_stalled_process_lookup_fails_within_cleanup_deadline(self):
         with patch.object(bundle_process.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 1)) as run, \
+             patch.object(bundle_process.time, "monotonic", side_effect=[0, 6, 6]), \
              patch.object(bundle_process.os, "kill") as kill:
-            with self.assertRaises(subprocess.TimeoutExpired):
+            with self.assertRaisesRegex(RuntimeError, "Could not establish"):
                 bundle_process.terminate_owned(pathlib.Path("/tmp/MGraphCapture"), "owned")
             self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.kwargs["timeout"], 1)
+            self.assertLessEqual(run.call_args.kwargs["timeout"], 1)
             kill.assert_not_called()
 
     def test_option_shaped_bundle_and_output_are_absolute_operands(self):
@@ -83,6 +87,19 @@ class BundleProcessTests(unittest.TestCase):
             bundle_process.approve_cli_capture("invocation", pathlib.Path(
                 "/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"))
 
+    def test_consent_lookup_error_is_only_ignored_after_process_exits(self):
+        binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture")
+        failed = subprocess.CompletedProcess([], 1, "", "process disappeared")
+        with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+             patch.object(bundle_process.subprocess, "run", return_value=failed), \
+             patch.object(bundle_process.os, "kill", side_effect=ProcessLookupError):
+            bundle_process.approve_cli_capture("invocation", binary)
+        with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+             patch.object(bundle_process.subprocess, "run", return_value=failed), \
+             patch.object(bundle_process.os, "kill", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "CLI capture consent failed"):
+                bundle_process.approve_cli_capture("invocation", binary)
+
     def test_timeout_and_interruption_terminate_only_invocation(self):
         for error in (subprocess.TimeoutExpired("open", 0.01), KeyboardInterrupt(), "sigterm"):
             with self.subTest(error=str(error)):
@@ -102,11 +119,14 @@ class BundleProcessTests(unittest.TestCase):
     def test_real_cleanup_preserves_preexisting_instance(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary = pathlib.Path(temporary) / "MGraphCapture"
-            binary.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n")
+            shutil.copyfile("/bin/sh", binary)
             binary.chmod(0o755)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True,
+                           capture_output=True)
             marker = str(uuid.uuid4())
-            preexisting = subprocess.Popen([str(binary)])
-            owned = subprocess.Popen([str(binary), "--invocation-id", marker])
+            loop = "while :; do sleep 1; done"
+            preexisting = subprocess.Popen([str(binary), "-c", loop])
+            owned = subprocess.Popen([str(binary), "-c", loop, "--invocation-id", marker])
             try:
                 for _ in range(20):
                     if owned.pid in bundle_process.owned_pids(binary, marker):
@@ -121,6 +141,45 @@ class BundleProcessTests(unittest.TestCase):
                     if process.poll() is None:
                         process.terminate()
                     process.wait(timeout=2)
+
+    def test_stalled_ps_after_discovery_still_terminates_owned_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = pathlib.Path(temporary) / "MGraphCapture"
+            shutil.copyfile("/bin/sh", binary)
+            binary.chmod(0o755)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(binary)],
+                           check=True, capture_output=True)
+            marker = str(uuid.uuid4())
+            owned = subprocess.Popen([str(binary), "-c", "while :; do sleep 1; done",
+                                      "--invocation-id", marker])
+            try:
+                for _ in range(20):
+                    if owned.pid in bundle_process.owned_pids(binary, marker):
+                        break
+                    time.sleep(0.05)
+                self.assertIn(owned.pid, bundle_process.owned_pids(binary, marker))
+                with patch.object(bundle_process.subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired("ps", 1)):
+                    bundle_process.terminate_owned(binary, marker)
+                owned.wait(timeout=2)
+                self.assertIsNotNone(owned.poll())
+            finally:
+                if owned.poll() is None:
+                    owned.kill()
+                owned.wait(timeout=2)
+
+    def test_reused_pid_is_never_signaled_from_cached_invocation(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture").resolve()
+        bundle_process._known[marker] = {4242: (str(binary), 100, 0)}
+        try:
+            with patch.object(bundle_process, "process_identity", return_value=(str(binary), 101, 0)), \
+                 patch.object(bundle_process, "owned_pids", return_value=set()), \
+                 patch.object(bundle_process.os, "kill") as kill:
+                bundle_process.terminate_owned(binary, marker)
+            kill.assert_not_called()
+        finally:
+            bundle_process._known.pop(marker, None)
 
 
 if __name__ == "__main__":

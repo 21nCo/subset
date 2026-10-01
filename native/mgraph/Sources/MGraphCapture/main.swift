@@ -82,7 +82,7 @@ if let command = arguments.first {
         private var captureDeadline: CaptureCollector.Deadline?
         private let captureRequests = CaptureRequestGate()
 
-        func applicationDidFinishLaunching(_ notification: Notification) {
+        func applicationDidFinishLaunching(_ _: Notification) {
             item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             item.button?.title = "M Graph"
             let menu = NSMenu()
@@ -107,7 +107,10 @@ if let command = arguments.first {
             captureRequests.cancel()
             captureDeadline?.cancel()
             captureDeadline = nil
-            captureItem.isEnabled = true
+            captureItem.isEnabled = false
+            CaptureCollector.afterCaptureWorkerDrains { [weak self] in
+                self?.captureItem.isEnabled = true
+            }
             CaptureCollector.requestAccess()
             refresh()
         }
@@ -120,7 +123,9 @@ if let command = arguments.first {
             captureDeadline = CaptureCollector.captureForeground { [weak self] result in
                 guard let self, self.captureRequests.finish(token) else { return }
                 self.captureDeadline = nil
-                self.captureItem.isEnabled = true
+                CaptureCollector.afterCaptureWorkerDrains { [weak self] in
+                    self?.captureItem.isEnabled = true
+                }
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = result.applicationName.map { "\($0) — \(result.state.rawValue)" } ?? result.state.rawValue

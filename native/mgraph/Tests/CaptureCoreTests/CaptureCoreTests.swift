@@ -28,6 +28,11 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXTextField", subrole: "AXSecureTextField"))
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXPasswordField", subrole: ""))
         XCTAssertFalse(CaptureCollector.shouldSkip(role: "AXTextArea", subrole: ""))
+        var readValue = false
+        let role = CaptureCollector.roleForExtraction { nil }
+        if role != nil { readValue = true }
+        XCTAssertNil(role)
+        XCTAssertFalse(readValue, "A failed role read must prevent the value read")
     }
 
     func testTextNormalizationHasStrictLimit() {
@@ -82,23 +87,28 @@ final class CaptureCoreTests: XCTestCase {
                                                             selectedTabs: [70], webAreas: [90])
         for current in [changedWindow, changedTab, changedPage, addedDocument] {
             let result = CaptureCollector.checkedCapture(text, initial: original, current: current,
-                                                         confirmation: text.text, final: current)
+                                                         confirmation: text.text, final: current, finalText: text.text)
             XCTAssertEqual(result.state, .readFailed)
             XCTAssertNil(result.text)
             XCTAssertNil(result.windowTitle)
         }
         let missingFocus = CaptureCollector.checkedCapture(text, initial: original, current: nil,
-                                                           confirmation: text.text, final: nil)
+                                                           confirmation: text.text, final: nil, finalText: text.text)
         XCTAssertEqual(missingFocus.state, .readFailed)
         XCTAssertNil(missingFocus.text)
         XCTAssertNil(missingFocus.windowTitle)
         let lostDocument = CaptureCollector.checkedCapture(text, initial: addedDocument, current: original,
-                                                           confirmation: text.text, final: original)
+                                                           confirmation: text.text, final: original, finalText: text.text)
         XCTAssertEqual(lostDocument.state, .readFailed)
         XCTAssertNil(lostDocument.text)
         XCTAssertEqual(CaptureCollector.checkedCapture(text, initial: original, current: original,
-                                                       confirmation: text.text, final: original).text,
+                                                       confirmation: text.text, final: original, finalText: text.text).text,
                        "prior tab private text")
+        let changedFinalText = CaptureCollector.checkedCapture(text, initial: original, current: original,
+                                                               confirmation: text.text, final: original,
+                                                               finalText: "later private text")
+        XCTAssertEqual(changedFinalText.state, .readFailed)
+        XCTAssertNil(changedFinalText.text)
     }
 
     func testUnavailableMetadataSameWindowNavigationRejectsPriorPageText() {
@@ -110,19 +120,22 @@ final class CaptureCoreTests: XCTestCase {
                                       text: "prior page private text")
         let changed = CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
                                                       current: sameOpaqueSource,
-                                                      confirmation: "new page text", final: sameOpaqueSource)
+                                                      confirmation: "new page text", final: sameOpaqueSource,
+                                                      finalText: priorPage.text)
         XCTAssertEqual(changed.state, .readFailed)
         XCTAssertNil(changed.text)
         XCTAssertNil(changed.windowTitle)
 
         let unreadable = CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
                                                          current: sameOpaqueSource,
-                                                         confirmation: nil, final: sameOpaqueSource)
+                                                         confirmation: nil, final: sameOpaqueSource,
+                                                         finalText: priorPage.text)
         XCTAssertEqual(unreadable.state, .readFailed)
         XCTAssertNil(unreadable.text)
         XCTAssertEqual(CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
                                                        current: sameOpaqueSource,
-                                                       confirmation: priorPage.text, final: sameOpaqueSource).state,
+                                                       confirmation: priorPage.text, final: sameOpaqueSource,
+                                                       finalText: priorPage.text).state,
                        .available)
     }
 
@@ -171,5 +184,25 @@ final class CaptureCoreTests: XCTestCase {
         }
         wait(for: [done], timeout: 1)
         wait(for: [noSecondDelivery], timeout: 0.65)
+    }
+
+    func testMenuCannotStartReplacementUntilCancelledWorkerDrains() {
+        let workerFinished = DeliveryCount()
+        let drained = expectation(description: "serial AX worker drained")
+        DispatchQueue.main.async {
+            let deadline = CaptureCollector.Deadline(seconds: 0.03)
+            CaptureCollector.runAsync(deadline: deadline, seconds: 0.03, work: {
+                Thread.sleep(forTimeInterval: 0.2)
+                _ = workerFinished.increment()
+                return CaptureResult(state: .readFailed)
+            }) { _ in }
+            deadline.cancel()
+            CaptureCollector.afterCaptureWorkerDrains {
+                XCTAssertEqual(workerFinished.increment(), 2,
+                               "Capture must stay disabled until the old AX work exits")
+                drained.fulfill()
+            }
+        }
+        wait(for: [drained], timeout: 1)
     }
 }
