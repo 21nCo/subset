@@ -8,6 +8,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import launched_bundle, owned_pids, wait_for_owned_pid
+from fixture_windows import close_fixture_window as close_owned_fixture_window, focus_fixture_window
 
 
 MARKER = "MGRAPH MENU FIXTURE Delta Echo Foxtrot"
@@ -33,21 +34,7 @@ def wait_for_capture_alert(read_alert, *, clock=time.monotonic, sleep=time.sleep
 
 
 def close_fixture_window(title):
-    # Check both the command outcome and the window state after the keystroke.
-    script = f'''tell application "TextEdit" to activate
-tell application "System Events"
-    tell process "TextEdit"
-        if name of front window does not contain "{title}" then return "not-focused"
-        keystroke "w" using command down
-        repeat 20 times
-            if not (exists (first window whose name contains "{title}")) then return "closed"
-            delay 0.1
-        end repeat
-        return "still-open"
-    end tell
-end tell'''
-    result = apple_script(script)
-    return result.returncode == 0 and result.stdout.strip() == "closed"
+    return close_owned_fixture_window("TextEdit", title)
 
 
 def run_check(bundle):
@@ -71,9 +58,7 @@ def run_check(bundle):
             try:
                 opened_fixture = True
                 subprocess.run(["open", "-a", "TextEdit", str(fixture)], check=True, timeout=20)
-                click_script = '''tell application "TextEdit" to activate
-delay 0.1
-tell application "System Events" to tell process "MGraphCapture"
+                click_script = '''tell application "System Events" to tell process "MGraphCapture"
     click menu bar item "M Graph" of menu bar 1
     click menu item "Capture Foreground" of menu 1 of menu bar item "M Graph" of menu bar 1
 end tell'''
@@ -82,6 +67,8 @@ end tell'''
     get value of every static text of window 1
 end tell'''
                 for attempt in range(5):
+                    if not focus_fixture_window("TextEdit", fixture.stem):
+                        raise AssertionError("TextEdit menu fixture could not be focused")
                     clicked = apple_script(click_script)
                     if clicked.returncode:
                         raise RuntimeError(f"Menu capture failed: {clicked.stderr.strip()}")

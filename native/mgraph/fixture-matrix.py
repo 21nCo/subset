@@ -10,6 +10,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import LaunchInterrupted, approve_cli_capture, launched_bundle
+from fixture_windows import close_fixture_window, focus_fixture_window
 
 
 bundle = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).parent / "dist/MGraphCapture.app"
@@ -24,24 +25,6 @@ expected = {
 
 def interrupt(_signum, _frame):
     raise LaunchInterrupted("Fixture check interrupted by SIGTERM")
-
-
-def close_fixture_window(app, title):
-    script = f'''tell application "{app}" to activate
-tell application "System Events"
-    tell process "{app}"
-        if not (exists front window) then return "not-focused"
-        if name of front window does not contain "{title}" then return "not-focused"
-        keystroke "w" using command down
-        repeat 20 times
-            if not (exists (first window whose name contains "{title}")) then return "closed"
-            delay 0.1
-        end repeat
-        return "still-open"
-    end tell
-end tell'''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
-    return result.returncode == 0 and result.stdout.strip() == "closed"
 
 
 def require_automation():
@@ -67,16 +50,14 @@ def write_fixtures(folder):
     return plain, html, textedit_title, browser_title
 
 
-def capture_fixture(bundle, folder, app, bundle_id):
+def capture_fixture(bundle, folder, app, bundle_id, title):
     output = folder / (app.replace(" ", "-") + ".json")
     result = None
     for _ in range(5):
         output.unlink(missing_ok=True)
-        subprocess.run(["osascript", "-e", f'tell application "{app}" to activate'],
-                       check=True, capture_output=True, timeout=20)
-        if app == "Firefox":
-            subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "9" using command down'],
-                           check=True, capture_output=True, timeout=20)
+        if not focus_fixture_window(app, title):
+            time.sleep(0.5)
+            continue
         time.sleep(0.5)
         with launched_bundle(bundle, ("capture",), output=output, allowed_returncodes=(0, 1, 2),
                              before_wait=approve_cli_capture):
@@ -119,7 +100,7 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
             failures.append(f"{app}: unavailable ({opened.stderr.strip()})")
         else:
             time.sleep(1)
-            failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id)))
+            failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, TimeoutError) as error:
         failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:

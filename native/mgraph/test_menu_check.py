@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import unittest
 from unittest.mock import patch
+import fixture_windows
 
 
 SCRIPT = pathlib.Path(__file__).parent / "check-menu.py"
@@ -52,6 +53,7 @@ class MenuCheckTests(unittest.TestCase):
              patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
              patch.object(check_menu, "owned_pids", return_value=set()), \
+             patch.object(check_menu, "focus_fixture_window", return_value=True), \
              patch.object(check_menu, "apple_script", side_effect=apple_script), \
              patch.object(check_menu, "close_fixture_window", return_value=False) as close, \
              contextlib.redirect_stdout(io.StringIO()):
@@ -60,12 +62,24 @@ class MenuCheckTests(unittest.TestCase):
             close.assert_called_once()
 
     def test_close_requires_window_readback(self):
-        with patch.object(check_menu, "apple_script", return_value=subprocess.CompletedProcess(
+        with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(
                 [], 0, "still-open\n", "")) as run:
-            self.assertFalse(check_menu.close_fixture_window("MGraph Menu Fixture abc123"))
-            self.assertIn('repeat 20 times', run.call_args.args[0])
-            self.assertIn('if not (exists (first window whose name contains "MGraph Menu Fixture abc123"))',
-                          run.call_args.args[0])
+            self.assertFalse(check_menu.close_fixture_window("MGraph Menu Fixture abc123ef"))
+            self.assertIn('repeat 20 times', run.call_args.args[0][2])
+            self.assertIn('repeat with remainingWindow in (get value of attribute "AXWindows")',
+                          run.call_args.args[0][2])
+
+    def test_menu_does_not_capture_an_unselected_fixture(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(check_menu.subprocess, "run", return_value=success), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
+             patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
+             patch.object(check_menu, "focus_fixture_window", return_value=False), \
+             patch.object(check_menu, "close_fixture_window", return_value=True), \
+             patch.object(check_menu, "apple_script") as click:
+            with self.assertRaisesRegex(AssertionError, "could not be focused"):
+                check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+            click.assert_not_called()
 
 
 if __name__ == "__main__":
