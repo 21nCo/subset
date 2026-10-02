@@ -8,7 +8,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from bundle_process import approve_cli_capture, launched_bundle, owned_pids, wait_for_owned_pid
+from bundle_process import (approve_cli_capture, identity_state, launched_bundle,
+                            verified_identity, wait_for_owned_pid)
 
 
 def canonical_bundle(path):
@@ -89,9 +90,10 @@ def main():
 
         with launched_bundle(bundle, wait=False) as invocation:
             pid = wait_for_owned_pid(bundle, invocation)
-            require(pid in owned_pids(binary, invocation), "Owned app process disappeared during startup")
+            identity = verified_identity(binary, invocation, pid)
+            require(identity is not None, "Owned app path and birth time unverified during startup")
             time.sleep(0.5)
-        require(pid not in owned_pids(binary, invocation), "App did not stop")
+        require(identity_state(pid, identity) == "exited", "App exit was not confirmed")
         print("bundle_startup_shutdown=passed")
 
         if status["state"] == "available":

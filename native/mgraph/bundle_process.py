@@ -112,8 +112,22 @@ def _known_states(binary, invocation):
 
 
 def is_owned(binary, invocation, pid):
-    live, unknown = _known_states(pathlib.Path(binary).resolve(), invocation)
-    return pid in live or pid in unknown
+    return owned_state(binary, invocation, pid) == "same"
+
+
+def owned_state(binary, invocation, pid):
+    """Only a matching cached path and birth time can authorize an action."""
+    expected = _known.get(invocation, {}).get(pid)
+    if expected is None or pathlib.Path(expected[0]).resolve() != pathlib.Path(binary).resolve():
+        return "unknown"
+    return identity_state(pid, expected)
+
+
+def verified_identity(binary, invocation, pid):
+    """Return the original birth identity only while that invocation matches."""
+    if owned_state(binary, invocation, pid) != "same":
+        return None
+    return _known[invocation][pid]
 
 
 def _ready_pid(binary, invocation):
@@ -277,6 +291,12 @@ def approve_cli_capture(invocation, binary):
         # A denied or revoked grant exits before presenting the prompt.
         # launched_bundle still checks the command and bundled_command its JSON.
         return
+    initial_state = owned_state(binary, invocation, pid)
+    if initial_state == "exited":
+        # Revocation can end the bundled command before its consent dialog.
+        return
+    if initial_state != "same":
+        raise RuntimeError("CLI capture consent process identity could not be verified")
     script = f'''tell application "System Events" to tell (first process whose unix id is {pid})
     repeat 50 times
         if exists window 1 then
@@ -300,7 +320,7 @@ end tell'''
         # The invocation-labeled click is the authorization event. A fast
         # capture may have written its result and exited before this readback.
         return
-    exited = not is_owned(binary, invocation, pid)
+    exited = owned_state(binary, invocation, pid) == "exited"
     if (result.returncode or result.stdout.strip() == "no-consent-alert") and exited:
         # Permission can be revoked between bundled status and capture. The
         # command exits before showing consent; let the caller inspect its

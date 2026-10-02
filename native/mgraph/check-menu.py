@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 import uuid
-from bundle_process import is_owned, launched_bundle, owned_pids, wait_for_owned_pid
+from bundle_process import launched_bundle, owned_state, wait_for_owned_pid
 from desktop_session import DesktopUnavailable, require_active_desktop
 from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
@@ -46,14 +46,17 @@ def close_fixture_window(title, open_outcome="success"):
 
 def menu_operation(pid, invocation, binary, body, *, timeout=20, allow_exit=False):
     require_active_desktop()
-    if not is_owned(binary, invocation, pid):
-        raise RuntimeError("Owned M Graph process exited before menu operation")
+    state = owned_state(binary, invocation, pid)
+    if state != "same":
+        raise RuntimeError(f"Owned M Graph process {state} before menu operation")
     menu_title = f"M Graph · {str(uuid.UUID(invocation)).upper()}"
     body = body.replace('menu bar item "M Graph"', f'menu bar item "{menu_title}"')
     script = f'tell application "System Events" to tell (first process whose unix id is {pid})\n{body}\nend tell'
     result = apple_script(script, timeout=timeout)
-    if not allow_exit and not is_owned(binary, invocation, pid):
-        raise RuntimeError("Owned M Graph process exited during menu operation")
+    if not allow_exit:
+        state = owned_state(binary, invocation, pid)
+        if state != "same":
+            raise RuntimeError(f"Owned M Graph process {state} during menu operation")
     if result.returncode:
         raise RuntimeError(f"Menu operation failed: {result.stderr.strip()}")
     return result
@@ -64,6 +67,15 @@ def require_automation():
         require_active_desktop()
     except DesktopUnavailable as error:
         raise DesktopUnavailable(f"System Events access required before opening menu fixture: {error}") from error
+
+
+def wait_for_menu_exit(pid, invocation, binary, *, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + 3
+    while clock() < deadline:
+        if owned_state(binary, invocation, pid) == "exited":
+            return
+        sleep(min(0.1, max(0, deadline - clock())))
+    raise RuntimeError("Quit did not confirm owned app exit")
 
 
 def exercise_menu(pid, invocation, binary, title):
@@ -95,12 +107,8 @@ def exercise_menu(pid, invocation, binary, title):
     click menu item "Quit M Graph" of menu 1 of menu bar item "M Graph" of menu bar 1
 '''
     menu_operation(pid, invocation, binary, quit_script, allow_exit=True)
-    for _ in range(30):
-        if pid not in owned_pids(binary, invocation):
-            print("menu_quit=passed")
-            return
-        time.sleep(0.1)
-    raise RuntimeError("Quit did not stop the app")
+    wait_for_menu_exit(pid, invocation, binary)
+    print("menu_quit=passed")
 
 
 def run_check(bundle):

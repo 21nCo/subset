@@ -116,6 +116,19 @@ int main(int argc, char **argv) {
         finally:
             bundle_process._known.pop(marker, None)
 
+    def test_startup_identity_retains_original_birth_across_pid_reuse(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture").resolve()
+        original = (str(binary), 100, 1)
+        bundle_process._known[marker] = {4242: original}
+        try:
+            with patch.object(bundle_process, "process_identity", side_effect=[
+                    original, (str(binary), 101, 1)]):
+                self.assertEqual(bundle_process.verified_identity(binary, marker, 4242), original)
+                self.assertEqual(bundle_process.owned_state(binary, marker, 4242), "exited")
+        finally:
+            bundle_process._known.pop(marker, None)
+
     def test_persistent_identity_failure_keeps_shutdown_marker_and_ownership(self):
         marker = str(uuid.uuid4())
         binary = pathlib.Path("/tmp/MGraphCapture").resolve()
@@ -130,7 +143,8 @@ int main(int argc, char **argv) {
                     bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 0.06)
                 self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
                 self.assertEqual(bundle_process._known[marker], {4242: identity})
-                self.assertTrue(bundle_process.is_owned(binary, marker, 4242))
+                self.assertEqual(bundle_process.owned_state(binary, marker, 4242), "unknown")
+                self.assertFalse(bundle_process.is_owned(binary, marker, 4242))
         finally:
             bundle_process._known.pop(marker, None)
 
@@ -149,7 +163,7 @@ int main(int argc, char **argv) {
     def test_consent_click_targets_only_the_owned_process(self):
         marker = str(uuid.uuid4())
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
-             patch.object(bundle_process, "is_owned", return_value=True), \
+             patch.object(bundle_process, "owned_state", return_value="same"), \
              patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 0, "approved\n", "")) as run:
             bundle_process.approve_cli_capture(marker, pathlib.Path(
@@ -162,9 +176,18 @@ int main(int argc, char **argv) {
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
              patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 0, "no-consent-alert\n", "")), \
-             patch.object(bundle_process, "is_owned", return_value=False):
+             patch.object(bundle_process, "owned_state", side_effect=["same", "exited"]):
             bundle_process.approve_cli_capture(marker, pathlib.Path(
                 "/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture"))
+
+    def test_revoked_capture_exits_after_pid_discovery_before_consent(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture")
+        with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+             patch.object(bundle_process, "owned_state", return_value="exited"), \
+             patch.object(bundle_process.subprocess, "run") as run:
+            bundle_process.approve_cli_capture(marker, binary)
+            run.assert_not_called()
 
     def test_consent_lookup_error_is_only_ignored_after_process_exits(self):
         binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture")
@@ -172,13 +195,44 @@ int main(int argc, char **argv) {
         failed = subprocess.CompletedProcess([], 1, "", "process disappeared")
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
              patch.object(bundle_process.subprocess, "run", return_value=failed), \
-             patch.object(bundle_process, "is_owned", return_value=False):
+             patch.object(bundle_process, "owned_state", side_effect=["same", "exited"]):
             bundle_process.approve_cli_capture(marker, binary)
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
              patch.object(bundle_process.subprocess, "run", return_value=failed), \
-             patch.object(bundle_process, "is_owned", return_value=True):
+             patch.object(bundle_process, "owned_state", side_effect=["same", "unknown"]):
             with self.assertRaisesRegex(RuntimeError, "CLI capture consent failed"):
                 bundle_process.approve_cli_capture(marker, binary)
+
+    def test_transient_identity_failure_refuses_consent_action(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture").resolve()
+        bundle_process._known[marker] = {4242: (str(binary), 100, 1)}
+        try:
+            with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+                 patch.object(bundle_process, "process_identity", return_value=None), \
+                 patch.object(bundle_process, "pid_exists", return_value=True), \
+                 patch.object(bundle_process.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "identity could not be verified"):
+                    bundle_process.approve_cli_capture(marker, binary)
+                run.assert_not_called()
+        finally:
+            bundle_process._known.pop(marker, None)
+
+    def test_unresolved_identity_cannot_mask_failed_consent_as_revocation(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture").resolve()
+        bundle_process._known[marker] = {4242: (str(binary), 100, 1)}
+        try:
+            with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
+                 patch.object(bundle_process, "process_identity", side_effect=[
+                     (str(binary), 100, 1), None]), \
+                 patch.object(bundle_process, "pid_exists", return_value=True), \
+                 patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 1, "", "lookup failed")):
+                with self.assertRaisesRegex(RuntimeError, "CLI capture consent failed"):
+                    bundle_process.approve_cli_capture(marker, binary)
+        finally:
+            bundle_process._known.pop(marker, None)
 
     def test_approved_consent_from_fast_exited_invocation_is_accepted(self):
         marker = str(uuid.uuid4())
@@ -186,7 +240,7 @@ int main(int argc, char **argv) {
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
              patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 0, "approved\n", "")), \
-             patch.object(bundle_process, "is_owned", return_value=False):
+             patch.object(bundle_process, "owned_state", side_effect=["same", "exited"]):
             bundle_process.approve_cli_capture(marker, binary)
 
     def test_missing_ready_file_returns_no_pid(self):

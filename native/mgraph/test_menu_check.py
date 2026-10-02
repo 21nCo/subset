@@ -68,8 +68,8 @@ class MenuCheckTests(unittest.TestCase):
         with patch.object(check_menu.subprocess, "run", return_value=success), \
              patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
-             patch.object(check_menu, "owned_pids", return_value=set()), \
-             patch.object(check_menu, "is_owned", return_value=True), \
+             patch.object(check_menu, "owned_state", return_value="same"), \
+             patch.object(check_menu, "wait_for_menu_exit"), \
              patch.object(check_menu, "focus_fixture_window", return_value=True), \
              patch.object(check_menu, "apple_script", side_effect=apple_script), \
              patch.object(check_menu, "close_fixture_window", return_value=False) as close, \
@@ -113,16 +113,31 @@ class MenuCheckTests(unittest.TestCase):
             click.assert_not_called()
 
     def test_menu_operation_refuses_other_instance(self):
-        with patch.object(check_menu, "is_owned", return_value=False), \
+        with patch.object(check_menu, "owned_state", return_value="exited"), \
              patch.object(check_menu, "apple_script") as script:
             with self.assertRaisesRegex(RuntimeError, "Owned M Graph process exited"):
                 check_menu.menu_operation(42, "owned", pathlib.Path("/tmp/MGraphCapture"),
                                           'click menu item "Capture Foreground"')
             script.assert_not_called()
 
+    def test_menu_operation_refuses_transient_identity_failure(self):
+        import bundle_process
+        binary = pathlib.Path("/tmp/MGraphCapture").resolve()
+        bundle_process._known[INVOCATION] = {42: (str(binary), 100, 1)}
+        try:
+            with patch.object(bundle_process, "process_identity", return_value=None), \
+                 patch.object(bundle_process, "pid_exists", return_value=True), \
+                 patch.object(check_menu, "apple_script") as script:
+                with self.assertRaisesRegex(RuntimeError, "process unknown before menu operation"):
+                    check_menu.menu_operation(42, INVOCATION, binary,
+                                              'click menu item "Capture Foreground"')
+                script.assert_not_called()
+        finally:
+            bundle_process._known.pop(INVOCATION, None)
+
     def test_menu_operation_targets_invocation_label(self):
         success = subprocess.CompletedProcess([], 0, "", "")
-        with patch.object(check_menu, "is_owned", return_value=True), \
+        with patch.object(check_menu, "owned_state", return_value="same"), \
              patch.object(check_menu, "apple_script", return_value=success) as script:
             check_menu.menu_operation(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
                                       'click menu bar item "M Graph" of menu bar 1')
@@ -130,11 +145,28 @@ class MenuCheckTests(unittest.TestCase):
 
     def test_menu_operation_rejects_process_replacement_after_click(self):
         success = subprocess.CompletedProcess([], 0, "", "")
-        with patch.object(check_menu, "is_owned", side_effect=[True, False]), \
+        with patch.object(check_menu, "owned_state", side_effect=["same", "exited"]), \
              patch.object(check_menu, "apple_script", return_value=success):
             with self.assertRaisesRegex(RuntimeError, "exited during menu operation"):
                 check_menu.menu_operation(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
                                           'click menu bar item "M Graph" of menu bar 1')
+
+    def test_quit_requires_confirmed_exit_after_transient_lookup_failure(self):
+        now = [0.0]
+        with patch.object(check_menu, "owned_state", side_effect=["same", "unknown", "exited"]):
+            check_menu.wait_for_menu_exit(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
+                                          clock=lambda: now[0],
+                                          sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        self.assertGreater(now[0], 0)
+
+    def test_noop_quit_with_persistent_lookup_failure_never_passes(self):
+        now = [0.0]
+        with patch.object(check_menu, "owned_state", side_effect=lambda *_: "unknown"):
+            with self.assertRaisesRegex(RuntimeError, "did not confirm owned app exit"):
+                check_menu.wait_for_menu_exit(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
+                                              clock=lambda: now[0],
+                                              sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        self.assertGreaterEqual(now[0], 3)
 
     def test_failed_menu_fixture_open_keeps_primary_error(self):
         success = subprocess.CompletedProcess([], 0, "", "")
