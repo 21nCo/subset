@@ -11,6 +11,7 @@ import fixture_windows
 
 
 SCRIPT = pathlib.Path(__file__).parent / "check-menu.py"
+INVOCATION = "00000000-0000-0000-0000-000000000001"
 spec = importlib.util.spec_from_file_location("check_menu", SCRIPT)
 check_menu = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_menu)
@@ -59,7 +60,7 @@ class MenuCheckTests(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, text, "")
 
         with patch.object(check_menu.subprocess, "run", return_value=success), \
-             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
              patch.object(check_menu, "owned_pids", return_value=set()), \
              patch.object(check_menu, "is_owned", return_value=True), \
@@ -82,7 +83,7 @@ class MenuCheckTests(unittest.TestCase):
     def test_menu_does_not_capture_an_unselected_fixture(self):
         success = subprocess.CompletedProcess([], 0, "", "")
         with patch.object(check_menu.subprocess, "run", return_value=success), \
-             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
              patch.object(check_menu, "focus_fixture_window", return_value=False), \
              patch.object(check_menu, "close_fixture_window", return_value=True), \
@@ -99,6 +100,22 @@ class MenuCheckTests(unittest.TestCase):
                                           'click menu item "Capture Foreground"')
             script.assert_not_called()
 
+    def test_menu_operation_targets_invocation_label(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(check_menu, "is_owned", return_value=True), \
+             patch.object(check_menu, "apple_script", return_value=success) as script:
+            check_menu.menu_operation(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
+                                      'click menu bar item "M Graph" of menu bar 1')
+        self.assertIn(f'M Graph · {INVOCATION.upper()}', script.call_args.args[0])
+
+    def test_menu_operation_rejects_process_replacement_after_click(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(check_menu, "is_owned", side_effect=[True, False]), \
+             patch.object(check_menu, "apple_script", return_value=success):
+            with self.assertRaisesRegex(RuntimeError, "exited during menu operation"):
+                check_menu.menu_operation(42, INVOCATION, pathlib.Path("/tmp/MGraphCapture"),
+                                          'click menu bar item "M Graph" of menu bar 1')
+
     def test_failed_menu_fixture_open_keeps_primary_error(self):
         success = subprocess.CompletedProcess([], 0, "", "")
         def run(command, **_kwargs):
@@ -106,13 +123,27 @@ class MenuCheckTests(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, command)
             return success
         with patch.object(check_menu.subprocess, "run", side_effect=run), \
-             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext("owned")), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
-             patch.object(check_menu, "fixture_window_exists", return_value=False), \
-             patch.object(check_menu, "close_fixture_window") as close:
+             patch.object(check_menu, "close_fixture_window", return_value=True) as close:
             with self.assertRaisesRegex(RuntimeError, "returned non-zero exit status"):
                 check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
-            close.assert_not_called()
+            close.assert_called_once()
+
+    def test_partial_menu_open_attempts_cleanup_without_presence_probe(self):
+        def run(command, **_kwargs):
+            if command[0] == "open":
+                raise subprocess.TimeoutExpired("open", 20)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with patch.object(check_menu.subprocess, "run", side_effect=run), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
+             patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
+             patch.object(fixture_windows, "fixture_window_exists") as probe, \
+             patch.object(fixture_windows, "close_fixture_window", return_value=True) as close:
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+        probe.assert_not_called()
+        close.assert_called_once()
 
 
 if __name__ == "__main__":

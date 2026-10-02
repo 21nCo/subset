@@ -8,8 +8,10 @@ import contextlib
 import ctypes
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -29,6 +31,7 @@ _libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                                   ctypes.c_void_p, ctypes.c_int]
 _libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
 _known = {}
+_controls = {}
 
 
 def process_identity(pid):
@@ -47,6 +50,9 @@ class LaunchInterrupted(Exception):
 
 
 def owned_pids(binary, invocation, timeout=1):
+    ready_pid = _ready_pid(binary, invocation)
+    if ready_pid is not None:
+        return {ready_pid}
     supplied_binary = str(binary)
     binary = pathlib.Path(binary).resolve()
     output = subprocess.run(["ps", "-axo", "pid=,command="], check=True,
@@ -78,44 +84,62 @@ def is_owned(binary, invocation, pid):
     return pid in _live_known(pathlib.Path(binary).resolve(), invocation)
 
 
-def terminate_owned(binary, invocation):
-    supplied_binary = binary
+def _ready_pid(binary, invocation):
+    control = _controls.get(invocation)
+    if control is None:
+        return None
+    try:
+        pid = int((control / "ready").read_text())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    identity = process_identity(pid)
+    if identity is None or pathlib.Path(identity[0]).resolve() != pathlib.Path(binary).resolve():
+        return None
+    known = _known.setdefault(invocation, {})
+    if pid in known and known[pid] != identity:
+        return None
+    known[pid] = identity
+    return pid
+
+
+def _owned_now(binary, invocation, deadline):
+    known = _live_known(binary, invocation)
+    if known or _known.get(invocation):
+        return known
+    ready = _ready_pid(binary, invocation)
+    if ready is not None:
+        return {ready}
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("Could not establish owned bundle process identity for cleanup")
+    try:
+        return owned_pids(binary, invocation, timeout=min(1, max(0.05, remaining)))
+    except subprocess.TimeoutExpired:
+        return _live_known(binary, invocation)
+
+
+def terminate_owned(binary, invocation, deadline=None):
     binary = pathlib.Path(binary).resolve()
-    end = time.monotonic() + 5
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        while True:
-            try:
-                pids = owned_pids(supplied_binary, invocation,
-                                  timeout=max(0.05, min(1, end - time.monotonic())))
-                break
-            except subprocess.TimeoutExpired:
-                # A stalled process listing is unknown, not evidence of exit.
-                pids = _live_known(binary, invocation)
-                if pids:
-                    break
-                if time.monotonic() >= end:
-                    raise RuntimeError("Could not establish owned bundle process identity for cleanup") from None
-        if not pids:
-            if not _live_known(binary, invocation):
-                _known.pop(invocation, None)
-                return
-            pids = _live_known(binary, invocation)
-        for pid in pids:
-            if pid not in _live_known(binary, invocation):
-                continue
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                pass
-        phase_end = min(end, time.monotonic() + (1.5 if sig == signal.SIGTERM else 2.5))
-        while time.monotonic() < phase_end:
-            if not _live_known(binary, invocation):
-                _known.pop(invocation, None)
-                return
-            time.sleep(min(0.1, max(0, phase_end - time.monotonic())))
-    remaining = _live_known(binary, invocation)
-    if remaining:
-        raise RuntimeError(f"Owned bundle process did not exit: {remaining}")
+    end = deadline if deadline is not None else time.monotonic() + 5
+    control = _controls.get(invocation)
+    if control is None:
+        raise RuntimeError("Invocation shutdown channel unavailable")
+    # The command is consumed only by this invocation. Never signal a bare PID:
+    # a process can exit and its number can be reused after an identity check.
+    (control / "shutdown").write_text(str(uuid.UUID(invocation)).upper())
+    had_identity = bool(_known.get(invocation))
+    while time.monotonic() < end:
+        pids = _owned_now(binary, invocation, end)
+        if pids:
+            had_identity = True
+        if had_identity and not pids:
+            _known.pop(invocation, None)
+            return
+        time.sleep(min(0.05, max(0, end - time.monotonic())))
+    if _live_known(binary, invocation):
+        raise RuntimeError("Owned bundle process did not exit before cleanup deadline")
+    if not had_identity:
+        raise RuntimeError("Could not establish owned bundle process identity for cleanup")
     _known.pop(invocation, None)
 
 
@@ -132,7 +156,10 @@ def launched_bundle(bundle, args=(), output=None, wait=True, timeout=20,
         command.append("-W")
     if output is not None:
         command += ["-o", str(pathlib.Path(output).resolve())]
-    command += [str(bundle), "--args", *args, "--invocation-id", invocation]
+    control_path = pathlib.Path(tempfile.mkdtemp(prefix="mgraph-invocation-"))
+    _controls[invocation] = control_path
+    command += [str(bundle), "--args", *args, "--shutdown-file", str(control_path / "shutdown"),
+                "--invocation-id", invocation]
     previous_term_handler = signal.getsignal(signal.SIGTERM)
 
     def interrupt(_signum, _frame):
@@ -140,31 +167,47 @@ def launched_bundle(bundle, args=(), output=None, wait=True, timeout=20,
 
     signal.signal(signal.SIGTERM, interrupt)
     launcher = None
+    completed_wait = False
     try:
         launcher = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if before_wait is not None:
             before_wait(invocation, binary)
         if wait:
             stdout, stderr = launcher.communicate(timeout=timeout)
+            completed_wait = True
             if launcher.returncode not in allowed_returncodes:
                 raise subprocess.CalledProcessError(launcher.returncode, command, stdout, stderr)
         else:
             launcher.communicate(timeout=timeout)
             if launcher.returncode:
                 raise subprocess.CalledProcessError(launcher.returncode, command)
+            wait_for_owned_pid(bundle, invocation, timeout=min(timeout, 5))
         yield invocation
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        shutdown_end = time.monotonic() + 5
+        cleanup_ok = launcher is None or completed_wait
         try:
-            if launcher is not None and launcher.poll() is None:
-                launcher.terminate()
-                try:
-                    launcher.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
-                    launcher.kill()
-                    launcher.communicate(timeout=2)
-            terminate_owned(binary, invocation)
+            try:
+                if launcher is not None and launcher.poll() is None:
+                    launcher.terminate()
+                    try:
+                        launcher.communicate(timeout=max(0.05, min(1, shutdown_end - time.monotonic())))
+                    except subprocess.TimeoutExpired:
+                        launcher.kill()
+                        launcher.communicate(timeout=max(0.05, min(1, shutdown_end - time.monotonic())))
+            finally:
+                if launcher is not None and not completed_wait:
+                    terminate_owned(binary, invocation, deadline=shutdown_end)
+                    cleanup_ok = True
+                else:
+                    _known.pop(invocation, None)
         finally:
+            _controls.pop(invocation, None)
+            if cleanup_ok:
+                shutil.rmtree(control_path)
+            # On an unproven exit, leave the shutdown marker in place so a
+            # delayed LaunchServices start still exits its exact invocation.
             signal.signal(signal.SIGTERM, previous_term_handler)
 
 
@@ -193,20 +236,24 @@ def approve_cli_capture(invocation, binary):
     repeat 50 times
         if exists window 1 then
             if exists button "Allow Capture" of window 1 then
-                click button "Allow Capture" of window 1
-                return "approved"
+                set promptText to (value of every static text of window 1) as text
+                if promptText contains "{str(uuid.UUID(invocation)).upper()}" then
+                    click button "Allow Capture" of window 1
+                    return "approved"
+                end if
             end if
         end if
         delay 0.1
     end repeat
     return "no-consent-alert"
 end tell'''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
     try:
-        os.kill(pid, 0)
-        exited = False
-    except ProcessLookupError:
-        exited = True
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("CLI capture consent automation timed out") from error
+    exited = not is_owned(binary, invocation, pid)
+    if result.returncode == 0 and result.stdout.strip() == "approved" and exited:
+        raise RuntimeError("Owned bundle process exited during CLI consent")
     if (result.returncode or result.stdout.strip() == "no-consent-alert") and exited:
         # Permission can be revoked between bundled status and capture. The
         # command exits before showing consent; let the caller inspect its

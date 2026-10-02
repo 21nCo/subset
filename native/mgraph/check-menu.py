@@ -8,7 +8,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import is_owned, launched_bundle, owned_pids, wait_for_owned_pid
-from fixture_windows import close_fixture_window as close_owned_fixture_window, fixture_window_exists, focus_fixture_window
+from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
 
 MARKER = "MGRAPH MENU FIXTURE Delta Echo Foxtrot"
@@ -39,15 +39,19 @@ def wait_for_capture_alert(read_alert, *, clock=time.monotonic, sleep=time.sleep
         sleep(min(0.1, max(0, deadline - clock())))
 
 
-def close_fixture_window(title):
-    return close_owned_fixture_window("TextEdit", title)
+def close_fixture_window(title, open_outcome="success"):
+    return cleanup_fixture_after_open("TextEdit", title, open_outcome)
 
 
-def menu_operation(pid, invocation, binary, body, *, timeout=20):
+def menu_operation(pid, invocation, binary, body, *, timeout=20, allow_exit=False):
     if not is_owned(binary, invocation, pid):
         raise RuntimeError("Owned M Graph process exited before menu operation")
+    menu_title = f"M Graph · {str(uuid.UUID(invocation)).upper()}"
+    body = body.replace('menu bar item "M Graph"', f'menu bar item "{menu_title}"')
     script = f'tell application "System Events" to tell (first process whose unix id is {pid})\n{body}\nend tell'
     result = apple_script(script, timeout=timeout)
+    if not allow_exit and not is_owned(binary, invocation, pid):
+        raise RuntimeError("Owned M Graph process exited during menu operation")
     if result.returncode:
         raise RuntimeError(f"Menu operation failed: {result.stderr.strip()}")
     return result
@@ -92,7 +96,7 @@ def exercise_menu(pid, invocation, binary, title):
     click menu bar item "M Graph" of menu bar 1
     click menu item "Quit M Graph" of menu 1 of menu bar item "M Graph" of menu bar 1
 '''
-    menu_operation(pid, invocation, binary, quit_script)
+    menu_operation(pid, invocation, binary, quit_script, allow_exit=True)
     for _ in range(30):
         if pid not in owned_pids(binary, invocation):
             print("menu_quit=passed")
@@ -109,22 +113,21 @@ def run_check(bundle):
         fixture.write_text(MARKER + "\n")
         with launched_bundle(bundle, wait=False) as invocation:
             pid = wait_for_owned_pid(bundle, invocation)
-            opened_fixture = False
+            open_outcome = "unknown"
             attempted_open = False
             failures = []
             try:
                 attempted_open = True
                 subprocess.run(["open", "-a", "TextEdit", str(fixture)], check=True, timeout=20)
-                opened_fixture = True
+                open_outcome = "success"
                 exercise_menu(pid, invocation, binary, fixture.stem)
-            except (RuntimeError, TimeoutError, subprocess.CalledProcessError,
+            except (RuntimeError, subprocess.CalledProcessError,
                     subprocess.TimeoutExpired, OSError) as error:
                 failures.append(str(error))
             finally:
                 try:
-                    if opened_fixture or (attempted_open and fixture_window_exists("TextEdit", fixture.stem)):
-                        if not close_fixture_window(fixture.stem):
-                            failures.append("TextEdit menu fixture window was not closed")
+                    if attempted_open and not close_fixture_window(fixture.stem, open_outcome):
+                        failures.append("TextEdit menu fixture window was not closed")
                 except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
                     failures.append(f"TextEdit fixture cleanup failed ({error})")
             if failures:

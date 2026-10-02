@@ -72,7 +72,7 @@ class CaptureBoundaryTests(unittest.TestCase):
         script = run.call_args_list[0].args[0][2]
         self.assertIn('get entire contents of remainingWindow', script)
         self.assertIn('if name of child contains fixtureTitle then set fixtureStillOpen to true', script)
-        self.assertIn('return "read-error"', script)
+        self.assertIn('on error\n                    set fixtureStillOpen to true', script)
 
     def test_chrome_hidden_tab_can_be_found_when_ax_omits_it(self):
         outcomes = ["absent\n", "exists\n"]
@@ -81,6 +81,31 @@ class CaptureBoundaryTests(unittest.TestCase):
         with patch.object(fixture_windows.subprocess, "run", side_effect=hidden_tab):
             self.assertTrue(fixture_windows.fixture_window_exists(
                 "Google Chrome", "MGraph Capture Fixture abcdef12"))
+
+    def test_partial_open_cleanup_attempt_survives_presence_probe_timeout(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_probe_timeout")
+        title = "MGraph Capture Fixture abcdef12"
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix.subprocess, "run", side_effect=subprocess.TimeoutExpired("open", 20)), \
+             patch.object(fixture_windows, "fixture_window_exists",
+                          side_effect=subprocess.TimeoutExpired("osascript", 1)) as probe, \
+             patch.object(fixture_windows, "close_fixture_window", return_value=True) as close:
+            folder = pathlib.Path(temporary)
+            failures = matrix.run_app(pathlib.Path("bundle"), folder, "Firefox", "org.mozilla.firefox",
+                                      folder / "fixture.txt", folder / "fixture.html",
+                                      "MGraph TextEdit Fixture abcdef12", title)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("transition or capture failed", failures[0])
+        probe.assert_not_called()
+        self.assertEqual(close.call_args.args, ("Firefox", title))
+        self.assertIn("deadline", close.call_args.kwargs)
+
+    def test_presence_probe_never_materializes_browser_descendants(self):
+        with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "absent\n", "")) as run:
+            self.assertIsNone(fixture_windows.fixture_window_exists(
+                "Firefox", "MGraph Capture Fixture abcdef12"))
+        self.assertNotIn("get entire contents", run.call_args.args[0][2])
 
     def test_chrome_hidden_fixture_can_be_selected_without_touching_other_tabs(self):
         title = "MGraph Capture Fixture abcdef12"
@@ -108,22 +133,20 @@ class CaptureBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, \
              patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 1, "", "app unavailable")), \
-             patch.object(matrix, "fixture_window_exists", return_value=False), \
-             patch.object(matrix, "close_fixture_window") as close:
+             patch.object(matrix, "cleanup_fixture_after_open", return_value=True) as close:
             folder = pathlib.Path(temporary)
             failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
                                       folder / "fixture.txt", folder / "fixture.html",
                                       "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
         self.assertEqual(len(failures), 1)
         self.assertIn("app unavailable", failures[0])
-        close.assert_not_called()
+        close.assert_called_once_with("TextEdit", "MGraph TextEdit Fixture abcdef12", "failed")
 
     def test_partial_open_and_stalled_cleanup_report_both_failures(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_partial_open")
         with tempfile.TemporaryDirectory() as temporary, \
              patch.object(matrix.subprocess, "run", side_effect=subprocess.TimeoutExpired("open", 20)), \
-             patch.object(matrix, "fixture_window_exists", return_value=True), \
-             patch.object(matrix, "close_fixture_window", side_effect=subprocess.TimeoutExpired("osascript", 5)):
+             patch.object(matrix, "cleanup_fixture_after_open", side_effect=subprocess.TimeoutExpired("osascript", 5)):
             folder = pathlib.Path(temporary)
             failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
                                       folder / "fixture.txt", folder / "fixture.html",
@@ -140,7 +163,7 @@ class CaptureBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, \
              patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
              patch.object(matrix, "focus_fixture_window", return_value=True), \
-             patch.object(matrix, "close_fixture_window", return_value=True), \
+             patch.object(matrix, "cleanup_fixture_after_open", return_value=True), \
              patch.object(matrix, "launched_bundle", side_effect=malformed), \
              patch.object(matrix.time, "sleep"):
             folder = pathlib.Path(temporary)

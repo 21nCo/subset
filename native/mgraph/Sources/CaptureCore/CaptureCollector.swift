@@ -11,6 +11,23 @@ public enum CaptureState: String, Codable, Sendable {
 }
 
 public struct CaptureResult: Codable, Sendable {
+    public struct Source: Codable, Sendable {
+        public let applicationName: String?
+        public let bundleIdentifier: String?
+        public let processIdentifier: Int32?
+        public let windowTitle: String?
+        public let documentURL: String?
+
+        public init(applicationName: String? = nil, bundleIdentifier: String? = nil,
+                    processIdentifier: Int32? = nil, windowTitle: String? = nil,
+                    documentURL: String? = nil) {
+            self.applicationName = applicationName
+            self.bundleIdentifier = bundleIdentifier
+            self.processIdentifier = processIdentifier
+            self.windowTitle = windowTitle
+            self.documentURL = documentURL
+        }
+    }
     public let state: CaptureState
     public let observedAt: Date
     public let applicationName: String?
@@ -21,17 +38,15 @@ public struct CaptureResult: Codable, Sendable {
     public let text: String?
     public let error: String?
 
-    public init(state: CaptureState, observedAt: Date = Date(), applicationName: String? = nil,
-                bundleIdentifier: String? = nil, processIdentifier: Int32? = nil,
-                windowTitle: String? = nil, documentURL: String? = nil, text: String? = nil,
-                error: String? = nil) {
+    public init(state: CaptureState, observedAt: Date = Date(), source: Source = Source(),
+                text: String? = nil, error: String? = nil) {
         self.state = state
         self.observedAt = observedAt
-        self.applicationName = applicationName
-        self.bundleIdentifier = bundleIdentifier
-        self.processIdentifier = processIdentifier
-        self.windowTitle = windowTitle
-        self.documentURL = documentURL
+        self.applicationName = source.applicationName
+        self.bundleIdentifier = source.bundleIdentifier
+        self.processIdentifier = source.processIdentifier
+        self.windowTitle = source.windowTitle
+        self.documentURL = source.documentURL
         self.text = text
         self.error = error
     }
@@ -114,8 +129,8 @@ public enum CaptureCollector {
     }
 
     private static func failed(_ app: Foreground?, _ message: String) -> CaptureResult {
-        CaptureResult(state: .readFailed, applicationName: app?.name, bundleIdentifier: app?.bundleID,
-                      processIdentifier: app?.pid, error: message)
+        CaptureResult(state: .readFailed, source: .init(applicationName: app?.name,
+                      bundleIdentifier: app?.bundleID, processIdentifier: app?.pid), error: message)
     }
 
     private static func validate(_ result: CaptureResult, app: Foreground?, deadline: Deadline) -> CaptureResult {
@@ -151,15 +166,11 @@ public enum CaptureCollector {
         let delivery = Delivery()
         captureQueue.async {
             let result = work()
-            DispatchQueue.main.async {
-                delivery.once { completion(deadline.expired ? nil : result) }
-            }
+            DispatchQueue.main.async { delivery.deliver(deadline.expired ? nil : result, to: completion) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-            delivery.once {
-                deadline.cancel()
-                completion(nil)
-            }
+            deadline.cancel()
+            delivery.deliver(nil, to: completion)
         }
     }
 
@@ -173,6 +184,10 @@ public enum CaptureCollector {
             lock.unlock()
             if shouldDeliver { body() }
         }
+        @MainActor func deliver(_ result: CaptureResult?,
+                                to completion: @escaping @MainActor @Sendable (CaptureResult?) -> Void) {
+            once { completion(result) }
+        }
     }
     public static func isTrusted() -> Bool { AXIsProcessTrusted() }
 
@@ -185,6 +200,14 @@ public enum CaptureCollector {
         let trusted = isTrusted()
         return CaptureResult(state: trusted ? .available : .permissionRequired,
                              error: trusted ? nil : "Grant Accessibility access in System Settings > Privacy & Security > Accessibility.")
+    }
+
+    public static func cliConsentFailure(approved: Bool, foregroundAvailable: Bool) -> CaptureResult? {
+        if !approved { return CaptureResult(state: .readFailed, error: "Command capture was not approved") }
+        if !foregroundAvailable {
+            return CaptureResult(state: .noForegroundApplication, error: "No foreground application")
+        }
+        return nil
     }
 
     public static func captureForeground(expectedProcessIdentifier: pid_t? = nil) -> CaptureResult {
@@ -260,22 +283,34 @@ public enum CaptureCollector {
         // make text from the preceding page look current.
         let confirmation = currentWindow.flatMap { extractText(from: $0, deadline: deadline)?.text }
         let finalWindow = captureWindow(root, deadline: deadline)
-        let final = finalWindow.flatMap { window in
-            sourceIdentity(root: root, target: window, app: app,
-                           title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
-                           document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
-                           deadline: deadline)
-        }
-        let finalText = finalWindow.flatMap { extractText(from: $0, deadline: deadline)?.text }
+        let finalRead = confirmAfterFinalText(
+            readText: { finalWindow.flatMap { extractText(from: $0, deadline: deadline)?.text } },
+            readSource: { focusedSource(root: root, app: app, deadline: deadline) })
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let state = stateForText(extraction.text)
-        let result = CaptureResult(state: state, applicationName: app.name, bundleIdentifier: app.bundleID,
-                                   processIdentifier: app.pid, windowTitle: title, documentURL: document,
+        let result = CaptureResult(state: state, source: .init(applicationName: app.name,
+                                   bundleIdentifier: app.bundleID, processIdentifier: app.pid,
+                                   windowTitle: title, documentURL: document),
                                    text: extraction.text.isEmpty ? nil : extraction.text,
                                    error: extraction.text.isEmpty ? "No readable text in the Accessibility tree" : nil)
         return checkedCapture(result, initial: source, current: current,
-                              confirmation: confirmation, final: final, finalText: finalText)
+                              confirmation: confirmation, final: finalRead.source, finalText: finalRead.text)
+    }
+
+    private static func focusedSource(root: AXUIElement, app: Foreground,
+                                      deadline: Deadline) -> SourceIdentity? {
+        guard let window = captureWindow(root, deadline: deadline) else { return nil }
+        return sourceIdentity(root: root, target: window, app: app,
+                              title: stringAttribute(window, kAXTitleAttribute as String, deadline: deadline),
+                              document: stringAttribute(window, kAXDocumentAttribute as String, deadline: deadline),
+                              deadline: deadline)
+    }
+
+    static func confirmAfterFinalText(readText: () -> String?,
+                                      readSource: () -> SourceIdentity?) -> (text: String?, source: SourceIdentity?) {
+        let text = readText()
+        return (text, readSource())
     }
 
     static func checkedCapture(_ result: CaptureResult, initial: SourceIdentity,
@@ -285,8 +320,8 @@ public enum CaptureCollector {
               let confirmation, let finalText,
               result.text == (confirmation.isEmpty ? nil : confirmation),
               result.text == (finalText.isEmpty ? nil : finalText) else {
-            return CaptureResult(state: .readFailed, applicationName: result.applicationName,
-                                 bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier,
+            return CaptureResult(state: .readFailed, source: .init(applicationName: result.applicationName,
+                                 bundleIdentifier: result.bundleIdentifier, processIdentifier: result.processIdentifier),
                                  error: "Foreground source or content changed during capture")
         }
         return result
@@ -422,7 +457,39 @@ public enum CaptureCollector {
         return (selected, webAreas)
     }
 
-    private static func extractText(from root: AXUIElement, deadline: Deadline) -> (text: String, visited: Int)? {
+    typealias StringReader = (AXUIElement, String, Deadline) -> String?
+    typealias MetadataReader = (AXUIElement, String, Deadline) -> (AXError, String?)
+    typealias ValueReader = (AXUIElement, Int, Deadline) -> String?
+    typealias ChildrenReader = (AXUIElement, Int, Deadline) -> [AXUIElement]?
+
+    private static func metadata(_ element: AXUIElement, _ key: String, _ deadline: Deadline) -> (AXError, String?) {
+        guard !deadline.expired else { return (.cannotComplete, nil) }
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        var raw: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, key as CFString, &raw)
+        guard !deadline.expired else { return (.cannotComplete, nil) }
+        return (error, raw as? String)
+    }
+
+    static func safeRole(_ element: AXUIElement, deadline: Deadline,
+                         read: MetadataReader) -> String? {
+        let (roleError, role) = read(element, kAXRoleAttribute as String, deadline)
+        guard roleError == .success, let role, !role.isEmpty else { return nil }
+        let (subroleError, subrole) = read(element, kAXSubroleAttribute as String, deadline)
+        guard subroleError == .success || subroleError == .attributeUnsupported || subroleError == .noValue else {
+            return nil
+        }
+        if subroleError == .success && subrole == nil { return nil }
+        return shouldSkip(role: role, subrole: subrole ?? "") ? nil : role
+    }
+
+    static func extractText(from root: AXUIElement, deadline: Deadline,
+                            readMetadata: MetadataReader = metadata,
+                            readString: StringReader = stringAttribute,
+                            readValue: ValueReader = textValue,
+                            readChildren: ChildrenReader = { element, limit, deadline in
+                                elements(element, kAXChildrenAttribute as String, maxCount: limit, deadline: deadline)
+                            }) -> (text: String, visited: Int)? {
         var queue: [(AXUIElement, Int)] = [(root, 0)]
         var index = 0
         var visited = Set<CFHashCode>()
@@ -438,16 +505,12 @@ public enum CaptureCollector {
             let identity = CFHash(element)
             guard visited.insert(identity).inserted else { continue }
             count += 1
-            guard let role = roleForExtraction({
-                stringAttribute(element, kAXRoleAttribute as String, deadline: deadline)
-            }) else { continue }
-            let subrole = stringAttribute(element, kAXSubroleAttribute as String, deadline: deadline) ?? ""
-            if shouldSkip(role: role, subrole: subrole) { continue }
+            guard safeRole(element, deadline: deadline, read: readMetadata) != nil else { continue }
 
             for key in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXValueAttribute as String] {
                 let raw = key == (kAXValueAttribute as String)
-                    ? textValue(element, remaining: 6000 - length, deadline: deadline)
-                    : stringAttribute(element, key, deadline: deadline)
+                    ? readValue(element, 6000 - length, deadline)
+                    : readString(element, key, deadline)
                 guard let raw else { continue }
                 let snippet = normalize(raw, remaining: 6000 - length)
                 if !snippet.isEmpty && seenText.insert(snippet).inserted {
@@ -456,8 +519,7 @@ public enum CaptureCollector {
                 }
             }
             if depth < 12 {
-                guard let children = elements(element, kAXChildrenAttribute as String,
-                                              maxCount: min(100, 600 - queue.count), deadline: deadline) else { return nil }
+                guard let children = readChildren(element, min(100, 600 - queue.count), deadline) else { return nil }
                 queue.append(contentsOf: children.map { ($0, depth + 1) })
             }
         }
@@ -467,12 +529,6 @@ public enum CaptureCollector {
     public static func shouldSkip(role: String, subrole: String) -> Bool {
         let combined = "\(role) \(subrole)".lowercased()
         return combined.contains("secure") || combined.contains("password")
-    }
-
-    // A failed role read cannot establish that a value is not protected.
-    static func roleForExtraction(_ read: () -> String?) -> String? {
-        guard let role = read(), !role.isEmpty, !shouldSkip(role: role, subrole: "") else { return nil }
-        return role
     }
 
     public static func normalize(_ raw: String, remaining: Int) -> String {

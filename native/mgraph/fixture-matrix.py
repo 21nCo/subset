@@ -10,7 +10,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import LaunchInterrupted, approve_cli_capture, launched_bundle
-from fixture_windows import close_fixture_window, fixture_window_exists, focus_fixture_window
+from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
 
 bundle = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).parent / "dist/MGraphCapture.app"
@@ -73,7 +73,7 @@ def capture_fixture(bundle, folder, app, bundle_id, title):
             raise RuntimeError("bundle output was malformed") from error
         if not isinstance(result, dict):
             raise RuntimeError("bundle output was not an object")
-        if (result is not None and result.get("bundleIdentifier") == bundle_id
+        if (result.get("bundleIdentifier") == bundle_id
                 and result.get("state") == "available" and marker in (result.get("text") or "")):
             break
         time.sleep(0.5)
@@ -103,26 +103,26 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
     title = textedit_title if app == "TextEdit" else browser_title
     fixture = plain if app == "TextEdit" else html
     failures = []
-    opened_fixture = False
+    open_outcome = "unknown"
     attempted_open = False
     try:
         attempted_open = True
         opened = subprocess.run(["open", "-a", app, str(fixture)], capture_output=True,
                                 text=True, timeout=20)
         if opened.returncode:
+            open_outcome = "failed"
             failures.append(f"{app}: unavailable ({opened.stderr.strip()})")
         else:
-            opened_fixture = True
+            open_outcome = "success"
             time.sleep(1)
             failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, TimeoutError, RuntimeError,
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError,
             OSError, ValueError) as error:
         failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:
         try:
-            if opened_fixture or (attempted_open and fixture_window_exists(app, title)):
-                if not close_fixture_window(app, title):
-                    failures.append(f"{app}: fixture window was not closed")
+            if attempted_open and not cleanup_fixture_after_open(app, title, open_outcome):
+                failures.append(f"{app}: fixture window was not closed")
         except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
             failures.append(f"{app}: fixture cleanup failed ({error})")
     return failures

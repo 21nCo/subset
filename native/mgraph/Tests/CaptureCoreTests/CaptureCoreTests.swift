@@ -28,11 +28,25 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXTextField", subrole: "AXSecureTextField"))
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXPasswordField", subrole: ""))
         XCTAssertFalse(CaptureCollector.shouldSkip(role: "AXTextArea", subrole: ""))
-        var readValue = false
-        let role = CaptureCollector.roleForExtraction { nil }
-        if role != nil { readValue = true }
-        XCTAssertNil(role)
-        XCTAssertFalse(readValue, "A failed role read must prevent the value read")
+        let root = AXUIElementCreateApplication(42)
+        for failedKey in [kAXRoleAttribute as String, kAXSubroleAttribute as String] {
+            var sensitiveReads: [String] = []
+            let result = CaptureCollector.extractText(from: root, deadline: .init(seconds: 1),
+                readMetadata: { _, key, _ in
+                    if key == failedKey { return (.cannotComplete, nil) }
+                    return key == (kAXRoleAttribute as String) ? (.success, "AXTextField") : (.success, "AXSecureTextField")
+                }, readString: { _, key, _ in sensitiveReads.append(key); return "secret" },
+                readValue: { _, _, _ in sensitiveReads.append(kAXValueAttribute as String); return "secret" },
+                readChildren: { _, _, _ in [] })
+            XCTAssertEqual(result?.text, "")
+            XCTAssertTrue(sensitiveReads.isEmpty, "Failed \(failedKey) requested protected text")
+        }
+        let ordinary = CaptureCollector.extractText(from: root, deadline: .init(seconds: 1),
+            readMetadata: { _, key, _ in
+                key == (kAXRoleAttribute as String) ? (.success, "AXTextArea") : (.attributeUnsupported, nil)
+            }, readString: { _, key, _ in key == (kAXTitleAttribute as String) ? "ordinary" : nil },
+            readValue: { _, _, _ in nil }, readChildren: { _, _, _ in [] })
+        XCTAssertEqual(ordinary?.text, "ordinary")
     }
 
     func testTextNormalizationHasStrictLimit() {
@@ -71,11 +85,22 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(CaptureCollector.stateForText("fixture body"), .available)
     }
 
+    func testCliConsentAndForegroundOutcomesAreDistinct() {
+        XCTAssertEqual(CaptureCollector.cliConsentFailure(approved: false, foregroundAvailable: false)?.state,
+                       .readFailed)
+        XCTAssertEqual(CaptureCollector.cliConsentFailure(approved: true, foregroundAvailable: false)?.state,
+                       .noForegroundApplication)
+        XCTAssertNil(CaptureCollector.cliConsentFailure(approved: true, foregroundAvailable: true))
+    }
+
     func testSameProcessWindowAndTabChangesDiscardCapturedText() {
+        let fixtureDocument = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mgraph-source-\(UUID().uuidString)").absoluteString
         let original = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
                                                        document: nil, focusedElement: 50, selectedTabs: [70], webAreas: [90])
-        let text = CaptureResult(state: .available, applicationName: "Browser", bundleIdentifier: "example.browser",
-                                 processIdentifier: 42, windowTitle: "Same title", text: "prior tab private text")
+        let text = CaptureResult(state: .available, source: .init(applicationName: "Browser",
+                                 bundleIdentifier: "example.browser", processIdentifier: 42,
+                                 windowTitle: "Same title"), text: "prior tab private text")
         let changedWindow = CaptureCollector.SourceIdentity(pid: 42, window: 11, title: "Same title",
                                                             document: nil, focusedElement: 50, selectedTabs: [70], webAreas: [90])
         let changedTab = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
@@ -83,7 +108,7 @@ final class CaptureCoreTests: XCTestCase {
         let changedPage = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
                                                           document: nil, focusedElement: 50, selectedTabs: [70], webAreas: [91])
         let addedDocument = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "Same title",
-                                                            document: "file:///fixture", focusedElement: 50,
+                                                            document: fixtureDocument, focusedElement: 50,
                                                             selectedTabs: [70], webAreas: [90])
         for current in [changedWindow, changedTab, changedPage, addedDocument] {
             let result = CaptureCollector.checkedCapture(text, initial: original, current: current,
@@ -115,8 +140,8 @@ final class CaptureCoreTests: XCTestCase {
         let sameOpaqueSource = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: nil,
                                                                document: nil, focusedElement: nil,
                                                                selectedTabs: [], webAreas: [])
-        let priorPage = CaptureResult(state: .available, applicationName: "Browser",
-                                      bundleIdentifier: "example.browser", processIdentifier: 42,
+        let priorPage = CaptureResult(state: .available, source: .init(applicationName: "Browser",
+                                      bundleIdentifier: "example.browser", processIdentifier: 42),
                                       text: "prior page private text")
         let changed = CaptureCollector.checkedCapture(priorPage, initial: sameOpaqueSource,
                                                       current: sameOpaqueSource,
@@ -137,6 +162,29 @@ final class CaptureCoreTests: XCTestCase {
                                                        confirmation: priorPage.text, final: sameOpaqueSource,
                                                        finalText: priorPage.text).state,
                        .available)
+    }
+
+    func testSameProcessSwitchDuringLastTextReadRejectsPriorWindow() {
+        let original = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "First",
+                                                       document: nil, focusedElement: 50,
+                                                       selectedTabs: [], webAreas: [])
+        let switched = CaptureCollector.SourceIdentity(pid: 42, window: 11, title: "Second",
+                                                       document: nil, focusedElement: 51,
+                                                       selectedTabs: [], webAreas: [])
+        let priorText = CaptureResult(state: .available,
+                                      source: .init(processIdentifier: 42, windowTitle: "First"),
+                                      text: "first window text")
+        var focused = original
+        let final = CaptureCollector.confirmAfterFinalText(readText: {
+            focused = switched
+            return priorText.text
+        }, readSource: { focused })
+        let result = CaptureCollector.checkedCapture(priorText, initial: original, current: original,
+                                                     confirmation: priorText.text, final: final.source,
+                                                     finalText: final.text)
+        XCTAssertEqual(result.state, .readFailed)
+        XCTAssertNil(result.text)
+        XCTAssertNil(result.windowTitle)
     }
 
     func testUnavailableFocusedWindowNeverFallsBackToBackgroundWindowsOrApplicationRoot() {
@@ -195,7 +243,9 @@ final class CaptureCoreTests: XCTestCase {
                 Thread.sleep(forTimeInterval: 0.2)
                 _ = workerFinished.increment()
                 return CaptureResult(state: .readFailed)
-            }) { _ in }
+            }) { _ in
+                // Delivery is intentionally ignored; only the worker drain orders the next request.
+            }
             deadline.cancel()
             CaptureCollector.afterCaptureWorkerDrains {
                 XCTAssertEqual(workerFinished.increment(), 2,

@@ -22,9 +22,28 @@ private func printJSON(_ result: CaptureResult) {
 var arguments = Array(CommandLine.arguments.dropFirst())
 // LaunchServices checks tag only their own process so a timeout cannot kill an
 // unrelated, preexisting M Graph instance.
-if arguments.count >= 2, arguments[arguments.count - 2] == "--invocation-id",
-   UUID(uuidString: arguments.last!) != nil {
-    arguments.removeLast(2)
+var checkInvocation: UUID?
+if arguments.count >= 4, arguments[arguments.count - 4] == "--shutdown-file",
+   arguments[arguments.count - 2] == "--invocation-id",
+   let invocation = UUID(uuidString: arguments.last!) {
+    let shutdown = URL(fileURLWithPath: arguments[arguments.count - 3])
+    let ready = shutdown.deletingLastPathComponent().appendingPathComponent("ready")
+    do {
+        try String(getpid()).write(to: ready, atomically: true, encoding: .utf8)
+    } catch {
+        fputs("M Graph check could not establish its invocation identity\n", stderr)
+        exit(3)
+    }
+    checkInvocation = invocation
+    DispatchQueue.global(qos: .utility).async {
+        while true {
+            if (try? String(contentsOf: shutdown, encoding: .utf8)) == invocation.uuidString {
+                exit(0)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+    arguments.removeLast(4)
 }
 if let command = arguments.first {
     guard arguments.count == 1 else {
@@ -52,7 +71,8 @@ if let command = arguments.first {
         application.activate(ignoringOtherApps: true)
         let consent = NSAlert()
         consent.messageText = "Allow foreground capture?"
-        consent.informativeText = "M Graph Capture will read the current foreground app once and write its result to the command output."
+        consent.informativeText = "M Graph Capture will read the current foreground app once and write its result to the command output." +
+            (checkInvocation.map { " Check \($0.uuidString)." } ?? "")
         consent.addButton(withTitle: "Allow Capture")
         consent.addButton(withTitle: "Cancel")
         let timeout = ConsentTimeout(alert: consent)
@@ -61,10 +81,12 @@ if let command = arguments.first {
         RunLoop.main.add(timer, forMode: .modalPanel)
         let approved = consent.runModal() == .alertFirstButtonReturn
         timer.invalidate()
-        guard approved, let foreground else {
-            printJSON(CaptureResult(state: .readFailed, error: "Command capture was not approved"))
+        if let failure = CaptureCollector.cliConsentFailure(approved: approved,
+                                                            foregroundAvailable: foreground != nil) {
+            printJSON(failure)
             exit(2)
         }
+        guard let foreground else { fatalError("Validated foreground application disappeared") }
         foreground.activate()
         Thread.sleep(forTimeInterval: 0.15)
         let result = CaptureCollector.captureForeground(expectedProcessIdentifier: foreground.processIdentifier)
@@ -84,7 +106,7 @@ if let command = arguments.first {
 
         func applicationDidFinishLaunching(_ _: Notification) {
             item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-            item.button?.title = "M Graph"
+            item.button?.title = checkInvocation.map { "M Graph · \($0.uuidString)" } ?? "M Graph"
             let menu = NSMenu()
             statusItem = NSMenuItem(title: "Checking Accessibility…", action: nil, keyEquivalent: "")
             menu.addItem(statusItem)
