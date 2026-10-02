@@ -9,7 +9,7 @@ import desktop_session
 
 
 class DesktopSessionTests(unittest.TestCase):
-    def session_state(self, values, *, asleep=False, uid=501):
+    def session_state(self, values, *, asleep=False, uid=501, number_conversion_succeeds=True):
         class Function:
             def __init__(self, operation):
                 self.operation = operation
@@ -31,6 +31,8 @@ class DesktopSessionTests(unittest.TestCase):
 
         def get_number(value, number_type, result):
             calls.append((number_type, type(result._obj)))
+            if not number_conversion_succeeds:
+                return False
             result._obj.value = value[1]
             return True
 
@@ -57,10 +59,16 @@ class DesktopSessionTests(unittest.TestCase):
                               ("kCGSSessionUserIDKey", ("number", 502)),
                               ("CGSSessionScreenIsLocked", ("boolean", True))):
             with self.subTest(change=change):
-                self.assertEqual(self.session_state({**active, change: value})[0][0], False)
+                self.assertFalse(self.session_state({**active, change: value})[0][0])
         self.assertEqual(self.session_state(active, asleep=True)[0], (True, False))
-        with self.assertRaisesRegex(desktop_session.DesktopUnavailable, "type mismatch"):
-            self.session_state({**active, "kCGSessionLoginDoneKey": ("number", 1)})
+        for key, value in (("kCGSessionLoginDoneKey", ("number", 1)),
+                           ("kCGSSessionUserIDKey", ("boolean", True))):
+            with self.subTest(wrong_type=key), \
+                 self.assertRaisesRegex(desktop_session.DesktopUnavailable, f"type mismatch: {key}"):
+                self.session_state({**active, key: value})
+        state, calls = self.session_state(active, number_conversion_succeeds=False)
+        self.assertEqual(state, (False, True))
+        self.assertEqual(calls, [(3, ctypes.c_int32)])
 
     def test_active_console_and_awake_display_accept_frontmost_app(self):
         with patch.object(desktop_session, "console_and_display_state", return_value=(True, True)), \
