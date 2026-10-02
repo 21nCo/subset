@@ -11,7 +11,7 @@ import fixture_windows
 
 
 SCRIPT = pathlib.Path(__file__).parent / "check-menu.py"
-INVOCATION = "00000000-0000-0000-0000-000000000001"
+INVOCATION = "a0bcde00-0000-0000-0000-000000000001"
 spec = importlib.util.spec_from_file_location("check_menu", SCRIPT)
 check_menu = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_menu)
@@ -71,6 +71,18 @@ class MenuCheckTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "fixture window was not closed"):
                 check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
             close.assert_called_once()
+
+    def test_menu_launch_passes_expected_fixture_title(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(check_menu.subprocess, "run", return_value=success), \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)) as launch, \
+             patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
+             patch.object(check_menu, "exercise_menu"), \
+             patch.object(check_menu, "close_fixture_window", return_value=True):
+            check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+        args = launch.call_args.kwargs["args"]
+        self.assertEqual(args[0], "--expected-fixture-title")
+        self.assertRegex(args[1], r"^MGraph Menu Fixture [a-f0-9]{8}$")
 
     def test_close_requires_window_readback(self):
         with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(

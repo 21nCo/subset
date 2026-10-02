@@ -96,7 +96,7 @@ class CaptureBoundaryTests(unittest.TestCase):
                                       "MGraph TextEdit Fixture abcdef12", title)
         self.assertEqual(len(failures), 1)
         self.assertIn("transition or capture failed", failures[0])
-        probe.assert_not_called()
+        probe.assert_called_once()
         self.assertEqual(close.call_args.args, ("Firefox", title))
         self.assertIn("deadline", close.call_args.kwargs)
 
@@ -106,6 +106,32 @@ class CaptureBoundaryTests(unittest.TestCase):
             self.assertIsNone(fixture_windows.fixture_window_exists(
                 "Firefox", "MGraph Capture Fixture abcdef12"))
         self.assertNotIn("get entire contents", run.call_args.args[0][2])
+
+    def test_missing_browser_process_is_conclusive_absence(self):
+        title = "MGraph Capture Fixture abcdef12"
+        for app in ("Safari", "Firefox", "Google Chrome"):
+            with self.subTest(app=app), \
+                 patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 0, "process-absent\n", "")) as run, \
+                 patch.object(fixture_windows, "chrome_tab_action") as chrome:
+                self.assertFalse(fixture_windows.fixture_window_exists(app, title))
+                self.assertTrue(fixture_windows.cleanup_fixture_after_open(app, title, "failed"))
+                self.assertEqual(run.call_count, 2)
+                chrome.assert_not_called()
+
+    def test_chrome_ax_timeout_uses_exact_tab_fallback(self):
+        title = "MGraph Capture Fixture abcdef12"
+        with patch.object(fixture_windows, "run_window_action", side_effect=subprocess.TimeoutExpired("osascript", 1)), \
+             patch.object(fixture_windows, "chrome_tab_action", side_effect=["exists", "closed", "absent"]) as chrome:
+            self.assertTrue(fixture_windows.close_fixture_window("Google Chrome", title))
+        self.assertEqual([call.args[1] for call in chrome.call_args_list], ["exists", "close", "exists"])
+
+    def test_exhausted_chrome_cleanup_deadline_fails_explicitly(self):
+        title = "MGraph Capture Fixture abcdef12"
+        with patch.object(fixture_windows, "run_window_action", side_effect=subprocess.TimeoutExpired("osascript", 1)), \
+             patch.object(fixture_windows, "chrome_tab_action", side_effect=TimeoutError("Fixture cleanup deadline exceeded")):
+            with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+                fixture_windows.close_fixture_window("Google Chrome", title)
 
     def test_chrome_hidden_fixture_can_be_selected_without_touching_other_tabs(self):
         title = "MGraph Capture Fixture abcdef12"

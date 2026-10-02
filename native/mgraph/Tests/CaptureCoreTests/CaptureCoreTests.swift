@@ -37,6 +37,7 @@ final class CaptureCoreTests: XCTestCase {
                     return key == (kAXRoleAttribute as String) ? (.success, "AXTextField") : (.success, "AXSecureTextField")
                 }, readString: { _, key, _ in sensitiveReads.append(key); return "secret" },
                 readValue: { _, _, _ in sensitiveReads.append(kAXValueAttribute as String); return "secret" },
+                checkTrust: { true },
                 readChildren: { _, _, _ in [] })
             XCTAssertEqual(result?.text, "")
             XCTAssertTrue(sensitiveReads.isEmpty, "Failed \(failedKey) requested protected text")
@@ -45,8 +46,27 @@ final class CaptureCoreTests: XCTestCase {
             readMetadata: { _, key, _ in
                 key == (kAXRoleAttribute as String) ? (.success, "AXTextArea") : (.attributeUnsupported, nil)
             }, readString: { _, key, _ in key == (kAXTitleAttribute as String) ? "ordinary" : nil },
-            readValue: { _, _, _ in nil }, readChildren: { _, _, _ in [] })
+            readValue: { _, _, _ in nil }, checkTrust: { true }, readChildren: { _, _, _ in [] })
         XCTAssertEqual(ordinary?.text, "ordinary")
+    }
+
+    func testMenuFixtureBindingMasksForegroundSwitchBeforeAlert() {
+        let fixture = "MGraph Menu Fixture abcdef12"
+        let expected = CaptureResult(state: .available,
+            source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: fixture), text: "fixture body")
+        XCTAssertEqual(CaptureCollector.bindFixture(expected, bundleIdentifier: "com.apple.TextEdit",
+                                                  windowTitle: fixture).text, "fixture body")
+        let switched = CaptureResult(state: .available,
+            source: .init(bundleIdentifier: "com.apple.Safari", windowTitle: "Unrelated"), text: "private body")
+        let rejected = CaptureCollector.bindFixture(switched, bundleIdentifier: "com.apple.TextEdit",
+                                                    windowTitle: fixture)
+        XCTAssertEqual(rejected.state, .readFailed)
+        XCTAssertNil(rejected.text)
+        XCTAssertNil(rejected.windowTitle)
+        let sameAppWrongWindow = CaptureResult(state: .available,
+            source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "Other document"), text: "private body")
+        XCTAssertNil(CaptureCollector.bindFixture(sameAppWrongWindow, bundleIdentifier: "com.apple.TextEdit",
+                                                  windowTitle: fixture).text)
     }
 
     func testTextNormalizationHasStrictLimit() {

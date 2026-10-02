@@ -23,7 +23,9 @@ var arguments = Array(CommandLine.arguments.dropFirst())
 // LaunchServices checks tag only their own process so a timeout cannot kill an
 // unrelated, preexisting M Graph instance.
 var checkInvocation: UUID?
-if arguments.count >= 4, arguments[arguments.count - 4] == "--shutdown-file",
+if arguments.count >= 6, arguments[arguments.count - 6] == "--shutdown-after",
+   let lifetime = Int(arguments[arguments.count - 5]), (1...120).contains(lifetime),
+   arguments[arguments.count - 4] == "--shutdown-file",
    arguments[arguments.count - 2] == "--invocation-id",
    let invocation = UUID(uuidString: arguments.last!) {
     let shutdown = URL(fileURLWithPath: arguments[arguments.count - 3])
@@ -36,14 +38,22 @@ if arguments.count >= 4, arguments[arguments.count - 4] == "--shutdown-file",
     }
     checkInvocation = invocation
     DispatchQueue.global(qos: .utility).async {
-        while true {
+        let expiry = DispatchTime.now() + .seconds(lifetime)
+        while DispatchTime.now() < expiry {
             if (try? String(contentsOf: shutdown, encoding: .utf8)) == invocation.uuidString {
                 exit(0)
             }
             Thread.sleep(forTimeInterval: 0.05)
         }
+        exit(0)
     }
-    arguments.removeLast(4)
+    arguments.removeLast(6)
+}
+var expectedFixtureTitle: String?
+if checkInvocation != nil, arguments.count == 2, arguments[0] == "--expected-fixture-title",
+   arguments[1].range(of: "^MGraph Menu Fixture [a-f0-9]{8}$", options: .regularExpression) != nil {
+    expectedFixtureTitle = arguments[1]
+    arguments.removeAll()
 }
 if let command = arguments.first {
     guard arguments.count == 1 else {
@@ -142,8 +152,11 @@ if let command = arguments.first {
             let token = captureRequests.begin()
             captureItem.isEnabled = false
             statusItem.title = "Capturing foreground…"
-            captureDeadline = CaptureCollector.captureForeground { [weak self] result in
+            captureDeadline = CaptureCollector.captureForeground { [weak self] captured in
                 guard let self, self.captureRequests.finish(token) else { return }
+                let result = expectedFixtureTitle.map {
+                    CaptureCollector.bindFixture(captured, bundleIdentifier: "com.apple.TextEdit", windowTitle: $0)
+                } ?? captured
                 self.captureDeadline = nil
                 CaptureCollector.afterCaptureWorkerDrains { [weak self] in
                     self?.captureItem.isEnabled = true

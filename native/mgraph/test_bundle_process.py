@@ -84,9 +84,9 @@ int main(int argc, char **argv) {
              patch.dict(bundle_process._controls, {marker: pathlib.Path(folder)}), \
              patch.object(bundle_process.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 1)), \
              patch.object(bundle_process.os, "kill") as kill:
+            binary = pathlib.Path("/tmp/MGraphCapture")
             with self.assertRaisesRegex(RuntimeError, "Could not establish"):
-                bundle_process.terminate_owned(pathlib.Path("/tmp/MGraphCapture"), marker,
-                                               deadline=time.monotonic() + 0.05)
+                bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 0.05)
             self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
             kill.assert_not_called()
 
@@ -136,15 +136,20 @@ int main(int argc, char **argv) {
             with self.assertRaisesRegex(RuntimeError, "CLI capture consent failed"):
                 bundle_process.approve_cli_capture(marker, binary)
 
-    def test_approved_consent_from_exited_invocation_is_rejected(self):
+    def test_approved_consent_from_fast_exited_invocation_is_accepted(self):
         marker = str(uuid.uuid4())
         binary = pathlib.Path("/tmp/MGraphCapture.app/Contents/MacOS/MGraphCapture")
         with patch.object(bundle_process, "wait_for_owned_pid", return_value=4242), \
              patch.object(bundle_process.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 0, "approved\n", "")), \
              patch.object(bundle_process, "is_owned", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "exited during CLI consent"):
-                bundle_process.approve_cli_capture(marker, binary)
+            bundle_process.approve_cli_capture(marker, binary)
+
+    def test_missing_ready_file_returns_no_pid(self):
+        marker = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.dict(bundle_process._controls, {marker: pathlib.Path(folder)}):
+            self.assertIsNone(bundle_process._ready_pid(pathlib.Path("/tmp/MGraphCapture"), marker))
 
     def test_timeout_and_interruption_terminate_only_invocation(self):
         for error in (subprocess.TimeoutExpired("open", 0.01), KeyboardInterrupt(), "sigterm"):

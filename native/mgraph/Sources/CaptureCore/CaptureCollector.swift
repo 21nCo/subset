@@ -210,6 +210,18 @@ public enum CaptureCollector {
         return nil
     }
 
+    // The native menu check may inspect alert text only for its own fixture.
+    // Reject a foreground switch before the alert receives any captured body.
+    public static func bindFixture(_ result: CaptureResult, bundleIdentifier: String,
+                                   windowTitle: String) -> CaptureResult {
+        guard result.state == .available else { return result }
+        guard result.bundleIdentifier == bundleIdentifier,
+              result.windowTitle?.contains(windowTitle) == true else {
+            return CaptureResult(state: .readFailed, error: "Foreground fixture changed before alert")
+        }
+        return result
+    }
+
     public static func captureForeground(expectedProcessIdentifier: pid_t? = nil) -> CaptureResult {
         guard isTrusted() else { return status() }
         guard let app = foreground() else {
@@ -487,6 +499,7 @@ public enum CaptureCollector {
                             readMetadata: MetadataReader = metadata,
                             readString: StringReader = stringAttribute,
                             readValue: ValueReader = textValue,
+                            checkTrust: () -> Bool = { isTrusted() },
                             readChildren: ChildrenReader = { element, limit, deadline in
                                 elements(element, kAXChildrenAttribute as String, maxCount: limit, deadline: deadline)
                             }) -> (text: String, visited: Int)? {
@@ -499,7 +512,7 @@ public enum CaptureCollector {
         var length = 0
 
         while index < queue.count && count < 600 && length < 6000 {
-            if deadline.expired || !isTrusted() { break }
+            if deadline.expired || !checkTrust() { break }
             let (element, depth) = queue[index]
             index += 1
             let identity = CFHash(element)

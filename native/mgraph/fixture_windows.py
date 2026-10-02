@@ -104,7 +104,14 @@ def focus_fixture_window(app, title):
 
 def close_fixture_window(app, title, *, deadline=None):
     deadline = deadline if deadline is not None else time.monotonic() + FIXTURE_CLEANUP_SECONDS
-    closed_by_ax = run_window_action(app, title, close=True, deadline=deadline)
+    try:
+        closed_by_ax = run_window_action(app, title, close=True, deadline=deadline)
+    except subprocess.TimeoutExpired:
+        if app != CHROME:
+            raise
+        # Chrome's exact-tab adapter can still verify or close this fixture
+        # after its AX tree stalls, provided the shared deadline has time.
+        closed_by_ax = False
     if app != CHROME:
         return closed_by_ax
     if chrome_tab_action(title, "exists", deadline=deadline) == "absent":
@@ -154,7 +161,7 @@ def fixture_window_exists(app, title, *, deadline=None):
         raise ValueError("Expected a native-check fixture app and unique title")
     script = f'''set fixtureTitle to "{title}"
 tell application "System Events"
-    if not (exists process "{app}") then return "absent"
+    if not (exists process "{app}") then return "process-absent"
     tell process "{app}"
     repeat with candidate in (get value of attribute "AXWindows")
         if name of candidate contains fixtureTitle then return "exists"
@@ -167,10 +174,12 @@ end tell'''
     if result.returncode:
         raise RuntimeError(f"Fixture presence check failed: {result.stderr.strip()}")
     answer = result.stdout.strip()
-    if answer not in {"exists", "absent"}:
+    if answer not in {"exists", "absent", "process-absent"}:
         raise RuntimeError("Fixture presence check returned an unknown result")
     if answer == "exists":
         return True
+    if answer == "process-absent":
+        return False
     if app == CHROME:
         return chrome_tab_action(title, "exists", deadline=deadline) == "exists"
     return False if app == "TextEdit" else None
@@ -189,6 +198,6 @@ def cleanup_fixture_after_open(app, title, open_outcome):
         return True
     # A partial open may have failed before creating a TextEdit window or
     # Chrome tab. A negative bounded readback is conclusive for these apps.
-    if open_outcome != "success" and app in {"TextEdit", CHROME}:
+    if open_outcome != "success":
         return fixture_window_exists(app, title, deadline=deadline) is False
     return False

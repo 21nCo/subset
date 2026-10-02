@@ -90,7 +90,7 @@ def _ready_pid(binary, invocation):
         return None
     try:
         pid = int((control / "ready").read_text())
-    except (FileNotFoundError, ValueError, OSError):
+    except (ValueError, OSError):
         return None
     identity = process_identity(pid)
     if identity is None or pathlib.Path(identity[0]).resolve() != pathlib.Path(binary).resolve():
@@ -143,9 +143,32 @@ def terminate_owned(binary, invocation, deadline=None):
     _known.pop(invocation, None)
 
 
+def _stop_launcher(launcher, deadline):
+    if launcher.poll() is not None:
+        return
+    launcher.terminate()
+    try:
+        launcher.communicate(timeout=max(0.05, min(1, deadline - time.monotonic())))
+    except subprocess.TimeoutExpired:
+        launcher.kill()
+        launcher.communicate(timeout=max(0.05, min(1, deadline - time.monotonic())))
+
+
+def _finish_invocation(launcher, completed_wait, binary, invocation, deadline):
+    if launcher is None:
+        return
+    try:
+        _stop_launcher(launcher, deadline)
+    finally:
+        if completed_wait:
+            _known.pop(invocation, None)
+        else:
+            terminate_owned(binary, invocation, deadline=deadline)
+
+
 @contextlib.contextmanager
 def launched_bundle(bundle, args=(), output=None, wait=True, timeout=20,
-                    allowed_returncodes=(0,), before_wait=None):
+                    allowed_returncodes=(0,), before_wait=None, lifetime=90):
     # Absolute paths cannot be parsed as options by open, even when a caller
     # supplied an option-shaped relative bundle or output path.
     bundle = pathlib.Path(bundle).resolve()
@@ -158,7 +181,8 @@ def launched_bundle(bundle, args=(), output=None, wait=True, timeout=20,
         command += ["-o", str(pathlib.Path(output).resolve())]
     control_path = pathlib.Path(tempfile.mkdtemp(prefix="mgraph-invocation-"))
     _controls[invocation] = control_path
-    command += [str(bundle), "--args", *args, "--shutdown-file", str(control_path / "shutdown"),
+    command += [str(bundle), "--args", *args, "--shutdown-after", str(lifetime),
+                "--shutdown-file", str(control_path / "shutdown"),
                 "--invocation-id", invocation]
     previous_term_handler = signal.getsignal(signal.SIGTERM)
 
@@ -186,22 +210,10 @@ def launched_bundle(bundle, args=(), output=None, wait=True, timeout=20,
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         shutdown_end = time.monotonic() + 5
-        cleanup_ok = launcher is None or completed_wait
+        cleanup_ok = False
         try:
-            try:
-                if launcher is not None and launcher.poll() is None:
-                    launcher.terminate()
-                    try:
-                        launcher.communicate(timeout=max(0.05, min(1, shutdown_end - time.monotonic())))
-                    except subprocess.TimeoutExpired:
-                        launcher.kill()
-                        launcher.communicate(timeout=max(0.05, min(1, shutdown_end - time.monotonic())))
-            finally:
-                if launcher is not None and not completed_wait:
-                    terminate_owned(binary, invocation, deadline=shutdown_end)
-                    cleanup_ok = True
-                else:
-                    _known.pop(invocation, None)
+            _finish_invocation(launcher, completed_wait, binary, invocation, shutdown_end)
+            cleanup_ok = True
         finally:
             _controls.pop(invocation, None)
             if cleanup_ok:
@@ -251,9 +263,11 @@ end tell'''
         result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("CLI capture consent automation timed out") from error
+    if result.returncode == 0 and result.stdout.strip() == "approved":
+        # The invocation-labeled click is the authorization event. A fast
+        # capture may have written its result and exited before this readback.
+        return
     exited = not is_owned(binary, invocation, pid)
-    if result.returncode == 0 and result.stdout.strip() == "approved" and exited:
-        raise RuntimeError("Owned bundle process exited during CLI consent")
     if (result.returncode or result.stdout.strip() == "no-consent-alert") and exited:
         # Permission can be revoked between bundled status and capture. The
         # command exits before showing consent; let the caller inspect its

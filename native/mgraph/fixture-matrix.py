@@ -104,9 +104,7 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
     fixture = plain if app == "TextEdit" else html
     failures = []
     open_outcome = "unknown"
-    attempted_open = False
     try:
-        attempted_open = True
         opened = subprocess.run(["open", "-a", app, str(fixture)], capture_output=True,
                                 text=True, timeout=20)
         if opened.returncode:
@@ -118,14 +116,21 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
             failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError,
             OSError, ValueError) as error:
+        if open_outcome == "unknown":
+            open_outcome = "failed"
         failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:
-        try:
-            if attempted_open and not cleanup_fixture_after_open(app, title, open_outcome):
-                failures.append(f"{app}: fixture window was not closed")
-        except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
-            failures.append(f"{app}: fixture cleanup failed ({error})")
+        failures.extend(cleanup_failure(app, title, open_outcome))
     return failures
+
+
+def cleanup_failure(app, title, open_outcome):
+    try:
+        if cleanup_fixture_after_open(app, title, open_outcome):
+            return []
+        return [f"{app}: fixture window was not closed"]
+    except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+        return [f"{app}: fixture cleanup failed ({error})"]
 
 
 def main():
