@@ -51,7 +51,7 @@ if arguments.count >= 6, arguments[arguments.count - 6] == "--shutdown-after",
 }
 var expectedFixtureTitle: String?
 if checkInvocation != nil, arguments.count == 2, arguments[0] == "--expected-fixture-title",
-   arguments[1].range(of: "^MGraph Menu Fixture [a-f0-9]{8}$", options: .regularExpression) != nil {
+   arguments[1].range(of: "^MGraph Menu Fixture [a-f0-9]{8}\\.txt$", options: .regularExpression) != nil {
     expectedFixtureTitle = arguments[1]
     arguments.removeAll()
 }

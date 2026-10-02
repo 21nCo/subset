@@ -83,12 +83,14 @@ class MenuCheckTests(unittest.TestCase):
         with patch.object(check_menu.subprocess, "run", return_value=success), \
              patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)) as launch, \
              patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
-             patch.object(check_menu, "exercise_menu"), \
-             patch.object(check_menu, "close_fixture_window", return_value=True):
+             patch.object(check_menu, "exercise_menu") as exercise, \
+             patch.object(check_menu, "close_fixture_window", return_value=True) as close:
             check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
         args = launch.call_args.kwargs["args"]
         self.assertEqual(args[0], "--expected-fixture-title")
-        self.assertRegex(args[1], r"^MGraph Menu Fixture [a-f0-9]{8}$")
+        self.assertRegex(args[1], r"^MGraph Menu Fixture [a-f0-9]{8}\.txt$")
+        self.assertEqual(exercise.call_args.args[3] + ".txt", args[1])
+        self.assertEqual(close.call_args.args[0] + ".txt", args[1])
 
     def test_close_requires_window_readback(self):
         with patch.object(fixture_windows.subprocess, "run", return_value=subprocess.CompletedProcess(

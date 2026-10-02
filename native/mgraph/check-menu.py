@@ -109,7 +109,7 @@ def run_check(bundle):
     with tempfile.TemporaryDirectory(prefix="mgraph-menu-check-") as temporary:
         fixture = pathlib.Path(temporary) / f"MGraph Menu Fixture {uuid.uuid4().hex[:8]}.txt"
         fixture.write_text(MARKER + "\n")
-        with launched_bundle(bundle, args=("--expected-fixture-title", fixture.stem), wait=False) as invocation:
+        with launched_bundle(bundle, args=("--expected-fixture-title", fixture.name), wait=False) as invocation:
             pid = wait_for_owned_pid(bundle, invocation)
             open_outcome = "unknown"
             attempted_open = False

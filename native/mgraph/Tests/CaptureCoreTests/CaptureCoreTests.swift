@@ -51,7 +51,7 @@ final class CaptureCoreTests: XCTestCase {
     }
 
     func testMenuFixtureBindingMasksForegroundSwitchBeforeAlert() {
-        let fixture = "MGraph Menu Fixture abcdef12"
+        let fixture = "MGraph Menu Fixture abcdef12.txt"
         let expected = CaptureResult(state: .available,
             source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: fixture), text: "fixture body")
         XCTAssertEqual(CaptureCollector.bindFixture(expected, bundleIdentifier: "com.apple.TextEdit",
@@ -67,6 +67,13 @@ final class CaptureCoreTests: XCTestCase {
             source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "Other document"), text: "private body")
         XCTAssertNil(CaptureCollector.bindFixture(sameAppWrongWindow, bundleIdentifier: "com.apple.TextEdit",
                                                   windowTitle: fixture).text)
+        let missingExtension = CaptureResult(state: .available,
+            source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "MGraph Menu Fixture abcdef12"),
+            text: "private body")
+        let missingExtensionResult = CaptureCollector.bindFixture(missingExtension,
+            bundleIdentifier: "com.apple.TextEdit", windowTitle: fixture)
+        XCTAssertEqual(missingExtensionResult.state, .readFailed)
+        XCTAssertNil(missingExtensionResult.text)
         for wrongTitle in ["Prefix " + fixture, fixture + " suffix"] {
             let wrong = CaptureResult(state: .available,
                 source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: wrongTitle),
