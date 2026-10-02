@@ -12,6 +12,16 @@ ROOT = pathlib.Path(__file__).parent
 
 
 class IntegrationPreflightTests(unittest.TestCase):
+    def run_with_active_console(self, script, environment):
+        # These tests inject System Events outcomes independently of the
+        # operator's current lock and display state.
+        environment = dict(environment, PYTHONPATH=str(ROOT))
+        code = ("import desktop_session, runpy, sys; "
+                "desktop_session.console_and_display_state = lambda: (True, True); "
+                "runpy.run_path(sys.argv[1], run_name='__main__')")
+        return subprocess.run([sys.executable, "-c", code, str(ROOT / script)],
+                              capture_output=True, text=True, timeout=15, env=environment)
+
     def test_denied_system_events_does_not_open_fixtures(self):
         with tempfile.TemporaryDirectory(prefix="mgraph-preflight-test-") as temporary:
             folder = pathlib.Path(temporary)
@@ -28,9 +38,7 @@ class IntegrationPreflightTests(unittest.TestCase):
 
             for script in ("fixture-matrix.py", "check-menu.py"):
                 with self.subTest(script=script):
-                    result = subprocess.run([sys.executable, str(ROOT / script)],
-                                            capture_output=True, text=True, timeout=15,
-                                            env=environment)
+                    result = self.run_with_active_console(script, environment)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("System Events access required before opening", result.stderr)
                     self.assertFalse(log.exists(), f"{script} opened a fixture without automation access")
@@ -52,9 +60,7 @@ class IntegrationPreflightTests(unittest.TestCase):
             environment["MGRAPH_TEST_OPEN_LOG"] = str(log)
             for script in ("fixture-matrix.py", "check-menu.py"):
                 with self.subTest(script=script):
-                    result = subprocess.run([sys.executable, str(ROOT / script)],
-                                            capture_output=True, text=True, timeout=15,
-                                            env=environment)
+                    result = self.run_with_active_console(script, environment)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("Active desktop required", result.stderr)
                     self.assertFalse(log.exists(), f"{script} opened a fixture on a locked desktop")
@@ -78,8 +84,7 @@ class IntegrationPreflightTests(unittest.TestCase):
             environment["PATH"] = str(folder) + os.pathsep + environment["PATH"]
             environment["MGRAPH_TEST_OPEN_LOG"] = str(log)
             environment["MGRAPH_TEST_QUERY_COUNT"] = str(folder / "queries")
-            result = subprocess.run([sys.executable, str(ROOT / "fixture-matrix.py")],
-                                    capture_output=True, text=True, timeout=15, env=environment)
+            result = self.run_with_active_console("fixture-matrix.py", environment)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(len(log.read_text().splitlines()), 1)
             self.assertIn("MGraph TextEdit Fixture", result.stderr)

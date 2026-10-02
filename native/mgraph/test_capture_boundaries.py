@@ -227,6 +227,25 @@ class CaptureBoundaryTests(unittest.TestCase):
                                folder / "fixture.txt", folder / "fixture.html",
                                "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
 
+    def test_capture_error_and_desktop_loss_keep_cleanup_unverified(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_capture_then_lock")
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", side_effect=[
+                 "Finder", DesktopUnavailable("session locked")]), \
+             patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             patch.object(matrix, "capture_fixture", side_effect=RuntimeError("malformed capture")), \
+             patch.object(matrix, "cleanup_fixture_after_open") as close, \
+             patch.object(matrix.time, "sleep"):
+            folder = pathlib.Path(temporary)
+            with self.assertRaises(DesktopUnavailable) as raised:
+                matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
+                               folder / "fixture.txt", folder / "fixture.html",
+                               "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
+        self.assertIn("malformed capture", str(raised.exception))
+        self.assertIn("cleanup unverified; exact fixture title MGraph TextEdit Fixture abcdef12",
+                      str(raised.exception))
+        close.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

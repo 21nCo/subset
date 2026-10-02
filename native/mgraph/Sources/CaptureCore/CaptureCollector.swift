@@ -216,7 +216,7 @@ public enum CaptureCollector {
                                    windowTitle: String) -> CaptureResult {
         guard result.state == .available else { return result }
         guard result.bundleIdentifier == bundleIdentifier,
-              result.windowTitle?.contains(windowTitle) == true else {
+              result.windowTitle == windowTitle else {
             return CaptureResult(state: .readFailed, error: "Foreground fixture changed before alert")
         }
         return result

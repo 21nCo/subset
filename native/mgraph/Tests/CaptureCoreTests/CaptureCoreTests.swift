@@ -67,6 +67,16 @@ final class CaptureCoreTests: XCTestCase {
             source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "Other document"), text: "private body")
         XCTAssertNil(CaptureCollector.bindFixture(sameAppWrongWindow, bundleIdentifier: "com.apple.TextEdit",
                                                   windowTitle: fixture).text)
+        for wrongTitle in ["Prefix " + fixture, fixture + " suffix"] {
+            let wrong = CaptureResult(state: .available,
+                source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: wrongTitle),
+                text: "private body")
+            let masked = CaptureCollector.bindFixture(wrong, bundleIdentifier: "com.apple.TextEdit",
+                                                      windowTitle: fixture)
+            XCTAssertEqual(masked.state, .readFailed)
+            XCTAssertNil(masked.windowTitle)
+            XCTAssertNil(masked.text)
+        }
     }
 
     func testTextNormalizationHasStrictLimit() {

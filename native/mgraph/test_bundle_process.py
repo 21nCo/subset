@@ -85,8 +85,9 @@ int main(int argc, char **argv) {
              patch.object(bundle_process.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 1)), \
              patch.object(bundle_process.os, "kill") as kill:
             binary = pathlib.Path("/tmp/MGraphCapture")
+            deadline = time.monotonic() + 0.05
             with self.assertRaisesRegex(RuntimeError, "Could not establish"):
-                bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 0.05)
+                bundle_process.terminate_owned(binary, marker, deadline=deadline)
             self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
             kill.assert_not_called()
 

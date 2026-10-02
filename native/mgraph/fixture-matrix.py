@@ -62,20 +62,25 @@ def capture_fixture(bundle, folder, app, bundle_id, title):
                              before_wait=approve_cli_capture) as invocation:
             if not invocation:
                 raise RuntimeError("LaunchServices invocation identity missing")
-        if not output.exists():
-            raise RuntimeError("bundle produced no output")
-        try:
-            result = json.loads(output.read_text())
-        except (json.JSONDecodeError, UnicodeError) as error:
-            raise RuntimeError("bundle output was malformed") from error
-        if not isinstance(result, dict):
-            raise RuntimeError("bundle output was not an object")
+        result = read_capture_output(output)
         if (result.get("bundleIdentifier") == bundle_id
                 and result.get("state") == "available" and marker in (result.get("text") or "")):
             break
         time.sleep(0.5)
     if not focused:
         raise RuntimeError("fixture could not be focused")
+    return result
+
+
+def read_capture_output(output):
+    if not output.exists():
+        raise RuntimeError("bundle produced no output")
+    try:
+        result = json.loads(output.read_text())
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise RuntimeError("bundle output was malformed") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("bundle output was not an object")
     return result
 
 
@@ -99,7 +104,7 @@ def validate_fixture(app, bundle_id, result):
 def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser_title):
     title = textedit_title if app == "TextEdit" else browser_title
     fixture = plain if app == "TextEdit" else html
-    failures = []
+    capture_failures = []
     open_outcome = "unknown"
     attempted_open = False
     session_error = None
@@ -110,39 +115,48 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
                                 text=True, timeout=20)
         if opened.returncode:
             open_outcome = "failed"
-            failures.append(f"{app}: unavailable ({opened.stderr.strip()})")
+            capture_failures.append(f"{app}: unavailable ({opened.stderr.strip()})")
         else:
             open_outcome = "success"
             time.sleep(1)
-            failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
+            capture_failures.extend(validate_fixture(app, bundle_id,
+                capture_fixture(bundle, folder, app, bundle_id, title)))
     except DesktopUnavailable as error:
         session_error = error
-        failures.append(f"{app}: active desktop lost ({error})")
+        capture_failures.append(f"{app}: active desktop lost ({error})")
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError,
             OSError, ValueError) as error:
         if open_outcome == "unknown":
             open_outcome = "failed"
-        failures.append(f"{app}: fixture transition or capture failed ({error})")
+        capture_failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:
         if attempted_open:
-            try:
-                require_active_desktop()
-            except DesktopUnavailable as error:
-                session_error = error
-                failures.append(f"{app}: cleanup unverified; exact fixture title {title}; "
-                                f"restore desktop and close this fixture by title ({error})")
-            else:
-                failures.extend(cleanup_failure(app, title, open_outcome))
-                if any("cleanup" in failure or "was not closed" in failure for failure in failures):
-                    failures.append(f"{app}: exact fixture title {title} remains pending cleanup")
-                try:
-                    require_active_desktop()
-                except DesktopUnavailable as error:
-                    session_error = error
-                    failures.append(f"{app}: active desktop lost after cleanup ({error})")
+            cleanup_failures, cleanup_session_error = finish_fixture(app, title, open_outcome)
+            if cleanup_session_error is not None:
+                session_error = cleanup_session_error
+        else:
+            cleanup_failures = []
+    failures = capture_failures + cleanup_failures
     if session_error is not None:
         raise DesktopUnavailable("; ".join(failures)) from session_error
     return failures
+
+
+def finish_fixture(app, title, open_outcome):
+    try:
+        require_active_desktop()
+    except DesktopUnavailable as error:
+        return ([f"{app}: cleanup unverified; exact fixture title {title}; "
+                 f"restore desktop and close this fixture by title ({error})"], error)
+    failures = cleanup_failure(app, title, open_outcome)
+    if failures:
+        failures.append(f"{app}: exact fixture title {title} remains pending cleanup")
+    try:
+        require_active_desktop()
+    except DesktopUnavailable as error:
+        failures.append(f"{app}: active desktop lost after cleanup ({error})")
+        return failures, error
+    return failures, None
 
 
 def cleanup_failure(app, title, open_outcome):

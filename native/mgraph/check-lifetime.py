@@ -2,6 +2,7 @@
 """OS-visible expiry and isolation check for a signed LaunchServices bundle."""
 
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,8 +22,7 @@ def alive(pid):
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def wait_ready(control, binary):
-    deadline = time.monotonic() + 5
+def wait_ready(control, binary, deadline):
     while time.monotonic() < deadline:
         try:
             pid = int((control / "ready").read_text())
@@ -30,17 +30,34 @@ def wait_ready(control, binary):
             time.sleep(0.05)
             continue
         identity = process_identity(pid)
-        require(identity is not None and pathlib.Path(identity[0]).resolve() == binary,
-                "Ready PID did not identify the signed bundle")
-        return pid
-    raise RuntimeError("Signed bundle did not publish a ready PID")
-
-
-def wait_exited(pid, seconds):
-    deadline = time.monotonic() + seconds
-    while alive(pid) and time.monotonic() < deadline:
+        if identity is not None and pathlib.Path(identity[0]).resolve() == binary:
+            return (pid, identity)
         time.sleep(0.05)
-    return not alive(pid)
+    raise RuntimeError("Ready PID did not identify the signed bundle before deadline")
+
+
+def wait_exited(control, binary, deadline, expected=None):
+    """Prove the exact ready invocation exited, even if its PID was reused."""
+    while time.monotonic() < deadline:
+        try:
+            pid = int((control / "ready").read_text())
+        except (OSError, ValueError):
+            time.sleep(0.05)
+            continue
+        if expected is not None and pid != expected[0]:
+            raise RuntimeError("Ready PID changed during invocation")
+        current = process_identity(pid)
+        if expected is not None:
+            if current is not None and current != expected[1]:
+                return True
+        elif current is not None:
+            if pathlib.Path(current[0]).resolve() != binary:
+                return True  # The private ready PID has since been reused.
+            expected = (pid, current)
+        if not alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def launch(bundle, control, marker, lifetime, *, wait):
@@ -61,12 +78,16 @@ def main(bundle):
     binary = bundle / "Contents/MacOS/MGraphCapture"
     require(binary.is_file(), "Signed MGraphCapture bundle is missing")
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
-    with tempfile.TemporaryDirectory(prefix="mgraph-lifetime-") as temporary:
+    temporary = pathlib.Path(tempfile.mkdtemp(prefix="mgraph-lifetime-"))
+    cleanup_verified = False
+    try:
         controls = {}
         launchers = []
+        launched = set()
+        identities = {}
 
         def control(name):
-            path = pathlib.Path(temporary) / name
+            path = temporary / name
             path.mkdir()
             marker = str(uuid.uuid4())
             controls[name] = (path, marker)
@@ -74,41 +95,61 @@ def main(bundle):
 
         try:
             other, other_marker = control("other")
+            launched.add("other")
             launchers.append(launch(bundle, other, other_marker, 20, wait=True))
-            other_pid = wait_ready(other, binary)
+            identities["other"] = wait_ready(other, binary, time.monotonic() + 5)
 
             early, early_marker = control("early")
+            launched.add("early")
             launch(bundle, early, early_marker, 3, wait=False)
             early_before_ready = not (early / "ready").exists()
-            early_pid = wait_ready(early, binary)
-            require(wait_exited(early_pid, 5), "App outlived its expiry after no-wait launcher exit")
-            require(early_before_ready, "No-wait launcher remained active until ready; before-ready abandonment unproven")
-            require(alive(other_pid), "Unrelated invocation exited with the early one")
+            identities["early"] = wait_ready(early, binary, time.monotonic() + 5)
+            require(wait_exited(early, binary, time.monotonic() + 5, identities["early"]),
+                    "App outlived its expiry after no-wait launcher exit")
+            require(process_identity(identities["other"][0]) == identities["other"][1],
+                    "Unrelated invocation exited with the early one")
 
             late, late_marker = control("late")
+            launched.add("late")
             late_launcher = launch(bundle, late, late_marker, 3, wait=True)
             launchers.append(late_launcher)
-            late_pid = wait_ready(late, binary)
+            identities["late"] = wait_ready(late, binary, time.monotonic() + 5)
             late_launcher.kill()
             late_launcher.wait(timeout=2)
             (late / "shutdown").unlink(missing_ok=True)
-            require(wait_exited(late_pid, 5), "App outlived its expiry after runner death")
-            require(alive(other_pid), "Unrelated invocation exited with the killed runner")
+            require(wait_exited(late, binary, time.monotonic() + 5, identities["late"]),
+                    "App outlived its expiry after runner death")
+            require(process_identity(identities["other"][0]) == identities["other"][1],
+                    "Unrelated invocation exited with the killed runner")
 
             (other / "shutdown").write_text(other_marker.upper())
-            require(wait_exited(other_pid, 5), "Other invocation ignored its shutdown marker")
-            print(f"early_launcher_exited_before_ready={str(early_before_ready).lower()}")
-            print("abandoned_invocations_expired=passed other_invocation_preserved=passed")
+            require(wait_exited(other, binary, time.monotonic() + 5, identities["other"]),
+                    "Other invocation ignored its shutdown marker")
         finally:
             for path, marker in controls.values():
                 (path / "shutdown").write_text(marker.upper())
+            deadline = time.monotonic() + 5
+            unverified = []
+            for name in launched:
+                path, _ = controls[name]
+                if not wait_exited(path, binary, deadline, identities.get(name)):
+                    unverified.append(name)
             for launcher in launchers:
                 if launcher is not None and launcher.poll() is None:
                     try:
-                        launcher.wait(timeout=5)
+                        launcher.wait(timeout=max(0.05, deadline - time.monotonic()))
                     except subprocess.TimeoutExpired:
                         launcher.kill()
-                        launcher.wait(timeout=2)
+                        launcher.wait(timeout=max(0.05, deadline - time.monotonic()))
+            if unverified:
+                raise RuntimeError(f"Owned invocation exit unverified: {', '.join(sorted(unverified))}; "
+                                   f"shutdown markers retained at {temporary}")
+            cleanup_verified = True
+        print(f"early_launcher_exited_before_ready={str(early_before_ready).lower()}")
+        print("abandoned_invocations_expired=passed other_invocation_preserved=passed")
+    finally:
+        if cleanup_verified:
+            shutil.rmtree(temporary)
 
 
 if __name__ == "__main__":
