@@ -65,8 +65,11 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNil(rejected.windowTitle)
         let sameAppWrongWindow = CaptureResult(state: .available,
             source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "Other document"), text: "private body")
-        XCTAssertNil(CaptureCollector.bindFixture(sameAppWrongWindow, bundleIdentifier: "com.apple.TextEdit",
-                                                  windowTitle: fixture).text)
+        let sameAppRejected = CaptureCollector.bindFixture(sameAppWrongWindow,
+            bundleIdentifier: "com.apple.TextEdit", windowTitle: fixture)
+        XCTAssertEqual(sameAppRejected.state, .readFailed)
+        XCTAssertNil(sameAppRejected.windowTitle)
+        XCTAssertNil(sameAppRejected.text)
         let missingExtension = CaptureResult(state: .available,
             source: .init(bundleIdentifier: "com.apple.TextEdit", windowTitle: "MGraph Menu Fixture abcdef12"),
             text: "private body")

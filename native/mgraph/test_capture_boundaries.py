@@ -165,9 +165,12 @@ class CaptureBoundaryTests(unittest.TestCase):
         old_title = "MGraph Capture Fixture 1234abcd"
         old_capture = {"bundleIdentifier": "com.google.Chrome", "state": "available",
                        "text": matrix.fixture_marker(old_title), "windowTitle": old_title}
+        self.assertNotIn(matrix.fixture_marker(title), old_capture["text"])
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertTrue(matrix.validate_fixture("Google Chrome", "com.google.Chrome",
-                                                    title, old_capture))
+            failures = matrix.validate_fixture("Google Chrome", "com.google.Chrome",
+                                               title, old_capture)
+            self.assertEqual(failures, ["Google Chrome: fixture text unavailable "
+                                        f"(state=available, characters={len(old_capture['text'])})"])
 
         captures = [old_capture, {**old_capture, "text": matrix.fixture_marker(title),
                                   "windowTitle": title}]

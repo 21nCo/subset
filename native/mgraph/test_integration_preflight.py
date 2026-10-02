@@ -12,15 +12,24 @@ ROOT = pathlib.Path(__file__).parent
 
 
 class IntegrationPreflightTests(unittest.TestCase):
-    def run_with_active_console(self, script, environment):
+    def run_with_active_console(self, script, environment, *arguments):
         # These tests inject System Events outcomes independently of the
         # operator's current lock and display state.
         environment = dict(environment, PYTHONPATH=str(ROOT))
         code = ("import desktop_session, runpy, sys; "
                 "desktop_session.console_and_display_state = lambda: (True, True); "
-                "runpy.run_path(sys.argv[1], run_name='__main__')")
-        return subprocess.run([sys.executable, "-c", code, str(ROOT / script)],
+                "script = sys.argv[1]; sys.argv = [script, *sys.argv[2:]]; "
+                "runpy.run_path(script, run_name='__main__')")
+        return subprocess.run([sys.executable, "-c", code, str(ROOT / script), *arguments],
                               capture_output=True, text=True, timeout=15, env=environment)
+
+    def test_script_receives_direct_execution_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="mgraph-argv-test-") as temporary:
+            probe = pathlib.Path(temporary) / "probe.py"
+            probe.write_text("import sys; print(repr(sys.argv))\n")
+            result = self.run_with_active_console(str(probe), os.environ.copy(), "MGraphCapture.app")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), repr([str(probe), "MGraphCapture.app"]))
 
     def test_denied_system_events_does_not_open_fixtures(self):
         with tempfile.TemporaryDirectory(prefix="mgraph-preflight-test-") as temporary:

@@ -16,10 +16,10 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def wait_ready(control, binary, deadline):
+def wait_identity(control, filename, binary, deadline):
     while time.monotonic() < deadline:
         try:
-            pid = int((control / "ready").read_text())
+            pid = int((control / filename).read_text())
         except (OSError, ValueError):
             time.sleep(0.05)
             continue
@@ -27,7 +27,23 @@ def wait_ready(control, binary, deadline):
         if identity is not None and pathlib.Path(identity[0]).resolve() == binary:
             return (pid, identity)
         time.sleep(0.05)
-    raise RuntimeError("Ready PID did not identify the signed bundle before deadline")
+    raise RuntimeError(f"{filename} PID did not identify the signed bundle before deadline")
+
+
+def wait_ready(control, binary, deadline):
+    return wait_identity(control, "ready", binary, deadline)
+
+
+def exit_probe(pid, binary, expected):
+    """Return confirmed exit and any identity learned from the ready file."""
+    current = process_identity(pid)
+    if current is not None:
+        if expected is not None:
+            return current != expected[1], expected
+        if pathlib.Path(current[0]).resolve() != binary:
+            return True, None
+        return False, (pid, current)
+    return pid_exists(pid) is False, expected
 
 
 def wait_exited(control, binary, deadline, expected=None):
@@ -40,25 +56,21 @@ def wait_exited(control, binary, deadline, expected=None):
             continue
         if expected is not None and pid != expected[0]:
             raise RuntimeError("Ready PID changed during invocation")
-        current = process_identity(pid)
-        if expected is not None:
-            if current is not None and current != expected[1]:
-                return True
-        elif current is not None:
-            if pathlib.Path(current[0]).resolve() != binary:
-                return True  # The private ready PID has since been reused.
-            expected = (pid, current)
-        if current is None and pid_exists(pid) is False:
+        exited, expected = exit_probe(pid, binary, expected)
+        if exited:
             return True
         time.sleep(0.05)
     return False
 
 
-def launch(bundle, control, marker, lifetime, *, wait):
+def launch(bundle, control, marker, lifetime, *, wait, defer_ready=False):
     command = ["open", "-n"]
     if wait:
         command.append("-W")
-    command += [str(bundle), "--args", "--shutdown-after", str(lifetime),
+    command += [str(bundle), "--args"]
+    if defer_ready:
+        command.append("--defer-ready")
+    command += ["--shutdown-after", str(lifetime),
                 "--shutdown-file", str(control / "shutdown"), "--invocation-id", marker]
     if wait:
         return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -93,11 +105,21 @@ def main(bundle):
             launchers.append(launch(bundle, other, other_marker, 20, wait=True))
             identities["other"] = wait_ready(other, binary, time.monotonic() + 5)
 
+            fast, fast_marker = control("fast")
+            launched.add("fast")
+            launch(bundle, fast, fast_marker, 3, wait=False)
+            identities["fast"] = wait_ready(fast, binary, time.monotonic() + 5)
+            require(wait_exited(fast, binary, time.monotonic() + 5, identities["fast"]),
+                    "Fast-ready app outlived its expiry")
+
             early, early_marker = control("early")
             launched.add("early")
-            launch(bundle, early, early_marker, 3, wait=False)
-            early_before_ready = not (early / "ready").exists()
+            launch(bundle, early, early_marker, 3, wait=False, defer_ready=True)
+            starting = wait_identity(early, "starting", binary, time.monotonic() + 5)
+            require(not (early / "ready").exists(), "Deferred app published ready before launcher exit")
+            (early / "release-ready").write_text(early_marker.upper())
             identities["early"] = wait_ready(early, binary, time.monotonic() + 5)
+            require(identities["early"] == starting, "Deferred app identity changed before ready")
             require(wait_exited(early, binary, time.monotonic() + 5, identities["early"]),
                     "App outlived its expiry after no-wait launcher exit")
             require(process_identity(identities["other"][0]) == identities["other"][1],
@@ -139,7 +161,7 @@ def main(bundle):
                 raise RuntimeError(f"Owned invocation exit unverified: {', '.join(sorted(unverified))}; "
                                    f"shutdown markers retained at {temporary}")
             cleanup_verified = True
-        print(f"early_launcher_exited_before_ready={str(early_before_ready).lower()}")
+        print("early_launcher_exited_before_ready=true fast_ready=passed")
         print("abandoned_invocations_expired=passed other_invocation_preserved=passed")
     finally:
         if cleanup_verified:

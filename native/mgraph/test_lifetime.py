@@ -3,6 +3,7 @@
 import importlib.util
 import pathlib
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -17,7 +18,40 @@ spec.loader.exec_module(lifetime)
 
 
 class LifetimeTests(unittest.TestCase):
-    def test_fast_ready_before_no_wait_launcher_exit_is_valid(self):
+    def test_deferred_ready_cannot_precede_launcher_exit(self):
+        class Launcher:
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout):
+                return 0
+
+        with tempfile.TemporaryDirectory() as folder:
+            bundle = pathlib.Path(folder) / "MGraphCapture.app"
+            binary = bundle / "Contents/MacOS/MGraphCapture"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            identities = {}
+
+            def launch(_bundle, control, _marker, _lifetime, *, wait, defer_ready=False):
+                pid = {"other": 101, "fast": 104, "early": 102, "late": 103}[control.name]
+                identities[pid] = (str(binary), pid, 1)
+                (control / "ready").write_text(str(pid))
+                if defer_ready:
+                    (control / "starting").write_text(str(pid))
+                return Launcher() if wait else None
+
+            with patch.object(lifetime.subprocess, "run"), \
+                 patch.object(lifetime, "launch", side_effect=launch), \
+                 patch.object(lifetime, "process_identity", side_effect=lambda pid: identities.get(pid)), \
+                 patch.object(lifetime, "wait_exited", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "published ready before launcher exit"):
+                    lifetime.main(bundle)
+
+    def test_fast_and_deferred_ready_orders_are_required(self):
         class Launcher:
             def __init__(self):
                 self.stopped = False
@@ -37,11 +71,24 @@ class LifetimeTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.touch()
             identities = {}
+            workers = []
 
-            def launch(_bundle, control, _marker, _lifetime, *, wait):
-                pid = {"other": 101, "early": 102, "late": 103}[control.name]
-                (control / "ready").write_text(str(pid))
+            def launch(_bundle, control, _marker, _lifetime, *, wait, defer_ready=False):
+                pid = {"other": 101, "fast": 104, "early": 102, "late": 103}[control.name]
                 identities[pid] = (str(binary), pid, 1)
+                if defer_ready:
+                    (control / "starting").write_text(str(pid))
+                    def publish_ready():
+                        deadline = time.monotonic() + 10
+                        while not (control / "release-ready").exists() and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                        if (control / "release-ready").exists():
+                            (control / "ready").write_text(str(pid))
+                    worker = threading.Thread(target=publish_ready, daemon=True)
+                    worker.start()
+                    workers.append(worker)
+                else:
+                    (control / "ready").write_text(str(pid))
                 return Launcher() if wait else None
 
             output = io.StringIO()
@@ -51,7 +98,10 @@ class LifetimeTests(unittest.TestCase):
                  patch.object(lifetime, "wait_exited", return_value=True), \
                  contextlib.redirect_stdout(output):
                 lifetime.main(bundle)
-            self.assertIn("early_launcher_exited_before_ready=false", output.getvalue())
+            for worker in workers:
+                worker.join(timeout=1)
+                self.assertFalse(worker.is_alive())
+            self.assertIn("early_launcher_exited_before_ready=true fast_ready=passed", output.getvalue())
             self.assertIn("abandoned_invocations_expired=passed", output.getvalue())
 
     def test_fast_ready_and_transient_identity_are_both_accepted(self):
@@ -68,10 +118,11 @@ class LifetimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             control = pathlib.Path(folder)
             (control / "ready").write_text("42")
+            binary = pathlib.Path("/tmp/MGraphCapture")
+            deadline = time.monotonic() + 0.06
             with patch.object(lifetime, "process_identity", return_value=None):
                 with self.assertRaisesRegex(RuntimeError, "before deadline"):
-                    lifetime.wait_ready(control, pathlib.Path("/tmp/MGraphCapture"),
-                                        time.monotonic() + 0.06)
+                    lifetime.wait_ready(control, binary, deadline)
 
     def test_replacement_pid_proves_original_exit(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -138,27 +189,41 @@ class LifetimeTests(unittest.TestCase):
                     binary.parent.mkdir(parents=True)
                     binary.touch()
                     identities = {}
-                    ready_reads = set()
+                    workers = []
+                    ready_reads = {}
                     probes = 0
 
-                    def launch(_bundle, control, _marker, _lifetime, *, wait):
-                        pid = {"other": 101, "early": 102, "late": 103}[control.name]
-                        (control / "ready").write_text(str(pid))
+                    def launch(_bundle, control, _marker, _lifetime, *, wait, defer_ready=False):
+                        pid = {"other": 101, "fast": 104, "early": 102, "late": 103}[control.name]
                         identities[pid] = (str(binary), pid, 1)
+                        if defer_ready:
+                            (control / "starting").write_text(str(pid))
+                            def publish_ready():
+                                deadline = time.monotonic() + 10
+                                while not (control / "release-ready").exists() and time.monotonic() < deadline:
+                                    time.sleep(0.005)
+                                if (control / "release-ready").exists():
+                                    (control / "ready").write_text(str(pid))
+                            worker = threading.Thread(target=publish_ready, daemon=True)
+                            worker.start()
+                            workers.append(worker)
+                        else:
+                            (control / "ready").write_text(str(pid))
                         return Launcher() if wait else None
 
                     def identity(pid):
-                        name = {101: "other", 102: "early", 103: "late"}[pid]
-                        if pid not in ready_reads:
-                            ready_reads.add(pid)
+                        name = {101: "other", 104: "fast", 102: "early", 103: "late"}[pid]
+                        reads = ready_reads.get(pid, 0)
+                        ready_reads[pid] = reads + 1
+                        if reads < (2 if name == "early" else 1):
                             return identities[pid]
-                        if name in ("early", "late") or (root / name / "shutdown").exists():
+                        if name in ("fast", "early", "late") or (root / name / "shutdown").exists():
                             return None
                         return identities[pid]
 
                     def exists(pid):
                         nonlocal probes
-                        name = {101: "other", 102: "early", 103: "late"}[pid]
+                        name = {101: "other", 104: "fast", 102: "early", 103: "late"}[pid]
                         if name != phase:
                             return False
                         probes += 1
@@ -183,6 +248,9 @@ class LifetimeTests(unittest.TestCase):
                             with self.assertRaisesRegex(RuntimeError, "exit unverified"):
                                 lifetime.main(bundle)
                             self.assertTrue((root / phase / "shutdown").is_file())
+                    for worker in workers:
+                        worker.join(timeout=1)
+                        self.assertFalse(worker.is_alive())
                     self.assertGreaterEqual(probes, 2)
 
     def test_missing_ready_after_launch_retains_shutdown_marker(self):

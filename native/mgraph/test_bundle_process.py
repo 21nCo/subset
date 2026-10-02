@@ -139,8 +139,9 @@ int main(int argc, char **argv) {
                  patch.dict(bundle_process._controls, {marker: pathlib.Path(folder)}), \
                  patch.object(bundle_process, "process_identity", return_value=None), \
                  patch.object(bundle_process, "pid_exists", return_value=True):
+                deadline = time.monotonic() + 0.06
                 with self.assertRaisesRegex(RuntimeError, "did not exit"):
-                    bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 0.06)
+                    bundle_process.terminate_owned(binary, marker, deadline=deadline)
                 self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
                 self.assertEqual(bundle_process._known[marker], {4242: identity})
                 self.assertEqual(bundle_process.owned_state(binary, marker, 4242), "unknown")

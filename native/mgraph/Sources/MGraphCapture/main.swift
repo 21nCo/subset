@@ -30,6 +30,32 @@ if arguments.count >= 6, arguments[arguments.count - 6] == "--shutdown-after",
    let invocation = UUID(uuidString: arguments.last!) {
     let shutdown = URL(fileURLWithPath: arguments[arguments.count - 3])
     let ready = shutdown.deletingLastPathComponent().appendingPathComponent("ready")
+    let deferReady = arguments.count == 7 && arguments[0] == "--defer-ready"
+    if deferReady {
+        let control = shutdown.deletingLastPathComponent()
+        let starting = control.appendingPathComponent("starting")
+        let release = control.appendingPathComponent("release-ready")
+        do {
+            try String(getpid()).write(to: starting, atomically: true, encoding: .utf8)
+        } catch {
+            fputs("M Graph check could not publish startup identity\n", stderr)
+            exit(3)
+        }
+        let deadline = DispatchTime.now() + .seconds(5)
+        while DispatchTime.now() < deadline {
+            if (try? String(contentsOf: release, encoding: .utf8)) == invocation.uuidString {
+                break
+            }
+            if (try? String(contentsOf: shutdown, encoding: .utf8)) == invocation.uuidString {
+                exit(0)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard (try? String(contentsOf: release, encoding: .utf8)) == invocation.uuidString else {
+            fputs("M Graph check readiness release timed out\n", stderr)
+            exit(3)
+        }
+    }
     do {
         try String(getpid()).write(to: ready, atomically: true, encoding: .utf8)
     } catch {
@@ -48,6 +74,7 @@ if arguments.count >= 6, arguments[arguments.count - 6] == "--shutdown-after",
         exit(0)
     }
     arguments.removeLast(6)
+    if deferReady { arguments.removeAll() }
 }
 var expectedFixtureTitle: String?
 if checkInvocation != nil, arguments.count == 2, arguments[0] == "--expected-fixture-title",
