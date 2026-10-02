@@ -2,6 +2,8 @@
 
 import importlib.util
 import contextlib
+import io
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -156,6 +158,40 @@ class CaptureBoundaryTests(unittest.TestCase):
                                        "MGraph Capture Fixture abcdef12")
         self.assertEqual(focus.call_count, 5)
         launch.assert_not_called()
+
+    def test_matrix_rejects_older_same_app_fixture_after_focus_switch(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_source_identity")
+        title = "MGraph Capture Fixture abcdef12"
+        old_title = "MGraph Capture Fixture 1234abcd"
+        old_capture = {"bundleIdentifier": "com.google.Chrome", "state": "available",
+                       "text": matrix.fixture_marker(old_title), "windowTitle": old_title}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(matrix.validate_fixture("Google Chrome", "com.google.Chrome",
+                                                    title, old_capture))
+
+        captures = [old_capture, {**old_capture, "text": matrix.fixture_marker(title),
+                                  "windowTitle": title}]
+        def capture(_bundle, _args, *, output, **_kwargs):
+            output.write_text(json.dumps(captures.pop(0)))
+            return contextlib.nullcontext("owned")
+
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
+             patch.object(matrix, "focus_fixture_window", return_value=True), \
+             patch.object(matrix, "launched_bundle", side_effect=capture) as launch, \
+             patch.object(matrix.time, "sleep"):
+            result = matrix.capture_fixture(pathlib.Path("bundle"), pathlib.Path(temporary),
+                                            "Google Chrome", "com.google.Chrome", title)
+        self.assertEqual(result["text"], matrix.fixture_marker(title))
+        self.assertEqual(launch.call_count, 2)
+
+    def test_written_fixture_body_uses_its_unique_title_id(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_unique_body")
+        with tempfile.TemporaryDirectory() as temporary:
+            plain, html, textedit_title, browser_title = matrix.write_fixtures(pathlib.Path(temporary))
+            self.assertIn(matrix.fixture_marker(textedit_title), plain.read_text())
+            self.assertIn(matrix.fixture_marker(browser_title), html.read_text())
+            self.assertEqual(textedit_title.split()[-1], browser_title.split()[-1])
 
     def test_failed_open_does_not_claim_fixture_cleanup_failure(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_failed_open")

@@ -3,6 +3,7 @@
 
 import json
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -15,7 +16,6 @@ from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
 
 bundle = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).parent / "dist/MGraphCapture.app"
-marker = "MGRAPH ACCESSIBILITY FIXTURE Alpha Bravo Cedar"
 expected = {
     "TextEdit": "com.apple.TextEdit",
     "Safari": "com.apple.Safari",
@@ -40,10 +40,17 @@ def write_fixtures(folder):
     textedit_title = f"MGraph TextEdit Fixture {fixture_id}"
     browser_title = f"MGraph Capture Fixture {fixture_id}"
     plain = folder / f"{textedit_title}.txt"
-    plain.write_text(marker + "\nSecond line for capture quality.\n")
+    plain.write_text(fixture_marker(textedit_title) + "\nSecond line for capture quality.\n")
     html = folder / "fixture.html"
-    html.write_text(f"<!doctype html><title>{browser_title}</title><h1>{marker}</h1><p>Second line for capture quality.</p>")
+    html.write_text(f"<!doctype html><title>{browser_title}</title><h1>{fixture_marker(browser_title)}</h1><p>Second line for capture quality.</p>")
     return plain, html, textedit_title, browser_title
+
+
+def fixture_marker(title):
+    match = re.fullmatch(r"MGraph (?:TextEdit|Capture) Fixture ([a-f0-9]{8})", title)
+    if match is None:
+        raise ValueError("Expected a unique M Graph fixture title")
+    return f"MGRAPH ACCESSIBILITY FIXTURE {match.group(1)} Alpha Bravo Cedar"
 
 
 def capture_fixture(bundle, folder, app, bundle_id, title):
@@ -64,7 +71,8 @@ def capture_fixture(bundle, folder, app, bundle_id, title):
                 raise RuntimeError("LaunchServices invocation identity missing")
         result = read_capture_output(output)
         if (result.get("bundleIdentifier") == bundle_id
-                and result.get("state") == "available" and marker in (result.get("text") or "")):
+                and result.get("state") == "available"
+                and fixture_marker(title) in (result.get("text") or "")):
             break
         time.sleep(0.5)
     if not focused:
@@ -84,18 +92,19 @@ def read_capture_output(output):
     return result
 
 
-def validate_fixture(app, bundle_id, result):
+def validate_fixture(app, bundle_id, title, result):
     if result is None:
         return [f"{app}: no bundle output"]
     body = result.get("text") or ""
     identity = result.get("bundleIdentifier") == bundle_id
+    marker_found = fixture_marker(title) in body
     failures = []
     if not identity:
         failures.append(f"{app}: foreground changed to {result.get('bundleIdentifier')}")
-    if result.get("state") != "available" or marker not in body:
+    if result.get("state") != "available" or not marker_found:
         failures.append(f"{app}: fixture text unavailable (state={result.get('state')}, characters={len(body)})")
     print(json.dumps({"app": app, "sourceIdentityMatches": identity, "state": result.get("state"),
-                      "characters": len(body), "fixtureTextFound": marker in body,
+                      "characters": len(body), "fixtureTextFound": marker_found,
                       "windowTitlePresent": bool(result.get("windowTitle")),
                       "documentURLPresent": bool(result.get("documentURL"))}))
     return failures
@@ -119,7 +128,7 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
         else:
             open_outcome = "success"
             time.sleep(1)
-            capture_failures.extend(validate_fixture(app, bundle_id,
+            capture_failures.extend(validate_fixture(app, bundle_id, title,
                 capture_fixture(bundle, folder, app, bundle_id, title)))
     except DesktopUnavailable as error:
         session_error = error
