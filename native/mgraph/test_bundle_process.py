@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import unittest
@@ -35,6 +36,14 @@ class FakeLauncher:
 
 
 class BundleProcessTests(unittest.TestCase):
+    def test_pid_probe_distinguishes_absence_from_lookup_failure(self):
+        with patch.object(bundle_process.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(bundle_process.pid_exists(4242))
+        with patch.object(bundle_process.os, "kill", side_effect=PermissionError):
+            self.assertTrue(bundle_process.pid_exists(4242))
+        with patch.object(bundle_process.os, "kill", side_effect=OSError(5, "query failed")):
+            self.assertIsNone(bundle_process.pid_exists(4242))
+
     def build_controlled_binary(self, folder):
         source = folder / "controlled.c"
         source.write_text(r'''#include <stdio.h>
@@ -90,6 +99,40 @@ int main(int argc, char **argv) {
                 bundle_process.terminate_owned(binary, marker, deadline=deadline)
             self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
             kill.assert_not_called()
+
+    def test_transient_identity_failure_does_not_prove_owned_exit(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture").resolve()
+        identity = (str(binary), 100, 1)
+        bundle_process._known[marker] = {4242: identity}
+        try:
+            with tempfile.TemporaryDirectory() as folder, \
+                 patch.dict(bundle_process._controls, {marker: pathlib.Path(folder)}), \
+                 patch.object(bundle_process, "process_identity", return_value=None), \
+                 patch.object(bundle_process, "pid_exists", side_effect=[True, False]):
+                bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 1)
+                self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
+            self.assertNotIn(marker, bundle_process._known)
+        finally:
+            bundle_process._known.pop(marker, None)
+
+    def test_persistent_identity_failure_keeps_shutdown_marker_and_ownership(self):
+        marker = str(uuid.uuid4())
+        binary = pathlib.Path("/tmp/MGraphCapture").resolve()
+        identity = (str(binary), 100, 1)
+        bundle_process._known[marker] = {4242: identity}
+        try:
+            with tempfile.TemporaryDirectory() as folder, \
+                 patch.dict(bundle_process._controls, {marker: pathlib.Path(folder)}), \
+                 patch.object(bundle_process, "process_identity", return_value=None), \
+                 patch.object(bundle_process, "pid_exists", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "did not exit"):
+                    bundle_process.terminate_owned(binary, marker, deadline=time.monotonic() + 0.06)
+                self.assertEqual((pathlib.Path(folder) / "shutdown").read_text(), marker.upper())
+                self.assertEqual(bundle_process._known[marker], {4242: identity})
+                self.assertTrue(bundle_process.is_owned(binary, marker, 4242))
+        finally:
+            bundle_process._known.pop(marker, None)
 
     def test_option_shaped_bundle_and_output_are_absolute_operands(self):
         launcher = FakeLauncher(None)
@@ -178,6 +221,8 @@ int main(int argc, char **argv) {
             control.mkdir()
             preexisting = subprocess.Popen([str(binary)])
             owned = self.start_controlled_shell(binary, marker, control)
+            reaper = threading.Thread(target=owned.wait, daemon=True)
+            reaper.start()
             try:
                 bundle_process._controls[marker] = control
                 for _ in range(50):
@@ -205,6 +250,8 @@ int main(int argc, char **argv) {
             control = pathlib.Path(temporary) / "control"
             control.mkdir()
             owned = self.start_controlled_shell(binary, marker, control)
+            reaper = threading.Thread(target=owned.wait, daemon=True)
+            reaper.start()
             try:
                 bundle_process._controls[marker] = control
                 for _ in range(50):
@@ -232,6 +279,8 @@ int main(int argc, char **argv) {
             control.mkdir()
             marker = str(uuid.uuid4())
             owned = self.start_controlled_shell(binary, marker, control)
+            reaper = threading.Thread(target=owned.wait, daemon=True)
+            reaper.start()
             preexisting = subprocess.Popen([str(binary)])
             try:
                 bundle_process._controls[marker] = control

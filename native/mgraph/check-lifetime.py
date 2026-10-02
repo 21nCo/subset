@@ -8,18 +8,12 @@ import sys
 import tempfile
 import time
 import uuid
-from bundle_process import process_identity
+from bundle_process import pid_exists, process_identity
 
 
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
-
-
-def alive(pid):
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                            capture_output=True, text=True, timeout=2)
-    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def wait_ready(control, binary, deadline):
@@ -54,7 +48,7 @@ def wait_exited(control, binary, deadline, expected=None):
             if pathlib.Path(current[0]).resolve() != binary:
                 return True  # The private ready PID has since been reused.
             expected = (pid, current)
-        if not alive(pid):
+        if current is None and pid_exists(pid) is False:
             return True
         time.sleep(0.05)
     return False

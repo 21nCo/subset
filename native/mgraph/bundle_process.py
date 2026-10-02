@@ -6,6 +6,7 @@ targets that UUID, even if another M Graph instance was already running.
 
 import contextlib
 import ctypes
+import errno
 import os
 import pathlib
 import shutil
@@ -45,6 +46,27 @@ def process_identity(pid):
     return (os.fsdecode(path.value), info.start_sec, info.start_usec)
 
 
+def pid_exists(pid):
+    """Return False only for a kernel-confirmed absent PID; None is unknown."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as error:
+        return False if error.errno == errno.ESRCH else None
+    return True
+
+
+def identity_state(pid, expected):
+    """Classify a known process without turning a failed identity read into exit."""
+    current = process_identity(pid)
+    if current is not None:
+        return "same" if current == expected else "exited"
+    return "exited" if pid_exists(pid) is False else "unknown"
+
+
 class LaunchInterrupted(Exception):
     """A signal interrupted a check while it owned a bundle invocation."""
 
@@ -75,13 +97,23 @@ def owned_pids(binary, invocation, timeout=1):
     return set(found)
 
 
-def _live_known(binary, invocation):
-    return {pid for pid, identity in _known.get(invocation, {}).items()
-            if identity == process_identity(pid) and pathlib.Path(identity[0]).resolve() == binary}
+def _known_states(binary, invocation):
+    live = set()
+    unknown = set()
+    for pid, identity in _known.get(invocation, {}).items():
+        if pathlib.Path(identity[0]).resolve() != binary:
+            continue
+        state = identity_state(pid, identity)
+        if state == "same":
+            live.add(pid)
+        elif state == "unknown":
+            unknown.add(pid)
+    return live, unknown
 
 
 def is_owned(binary, invocation, pid):
-    return pid in _live_known(pathlib.Path(binary).resolve(), invocation)
+    live, unknown = _known_states(pathlib.Path(binary).resolve(), invocation)
+    return pid in live or pid in unknown
 
 
 def _ready_pid(binary, invocation):
@@ -103,19 +135,19 @@ def _ready_pid(binary, invocation):
 
 
 def _owned_now(binary, invocation, deadline):
-    known = _live_known(binary, invocation)
-    if known or _known.get(invocation):
-        return known
+    known, unknown = _known_states(binary, invocation)
+    if known or unknown or _known.get(invocation):
+        return known, unknown
     ready = _ready_pid(binary, invocation)
     if ready is not None:
-        return {ready}
+        return {ready}, set()
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise RuntimeError("Could not establish owned bundle process identity for cleanup")
     try:
-        return owned_pids(binary, invocation, timeout=min(1, max(0.05, remaining)))
+        return owned_pids(binary, invocation, timeout=min(1, max(0.05, remaining))), set()
     except subprocess.TimeoutExpired:
-        return _live_known(binary, invocation)
+        return _known_states(binary, invocation)
 
 
 def terminate_owned(binary, invocation, deadline=None):
@@ -129,14 +161,15 @@ def terminate_owned(binary, invocation, deadline=None):
     (control / "shutdown").write_text(str(uuid.UUID(invocation)).upper())
     had_identity = bool(_known.get(invocation))
     while time.monotonic() < end:
-        pids = _owned_now(binary, invocation, end)
+        pids, unknown = _owned_now(binary, invocation, end)
         if pids:
             had_identity = True
-        if had_identity and not pids:
+        if had_identity and not pids and not unknown:
             _known.pop(invocation, None)
             return
         time.sleep(min(0.05, max(0, end - time.monotonic())))
-    if _live_known(binary, invocation):
+    live, unknown = _known_states(binary, invocation)
+    if live or unknown:
         raise RuntimeError("Owned bundle process did not exit before cleanup deadline")
     if not had_identity:
         raise RuntimeError("Could not establish owned bundle process identity for cleanup")
