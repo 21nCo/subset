@@ -8,6 +8,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import is_owned, launched_bundle, owned_pids, wait_for_owned_pid
+from desktop_session import DesktopUnavailable, require_active_desktop
 from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
 
@@ -44,6 +45,7 @@ def close_fixture_window(title, open_outcome="success"):
 
 
 def menu_operation(pid, invocation, binary, body, *, timeout=20, allow_exit=False):
+    require_active_desktop()
     if not is_owned(binary, invocation, pid):
         raise RuntimeError("Owned M Graph process exited before menu operation")
     menu_title = f"M Graph · {str(uuid.UUID(invocation)).upper()}"
@@ -59,14 +61,9 @@ def menu_operation(pid, invocation, binary, body, *, timeout=20, allow_exit=Fals
 
 def require_automation():
     try:
-        automation = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to get count of menu bar items of menu bar 1 of process "Finder"'],
-            capture_output=True, text=True, timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("System Events access timed out before opening menu fixture") from None
-    if automation.returncode:
-        raise RuntimeError(f"System Events access required before opening menu fixture: {automation.stderr.strip()}")
+        require_active_desktop()
+    except DesktopUnavailable as error:
+        raise DesktopUnavailable(f"System Events access required before opening menu fixture: {error}") from error
 
 
 def exercise_menu(pid, invocation, binary, title):
@@ -79,6 +76,7 @@ def exercise_menu(pid, invocation, binary, title):
     get value of every static text of window 1
 '''
     for _ in range(5):
+        require_active_desktop()
         if not focus_fixture_window("TextEdit", title):
             raise RuntimeError("TextEdit menu fixture could not be focused")
         menu_operation(pid, invocation, binary, click_script)
@@ -117,19 +115,25 @@ def run_check(bundle):
             attempted_open = False
             failures = []
             try:
+                require_active_desktop()
                 attempted_open = True
                 subprocess.run(["open", "-a", "TextEdit", str(fixture)], check=True, timeout=20)
                 open_outcome = "success"
+                require_active_desktop()
                 exercise_menu(pid, invocation, binary, fixture.stem)
             except (RuntimeError, subprocess.CalledProcessError,
                     subprocess.TimeoutExpired, OSError) as error:
                 failures.append(str(error))
             finally:
                 try:
-                    if attempted_open and not close_fixture_window(fixture.stem, open_outcome):
-                        failures.append("TextEdit menu fixture window was not closed")
+                    if attempted_open:
+                        require_active_desktop()
+                        if not close_fixture_window(fixture.stem, open_outcome):
+                            failures.append("TextEdit menu fixture window was not closed")
                 except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
                     failures.append(f"TextEdit fixture cleanup failed ({error})")
+                if attempted_open and any("fixture cleanup failed" in item or "was not closed" in item for item in failures):
+                    failures.append(f"TextEdit: exact fixture title {fixture.stem} remains pending cleanup")
             if failures:
                 raise RuntimeError("; ".join(failures))
 

@@ -8,6 +8,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 import fixture_windows
+from desktop_session import DesktopUnavailable
 
 
 SCRIPT = pathlib.Path(__file__).parent / "check-menu.py"
@@ -18,6 +19,11 @@ spec.loader.exec_module(check_menu)
 
 
 class MenuCheckTests(unittest.TestCase):
+    def setUp(self):
+        desktop = patch.object(check_menu, "require_active_desktop", return_value="Finder")
+        desktop.start()
+        self.addCleanup(desktop.stop)
+
     def test_alert_can_arrive_after_old_half_second_wait(self):
         now = [0.0]
 
@@ -156,6 +162,39 @@ class MenuCheckTests(unittest.TestCase):
                 check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
         probe.assert_not_called()
         close.assert_called_once()
+
+    def test_locked_start_does_not_launch_or_open(self):
+        with patch.object(check_menu, "require_active_desktop",
+                          side_effect=DesktopUnavailable("Invalid index. (-1719)")), \
+             patch.object(check_menu, "launched_bundle") as launch, \
+             patch.object(check_menu.subprocess, "run") as run:
+            with self.assertRaisesRegex(DesktopUnavailable, "before opening menu fixture"):
+                check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+        launch.assert_not_called()
+        run.assert_not_called()
+
+    def test_desktop_loss_after_open_skips_menu_and_keeps_exact_cleanup_identity(self):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        active = iter(["Finder", "Finder", DesktopUnavailable("Invalid index. (-1719)"),
+                       DesktopUnavailable("Invalid index. (-1719)")])
+
+        def desktop():
+            result = next(active)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with patch.object(check_menu, "require_active_desktop", side_effect=desktop), \
+             patch.object(check_menu.subprocess, "run", return_value=success) as run, \
+             patch.object(check_menu, "launched_bundle", return_value=contextlib.nullcontext(INVOCATION)), \
+             patch.object(check_menu, "wait_for_owned_pid", return_value=42), \
+             patch.object(check_menu, "exercise_menu") as menu, \
+             patch.object(check_menu, "close_fixture_window") as close:
+            with self.assertRaisesRegex(RuntimeError, r"exact fixture title MGraph Menu Fixture [a-f0-9]{8}"):
+                check_menu.run_check(pathlib.Path("/tmp/MGraphCapture.app"))
+        self.assertEqual(sum(call.args[0][0] == "open" for call in run.call_args_list), 1)
+        menu.assert_not_called()
+        close.assert_not_called()
 
 
 if __name__ == "__main__":

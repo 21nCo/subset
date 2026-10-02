@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import fixture_windows
+from desktop_session import DesktopUnavailable
 
 
 ROOT = pathlib.Path(__file__).parent
@@ -86,6 +87,7 @@ class CaptureBoundaryTests(unittest.TestCase):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_probe_timeout")
         title = "MGraph Capture Fixture abcdef12"
         with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
              patch.object(matrix.subprocess, "run", side_effect=subprocess.TimeoutExpired("open", 20)), \
              patch.object(fixture_windows, "fixture_window_exists",
                           side_effect=subprocess.TimeoutExpired("osascript", 1)) as probe, \
@@ -144,6 +146,7 @@ class CaptureBoundaryTests(unittest.TestCase):
     def test_background_fixture_never_launches_capture_until_selected(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_background")
         with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
              patch.object(matrix, "focus_fixture_window", return_value=False) as focus, \
              patch.object(matrix, "launched_bundle") as launch, \
              patch.object(matrix.time, "sleep"):
@@ -157,6 +160,7 @@ class CaptureBoundaryTests(unittest.TestCase):
     def test_failed_open_does_not_claim_fixture_cleanup_failure(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_failed_open")
         with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
              patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess(
                  [], 1, "", "app unavailable")), \
              patch.object(matrix, "cleanup_fixture_after_open", return_value=True) as close:
@@ -171,15 +175,17 @@ class CaptureBoundaryTests(unittest.TestCase):
     def test_partial_open_and_stalled_cleanup_report_both_failures(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_partial_open")
         with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
              patch.object(matrix.subprocess, "run", side_effect=subprocess.TimeoutExpired("open", 20)), \
              patch.object(matrix, "cleanup_fixture_after_open", side_effect=subprocess.TimeoutExpired("osascript", 5)):
             folder = pathlib.Path(temporary)
             failures = matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
                                       folder / "fixture.txt", folder / "fixture.html",
                                       "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
-        self.assertEqual(len(failures), 2)
+        self.assertEqual(len(failures), 3)
         self.assertIn("transition or capture failed", failures[0])
         self.assertIn("cleanup failed", failures[1])
+        self.assertIn("MGraph TextEdit Fixture abcdef12", failures[2])
 
     def test_malformed_capture_output_is_a_per_app_failure(self):
         matrix = load_script("fixture-matrix.py", "fixture_matrix_malformed")
@@ -187,6 +193,7 @@ class CaptureBoundaryTests(unittest.TestCase):
             output.write_text("{")
             return contextlib.nullcontext("owned")
         with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", return_value="Finder"), \
              patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
              patch.object(matrix, "focus_fixture_window", return_value=True), \
              patch.object(matrix, "cleanup_fixture_after_open", return_value=True), \
@@ -198,6 +205,27 @@ class CaptureBoundaryTests(unittest.TestCase):
                                       "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
         self.assertEqual(len(failures), 1)
         self.assertIn("bundle output was malformed", failures[0])
+
+    def test_desktop_lost_after_cleanup_stops_before_next_fixture(self):
+        matrix = load_script("fixture-matrix.py", "fixture_matrix_post_cleanup_lock")
+        states = iter(["Finder", "Finder", DesktopUnavailable("Invalid index. (-1719)")])
+
+        def desktop():
+            state = next(states)
+            if isinstance(state, Exception):
+                raise state
+            return state
+
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(matrix, "require_active_desktop", side_effect=desktop), \
+             patch.object(matrix.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 [], 1, "", "app unavailable")), \
+             patch.object(matrix, "cleanup_fixture_after_open", return_value=True):
+            folder = pathlib.Path(temporary)
+            with self.assertRaisesRegex(DesktopUnavailable, "active desktop lost after cleanup"):
+                matrix.run_app(pathlib.Path("bundle"), folder, "TextEdit", "com.apple.TextEdit",
+                               folder / "fixture.txt", folder / "fixture.html",
+                               "MGraph TextEdit Fixture abcdef12", "MGraph Capture Fixture abcdef12")
 
 
 if __name__ == "__main__":

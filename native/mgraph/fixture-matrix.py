@@ -10,6 +10,7 @@ import tempfile
 import time
 import uuid
 from bundle_process import LaunchInterrupted, approve_cli_capture, launched_bundle
+from desktop_session import DesktopUnavailable, require_active_desktop
 from fixture_windows import cleanup_fixture_after_open, focus_fixture_window
 
 
@@ -29,14 +30,9 @@ def interrupt(_signum, _frame):
 
 def require_automation():
     try:
-        automation = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to get count of menu bar items of menu bar 1 of process "Finder"'],
-            capture_output=True, text=True, timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        sys.exit("System Events access timed out before opening fixtures")
-    if automation.returncode:
-        raise RuntimeError(f"System Events access required before opening fixtures: {automation.stderr.strip()}")
+        require_active_desktop()
+    except DesktopUnavailable as error:
+        raise DesktopUnavailable(f"System Events access required before opening fixtures: {error}") from error
 
 
 def write_fixtures(folder):
@@ -55,6 +51,7 @@ def capture_fixture(bundle, folder, app, bundle_id, title):
     result = None
     focused = False
     for _ in range(5):
+        require_active_desktop()
         output.unlink(missing_ok=True)
         if not focus_fixture_window(app, title):
             time.sleep(0.5)
@@ -104,7 +101,11 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
     fixture = plain if app == "TextEdit" else html
     failures = []
     open_outcome = "unknown"
+    attempted_open = False
+    session_error = None
     try:
+        require_active_desktop()
+        attempted_open = True
         opened = subprocess.run(["open", "-a", app, str(fixture)], capture_output=True,
                                 text=True, timeout=20)
         if opened.returncode:
@@ -114,13 +115,33 @@ def run_app(bundle, folder, app, bundle_id, plain, html, textedit_title, browser
             open_outcome = "success"
             time.sleep(1)
             failures.extend(validate_fixture(app, bundle_id, capture_fixture(bundle, folder, app, bundle_id, title)))
+    except DesktopUnavailable as error:
+        session_error = error
+        failures.append(f"{app}: active desktop lost ({error})")
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError,
             OSError, ValueError) as error:
         if open_outcome == "unknown":
             open_outcome = "failed"
         failures.append(f"{app}: fixture transition or capture failed ({error})")
     finally:
-        failures.extend(cleanup_failure(app, title, open_outcome))
+        if attempted_open:
+            try:
+                require_active_desktop()
+            except DesktopUnavailable as error:
+                session_error = error
+                failures.append(f"{app}: cleanup unverified; exact fixture title {title}; "
+                                f"restore desktop and close this fixture by title ({error})")
+            else:
+                failures.extend(cleanup_failure(app, title, open_outcome))
+                if any("cleanup" in failure or "was not closed" in failure for failure in failures):
+                    failures.append(f"{app}: exact fixture title {title} remains pending cleanup")
+                try:
+                    require_active_desktop()
+                except DesktopUnavailable as error:
+                    session_error = error
+                    failures.append(f"{app}: active desktop lost after cleanup ({error})")
+    if session_error is not None:
+        raise DesktopUnavailable("; ".join(failures)) from session_error
     return failures
 
 
@@ -141,11 +162,18 @@ def main():
         plain, html, textedit_title, browser_title = write_fixtures(folder)
         failures = []
         for app, bundle_id in expected.items():
-            failures.extend(run_app(bundle, folder, app, bundle_id, plain, html,
-                                    textedit_title, browser_title))
+            try:
+                failures.extend(run_app(bundle, folder, app, bundle_id, plain, html,
+                                        textedit_title, browser_title))
+            except DesktopUnavailable as error:
+                failures.append(str(error))
+                break
         if failures:
             sys.exit("; ".join(failures))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except DesktopUnavailable as error:
+        sys.exit(str(error))
