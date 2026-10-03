@@ -113,10 +113,10 @@ function readTransaction<T>(db: DatabaseSync, fn: () => T): T {
 function migrate(db: DatabaseSync): void {
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
   if (version > STORE_SCHEMA_VERSION) throw new StoreUnavailable(`Store schema ${version} is newer than this binary`);
-  if (version === 1 && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
+  if ((version === 1 || version === 2) && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
     AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.source_id = s.source_id AND o.revision = s.revision)
     LIMIT 1`).get()) {
-    throw new StoreUnavailable('V1 source needs reprocessing but has no current observation');
+    throw new StoreUnavailable(`V${version} source needs reprocessing but has no current observation`);
   }
   if (version < 1) transaction(db, () => {
     db.exec(`

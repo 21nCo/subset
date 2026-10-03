@@ -29,6 +29,27 @@ function createV1Database(filename) {
     PRAGMA user_version = 1;`);
   return old;
 }
+function createV2Database(filename) {
+  const old = new DatabaseSync(filename);
+  old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
+    display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE observations (observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(source_id, revision));
+    CREATE TABLE jobs (job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, observation_id TEXT NOT NULL, state TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER, worker_id TEXT);
+    CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
+    CREATE TABLE evidence (kind TEXT NOT NULL, entity_id TEXT NOT NULL,
+      source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+      payload TEXT NOT NULL, PRIMARY KEY(kind, entity_id));
+    CREATE INDEX evidence_source ON evidence(source_id, kind);
+    CREATE TABLE evidence_terms (source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, term TEXT NOT NULL, PRIMARY KEY(source_id, kind, term));
+    CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
+    PRAGMA user_version = 2;`);
+  return old;
+}
 function observation(sourceId = randomUUID(), observationId = randomUUID(), text = 'Alice knows Bob', observedAt = '2026-10-01T00:00:00.000Z') {
   return { schemaVersion: 1, observationId, source: { sourceId, kind: 'manual', locator: `note:${sourceId}` },
     observedAt, state: 'complete', content: text, sourceHash: sourceHash(text) };
@@ -142,6 +163,46 @@ test('v1 upgrade refuses a completed source with no current observation before c
   const disk = new DatabaseSync(filename, { readOnly: true });
   assert.equal(disk.prepare('PRAGMA user_version').get().user_version, 1);
   disk.close();
+});
+
+test('v2 upgrade refuses a missing current observation and succeeds after repair', t => {
+  const filename = fixture(t);
+  const old = createV2Database(filename);
+  const stale = observation(randomUUID(), randomUUID(), 'Old only term', '2026-10-01T00:00:00Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Restored current term', '2026-10-02T00:00:00Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'complete', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+    .run(stale.observationId, stale.source.sourceId, JSON.stringify(stale));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'pending')")
+    .run(stale.observationId, stale.source.sourceId, stale.observationId);
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'complete')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  old.close();
+
+  assert.throws(() => new MGraphStore(filename), /V2 source.*no current observation/);
+  const disk = new DatabaseSync(filename);
+  assert.equal(disk.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(disk.prepare('SELECT count(*) AS count FROM observations').get().count, 1);
+  assert.equal(disk.prepare('SELECT count(*) AS count FROM jobs').get().count, 2);
+  disk.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)')
+    .run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  disk.close();
+
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'pending');
+  assert.deepEqual(store.getSnapshot(current.source.sourceId).observations.map(row => row.observationId), [current.observationId]);
+  assert.equal(store.queryMemory('Old').graph.observations.length, 0);
+  assert.deepEqual(store.queryMemory('Restored').graph.observations.map(row => row.observationId), [current.observationId]);
+  assert.equal(store.pendingJobs(), 1);
+  const job = store.claimNextJob('repair-worker');
+  assert.equal(job.observationId, current.observationId);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(current));
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'complete');
+  assert.equal(store.queryMemory('Restored').graph.claims.length, 1);
+  assert.equal(store.pendingJobs(), 0);
+  assert.equal(store.claimNextJob('repair-worker'), null);
 });
 
 test('submillisecond source order accepts newer instant and fences equal or older observations', t => {
@@ -322,24 +383,7 @@ test('invalid graph, malformed query, revocation and failed-job retry', t => {
 
 test('v2 upgrade backfills observation identities after source replacement', t => {
   const filename = fixture(t);
-  const old = new DatabaseSync(filename);
-  old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
-    display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
-    observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
-    CREATE TABLE observations (observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(source_id, revision));
-    CREATE TABLE jobs (job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL, observation_id TEXT NOT NULL, state TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER, worker_id TEXT);
-    CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
-    CREATE TABLE evidence (kind TEXT NOT NULL, entity_id TEXT NOT NULL,
-      source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-      payload TEXT NOT NULL, PRIMARY KEY(kind, entity_id));
-    CREATE INDEX evidence_source ON evidence(source_id, kind);
-    CREATE TABLE evidence_terms (source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-      kind TEXT NOT NULL, term TEXT NOT NULL, PRIMARY KEY(source_id, kind, term));
-    CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
-    PRAGMA user_version = 2;`);
+  const old = createV2Database(filename);
   const first = observation();
   const completedGraph = graphFor(first);
   const leaseToken = randomUUID();
