@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { sourceHash } from '@subset/mgraph-contracts';
+import { decodeIpcRequest, parseIpcResponse, sourceHash } from '@subset/mgraph-contracts';
 import { MGraphStore, STORE_SCHEMA_VERSION, StoreConflict, StoreUnavailable } from '../dist/index.js';
 
 function fixture(t) {
@@ -50,6 +50,13 @@ function createV2Database(filename) {
     PRAGMA user_version = 2;`);
   return old;
 }
+function createV3Database(filename) {
+  const old = createV2Database(filename);
+  old.exec(`CREATE TABLE observation_ids (id_hash TEXT PRIMARY KEY);
+    ALTER TABLE jobs ADD COLUMN graph_hash TEXT;
+    PRAGMA user_version = 3;`);
+  return old;
+}
 function observation(sourceId = randomUUID(), observationId = randomUUID(), text = 'Alice knows Bob', observedAt = '2026-10-01T00:00:00.000Z') {
   return { schemaVersion: 1, observationId, source: { sourceId, kind: 'manual', locator: `note:${sourceId}` },
     observedAt, state: 'complete', content: text, sourceHash: sourceHash(text) };
@@ -63,6 +70,18 @@ function graphFor(observation) {
   return { schemaVersion: 1, observations: [observation], passages: [passage], claims: [claim],
     profiles: [{ schemaVersion: 1, profileId: randomUUID(), name: 'Alice', modelVersion: 'fixture-v1', claimIds: [claim.claimId] }],
     relationships: [], clusters: [], statuses: [] };
+}
+function uppercaseUuids(value) {
+  const fields = new Set(['sourceId', 'observationId', 'targetObservationId', 'passageId', 'claimId', 'profileId',
+    'relationshipId', 'clusterId', 'fromProfileId', 'toProfileId']);
+  const arrays = new Set(['claimIds', 'memberProfileIds']);
+  if (Array.isArray(value)) return value.map(uppercaseUuids);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+    if (fields.has(key) && typeof field === 'string') return [key, field.toUpperCase()];
+    if (arrays.has(key)) return [key, field.map(id => id.toUpperCase())];
+    return [key, uppercaseUuids(field)];
+  }));
 }
 function finish(store, observation) {
   const job = store.claimNextJob('test-worker');
@@ -94,6 +113,70 @@ test('fresh migration, evidence lookup, rebuild and read-only clients', t => {
   assert.equal(reader.getStatus(first.source.sourceId)[0].state, 'pending');
   finish(store, first);
   assert.equal(reader.queryMemory('Bob').graph.passages.length, 1);
+});
+
+test('snapshot and search retain every derived evidence kind', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const item = observation();
+  store.submitObservation(item);
+  const graph = graphFor(item);
+  graph.claims[0].statement = 'Generous association';
+  graph.profiles[0].name = 'Alaria';
+  const peer = { schemaVersion: 1, profileId: randomUUID(), name: 'Borealis', modelVersion: 'fixture-v1',
+    claimIds: [graph.claims[0].claimId] };
+  graph.profiles.push(peer);
+  graph.relationships.push({ schemaVersion: 1, relationshipId: randomUUID(), fromProfileId: graph.profiles[0].profileId,
+    toProfileId: peer.profileId, kind: 'Collaborates', modelVersion: 'fixture-v1', claimIds: [graph.claims[0].claimId] });
+  graph.clusters.push({ schemaVersion: 1, clusterId: randomUUID(), name: 'Constellation', memberProfileIds: [
+    graph.profiles[0].profileId, peer.profileId], modelVersion: 'fixture-v1', claimIds: [graph.claims[0].claimId] });
+  const job = store.claimNextJob('worker');
+  store.completeJob(job.jobId, job.leaseToken, graph);
+  const result = store.queryMemory('Alice').graph;
+  assert.deepEqual([result.passages.length, result.claims.length, result.profiles.length,
+    result.relationships.length, result.clusters.length], [1, 1, 2, 1, 1]);
+  assert.equal(store.getSnapshot(item.source.sourceId).relationships[0].relationshipId, graph.relationships[0].relationshipId);
+  for (const term of ['Generous', 'Alaria', 'Borealis', 'Collaborates', 'Constellation']) {
+    assert.equal(store.queryMemory(term).graph.observations.length, 1, term);
+  }
+  store.rebuildSearchIndex();
+  assert.equal(store.queryMemory('Generous').graph.claims.length, 1);
+  store.rebuildSource(item.source.sourceId);
+  for (const term of ['Generous', 'Alaria', 'Collaborates', 'Constellation']) {
+    assert.equal(store.queryMemory(term).graph.observations.length, 0, term);
+  }
+  assert.equal(store.queryMemory('Alice').graph.observations.length, 1);
+  const rebuilt = store.claimNextJob('worker');
+  store.completeJob(rebuilt.jobId, rebuilt.leaseToken, graph);
+  assert.equal(store.queryMemory('Generous').graph.claims.length, 1);
+  store.deleteSource(item.source.sourceId);
+  assert.equal(store.queryMemory('Generous').graph.observations.length, 0);
+});
+
+test('derived entity IDs cannot be reused by another source and fail as a typed conflict', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const first = observation();
+  const second = observation();
+  store.submitObservation(first);
+  const firstGraph = finish(store, first).graph;
+  store.submitObservation(second);
+  const job = store.claimNextJob('worker');
+  const conflicting = graphFor(second);
+  conflicting.claims[0].claimId = firstGraph.claims[0].claimId;
+  conflicting.profiles[0].claimIds = [firstGraph.claims[0].claimId];
+  assert.throws(() => store.completeJob(job.jobId, job.leaseToken, conflicting), StoreConflict);
+  assert.equal(store.getStatus(second.source.sourceId)[0].state, 'processing');
+  assert.equal(store.pendingJobs(), 1);
+  assert.equal(store.getSnapshot(first.source.sourceId).claims.length, 1);
+  store.failJob(job.jobId, job.leaseToken, 'Duplicate generated ID');
+  store.retryJob(job.jobId);
+  const retry = store.claimNextJob('worker');
+  store.completeJob(retry.jobId, retry.leaseToken, graphFor(second));
+  assert.equal(store.getSnapshot(second.source.sourceId).claims.length, 1);
+  assert.equal(store.pendingJobs(), 0);
 });
 
 test('v1 upgrade keeps only current revision in search, snapshot and queue', t => {
@@ -150,6 +233,156 @@ test('v1 completed work without derived evidence is requeued during upgrade', t 
   assert.equal(store.getStatus(item.source.sourceId)[0].state, 'complete');
   assert.equal(store.queryMemory('Alice').graph.claims.length, 1);
   assert.equal(store.pendingJobs(), 0);
+});
+
+test('failed late v1 upgrade rolls back schema and preserves claimable work', t => {
+  const filename = fixture(t);
+  const old = createV1Database(filename);
+  const item = observation();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'complete', ?)")
+    .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(item.observationId, item.source.sourceId, JSON.stringify(item));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'complete')")
+    .run(item.observationId, item.source.sourceId, item.observationId);
+  old.close();
+  const originalExec = DatabaseSync.prototype.exec;
+  DatabaseSync.prototype.exec = function (sql) {
+    if (sql.includes('CREATE TABLE observation_ids')) throw new Error('injected late upgrade failure');
+    return originalExec.call(this, sql);
+  };
+  try { assert.throws(() => new MGraphStore(filename), /injected late upgrade failure/); }
+  finally { DatabaseSync.prototype.exec = originalExec; }
+  const disk = new DatabaseSync(filename);
+  assert.equal(disk.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(disk.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name IN ('evidence', 'observation_ids')").get().n, 0);
+  assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 1);
+  disk.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.pendingJobs(), 1);
+  assert.equal(store.claimNextJob('repair-worker').observationId, item.observationId);
+});
+
+test('v1 and v2 case-colliding observation IDs fail upgrade with a typed error and no schema change', t => {
+  for (const [create, expectedVersion] of [[createV1Database, 1], [createV2Database, 2]]) {
+    const filename = fixture(t);
+    const old = create(filename);
+    const reusedId = randomUUID();
+    const first = observation(randomUUID(), reusedId);
+    const second = observation(randomUUID(), reusedId.toUpperCase());
+    for (const item of [first, second]) {
+      old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'pending', ?)")
+        .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+      old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+        .run(item.observationId, item.source.sourceId, JSON.stringify(item));
+    }
+    old.close();
+    assert.throws(() => new MGraphStore(filename), error => error instanceof StoreUnavailable &&
+      /Case-folded UUID collision in observations/.test(error.message));
+    const disk = new DatabaseSync(filename, { readOnly: true });
+    assert.equal(disk.prepare('PRAGMA user_version').get().user_version, expectedVersion);
+    assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 2);
+    assert.equal(disk.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'observation_ids'").get().n, 0);
+    disk.close();
+  }
+});
+
+test('v1 and v3 upgrade refuse malformed retained status or checkpoint before schema change', t => {
+  for (const [create, version] of [[createV1Database, 1], [createV3Database, 3]]) {
+    for (const malformed of ['status', 'checkpoint']) {
+      const filename = fixture(t);
+      const old = create(filename);
+      const item = observation();
+      old.prepare('INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)')
+        .run(item.source.sourceId, item.source.kind, item.source.locator, item.observedAt,
+          malformed === 'status' ? 'queued' : 'pending', item.observedAt);
+      old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+        .run(item.observationId, item.source.sourceId, JSON.stringify(item));
+      old.prepare('INSERT INTO jobs(job_id, source_id, revision, observation_id, state, checkpoint) VALUES (?, ?, 1, ?, ?, ?)')
+        .run(item.observationId, item.source.sourceId, item.observationId, 'pending',
+          malformed === 'checkpoint' ? '{"legacyStage":"halfway","extra":true}' : null);
+      old.close();
+      assert.throws(() => new MGraphStore(filename), error => error instanceof StoreUnavailable &&
+        new RegExp(`V${version} (source|job) .*invalid`).test(error.message));
+      const disk = new DatabaseSync(filename, { readOnly: true });
+      assert.equal(disk.prepare('PRAGMA user_version').get().user_version, version);
+      assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 1);
+      assert.equal(disk.prepare('SELECT count(*) AS n FROM jobs').get().n, 1);
+      disk.close();
+    }
+  }
+});
+
+test('v3 upgrade refuses an invalid current observation before changing schema', t => {
+  const filename = fixture(t);
+  const old = createV3Database(filename);
+  const item = observation();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'pending', ?)")
+    .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+    .run(item.observationId, item.source.sourceId, JSON.stringify({ ...item, content: 'Changed without updating hash' }));
+  old.close();
+  assert.throws(() => new MGraphStore(filename), error => error instanceof StoreUnavailable &&
+    /invalid current observation/.test(error.message));
+  const disk = new DatabaseSync(filename, { readOnly: true });
+  assert.equal(disk.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 1);
+  disk.close();
+});
+
+test('committed v2/v3 midpoint with complete work but no evidence is requeued', t => {
+  for (const create of [createV2Database, createV3Database]) {
+    const filename = fixture(t);
+    const old = create(filename);
+    const item = observation();
+    old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'complete', ?)")
+      .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+    old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(item.observationId, item.source.sourceId, JSON.stringify(item));
+    old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'complete')")
+      .run(item.observationId, item.source.sourceId, item.observationId);
+    old.close();
+    const store = new MGraphStore(filename);
+    t.after(() => store.close());
+    assert.equal(store.getStatus(item.source.sourceId)[0].state, 'pending');
+    assert.equal(store.getSnapshot().claims.length, 0);
+    assert.equal(store.queryMemory('Alice').graph.observations.length, 1);
+    assert.equal(store.pendingJobs(), 1);
+    finish(store, item);
+    assert.equal(store.queryMemory('Alice').graph.claims.length, 1);
+  }
+});
+
+test('v3 upgrade prunes an obsolete failed job and retry cannot disturb newer completed work', t => {
+  const filename = fixture(t);
+  const old = createV3Database(filename);
+  const stale = observation(randomUUID(), randomUUID(), 'Old revision', '2026-10-01T00:00:00Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Current revision', '2026-10-02T00:00:00Z');
+  const graph = graphFor(current);
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'complete', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(stale.observationId, stale.source.sourceId, JSON.stringify(stale));
+  old.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)').run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'failed')")
+    .run(stale.observationId, stale.source.sourceId, stale.observationId);
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'complete')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  const insert = old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)');
+  for (const [kind, records, key] of [
+    ['passage', graph.passages, 'passageId'], ['claim', graph.claims, 'claimId'], ['profile', graph.profiles, 'profileId'],
+  ]) for (const record of records) insert.run(kind, record[key], current.source.sourceId, JSON.stringify(record));
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.throws(() => store.retryJob(stale.observationId), StoreConflict);
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'complete');
+  assert.equal(store.pendingJobs(), 0);
+  assert.equal(store.claimNextJob('worker'), null);
+  assert.equal(store.queryMemory('Current').graph.claims.length, 1);
+  assert.equal(store.queryMemory('Old').graph.observations.length, 0);
+  const disk = new DatabaseSync(filename, { readOnly: true });
+  assert.equal(disk.prepare('SELECT count(*) AS n FROM jobs').get().n, 1);
+  assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 1);
+  disk.close();
 });
 
 test('v1 upgrade refuses a completed source with no current observation before changing schema', t => {
@@ -230,6 +463,165 @@ test('submillisecond source order accepts newer instant and fences equal or olde
   assert.equal(accepted.revision, 1);
 });
 
+test('long fractional timestamps preserve ordering without trailing-zero backtracking', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const sourceId = randomUUID();
+  const first = observation(sourceId, randomUUID(), 'First', `2026-10-01T00:00:00.${'0'.repeat(20_000)}1Z`);
+  const second = observation(sourceId, randomUUID(), 'Second', `2026-10-01T00:00:00.${'0'.repeat(20_000)}2Z`);
+  store.submitObservation(first);
+  assert.equal(store.submitObservation(second).revision, 2);
+  assert.equal(store.getSnapshot(sourceId).observations[0].observationId, second.observationId);
+});
+
+test('UUID casing is one identity for source, observation, graph, replay and retirement', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const item = observation();
+  const uppercase = { ...item, observationId: item.observationId.toUpperCase(),
+    source: { ...item.source, sourceId: item.source.sourceId.toUpperCase() } };
+  assert.equal(store.submitObservation(uppercase).observationId, uppercase.observationId);
+  assert.equal(store.submitObservation(item).replayed, true);
+  const job = store.claimNextJob('worker');
+  assert.equal(job.sourceId, item.source.sourceId);
+  const graph = graphFor(item);
+  const upperGraph = structuredClone(graph);
+  upperGraph.observations = [uppercase];
+  upperGraph.passages[0].passageId = upperGraph.passages[0].passageId.toUpperCase();
+  upperGraph.passages[0].observationId = uppercase.observationId;
+  upperGraph.claims[0].claimId = upperGraph.claims[0].claimId.toUpperCase();
+  upperGraph.claims[0].provenance[0].passageId = upperGraph.passages[0].passageId;
+  upperGraph.claims[0].provenance[0].observationId = uppercase.observationId;
+  upperGraph.profiles[0].profileId = upperGraph.profiles[0].profileId.toUpperCase();
+  upperGraph.profiles[0].claimIds = [upperGraph.claims[0].claimId];
+  store.completeJob(job.jobId.toUpperCase(), job.leaseToken.toUpperCase(), upperGraph);
+  store.completeJob(job.jobId, job.leaseToken, graph);
+  assert.equal(store.getSnapshot(item.source.sourceId.toUpperCase()).claims[0].claimId, graph.claims[0].claimId);
+  assert.equal(store.getStatus(item.source.sourceId.toUpperCase())[0].sourceId, item.source.sourceId.toUpperCase());
+  const next = observation(item.source.sourceId, randomUUID(), 'Next revision', '2026-10-02T00:00:00Z');
+  store.submitObservation(next);
+  assert.throws(() => store.submitObservation(observation(item.source.sourceId, item.observationId.toUpperCase(),
+    'Reused after replacement', '2026-10-03T00:00:00Z')), StoreConflict);
+  store.deleteSource(item.source.sourceId.toUpperCase());
+  assert.equal(store.queryMemory('Alice').graph.observations.length, 0);
+  assert.throws(() => store.submitObservation(item), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(randomUUID(), item.observationId.toUpperCase(),
+    'Reused ID', '2026-10-02T00:00:00Z')), StoreConflict);
+});
+
+test('store acknowledgments preserve UUID spelling required by SET-5 response correlation', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const item = uppercaseUuids(observation());
+  const submit = decodeIpcRequest({ protocolVersion: 2, requestId: randomUUID(), operation: 'submitObservation', payload: item });
+  const accepted = store.submitObservation(submit.request.payload);
+  assert.equal(parseIpcResponse({ protocolVersion: 2, requestId: submit.request.requestId, operation: 'submitObservation',
+    ok: true, result: { kind: 'observationAccepted', observationId: accepted.observationId } }, submit).ok, true);
+  const status = decodeIpcRequest({ protocolVersion: 2, requestId: randomUUID(), operation: 'getStatus',
+    sourceId: item.source.sourceId });
+  assert.equal(parseIpcResponse({ protocolVersion: 2, requestId: status.request.requestId, operation: 'getStatus',
+    ok: true, result: { kind: 'status', statuses: store.getStatus(status.request.sourceId) } }, status).ok, true);
+  assert.equal(store.getStatus()[0].sourceId, item.source.sourceId.toLowerCase());
+});
+
+test('v3 upgrade canonicalizes retained source, observation and evidence references', t => {
+  const filename = fixture(t);
+  const old = createV3Database(filename);
+  const item = observation();
+  const upperItem = uppercaseUuids(item);
+  const graph = uppercaseUuids(graphFor(item));
+  const token = randomUUID().toUpperCase();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'complete', ?)")
+    .run(upperItem.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+    .run(upperItem.observationId, upperItem.source.sourceId, JSON.stringify(upperItem));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state, lease_token, graph_hash) VALUES (?, ?, 1, ?, 'complete', ?, 'old-digest')")
+    .run(upperItem.observationId, upperItem.source.sourceId, upperItem.observationId, token);
+  old.prepare('INSERT INTO observation_ids VALUES (?)')
+    .run(createHash('sha256').update(upperItem.observationId).digest('hex'));
+  const insert = old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)');
+  for (const [kind, records, key] of [
+    ['passage', graph.passages, 'passageId'], ['claim', graph.claims, 'claimId'], ['profile', graph.profiles, 'profileId'],
+  ]) for (const record of records) insert.run(kind, record[key], upperItem.source.sourceId, JSON.stringify(record));
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.submitObservation(item).replayed, true);
+  const snapshot = store.getSnapshot(item.source.sourceId.toUpperCase());
+  assert.equal(snapshot.observations[0].observationId, item.observationId);
+  assert.equal(snapshot.passages[0].observationId, item.observationId);
+  assert.equal(snapshot.claims[0].provenance[0].passageId, graph.passages[0].passageId.toLowerCase());
+  assert.equal(store.queryMemory('Alice').graph.claims.length, 1);
+  store.completeJob(upperItem.observationId, token, graph);
+  store.deleteSource(item.source.sourceId);
+  assert.equal(store.pendingJobs(), 0);
+  assert.throws(() => store.submitObservation(observation(randomUUID(), upperItem.observationId,
+    'Reused', '2026-10-02T00:00:00Z')), StoreConflict);
+});
+
+test('v3 ledger still fences a purged all-uppercase observation ID', t => {
+  const filename = fixture(t);
+  const old = createV3Database(filename);
+  const usedId = randomUUID();
+  old.prepare('INSERT INTO observation_ids VALUES (?)')
+    .run(createHash('sha256').update(usedId.toUpperCase()).digest('hex'));
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.throws(() => store.submitObservation(observation(randomUUID(), usedId,
+    'Reused purged ID', '2026-10-02T00:00:00Z')), StoreConflict);
+  assert.equal(store.getSnapshot().observations.length, 0);
+});
+
+test('malformed optional source scopes never expand into all-source reads', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  store.submitObservation(observation());
+  for (const bad of ['', null, false, 0]) {
+    assert.throws(() => store.getStatus(bad));
+    assert.throws(() => store.getSnapshot(bad));
+  }
+  assert.throws(() => store.queryMemory('Alice', { cursor: '' }));
+  assert.throws(() => store.queryMemory('Alice', { cursor: null }));
+  assert.equal(store.getStatus().length, 1);
+  assert.equal(store.getSnapshot().observations.length, 1);
+});
+
+test('failed rollback preserves original write and read errors', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const item = observation();
+  store.submitObservation(item);
+  const db = store.db;
+  const originalExec = db.exec.bind(db);
+  db.exec = sql => {
+    if (sql === 'ROLLBACK') throw new Error('secondary rollback failure');
+    return originalExec(sql);
+  };
+  try {
+    assert.throws(() => store.submitObservation(observation(item.source.sourceId, randomUUID(), 'Old',
+      '2025-10-01T00:00:00Z')), StoreConflict);
+  } finally {
+    db.exec = originalExec;
+    originalExec('ROLLBACK');
+  }
+  const disk = new DatabaseSync(filename);
+  disk.prepare("INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES ('passage', ?, ?, ?)")
+    .run(randomUUID(), item.source.sourceId, JSON.stringify({ ...graphFor(item).passages[0], observationId: randomUUID() }));
+  disk.close();
+  db.exec = sql => {
+    if (sql === 'ROLLBACK') throw new Error('secondary rollback failure');
+    return originalExec(sql);
+  };
+  try { assert.throws(() => store.getSnapshot(), /Passage has no live observation/); }
+  finally { db.exec = originalExec; originalExec('ROLLBACK'); }
+});
+
 test('WAL reader snapshot remains stable while one writer advances a source', t => {
   const filename = fixture(t);
   const writer = new MGraphStore(filename);
@@ -280,7 +672,7 @@ test('interrupted job resumes checkpoint, stale lease fails, replay is idempoten
   assert.equal(store.pendingJobs(), 0);
 });
 
-test('expired lease cannot mutate before reclaim, even with a supplied invalid clock', async t => {
+test('expired lease cannot mutate before reclaim', async t => {
   const filename = fixture(t);
   const store = new MGraphStore(filename);
   t.after(() => store.close());
@@ -288,10 +680,10 @@ test('expired lease cannot mutate before reclaim, even with a supplied invalid c
   store.submitObservation(item);
   const first = store.claimNextJob('first', 20);
   await delay(50);
-  assert.throws(() => store.checkpointJob(first.jobId, first.leaseToken, { stage: 'late' }, NaN), StoreConflict);
-  assert.throws(() => store.renewJob(first.jobId, first.leaseToken, 1000, NaN), StoreConflict);
-  assert.throws(() => store.failJob(first.jobId, first.leaseToken, 'late', NaN), StoreConflict);
-  assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graphFor(item), NaN), StoreConflict);
+  assert.throws(() => store.checkpointJob(first.jobId, first.leaseToken, { stage: 'late' }), StoreConflict);
+  assert.throws(() => store.renewJob(first.jobId, first.leaseToken, 1000), StoreConflict);
+  assert.throws(() => store.failJob(first.jobId, first.leaseToken, 'late'), StoreConflict);
+  assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graphFor(item)), StoreConflict);
   assert.equal(store.pendingJobs(), 1);
   const second = store.claimNextJob('second', 5000);
   assert.equal(second.attempts, 2);
@@ -304,15 +696,24 @@ test('abrupt writer exit leaves a reclaimable lock and durable queued work', asy
   const filename = fixture(t);
   const item = observation();
   const moduleUrl = new URL('../dist/index.js', import.meta.url).href;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import { MGraphStore } from ${JSON.stringify(moduleUrl)};
     const store = new MGraphStore(${JSON.stringify(filename)});
     store.submitObservation(${JSON.stringify(item)});
     const job = store.claimNextJob('terminated-worker', 100);
     store.checkpointJob(job.jobId, job.leaseToken, { stage: 'captured' });
-    process.exit(0);
-  `], { encoding: 'utf8' });
-  assert.equal(child.status, 0, child.stderr);
+    console.log('CHECKPOINTED');
+    setInterval(() => store.pendingJobs(), 1000);
+  `], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill('SIGKILL'));
+  await new Promise((resolve, reject) => {
+    child.stdout.once('data', chunk => chunk.toString().includes('CHECKPOINTED') ? resolve() : reject(new Error('Missing checkpoint signal')));
+    child.once('error', reject);
+    child.once('exit', code => reject(new Error(`Writer exited ${code} before checkpoint`)));
+  });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
   const store = new MGraphStore(filename);
   t.after(() => store.close());
   await delay(150);
@@ -502,6 +903,31 @@ test('v2 upgrade repairs a completed current job with stale evidence but no stal
   store.completeJob(job.jobId, job.leaseToken, graphFor(current));
   assert.equal(store.getStatus(current.source.sourceId)[0].state, 'complete');
   assert.equal(store.queryMemory('Present').graph.claims.length, 1);
+});
+
+test('v3 upgrade repairs stale passage with a current pending job', t => {
+  const filename = fixture(t);
+  const old = createV3Database(filename);
+  const stale = observation(randomUUID(), randomUUID(), 'Stalephrase', '2026-10-01T00:00:00Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Currentphrase', '2026-10-02T00:00:00Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'pending', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)')
+    .run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'pending')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  const passage = graphFor(stale).passages[0];
+  old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)')
+    .run('passage', passage.passageId, current.source.sourceId, JSON.stringify(passage));
+  old.prepare("INSERT INTO evidence_terms VALUES (?, 'passage', 'stalephrase')").run(current.source.sourceId);
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.queryMemory('Stalephrase').graph.observations.length, 0);
+  assert.equal(store.getSnapshot().passages.length, 0);
+  assert.equal(store.pendingJobs(), 1);
+  finish(store, current);
+  assert.equal(store.queryMemory('Currentphrase').graph.claims.length, 1);
 });
 
 test('writer OS lock has one owner across simultaneous recovery and repeated close', async t => {

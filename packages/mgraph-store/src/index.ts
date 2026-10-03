@@ -5,11 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
-  parseGraphSnapshot, parseObservation,
+  graphSnapshotSchema, parseGraphSnapshot, parseObservation, processingStatusSchema,
   type GraphSnapshot, type Observation,
 } from '@subset/mgraph-contracts';
 
-export const STORE_SCHEMA_VERSION = 3;
+export const STORE_SCHEMA_VERSION = 4;
 const uuid = z.uuid();
 const checkpointSchema = z.strictObject({ stage: z.string().min(1).max(128), cursor: z.string().max(4096).optional() });
 export type JobCheckpoint = z.infer<typeof checkpointSchema>;
@@ -67,8 +67,72 @@ function acquireWriterLock(filename: string): DatabaseSync {
   }
 }
 
-function idHash(id: string): string { return createHash('sha256').update(id).digest('hex'); }
+function rawIdHash(id: string): string { return createHash('sha256').update(id).digest('hex'); }
+function idHash(id: string): string { return rawIdHash(id.toLowerCase()); }
 function graphHash(graph: GraphSnapshot): string { return createHash('sha256').update(JSON.stringify(graph)).digest('hex'); }
+function canonicalId(id: string): string { return uuid.parse(id).toLowerCase(); }
+const uuidFields = new Set(['sourceId', 'observationId', 'targetObservationId', 'passageId', 'claimId', 'profileId',
+  'relationshipId', 'clusterId', 'fromProfileId', 'toProfileId']);
+const uuidArrays = new Set(['claimIds', 'memberProfileIds']);
+
+function canonicalPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalPayload);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+    if (uuidFields.has(key) && typeof field === 'string') return [key, field.toLowerCase()];
+    if (uuidArrays.has(key) && Array.isArray(field)) return [key, field.map(item => typeof item === 'string' ? item.toLowerCase() : item)];
+    return [key, canonicalPayload(field)];
+  }));
+}
+
+function canonicalObservation(input: unknown): Observation {
+  return parseObservation(canonicalPayload(parseObservation(input)));
+}
+
+function canonicalGraph(input: unknown): GraphSnapshot {
+  return parseGraphSnapshot(canonicalPayload(graphSnapshotSchema.parse(input)));
+}
+
+/** Reject aliases before legacy rows or the canonical ID ledger can collide. */
+function assertNoCaseFoldCollisions(db: DatabaseSync): void {
+  for (const [table, columns] of [['sources', 'lower(source_id)'], ['observations', 'lower(observation_id)'],
+    ['jobs', 'lower(job_id)'], ['evidence', 'kind, lower(entity_id)']] as const) {
+    if (db.prepare(`SELECT 1 FROM ${table} GROUP BY ${columns} HAVING count(*) > 1 LIMIT 1`).get()) {
+      throw new StoreUnavailable(`Case-folded UUID collision in ${table}`);
+    }
+  }
+}
+
+/** Normalize retained UUIDs and references before a v4 writer can serve requests. */
+function normalizePersistedIds(db: DatabaseSync): void {
+  assertNoCaseFoldCollisions(db);
+  // Legacy v3 hashes for already purged IDs cannot be reversed. Reserve every
+  // retained observation under its canonical identity before changing rows.
+  for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
+    db.prepare('INSERT OR IGNORE INTO observation_ids(id_hash) VALUES (?)').run(idHash(row.observation_id.toLowerCase()));
+  }
+  db.exec('PRAGMA defer_foreign_keys = ON');
+  db.exec(`UPDATE sources SET source_id = lower(source_id);
+    UPDATE observations SET source_id = lower(source_id), observation_id = lower(observation_id);
+    UPDATE jobs SET source_id = lower(source_id), observation_id = lower(observation_id), job_id = lower(job_id),
+      lease_token = lower(lease_token);
+    UPDATE evidence SET source_id = lower(source_id), entity_id = lower(entity_id);
+    UPDATE evidence_terms SET source_id = lower(source_id);`);
+  for (const row of db.prepare('SELECT observation_id, payload FROM observations').all() as { observation_id: string; payload: string }[]) {
+    const payload = canonicalObservation(JSON.parse(row.payload));
+    db.prepare('UPDATE observations SET payload = ? WHERE observation_id = ?').run(JSON.stringify(payload), row.observation_id);
+  }
+  for (const row of db.prepare('SELECT kind, entity_id, payload FROM evidence').all() as { kind: string; entity_id: string; payload: string }[]) {
+    db.prepare('UPDATE evidence SET payload = ? WHERE kind = ? AND entity_id = ?')
+      .run(JSON.stringify(canonicalPayload(JSON.parse(row.payload))), row.kind, row.entity_id);
+  }
+  rebuildSearchTerms(db);
+  for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
+    .all() as { job_id: string; source_id: string; observation_id: string }[]) {
+    db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?')
+      .run(graphHash(storedCompletedGraph(db, row.source_id, row.observation_id)), row.job_id);
+  }
+}
 function storedCompletedGraph(db: DatabaseSync, sourceId: string, observationId: string): GraphSnapshot {
   const observation = db.prepare('SELECT payload FROM observations WHERE source_id = ? AND observation_id = ?')
     .get(sourceId, observationId) as JsonRow | undefined;
@@ -87,9 +151,14 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
     db.exec('COMMIT');
     return result;
   } catch (error) {
-    db.exec('ROLLBACK');
+    rollbackQuietly(db);
     throw error;
   }
+}
+
+function rollbackQuietly(db: DatabaseSync): void {
+  try { db.exec('ROLLBACK'); }
+  catch { /* SQLite may already have ended the transaction; preserve the original error. */ }
 }
 
 function leaseNow(): number {
@@ -105,168 +174,254 @@ function readTransaction<T>(db: DatabaseSync, fn: () => T): T {
     db.exec('COMMIT');
     return result;
   } catch (error) {
-    db.exec('ROLLBACK');
+    rollbackQuietly(db);
     throw error;
   }
 }
 
+/** Replace uncertain derived state with one current-revision job, or purge a tombstone. */
+function requeueLegacySource(db: DatabaseSync, sourceId: string): void {
+  db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
+  db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
+  const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(sourceId) as
+    { state: string; revision: number };
+  if (!live(source.state)) return;
+  const current = db.prepare('SELECT observation_id FROM observations WHERE source_id = ? AND revision = ?')
+    .get(sourceId, source.revision) as { observation_id: string } | undefined;
+  if (!current) throw new StoreUnavailable('Live source has no current observation during upgrade');
+  db.prepare('DELETE FROM jobs WHERE source_id = ?').run(sourceId);
+  db.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
+    .run(randomUUID(), sourceId, source.revision, current.observation_id);
+  db.prepare("UPDATE sources SET state = 'pending', reason = NULL, updated_at = ? WHERE source_id = ?")
+    .run(nowIso(), sourceId);
+}
+
+/** Legacy evidence lacks revision metadata; retain it only with valid current provenance. */
+function markUnprovenLegacyEvidence(db: DatabaseSync, rebuildSources: Set<string>): void {
+  for (const row of db.prepare('SELECT DISTINCT source_id FROM evidence').all() as IdRow[]) {
+    const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(row.source_id) as
+      { state: string; revision: number } | undefined;
+    if (!source) throw new StoreUnavailable('Legacy evidence has no source');
+    if (!live(source.state)) {
+      rebuildSources.add(row.source_id);
+      continue;
+    }
+    const completed = db.prepare(`SELECT j.observation_id FROM jobs j JOIN observations o
+      ON o.observation_id = j.observation_id AND o.source_id = j.source_id AND o.revision = j.revision
+      WHERE j.source_id = ? AND j.revision = ? AND j.state = 'complete' LIMIT 1`)
+      .get(row.source_id, source.revision) as { observation_id: string } | undefined;
+    if (!completed) {
+      rebuildSources.add(row.source_id);
+      continue;
+    }
+    try { storedCompletedGraph(db, row.source_id, completed.observation_id); }
+    catch { rebuildSources.add(row.source_id); }
+  }
+}
+
+/** Reserve old IDs, then remove rows that no longer belong to their source revision. */
+function pruneObsoleteWork(db: DatabaseSync): void {
+  for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
+    db.prepare('INSERT OR IGNORE INTO observation_ids(id_hash) VALUES (?)').run(idHash(row.observation_id));
+  }
+  db.exec(`DELETE FROM jobs WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
+    OR revision != (SELECT revision FROM sources WHERE source_id = jobs.source_id)
+    OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = jobs.observation_id
+      AND o.source_id = jobs.source_id AND o.revision = jobs.revision);
+    DELETE FROM observations WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
+    OR revision != (SELECT revision FROM sources WHERE source_id = observations.source_id);`);
+}
+
+/** Upgrade legacy evidence and queue state within the caller's one migration transaction. */
+function upgradeToV3(db: DatabaseSync, version: number): void {
+  assertNoCaseFoldCollisions(db);
+  db.exec(`
+    CREATE TABLE observation_ids (id_hash TEXT PRIMARY KEY);
+    ALTER TABLE jobs ADD COLUMN graph_hash TEXT;
+    PRAGMA user_version = 3;
+  `);
+  const insert = db.prepare('INSERT INTO observation_ids(id_hash) VALUES (?)');
+  for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
+    insert.run(idHash(row.observation_id));
+  }
+  // Older schemas could retain superseded revisions. Remember their IDs before
+  // removing the payloads so an old ID cannot be submitted again after upgrade.
+  const staleSources = db.prepare(`SELECT DISTINCT o.source_id FROM observations o JOIN sources s ON s.source_id = o.source_id
+    WHERE o.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
+    UNION SELECT DISTINCT j.source_id FROM jobs j JOIN sources s ON s.source_id = j.source_id
+    WHERE j.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
+    OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
+      AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as IdRow[];
+  const rebuildSources = new Set(staleSources.map(row => row.source_id));
+  if (version === 2) markUnprovenLegacyEvidence(db, rebuildSources);
+  // V2 can also be the committed midpoint of a V1 upgrade from an older
+  // binary. A completed job without persisted evidence cannot prove that
+  // processing finished; queue its current observation again.
+  for (const row of db.prepare(`SELECT s.source_id FROM sources s
+    WHERE s.state NOT IN ('deleted', 'permissionRevoked')
+    AND (NOT EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.source_id AND j.revision = s.revision)
+      OR (s.state IN ('complete', 'partial') AND NOT EXISTS
+        (SELECT 1 FROM evidence e WHERE e.source_id = s.source_id)))`).all() as IdRow[]) {
+    rebuildSources.add(row.source_id);
+  }
+  if (version === 1) {
+    // V1 had no evidence table. A completed V1 job cannot have persisted its
+    // result, even if its observation is the current revision.
+    for (const row of db.prepare(`SELECT source_id FROM sources WHERE state IN ('complete', 'partial')
+      UNION SELECT source_id FROM jobs WHERE state = 'complete'`).all() as IdRow[]) {
+      rebuildSources.add(row.source_id);
+    }
+  }
+  pruneObsoleteWork(db);
+  for (const sourceId of rebuildSources) requeueLegacySource(db, sourceId);
+  rebuildSearchTerms(db);
+  const update = db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?');
+  for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
+    .all() as { job_id: string; source_id: string; observation_id: string }[]) {
+    update.run(graphHash(storedCompletedGraph(db, row.source_id, row.observation_id)), row.job_id);
+  }
+}
+
+/** Repair an older v3 file left after its predecessor committed v2 separately. */
+function recoverV3Midpoint(db: DatabaseSync): void {
+  const rebuildSources = new Set<string>();
+  pruneObsoleteWork(db);
+  for (const row of db.prepare(`SELECT s.source_id FROM sources s
+    WHERE s.state NOT IN ('deleted', 'permissionRevoked') AND
+    (NOT EXISTS (SELECT 1 FROM jobs j WHERE j.source_id = s.source_id AND j.revision = s.revision)
+    OR (s.state IN ('complete', 'partial') AND NOT EXISTS
+      (SELECT 1 FROM evidence e WHERE e.source_id = s.source_id)))`).all() as IdRow[]) {
+    rebuildSources.add(row.source_id);
+  }
+  markUnprovenLegacyEvidence(db, rebuildSources);
+  for (const sourceId of rebuildSources) requeueLegacySource(db, sourceId);
+}
+
+/** Apply all schema and data repairs atomically; never expose an intermediate version. */
 function migrate(db: DatabaseSync): void {
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
   if (version > STORE_SCHEMA_VERSION) throw new StoreUnavailable(`Store schema ${version} is newer than this binary`);
-  if ((version === 1 || version === 2) && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
+  if (version >= 1 && version < STORE_SCHEMA_VERSION) validateLegacyRows(db, version);
+  if ((version === 1 || version === 2 || version === 3) && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
     AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.source_id = s.source_id AND o.revision = s.revision)
     LIMIT 1`).get()) {
     throw new StoreUnavailable(`V${version} source needs reprocessing but has no current observation`);
   }
-  if (version < 1) transaction(db, () => {
-    db.exec(`
-      CREATE TABLE sources (
-        source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
-        display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
-        observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL
-      );
-      CREATE TABLE observations (
-        observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-        revision INTEGER NOT NULL, payload TEXT NOT NULL,
-        UNIQUE(source_id, revision)
-      );
-      CREATE TABLE jobs (
-        job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-        revision INTEGER NOT NULL, observation_id TEXT NOT NULL,
-        state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-        checkpoint TEXT, lease_token TEXT, lease_until INTEGER
-      );
-      CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
-      PRAGMA user_version = 1;
-    `);
-  });
-  if (version < 2) transaction(db, () => {
-    db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT');
-    db.exec(`
-      CREATE TABLE evidence (
-        kind TEXT NOT NULL, entity_id TEXT NOT NULL, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-        payload TEXT NOT NULL, PRIMARY KEY(kind, entity_id)
-      );
-      CREATE INDEX evidence_source ON evidence(source_id, kind);
-      CREATE TABLE evidence_terms (
-        source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-        kind TEXT NOT NULL, term TEXT NOT NULL,
-        PRIMARY KEY(source_id, kind, term)
-      );
-      CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
-      PRAGMA user_version = 2;
-    `);
-    // Version 1 already held observations. Reindex them as part of the same upgrade transaction.
-    for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o
-      JOIN sources s ON s.source_id = o.source_id AND s.revision = o.revision
-      WHERE s.state NOT IN ('deleted', 'permissionRevoked')`).all() as { source_id: string; payload: string }[]) {
-      const observation = parseObservation(JSON.parse(row.payload));
-      if (observation.state === 'complete' || observation.state === 'partial') {
-        indexText(db, row.source_id, 'observation', observation.content);
-      }
+  if (version === STORE_SCHEMA_VERSION) return;
+  // A process exit during an upgrade must leave either the old schema or the
+  // fully repaired new schema. No intermediate v2 commit may strand v1 work.
+  transaction(db, () => {
+    if (version < 1) {
+      db.exec(`
+        CREATE TABLE sources (
+          source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
+          display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+          observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE observations (
+          observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL, payload TEXT NOT NULL,
+          UNIQUE(source_id, revision)
+        );
+        CREATE TABLE jobs (
+          job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL, observation_id TEXT NOT NULL,
+          state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          checkpoint TEXT, lease_token TEXT, lease_until INTEGER
+        );
+        CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
+        PRAGMA user_version = 1;
+      `);
     }
-  });
-  if (version < 3) transaction(db, () => {
-    db.exec(`
-      CREATE TABLE observation_ids (id_hash TEXT PRIMARY KEY);
-      ALTER TABLE jobs ADD COLUMN graph_hash TEXT;
-      PRAGMA user_version = 3;
-    `);
-    const insert = db.prepare('INSERT INTO observation_ids(id_hash) VALUES (?)');
-    for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
-      insert.run(idHash(row.observation_id));
-    }
-    // Older schemas could retain superseded revisions. Remember their IDs before
-    // removing the payloads so an old ID cannot be submitted again after upgrade.
-    const staleSources = db.prepare(`SELECT DISTINCT o.source_id FROM observations o JOIN sources s ON s.source_id = o.source_id
-      WHERE o.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
-      UNION SELECT DISTINCT j.source_id FROM jobs j JOIN sources s ON s.source_id = j.source_id
-      WHERE j.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
-      OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
-        AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as IdRow[];
-    const rebuildSources = new Set(staleSources.map(row => row.source_id));
-    if (version === 2) {
-      // V2 evidence has no revision column. An old passage can survive even
-      // when its observation and job were already removed. Retain evidence
-      // only for a completed current job whose graph validates against the
-      // current observation; otherwise rebuild it from that observation.
-      for (const row of db.prepare('SELECT DISTINCT source_id FROM evidence').all() as IdRow[]) {
-        const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(row.source_id) as
-          { state: string; revision: number } | undefined;
-        if (!source) throw new StoreUnavailable('V2 evidence has no source');
-        if (!live(source.state)) {
-          rebuildSources.add(row.source_id);
-          continue;
+    if (version < 2) {
+      db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT');
+      db.exec(`
+        CREATE TABLE evidence (
+          kind TEXT NOT NULL, entity_id TEXT NOT NULL, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+          payload TEXT NOT NULL, PRIMARY KEY(kind, entity_id)
+        );
+        CREATE INDEX evidence_source ON evidence(source_id, kind);
+        CREATE TABLE evidence_terms (
+          source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+          kind TEXT NOT NULL, term TEXT NOT NULL,
+          PRIMARY KEY(source_id, kind, term)
+        );
+        CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
+        PRAGMA user_version = 2;
+      `);
+      // Version 1 already held observations. Reindex them as part of the same upgrade transaction.
+      for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o
+        JOIN sources s ON s.source_id = o.source_id AND s.revision = o.revision
+        WHERE s.state NOT IN ('deleted', 'permissionRevoked')`).all() as { source_id: string; payload: string }[]) {
+        const observation = parseObservation(JSON.parse(row.payload));
+        if (observation.state === 'complete' || observation.state === 'partial') {
+          indexText(db, row.source_id, 'observation', observation.content);
         }
-        const completed = db.prepare(`SELECT j.observation_id FROM jobs j JOIN observations o
-          ON o.observation_id = j.observation_id AND o.source_id = j.source_id AND o.revision = j.revision
-          WHERE j.source_id = ? AND j.revision = ? AND j.state = 'complete' LIMIT 1`)
-          .get(row.source_id, source.revision) as { observation_id: string } | undefined;
-        if (!completed) {
-          rebuildSources.add(row.source_id);
-          continue;
-        }
-        try { storedCompletedGraph(db, row.source_id, completed.observation_id); }
-        catch { rebuildSources.add(row.source_id); }
       }
     }
-    if (version === 1) {
-      // V1 had no evidence table. A completed V1 job cannot have persisted its
-      // result, even if its observation is the current revision.
-      for (const row of db.prepare(`SELECT source_id FROM sources WHERE state IN ('complete', 'partial')
-        UNION SELECT source_id FROM jobs WHERE state = 'complete'`).all() as IdRow[]) {
-        rebuildSources.add(row.source_id);
-      }
-    }
-    db.exec(`DELETE FROM jobs WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
-      OR revision != (SELECT revision FROM sources WHERE source_id = jobs.source_id)
-      OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = jobs.observation_id
-        AND o.source_id = jobs.source_id AND o.revision = jobs.revision);
-      DELETE FROM observations WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
-      OR revision != (SELECT revision FROM sources WHERE source_id = observations.source_id);`);
-    for (const sourceId of rebuildSources) {
-      db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
-      db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
-      const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(sourceId) as
-        { state: string; revision: number };
-      if (!live(source.state)) continue;
-      const current = db.prepare('SELECT observation_id FROM observations WHERE source_id = ? AND revision = ?')
-        .get(sourceId, source.revision) as { observation_id: string } | undefined;
-      if (!current) continue;
-      // Derived evidence had no revision column. Discard all old work and create
-      // exactly one job for the current observation.
-      db.prepare('DELETE FROM jobs WHERE source_id = ?').run(sourceId);
-      db.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
-        .run(randomUUID(), sourceId, source.revision, current.observation_id);
-      db.prepare("UPDATE sources SET state = 'pending', reason = NULL, updated_at = ? WHERE source_id = ?")
-        .run(nowIso(), sourceId);
-    }
-    db.exec('DELETE FROM evidence_terms');
-    for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o JOIN sources s
-      ON s.source_id = o.source_id AND s.revision = o.revision WHERE s.state NOT IN ('deleted', 'permissionRevoked')`)
-      .all() as { source_id: string; payload: string }[]) {
-      const observation = parseObservation(JSON.parse(row.payload));
-      if (observation.state === 'complete' || observation.state === 'partial') indexText(db, row.source_id, 'observation', observation.content);
-    }
-    for (const row of db.prepare("SELECT source_id, payload FROM evidence WHERE kind = 'passage'")
-      .all() as { source_id: string; payload: string }[]) {
-      const passage = JSON.parse(row.payload) as GraphSnapshot['passages'][number];
-      indexText(db, row.source_id, 'passage', passage.text);
-    }
-    const update = db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?');
-    for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
-      .all() as { job_id: string; source_id: string; observation_id: string }[]) {
-      update.run(graphHash(storedCompletedGraph(db, row.source_id, row.observation_id)), row.job_id);
+    if (version < 3) upgradeToV3(db, version);
+    if (version < 4) {
+      if (version === 3) recoverV3Midpoint(db);
+      normalizePersistedIds(db);
+      db.exec('PRAGMA user_version = 4');
     }
   });
 }
 
+/** Refuse retained legacy rows that cannot be served after a successful upgrade. */
+function validateLegacyRows(db: DatabaseSync, version: number): void {
+  for (const source of db.prepare('SELECT * FROM sources').all() as SourceRow[]) {
+    try { statusFrom(source); }
+    catch { throw new StoreUnavailable(`V${version} source ${source.source_id} has invalid status`); }
+    if (!Number.isSafeInteger(source.revision) || source.revision < 0) {
+      throw new StoreUnavailable(`V${version} source ${source.source_id} has invalid revision`);
+    }
+    if (!live(source.state)) continue;
+    const current = db.prepare('SELECT observation_id, payload FROM observations WHERE source_id = ? AND revision = ?')
+      .get(source.source_id, source.revision) as { observation_id: string; payload: string } | undefined;
+    if (!current) continue; // The explicit missing-current-observation guard reports this below.
+    let observation: Observation;
+    try { observation = canonicalObservation(JSON.parse(current.payload)); }
+    catch { throw new StoreUnavailable(`V${version} source ${source.source_id} has invalid current observation`); }
+    if (observation.observationId !== current.observation_id.toLowerCase() ||
+        observation.source.sourceId !== source.source_id.toLowerCase() ||
+        observation.source.kind !== source.kind || observation.source.locator !== source.locator ||
+        (observation.source.applicationBundleId ?? null) !== source.application_bundle_id ||
+        observation.observedAt !== source.observed_at ||
+        (observation.state !== 'complete' && observation.state !== 'partial')) {
+      throw new StoreUnavailable(`V${version} source ${source.source_id} has mismatched current observation`);
+    }
+  }
+  for (const job of db.prepare(`SELECT j.* FROM jobs j JOIN sources s ON s.source_id = j.source_id
+    WHERE j.revision = s.revision AND s.state NOT IN ('deleted', 'permissionRevoked')
+    AND EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
+      AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as JobRow[]) {
+    try {
+      canonicalId(job.job_id);
+      canonicalId(job.observation_id);
+      if (!['pending', 'processing', 'failed', 'complete'].includes(job.state)) throw new Error('Invalid job state');
+      if (!Number.isSafeInteger(job.attempts) || job.attempts < 0) throw new Error('Invalid job attempts');
+      if (job.checkpoint !== null) checkpointSchema.parse(JSON.parse(job.checkpoint));
+      if (job.state === 'processing' && (!Number.isSafeInteger(job.lease_until) || job.lease_until! < 0 ||
+          job.lease_token === null)) throw new Error('Invalid processing lease');
+      if (job.lease_token !== null) canonicalId(job.lease_token);
+    } catch {
+      throw new StoreUnavailable(`V${version} job ${job.job_id} has invalid retained state`);
+    }
+  }
+}
+
 function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
   const base = { schemaVersion: 1 as const, sourceId: row.source_id, updatedAt: row.updated_at };
+  let status: unknown;
   if (row.state === 'partial' || row.state === 'failed' || row.state === 'permissionRevoked') {
-    return { ...base, state: row.state, reason: row.reason ?? 'Unknown reason' };
+    status = { ...base, state: row.state, reason: row.reason ?? 'Unknown reason' };
+  } else {
+    status = { ...base, state: row.state };
   }
-  return { ...base, state: row.state as 'pending' | 'processing' | 'complete' | 'deleted' };
+  const parsed = processingStatusSchema.safeParse(status);
+  if (!parsed.success) throw new StoreUnavailable(`Invalid persisted status for source ${row.source_id}`);
+  return parsed.data;
 }
 function nowIso(): string { return new Date().toISOString(); }
 function live(state: string): boolean { return state !== 'deleted' && state !== 'permissionRevoked'; }
@@ -279,7 +434,10 @@ function compareObservedAt(left: string, right: string): number {
     if (!match) throw new StoreConflict('Invalid persisted observation timestamp');
     const second = Date.parse(`${match[1]}${match[3]}`);
     if (!Number.isFinite(second)) throw new StoreConflict('Invalid persisted observation timestamp');
-    return { second, fraction: (match[2] ?? '').replace(/0+$/, '') };
+    const fraction = match[2] ?? '';
+    let end = fraction.length;
+    while (end > 0 && fraction[end - 1] === '0') end--;
+    return { second, fraction: fraction.slice(0, end) };
   };
   const a = parts(left);
   const b = parts(right);
@@ -287,12 +445,70 @@ function compareObservedAt(left: string, right: string): number {
   const width = Math.max(a.fraction.length, b.fraction.length);
   const aFraction = a.fraction.padEnd(width, '0');
   const bFraction = b.fraction.padEnd(width, '0');
-  return aFraction < bFraction ? -1 : aFraction > bFraction ? 1 : 0;
+  if (aFraction < bFraction) return -1;
+  if (aFraction > bFraction) return 1;
+  return 0;
 }
+
+/** Decide replay before a new revision can erase the current snapshot. */
+function currentReplay(db: DatabaseSync, existing: SourceRow | undefined, observation: Observation):
+  { observationId: string; revision: number; replayed: true } | undefined {
+  if (!existing) return undefined;
+  if (!live(existing.state)) throw new StoreConflict('A retired source ID cannot be reused');
+  if (existing.kind !== observation.source.kind || existing.locator !== observation.source.locator ||
+      existing.application_bundle_id !== (observation.source.applicationBundleId ?? null)) {
+    throw new StoreConflict('Source identity changed');
+  }
+  if (!existing.observed_at || compareObservedAt(observation.observedAt, existing.observed_at) > 0) return undefined;
+  const prior = db.prepare('SELECT source_id, payload, revision FROM observations WHERE observation_id = ?')
+    .get(observation.observationId) as { source_id: string; payload: string; revision: number } | undefined;
+  if (prior?.source_id === observation.source.sourceId && prior.payload === JSON.stringify(observation)) {
+    return { observationId: observation.observationId, revision: prior.revision, replayed: true };
+  }
+  throw new StoreConflict('Observation is older than the current source revision');
+}
+
 function terms(text: string): string[] { return [...new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []))]; }
 function indexText(db: DatabaseSync, sourceId: string, kind: string, body: string): void {
   const insert = db.prepare('INSERT OR IGNORE INTO evidence_terms(source_id, kind, term) VALUES (?, ?, ?)');
   for (const term of terms(body)) insert.run(sourceId, kind, term);
+}
+
+function evidenceSearchText(kind: string, entity: unknown): string {
+  const field = ({ passage: 'text', claim: 'statement', profile: 'name', relationship: 'kind', cluster: 'name' } as
+    Record<string, string>)[kind];
+  const value = field && entity && typeof entity === 'object' ? (entity as Record<string, unknown>)[field] : undefined;
+  if (typeof value !== 'string') throw new StoreUnavailable(`Invalid searchable ${kind} evidence`);
+  return value;
+}
+
+/** Rebuild observation and derived evidence terms in the caller's transaction. */
+function rebuildSearchTerms(db: DatabaseSync): void {
+  db.exec('DELETE FROM evidence_terms');
+  for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o JOIN sources s
+    ON s.source_id = o.source_id AND s.revision = o.revision WHERE s.state NOT IN ('deleted', 'permissionRevoked')`)
+    .all() as { source_id: string; payload: string }[]) {
+    const observation = parseObservation(JSON.parse(row.payload));
+    if (observation.state === 'complete' || observation.state === 'partial') {
+      indexText(db, row.source_id, 'observation', observation.content);
+    }
+  }
+  for (const row of db.prepare('SELECT source_id, kind, payload FROM evidence')
+    .all() as { source_id: string; kind: string; payload: string }[]) {
+    indexText(db, row.source_id, row.kind, evidenceSearchText(row.kind, JSON.parse(row.payload)));
+  }
+}
+
+function appendEvidence(graph: GraphSnapshot, kind: string, payload: string): void {
+  const entity = JSON.parse(payload);
+  switch (kind) {
+    case 'passage': graph.passages.push(entity); break;
+    case 'claim': graph.claims.push(entity); break;
+    case 'profile': graph.profiles.push(entity); break;
+    case 'relationship': graph.relationships.push(entity); break;
+    case 'cluster': graph.clusters.push(entity); break;
+    default: throw new StoreUnavailable(`Unknown evidence kind: ${kind}`);
+  }
 }
 
 export class MGraphStore {
@@ -301,6 +517,7 @@ export class MGraphStore {
   private closed = false;
   readonly readOnly: boolean;
 
+  /** Open the sole local writer or a concurrent read-only client. */
   constructor(filename: string, options: { readOnly?: boolean } = {}) {
     this.readOnly = options.readOnly ?? false;
     const path = canonicalPath(filename);
@@ -329,6 +546,7 @@ export class MGraphStore {
     if (!this.writerLock) return;
     this.writerLock.close();
   }
+  /** Release the database handle and the process-held writer lock. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -337,10 +555,10 @@ export class MGraphStore {
   }
   private writable(): void { if (this.readOnly) throw new StoreUnavailable('Read-only client cannot mutate the store'); }
   private source(sourceId: string): SourceRow | undefined {
-    return this.db.prepare('SELECT * FROM sources WHERE source_id = ?').get(sourceId) as SourceRow | undefined;
+    return this.db.prepare('SELECT * FROM sources WHERE source_id = ?').get(canonicalId(sourceId)) as SourceRow | undefined;
   }
   private job(jobId: string): JobRow | undefined {
-    return this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(jobId) as JobRow | undefined;
+    return this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(canonicalId(jobId)) as JobRow | undefined;
   }
   private purgeContent(sourceId: string): void {
     this.db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
@@ -348,29 +566,21 @@ export class MGraphStore {
     this.db.prepare('DELETE FROM observations WHERE source_id = ?').run(sourceId);
   }
 
+  /** Persist one snapshot and queue its current revision, or return an exact replay. */
   submitObservation(input: unknown): { observationId: string; revision: number; replayed: boolean } {
     this.writable();
-    const observation = parseObservation(input);
+    const supplied = parseObservation(input);
+    const observation = canonicalObservation(supplied);
     if (observation.state !== 'complete' && observation.state !== 'partial') throw new StoreConflict('Terminal observations require deleteSource or revokeSource');
     return transaction(this.db, () => {
       const sourceId = observation.source.sourceId;
       const existing = this.source(sourceId);
-      if (existing) {
-        if (!live(existing.state)) throw new StoreConflict('A retired source ID cannot be reused');
-        if (existing.kind !== observation.source.kind || existing.locator !== observation.source.locator ||
-            existing.application_bundle_id !== (observation.source.applicationBundleId ?? null)) {
-          throw new StoreConflict('Source identity changed');
-        }
-        if (existing.observed_at && compareObservedAt(observation.observedAt, existing.observed_at) <= 0) {
-          const prior = this.db.prepare('SELECT source_id, payload, revision FROM observations WHERE observation_id = ?').get(observation.observationId) as
-            | { source_id: string; payload: string; revision: number } | undefined;
-          if (prior?.source_id === sourceId && prior.payload === JSON.stringify(observation)) {
-            return { observationId: observation.observationId, revision: prior.revision, replayed: true };
-          }
-          throw new StoreConflict('Observation is older than the current source revision');
-        }
-      }
-      if (this.db.prepare('SELECT 1 FROM observation_ids WHERE id_hash = ?').get(idHash(observation.observationId))) {
+      const replay = currentReplay(this.db, existing, observation);
+      if (replay) return { ...replay, observationId: supplied.observationId };
+      // Pre-v4 databases may retain a hash of an all-uppercase ID whose
+      // payload was already purged. Check that legacy spelling as well.
+      if (this.db.prepare('SELECT 1 FROM observation_ids WHERE id_hash IN (?, ?)').get(
+        idHash(observation.observationId), rawIdHash(observation.observationId.toUpperCase()))) {
         throw new StoreConflict('Observation ID was already used');
       }
       // The old revision is removed before the new one is visible. Jobs for it cannot later commit.
@@ -394,18 +604,20 @@ export class MGraphStore {
       indexText(this.db, sourceId, 'observation', observation.content);
       this.db.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
         .run(observation.observationId, sourceId, revision, observation.observationId);
-      return { observationId: observation.observationId, revision, replayed: false };
+      return { observationId: supplied.observationId, revision, replayed: false };
     });
   }
 
+  /** Read all source statuses, or the status for one validated source ID. */
   getStatus(sourceId?: string): GraphSnapshot['statuses'] {
-    if (sourceId) uuid.parse(sourceId);
-    const rows = (sourceId
-      ? this.db.prepare('SELECT * FROM sources WHERE source_id = ?').all(sourceId)
+    const canonicalSourceId = sourceId === undefined ? undefined : canonicalId(sourceId);
+    const rows = (canonicalSourceId !== undefined
+      ? this.db.prepare('SELECT * FROM sources WHERE source_id = ?').all(canonicalSourceId)
       : this.db.prepare('SELECT * FROM sources ORDER BY source_id').all()) as SourceRow[];
-    return rows.map(statusFrom);
+    return rows.map(row => ({ ...statusFrom(row), sourceId: sourceId ?? row.source_id }));
   }
 
+  /** Claim one pending or expired job with a token that fences earlier workers. */
   claimNextJob(workerId: string, leaseMs = 30_000): ProcessingJob | null {
     this.writable();
     z.string().min(1).max(128).parse(workerId);
@@ -430,37 +642,40 @@ export class MGraphStore {
 
   private assertLease(jobId: string, leaseToken: string): JobRow {
     const job = this.job(uuid.parse(jobId));
-    if (!job || job.state !== 'processing' || job.lease_token !== uuid.parse(leaseToken) ||
+    if (job?.state !== 'processing' || job.lease_token !== canonicalId(leaseToken) ||
         job.lease_until === null || job.lease_until <= leaseNow() || this.source(job.source_id)?.revision !== job.revision) {
       throw new StoreConflict('Job lease or source revision is stale');
     }
     return job;
   }
+  /** Save restart progress only while the caller still owns a live lease. */
   checkpointJob(jobId: string, leaseToken: string, input: unknown): void {
     this.writable();
     const checkpoint = checkpointSchema.parse(input);
     transaction(this.db, () => {
-      this.assertLease(jobId, leaseToken);
-      this.db.prepare('UPDATE jobs SET checkpoint = ? WHERE job_id = ?').run(JSON.stringify(checkpoint), jobId);
+      const job = this.assertLease(jobId, leaseToken);
+      this.db.prepare('UPDATE jobs SET checkpoint = ? WHERE job_id = ?').run(JSON.stringify(checkpoint), job.job_id);
     });
   }
+  /** Extend a live lease and return its new expiry in epoch milliseconds. */
   renewJob(jobId: string, leaseToken: string, leaseMs = 30_000): number {
     this.writable();
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError('Invalid lease');
     return transaction(this.db, () => {
-      this.assertLease(jobId, leaseToken);
+      const job = this.assertLease(jobId, leaseToken);
       const until = leaseNow() + leaseMs;
-      this.db.prepare('UPDATE jobs SET lease_until = ? WHERE job_id = ?').run(until, jobId);
+      this.db.prepare('UPDATE jobs SET lease_until = ? WHERE job_id = ?').run(until, job.job_id);
       return until;
     });
   }
 
+  /** Commit a provenance-valid current graph once; identical token replays are safe. */
   completeJob(jobId: string, leaseToken: string, input: unknown): void {
     this.writable();
-    const graph = parseGraphSnapshot(input);
+    const graph = canonicalGraph(input);
     transaction(this.db, () => {
-      const existing = this.job(uuid.parse(jobId));
-      if (existing?.state === 'complete' && existing.lease_token === uuid.parse(leaseToken)) {
+      const existing = this.job(jobId);
+      if (existing?.state === 'complete' && existing.lease_token === canonicalId(leaseToken)) {
         if (existing.graph_hash !== graphHash(graph)) throw new StoreConflict('Completed job graph differs from original');
         return;
       }
@@ -471,19 +686,24 @@ export class MGraphStore {
         throw new StoreConflict('Job graph must contain exactly the current observation and no status override');
       }
       for (const passage of graph.passages) if (passage.observationId !== job.observation_id) throw new StoreConflict('Passage cites another source');
-      this.db.prepare("DELETE FROM evidence_terms WHERE source_id = ? AND kind = 'passage'").run(job.source_id);
+      this.db.prepare("DELETE FROM evidence_terms WHERE source_id = ? AND kind != 'observation'").run(job.source_id);
       this.db.prepare('DELETE FROM evidence WHERE source_id = ?').run(job.source_id);
       const insert = this.db.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)');
+      const owner = this.db.prepare('SELECT source_id FROM evidence WHERE kind = ? AND entity_id = ?');
+      const persist = (kind: string, id: string, entity: unknown): void => {
+        if (owner.get(kind, id)) throw new StoreConflict('Derived entity ID belongs to another source');
+        insert.run(kind, id, job.source_id, JSON.stringify(entity));
+        indexText(this.db, job.source_id, kind, evidenceSearchText(kind, entity));
+      };
       for (const entity of graph.passages) {
-        insert.run('passage', entity.passageId, job.source_id, JSON.stringify(entity));
-        indexText(this.db, job.source_id, 'passage', entity.text);
+        persist('passage', entity.passageId, entity);
       }
-      for (const entity of graph.claims) insert.run('claim', entity.claimId, job.source_id, JSON.stringify(entity));
-      for (const entity of graph.profiles) insert.run('profile', entity.profileId, job.source_id, JSON.stringify(entity));
-      for (const entity of graph.relationships) insert.run('relationship', entity.relationshipId, job.source_id, JSON.stringify(entity));
-      for (const entity of graph.clusters) insert.run('cluster', entity.clusterId, job.source_id, JSON.stringify(entity));
+      for (const entity of graph.claims) persist('claim', entity.claimId, entity);
+      for (const entity of graph.profiles) persist('profile', entity.profileId, entity);
+      for (const entity of graph.relationships) persist('relationship', entity.relationshipId, entity);
+      for (const entity of graph.clusters) persist('cluster', entity.clusterId, entity);
       this.db.prepare("UPDATE jobs SET state = 'complete', checkpoint = NULL, lease_until = NULL, graph_hash = ? WHERE job_id = ?")
-        .run(graphHash(graph), jobId);
+        .run(graphHash(graph), job.job_id);
       const state = graph.observations[0].state;
       const reason = state === 'partial' ? graph.observations[0].partialReason : null;
       this.db.prepare('UPDATE sources SET state = ?, reason = ?, updated_at = ? WHERE source_id = ?')
@@ -491,29 +711,36 @@ export class MGraphStore {
     });
   }
 
+  /** Mark a leased job failed without discarding its checkpoint. */
   failJob(jobId: string, leaseToken: string, reason: string): void {
     this.writable();
     z.string().min(1).max(512).parse(reason);
     transaction(this.db, () => {
       const job = this.assertLease(jobId, leaseToken);
-      this.db.prepare("UPDATE jobs SET state = 'failed', lease_token = NULL, lease_until = NULL WHERE job_id = ?").run(jobId);
+      this.db.prepare("UPDATE jobs SET state = 'failed', lease_token = NULL, lease_until = NULL WHERE job_id = ?").run(job.job_id);
       this.db.prepare("UPDATE sources SET state = 'failed', reason = ?, updated_at = ? WHERE source_id = ?")
         .run(reason, nowIso(), job.source_id);
     });
   }
+  /** Return a failed current job to the pending queue. */
   retryJob(jobId: string): void {
     this.writable();
     transaction(this.db, () => {
-      const job = this.job(uuid.parse(jobId));
-      if (!job || job.state !== 'failed' || !live(this.source(job.source_id)?.state ?? 'deleted')) throw new StoreConflict('Job is not retryable');
-      this.db.prepare("UPDATE jobs SET state = 'pending', worker_id = NULL WHERE job_id = ?").run(jobId);
+      const job = this.job(jobId);
+      const source = job ? this.source(job.source_id) : undefined;
+      const current = job && source ? this.db.prepare(`SELECT 1 FROM observations WHERE observation_id = ?
+        AND source_id = ? AND revision = ?`).get(job.observation_id, job.source_id, job.revision) : undefined;
+      if (job?.state !== 'failed' || !source || !live(source.state) || source.revision !== job.revision || !current) {
+        throw new StoreConflict('Job is not retryable');
+      }
+      this.db.prepare("UPDATE jobs SET state = 'pending', worker_id = NULL WHERE job_id = ?").run(job.job_id);
       this.db.prepare("UPDATE sources SET state = 'pending', reason = NULL, updated_at = ? WHERE source_id = ?").run(nowIso(), job.source_id);
     });
   }
 
   private retire(sourceId: string, state: 'deleted' | 'permissionRevoked', reason: string | null): void {
     this.writable();
-    uuid.parse(sourceId);
+    sourceId = canonicalId(sourceId);
     transaction(this.db, () => {
       const source = this.source(sourceId);
       if (!source) throw new StoreConflict('Unknown source');
@@ -528,22 +755,25 @@ export class MGraphStore {
         .run(state, reason, nowIso(), sourceId);
     });
   }
+  /** Erase source content and queue work while retaining its terminal tombstone. */
   deleteSource(sourceId: string): void { this.retire(sourceId, 'deleted', null); }
+  /** Erase content after permission loss and retain the revocation reason. */
   revokeSource(sourceId: string, reason: string): void {
     z.string().min(1).max(512).parse(reason);
     this.retire(sourceId, 'permissionRevoked', reason);
   }
 
+  /** Discard a live source's derived graph and queue its current observation. */
   rebuildSource(sourceId: string): string {
     this.writable();
-    uuid.parse(sourceId);
+    sourceId = canonicalId(sourceId);
     return transaction(this.db, () => {
       const source = this.source(sourceId);
       if (!source || !live(source.state)) throw new StoreConflict('Source cannot be rebuilt');
       const observation = this.db.prepare('SELECT observation_id, payload FROM observations WHERE source_id = ? AND revision = ?')
         .get(sourceId, source.revision) as { observation_id: string; payload: string } | undefined;
       if (!observation) throw new StoreConflict('Source has no observation');
-      this.db.prepare("DELETE FROM evidence_terms WHERE source_id = ? AND kind = 'passage'").run(sourceId);
+      this.db.prepare("DELETE FROM evidence_terms WHERE source_id = ? AND kind != 'observation'").run(sourceId);
       this.db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
       this.db.prepare('DELETE FROM jobs WHERE source_id = ?').run(sourceId);
       const jobId = randomUUID();
@@ -554,62 +784,46 @@ export class MGraphStore {
     });
   }
 
+  /** Rebuild persisted word lookup from current observations and passages. */
   rebuildSearchIndex(): void {
     this.writable();
-    transaction(this.db, () => {
-      this.db.exec('DELETE FROM evidence_terms');
-      for (const row of this.db.prepare(`SELECT o.source_id, o.payload FROM observations o JOIN sources s
-        ON s.source_id = o.source_id AND s.revision = o.revision WHERE s.state NOT IN ('deleted', 'permissionRevoked')`)
-        .all() as { source_id: string; payload: string }[]) {
-        const observation = parseObservation(JSON.parse(row.payload));
-        if (observation.state === 'complete' || observation.state === 'partial') {
-          indexText(this.db, row.source_id, 'observation', observation.content);
-        }
-      }
-      for (const row of this.db.prepare("SELECT source_id, payload FROM evidence WHERE kind = 'passage'").all() as { source_id: string; payload: string }[]) {
-        const passage = JSON.parse(row.payload) as GraphSnapshot['passages'][number];
-        indexText(this.db, row.source_id, 'passage', passage.text);
-      }
-    });
+    transaction(this.db, () => rebuildSearchTerms(this.db));
   }
 
+  private appendSourceSnapshot(graph: GraphSnapshot, sourceId: string): void {
+    const source = this.source(sourceId);
+    if (!source || !live(source.state)) return;
+    for (const row of this.db.prepare('SELECT payload FROM observations WHERE source_id = ? AND revision = ?')
+      .all(sourceId, source.revision) as JsonRow[]) {
+      graph.observations.push(JSON.parse(row.payload) as Observation);
+    }
+    for (const row of this.db.prepare('SELECT kind, payload FROM evidence WHERE source_id = ?').all(sourceId) as { kind: string; payload: string }[]) {
+      appendEvidence(graph, row.kind, row.payload);
+    }
+    graph.statuses.push(statusFrom(source));
+  }
   private snapshot(sourceIds: string[]): GraphSnapshot {
     const graph: GraphSnapshot = { schemaVersion: 1, observations: [], passages: [], claims: [], profiles: [], relationships: [], clusters: [], statuses: [] };
-    for (const sourceId of sourceIds) {
-      const source = this.source(sourceId);
-      if (!source || !live(source.state)) continue;
-      for (const row of this.db.prepare('SELECT payload FROM observations WHERE source_id = ? AND revision = ?')
-        .all(sourceId, source.revision) as JsonRow[]) {
-        graph.observations.push(JSON.parse(row.payload) as Observation);
-      }
-      for (const row of this.db.prepare('SELECT kind, payload FROM evidence WHERE source_id = ?').all(sourceId) as { kind: string; payload: string }[]) {
-        const entity = JSON.parse(row.payload);
-        if (row.kind === 'passage') graph.passages.push(entity);
-        if (row.kind === 'claim') graph.claims.push(entity);
-        if (row.kind === 'profile') graph.profiles.push(entity);
-        if (row.kind === 'relationship') graph.relationships.push(entity);
-        if (row.kind === 'cluster') graph.clusters.push(entity);
-      }
-      graph.statuses.push(statusFrom(source));
-    }
+    for (const sourceId of sourceIds) this.appendSourceSnapshot(graph, sourceId);
     return parseGraphSnapshot(graph);
   }
+  /** Read a revision-consistent graph for one source or every live source. */
   getSnapshot(sourceId?: string): GraphSnapshot {
-    if (sourceId) uuid.parse(sourceId);
+    if (sourceId !== undefined) sourceId = canonicalId(sourceId);
     return readTransaction(this.db, () => {
-      const ids = (sourceId ? [sourceId] : (this.db.prepare("SELECT source_id FROM sources WHERE state NOT IN ('deleted', 'permissionRevoked') ORDER BY source_id").all() as IdRow[]).map(r => r.source_id));
+      const ids = (sourceId !== undefined ? [sourceId] : (this.db.prepare("SELECT source_id FROM sources WHERE state NOT IN ('deleted', 'permissionRevoked') ORDER BY source_id").all() as IdRow[]).map(r => r.source_id));
       return this.snapshot(ids);
     });
   }
+  /** Find live sources containing every normalized query term and page by source ID. */
   queryMemory(query: string, options: { limit?: number; cursor?: string } = {}): { graph: GraphSnapshot; nextCursor?: string } {
     z.string().min(1).max(512).parse(query);
     const limit = options.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid query limit');
     let after = '';
-    if (options.cursor) {
+    if (options.cursor !== undefined) {
       z.string().min(1).max(512).parse(options.cursor);
-      after = Buffer.from(options.cursor, 'base64url').toString('utf8');
-      uuid.parse(after);
+      after = canonicalId(Buffer.from(options.cursor, 'base64url').toString('utf8'));
     }
     const tokens = terms(query);
     if (!tokens.length) return { graph: this.snapshot([]) };
@@ -621,12 +835,12 @@ export class MGraphStore {
         ORDER BY t.source_id LIMIT ?`).all(...tokens, after, tokens.length, limit + 1) as IdRow[];
       const selected = rows.slice(0, limit).map(row => row.source_id);
       const result: { graph: GraphSnapshot; nextCursor?: string } = { graph: this.snapshot(selected) };
-      if (rows.length > limit) result.nextCursor = Buffer.from(selected[selected.length - 1]).toString('base64url');
+      if (rows.length > limit) result.nextCursor = Buffer.from(selected.at(-1)!).toString('base64url');
       return result;
     });
   }
 
-  // Useful for an owner to expose queue state without leaking payloads.
+  /** Count current pending and leased work without exposing payloads. */
   pendingJobs(): number {
     return (this.db.prepare(`SELECT count(*) AS count FROM jobs j JOIN sources s ON s.source_id = j.source_id
       WHERE j.state IN ('pending', 'processing') AND j.revision = s.revision
