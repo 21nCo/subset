@@ -148,23 +148,37 @@ function consistentSourceIdentities(observations: GraphSnapshot['observations'])
   }
 }
 
-function validateLifecycle(graph: GraphSnapshot, observations: Map<string, Observation>): Set<string> {
+function retiredSources(graph: GraphSnapshot): Set<string> {
   const retired = new Set<string>();
   for (const observation of graph.observations) {
     if (observation.state === 'deleted' || observation.state === 'permissionRevoked') retired.add(observation.source.sourceId);
     else parseObservation(observation);
   }
   for (const status of graph.statuses) if (status.state === 'deleted' || status.state === 'permissionRevoked') retired.add(status.sourceId);
-  for (const observation of graph.observations) {
-    if (observation.state !== 'deleted' && observation.state !== 'permissionRevoked') continue;
-    if (observation.state === 'deleted') {
-      const target = observations.get(observation.targetObservationId);
-      if (target && target.source.sourceId !== observation.source.sourceId) {
-        throw new Error(`Deletion target belongs to another source: ${observation.observationId}`);
-      }
+  return retired;
+}
+
+function validateTerminalObservation(
+  observation: Observation,
+  observations: Map<string, Observation>,
+  statuses: Map<string, GraphSnapshot['statuses'][number]>,
+): void {
+  if (observation.state !== 'deleted' && observation.state !== 'permissionRevoked') return;
+  if (observation.state === 'deleted') {
+    const target = observations.get(observation.targetObservationId);
+    if (target && target.source.sourceId !== observation.source.sourceId) {
+      throw new Error(`Deletion target belongs to another source: ${observation.observationId}`);
     }
-    const status = graph.statuses.find(item => item.sourceId === observation.source.sourceId);
-    if (status && status.state !== observation.state) throw new Error(`Terminal status mismatch: ${observation.source.sourceId}`);
+  }
+  const status = statuses.get(observation.source.sourceId);
+  if (status && status.state !== observation.state) throw new Error(`Terminal status mismatch: ${observation.source.sourceId}`);
+}
+
+function validateLifecycle(graph: GraphSnapshot, observations: Map<string, Observation>): Set<string> {
+  const retired = retiredSources(graph);
+  const statuses = new Map(graph.statuses.map(status => [status.sourceId, status] as const));
+  for (const observation of graph.observations) {
+    validateTerminalObservation(observation, observations, statuses);
   }
   return retired;
 }
@@ -208,19 +222,39 @@ function validateClaims(graph: GraphSnapshot, passages: Map<string, GraphSnapsho
   return claims;
 }
 
-function validateDerivedEntities(graph: GraphSnapshot, claims: Map<string, GraphSnapshot['claims'][number]>): void {
-  const profiles = unique(graph.profiles, x => x.profileId, 'profile');
-  unique(graph.relationships, x => x.relationshipId, 'relationship');
-  unique(graph.clusters, x => x.clusterId, 'cluster');
+function validateProfileClaims(graph: GraphSnapshot, claims: Map<string, GraphSnapshot['claims'][number]>): void {
   for (const profile of graph.profiles) for (const claimId of profile.claimIds) if (!claims.has(claimId)) throw new Error(`Profile claim missing: ${claimId}`);
+}
+
+function validateRelationshipLinks(
+  graph: GraphSnapshot,
+  profiles: Map<string, GraphSnapshot['profiles'][number]>,
+  claims: Map<string, GraphSnapshot['claims'][number]>,
+): void {
   for (const relation of graph.relationships) {
     if (!profiles.has(relation.fromProfileId) || !profiles.has(relation.toProfileId)) throw new Error(`Relationship profile missing: ${relation.relationshipId}`);
     for (const claimId of relation.claimIds) if (!claims.has(claimId)) throw new Error(`Relationship claim missing: ${claimId}`);
   }
+}
+
+function validateClusterLinks(
+  graph: GraphSnapshot,
+  profiles: Map<string, GraphSnapshot['profiles'][number]>,
+  claims: Map<string, GraphSnapshot['claims'][number]>,
+): void {
   for (const cluster of graph.clusters) {
     for (const profileId of cluster.memberProfileIds) if (!profiles.has(profileId)) throw new Error(`Cluster profile missing: ${profileId}`);
     for (const claimId of cluster.claimIds) if (!claims.has(claimId)) throw new Error(`Cluster claim missing: ${claimId}`);
   }
+}
+
+function validateDerivedEntities(graph: GraphSnapshot, claims: Map<string, GraphSnapshot['claims'][number]>): void {
+  const profiles = unique(graph.profiles, x => x.profileId, 'profile');
+  unique(graph.relationships, x => x.relationshipId, 'relationship');
+  unique(graph.clusters, x => x.clusterId, 'cluster');
+  validateProfileClaims(graph, claims);
+  validateRelationshipLinks(graph, profiles, claims);
+  validateClusterLinks(graph, profiles, claims);
 }
 
 // JSON Schema validates each payload's shape. This function also checks the
