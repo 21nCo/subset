@@ -114,11 +114,15 @@ export function sourceHash(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-export function parseObservation(input: unknown): Observation {
-  const observation = observationSchema.parse(input);
-  if ((observation.state === 'complete' || observation.state === 'partial') && sourceHash(observation.content) !== observation.sourceHash) {
+function validateObservationHash(observation: Extract<Observation, { state: 'complete' | 'partial' }>): void {
+  if (sourceHash(observation.content) !== observation.sourceHash) {
     throw new Error(`Observation hash mismatch: ${observation.observationId}`);
   }
+}
+
+export function parseObservation(input: unknown): Observation {
+  const observation = observationSchema.parse(input);
+  if (observation.state === 'complete' || observation.state === 'partial') validateObservationHash(observation);
   return observation;
 }
 
@@ -159,7 +163,7 @@ function retiredSources(graph: GraphSnapshot): Set<string> {
 
 function validateLiveObservationHashes(observations: GraphSnapshot['observations']): void {
   for (const observation of observations) {
-    if (observation.state === 'complete' || observation.state === 'partial') parseObservation(observation);
+    if (observation.state === 'complete' || observation.state === 'partial') validateObservationHash(observation);
   }
 }
 
