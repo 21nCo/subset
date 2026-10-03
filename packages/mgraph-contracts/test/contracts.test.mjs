@@ -20,11 +20,11 @@ const claim = { schemaVersion: 1, claimId: ids.claim, statement: 'Alice works wi
 const graph = {
   schemaVersion: 1, observations: [observation], passages: [passage], claims: [claim],
   profiles: [
-    { schemaVersion: 1, profileId: ids.profile, name: 'Alice', claimIds: [ids.claim] },
-    { schemaVersion: 1, profileId: ids.other, name: 'Bob', claimIds: [ids.claim] },
+    { schemaVersion: 1, profileId: ids.profile, name: 'Alice', modelVersion: 'profile-model-1', claimIds: [ids.claim] },
+    { schemaVersion: 1, profileId: ids.other, name: 'Bob', modelVersion: 'profile-model-1', claimIds: [ids.claim] },
   ],
-  relationships: [{ schemaVersion: 1, relationshipId: ids.relationship, fromProfileId: ids.profile, toProfileId: ids.other, kind: 'worksWith', claimIds: [ids.claim] }],
-  clusters: [{ schemaVersion: 1, clusterId: ids.cluster, name: 'Colleagues', memberProfileIds: [ids.profile, ids.other], claimIds: [ids.claim] }],
+  relationships: [{ schemaVersion: 1, relationshipId: ids.relationship, fromProfileId: ids.profile, toProfileId: ids.other, kind: 'worksWith', modelVersion: 'relation-model-2', claimIds: [ids.claim] }],
+  clusters: [{ schemaVersion: 1, clusterId: ids.cluster, name: 'Colleagues', memberProfileIds: [ids.profile, ids.other], modelVersion: 'cluster-model-3', claimIds: [ids.claim] }],
   statuses: [{ schemaVersion: 1, sourceId: ids.source, updatedAt: at, state: 'complete' }],
 };
 const copy = value => structuredClone(value);
@@ -33,6 +33,32 @@ test('valid graph resolves every claim to exact passage, observation, hash, and 
   assert.deepEqual(parseGraphSnapshot(graph), graph);
   assert.equal(graphSnapshotSchema.safeParse(graph).success, true);
   assert.equal(parseObservation(observation).sourceHash, sourceHash(content));
+});
+
+test('every derived entity names its own model and traces through claims to source evidence', () => {
+  const byClaimId = new Map(graph.claims.map(item => [item.claimId, item]));
+  for (const entity of [...graph.profiles, ...graph.relationships, ...graph.clusters]) {
+    assert.ok(entity.modelVersion);
+    for (const claimId of entity.claimIds) {
+      const cited = byClaimId.get(claimId).provenance[0];
+      assert.equal(cited.observationId, observation.observationId);
+      assert.equal(cited.passageId, passage.passageId);
+      assert.equal(cited.sourceHash, observation.sourceHash);
+    }
+  }
+  for (const kind of ['profiles', 'relationships', 'clusters']) {
+    const missing = copy(graph);
+    delete missing[kind][0].modelVersion;
+    assert.equal(graphSnapshotSchema.safeParse(missing).success, false, `${kind} missing model`);
+    assert.throws(() => parseGraphSnapshot(missing));
+    const empty = copy(graph);
+    empty[kind][0].modelVersion = '';
+    assert.equal(graphSnapshotSchema.safeParse(empty).success, false, `${kind} empty model`);
+    assert.throws(() => parseGraphSnapshot(empty));
+    const disconnected = copy(graph);
+    disconnected[kind][0].claimIds = [ids.other];
+    assert.throws(() => parseGraphSnapshot(disconnected), /[Cc]laim missing/);
+  }
 });
 
 test('claim provenance rejects absent or mismatched passages and observations', () => {
@@ -129,28 +155,34 @@ test('IPC v1 query upgrades to v2; v2 cursor and strict version transition', () 
 });
 
 test('IPC responses correlate operation, version, and semantic graph; errors are explicit', () => {
-  const request = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory' };
-  const response = { ...request, ok: true, result: { kind: 'memory', graph } };
-  assert.deepEqual(parseIpcResponse(response, request), response);
-  assert.throws(() => parseIpcResponse({ ...response, requestId: ids.other }, request), /correlation/);
-  assert.throws(() => parseIpcResponse({ ...response, result: { kind: 'status', statuses: [] } }, request), /operation/);
-  assert.throws(() => parseIpcResponse({ ...response, result: { ...response.result, nextCursor: 'next' } }, request));
-  const error = { ...request, ok: false, error: { code: 'unauthorized', message: 'Local peer denied', retryable: false } };
-  assert.deepEqual(parseIpcResponse(error, request), error);
+  const request = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory', query: 'Alice' };
+  const decoded = decodeIpcRequest(request);
+  const response = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory', ok: true, result: { kind: 'memory', graph } };
+  assert.deepEqual(parseIpcResponse(response, decoded), response);
+  assert.throws(() => parseIpcResponse(response, decoded.request), /decoded wire version/);
+  assert.throws(() => parseIpcResponse(response, { wireVersion: 1, request: { ...decoded.request, cursor: 'next' } }));
+  assert.throws(() => parseIpcResponse({ ...response, protocolVersion: 2 }, decoded));
+  assert.throws(() => parseIpcResponse({ ...response, requestId: ids.other }, decoded), /correlation/);
+  assert.throws(() => parseIpcResponse({ ...response, result: { kind: 'status', statuses: [] } }, decoded), /operation/);
+  assert.throws(() => parseIpcResponse({ ...response, result: { ...response.result, nextCursor: 'next' } }, decoded));
+  const error = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory', ok: false, error: { code: 'unauthorized', message: 'Local peer denied', retryable: false } };
+  assert.deepEqual(parseIpcResponse(error, decoded), error);
+  const v2 = decodeIpcRequest({ ...request, protocolVersion: 2, cursor: 'next' });
+  assert.equal(parseIpcResponse({ ...response, protocolVersion: 2, result: { ...response.result, nextCursor: 'next' } }, v2).result.nextCursor, 'next');
   const mutation = { protocolVersion: 2, requestId: ids.request, operation: 'deleteSource', sourceId: ids.source };
-  assert.throws(() => parseIpcResponse({ protocolVersion: 2, requestId: ids.request, operation: 'deleteSource', ok: true, result: { kind: 'sourceChanged', sourceId: ids.other, state: 'deleted' } }, mutation), /identity/);
+  assert.throws(() => parseIpcResponse({ protocolVersion: 2, requestId: ids.request, operation: 'deleteSource', ok: true, result: { kind: 'sourceChanged', sourceId: ids.other, state: 'deleted' } }, decodeIpcRequest(mutation)), /identity/);
   const statusRequest = { protocolVersion: 2, requestId: ids.request, operation: 'getStatus' };
   const statusResponse = { ...statusRequest, ok: true, result: { kind: 'status', statuses: [
     { schemaVersion: 1, sourceId: ids.source, updatedAt: at, state: 'processing' },
     { schemaVersion: 1, sourceId: ids.source, updatedAt: at, state: 'permissionRevoked', reason: 'Permission withdrawn' },
   ] } };
-  assert.throws(() => parseIpcResponse(statusResponse, statusRequest), /Duplicate source status/);
+  assert.throws(() => parseIpcResponse(statusResponse, decodeIpcRequest(statusRequest)), /Duplicate source status/);
 });
 
 test('portable JSON Schema artifacts retain version and object constraints', async () => {
   const ajv = new Ajv2020({ strict: true });
   addFormats(ajv);
-  for (const name of ['observation', 'evidencePassage', 'graphSnapshot', 'ipcRequestV1', 'ipcRequestV2']) {
+  for (const name of ['observation', 'evidencePassage', 'profile', 'relationship', 'cluster', 'graphSnapshot', 'ipcRequestV1', 'ipcRequestV2']) {
     const schema = JSON.parse(await readFile(new URL(`../dist/schemas/${name}.json`, import.meta.url)));
     assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
     const validate = ajv.compile(schema);
@@ -166,6 +198,14 @@ test('portable JSON Schema artifacts retain version and object constraints', asy
     if (name === 'graphSnapshot') {
       assert.equal(validate(graph), true);
       assert.equal(validate({ ...graph, unexpected: true }), false);
+    }
+    if (['profile', 'relationship', 'cluster'].includes(name)) {
+      const value = graph[{ profile: 'profiles', relationship: 'relationships', cluster: 'clusters' }[name]][0];
+      assert.equal(validate(value), true);
+      const missing = { ...value };
+      delete missing.modelVersion;
+      assert.equal(validate(missing), false);
+      assert.equal(validate({ ...value, modelVersion: '' }), false);
     }
     if (name === 'ipcRequestV1') {
       assert.equal(validate({ protocolVersion: 1, requestId: ids.request, operation: 'getStatus' }), true);

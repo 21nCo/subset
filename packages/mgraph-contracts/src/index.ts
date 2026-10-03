@@ -62,6 +62,7 @@ export const profileSchema = z.strictObject({
   schemaVersion: z.literal(1),
   profileId: id,
   name: label,
+  modelVersion,
   claimIds: z.array(id).min(1),
 });
 export const relationshipSchema = z.strictObject({
@@ -70,6 +71,7 @@ export const relationshipSchema = z.strictObject({
   fromProfileId: id,
   toProfileId: id,
   kind: label,
+  modelVersion,
   claimIds: z.array(id).min(1),
 });
 export const clusterSchema = z.strictObject({
@@ -77,6 +79,7 @@ export const clusterSchema = z.strictObject({
   clusterId: id,
   name: label,
   memberProfileIds: z.array(id).min(1),
+  modelVersion,
   claimIds: z.array(id).min(1),
 });
 
@@ -221,7 +224,8 @@ export const ipcRequestV2Schema = z.discriminatedUnion('operation', [
   requestOperations[4].extend({ protocolVersion: z.literal(2) }),
 ]);
 export type IpcRequestV2 = z.infer<typeof ipcRequestV2Schema>;
-export function decodeIpcRequest(input: unknown): { wireVersion: 1 | 2; request: IpcRequestV2 } {
+export type DecodedIpcRequest = { wireVersion: 1 | 2; request: IpcRequestV2 };
+export function decodeIpcRequest(input: unknown): DecodedIpcRequest {
   if (input && typeof input === 'object' && 'protocolVersion' in input && input.protocolVersion === 1) {
     const v1 = ipcRequestV1Schema.parse(input);
     if (v1.operation === 'submitObservation') parseObservation(v1.payload);
@@ -252,19 +256,23 @@ const response = (version: 1 | 2) => z.discriminatedUnion('ok', [
 export const ipcResponseV1Schema = response(1);
 export const ipcResponseV2Schema = response(2);
 
-export function parseIpcResponse(input: unknown, request: { requestId: string; operation: IpcRequestV2['operation']; protocolVersion: 1 | 2; sourceId?: string; payload?: Observation }) {
-  const parsed = (request.protocolVersion === 1 ? ipcResponseV1Schema : ipcResponseV2Schema).parse(input);
+export function parseIpcResponse(input: unknown, decoded: DecodedIpcRequest) {
+  if (decoded?.wireVersion !== 1 && decoded?.wireVersion !== 2) throw new Error('Response correlation requires the decoded wire version');
+  const { request } = decoded;
+  const wireRequest = { ...request, protocolVersion: decoded.wireVersion };
+  (decoded.wireVersion === 1 ? ipcRequestV1Schema : ipcRequestV2Schema).parse(wireRequest);
+  const parsed = (decoded.wireVersion === 1 ? ipcResponseV1Schema : ipcResponseV2Schema).parse(input);
   if (parsed.requestId !== request.requestId || parsed.operation !== request.operation) throw new Error('Response correlation mismatch');
   if (parsed.ok) {
     const kindByOperation = { submitObservation: 'observationAccepted', queryMemory: 'memory', getStatus: 'status', deleteSource: 'sourceChanged', revokeSource: 'sourceChanged' };
     if (parsed.result.kind !== kindByOperation[request.operation]) throw new Error('Response result does not match operation');
     if (parsed.result.kind === 'memory') parseGraphSnapshot(parsed.result.graph);
     if (parsed.result.kind === 'sourceChanged' && parsed.result.state !== (request.operation === 'deleteSource' ? 'deleted' : 'permissionRevoked')) throw new Error('Source state does not match operation');
-    if (parsed.result.kind === 'sourceChanged' && request.sourceId && parsed.result.sourceId !== request.sourceId) throw new Error('Source identity does not match request');
-    if (parsed.result.kind === 'observationAccepted' && request.payload && parsed.result.observationId !== request.payload.observationId) throw new Error('Observation identity does not match request');
+    if (parsed.result.kind === 'sourceChanged' && 'sourceId' in request && request.sourceId && parsed.result.sourceId !== request.sourceId) throw new Error('Source identity does not match request');
+    if (parsed.result.kind === 'observationAccepted' && 'payload' in request && parsed.result.observationId !== request.payload.observationId) throw new Error('Observation identity does not match request');
     if (parsed.result.kind === 'status') {
       uniqueSourceStatuses(parsed.result.statuses);
-      if (request.sourceId && parsed.result.statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
+      if ('sourceId' in request && request.sourceId && parsed.result.statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
     }
   }
   return parsed;
