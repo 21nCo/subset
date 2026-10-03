@@ -8,7 +8,7 @@
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
     "dev": "npm run build --workspace=@subset/catalog && npm run dev --workspace=@subset/directory",
-    "check": "node scripts/check-workspaces.mjs && npm run build --workspace=@subset/catalog && npm run check --workspace=@subset/directory",
-    "build": "npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/directory"
+    "check": "node scripts/check-workspaces.mjs && npm run test --workspace=@subset/mgraph-contracts && npm run build --workspace=@subset/catalog && npm run check --workspace=@subset/directory",
+    "build": "npm run build --workspace=@subset/mgraph-contracts && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/directory"
   }
 }
