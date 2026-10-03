@@ -185,6 +185,31 @@ function migrate(db: DatabaseSync): void {
       OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
         AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as IdRow[];
     const rebuildSources = new Set(staleSources.map(row => row.source_id));
+    if (version === 2) {
+      // V2 evidence has no revision column. An old passage can survive even
+      // when its observation and job were already removed. Retain evidence
+      // only for a completed current job whose graph validates against the
+      // current observation; otherwise rebuild it from that observation.
+      for (const row of db.prepare('SELECT DISTINCT source_id FROM evidence').all() as IdRow[]) {
+        const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(row.source_id) as
+          { state: string; revision: number } | undefined;
+        if (!source) throw new StoreUnavailable('V2 evidence has no source');
+        if (!live(source.state)) {
+          rebuildSources.add(row.source_id);
+          continue;
+        }
+        const completed = db.prepare(`SELECT j.observation_id FROM jobs j JOIN observations o
+          ON o.observation_id = j.observation_id AND o.source_id = j.source_id AND o.revision = j.revision
+          WHERE j.source_id = ? AND j.revision = ? AND j.state = 'complete' LIMIT 1`)
+          .get(row.source_id, source.revision) as { observation_id: string } | undefined;
+        if (!completed) {
+          rebuildSources.add(row.source_id);
+          continue;
+        }
+        try { storedCompletedGraph(db, row.source_id, completed.observation_id); }
+        catch { rebuildSources.add(row.source_id); }
+      }
+    }
     if (version === 1) {
       // V1 had no evidence table. A completed V1 job cannot have persisted its
       // result, even if its observation is the current revision.

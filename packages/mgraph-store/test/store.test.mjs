@@ -432,6 +432,78 @@ test('v2 upgrade backfills observation identities after source replacement', t =
     'Changed content', '2026-10-03T00:00:00.000Z')), StoreConflict);
 });
 
+test('v2 upgrade discards evidence-only stale revision and requeues current work', t => {
+  const filename = fixture(t);
+  const old = createV2Database(filename);
+  const stale = observation(randomUUID(), randomUUID(), 'Oldterm only', '2026-10-01T00:00:00Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Currentterm only', '2026-10-02T00:00:00Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'pending', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)')
+    .run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'pending')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  const oldPassage = graphFor(stale).passages[0];
+  old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)')
+    .run('passage', oldPassage.passageId, current.source.sourceId, JSON.stringify(oldPassage));
+  old.prepare("INSERT INTO evidence_terms VALUES (?, 'passage', 'oldterm')").run(current.source.sourceId);
+  assert.equal(old.prepare('SELECT count(*) AS n FROM observations').get().n, 1);
+  assert.equal(old.prepare('SELECT count(*) AS n FROM jobs').get().n, 1);
+  old.close();
+
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'pending');
+  assert.deepEqual(store.getSnapshot(current.source.sourceId).observations.map(row => row.observationId), [current.observationId]);
+  assert.equal(store.getSnapshot(current.source.sourceId).passages.length, 0);
+  assert.equal(store.queryMemory('Oldterm').graph.observations.length, 0);
+  store.rebuildSearchIndex();
+  assert.equal(store.queryMemory('Oldterm').graph.observations.length, 0);
+  assert.equal(store.queryMemory('Currentterm').graph.observations.length, 1);
+  assert.equal(store.pendingJobs(), 1);
+  const job = store.claimNextJob('upgrade-worker');
+  assert.equal(job.observationId, current.observationId);
+  assert.equal(store.claimNextJob('other-worker'), null);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(current));
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'complete');
+  assert.equal(store.queryMemory('Currentterm').graph.claims.length, 1);
+  assert.equal(store.pendingJobs(), 0);
+  store.deleteSource(current.source.sourceId);
+  assert.equal(store.getSnapshot(current.source.sourceId).observations.length, 0);
+  assert.equal(store.queryMemory('Currentterm').graph.observations.length, 0);
+  assert.equal(store.pendingJobs(), 0);
+  assert.equal(store.claimNextJob('other-worker'), null);
+});
+
+test('v2 upgrade repairs a completed current job with stale evidence but no stale job', t => {
+  const filename = fixture(t);
+  const old = createV2Database(filename);
+  const stale = observation(randomUUID(), randomUUID(), 'Former passage', '2026-10-01T00:00:00Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Present passage', '2026-10-02T00:00:00Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'complete', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)')
+    .run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'complete')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  const stalePassage = graphFor(stale).passages[0];
+  old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)')
+    .run('passage', stalePassage.passageId, current.source.sourceId, JSON.stringify(stalePassage));
+  old.close();
+
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'pending');
+  assert.equal(store.getSnapshot(current.source.sourceId).passages.length, 0);
+  assert.equal(store.queryMemory('Former').graph.observations.length, 0);
+  assert.equal(store.pendingJobs(), 1);
+  const job = store.claimNextJob('repair-worker');
+  assert.equal(job.observationId, current.observationId);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(current));
+  assert.equal(store.getStatus(current.source.sourceId)[0].state, 'complete');
+  assert.equal(store.queryMemory('Present').graph.claims.length, 1);
+});
+
 test('writer OS lock has one owner across simultaneous recovery and repeated close', async t => {
   const filename = fixture(t);
   const moduleUrl = new URL('../dist/index.js', import.meta.url).href;
