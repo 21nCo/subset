@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmodSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
@@ -9,7 +9,7 @@ import {
   type GraphSnapshot, type Observation,
 } from '@subset/mgraph-contracts';
 
-export const STORE_SCHEMA_VERSION = 2;
+export const STORE_SCHEMA_VERSION = 3;
 const uuid = z.uuid();
 const checkpointSchema = z.strictObject({ stage: z.string().min(1).max(128), cursor: z.string().max(4096).optional() });
 export type JobCheckpoint = z.infer<typeof checkpointSchema>;
@@ -32,7 +32,7 @@ type SourceRow = {
 type JobRow = {
   job_id: string; source_id: string; revision: number; observation_id: string;
   state: string; attempts: number; checkpoint: string | null;
-  lease_token: string | null; lease_until: number | null;
+  lease_token: string | null; lease_until: number | null; graph_hash: string | null;
 };
 type JsonRow = { payload: string };
 type IdRow = { source_id: string };
@@ -50,40 +50,34 @@ function canonicalPath(filename: string): string {
   }
 }
 
-function acquireWriterLock(filename: string): { path: string; token: string } {
-  const path = `${filename}.writer.lock`;
-  const token = randomUUID();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      mkdirSync(path);
-      try {
-        writeFileSync(`${path}/owner.json`, JSON.stringify({ pid: process.pid, token }), { flag: 'wx', mode: 0o600 });
-      } catch (error) {
-        rmSync(path, { recursive: true, force: true });
-        throw error;
-      }
-      return { path, token };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      let owner: { pid: number; token: string } | null = null;
-      try { owner = JSON.parse(readFileSync(`${path}/owner.json`, 'utf8')); } catch { /* A newly starting writer may not have written it yet. */ }
-      if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
-        try { process.kill(owner.pid, 0); throw new StoreUnavailable('Another process owns the M Graph writer'); }
-        catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ESRCH') throw cause; }
-      } else if (Date.now() - statSync(path).mtimeMs < 5_000) {
-        throw new StoreUnavailable('M Graph writer lock is being initialized');
-      }
-      // Rename is atomic. Only the process that moved the stale lock removes it.
-      const stalePath = `${path}.stale.${token}`;
-      try {
-        renameSync(path, stalePath);
-        rmSync(stalePath, { recursive: true, force: true });
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-      }
+function acquireWriterLock(filename: string): DatabaseSync {
+  // SQLite's OS lock is released on process death. Unlike a PID file, it cannot be
+  // reclaimed by a racing opener while a new owner is initializing or closing.
+  const lock = new DatabaseSync(`${filename}.writer-lock.sqlite`);
+  try {
+    chmodSync(`${filename}.writer-lock.sqlite`, 0o600);
+    lock.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
+    return lock;
+  } catch (error) {
+    lock.close();
+    if (error instanceof Error && /SQLITE_BUSY|database is locked/.test(error.message)) {
+      throw new StoreUnavailable('Another process owns the M Graph writer');
     }
+    throw error;
   }
-  throw new StoreUnavailable('Could not acquire the M Graph writer lock');
+}
+
+function idHash(id: string): string { return createHash('sha256').update(id).digest('hex'); }
+function graphHash(graph: GraphSnapshot): string { return createHash('sha256').update(JSON.stringify(graph)).digest('hex'); }
+function storedCompletedGraph(db: DatabaseSync, sourceId: string, observationId: string): GraphSnapshot {
+  const observation = db.prepare('SELECT payload FROM observations WHERE source_id = ? AND observation_id = ?')
+    .get(sourceId, observationId) as JsonRow | undefined;
+  if (!observation) throw new StoreUnavailable('Completed job has no observation during migration');
+  const entities = (kind: string): unknown[] => (db.prepare('SELECT payload FROM evidence WHERE source_id = ? AND kind = ? ORDER BY rowid')
+    .all(sourceId, kind) as JsonRow[]).map(row => JSON.parse(row.payload));
+  return parseGraphSnapshot({ schemaVersion: 1, observations: [JSON.parse(observation.payload)],
+    passages: entities('passage'), claims: entities('claim'), profiles: entities('profile'),
+    relationships: entities('relationship'), clusters: entities('cluster'), statuses: [] });
 }
 
 function transaction<T>(db: DatabaseSync, fn: () => T): T {
@@ -159,6 +153,22 @@ function migrate(db: DatabaseSync): void {
       }
     }
   });
+  if (version < 3) transaction(db, () => {
+    db.exec(`
+      CREATE TABLE observation_ids (id_hash TEXT PRIMARY KEY);
+      ALTER TABLE jobs ADD COLUMN graph_hash TEXT;
+      PRAGMA user_version = 3;
+    `);
+    const insert = db.prepare('INSERT INTO observation_ids(id_hash) VALUES (?)');
+    for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
+      insert.run(idHash(row.observation_id));
+    }
+    const update = db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?');
+    for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
+      .all() as { job_id: string; source_id: string; observation_id: string }[]) {
+      update.run(graphHash(storedCompletedGraph(db, row.source_id, row.observation_id)), row.job_id);
+    }
+  });
 }
 
 function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
@@ -178,7 +188,8 @@ function indexText(db: DatabaseSync, sourceId: string, kind: string, body: strin
 
 export class MGraphStore {
   private readonly db: DatabaseSync;
-  private readonly writerLock?: { path: string; token: string };
+  private readonly writerLock?: DatabaseSync;
+  private closed = false;
   readonly readOnly: boolean;
 
   constructor(filename: string, options: { readOnly?: boolean } = {}) {
@@ -207,12 +218,14 @@ export class MGraphStore {
 
   private releaseWriterLock(): void {
     if (!this.writerLock) return;
-    try {
-      const owner = JSON.parse(readFileSync(`${this.writerLock.path}/owner.json`, 'utf8')) as { token: string };
-      if (owner.token === this.writerLock.token) rmSync(this.writerLock.path, { recursive: true, force: true });
-    } catch { /* The lock was already removed or replaced. */ }
+    this.writerLock.close();
   }
-  close(): void { this.db.close(); this.releaseWriterLock(); }
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try { this.db.close(); }
+    finally { this.releaseWriterLock(); }
+  }
   private writable(): void { if (this.readOnly) throw new StoreUnavailable('Read-only client cannot mutate the store'); }
   private source(sourceId: string): SourceRow | undefined {
     return this.db.prepare('SELECT * FROM sources WHERE source_id = ?').get(sourceId) as SourceRow | undefined;
@@ -239,15 +252,17 @@ export class MGraphStore {
             existing.application_bundle_id !== (observation.source.applicationBundleId ?? null)) {
           throw new StoreConflict('Source identity changed');
         }
-        const prior = this.db.prepare('SELECT payload, revision FROM observations WHERE observation_id = ?').get(observation.observationId) as
-          | { payload: string; revision: number } | undefined;
-        if (prior) {
-          if (prior.payload !== JSON.stringify(observation)) throw new StoreConflict('Observation ID reused with different content');
-          return { observationId: observation.observationId, revision: prior.revision, replayed: true };
-        }
         if (existing.observed_at && Date.parse(observation.observedAt) <= Date.parse(existing.observed_at)) {
+          const prior = this.db.prepare('SELECT source_id, payload, revision FROM observations WHERE observation_id = ?').get(observation.observationId) as
+            | { source_id: string; payload: string; revision: number } | undefined;
+          if (prior?.source_id === sourceId && prior.payload === JSON.stringify(observation)) {
+            return { observationId: observation.observationId, revision: prior.revision, replayed: true };
+          }
           throw new StoreConflict('Observation is older than the current source revision');
         }
+      }
+      if (this.db.prepare('SELECT 1 FROM observation_ids WHERE id_hash = ?').get(idHash(observation.observationId))) {
+        throw new StoreConflict('Observation ID was already used');
       }
       // The old revision is removed before the new one is visible. Jobs for it cannot later commit.
       if (existing) {
@@ -266,6 +281,7 @@ export class MGraphStore {
       }
       this.db.prepare('INSERT INTO observations(observation_id, source_id, revision, payload) VALUES (?, ?, ?, ?)')
         .run(observation.observationId, sourceId, revision, JSON.stringify(observation));
+      this.db.prepare('INSERT INTO observation_ids(id_hash) VALUES (?)').run(idHash(observation.observationId));
       indexText(this.db, sourceId, 'observation', observation.content);
       this.db.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
         .run(observation.observationId, sourceId, revision, observation.observationId);
@@ -333,7 +349,10 @@ export class MGraphStore {
     const graph = parseGraphSnapshot(input);
     transaction(this.db, () => {
       const existing = this.job(uuid.parse(jobId));
-      if (existing?.state === 'complete' && existing.lease_token === uuid.parse(leaseToken)) return;
+      if (existing?.state === 'complete' && existing.lease_token === uuid.parse(leaseToken)) {
+        if (existing.graph_hash !== graphHash(graph)) throw new StoreConflict('Completed job graph differs from original');
+        return;
+      }
       const job = this.assertLease(jobId, leaseToken, at);
       const current = this.db.prepare('SELECT payload FROM observations WHERE observation_id = ? AND source_id = ? AND revision = ?')
         .get(job.observation_id, job.source_id, job.revision) as JsonRow | undefined;
@@ -352,7 +371,8 @@ export class MGraphStore {
       for (const entity of graph.profiles) insert.run('profile', entity.profileId, job.source_id, JSON.stringify(entity));
       for (const entity of graph.relationships) insert.run('relationship', entity.relationshipId, job.source_id, JSON.stringify(entity));
       for (const entity of graph.clusters) insert.run('cluster', entity.clusterId, job.source_id, JSON.stringify(entity));
-      this.db.prepare("UPDATE jobs SET state = 'complete', checkpoint = NULL, lease_until = NULL WHERE job_id = ?").run(jobId);
+      this.db.prepare("UPDATE jobs SET state = 'complete', checkpoint = NULL, lease_until = NULL, graph_hash = ? WHERE job_id = ?")
+        .run(graphHash(graph), jobId);
       const state = graph.observations[0].state;
       const reason = state === 'partial' ? graph.observations[0].partialReason : null;
       this.db.prepare('UPDATE sources SET state = ?, reason = ?, updated_at = ? WHERE source_id = ?')

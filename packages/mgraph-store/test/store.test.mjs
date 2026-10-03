@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +85,9 @@ test('v1 upgrade preserves observations and creates searchable evidence', t => {
   assert.equal(store.queryMemory('Alice').graph.observations[0].observationId, item.observationId);
   finish(store, item);
   assert.equal(store.queryMemory('Bob').graph.claims.length, 1);
+  store.submitObservation(observation(item.source.sourceId, randomUUID(), 'Replacement', '2026-10-02T00:00:00.000Z'));
+  assert.throws(() => store.submitObservation(observation(item.source.sourceId, item.observationId,
+    'Reused after upgrade', '2026-10-03T00:00:00.000Z')), StoreConflict);
 });
 
 test('WAL reader snapshot remains stable while one writer advances a source', t => {
@@ -127,6 +130,11 @@ test('interrupted job resumes checkpoint, stale lease fails, replay is idempoten
   assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graph, 2001), StoreConflict);
   store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
   store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
+  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item), 2500), StoreConflict);
+  store.close();
+  store = new MGraphStore(filename);
+  store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
+  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item), 2500), StoreConflict);
   assert.equal(store.getSnapshot().claims.length, 1);
   assert.equal(store.pendingJobs(), 0);
 });
@@ -163,6 +171,8 @@ test('newer revision fences old job and old submission; deletion erases content 
   store.submitObservation(second);
   assert.throws(() => store.completeJob(oldJob.jobId, oldJob.leaseToken, graphFor(first)), StoreConflict);
   assert.throws(() => store.submitObservation(first), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(first.source.sourceId, first.observationId,
+    'Reused ID with newer timestamp', '2026-10-03T00:00:00.000Z')), StoreConflict);
   finish(store, second);
   assert.equal(store.queryMemory('New').graph.observations.length, 1);
   store.rebuildSource(first.source.sourceId);
@@ -174,6 +184,8 @@ test('newer revision fences old job and old submission; deletion erases content 
   assert.equal(store.getStatus(first.source.sourceId)[0].state, 'deleted');
   assert.equal(store.claimNextJob('worker'), null);
   assert.throws(() => store.submitObservation(second), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(randomUUID(), first.observationId,
+    'Reused after deletion', '2026-10-04T00:00:00.000Z')), StoreConflict);
   const disk = new DatabaseSync(filename, { readOnly: true });
   const retained = disk.prepare('SELECT locator, display_name, observed_at FROM sources WHERE source_id = ?').get(first.source.sourceId);
   assert.deepEqual({ ...retained }, { locator: '', display_name: null, observed_at: null });
@@ -205,4 +217,94 @@ test('invalid graph, malformed query, revocation and failed-job retry', t => {
   assert.equal(store.queryMemory('Alice').graph.observations.length, 0);
   assert.equal(store.getStatus(item.source.sourceId)[0].state, 'permissionRevoked');
   assert.throws(() => store.rebuildSource(item.source.sourceId), StoreConflict);
+});
+
+test('v2 upgrade backfills observation identities after source replacement', t => {
+  const filename = fixture(t);
+  const old = new DatabaseSync(filename);
+  old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
+    display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE observations (observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(source_id, revision));
+    CREATE TABLE jobs (job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, observation_id TEXT NOT NULL, state TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER, worker_id TEXT);
+    CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
+    CREATE TABLE evidence (kind TEXT NOT NULL, entity_id TEXT NOT NULL,
+      source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+      payload TEXT NOT NULL, PRIMARY KEY(kind, entity_id));
+    CREATE INDEX evidence_source ON evidence(source_id, kind);
+    CREATE TABLE evidence_terms (source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, term TEXT NOT NULL, PRIMARY KEY(source_id, kind, term));
+    CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
+    PRAGMA user_version = 2;`);
+  const first = observation();
+  const completedGraph = graphFor(first);
+  const leaseToken = randomUUID();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'pending', ?)")
+    .run(first.source.sourceId, first.source.locator, first.observedAt, first.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(first.observationId, first.source.sourceId, JSON.stringify(first));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state, lease_token) VALUES (?, ?, 1, ?, 'complete', ?)")
+    .run(first.observationId, first.source.sourceId, first.observationId, leaseToken);
+  const insertEvidence = old.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)');
+  for (const [kind, entries, key] of [
+    ['passage', completedGraph.passages, 'passageId'], ['claim', completedGraph.claims, 'claimId'],
+    ['profile', completedGraph.profiles, 'profileId'],
+  ]) for (const entity of entries) insertEvidence.run(kind, entity[key], first.source.sourceId, JSON.stringify(entity));
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.equal(store.submitObservation(first).replayed, true);
+  store.completeJob(first.observationId, leaseToken, completedGraph);
+  assert.throws(() => store.completeJob(first.observationId, leaseToken, graphFor(first)), StoreConflict);
+  store.submitObservation(observation(first.source.sourceId, randomUUID(), 'New snapshot', '2026-10-02T00:00:00.000Z'));
+  assert.throws(() => store.submitObservation(observation(first.source.sourceId, first.observationId,
+    'Changed content', '2026-10-03T00:00:00.000Z')), StoreConflict);
+});
+
+test('writer OS lock has one owner across simultaneous recovery and repeated close', async t => {
+  const filename = fixture(t);
+  const moduleUrl = new URL('../dist/index.js', import.meta.url).href;
+  const script = `
+    import { MGraphStore, StoreUnavailable } from ${JSON.stringify(moduleUrl)};
+    try {
+      const store = new MGraphStore(${JSON.stringify(filename)});
+      console.log('OWNER');
+      setInterval(() => store.pendingJobs(), 1000);
+    } catch (error) {
+      if (!(error instanceof StoreUnavailable)) throw error;
+      console.log('BUSY');
+    }
+  `;
+  async function contend() {
+    const children = Array.from({ length: 5 }, () => spawn(process.execPath,
+      ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] }));
+    t.after(() => children.forEach(child => child.kill('SIGKILL')));
+    const results = await Promise.all(children.map(child => new Promise((resolve, reject) => {
+      let output = '';
+      child.stdout.on('data', chunk => {
+        output += chunk;
+        if (output.includes('\n')) resolve({ child, result: output.trim() });
+      });
+      child.once('error', reject);
+      child.once('exit', code => { if (!output.includes('\n')) reject(new Error(`child exited ${code} before lock result`)); });
+    })));
+    const owners = results.filter(entry => entry.result === 'OWNER');
+    assert.equal(owners.length, 1, JSON.stringify(results.map(entry => entry.result)));
+    assert.equal(results.filter(entry => entry.result === 'BUSY').length, 4);
+    const ownerExit = new Promise(resolve => owners[0].child.once('exit', resolve));
+    owners[0].child.kill('SIGKILL');
+    await ownerExit;
+    await Promise.all(results.filter(entry => entry.result === 'BUSY').map(entry =>
+      entry.child.exitCode !== null ? Promise.resolve() : new Promise(resolve => entry.child.once('exit', resolve))));
+  }
+  await contend();
+  await contend();
+  const store = new MGraphStore(filename);
+  store.close();
+  store.close();
+  const replacement = new MGraphStore(filename);
+  replacement.close();
+  replacement.close();
 });
