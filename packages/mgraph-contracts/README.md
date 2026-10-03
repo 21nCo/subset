@@ -11,11 +11,11 @@ This private `@subset/mgraph-contracts` workspace defines the local memory servi
 
 ## Record rules
 
-`SourceIdentity.sourceId` is a stable local identity for one logical source. `locator` identifies that source within its kind; both it and `displayName` may contain private information and belong only in local storage or authorized responses. An observation is an immutable snapshot with a unique `observationId`, source identity, and time. `complete` and `partial` carry nonempty `content` plus `sourceHash`, the lowercase SHA-256 of the exact UTF-8 content. `partial` also requires `partialReason`. `deleted` carries a target observation ID, and `permissionRevoked` carries a reason. Neither terminal state accepts content or hash. A new observation is needed after any content change.
+`SourceIdentity.sourceId` is a stable local identity for one logical source. Its `kind`, `locator`, and optional `applicationBundleId` must remain consistent across observations in one graph snapshot; `displayName` may change. A changed canonical identity needs a new `sourceId`. `locator` identifies the source within its kind; both it and `displayName` may contain private information and belong only in local storage or authorized responses. An observation is an immutable snapshot with a unique `observationId`, source identity, and time. `complete` and `partial` carry nonempty `content` plus `sourceHash`, the lowercase SHA-256 of the exact UTF-8 content. `partial` also requires `partialReason`. `deleted` carries a target observation ID, and `permissionRevoked` carries a reason. Neither terminal state accepts content or hash. A new observation is needed after any content change.
 
 Passages cite a live observation, repeat its hash, and contain an exact excerpt located by Unicode code point offsets `[start, end)` in the observation content. A claim has at least one provenance entry with an observation ID, passage ID, source hash, and model version. Every entry must resolve to the matching passage and observation. Profiles, relationships, and clusters refer to existing claims; relationships and clusters also refer to existing profiles. A graph snapshot cannot retain readable observations, passages, or claims for a source marked deleted or permission revoked. A terminal status may coexist with its terminal observation. The local store must erase other retained representations and derived indexes as part of those operations; this package only rejects a leaked graph snapshot.
 
-Processing states are `pending`, `processing`, `complete`, `partial`, `failed`, `deleted`, and `permissionRevoked`. `partial`, `failed`, and `permissionRevoked` require a reason. A status is per source and has an update time. The schema does not infer a status from an observation, and a pending source need not yet have an observation. The store owns durable ordering and recovery after interruption.
+Processing states are `pending`, `processing`, `complete`, `partial`, `failed`, `deleted`, and `permissionRevoked`. `partial`, `failed`, and `permissionRevoked` require a reason. A status is per source and has an update time. Graph snapshots and `getStatus` responses contain at most one current status per source. The schema does not infer a status from an observation, and a pending source need not yet have an observation. The store owns durable ordering and recovery after interruption.
 
 ## Local IPC
 
@@ -35,10 +35,10 @@ For a future Unix socket transport, use one UTF-8 JSON value per frame with an e
 
 | Boundary | Failure mode | Focused evidence |
 | --- | --- | --- |
-| Observation and passage | Changed content, incorrect hash or offset, malformed state | Valid/invalid schema and hash/excerpt tests |
+| Observation and passage | Changed content, incorrect hash or out-of-bounds Unicode offset, malformed state | Valid/invalid schema and hash/excerpt tests |
 | Derived graph | Dangling claim, wrong source, invalid profile/relation/cluster edge | Full graph and broken-reference tests |
-| Lifecycle | Partial record lacks reason; deleted/revoked source leaks text | State and retirement tests |
-| IPC | Wrong operation, response ID, or protocol version; unsafe retry assumption | v1-to-v2, malformed request, response-correlation tests; retry/authorization policy documented |
+| Lifecycle | Partial record lacks reason; deleted/revoked source leaks text; duplicate current status | State, retirement, and status-response tests |
+| IPC | Wrong operation, response ID, or protocol version; v2 diagnostic masked; unsafe retry assumption | v1-to-v2, malformed request diagnostic, response-correlation tests; retry/authorization policy documented |
 | Portability | Generated schema differs from runtime shape | Ajv validates representative generated JSON Schema artifacts |
 
 Run `npm run test --workspace=@subset/mgraph-contracts`. Repository gates are `npm run check` and `npm run build`. Tests prove the contract implementation and generated artifacts, not persistence, native permissions, live IPC, or hosted behavior. For this issue, Railway Postgres, Cloudflare Preview, connected provider sandboxes, and Aside Browser have no runtime boundary to exercise; the final reviewer can verify the schema/provenance contract with the generated artifacts and focused tests.

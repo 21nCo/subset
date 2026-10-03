@@ -48,6 +48,30 @@ test('claim provenance rejects absent or mismatched passages and observations', 
   }
 });
 
+test('passage offsets must fit Unicode code points without slice clamping', () => {
+  const codePointLength = Array.from(content).length;
+  const unicode = copy(graph);
+  unicode.passages[0] = { ...unicode.passages[0], start: codePointLength - 1, end: codePointLength, text: '🌍' };
+  assert.deepEqual(parseGraphSnapshot(unicode), unicode);
+  unicode.passages[0].end = codePointLength + 1;
+  assert.throws(() => parseGraphSnapshot(unicode), /offset out of bounds/);
+});
+
+test('one source ID has one canonical kind, locator, and application identity', () => {
+  const changedName = copy(graph);
+  changedName.observations.push({ ...observation, observationId: ids.other, source: { ...source, displayName: 'Renamed window' } });
+  assert.deepEqual(parseGraphSnapshot(changedName), changedName);
+  for (const changedSource of [
+    { ...source, kind: 'file' },
+    { ...source, locator: 'app:example/window:2' },
+    { ...source, applicationBundleId: 'dev.other.app' },
+  ]) {
+    const conflicting = copy(changedName);
+    conflicting.observations[1].source = changedSource;
+    assert.throws(() => parseGraphSnapshot(conflicting), /Conflicting source identity/);
+  }
+});
+
 test('invalid graph edges and malformed schema fields fail', () => {
   for (const change of [
     g => { g.profiles[0].claimIds = [ids.other]; },
@@ -99,6 +123,8 @@ test('IPC v1 query upgrades to v2; v2 cursor and strict version transition', () 
   assert.throws(() => parseIpcRequest({ ...v1, protocolVersion: 3 }));
   assert.throws(() => parseIpcRequest({ ...v1, limit: 0 }));
   assert.throws(() => parseIpcRequest({ ...v1, operation: 'deleteSource' }));
+  assert.throws(() => parseIpcRequest({ ...v1, protocolVersion: 2, cursor: '' }), error =>
+    error.issues?.some(issue => issue.path.join('.') === 'cursor' && issue.code === 'too_small'));
   assert.throws(() => parseIpcRequest({ protocolVersion: 2, requestId: ids.request, operation: 'submitObservation', payload: { ...observation, sourceHash: 'a'.repeat(64) } }), /hash mismatch/);
 });
 
@@ -113,6 +139,12 @@ test('IPC responses correlate operation, version, and semantic graph; errors are
   assert.deepEqual(parseIpcResponse(error, request), error);
   const mutation = { protocolVersion: 2, requestId: ids.request, operation: 'deleteSource', sourceId: ids.source };
   assert.throws(() => parseIpcResponse({ protocolVersion: 2, requestId: ids.request, operation: 'deleteSource', ok: true, result: { kind: 'sourceChanged', sourceId: ids.other, state: 'deleted' } }, mutation), /identity/);
+  const statusRequest = { protocolVersion: 2, requestId: ids.request, operation: 'getStatus' };
+  const statusResponse = { ...statusRequest, ok: true, result: { kind: 'status', statuses: [
+    { schemaVersion: 1, sourceId: ids.source, updatedAt: at, state: 'processing' },
+    { schemaVersion: 1, sourceId: ids.source, updatedAt: at, state: 'permissionRevoked', reason: 'Permission withdrawn' },
+  ] } };
+  assert.throws(() => parseIpcResponse(statusResponse, statusRequest), /Duplicate source status/);
 });
 
 test('portable JSON Schema artifacts retain version and object constraints', async () => {

@@ -125,6 +125,22 @@ function unique<T>(items: T[], key: (item: T) => string, kind: string): Map<stri
   return result;
 }
 
+function uniqueSourceStatuses(statuses: GraphSnapshot['statuses']): void {
+  unique(statuses, status => status.sourceId, 'source status');
+}
+
+function consistentSourceIdentities(observations: GraphSnapshot['observations']): void {
+  const sources = new Map<string, Observation['source']>();
+  for (const { source } of observations) {
+    const previous = sources.get(source.sourceId);
+    // displayName is presentation metadata; the other fields identify the source.
+    if (previous && (previous.kind !== source.kind || previous.locator !== source.locator || previous.applicationBundleId !== source.applicationBundleId)) {
+      throw new Error(`Conflicting source identity: ${source.sourceId}`);
+    }
+    sources.set(source.sourceId, source);
+  }
+}
+
 // JSON Schema validates each payload's shape. This function also checks the
 // graph's referential and lifecycle invariants, which JSON Schema cannot express.
 export function parseGraphSnapshot(input: unknown): GraphSnapshot {
@@ -135,7 +151,8 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
   const profiles = unique(graph.profiles, x => x.profileId, 'profile');
   unique(graph.relationships, x => x.relationshipId, 'relationship');
   unique(graph.clusters, x => x.clusterId, 'cluster');
-  unique(graph.statuses, x => x.sourceId, 'source status');
+  uniqueSourceStatuses(graph.statuses);
+  consistentSourceIdentities(graph.observations);
   const retired = new Set<string>();
   for (const observation of graph.observations) {
     if (observation.state === 'deleted' || observation.state === 'permissionRevoked') retired.add(observation.source.sourceId);
@@ -151,7 +168,9 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
     const observation = observations.get(passage.observationId);
     if (!observation || observation.state === 'deleted' || observation.state === 'permissionRevoked') throw new Error(`Passage has no live observation: ${passage.passageId}`);
     if (retired.has(observation.source.sourceId)) throw new Error(`Passage cites retired source: ${passage.passageId}`);
-    const slice = Array.from(observation.content).slice(passage.start, passage.end).join('');
+    const codePoints = Array.from(observation.content);
+    if (passage.end > codePoints.length) throw new Error(`Passage offset out of bounds: ${passage.passageId}`);
+    const slice = codePoints.slice(passage.start, passage.end).join('');
     if (slice !== passage.text || passage.sourceHash !== observation.sourceHash) throw new Error(`Passage mismatch: ${passage.passageId}`);
   }
   for (const claim of graph.claims) for (const citation of claim.provenance) {
@@ -203,14 +222,14 @@ export const ipcRequestV2Schema = z.discriminatedUnion('operation', [
 ]);
 export type IpcRequestV2 = z.infer<typeof ipcRequestV2Schema>;
 export function decodeIpcRequest(input: unknown): { wireVersion: 1 | 2; request: IpcRequestV2 } {
-  const v2 = ipcRequestV2Schema.safeParse(input);
-  if (v2.success) {
-    if (v2.data.operation === 'submitObservation') parseObservation(v2.data.payload);
-    return { wireVersion: 2, request: v2.data };
+  if (input && typeof input === 'object' && 'protocolVersion' in input && input.protocolVersion === 1) {
+    const v1 = ipcRequestV1Schema.parse(input);
+    if (v1.operation === 'submitObservation') parseObservation(v1.payload);
+    return { wireVersion: 1, request: ipcRequestV2Schema.parse({ ...v1, protocolVersion: 2 }) };
   }
-  const v1 = ipcRequestV1Schema.parse(input);
-  if (v1.operation === 'submitObservation') parseObservation(v1.payload);
-  return { wireVersion: 1, request: ipcRequestV2Schema.parse({ ...v1, protocolVersion: 2 }) };
+  const v2 = ipcRequestV2Schema.parse(input);
+  if (v2.operation === 'submitObservation') parseObservation(v2.payload);
+  return { wireVersion: 2, request: v2 };
 }
 export function parseIpcRequest(input: unknown): IpcRequestV2 {
   return decodeIpcRequest(input).request;
@@ -243,7 +262,10 @@ export function parseIpcResponse(input: unknown, request: { requestId: string; o
     if (parsed.result.kind === 'sourceChanged' && parsed.result.state !== (request.operation === 'deleteSource' ? 'deleted' : 'permissionRevoked')) throw new Error('Source state does not match operation');
     if (parsed.result.kind === 'sourceChanged' && request.sourceId && parsed.result.sourceId !== request.sourceId) throw new Error('Source identity does not match request');
     if (parsed.result.kind === 'observationAccepted' && request.payload && parsed.result.observationId !== request.payload.observationId) throw new Error('Observation identity does not match request');
-    if (parsed.result.kind === 'status' && request.sourceId && parsed.result.statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
+    if (parsed.result.kind === 'status') {
+      uniqueSourceStatuses(parsed.result.statuses);
+      if (request.sourceId && parsed.result.statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
+    }
   }
   return parsed;
 }
