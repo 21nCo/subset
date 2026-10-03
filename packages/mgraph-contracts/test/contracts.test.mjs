@@ -35,6 +35,17 @@ test('valid graph resolves every claim to exact passage, observation, hash, and 
   assert.equal(parseObservation(observation).sourceHash, sourceHash(content));
 });
 
+test('graph and query replies reject a live observation with an incorrect content hash', () => {
+  const badHash = copy(graph);
+  badHash.observations[0].sourceHash = 'a'.repeat(64);
+  assert.throws(() => parseGraphSnapshot(badHash), /Observation hash mismatch/);
+  const decoded = decodeIpcRequest({ protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', query: 'Alice' });
+  const response = { protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', ok: true,
+    result: { kind: 'memory', graph: badHash } };
+  assert.throws(() => parseIpcResponse(response, decoded), /Observation hash mismatch/);
+  assert.deepEqual(parseIpcResponse({ ...response, result: { kind: 'memory', graph } }, decoded).result.graph, graph);
+});
+
 test('every derived entity names its own model and traces through claims to source evidence', () => {
   const byClaimId = new Map(graph.claims.map(item => [item.claimId, item]));
   for (const entity of [...graph.profiles, ...graph.relationships, ...graph.clusters]) {

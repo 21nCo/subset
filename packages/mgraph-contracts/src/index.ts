@@ -152,10 +152,15 @@ function retiredSources(graph: GraphSnapshot): Set<string> {
   const retired = new Set<string>();
   for (const observation of graph.observations) {
     if (observation.state === 'deleted' || observation.state === 'permissionRevoked') retired.add(observation.source.sourceId);
-    else parseObservation(observation);
   }
   for (const status of graph.statuses) if (status.state === 'deleted' || status.state === 'permissionRevoked') retired.add(status.sourceId);
   return retired;
+}
+
+function validateLiveObservationHashes(observations: GraphSnapshot['observations']): void {
+  for (const observation of observations) {
+    if (observation.state === 'complete' || observation.state === 'partial') parseObservation(observation);
+  }
 }
 
 function validateTerminalObservation(
@@ -264,6 +269,7 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
   const observations = unique(graph.observations, x => x.observationId, 'observation');
   uniqueSourceStatuses(graph.statuses);
   consistentSourceIdentities(graph.observations);
+  validateLiveObservationHashes(graph.observations);
   const retired = validateLifecycle(graph, observations);
   const passages = validatePassages(graph, observations, retired);
   const claims = validateClaims(graph, passages);
