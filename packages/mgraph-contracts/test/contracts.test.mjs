@@ -154,6 +154,32 @@ test('IPC v1 query upgrades to v2; v2 cursor and strict version transition', () 
   assert.throws(() => parseIpcRequest({ protocolVersion: 2, requestId: ids.request, operation: 'submitObservation', payload: { ...observation, sourceHash: 'a'.repeat(64) } }), /hash mismatch/);
 });
 
+test('IPC submit accepts content states but terminal states require their own operations in both versions', () => {
+  const partial = { ...observation, state: 'partial', partialReason: 'Capture budget reached' };
+  const terminal = [
+    { schemaVersion: 1, observationId: ids.observation, source, observedAt: at, state: 'deleted', targetObservationId: ids.other },
+    { schemaVersion: 1, observationId: ids.observation, source, observedAt: at, state: 'permissionRevoked', reason: 'Permission withdrawn' },
+  ];
+  for (const version of [1, 2]) {
+    const schema = version === 1 ? ipcRequestV1Schema : ipcRequestV2Schema;
+    const request = { protocolVersion: version, requestId: ids.request, operation: 'submitObservation' };
+    for (const payload of [observation, partial]) {
+      assert.equal(schema.safeParse({ ...request, payload }).success, true);
+      assert.equal(decodeIpcRequest({ ...request, payload }).request.payload.state, payload.state);
+    }
+    for (const payload of terminal) {
+      assert.equal(observationSchema.safeParse(payload).success, true);
+      assert.equal(schema.safeParse({ ...request, payload }).success, false);
+      assert.throws(() => decodeIpcRequest({ ...request, payload }));
+    }
+    for (const operation of ['deleteSource', 'revokeSource']) {
+      const dedicated = { protocolVersion: version, requestId: ids.request, operation, sourceId: ids.source };
+      assert.equal(schema.safeParse(dedicated).success, true);
+      assert.equal(decodeIpcRequest(dedicated).request.operation, operation);
+    }
+  }
+});
+
 test('IPC responses correlate operation, version, and semantic graph; errors are explicit', () => {
   const request = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory', query: 'Alice' };
   const decoded = decodeIpcRequest(request);
@@ -214,6 +240,19 @@ test('portable JSON Schema artifacts retain version and object constraints', asy
     if (name === 'ipcRequestV2') {
       assert.equal(validate({ protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', query: 'Alice', cursor: 'next' }), true);
       assert.equal(validate({ protocolVersion: 2, requestId: ids.request, operation: 'deleteSource' }), false);
+    }
+    if (name === 'ipcRequestV1' || name === 'ipcRequestV2') {
+      const version = name === 'ipcRequestV1' ? 1 : 2;
+      const request = { protocolVersion: version, requestId: ids.request, operation: 'submitObservation' };
+      assert.equal(validate({ ...request, payload: observation }), true);
+      assert.equal(validate({ ...request, payload: { ...observation, state: 'partial', partialReason: 'Capture budget reached' } }), true);
+      for (const payload of [
+        { schemaVersion: 1, observationId: ids.observation, source, observedAt: at, state: 'deleted', targetObservationId: ids.other },
+        { schemaVersion: 1, observationId: ids.observation, source, observedAt: at, state: 'permissionRevoked', reason: 'Permission withdrawn' },
+      ]) assert.equal(validate({ ...request, payload }), false);
+      for (const operation of ['deleteSource', 'revokeSource']) {
+        assert.equal(validate({ protocolVersion: version, requestId: ids.request, operation, sourceId: ids.source }), true);
+      }
     }
   }
 });

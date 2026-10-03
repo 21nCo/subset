@@ -27,12 +27,16 @@ const observationBase = {
   source: sourceIdentitySchema,
   observedAt: timestamp,
 };
+const completeObservationSchema = z.strictObject({ ...observationBase, state: z.literal('complete'), content: text, sourceHash: hash });
+const partialObservationSchema = z.strictObject({ ...observationBase, state: z.literal('partial'), content: text, sourceHash: hash, partialReason: label });
+const deletedObservationSchema = z.strictObject({ ...observationBase, state: z.literal('deleted'), targetObservationId: id });
+const permissionRevokedObservationSchema = z.strictObject({ ...observationBase, state: z.literal('permissionRevoked'), reason: label });
 export const observationSchema = z.discriminatedUnion('state', [
-  z.strictObject({ ...observationBase, state: z.literal('complete'), content: text, sourceHash: hash }),
-  z.strictObject({ ...observationBase, state: z.literal('partial'), content: text, sourceHash: hash, partialReason: label }),
-  z.strictObject({ ...observationBase, state: z.literal('deleted'), targetObservationId: id }),
-  z.strictObject({ ...observationBase, state: z.literal('permissionRevoked'), reason: label }),
+  completeObservationSchema, partialObservationSchema, deletedObservationSchema, permissionRevokedObservationSchema,
 ]);
+// Terminal observations are domain events, but they cannot be submitted through
+// the general IPC write. Deletion and revocation need their own host decisions.
+export const submitObservationPayloadSchema = z.discriminatedUnion('state', [completeObservationSchema, partialObservationSchema]);
 export type Observation = z.infer<typeof observationSchema>;
 
 export const evidencePassageSchema = z.strictObject({
@@ -202,7 +206,7 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
 
 const requestBase = { requestId: id };
 const requestOperations = [
-  z.strictObject({ ...requestBase, operation: z.literal('submitObservation'), payload: observationSchema }),
+  z.strictObject({ ...requestBase, operation: z.literal('submitObservation'), payload: submitObservationPayloadSchema }),
   z.strictObject({ ...requestBase, operation: z.literal('queryMemory'), query: label, limit: z.number().int().min(1).max(100).optional() }),
   z.strictObject({ ...requestBase, operation: z.literal('getStatus'), sourceId: id.optional() }),
   z.strictObject({ ...requestBase, operation: z.literal('deleteSource'), sourceId: id }),

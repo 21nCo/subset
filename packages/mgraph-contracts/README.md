@@ -5,7 +5,7 @@ This private `@subset/mgraph-contracts` workspace defines the local memory servi
 ## Versions and exported validation
 
 - Domain records carry `schemaVersion: 1`. IPC envelopes carry `protocolVersion: 1` or `2`. The current protocol is 2.
-- `observationSchema`, `evidencePassageSchema`, `claimSchema`, `profileSchema`, `relationshipSchema`, `clusterSchema`, `processingStatusSchema`, `graphSnapshotSchema`, and the IPC request/response schemas validate individual shapes. All objects are closed to unknown fields.
+- `observationSchema`, `evidencePassageSchema`, `claimSchema`, `profileSchema`, `relationshipSchema`, `clusterSchema`, `processingStatusSchema`, `graphSnapshotSchema`, and the IPC request/response schemas validate individual shapes. `submitObservationPayloadSchema` limits the general IPC write to complete and partial observations. All objects are closed to unknown fields.
 - `parseObservation`, `parseGraphSnapshot`, `decodeIpcRequest`, and `parseIpcResponse` enforce additional semantic rules. Use these at trust boundaries. Build output includes draft 2020-12 JSON Schemas under `dist/schemas/` for non-TypeScript consumers. JSON Schema alone cannot verify hashes, graph references, passage offsets, retired-source purging, or response correlation.
 - `decodeIpcRequest` returns `{ wireVersion, request }`. A v1 request is normalized to the v2 in-process shape while retaining `wireVersion: 1` for the reply. Pass the entire decoded value to `parseIpcResponse(response, decoded)` so reply validation uses the original wire version. The normalized `request` alone is not a response correlation value. Version 2 adds an optional `cursor` to `queryMemory`; v1 rejects it. Servers must encode a response using the caller's wire version. Unknown versions and fields are rejected.
 
@@ -21,13 +21,15 @@ Processing states are `pending`, `processing`, `complete`, `partial`, `failed`, 
 
 | Operation | Kind | Input | Result |
 | --- | --- | --- | --- |
-| `submitObservation` | write | Observation | Accepted observation ID |
+| `submitObservation` | write | Complete or partial observation | Accepted observation ID |
 | `queryMemory` | read | Query, optional 1–100 limit and v2 cursor | Provenance-checked graph, optional v2 next cursor |
 | `getStatus` | read | Optional source ID | Source statuses |
 | `deleteSource` | write | Source ID | Deleted source ID/state |
 | `revokeSource` | write | Source ID | Permission-revoked source ID/state |
 
 Every request has a UUID `requestId`; responses echo the ID, operation, and wire version. Errors have a code, message, and `retryable` flag. `parseIpcResponse` requires the full value returned by `decodeIpcRequest`, checks its `wireVersion` and expected operation, and checks source and observation identities when supplied. A server should deduplicate retried writes by request ID and persist the result atomically with the mutation. The wire framing, local peer authorization, socket permissions, maximum frame size, pagination implementation, shutdown behavior, and durable retry policy belong to the service in SET-6 or later. A request ID is a correlation and retry key, not an authorization token. The IPC payload must not carry credentials. An unauthorized write must return `unauthorized`; clients must not infer that `retryable: true` makes an unauthorized operation safe to repeat without a new grant.
+
+Terminal observations remain valid domain records for graph snapshots. A client cannot send one through `submitObservation` in either wire version; it must call `deleteSource` or `revokeSource`. The service owns the authorization, atomic cleanup, and idempotent retry behavior for those operations. A capture interruption may produce a partial observation, while a failed capture cannot be submitted as content.
 
 For a future Unix socket transport, use one UTF-8 JSON value per frame with an explicit byte limit, reject oversized or malformed frames before dispatch, and authenticate the local peer before any read or write. Each write needs its own host authorization decision. Swift clients can validate the generated JSON Schema and must implement the documented semantic checks, including SHA-256 and Unicode code point passage ranges. No platform-specific capture result is accepted directly as an IPC observation.
 
@@ -38,7 +40,8 @@ For a future Unix socket transport, use one UTF-8 JSON value per frame with an e
 | Observation and passage | Changed content, incorrect hash or out-of-bounds Unicode offset, malformed state | Valid/invalid schema and hash/excerpt tests |
 | Derived graph | Dangling claim, wrong source, missing entity model version, invalid profile/relation/cluster edge | Full graph, generated schema, and broken-reference tests |
 | Lifecycle | Partial record lacks reason; deleted/revoked source leaks text; duplicate current status | State, retirement, and status-response tests |
-| IPC | Wrong operation, response ID, or wire version; v2 diagnostic masked; unsafe retry assumption | Full v1 request/reply and v2 cursor round trips, malformed request diagnostic, response-correlation tests; retry/authorization policy documented |
+| IPC mutation boundary | Terminal payload bypasses delete/revoke authorization and cleanup | Runtime and generated-schema tests reject terminal submit in v1/v2 and accept dedicated writes |
+| IPC correlation | Wrong operation, response ID, or wire version; v2 diagnostic masked; unsafe retry assumption | Full v1 request/reply and v2 cursor round trips, malformed request diagnostic, response-correlation tests; retry/authorization policy documented |
 | Portability | Generated schema differs from runtime shape | Ajv validates representative generated JSON Schema artifacts |
 
 Run `npm run test --workspace=@subset/mgraph-contracts`. Repository gates are `npm run check` and `npm run build`. Tests prove the contract implementation and generated artifacts, not persistence, native permissions, live IPC, or hosted behavior. For this issue, Railway Postgres, Cloudflare Preview, connected provider sandboxes, and Aside Browser have no runtime boundary to exercise; the final reviewer can verify the schema/provenance contract with the generated artifacts and focused tests.
