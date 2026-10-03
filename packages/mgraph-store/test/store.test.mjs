@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { sourceHash } from '@subset/mgraph-contracts';
@@ -60,7 +61,7 @@ test('fresh migration, evidence lookup, rebuild and read-only clients', t => {
   assert.equal(reader.queryMemory('Bob').graph.passages.length, 1);
 });
 
-test('v1 upgrade preserves observations and creates searchable evidence', t => {
+test('v1 upgrade keeps only current revision in search, snapshot and queue', t => {
   const filename = fixture(t);
   const old = new DatabaseSync(filename);
   old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
@@ -73,21 +74,30 @@ test('v1 upgrade preserves observations and creates searchable evidence', t => {
     attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER);
     CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
     PRAGMA user_version = 1;`);
-  const item = observation();
-  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'pending', ?)")
+  const stale = observation(randomUUID(), randomUUID(), 'Obsolete keyword', '2026-10-01T00:00:00.000Z');
+  const item = observation(stale.source.sourceId, randomUUID(), 'Current keyword', '2026-10-02T00:00:00.000Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'pending', ?)")
     .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
-  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(item.observationId, item.source.sourceId, JSON.stringify(item));
-  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'pending')")
-    .run(item.observationId, item.source.sourceId, item.observationId);
+  for (const [revision, entry] of [[1, stale], [2, item]]) {
+    old.prepare('INSERT INTO observations VALUES (?, ?, ?, ?)').run(entry.observationId, item.source.sourceId, revision, JSON.stringify(entry));
+    old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
+      .run(entry.observationId, item.source.sourceId, revision, entry.observationId);
+  }
   old.close();
   const store = new MGraphStore(filename);
   t.after(() => store.close());
-  assert.equal(store.queryMemory('Alice').graph.observations[0].observationId, item.observationId);
+  assert.equal(store.queryMemory('Obsolete').graph.observations.length, 0);
+  assert.deepEqual(store.getSnapshot().observations.map(row => row.observationId), [item.observationId]);
+  assert.equal(store.pendingJobs(), 1);
+  assert.equal(store.queryMemory('Current').graph.observations[0].observationId, item.observationId);
   finish(store, item);
-  assert.equal(store.queryMemory('Bob').graph.claims.length, 1);
-  store.submitObservation(observation(item.source.sourceId, randomUUID(), 'Replacement', '2026-10-02T00:00:00.000Z'));
+  assert.equal(store.queryMemory('keyword').graph.claims.length, 1);
+  assert.equal(store.claimNextJob('worker'), null);
+  assert.throws(() => store.submitObservation(observation(item.source.sourceId, stale.observationId,
+    'Reused old ID', '2026-10-03T00:00:00.000Z')), StoreConflict);
+  store.submitObservation(observation(item.source.sourceId, randomUUID(), 'Replacement', '2026-10-03T00:00:00.000Z'));
   assert.throws(() => store.submitObservation(observation(item.source.sourceId, item.observationId,
-    'Reused after upgrade', '2026-10-03T00:00:00.000Z')), StoreConflict);
+    'Reused after upgrade', '2026-10-04T00:00:00.000Z')), StoreConflict);
 });
 
 test('WAL reader snapshot remains stable while one writer advances a source', t => {
@@ -110,36 +120,57 @@ test('WAL reader snapshot remains stable while one writer advances a source', t 
   assert.equal(reader.queryMemory('Carol').graph.observations.length, 1);
 });
 
-test('interrupted job resumes checkpoint, stale lease fails, replay is idempotent', t => {
+test('interrupted job resumes checkpoint, stale lease fails, replay is idempotent', async t => {
   const filename = fixture(t);
   let store = new MGraphStore(filename);
   const item = observation();
   const accepted = store.submitObservation(item);
   assert.equal(accepted.replayed, false);
   assert.deepEqual(store.submitObservation(item), { ...accepted, replayed: true });
-  const first = store.claimNextJob('first', 1000, 1000);
+  const first = store.claimNextJob('first', 100);
   assert.ok(first);
-  store.checkpointJob(first.jobId, first.leaseToken, { stage: 'extracted', cursor: 'page:2' }, 1500);
+  store.checkpointJob(first.jobId, first.leaseToken, { stage: 'extracted', cursor: 'page:2' });
   store.close();
   store = new MGraphStore(filename);
   t.after(() => store.close());
-  const resumed = store.claimNextJob('second', 1000, 2001);
+  await delay(150);
+  const resumed = store.claimNextJob('second', 5000);
   assert.equal(resumed.attempts, 2);
   assert.deepEqual(resumed.checkpoint, { stage: 'extracted', cursor: 'page:2' });
   const graph = graphFor(item);
-  assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graph, 2001), StoreConflict);
-  store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
-  store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
-  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item), 2500), StoreConflict);
+  assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graph), StoreConflict);
+  store.completeJob(resumed.jobId, resumed.leaseToken, graph);
+  store.completeJob(resumed.jobId, resumed.leaseToken, graph);
+  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item)), StoreConflict);
   store.close();
   store = new MGraphStore(filename);
-  store.completeJob(resumed.jobId, resumed.leaseToken, graph, 2500);
-  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item), 2500), StoreConflict);
+  store.completeJob(resumed.jobId, resumed.leaseToken, graph);
+  assert.throws(() => store.completeJob(resumed.jobId, resumed.leaseToken, graphFor(item)), StoreConflict);
   assert.equal(store.getSnapshot().claims.length, 1);
   assert.equal(store.pendingJobs(), 0);
 });
 
-test('abrupt writer exit leaves a reclaimable lock and durable queued work', t => {
+test('expired lease cannot mutate before reclaim, even with a supplied invalid clock', async t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const item = observation();
+  store.submitObservation(item);
+  const first = store.claimNextJob('first', 20);
+  await delay(50);
+  assert.throws(() => store.checkpointJob(first.jobId, first.leaseToken, { stage: 'late' }, NaN), StoreConflict);
+  assert.throws(() => store.renewJob(first.jobId, first.leaseToken, 1000, NaN), StoreConflict);
+  assert.throws(() => store.failJob(first.jobId, first.leaseToken, 'late', NaN), StoreConflict);
+  assert.throws(() => store.completeJob(first.jobId, first.leaseToken, graphFor(item), NaN), StoreConflict);
+  assert.equal(store.pendingJobs(), 1);
+  const second = store.claimNextJob('second', 5000);
+  assert.equal(second.attempts, 2);
+  assert.equal(second.checkpoint, null);
+  store.completeJob(second.jobId, second.leaseToken, graphFor(item));
+  assert.equal(store.pendingJobs(), 0);
+});
+
+test('abrupt writer exit leaves a reclaimable lock and durable queued work', async t => {
   const filename = fixture(t);
   const item = observation();
   const moduleUrl = new URL('../dist/index.js', import.meta.url).href;
@@ -147,16 +178,17 @@ test('abrupt writer exit leaves a reclaimable lock and durable queued work', t =
     import { MGraphStore } from ${JSON.stringify(moduleUrl)};
     const store = new MGraphStore(${JSON.stringify(filename)});
     store.submitObservation(${JSON.stringify(item)});
-    const job = store.claimNextJob('terminated-worker', 1000, 1000);
-    store.checkpointJob(job.jobId, job.leaseToken, { stage: 'captured' }, 1500);
+    const job = store.claimNextJob('terminated-worker', 100);
+    store.checkpointJob(job.jobId, job.leaseToken, { stage: 'captured' });
     process.exit(0);
   `], { encoding: 'utf8' });
   assert.equal(child.status, 0, child.stderr);
   const store = new MGraphStore(filename);
   t.after(() => store.close());
-  const job = store.claimNextJob('replacement-worker', 1000, 2001);
+  await delay(150);
+  const job = store.claimNextJob('replacement-worker', 5000);
   assert.equal(job.checkpoint.stage, 'captured');
-  store.completeJob(job.jobId, job.leaseToken, graphFor(item), 2500);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(item));
   assert.equal(store.queryMemory('Alice').graph.claims.length, 1);
 });
 
@@ -252,12 +284,36 @@ test('v2 upgrade backfills observation identities after source replacement', t =
     ['passage', completedGraph.passages, 'passageId'], ['claim', completedGraph.claims, 'claimId'],
     ['profile', completedGraph.profiles, 'profileId'],
   ]) for (const entity of entries) insertEvidence.run(kind, entity[key], first.source.sourceId, JSON.stringify(entity));
+  const stale = observation(randomUUID(), randomUUID(), 'Forgotten passage', '2026-10-01T00:00:00.000Z');
+  const current = observation(stale.source.sourceId, randomUUID(), 'Fresh passage', '2026-10-02T00:00:00.000Z');
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'complete', ?)")
+    .run(current.source.sourceId, current.source.locator, current.observedAt, current.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(stale.observationId, stale.source.sourceId, JSON.stringify(stale));
+  old.prepare('INSERT INTO observations VALUES (?, ?, 2, ?)').run(current.observationId, current.source.sourceId, JSON.stringify(current));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 1, ?, 'pending')")
+    .run(stale.observationId, stale.source.sourceId, stale.observationId);
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, 2, ?, 'complete')")
+    .run(current.observationId, current.source.sourceId, current.observationId);
+  const stalePassage = graphFor(stale).passages[0];
+  insertEvidence.run('passage', stalePassage.passageId, stale.source.sourceId, JSON.stringify(stalePassage));
+  old.prepare("INSERT INTO evidence_terms VALUES (?, 'passage', 'forgotten')").run(stale.source.sourceId);
   old.close();
   const store = new MGraphStore(filename);
   t.after(() => store.close());
   assert.equal(store.submitObservation(first).replayed, true);
   store.completeJob(first.observationId, leaseToken, completedGraph);
   assert.throws(() => store.completeJob(first.observationId, leaseToken, graphFor(first)), StoreConflict);
+  assert.equal(store.queryMemory('Forgotten').graph.observations.length, 0);
+  assert.deepEqual(store.getSnapshot(stale.source.sourceId).observations.map(row => row.observationId), [current.observationId]);
+  assert.equal(store.pendingJobs(), 1);
+  assert.equal(store.getStatus(stale.source.sourceId)[0].state, 'pending');
+  const repaired = store.claimNextJob('repair-worker');
+  assert.equal(repaired.observationId, current.observationId);
+  store.completeJob(repaired.jobId, repaired.leaseToken, graphFor(current));
+  assert.equal(store.queryMemory('Fresh').graph.observations.length, 1);
+  assert.equal(store.pendingJobs(), 0);
+  assert.throws(() => store.submitObservation(observation(stale.source.sourceId, stale.observationId,
+    'Old ID reused', '2026-10-03T00:00:00.000Z')), StoreConflict);
   store.submitObservation(observation(first.source.sourceId, randomUUID(), 'New snapshot', '2026-10-02T00:00:00.000Z'));
   assert.throws(() => store.submitObservation(observation(first.source.sourceId, first.observationId,
     'Changed content', '2026-10-03T00:00:00.000Z')), StoreConflict);

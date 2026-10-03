@@ -92,6 +92,12 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
+function leaseNow(): number {
+  const at = Date.now();
+  if (!Number.isSafeInteger(at) || at < 0) throw new StoreUnavailable('Invalid system clock');
+  return at;
+}
+
 function readTransaction<T>(db: DatabaseSync, fn: () => T): T {
   db.exec('BEGIN');
   try {
@@ -146,7 +152,9 @@ function migrate(db: DatabaseSync): void {
       PRAGMA user_version = 2;
     `);
     // Version 1 already held observations. Reindex them as part of the same upgrade transaction.
-    for (const row of db.prepare('SELECT source_id, payload FROM observations').all() as { source_id: string; payload: string }[]) {
+    for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o
+      JOIN sources s ON s.source_id = o.source_id AND s.revision = o.revision
+      WHERE s.state NOT IN ('deleted', 'permissionRevoked')`).all() as { source_id: string; payload: string }[]) {
       const observation = parseObservation(JSON.parse(row.payload));
       if (observation.state === 'complete' || observation.state === 'partial') {
         indexText(db, row.source_id, 'observation', observation.content);
@@ -162,6 +170,49 @@ function migrate(db: DatabaseSync): void {
     const insert = db.prepare('INSERT INTO observation_ids(id_hash) VALUES (?)');
     for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
       insert.run(idHash(row.observation_id));
+    }
+    // Older schemas could retain superseded revisions. Remember their IDs before
+    // removing the payloads so an old ID cannot be submitted again after upgrade.
+    const staleSources = db.prepare(`SELECT DISTINCT o.source_id FROM observations o JOIN sources s ON s.source_id = o.source_id
+      WHERE o.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
+      UNION SELECT DISTINCT j.source_id FROM jobs j JOIN sources s ON s.source_id = j.source_id
+      WHERE j.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
+      OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
+        AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as IdRow[];
+    db.exec(`DELETE FROM jobs WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
+      OR revision != (SELECT revision FROM sources WHERE source_id = jobs.source_id)
+      OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = jobs.observation_id
+        AND o.source_id = jobs.source_id AND o.revision = jobs.revision);
+      DELETE FROM observations WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
+      OR revision != (SELECT revision FROM sources WHERE source_id = observations.source_id);`);
+    for (const { source_id: sourceId } of staleSources) {
+      db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
+      db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
+      const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(sourceId) as
+        { state: string; revision: number };
+      if (!live(source.state)) continue;
+      const current = db.prepare('SELECT observation_id FROM observations WHERE source_id = ? AND revision = ?')
+        .get(sourceId, source.revision) as { observation_id: string } | undefined;
+      if (!current) continue;
+      // Derived evidence had no revision column. Discard all old work and create
+      // exactly one job for the current observation.
+      db.prepare('DELETE FROM jobs WHERE source_id = ?').run(sourceId);
+      db.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state) VALUES (?, ?, ?, ?, 'pending')")
+        .run(randomUUID(), sourceId, source.revision, current.observation_id);
+      db.prepare("UPDATE sources SET state = 'pending', reason = NULL, updated_at = ? WHERE source_id = ?")
+        .run(nowIso(), sourceId);
+    }
+    db.exec('DELETE FROM evidence_terms');
+    for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o JOIN sources s
+      ON s.source_id = o.source_id AND s.revision = o.revision WHERE s.state NOT IN ('deleted', 'permissionRevoked')`)
+      .all() as { source_id: string; payload: string }[]) {
+      const observation = parseObservation(JSON.parse(row.payload));
+      if (observation.state === 'complete' || observation.state === 'partial') indexText(db, row.source_id, 'observation', observation.content);
+    }
+    for (const row of db.prepare("SELECT source_id, payload FROM evidence WHERE kind = 'passage'")
+      .all() as { source_id: string; payload: string }[]) {
+      const passage = JSON.parse(row.payload) as GraphSnapshot['passages'][number];
+      indexText(db, row.source_id, 'passage', passage.text);
     }
     const update = db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?');
     for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
@@ -297,11 +348,12 @@ export class MGraphStore {
     return rows.map(statusFrom);
   }
 
-  claimNextJob(workerId: string, leaseMs = 30_000, at = Date.now()): ProcessingJob | null {
+  claimNextJob(workerId: string, leaseMs = 30_000): ProcessingJob | null {
     this.writable();
     z.string().min(1).max(128).parse(workerId);
-    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000 || !Number.isSafeInteger(at)) throw new TypeError('Invalid lease');
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError('Invalid lease');
     return transaction(this.db, () => {
+      const at = leaseNow();
       const row = this.db.prepare(`SELECT j.* FROM jobs j JOIN sources s ON s.source_id = j.source_id
         WHERE (j.state = 'pending' OR (j.state = 'processing' AND j.lease_until <= ?))
         AND s.revision = j.revision AND s.state NOT IN ('deleted', 'permissionRevoked')
@@ -318,33 +370,34 @@ export class MGraphStore {
     });
   }
 
-  private assertLease(jobId: string, leaseToken: string, at: number): JobRow {
+  private assertLease(jobId: string, leaseToken: string): JobRow {
     const job = this.job(uuid.parse(jobId));
     if (!job || job.state !== 'processing' || job.lease_token !== uuid.parse(leaseToken) ||
-        job.lease_until === null || job.lease_until <= at || this.source(job.source_id)?.revision !== job.revision) {
+        job.lease_until === null || job.lease_until <= leaseNow() || this.source(job.source_id)?.revision !== job.revision) {
       throw new StoreConflict('Job lease or source revision is stale');
     }
     return job;
   }
-  checkpointJob(jobId: string, leaseToken: string, input: unknown, at = Date.now()): void {
+  checkpointJob(jobId: string, leaseToken: string, input: unknown): void {
     this.writable();
     const checkpoint = checkpointSchema.parse(input);
     transaction(this.db, () => {
-      this.assertLease(jobId, leaseToken, at);
+      this.assertLease(jobId, leaseToken);
       this.db.prepare('UPDATE jobs SET checkpoint = ? WHERE job_id = ?').run(JSON.stringify(checkpoint), jobId);
     });
   }
-  renewJob(jobId: string, leaseToken: string, leaseMs = 30_000, at = Date.now()): number {
+  renewJob(jobId: string, leaseToken: string, leaseMs = 30_000): number {
     this.writable();
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError('Invalid lease');
     return transaction(this.db, () => {
-      this.assertLease(jobId, leaseToken, at);
-      this.db.prepare('UPDATE jobs SET lease_until = ? WHERE job_id = ?').run(at + leaseMs, jobId);
-      return at + leaseMs;
+      this.assertLease(jobId, leaseToken);
+      const until = leaseNow() + leaseMs;
+      this.db.prepare('UPDATE jobs SET lease_until = ? WHERE job_id = ?').run(until, jobId);
+      return until;
     });
   }
 
-  completeJob(jobId: string, leaseToken: string, input: unknown, at = Date.now()): void {
+  completeJob(jobId: string, leaseToken: string, input: unknown): void {
     this.writable();
     const graph = parseGraphSnapshot(input);
     transaction(this.db, () => {
@@ -353,7 +406,7 @@ export class MGraphStore {
         if (existing.graph_hash !== graphHash(graph)) throw new StoreConflict('Completed job graph differs from original');
         return;
       }
-      const job = this.assertLease(jobId, leaseToken, at);
+      const job = this.assertLease(jobId, leaseToken);
       const current = this.db.prepare('SELECT payload FROM observations WHERE observation_id = ? AND source_id = ? AND revision = ?')
         .get(job.observation_id, job.source_id, job.revision) as JsonRow | undefined;
       if (!current || graph.observations.length !== 1 || !isDeepStrictEqual(graph.observations[0], JSON.parse(current.payload)) || graph.statuses.length) {
@@ -380,11 +433,11 @@ export class MGraphStore {
     });
   }
 
-  failJob(jobId: string, leaseToken: string, reason: string, at = Date.now()): void {
+  failJob(jobId: string, leaseToken: string, reason: string): void {
     this.writable();
     z.string().min(1).max(512).parse(reason);
     transaction(this.db, () => {
-      const job = this.assertLease(jobId, leaseToken, at);
+      const job = this.assertLease(jobId, leaseToken);
       this.db.prepare("UPDATE jobs SET state = 'failed', lease_token = NULL, lease_until = NULL WHERE job_id = ?").run(jobId);
       this.db.prepare("UPDATE sources SET state = 'failed', reason = ?, updated_at = ? WHERE source_id = ?")
         .run(reason, nowIso(), job.source_id);
@@ -429,8 +482,8 @@ export class MGraphStore {
     return transaction(this.db, () => {
       const source = this.source(sourceId);
       if (!source || !live(source.state)) throw new StoreConflict('Source cannot be rebuilt');
-      const observation = this.db.prepare('SELECT observation_id, payload FROM observations WHERE source_id = ?')
-        .get(sourceId) as { observation_id: string; payload: string } | undefined;
+      const observation = this.db.prepare('SELECT observation_id, payload FROM observations WHERE source_id = ? AND revision = ?')
+        .get(sourceId, source.revision) as { observation_id: string; payload: string } | undefined;
       if (!observation) throw new StoreConflict('Source has no observation');
       this.db.prepare("DELETE FROM evidence_terms WHERE source_id = ? AND kind = 'passage'").run(sourceId);
       this.db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
@@ -447,7 +500,9 @@ export class MGraphStore {
     this.writable();
     transaction(this.db, () => {
       this.db.exec('DELETE FROM evidence_terms');
-      for (const row of this.db.prepare('SELECT source_id, payload FROM observations').all() as { source_id: string; payload: string }[]) {
+      for (const row of this.db.prepare(`SELECT o.source_id, o.payload FROM observations o JOIN sources s
+        ON s.source_id = o.source_id AND s.revision = o.revision WHERE s.state NOT IN ('deleted', 'permissionRevoked')`)
+        .all() as { source_id: string; payload: string }[]) {
         const observation = parseObservation(JSON.parse(row.payload));
         if (observation.state === 'complete' || observation.state === 'partial') {
           indexText(this.db, row.source_id, 'observation', observation.content);
@@ -465,7 +520,8 @@ export class MGraphStore {
     for (const sourceId of sourceIds) {
       const source = this.source(sourceId);
       if (!source || !live(source.state)) continue;
-      for (const row of this.db.prepare('SELECT payload FROM observations WHERE source_id = ?').all(sourceId) as JsonRow[]) {
+      for (const row of this.db.prepare('SELECT payload FROM observations WHERE source_id = ? AND revision = ?')
+        .all(sourceId, source.revision) as JsonRow[]) {
         graph.observations.push(JSON.parse(row.payload) as Observation);
       }
       for (const row of this.db.prepare('SELECT kind, payload FROM evidence WHERE source_id = ?').all(sourceId) as { kind: string; payload: string }[]) {
@@ -514,6 +570,8 @@ export class MGraphStore {
 
   // Useful for an owner to expose queue state without leaking payloads.
   pendingJobs(): number {
-    return (this.db.prepare("SELECT count(*) AS count FROM jobs WHERE state IN ('pending', 'processing')").get() as { count: number }).count;
+    return (this.db.prepare(`SELECT count(*) AS count FROM jobs j JOIN sources s ON s.source_id = j.source_id
+      WHERE j.state IN ('pending', 'processing') AND j.revision = s.revision
+      AND s.state NOT IN ('deleted', 'permissionRevoked')`).get() as { count: number }).count;
   }
 }
