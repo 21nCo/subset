@@ -148,18 +148,7 @@ function consistentSourceIdentities(observations: GraphSnapshot['observations'])
   }
 }
 
-// JSON Schema validates each payload's shape. This function also checks the
-// graph's referential and lifecycle invariants, which JSON Schema cannot express.
-export function parseGraphSnapshot(input: unknown): GraphSnapshot {
-  const graph = graphSnapshotSchema.parse(input);
-  const observations = unique(graph.observations, x => x.observationId, 'observation');
-  const passages = unique(graph.passages, x => x.passageId, 'passage');
-  const claims = unique(graph.claims, x => x.claimId, 'claim');
-  const profiles = unique(graph.profiles, x => x.profileId, 'profile');
-  unique(graph.relationships, x => x.relationshipId, 'relationship');
-  unique(graph.clusters, x => x.clusterId, 'cluster');
-  uniqueSourceStatuses(graph.statuses);
-  consistentSourceIdentities(graph.observations);
+function validateLifecycle(graph: GraphSnapshot, observations: Map<string, Observation>): Set<string> {
   const retired = new Set<string>();
   for (const observation of graph.observations) {
     if (observation.state === 'deleted' || observation.state === 'permissionRevoked') retired.add(observation.source.sourceId);
@@ -168,24 +157,61 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
   for (const status of graph.statuses) if (status.state === 'deleted' || status.state === 'permissionRevoked') retired.add(status.sourceId);
   for (const observation of graph.observations) {
     if (observation.state !== 'deleted' && observation.state !== 'permissionRevoked') continue;
+    if (observation.state === 'deleted') {
+      const target = observations.get(observation.targetObservationId);
+      if (target && target.source.sourceId !== observation.source.sourceId) {
+        throw new Error(`Deletion target belongs to another source: ${observation.observationId}`);
+      }
+    }
     const status = graph.statuses.find(item => item.sourceId === observation.source.sourceId);
     if (status && status.state !== observation.state) throw new Error(`Terminal status mismatch: ${observation.source.sourceId}`);
   }
+  return retired;
+}
+
+function rejectRetainedContent(observations: GraphSnapshot['observations'], retired: Set<string>): void {
+  for (const observation of observations) {
+    if (retired.has(observation.source.sourceId) && observation.state !== 'deleted' && observation.state !== 'permissionRevoked') {
+      // A snapshot may include the terminal event but must not include retained content.
+      throw new Error(`Retired source retains observation: ${observation.source.sourceId}`);
+    }
+  }
+}
+
+function validatePassages(graph: GraphSnapshot, observations: Map<string, Observation>, retired: Set<string>): Map<string, GraphSnapshot['passages'][number]> {
+  const passages = unique(graph.passages, x => x.passageId, 'passage');
+  const codePointsByObservation = new Map<string, string[]>();
   for (const passage of graph.passages) {
     const observation = observations.get(passage.observationId);
     if (!observation || observation.state === 'deleted' || observation.state === 'permissionRevoked') throw new Error(`Passage has no live observation: ${passage.passageId}`);
     if (retired.has(observation.source.sourceId)) throw new Error(`Passage cites retired source: ${passage.passageId}`);
-    const codePoints = Array.from(observation.content);
+    let codePoints = codePointsByObservation.get(observation.observationId);
+    if (!codePoints) {
+      codePoints = Array.from(observation.content);
+      codePointsByObservation.set(observation.observationId, codePoints);
+    }
     if (passage.end > codePoints.length) throw new Error(`Passage offset out of bounds: ${passage.passageId}`);
     const slice = codePoints.slice(passage.start, passage.end).join('');
     if (slice !== passage.text || passage.sourceHash !== observation.sourceHash) throw new Error(`Passage mismatch: ${passage.passageId}`);
   }
+  return passages;
+}
+
+function validateClaims(graph: GraphSnapshot, passages: Map<string, GraphSnapshot['passages'][number]>): Map<string, GraphSnapshot['claims'][number]> {
+  const claims = unique(graph.claims, x => x.claimId, 'claim');
   for (const claim of graph.claims) for (const citation of claim.provenance) {
     const passage = passages.get(citation.passageId);
     if (!passage || passage.observationId !== citation.observationId || passage.sourceHash !== citation.sourceHash) {
       throw new Error(`Claim provenance mismatch: ${claim.claimId}`);
     }
   }
+  return claims;
+}
+
+function validateDerivedEntities(graph: GraphSnapshot, claims: Map<string, GraphSnapshot['claims'][number]>): void {
+  const profiles = unique(graph.profiles, x => x.profileId, 'profile');
+  unique(graph.relationships, x => x.relationshipId, 'relationship');
+  unique(graph.clusters, x => x.clusterId, 'cluster');
   for (const profile of graph.profiles) for (const claimId of profile.claimIds) if (!claims.has(claimId)) throw new Error(`Profile claim missing: ${claimId}`);
   for (const relation of graph.relationships) {
     if (!profiles.has(relation.fromProfileId) || !profiles.has(relation.toProfileId)) throw new Error(`Relationship profile missing: ${relation.relationshipId}`);
@@ -195,12 +221,20 @@ export function parseGraphSnapshot(input: unknown): GraphSnapshot {
     for (const profileId of cluster.memberProfileIds) if (!profiles.has(profileId)) throw new Error(`Cluster profile missing: ${profileId}`);
     for (const claimId of cluster.claimIds) if (!claims.has(claimId)) throw new Error(`Cluster claim missing: ${claimId}`);
   }
-  for (const observation of graph.observations) {
-    if (retired.has(observation.source.sourceId) && observation.state !== 'deleted' && observation.state !== 'permissionRevoked') {
-      // A snapshot may include the terminal event but must not include retained content.
-      throw new Error(`Retired source retains observation: ${observation.source.sourceId}`);
-    }
-  }
+}
+
+// JSON Schema validates each payload's shape. This function also checks the
+// graph's referential and lifecycle invariants, which JSON Schema cannot express.
+export function parseGraphSnapshot(input: unknown): GraphSnapshot {
+  const graph = graphSnapshotSchema.parse(input);
+  const observations = unique(graph.observations, x => x.observationId, 'observation');
+  uniqueSourceStatuses(graph.statuses);
+  consistentSourceIdentities(graph.observations);
+  const retired = validateLifecycle(graph, observations);
+  const passages = validatePassages(graph, observations, retired);
+  const claims = validateClaims(graph, passages);
+  validateDerivedEntities(graph, claims);
+  rejectRetainedContent(graph.observations, retired);
   return graph;
 }
 
@@ -260,6 +294,27 @@ const response = (version: 1 | 2) => z.discriminatedUnion('ok', [
 export const ipcResponseV1Schema = response(1);
 export const ipcResponseV2Schema = response(2);
 
+function validateIpcResult(result: Extract<z.infer<typeof ipcResponseV2Schema>, { ok: true }>['result'], request: IpcRequestV2): void {
+  const kindByOperation = { submitObservation: 'observationAccepted', queryMemory: 'memory', getStatus: 'status', deleteSource: 'sourceChanged', revokeSource: 'sourceChanged' };
+  if (result.kind !== kindByOperation[request.operation]) throw new Error('Response result does not match operation');
+  if (result.kind === 'memory') parseGraphSnapshot(result.graph);
+  if (result.kind === 'sourceChanged') validateSourceChange(result, request);
+  if (result.kind === 'observationAccepted' && request.operation === 'submitObservation' && result.observationId !== request.payload.observationId) {
+    throw new Error('Observation identity does not match request');
+  }
+  if (result.kind === 'status') validateStatusResult(result.statuses, request);
+}
+
+function validateSourceChange(result: { sourceId: string; state: 'deleted' | 'permissionRevoked' }, request: IpcRequestV2): void {
+  if (result.state !== (request.operation === 'deleteSource' ? 'deleted' : 'permissionRevoked')) throw new Error('Source state does not match operation');
+  if ('sourceId' in request && request.sourceId && result.sourceId !== request.sourceId) throw new Error('Source identity does not match request');
+}
+
+function validateStatusResult(statuses: GraphSnapshot['statuses'], request: IpcRequestV2): void {
+  uniqueSourceStatuses(statuses);
+  if ('sourceId' in request && request.sourceId && statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
+}
+
 export function parseIpcResponse(input: unknown, decoded: DecodedIpcRequest) {
   if (decoded?.wireVersion !== 1 && decoded?.wireVersion !== 2) throw new Error('Response correlation requires the decoded wire version');
   const { request } = decoded;
@@ -267,18 +322,7 @@ export function parseIpcResponse(input: unknown, decoded: DecodedIpcRequest) {
   (decoded.wireVersion === 1 ? ipcRequestV1Schema : ipcRequestV2Schema).parse(wireRequest);
   const parsed = (decoded.wireVersion === 1 ? ipcResponseV1Schema : ipcResponseV2Schema).parse(input);
   if (parsed.requestId !== request.requestId || parsed.operation !== request.operation) throw new Error('Response correlation mismatch');
-  if (parsed.ok) {
-    const kindByOperation = { submitObservation: 'observationAccepted', queryMemory: 'memory', getStatus: 'status', deleteSource: 'sourceChanged', revokeSource: 'sourceChanged' };
-    if (parsed.result.kind !== kindByOperation[request.operation]) throw new Error('Response result does not match operation');
-    if (parsed.result.kind === 'memory') parseGraphSnapshot(parsed.result.graph);
-    if (parsed.result.kind === 'sourceChanged' && parsed.result.state !== (request.operation === 'deleteSource' ? 'deleted' : 'permissionRevoked')) throw new Error('Source state does not match operation');
-    if (parsed.result.kind === 'sourceChanged' && 'sourceId' in request && request.sourceId && parsed.result.sourceId !== request.sourceId) throw new Error('Source identity does not match request');
-    if (parsed.result.kind === 'observationAccepted' && 'payload' in request && parsed.result.observationId !== request.payload.observationId) throw new Error('Observation identity does not match request');
-    if (parsed.result.kind === 'status') {
-      uniqueSourceStatuses(parsed.result.statuses);
-      if ('sourceId' in request && request.sourceId && parsed.result.statuses.some(item => item.sourceId !== request.sourceId)) throw new Error('Status source does not match request');
-    }
-  }
+  if (parsed.ok) validateIpcResult(parsed.result, request);
   return parsed;
 }
 

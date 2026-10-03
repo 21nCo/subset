@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
   decodeIpcRequest, graphSnapshotSchema, ipcRequestV1Schema, ipcRequestV2Schema,
-  observationSchema, parseGraphSnapshot, parseIpcRequest, parseIpcResponse,
+  jsonSchemas, observationSchema, parseGraphSnapshot, parseIpcRequest, parseIpcResponse,
   parseObservation, sourceHash,
 } from '../dist/index.js';
 
@@ -139,6 +139,37 @@ test('partial observations cite available content; deletion and revocation remov
   }
 });
 
+test('a deletion target cannot cross source ownership in a graph or query reply', () => {
+  const tombstoneSource = { ...source, sourceId: ids.cluster, locator: 'app:example/window:2' };
+  const tombstone = { schemaVersion: 1, observationId: ids.relationship, source: tombstoneSource,
+    observedAt: at, state: 'deleted', targetObservationId: ids.observation };
+  const crossSource = copy(graph);
+  crossSource.observations.push(tombstone);
+  crossSource.statuses.push({ schemaVersion: 1, sourceId: tombstoneSource.sourceId, updatedAt: at, state: 'deleted' });
+  assert.throws(() => parseGraphSnapshot(crossSource), /Deletion target belongs to another source/);
+  const decoded = decodeIpcRequest({ protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', query: 'Alice' });
+  const reply = { protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', ok: true,
+    result: { kind: 'memory', graph: crossSource } };
+  assert.throws(() => parseIpcResponse(reply, decoded), /Deletion target belongs to another source/);
+
+  // A missing target can be an erased observation. A present target may be a
+  // terminal event from the same source, but readable data must stay erased.
+  tombstone.targetObservationId = ids.other;
+  crossSource.observations[1].targetObservationId = ids.other;
+  assert.deepEqual(parseGraphSnapshot(crossSource), crossSource);
+  const sameSource = copy(crossSource);
+  sameSource.observations = [
+    { ...tombstone, targetObservationId: ids.other },
+    { ...tombstone, observationId: ids.other, targetObservationId: ids.passage },
+  ];
+  sameSource.passages = []; sameSource.claims = []; sameSource.profiles = [];
+  sameSource.relationships = []; sameSource.clusters = [];
+  sameSource.statuses = [crossSource.statuses[1]];
+  assert.deepEqual(parseGraphSnapshot(sameSource), sameSource);
+  sameSource.observations.push({ ...observation, source: tombstoneSource });
+  assert.throws(() => parseGraphSnapshot(sameSource), /retains observation/);
+});
+
 test('IPC v1 query upgrades to v2; v2 cursor and strict version transition', () => {
   const v1 = { protocolVersion: 1, requestId: ids.request, operation: 'queryMemory', query: 'Alice', limit: 5 };
   assert.equal(ipcRequestV1Schema.safeParse(v1).success, true);
@@ -208,39 +239,35 @@ test('IPC responses correlate operation, version, and semantic graph; errors are
 test('portable JSON Schema artifacts retain version and object constraints', async () => {
   const ajv = new Ajv2020({ strict: true });
   addFormats(ajv);
-  for (const name of ['observation', 'evidencePassage', 'profile', 'relationship', 'cluster', 'graphSnapshot', 'ipcRequestV1', 'ipcRequestV2']) {
+  const response = version => ({ protocolVersion: version, requestId: ids.request, operation: 'queryMemory', ok: true,
+    result: { kind: 'memory', graph } });
+  const fixtures = {
+    sourceIdentity: [source, { ...source, kind: 'unknown' }],
+    observation: [observation, { ...observation, schemaVersion: 2 }],
+    evidencePassage: [passage, { ...passage, start: -1 }],
+    claim: [claim, { ...claim, provenance: [] }],
+    profile: [graph.profiles[0], { ...graph.profiles[0], modelVersion: '' }],
+    relationship: [graph.relationships[0], { ...graph.relationships[0], modelVersion: '' }],
+    cluster: [graph.clusters[0], { ...graph.clusters[0], modelVersion: '' }],
+    processingStatus: [graph.statuses[0], { ...graph.statuses[0], state: 'partial' }],
+    graphSnapshot: [graph, { ...graph, unexpected: true }],
+    ipcRequestV1: [{ protocolVersion: 1, requestId: ids.request, operation: 'getStatus' },
+      { protocolVersion: 2, requestId: ids.request, operation: 'getStatus' }],
+    ipcRequestV2: [{ protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', query: 'Alice', cursor: 'next' },
+      { protocolVersion: 2, requestId: ids.request, operation: 'deleteSource' }],
+    ipcResponseV1: [response(1), response(2)],
+    ipcResponseV2: [response(2), response(1)],
+  };
+  const names = Object.keys(jsonSchemas);
+  assert.deepEqual(names.sort(), Object.keys(fixtures).sort());
+  assert.deepEqual((await readdir(new URL('../dist/schemas/', import.meta.url))).sort(), names.map(name => `${name}.json`).sort());
+  for (const name of names) {
     const schema = JSON.parse(await readFile(new URL(`../dist/schemas/${name}.json`, import.meta.url)));
     assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
+    assert.deepEqual(schema, jsonSchemas[name]);
     const validate = ajv.compile(schema);
-    if (name === 'observation') {
-      assert.equal(validate(observation), true);
-      assert.equal(validate({ ...observation, schemaVersion: 2 }), false);
-      assert.equal(validate({ ...observation, state: 'deleted' }), false);
-    }
-    if (name === 'evidencePassage') {
-      assert.equal(validate(passage), true);
-      assert.equal(validate({ ...passage, start: -1 }), false);
-    }
-    if (name === 'graphSnapshot') {
-      assert.equal(validate(graph), true);
-      assert.equal(validate({ ...graph, unexpected: true }), false);
-    }
-    if (['profile', 'relationship', 'cluster'].includes(name)) {
-      const value = graph[{ profile: 'profiles', relationship: 'relationships', cluster: 'clusters' }[name]][0];
-      assert.equal(validate(value), true);
-      const missing = { ...value };
-      delete missing.modelVersion;
-      assert.equal(validate(missing), false);
-      assert.equal(validate({ ...value, modelVersion: '' }), false);
-    }
-    if (name === 'ipcRequestV1') {
-      assert.equal(validate({ protocolVersion: 1, requestId: ids.request, operation: 'getStatus' }), true);
-      assert.equal(validate({ protocolVersion: 2, requestId: ids.request, operation: 'getStatus' }), false);
-    }
-    if (name === 'ipcRequestV2') {
-      assert.equal(validate({ protocolVersion: 2, requestId: ids.request, operation: 'queryMemory', query: 'Alice', cursor: 'next' }), true);
-      assert.equal(validate({ protocolVersion: 2, requestId: ids.request, operation: 'deleteSource' }), false);
-    }
+    assert.equal(validate(fixtures[name][0]), true, `${name} valid: ${ajv.errorsText(validate.errors)}`);
+    assert.equal(validate(fixtures[name][1]), false, `${name} invalid`);
     if (name === 'ipcRequestV1' || name === 'ipcRequestV2') {
       const version = name === 'ipcRequestV1' ? 1 : 2;
       const request = { protocolVersion: version, requestId: ids.request, operation: 'submitObservation' };
