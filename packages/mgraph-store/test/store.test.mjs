@@ -15,6 +15,20 @@ function fixture(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return join(dir, 'graph.sqlite');
 }
+function createV1Database(filename) {
+  const old = new DatabaseSync(filename);
+  old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
+    display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE observations (observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(source_id, revision));
+    CREATE TABLE jobs (job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL, observation_id TEXT NOT NULL, state TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER);
+    CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
+    PRAGMA user_version = 1;`);
+  return old;
+}
 function observation(sourceId = randomUUID(), observationId = randomUUID(), text = 'Alice knows Bob', observedAt = '2026-10-01T00:00:00.000Z') {
   return { schemaVersion: 1, observationId, source: { sourceId, kind: 'manual', locator: `note:${sourceId}` },
     observedAt, state: 'complete', content: text, sourceHash: sourceHash(text) };
@@ -63,17 +77,7 @@ test('fresh migration, evidence lookup, rebuild and read-only clients', t => {
 
 test('v1 upgrade keeps only current revision in search, snapshot and queue', t => {
   const filename = fixture(t);
-  const old = new DatabaseSync(filename);
-  old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
-    display_name TEXT, application_bundle_id TEXT, revision INTEGER NOT NULL DEFAULT 0,
-    observed_at TEXT, state TEXT NOT NULL, reason TEXT, updated_at TEXT NOT NULL);
-    CREATE TABLE observations (observation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(source_id, revision));
-    CREATE TABLE jobs (job_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL, observation_id TEXT NOT NULL, state TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0, checkpoint TEXT, lease_token TEXT, lease_until INTEGER);
-    CREATE INDEX jobs_ready ON jobs(state, lease_until, job_id);
-    PRAGMA user_version = 1;`);
+  const old = createV1Database(filename);
   const stale = observation(randomUUID(), randomUUID(), 'Obsolete keyword', '2026-10-01T00:00:00.000Z');
   const item = observation(stale.source.sourceId, randomUUID(), 'Current keyword', '2026-10-02T00:00:00.000Z');
   old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 2, ?, 'pending', ?)")
@@ -98,6 +102,71 @@ test('v1 upgrade keeps only current revision in search, snapshot and queue', t =
   store.submitObservation(observation(item.source.sourceId, randomUUID(), 'Replacement', '2026-10-03T00:00:00.000Z'));
   assert.throws(() => store.submitObservation(observation(item.source.sourceId, item.observationId,
     'Reused after upgrade', '2026-10-04T00:00:00.000Z')), StoreConflict);
+});
+
+test('v1 completed work without derived evidence is requeued during upgrade', t => {
+  const filename = fixture(t);
+  const old = createV1Database(filename);
+  const item = observation();
+  const leaseToken = randomUUID();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'complete', ?)")
+    .run(item.source.sourceId, item.source.locator, item.observedAt, item.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)').run(item.observationId, item.source.sourceId, JSON.stringify(item));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state, lease_token) VALUES (?, ?, 1, ?, 'complete', ?)")
+    .run(item.observationId, item.source.sourceId, item.observationId, leaseToken);
+  old.close();
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  assert.deepEqual(store.getSnapshot().observations.map(row => row.observationId), [item.observationId]);
+  assert.equal(store.getSnapshot().claims.length, 0);
+  assert.equal(store.queryMemory('Alice').graph.observations.length, 1);
+  assert.equal(store.getStatus(item.source.sourceId)[0].state, 'pending');
+  assert.equal(store.pendingJobs(), 1);
+  assert.throws(() => store.completeJob(item.observationId, leaseToken, graphFor(item)), StoreConflict);
+  const job = store.claimNextJob('upgrade-worker');
+  assert.equal(job.observationId, item.observationId);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(item));
+  assert.equal(store.getStatus(item.source.sourceId)[0].state, 'complete');
+  assert.equal(store.queryMemory('Alice').graph.claims.length, 1);
+  assert.equal(store.pendingJobs(), 0);
+});
+
+test('v1 upgrade refuses a completed source with no current observation before changing schema', t => {
+  const filename = fixture(t);
+  const old = createV1Database(filename);
+  const sourceId = randomUUID();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'complete', ?)")
+    .run(sourceId, `note:${sourceId}`, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z');
+  old.close();
+  assert.throws(() => new MGraphStore(filename), /no current observation/);
+  const disk = new DatabaseSync(filename, { readOnly: true });
+  assert.equal(disk.prepare('PRAGMA user_version').get().user_version, 1);
+  disk.close();
+});
+
+test('submillisecond source order accepts newer instant and fences equal or older observations', t => {
+  const filename = fixture(t);
+  const store = new MGraphStore(filename);
+  t.after(() => store.close());
+  const first = observation(randomUUID(), randomUUID(), 'First revision', '2026-10-01T00:00:00.000001Z');
+  const accepted = store.submitObservation(first);
+  const oldJob = store.claimNextJob('old-worker');
+  const second = observation(first.source.sourceId, randomUUID(), 'Second revision', '2026-10-01T00:00:00.000002Z');
+  assert.equal(store.submitObservation(second).revision, 2);
+  assert.throws(() => store.completeJob(oldJob.jobId, oldJob.leaseToken, graphFor(first)), StoreConflict);
+  assert.deepEqual(store.submitObservation(second), { observationId: second.observationId, revision: 2, replayed: true });
+  assert.throws(() => store.submitObservation(observation(first.source.sourceId, randomUUID(), 'Equal instant',
+    '2026-10-01T05:30:00.000002+05:30')), StoreConflict);
+  assert.throws(() => store.submitObservation(first), StoreConflict);
+  assert.equal(store.queryMemory('First').graph.observations.length, 0);
+  assert.deepEqual(store.getSnapshot().observations.map(row => row.observationId), [second.observationId]);
+  assert.equal(store.pendingJobs(), 1);
+  const job = store.claimNextJob('new-worker');
+  assert.equal(job.observationId, second.observationId);
+  store.completeJob(job.jobId, job.leaseToken, graphFor(second));
+  assert.equal(store.queryMemory('Second').graph.claims.length, 1);
+  assert.equal(store.pendingJobs(), 0);
+  assert.equal(accepted.revision, 1);
 });
 
 test('WAL reader snapshot remains stable while one writer advances a source', t => {

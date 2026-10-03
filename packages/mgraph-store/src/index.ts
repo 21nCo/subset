@@ -113,6 +113,11 @@ function readTransaction<T>(db: DatabaseSync, fn: () => T): T {
 function migrate(db: DatabaseSync): void {
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
   if (version > STORE_SCHEMA_VERSION) throw new StoreUnavailable(`Store schema ${version} is newer than this binary`);
+  if (version === 1 && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
+    AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.source_id = s.source_id AND o.revision = s.revision)
+    LIMIT 1`).get()) {
+    throw new StoreUnavailable('V1 source needs reprocessing but has no current observation');
+  }
   if (version < 1) transaction(db, () => {
     db.exec(`
       CREATE TABLE sources (
@@ -179,13 +184,22 @@ function migrate(db: DatabaseSync): void {
       WHERE j.revision != s.revision OR s.state IN ('deleted', 'permissionRevoked')
       OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
         AND o.source_id = j.source_id AND o.revision = j.revision)`).all() as IdRow[];
+    const rebuildSources = new Set(staleSources.map(row => row.source_id));
+    if (version === 1) {
+      // V1 had no evidence table. A completed V1 job cannot have persisted its
+      // result, even if its observation is the current revision.
+      for (const row of db.prepare(`SELECT source_id FROM sources WHERE state IN ('complete', 'partial')
+        UNION SELECT source_id FROM jobs WHERE state = 'complete'`).all() as IdRow[]) {
+        rebuildSources.add(row.source_id);
+      }
+    }
     db.exec(`DELETE FROM jobs WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
       OR revision != (SELECT revision FROM sources WHERE source_id = jobs.source_id)
       OR NOT EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = jobs.observation_id
         AND o.source_id = jobs.source_id AND o.revision = jobs.revision);
       DELETE FROM observations WHERE source_id IN (SELECT source_id FROM sources WHERE state IN ('deleted', 'permissionRevoked'))
       OR revision != (SELECT revision FROM sources WHERE source_id = observations.source_id);`);
-    for (const { source_id: sourceId } of staleSources) {
+    for (const sourceId of rebuildSources) {
       db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
       db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
       const source = db.prepare('SELECT state, revision FROM sources WHERE source_id = ?').get(sourceId) as
@@ -231,6 +245,25 @@ function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
 }
 function nowIso(): string { return new Date().toISOString(); }
 function live(state: string): boolean { return state !== 'deleted' && state !== 'permissionRevoked'; }
+function compareObservedAt(left: string, right: string): number {
+  // The SET-5 schema permits arbitrary fractional precision and UTC offsets.
+  // Date.parse truncates to milliseconds, so compare the seconds and fraction
+  // separately after both timestamps have been validated as ISO datetimes.
+  const parts = (value: string): { second: number; fraction: string } => {
+    const match = /^(.*:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+    if (!match) throw new StoreConflict('Invalid persisted observation timestamp');
+    const second = Date.parse(`${match[1]}${match[3]}`);
+    if (!Number.isFinite(second)) throw new StoreConflict('Invalid persisted observation timestamp');
+    return { second, fraction: (match[2] ?? '').replace(/0+$/, '') };
+  };
+  const a = parts(left);
+  const b = parts(right);
+  if (a.second !== b.second) return Math.sign(a.second - b.second);
+  const width = Math.max(a.fraction.length, b.fraction.length);
+  const aFraction = a.fraction.padEnd(width, '0');
+  const bFraction = b.fraction.padEnd(width, '0');
+  return aFraction < bFraction ? -1 : aFraction > bFraction ? 1 : 0;
+}
 function terms(text: string): string[] { return [...new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []))]; }
 function indexText(db: DatabaseSync, sourceId: string, kind: string, body: string): void {
   const insert = db.prepare('INSERT OR IGNORE INTO evidence_terms(source_id, kind, term) VALUES (?, ?, ?)');
@@ -303,7 +336,7 @@ export class MGraphStore {
             existing.application_bundle_id !== (observation.source.applicationBundleId ?? null)) {
           throw new StoreConflict('Source identity changed');
         }
-        if (existing.observed_at && Date.parse(observation.observedAt) <= Date.parse(existing.observed_at)) {
+        if (existing.observed_at && compareObservedAt(observation.observedAt, existing.observed_at) <= 0) {
           const prior = this.db.prepare('SELECT source_id, payload, revision FROM observations WHERE observation_id = ?').get(observation.observationId) as
             | { source_id: string; payload: string; revision: number } | undefined;
           if (prior?.source_id === sourceId && prior.payload === JSON.stringify(observation)) {
