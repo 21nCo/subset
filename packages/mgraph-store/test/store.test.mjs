@@ -1,20 +1,22 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { decodeIpcRequest, parseIpcResponse, sourceHash } from '@subset/mgraph-contracts';
 import { MGraphStore, STORE_SCHEMA_VERSION, StoreConflict, StoreUnavailable } from '../dist/index.js';
 
+/** Give each database test an isolated file and remove its WAL and lock sidecars afterward. */
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'mgraph-store-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return join(dir, 'graph.sqlite');
 }
+/** Create the original queue schema so upgrades run against persisted legacy rows. */
 function createV1Database(filename) {
   const old = new DatabaseSync(filename);
   old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
@@ -29,6 +31,7 @@ function createV1Database(filename) {
     PRAGMA user_version = 1;`);
   return old;
 }
+/** Create the legacy evidence schema, whose rows do not carry source revisions. */
 function createV2Database(filename) {
   const old = new DatabaseSync(filename);
   old.exec(`CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, locator TEXT NOT NULL,
@@ -50,6 +53,7 @@ function createV2Database(filename) {
     PRAGMA user_version = 2;`);
   return old;
 }
+/** Add the pre-canonical UUID ledger and replay digest columns to a v2 fixture. */
 function createV3Database(filename) {
   const old = createV2Database(filename);
   old.exec(`CREATE TABLE observation_ids (id_hash TEXT PRIMARY KEY);
@@ -57,10 +61,12 @@ function createV3Database(filename) {
     PRAGMA user_version = 3;`);
   return old;
 }
+/** Build a SET-5 observation with the content hash required at submission. */
 function observation(sourceId = randomUUID(), observationId = randomUUID(), text = 'Alice knows Bob', observedAt = '2026-10-01T00:00:00.000Z') {
   return { schemaVersion: 1, observationId, source: { sourceId, kind: 'manual', locator: `note:${sourceId}` },
     observedAt, state: 'complete', content: text, sourceHash: sourceHash(text) };
 }
+/** Supply passage and claim provenance for a one-source completion. */
 function graphFor(observation) {
   const passage = { schemaVersion: 1, passageId: randomUUID(), observationId: observation.observationId,
     sourceHash: observation.sourceHash, start: 0, end: Array.from(observation.content).length, text: observation.content };
@@ -71,6 +77,7 @@ function graphFor(observation) {
     profiles: [{ schemaVersion: 1, profileId: randomUUID(), name: 'Alice', modelVersion: 'fixture-v1', claimIds: [claim.claimId] }],
     relationships: [], clusters: [], statuses: [] };
 }
+/** Change only declared UUID fields to test identity without changing source content. */
 function uppercaseUuids(value) {
   const fields = new Set(['sourceId', 'observationId', 'targetObservationId', 'passageId', 'claimId', 'profileId',
     'relationshipId', 'clusterId', 'fromProfileId', 'toProfileId']);
@@ -83,9 +90,11 @@ function uppercaseUuids(value) {
     return [key, uppercaseUuids(field)];
   }));
 }
+/** Produce a spelling that neither lowercase nor all-uppercase legacy hashes cover. */
 function mixedUuid(id) {
   return id.replace(/[a-f]/g, (letter, index) => index % 2 ? letter.toUpperCase() : letter);
 }
+/** Claim and complete a fixture observation, returning its token and committed graph. */
 function finish(store, observation) {
   const job = store.claimNextJob('test-worker');
   assert.ok(job);
@@ -116,6 +125,66 @@ test('fresh migration, evidence lookup, rebuild and read-only clients', t => {
   assert.equal(reader.getStatus(first.source.sourceId)[0].state, 'pending');
   finish(store, first);
   assert.equal(reader.queryMemory('Bob').graph.passages.length, 1);
+});
+
+test('missing reader files and directories report store unavailability', t => {
+  const filename = fixture(t);
+  assert.throws(() => new MGraphStore(filename, { readOnly: true }), StoreUnavailable);
+  assert.throws(() => new MGraphStore(join(dirname(filename), 'missing', 'graph.sqlite')), StoreUnavailable);
+  const writer = new MGraphStore(filename);
+  writer.close();
+  const reader = new MGraphStore(filename, { readOnly: true });
+  reader.close();
+});
+
+test('invalid database schemas and lock sidecars report store unavailability', t => {
+  const filename = fixture(t);
+  writeFileSync(filename, 'not a SQLite database');
+  assert.throws(() => new MGraphStore(filename, { readOnly: true }), StoreUnavailable);
+  assert.throws(() => new MGraphStore(filename), StoreUnavailable);
+  rmSync(filename);
+
+  const legacy = new DatabaseSync(filename);
+  legacy.exec('CREATE TABLE sources (id TEXT)');
+  legacy.close();
+  assert.throws(() => new MGraphStore(filename), StoreUnavailable);
+  rmSync(filename);
+
+  const writer = new MGraphStore(filename);
+  writer.close();
+  const sidecar = `${filename}.writer-lock.sqlite`;
+  rmSync(sidecar);
+  mkdirSync(sidecar);
+  assert.throws(() => new MGraphStore(filename), StoreUnavailable);
+});
+
+test('hard-linked database aliases cannot split writer locks or WAL files', t => {
+  const filename = fixture(t);
+  const writer = new MGraphStore(filename);
+  t.after(() => writer.close());
+  const alias = join(dirname(filename), 'alias.sqlite');
+  linkSync(filename, alias);
+  assert.throws(() => new MGraphStore(alias), StoreUnavailable);
+  assert.throws(() => new MGraphStore(alias, { readOnly: true }), StoreUnavailable);
+  assert.equal(existsSync(`${alias}.writer-lock.sqlite`), false);
+  unlinkSync(alias);
+  writer.close();
+  const reopened = new MGraphStore(filename);
+  reopened.close();
+});
+
+test('dangling symlink cannot create a writer lock under an alias', t => {
+  const filename = fixture(t);
+  const alias = join(dirname(filename), 'alias.sqlite');
+  symlinkSync(filename, alias);
+  assert.throws(() => new MGraphStore(alias), StoreUnavailable);
+  assert.equal(existsSync(filename), false);
+  assert.equal(existsSync(`${alias}.writer-lock.sqlite`), false);
+  const writer = new MGraphStore(filename);
+  t.after(() => writer.close());
+  assert.throws(() => new MGraphStore(alias), StoreUnavailable);
+  const reader = new MGraphStore(alias, { readOnly: true });
+  reader.close();
 });
 
 test('snapshot and search retain every derived evidence kind', t => {
@@ -198,6 +267,38 @@ test('Unicode-equivalent observation and evidence terms survive rebuild, reopen 
   store.deleteSource(item.source.sourceId);
   assert.equal(store.queryMemory('Café').graph.observations.length, 0);
   store.close();
+});
+
+test('combining marks distinguish words before and after rebuild and v5 upgrade', t => {
+  const filename = fixture(t);
+  const writer = new MGraphStore(filename);
+  t.after(() => writer.close());
+  const first = observation(randomUUID(), randomUUID(), 'मि');
+  const second = observation(randomUUID(), randomUUID(), 'मा');
+  writer.submitObservation(first);
+  finish(writer, first);
+  writer.submitObservation(second);
+  finish(writer, second);
+  const matchingSourceIds = query => writer.queryMemory(query).graph.observations.map(row => row.source.sourceId);
+  assert.deepEqual(matchingSourceIds('मि'), [first.source.sourceId]);
+  assert.deepEqual(matchingSourceIds('मा'), [second.source.sourceId]);
+  writer.rebuildSearchIndex();
+  assert.deepEqual(matchingSourceIds('मि'), [first.source.sourceId]);
+  assert.deepEqual(matchingSourceIds('मा'), [second.source.sourceId]);
+  writer.close();
+
+  const legacy = new DatabaseSync(filename);
+  legacy.exec("DELETE FROM evidence_terms; PRAGMA user_version = 5");
+  legacy.prepare("INSERT INTO evidence_terms(source_id, kind, term) VALUES (?, 'observation', 'म')")
+    .run(first.source.sourceId);
+  legacy.prepare("INSERT INTO evidence_terms(source_id, kind, term) VALUES (?, 'observation', 'म')")
+    .run(second.source.sourceId);
+  legacy.close();
+  const upgraded = new MGraphStore(filename);
+  t.after(() => upgraded.close());
+  assert.equal(STORE_SCHEMA_VERSION, 6);
+  assert.deepEqual(upgraded.queryMemory('मि').graph.observations.map(row => row.source.sourceId), [first.source.sourceId]);
+  assert.deepEqual(upgraded.queryMemory('मा').graph.observations.map(row => row.source.sourceId), [second.source.sourceId]);
 });
 
 test('derived entity IDs cannot be reused by another source and fail as a typed conflict', t => {

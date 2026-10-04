@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, realpathSync } from 'node:fs';
+import { chmodSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
@@ -10,7 +10,7 @@ import {
 } from '@subset/mgraph-contracts';
 
 /** SQLite layout understood by writers and required by read-only clients. */
-export const STORE_SCHEMA_VERSION = 5;
+export const STORE_SCHEMA_VERSION = 6;
 const uuid = z.uuid();
 const checkpointSchema = z.strictObject({ stage: z.string().min(1).max(128), cursor: z.string().max(4096).optional() });
 /** Persisted worker progress that survives lease expiry and process restart. */
@@ -45,14 +45,55 @@ export class StoreConflict extends Error { constructor(message: string) { super(
 /** A database or schema condition that prevents this process from serving the store. */
 export class StoreUnavailable extends Error { constructor(message: string) { super(message); this.name = 'StoreUnavailable'; } }
 
-/** Resolve the database path so aliases contend for the same writer sidecar. */
+/** Resolve symlinks and refuse hard links that would split WAL and writer-lock paths. */
 function canonicalPath(filename: string): string {
   if (filename === ':memory:') throw new StoreUnavailable('Store requires a local database file');
   const full = resolve(filename);
-  try { return realpathSync(full); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    return join(realpathSync(dirname(full)), basename(full));
+  try {
+    const path = realpathSync(full);
+    if (statSync(path).nlink !== 1) throw new StoreUnavailable('Hard-linked M Graph databases cannot be served safely');
+    return path;
+  } catch (error) {
+    if (error instanceof StoreUnavailable) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      if (code === 'EACCES' || code === 'ENOTDIR') throw new StoreUnavailable(`Database path is unavailable: ${code}`);
+      throw error;
+    }
+    // A dangling symlink would acquire a lock under its alias, then create a
+    // target that future openers lock under a different pathname.
+    try {
+      if (lstatSync(full).isSymbolicLink()) throw new StoreUnavailable('Dangling M Graph database symlink');
+    } catch (linkError) {
+      if (linkError instanceof StoreUnavailable) throw linkError;
+      if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
+    }
+    try { return join(realpathSync(dirname(full)), basename(full)); } catch (parentError) {
+      const parentCode = (parentError as NodeJS.ErrnoException).code;
+      if (parentCode === 'ENOENT' || parentCode === 'EACCES' || parentCode === 'ENOTDIR') {
+        throw new StoreUnavailable(`Database directory is unavailable: ${parentCode}`);
+      }
+      throw parentError;
+    }
+  }
+}
+
+/** Preserve programmer errors while classifying SQLite and filesystem failures. */
+function throwStoreUnavailable(error: unknown): never {
+  if (error instanceof StoreUnavailable) throw error;
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ERR_SQLITE_ERROR' || code === 'EACCES' || code === 'EPERM' || code === 'ENOENT' || code === 'EISDIR') {
+      throw new StoreUnavailable(`M Graph database is unavailable: ${error.message}`);
+    }
+  }
+  throw error;
+}
+
+/** Open the main file with the same availability classification as migrations. */
+function openDatabase(path: string, readOnly: boolean): DatabaseSync {
+  try { return new DatabaseSync(path, { readOnly }); } catch (error) {
+    throwStoreUnavailable(error);
   }
 }
 
@@ -60,17 +101,19 @@ function canonicalPath(filename: string): string {
 function acquireWriterLock(filename: string): DatabaseSync {
   // SQLite's OS lock is released on process death. Unlike a PID file, it cannot be
   // reclaimed by a racing opener while a new owner is initializing or closing.
-  const lock = new DatabaseSync(`${filename}.writer-lock.sqlite`);
+  let lock: DatabaseSync;
+  try { lock = new DatabaseSync(`${filename}.writer-lock.sqlite`); }
+  catch (error) { throwStoreUnavailable(error); }
   try {
     chmodSync(`${filename}.writer-lock.sqlite`, 0o600);
     lock.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
     return lock;
   } catch (error) {
-    lock.close();
+    try { lock.close(); } catch { /* Keep the lock failure as the primary error. */ }
     if (error instanceof Error && /SQLITE_BUSY|database is locked/.test(error.message)) {
       throw new StoreUnavailable('Another process owns the M Graph writer');
     }
-    throw error;
+    throwStoreUnavailable(error);
   }
 }
 
@@ -169,6 +212,7 @@ function storedCompletedGraph(db: DatabaseSync, sourceId: string, observationId:
   const observation = db.prepare('SELECT payload FROM observations WHERE source_id = ? AND observation_id = ?')
     .get(sourceId, observationId) as JsonRow | undefined;
   if (!observation) throw new StoreUnavailable('Completed job has no observation during migration');
+  /** Read evidence in persisted order so the replay digest matches the committed graph. */
   const entities = (kind: string): unknown[] => (db.prepare('SELECT payload FROM evidence WHERE source_id = ? AND kind = ? ORDER BY rowid')
     .all(sourceId, kind) as JsonRow[]).map(row => JSON.parse(row.payload));
   return parseGraphSnapshot({ schemaVersion: 1, observations: [JSON.parse(observation.payload)],
@@ -392,9 +436,9 @@ function migrate(db: DatabaseSync): void {
       normalizePersistedIds(db);
       db.exec('PRAGMA user_version = 4');
     }
-    if (version < 5) {
+    if (version < 6) {
       rebuildSearchTerms(db);
-      db.exec('PRAGMA user_version = 5');
+      db.exec('PRAGMA user_version = 6');
     }
   });
 }
@@ -465,13 +509,16 @@ function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
   if (!parsed.success) throw new StoreUnavailable(`Invalid persisted status for source ${row.source_id}`);
   return parsed.data;
 }
+/** Timestamp source status changes with the store process clock. */
 function nowIso(): string { return new Date().toISOString(); }
+/** A terminal source has metadata but cannot expose content or receive work. */
 function live(state: string): boolean { return state !== 'deleted' && state !== 'permissionRevoked'; }
 /** Compare full fractional timestamps without millisecond truncation. */
 function compareObservedAt(left: string, right: string): number {
   // The SET-5 schema permits arbitrary fractional precision and UTC offsets.
   // Date.parse truncates to milliseconds, so compare the seconds and fraction
   // separately after both timestamps have been validated as ISO datetimes.
+  /** Preserve arbitrary fractional precision after normalizing an offset to UTC. */
   const parts = (value: string): { second: number; fraction: string } => {
     const match = /^(.*:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
     if (!match) throw new StoreConflict('Invalid persisted observation timestamp');
@@ -511,9 +558,9 @@ function currentReplay(db: DatabaseSync, existing: SourceRow | undefined, observ
   throw new StoreConflict('Observation is older than the current source revision');
 }
 
-/** Apply one Unicode spelling to both indexed content and incoming queries. */
+/** Apply one Unicode spelling and keep combining marks with their base word. */
 function terms(text: string): string[] {
-  return [...new Set((text.toLowerCase().normalize('NFC').match(/[\p{L}\p{N}]+/gu) ?? []))];
+  return [...new Set((text.toLowerCase().normalize('NFC').match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu) ?? []))];
 }
 /** Persist each distinct search token for one live source and evidence kind. */
 function indexText(db: DatabaseSync, sourceId: string, kind: string, body: string): void {
@@ -574,7 +621,7 @@ export class MGraphStore {
     this.writerLock = this.readOnly ? undefined : acquireWriterLock(path);
     let opened: DatabaseSync | undefined;
     try {
-      opened = new DatabaseSync(path, { readOnly: this.readOnly });
+      opened = openDatabase(path, this.readOnly);
       this.db = opened;
       this.db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000');
       if (this.readOnly) {
@@ -586,9 +633,9 @@ export class MGraphStore {
         migrate(this.db);
       }
     } catch (error) {
-      opened?.close();
-      this.releaseWriterLock();
-      throw error;
+      try { opened?.close(); } catch { /* Preserve the constructor failure. */ }
+      try { this.releaseWriterLock(); } catch { /* Preserve the constructor failure. */ }
+      throwStoreUnavailable(error);
     }
   }
 
@@ -743,6 +790,7 @@ export class MGraphStore {
       this.db.prepare('DELETE FROM evidence WHERE source_id = ?').run(job.source_id);
       const insert = this.db.prepare('INSERT INTO evidence(kind, entity_id, source_id, payload) VALUES (?, ?, ?, ?)');
       const owner = this.db.prepare('SELECT source_id FROM evidence WHERE kind = ? AND entity_id = ?');
+      /** Reject an ID owned by another source before storing its row and search terms. */
       const persist = (kind: string, id: string, entity: unknown): void => {
         if (owner.get(kind, id)) throw new StoreConflict('Derived entity ID belongs to another source');
         insert.run(kind, id, job.source_id, JSON.stringify(entity));
@@ -838,7 +886,7 @@ export class MGraphStore {
     });
   }
 
-  /** Rebuild persisted word lookup from current observations and passages. */
+  /** Rebuild persisted word lookup from current observations and every derived evidence kind. */
   rebuildSearchIndex(): void {
     this.writable();
     transaction(this.db, () => rebuildSearchTerms(this.db));
