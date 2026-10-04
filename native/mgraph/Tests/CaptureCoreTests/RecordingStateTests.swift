@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 
@@ -123,6 +124,93 @@ import XCTest
     XCTAssertEqual(
       try RecordingVault(directory: directory).observations.count,
       RecordingVault.maximumObservations - 1)
+  }
+
+  func testDeletionPreservesOffAndPausedAndFencesActiveReads() throws {
+    for mode in [RecordingMode.off, .paused, .recording] {
+      for perApp in [false, true] {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let vault = try RecordingVault(directory: directory)
+        try vault.allow("com.example.first", at: firstApp)
+        try vault.allow("com.example.new", at: newApp)
+        try vault.setMode(.recording)
+        try vault.append(capture("com.example.first", text: "erase"), from: firstApp)
+        try vault.append(capture("com.example.new", text: "keep if per app"), from: newApp)
+        try vault.setMode(mode)
+
+        let gate = RecordingGate()
+        let pending = mode == .recording ? gate.begin(at: 100) : nil
+        gate.invalidate() // RecordingController fences a read before deleting.
+        try vault.deleteCapturedData(bundleIdentifier: perApp ? "com.example.first" : nil)
+        if let pending { XCTAssertFalse(gate.finish(pending)) }
+
+        let expectedMode: RecordingMode = mode == .recording ? .paused : mode
+        XCTAssertEqual(vault.settings.mode, expectedMode)
+        let settings = try JSONDecoder().decode(
+          RecordingSettings.self,
+          from: Data(contentsOf: directory.appendingPathComponent("recording-settings.json")))
+        XCTAssertEqual(settings.mode, expectedMode)
+        XCTAssertEqual(vault.observations.map(\.text), perApp ? ["keep if per app"] : [])
+        try vault.append(capture("com.example.first", text: "late read"), from: firstApp)
+        XCTAssertEqual(vault.observations.map(\.text), perApp ? ["keep if per app"] : [])
+      }
+    }
+  }
+
+  func testDeletionArchiveFailureKeepsDataAndOnlyPausesActiveRecording() throws {
+    for mode in [RecordingMode.off, .paused, .recording] {
+      for perApp in [false, true] {
+        let directory = try temporaryDirectory()
+        let archive = directory.appendingPathComponent("captured-observations.json")
+        defer {
+          _ = chflags(archive.path, 0)
+          try? FileManager.default.removeItem(at: directory)
+        }
+        let vault = try RecordingVault(directory: directory)
+        try vault.allow("com.example.first", at: firstApp)
+        try vault.allow("com.example.new", at: newApp)
+        try vault.setMode(.recording)
+        try vault.append(capture("com.example.first", text: "erase"), from: firstApp)
+        try vault.append(capture("com.example.new", text: "retain"), from: newApp)
+        try vault.setMode(mode)
+        let original = try Data(contentsOf: archive)
+        XCTAssertEqual(chflags(archive.path, UInt32(UF_IMMUTABLE)), 0)
+
+        XCTAssertThrowsError(
+          try vault.deleteCapturedData(bundleIdentifier: perApp ? "com.example.first" : nil))
+        let expectedMode: RecordingMode = mode == .recording ? .paused : mode
+        XCTAssertEqual(vault.settings.mode, expectedMode)
+        XCTAssertEqual(vault.observations.count, 2)
+        XCTAssertEqual(try Data(contentsOf: archive), original)
+      }
+    }
+  }
+
+  func testDeletionCannotEraseWhenActiveRecordingCannotPersistPause() throws {
+    for perApp in [false, true] {
+      let directory = try temporaryDirectory()
+      let settingsURL = directory.appendingPathComponent("recording-settings.json")
+      defer {
+        _ = chflags(settingsURL.path, 0)
+        try? FileManager.default.removeItem(at: directory)
+      }
+      let vault = try RecordingVault(directory: directory)
+      try vault.allow("com.example.first", at: firstApp)
+      try vault.setMode(.recording)
+      try vault.append(capture("com.example.first", text: "must survive"), from: firstApp)
+      let archive = directory.appendingPathComponent("captured-observations.json")
+      let original = try Data(contentsOf: archive)
+      XCTAssertEqual(chflags(settingsURL.path, UInt32(UF_IMMUTABLE)), 0)
+
+      XCTAssertThrowsError(
+        try vault.deleteCapturedData(bundleIdentifier: perApp ? "com.example.first" : nil))
+      XCTAssertEqual(vault.settings.mode, .paused, "A failed pause still fences new reads")
+      XCTAssertEqual(vault.observations.count, 1)
+      XCTAssertEqual(try Data(contentsOf: archive), original)
+      try vault.append(capture("com.example.first", text: "late read"), from: firstApp)
+      XCTAssertEqual(vault.observations.count, 1)
+    }
   }
 
   func testDamagedArchiveIsNotOverwrittenOnOpen() throws {

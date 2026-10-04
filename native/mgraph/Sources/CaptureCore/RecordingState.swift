@@ -185,8 +185,8 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     }
 
     public func deleteCapturedData(bundleIdentifier: String? = nil) throws {
-        // Deletion must not be undone by the next scheduled foreground read.
-        try setMode(.paused)
+        // Fence active recording before erasure without changing a selected Off or Paused mode.
+        if settings.mode == .recording { try setMode(.paused) }
         if let bundleIdentifier {
             let next = observations.filter { $0.bundleIdentifier != bundleIdentifier }
             if next.isEmpty {
