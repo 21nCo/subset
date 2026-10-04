@@ -358,6 +358,24 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [noSecondDelivery], timeout: 0.65)
     }
 
+    /// Discards a finished worker result if a modal main loop defers delivery past its budget.
+    @MainActor func testManualResultExpiresWhileMainActorDefersDelivery() {
+        let completed = expectation(description: "expired manual result is delivered without text")
+        let workerStarted = DispatchSemaphore(value: 0)
+        let deadline = CaptureCollector.Deadline(seconds: 0.05, startWhenWorkerBegins: true)
+        CaptureCollector.runAsync(deadline: deadline, seconds: 0.05, work: {
+            workerStarted.signal()
+            return CaptureResult(state: .available, text: "private text")
+        }) { result in
+            XCTAssertNil(result)
+            completed.fulfill()
+        }
+        XCTAssertEqual(workerStarted.wait(timeout: .now() + 1), .success)
+        Thread.sleep(forTimeInterval: 0.12)
+        XCTAssertTrue(deadline.expired)
+        wait(for: [completed], timeout: 1)
+    }
+
     /// Checks worker drain orders replacement after cancellation.
     @MainActor func testMenuCannotStartReplacementUntilCancelledWorkerDrains() {
         let workerFinished = DeliveryCount()

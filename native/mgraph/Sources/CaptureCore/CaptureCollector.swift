@@ -413,24 +413,71 @@ public enum CaptureCollector {
                                     onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
                                     work: @escaping @Sendable () -> CaptureResult,
                                     completion: @escaping @MainActor @Sendable (CaptureResult?) -> Void) {
+        let attempt = ManualAttempt(deadline: deadline, seconds: seconds,
+                                    onWorkerStart: onWorkerStart, work: work, completion: completion)
+        captureQueue.async { attempt.beginOnWorker() }
+    }
+
+    /// Keeps the one-shot worker budget, timeout, and actor delivery together.
+    private final class ManualAttempt: @unchecked Sendable {
+        let deadline: Deadline
+        let seconds: TimeInterval
+        let onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)?
+        let work: @Sendable () -> CaptureResult
+        let completion: @MainActor @Sendable (CaptureResult?) -> Void
         let delivery = Delivery()
-        captureQueue.async {
+
+        /// Freezes the manual request's callbacks while it waits on the serial AX queue.
+        init(deadline: Deadline, seconds: TimeInterval,
+             onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)?,
+             work: @escaping @Sendable () -> CaptureResult,
+             completion: @escaping @MainActor @Sendable (CaptureResult?) -> Void) {
+            self.deadline = deadline
+            self.seconds = seconds
+            self.onWorkerStart = onWorkerStart
+            self.work = work
+            self.completion = completion
+        }
+
+        /// Starts the budget at worker admission and drains even after timeout or cancellation.
+        func beginOnWorker() {
             workerRevision.advance()
             defer { workerRevision.advance() }
-            guard deadline.beginWorker() else {
-                DispatchQueue.main.async { delivery.deliver(nil, to: completion) }
-                return
-            }
-            let startedAt = ProcessInfo.processInfo.systemUptime
-            if let onWorkerStart {
-                DispatchQueue.main.async { onWorkerStart(startedAt) }
-            }
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) {
-                deadline.cancel()
-                DispatchQueue.main.async { delivery.deliver(nil, to: completion) }
-            }
+            guard deadline.beginWorker() else { dispatch(nil); return }
+            reportWorkerStart()
+            scheduleTimeout()
             let result = work()
-            DispatchQueue.main.async { delivery.deliver(deadline.expired ? nil : result, to: completion) }
+            dispatch(result)
+        }
+
+        /// Reports the actual AX start so automatic throttling includes queue delay.
+        func reportWorkerStart() {
+            guard let onWorkerStart else { return }
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            DispatchQueue.main.async { onWorkerStart(startedAt) }
+        }
+
+        /// Races the bounded worker with a timer without occupying the AX queue.
+        func scheduleTimeout() {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) {
+                self.timeout()
+            }
+        }
+
+        /// Fences a late AX reply before requesting the single actor completion.
+        func timeout() {
+            deadline.cancel()
+            dispatch(nil)
+        }
+
+        /// Queues completion without blocking a worker behind a modal main loop.
+        func dispatch(_ result: CaptureResult?) {
+            DispatchQueue.main.async { self.deliverOnMain(result) }
+        }
+
+        /// Rechecks the deadline when the menu actor resumes and accepts one outcome.
+        @MainActor func deliverOnMain(_ result: CaptureResult?) {
+            delivery.deliver(deadline.expired ? nil : result, to: completion)
         }
     }
 
