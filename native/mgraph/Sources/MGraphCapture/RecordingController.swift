@@ -9,13 +9,15 @@ import Foundation
     private var deadline: CaptureCollector.Deadline?
     private var observer: AXObserver?
     private var observedApplication: AXUIElement?
-    private var observedPID: pid_t?
+    private var foregroundPID: pid_t?
+    private var observerRetry = ObserverRetryState()
     private var awake = true
     private var workspaceTokens: [NSObjectProtocol] = []
     private var heartbeat: Timer?
     private var workerReady = true
     private var stopped = false
     private(set) var lastError: String?
+    private(set) var observerError: String?
 
     init(vault: RecordingVault) {
         self.vault = vault
@@ -71,6 +73,10 @@ import Foundation
 
     func deleteCapturedData(bundleIdentifier: String? = nil) throws {
         invalidate()
+        defer {
+            detachObserver()
+            foregroundPID = nil
+        }
         try vault.deleteCapturedData(bundleIdentifier: bundleIdentifier)
     }
 
@@ -93,6 +99,7 @@ import Foundation
     private func foregroundChanged() {
         invalidate()
         detachObserver()
+        foregroundPID = nil
         tick()
     }
 
@@ -100,14 +107,29 @@ import Foundation
         guard !stopped, awake, CaptureCollector.isTrusted(),
               let app = NSWorkspace.shared.frontmostApplication,
               vault.allows(app.bundleIdentifier, at: app.bundleURL) else {
-            if observedPID != nil { invalidate(); detachObserver() }
+            if foregroundPID != nil {
+                invalidate()
+                detachObserver()
+                foregroundPID = nil
+            }
             return
         }
-        if observedPID != app.processIdentifier {
+        if foregroundPID != app.processIdentifier {
             invalidate()
             detachObserver()
-            observedPID = app.processIdentifier
-            attachObserver(pid: app.processIdentifier)
+            foregroundPID = app.processIdentifier
+        }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if observerRetry.shouldAttempt(pid: app.processIdentifier, at: uptime) {
+            if let error = attachObserver(pid: app.processIdentifier) {
+                observerRetry.failed(at: uptime)
+                if observerRetry.consecutiveFailures >= 3 {
+                    observerError = "AX notifications unavailable (\(error)); checking every 2 seconds"
+                }
+            } else {
+                observerRetry.succeeded(pid: app.processIdentifier)
+                observerError = nil
+            }
         }
         signal()
     }
@@ -148,9 +170,11 @@ import Foundation
         }
     }
 
-    private func attachObserver(pid: pid_t) {
+    // A failed partial registration must be removed before the next attempt.
+    // Return a diagnostic only after the caller can safely retry on a heartbeat.
+    private func attachObserver(pid: pid_t) -> String? {
         var created: AXObserver?
-        guard AXObserverCreate(pid, { _, _, _, context in
+        let createError = AXObserverCreate(pid, { _, _, _, context in
             guard let context else { return }
             let controller = Unmanaged<RecordingController>.fromOpaque(context).takeUnretainedValue()
             // This source is installed on the main run loop. Handle the bounded
@@ -158,29 +182,42 @@ import Foundation
             MainActor.assumeIsolated {
                 controller.signal()
             }
-        }, &created) == .success, let created else { return }
+        }, &created)
+        guard createError == .success, let created else {
+            return "observer creation failed: \(createError.rawValue)"
+        }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         let context = Unmanaged.passUnretained(self).toOpaque()
+        var registered: [String] = []
         for notification in [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification] {
-            _ = AXObserverAddNotification(created, app, notification as CFString, context)
+            let result = AXObserverAddNotification(created, app, notification as CFString, context)
+            guard result == .success else {
+                for name in registered {
+                    _ = AXObserverRemoveNotification(created, app, name as CFString)
+                }
+                return "notification registration failed: \(result.rawValue)"
+            }
+            registered.append(notification)
         }
         observer = created
         observedApplication = app
-        observedPID = pid
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
+        return nil
     }
 
     private func detachObserver() {
-        guard let observer else { observedPID = nil; return }
-        if let app = observedApplication {
-            for notification in [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification] {
-                _ = AXObserverRemoveNotification(observer, app, notification as CFString)
+        if let observer {
+            if let app = observedApplication {
+                for notification in [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification] {
+                    _ = AXObserverRemoveNotification(observer, app, notification as CFString)
+                }
             }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         self.observer = nil
         observedApplication = nil
-        observedPID = nil
+        observerRetry.reset()
+        observerError = nil
     }
 }

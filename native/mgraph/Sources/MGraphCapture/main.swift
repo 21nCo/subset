@@ -200,7 +200,7 @@ if let command = arguments.first {
             statusItem.title = CaptureCollector.isTrusted() ? "Accessibility: Granted" : "Accessibility: Required"
             if let recording {
                 recordingItem.title = "Recording: \(recording.vault.settings.mode.rawValue.capitalized)"
-                countItem.title = recording.lastError.map { "Recording error: \($0)" } ??
+                countItem.title = (recording.lastError ?? recording.observerError).map { "Recording error: \($0)" } ??
                     "Captured observations: \(recording.vault.observations.count)"
                 let allowedApps = recording.vault.settings.allowedApps.keys.sorted()
                 let retainedApps = recording.vault.retainedAppIdentifiers

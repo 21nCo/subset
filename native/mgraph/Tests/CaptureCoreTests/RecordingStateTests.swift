@@ -200,4 +200,35 @@ import XCTest
     XCTAssertFalse(gate.finish(second!))
     XCTAssertNotNil(gate.begin(at: 103.1), "Resume or app switch may capture immediately")
   }
+
+  func testObserverFailuresRetryOnHeartbeatAndRecoverAfterTransitions() {
+    var retry = ObserverRetryState()
+    let app: Int32 = 101
+    XCTAssertTrue(retry.shouldAttempt(pid: app, at: 100))
+
+    // AXObserverCreate fails. A completion tick cannot turn that into a tight retry loop.
+    retry.failed(at: 100)
+    XCTAssertNil(retry.registeredPID)
+    XCTAssertFalse(retry.shouldAttempt(pid: app, at: 101.9))
+    XCTAssertTrue(retry.shouldAttempt(pid: app, at: 102))
+
+    // Notification registration fails after creation, then recovers on a later heartbeat.
+    retry.failed(at: 102)
+    XCTAssertFalse(retry.shouldAttempt(pid: app, at: 103))
+    retry.failed(at: 104)
+    XCTAssertEqual(retry.consecutiveFailures, 3)
+    XCTAssertTrue(retry.shouldAttempt(pid: app, at: 106))
+    retry.succeeded(pid: app)
+    XCTAssertFalse(retry.shouldAttempt(pid: app, at: 108))
+    XCTAssertEqual(retry.consecutiveFailures, 0)
+
+    // Permission loss, sleep, and switching apps detach and allow a fresh attempt.
+    for nextPID: Int32 in [app, 202, app] {
+      retry.reset()
+      XCTAssertNil(retry.registeredPID)
+      XCTAssertTrue(retry.shouldAttempt(pid: nextPID, at: 108))
+      retry.succeeded(pid: nextPID)
+      XCTAssertFalse(retry.shouldAttempt(pid: nextPID, at: 110))
+    }
+  }
 }
