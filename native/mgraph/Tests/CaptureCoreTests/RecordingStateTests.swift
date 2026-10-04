@@ -357,6 +357,49 @@ private enum TestStorageFailure: Error { case injected }
     }
   }
 
+  func testArchiveDeletionRetrySyncsAbsentFileAfterUncertainUnlink() throws {
+    for deletion in ["all", "last app"] {
+      let directory = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: directory) }
+      var vault: RecordingVault? = try RecordingVault(directory: directory)
+      try vault?.allow("com.example.first", at: firstApp)
+      try vault?.setMode(.recording)
+      try vault?.append(capture("com.example.first", text: "must stay deleted"), from: firstApp)
+      let archive = directory.appendingPathComponent("captured-observations.json")
+      var failedOnce = false
+      vault?.storageCheckpoint = { phase, url in
+        if phase == .beforeDirectorySync && url == archive && !failedOnce {
+          failedOnce = true
+          throw TestStorageFailure.injected
+        }
+      }
+      if deletion == "all" {
+        XCTAssertThrowsError(try vault?.deleteCapturedData())
+      } else {
+        XCTAssertThrowsError(try vault?.deleteCapturedData(bundleIdentifier: "com.example.first"))
+      }
+      XCTAssertTrue(failedOnce)
+      XCTAssertEqual(vault?.settings.mode, .paused)
+      XCTAssertTrue(vault?.observations.isEmpty == true)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+
+      var retriedSync = false
+      vault?.storageCheckpoint = { phase, url in
+        if phase == .beforeDirectorySync && url == archive { retriedSync = true }
+      }
+      if deletion == "all" {
+        try vault?.deleteCapturedData()
+      } else {
+        try vault?.deleteCapturedData(bundleIdentifier: "com.example.first")
+      }
+      XCTAssertTrue(retriedSync, "A missing archive still needs a directory sync on retry")
+      vault = nil
+      let reopened = try RecordingVault(directory: directory)
+      XCTAssertTrue(reopened.observations.isEmpty)
+      XCTAssertEqual(reopened.settings.mode, .off)
+    }
+  }
+
   func testSettingsSyncFailureReconcilesAllowAndMode() throws {
     for operation in ["allow", "start"] {
       let directory = try temporaryDirectory()

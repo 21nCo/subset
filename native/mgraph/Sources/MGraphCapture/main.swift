@@ -13,7 +13,9 @@ private func printJSON(_ result: CaptureResult) {
 
 @MainActor private final class ConsentTimeout: NSObject {
     let alert: NSAlert
+    /// Retains the one-shot consent alert until its five-second limit expires.
     init(alert: NSAlert) { self.alert = alert }
+    /// Ends only the current modal consent prompt on timeout.
     @objc func expire() {
         NSApplication.shared.abortModal()
         alert.window.orderOut(nil)
@@ -252,8 +254,11 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Starts authorized automatic capture after an explicit local menu action.
         @objc private func startRecording() { changeMode(.recording) }
+        /// Stops new automatic reads without clearing the selected apps.
         @objc private func pauseRecording() { changeMode(.paused) }
+        /// Turns automatic recording off while retaining the allowlist.
         @objc private func stopRecording() { changeMode(.off) }
 
         /// Grants recording only to the bundle selected through the local app picker.
@@ -329,6 +334,7 @@ if let command = arguments.first {
             alert.runModal()
         }
 
+        /// Shows a local storage or permission error without captured text in diagnostics.
         private func showError(_ error: Error) {
             let alert = NSAlert()
             alert.messageText = "Recording operation failed"
@@ -336,6 +342,7 @@ if let command = arguments.first {
             alert.runModal()
         }
 
+        /// Explains why the recorder could not open while leaving capture disabled.
         private func showRecordingUnavailable() {
             let alert = NSAlert()
             alert.messageText = "Recording unavailable"

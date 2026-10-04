@@ -141,8 +141,9 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         let archive = directory.appendingPathComponent("captured-observations.json")
         if FileManager.default.fileExists(atPath: archive.path) {
             try FileManager.default.removeItem(at: archive)
-            try syncDirectory(containing: archive)
         }
+        // A previous unlink may have succeeded before its directory sync failed.
+        try syncDirectory(containing: archive)
     }
 
     /// Bundle identifiers with retained observations, including apps now excluded.
@@ -287,16 +288,17 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         if settings.mode == .recording { settings.mode = .paused }
     }
 
-    /// Unlinks retained text and reports whether the namespace changed before a sync failure.
+    /// Unlinks retained text and syncs even an absent archive after an uncertain prior unlink.
     private func removeArchive(committed: inout Bool) throws {
         if FileManager.default.fileExists(atPath: archiveURL.path) {
             try storageCheckpoint?(.beforeCommit, archiveURL)
             guard Darwin.unlink(archiveURL.path) == 0 else { throw Self.posixError() }
             committed = true
-            try storageCheckpoint?(.beforeDirectorySync, archiveURL)
-            try Self.syncDirectory(containing: archiveURL)
-            try? storageCheckpoint?(.afterCommit, archiveURL)
         }
+        // Retry must establish crash durability even when the first unlink already removed it.
+        try storageCheckpoint?(.beforeDirectorySync, archiveURL)
+        try Self.syncDirectory(containing: archiveURL)
+        try? storageCheckpoint?(.afterCommit, archiveURL)
     }
 
     /// Preserves the operating system failure code for vault callers.
