@@ -164,6 +164,13 @@ public enum CaptureCollector {
             return cancelled || (end.map { DispatchTime.now().uptimeNanoseconds >= $0 } ?? false)
         }
 
+        /// Distinguishes a caller's explicit invalidation from an elapsed budget.
+        var wasCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
         /// Starts the budget on first worker admission and rejects cancelled or expired work.
         /// A second call checks the same budget without resetting it.
         func beginWorker() -> Bool {
@@ -238,9 +245,9 @@ public enum CaptureCollector {
         completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
     ) -> Deadline? {
         captureAllowedForeground(target: .init(pid: pid, bundleID: bundleIdentifier, bundleURL: bundleURL),
-                                 trusted: { isTrusted() }, foregroundProvider: { foreground() },
-                                 read: { app, deadline in performCapture(app, deadline: deadline) },
-                                 workerAuthorized: { activeTargetMatches($0) },
+                                 environment: .init(trusted: { isTrusted() }, foregroundProvider: { foreground() },
+                                                    read: { app, deadline in performCapture(app, deadline: deadline) },
+                                                    workerAuthorized: { activeTargetMatches($0) }),
                                  onWorkerStart: onWorkerStart, completion: completion)
     }
 
@@ -252,98 +259,153 @@ public enum CaptureCollector {
             app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path == target.bundlePath
     }
 
+    /// Inputs that can change while an automatic request waits for actor and worker admission.
+    struct AllowedCaptureEnvironment: Sendable {
+        let trusted: @Sendable () -> Bool
+        let foregroundProvider: @MainActor @Sendable () -> Foreground?
+        let read: @Sendable (Foreground, Deadline) -> CaptureResult
+        let workerAuthorized: @Sendable (CaptureTarget) -> Bool
+        var seconds: TimeInterval = captureTimeout
+        var scheduleAdmission: AdmissionScheduler = { DispatchQueue.main.async(execute: $0) }
+    }
+
+    private enum AllowedOutcome: Sendable {
+        case result(CaptureResult)
+        case targetChanged
+        case permissionRequired
+        case deadlineExceeded
+        case cancelled
+
+        /// Indicates that a caller or queued worker invalidated this request.
+        var isCancellation: Bool { if case .cancelled = self { return true }; return false }
+        /// Indicates trust was revoked before a remote Accessibility read.
+        var isPermissionFailure: Bool { if case .permissionRequired = self { return true }; return false }
+        /// Indicates that the elapsed budget won the completion race.
+        var isTimeout: Bool { if case .deadlineExceeded = self { return true }; return false }
+        /// Indicates that the authorized application identity changed before delivery.
+        var isTargetChange: Bool { if case .targetChanged = self { return true }; return false }
+    }
+
+    /// Owns one automatic request from queue admission through its single main-actor delivery.
+    private final class AllowedAttempt: @unchecked Sendable {
+        let target: CaptureTarget
+        let environment: AllowedCaptureEnvironment
+        let deadline: Deadline
+        let onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)?
+        let completion: @MainActor @Sendable (CaptureResult) -> Void
+        let delivery = Delivery()
+
+        /// Freezes the authorized target and one set of callbacks for this request.
+        init(target: CaptureTarget, environment: AllowedCaptureEnvironment, deadline: Deadline,
+             onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)?,
+             completion: @escaping @MainActor @Sendable (CaptureResult) -> Void) {
+            self.target = target
+            self.environment = environment
+            self.deadline = deadline
+            self.onWorkerStart = onWorkerStart
+            self.completion = completion
+        }
+
+        /// Starts the deadline only when the serial worker first admits this request.
+        func beginOnWorker() {
+            workerRevision.advance()
+            guard deadline.beginWorker() else { dispatch(stoppedOutcome()); return }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + environment.seconds) {
+                self.dispatch(.deadlineExceeded)
+            }
+            requestAdmission()
+        }
+
+        /// Hops to AppKit's actor without occupying the serial AX worker.
+        func requestAdmission() {
+            environment.scheduleAdmission { self.admitOnMain() }
+        }
+
+        /// Captures a main-actor foreground identity and the worker activity revision.
+        @MainActor func admitOnMain() {
+            guard environment.trusted() else { finish(.permissionRequired); return }
+            guard !deadline.expired else { finish(.deadlineExceeded); return }
+            guard let app = environment.foregroundProvider(), target.matches(app) else {
+                finish(.targetChanged)
+                return
+            }
+            let revision = workerRevision.snapshot()
+            captureQueue.async { self.admitOnWorker(app: app, revision: revision) }
+        }
+
+        /// Rejects a stale actor snapshot or changed PID, bundle ID, and path before AX reads.
+        func admitOnWorker(app: Foreground, revision: UInt64) {
+            guard deadline.beginWorker() else { dispatch(stoppedOutcome()); return }
+            guard environment.trusted() else { dispatch(.permissionRequired); return }
+            if workerRevision.snapshot() != revision { requestAdmission(); return }
+            guard environment.workerAuthorized(target) else { dispatch(.targetChanged); return }
+            guard environment.trusted() else { dispatch(.permissionRequired); return }
+            guard !deadline.expired else { dispatch(.deadlineExceeded); return }
+            workerRevision.advance()
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            if let onWorkerStart { DispatchQueue.main.async { onWorkerStart(startedAt) } }
+            let result = environment.read(app, deadline)
+            workerRevision.advance()
+            dispatch(.result(result))
+        }
+
+        /// Preserves whether a failed worker admission was cancelled or timed out.
+        func stoppedOutcome() -> AllowedOutcome {
+            deadline.wasCancelled ? .cancelled : .deadlineExceeded
+        }
+
+        /// Moves a worker or timer outcome to the actor without waiting on a modal main loop.
+        func dispatch(_ outcome: AllowedOutcome) {
+            DispatchQueue.main.async { self.finish(outcome) }
+        }
+
+        /// Applies terminal priority and delivers at most once, including late worker replies.
+        @MainActor func finish(_ outcome: AllowedOutcome) {
+            delivery.once {
+                let result: CaptureResult
+                if !environment.trusted() || outcome.isPermissionFailure {
+                    result = CaptureResult(state: .permissionRequired, error: "Accessibility permission is unavailable")
+                } else if deadline.wasCancelled || outcome.isCancellation {
+                    result = CaptureResult(state: .readFailed, error: "Accessibility capture was cancelled")
+                } else if outcome.isTargetChange {
+                    result = CaptureResult(state: .readFailed,
+                                           error: "Allowed foreground application changed during AX read")
+                } else if deadline.expired || outcome.isTimeout {
+                    result = CaptureResult(state: .readFailed, error: "Accessibility capture deadline exceeded")
+                } else if !target.matches(environment.foregroundProvider()) {
+                    result = CaptureResult(state: .readFailed,
+                                           error: "Allowed foreground application changed during AX read")
+                } else if case .result(let captured) = outcome {
+                    result = captured
+                } else {
+                    result = CaptureResult(state: .readFailed, error: "Accessibility capture failed")
+                }
+                completion(result)
+            }
+        }
+    }
+
     /// Admits an automatic read after an actor-bound identity check without parking the AX worker.
     /// The scheduler is injectable to prove that a modal main-loop delay cannot block other work.
     @discardableResult
     @MainActor static func captureAllowedForeground(
-        target: CaptureTarget, trusted: @escaping @Sendable () -> Bool,
-        foregroundProvider: @escaping @MainActor @Sendable () -> Foreground?,
-        read: @escaping @Sendable (Foreground, Deadline) -> CaptureResult,
-        workerAuthorized: @escaping @Sendable (CaptureTarget) -> Bool,
-        seconds: TimeInterval = captureTimeout,
-        scheduleAdmission: @escaping AdmissionScheduler = { DispatchQueue.main.async(execute: $0) },
+        target: CaptureTarget, environment: AllowedCaptureEnvironment,
         onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
         completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
     ) -> Deadline? {
-        guard trusted() else {
+        guard environment.trusted() else {
             completion(CaptureResult(state: .permissionRequired, error: "Accessibility permission is unavailable"))
             return nil
         }
-        guard target.matches(foregroundProvider()) else {
+        guard target.matches(environment.foregroundProvider()) else {
             completion(CaptureResult(state: .readFailed, error: "Allowed foreground application changed"))
             return nil
         }
-        let deadline = Deadline(seconds: seconds, startWhenWorkerBegins: true)
-        let delivery = Delivery()
-        let finish: @MainActor @Sendable (CaptureResult?) -> Void = { result in
-            guard trusted(), !deadline.expired, target.matches(foregroundProvider()) else {
-                completion(CaptureResult(state: .readFailed, error: "Allowed foreground application changed during AX read"))
-                return
-            }
-            completion(result ?? CaptureResult(state: .readFailed, error: "Accessibility capture deadline exceeded"))
-        }
-        captureQueue.async {
-            workerRevision.advance()
-            defer { workerRevision.advance() }
-            guard deadline.beginWorker() else {
-                DispatchQueue.main.async { delivery.deliver(nil, to: finish) }
-                return
-            }
-            // Timeout and cancellation continue while a modal loop defers main-queue callbacks.
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) {
-                deadline.cancel()
-                DispatchQueue.main.async { delivery.deliver(nil, to: finish) }
-            }
-            admitAllowed(target: target, trusted: trusted, foregroundProvider: foregroundProvider,
-                         read: read, workerAuthorized: workerAuthorized, deadline: deadline,
-                         scheduleAdmission: scheduleAdmission,
-                         onWorkerStart: onWorkerStart, delivery: delivery, finish: finish)
-        }
+        let deadline = Deadline(seconds: environment.seconds, startWhenWorkerBegins: true)
+        let attempt = AllowedAttempt(target: target, environment: environment, deadline: deadline,
+                                     onWorkerStart: onWorkerStart, completion: completion)
+        captureQueue.async { attempt.beginOnWorker() }
         return deadline
-    }
-
-    /// Repeats actor admission if intervening serial work could stale its foreground snapshot.
-    private static func admitAllowed(
-        target: CaptureTarget, trusted: @escaping @Sendable () -> Bool,
-        foregroundProvider: @escaping @MainActor @Sendable () -> Foreground?,
-        read: @escaping @Sendable (Foreground, Deadline) -> CaptureResult,
-        workerAuthorized: @escaping @Sendable (CaptureTarget) -> Bool,
-        deadline: Deadline, scheduleAdmission: @escaping AdmissionScheduler,
-        onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)?, delivery: Delivery,
-        finish: @escaping @MainActor @Sendable (CaptureResult?) -> Void
-    ) {
-        scheduleAdmission {
-            let app = foregroundProvider()
-            guard trusted(), !deadline.expired, let app, target.matches(app) else {
-                delivery.deliver(CaptureResult(state: .readFailed,
-                    error: "Allowed foreground application changed before AX read"), to: finish)
-                return
-            }
-            let revision = workerRevision.snapshot()
-            captureQueue.async {
-                guard deadline.beginWorker(), trusted() else {
-                    DispatchQueue.main.async { delivery.deliver(nil, to: finish) }
-                    return
-                }
-                if workerRevision.snapshot() != revision {
-                    admitAllowed(target: target, trusted: trusted, foregroundProvider: foregroundProvider,
-                                 read: read, workerAuthorized: workerAuthorized, deadline: deadline,
-                                 scheduleAdmission: scheduleAdmission,
-                                 onWorkerStart: onWorkerStart, delivery: delivery, finish: finish)
-                    return
-                }
-                guard workerAuthorized(target), trusted(), !deadline.expired else {
-                    DispatchQueue.main.async { delivery.deliver(nil, to: finish) }
-                    return
-                }
-                workerRevision.advance()
-                defer { workerRevision.advance() }
-                let startedAt = ProcessInfo.processInfo.systemUptime
-                if let onWorkerStart { DispatchQueue.main.async { onWorkerStart(startedAt) } }
-                let result = read(app, deadline)
-                DispatchQueue.main.async { delivery.deliver(deadline.expired ? nil : result, to: finish) }
-            }
-        }
     }
 
     /// Serializes AX work and gives a queued request its budget when admitted to the worker.

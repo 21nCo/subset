@@ -5,6 +5,7 @@ import XCTest
 private final class DeliveryCount: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
+    /// Counts worker reads or deliveries safely across test queues.
     func increment() -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -25,18 +26,21 @@ private final class ForegroundFixture: @unchecked Sendable {
 
     init(_ initial: CaptureCollector.Foreground) { current = initial }
 
+    /// Returns a synchronized foreground identity for admission fixtures.
     func snapshot() -> CaptureCollector.Foreground {
         lock.lock()
         defer { lock.unlock() }
         return current
     }
 
+    /// Returns the fixture permission state without relying on system TCC.
     func isTrusted() -> Bool {
         lock.lock()
         defer { lock.unlock() }
         return permission
     }
 
+    /// Changes foreground identity and permission as one synchronized event.
     func update(_ foreground: CaptureCollector.Foreground, trusted: Bool = true) {
         lock.lock()
         current = foreground
@@ -50,6 +54,7 @@ private final class DeferredAdmission: @unchecked Sendable {
     private let stored = DispatchSemaphore(value: 0)
     private var callback: (@MainActor @Sendable () -> Void)?
 
+    /// Holds a main-actor admission callback to simulate a deferred modal loop.
     func schedule(_ callback: @escaping @MainActor @Sendable () -> Void) {
         lock.lock()
         self.callback = callback
@@ -57,8 +62,10 @@ private final class DeferredAdmission: @unchecked Sendable {
         stored.signal()
     }
 
+    /// Waits until the automatic request has requested actor admission.
     func waitUntilScheduled() -> Bool { stored.wait(timeout: .now() + 1) == .success }
 
+    /// Releases one deferred admission callback on the main actor.
     @MainActor func resume() {
         lock.lock()
         let pending = callback
@@ -68,6 +75,7 @@ private final class DeferredAdmission: @unchecked Sendable {
     }
 }
 
+/// Asserts that replacement work starts only after the cancelled AX worker exits.
 @MainActor private func verifyWorkerDrain(workerFinished: DeliveryCount, drained: XCTestExpectation) {
     CaptureCollector.afterCaptureWorkerDrains {
         XCTAssertEqual(workerFinished.increment(), 2,
@@ -77,6 +85,7 @@ private final class DeferredAdmission: @unchecked Sendable {
 }
 
 final class CaptureCoreTests: XCTestCase {
+    /// Checks request tokens fence late menu results without rejecting the replacement.
     @MainActor func testCancelledMenuCaptureCannotPresentLateResultOrReplaceNewCapture() {
         let requests = CaptureRequestGate()
         let cancelled = requests.begin()
@@ -87,6 +96,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertFalse(requests.finish(replacement))
     }
 
+    /// Proves secure AX roles are skipped before their values can be read.
     func testProtectedRolesAreExcluded() {
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXTextField", subrole: "AXSecureTextField"))
         XCTAssertTrue(CaptureCollector.shouldSkip(role: "AXPasswordField", subrole: ""))
@@ -113,6 +123,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(ordinary?.text, "ordinary")
     }
 
+    /// Checks fixture text cannot appear after the expected window changes.
     func testMenuFixtureBindingMasksForegroundSwitchBeforeAlert() {
         let fixture = "MGraph Menu Fixture abcdef12.txt"
         let expected = CaptureResult(state: .available,
@@ -152,12 +163,14 @@ final class CaptureCoreTests: XCTestCase {
         }
     }
 
+    /// Checks normalized output stays within the character budget.
     func testTextNormalizationHasStrictLimit() {
         XCTAssertEqual(CaptureCollector.normalize("  Hello\n\tworld  ", remaining: 8), "Hello wo")
         XCTAssertEqual(CaptureCollector.normalize("secret", remaining: 0), "")
         XCTAssertEqual(CaptureCollector.normalize(String(repeating: "x", count: 1_000_000), remaining: 3), "xxx")
     }
 
+    /// Rejects oversized AX child arrays before their elements are traversed.
     func testOversizedAXArraysAreRejectedBeforeRangeRead() {
         for limit in [30, 100] { // Identity and text traversals.
             var read = false
@@ -171,6 +184,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNil(shortRead)
     }
 
+    /// Checks a slow one-shot read cannot publish text after its deadline.
     func testSlowCaptureIsBoundedAndLateTextIsDiscarded() {
         let deadline = CaptureCollector.Deadline(seconds: 0.03)
         let start = Date()
@@ -183,11 +197,13 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 0.35)
     }
 
+    /// Checks empty AX content reports an unsupported source.
     func testEmptyTreeIsUnsupported() {
         XCTAssertEqual(CaptureCollector.stateForText(""), .unsupportedApplication)
         XCTAssertEqual(CaptureCollector.stateForText("fixture body"), .available)
     }
 
+    /// Separates missing user consent from missing foreground availability.
     func testCliConsentAndForegroundOutcomesAreDistinct() {
         XCTAssertEqual(CaptureCollector.cliConsentFailure(approved: false, foregroundAvailable: false)?.state,
                        .readFailed)
@@ -196,6 +212,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNil(CaptureCollector.cliConsentFailure(approved: true, foregroundAvailable: true))
     }
 
+    /// Fences text when the AX source changes inside the same process.
     func testSameProcessWindowAndTabChangesDiscardCapturedText() {
         let fixtureDocument = FileManager.default.temporaryDirectory
             .appendingPathComponent("mgraph-source-\(UUID().uuidString)").absoluteString
@@ -239,6 +256,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNil(changedFinalText.text)
     }
 
+    /// Rejects old page text when navigation changes source identity.
     func testUnavailableMetadataSameWindowNavigationRejectsPriorPageText() {
         let sameOpaqueSource = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: nil,
                                                                document: nil, focusedElement: nil,
@@ -267,6 +285,7 @@ final class CaptureCoreTests: XCTestCase {
                        .available)
     }
 
+    /// Rechecks the source after the last text read before publishing it.
     func testSameProcessSwitchDuringLastTextReadRejectsPriorWindow() {
         let original = CaptureCollector.SourceIdentity(pid: 42, window: 10, title: "First",
                                                        document: nil, focusedElement: 50,
@@ -290,6 +309,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNil(result.windowTitle)
     }
 
+    /// Avoids reading background content when no focused window exists.
     func testUnavailableFocusedWindowNeverFallsBackToBackgroundWindowsOrApplicationRoot() {
         let background = AXUIElementCreateApplication(43)
         let otherBackground = AXUIElementCreateApplication(44)
@@ -316,6 +336,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(CFHash(focused!), CFHash(background))
     }
 
+    /// Checks the menu callback arrives by its deadline and only once.
     func testMenuRunnerReturnsOnDeadlineWithoutPublishingLateText() {
         let done = expectation(description: "asynchronous capture finishes")
         let noSecondDelivery = expectation(description: "late worker does not deliver again")
@@ -337,6 +358,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [noSecondDelivery], timeout: 0.65)
     }
 
+    /// Checks worker drain orders replacement after cancellation.
     @MainActor func testMenuCannotStartReplacementUntilCancelledWorkerDrains() {
         let workerFinished = DeliveryCount()
         let drained = expectation(description: "serial AX worker drained")
@@ -355,6 +377,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [drained], timeout: 1)
     }
 
+    /// Starts the manual budget when its queued AX worker actually begins.
     func testManualCaptureGetsFullDeadlineAfterSlowAutomaticWorkerDrains() {
         let manualFinished = expectation(description: "manual capture inspects the new foreground source")
         let started = Date()
@@ -377,6 +400,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [manualFinished], timeout: 1)
     }
 
+    /// Checks manual contention and invalidation cannot bypass capture throttling.
     @MainActor func testAutomaticAXStartsStayThreeSecondsApartAfterManualContentionAndSwitch() {
         let secondStarted = expectation(description: "second automatic AX worker starts after interval")
         let gate = RecordingGate()
@@ -421,6 +445,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [secondStarted], timeout: 8)
     }
 
+    /// Measures the next automatic AX start against the previous worker start.
     @MainActor private func startSecondAutomaticCapture(gate: RecordingGate, firstStart: TimeInterval,
                                                          done: XCTestExpectation) {
         guard let nextToken = gate.begin(at: ProcessInfo.processInfo.systemUptime) else {
@@ -441,6 +466,7 @@ final class CaptureCoreTests: XCTestCase {
         }
     }
 
+    /// Ensures a paused queued request skips AX while subsequent manual work runs.
     func testPausedQueuedCaptureSkipsAXAndLaterManualCaptureRuns() {
         let pausedFinished = expectation(description: "paused request completes without AX")
         let manualFinished = expectation(description: "manual request runs after worker drain")
@@ -473,6 +499,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [pausedFinished, manualFinished], timeout: 1)
     }
 
+    /// Rejects an excluded foreground switch before any reader invocation.
     @MainActor func testAutomaticCaptureRejectsExcludedTargetBeforeAnyAXRead() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -496,14 +523,14 @@ final class CaptureCoreTests: XCTestCase {
         let target = CaptureCollector.CaptureTarget(pid: allowed.pid,
             bundleID: "com.example.allowed", bundleURL: allowedURL)
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: {
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: {
                 XCTAssertTrue(Thread.isMainThread, "AppKit foreground reads must remain on the menu actor")
                 return fixture.snapshot()
             },
             read: { _, _ in
                 _ = axReads.increment()
                 return CaptureResult(state: .available, text: "unexpected text")
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) })) { result in
                 XCTAssertEqual(result.state, .readFailed)
                 XCTAssertEqual(axReads.count, 0, "Excluded app must receive zero AX calls")
                 completed.fulfill()
@@ -514,6 +541,7 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [completed], timeout: 2)
     }
 
+    /// Rejects same-ID path substitution and permission loss.
     @MainActor func testAutomaticCaptureRejectsPathSubstitutionAndRevokedPermission() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -526,11 +554,11 @@ final class CaptureCoreTests: XCTestCase {
         fixture.update(.init(pid: 101, name: "Substitute", bundleID: "com.example.allowed",
                              bundlePath: "/Other/Allowed.app"))
         let denied = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
             read: { _, _ in
                 _ = axReads.increment()
                 return CaptureResult(state: .available)
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) })) { result in
                 XCTAssertEqual(result.state, .readFailed)
                 otherPath.fulfill()
             }
@@ -541,11 +569,11 @@ final class CaptureCoreTests: XCTestCase {
         fixture.update(allowed, trusted: false)
         let revoked = expectation(description: "revoked permission denies automatic capture")
         let permissionDenied = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
             read: { _, _ in
                 _ = axReads.increment()
                 return CaptureResult(state: .available)
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) })) { result in
                 XCTAssertNotEqual(result.state, .available)
                 revoked.fulfill()
             }
@@ -554,6 +582,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(axReads.count, 0)
     }
 
+    /// Allows exactly one read for an unchanged authorized app.
     @MainActor func testAutomaticCaptureReadsUnchangedAllowedTarget() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -564,12 +593,12 @@ final class CaptureCoreTests: XCTestCase {
         let reads = DeliveryCount()
         let completed = expectation(description: "allowed target is read once")
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
             read: { app, _ in
                 _ = reads.increment()
                 return CaptureResult(state: .available,
                     source: .init(bundleIdentifier: app.bundleID, processIdentifier: app.pid), text: "allowed")
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) })) { result in
                 XCTAssertEqual(result.state, .available)
                 XCTAssertEqual(result.text, "allowed")
                 completed.fulfill()
@@ -579,6 +608,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(reads.count, 1)
     }
 
+    /// Keeps the serial worker moving while actor admission is deferred and reports timeout.
     @MainActor func testDeferredAutomaticAdmissionDoesNotBlockManualWorkerOrReadAfterDeadline() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -588,16 +618,19 @@ final class CaptureCoreTests: XCTestCase {
             bundleID: "com.example.allowed", bundleURL: allowedURL)
         let deferred = DeferredAdmission()
         let axReads = DeliveryCount()
+        let completions = DeliveryCount()
         let timedOut = expectation(description: "automatic request expires while actor admission is deferred")
         let manualFinished = expectation(description: "manual worker runs while admission is deferred")
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
             read: { _, _ in
                 _ = axReads.increment()
                 return CaptureResult(state: .available, text: "unexpected")
             }, workerAuthorized: { target in target.matches(fixture.snapshot()) },
-            seconds: 0.1, scheduleAdmission: { deferred.schedule($0) }) { result in
-                XCTAssertNotEqual(result.state, .available)
+            seconds: 0.1, scheduleAdmission: { deferred.schedule($0) })) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(result.error, "Accessibility capture deadline exceeded")
+                _ = completions.increment()
                 timedOut.fulfill()
             }
         XCTAssertNotNil(deadline)
@@ -611,9 +644,12 @@ final class CaptureCoreTests: XCTestCase {
         }
         wait(for: [manualFinished, timedOut], timeout: 1)
         deferred.resume()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(completions.count, 1, "Late admission must not deliver a second outcome")
         XCTAssertEqual(axReads.count, 0, "Expired admission must never call AX")
     }
 
+    /// Checks explicit cancellation has its own outcome and no late AX read.
     @MainActor func testCancelledAutomaticAdmissionMakesNoAXRead() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let foreground = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -622,15 +658,18 @@ final class CaptureCoreTests: XCTestCase {
             bundleID: "com.example.allowed", bundleURL: allowedURL)
         let deferred = DeferredAdmission()
         let reads = DeliveryCount()
+        let completions = DeliveryCount()
         let completed = expectation(description: "cancelled admission finishes without AX")
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { true }, foregroundProvider: { foreground },
+            environment: .init(trusted: { true }, foregroundProvider: { foreground },
             read: { _, _ in
                 _ = reads.increment()
                 return CaptureResult(state: .available, text: "unexpected")
             }, workerAuthorized: { target in target.matches(foreground) },
-            seconds: 0.2, scheduleAdmission: { deferred.schedule($0) }) { result in
-                XCTAssertNotEqual(result.state, .available)
+            seconds: 0.2, scheduleAdmission: { deferred.schedule($0) })) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(result.error, "Accessibility capture was cancelled")
+                _ = completions.increment()
                 completed.fulfill()
             }
         XCTAssertNotNil(deadline)
@@ -638,9 +677,42 @@ final class CaptureCoreTests: XCTestCase {
         deadline?.cancel() // Pause, exclusion, sleep, and revocation fence this token.
         deferred.resume()
         wait(for: [completed], timeout: 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertEqual(completions.count, 1, "Later timer must not repeat cancellation delivery")
         XCTAssertEqual(reads.count, 0)
     }
 
+    /// Reports a permission revocation during deferred admission without making an AX call.
+    @MainActor func testRevokedPermissionDuringAdmissionHasDistinctOutcome() {
+        let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
+        let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
+            bundleID: "com.example.allowed", bundlePath: allowedURL.path)
+        let fixture = ForegroundFixture(allowed)
+        let target = CaptureCollector.CaptureTarget(pid: allowed.pid,
+            bundleID: "com.example.allowed", bundleURL: allowedURL)
+        let deferred = DeferredAdmission()
+        let reads = DeliveryCount()
+        let completed = expectation(description: "revocation during admission reports permission")
+        let deadline = CaptureCollector.captureAllowedForeground(target: target,
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+                read: { _, _ in
+                    _ = reads.increment()
+                    return CaptureResult(state: .available, text: "unexpected")
+                }, workerAuthorized: { target in target.matches(fixture.snapshot()) },
+                seconds: 0.2, scheduleAdmission: { deferred.schedule($0) })) { result in
+            XCTAssertEqual(result.state, .permissionRequired)
+            XCTAssertEqual(result.error, "Accessibility permission is unavailable")
+            completed.fulfill()
+        }
+        XCTAssertNotNil(deadline)
+        XCTAssertTrue(deferred.waitUntilScheduled())
+        fixture.update(allowed, trusted: false)
+        deferred.resume()
+        wait(for: [completed], timeout: 1)
+        XCTAssertEqual(reads.count, 0)
+    }
+
+    /// Invalidates an actor snapshot when manual AX work intervenes.
     @MainActor func testManualWorkBetweenAdmissionAndAXRechecksForeground() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -656,7 +728,7 @@ final class CaptureCoreTests: XCTestCase {
         let manualStarted = expectation(description: "manual AX work begins after automatic admission")
         let completed = expectation(description: "foreground switch blocks automatic AX read")
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: {
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: {
                 if snapshots.increment() == 2 {
                     CaptureCollector.runAsync(deadline: .init(seconds: 0.2, startWhenWorkerBegins: true),
                                               seconds: 0.2, work: {
@@ -671,8 +743,9 @@ final class CaptureCoreTests: XCTestCase {
             }, read: { _, _ in
                 _ = reads.increment()
                 return CaptureResult(state: .available, text: "unexpected")
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
-                XCTAssertNotEqual(result.state, .available)
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) })) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(result.error, "Allowed foreground application changed during AX read")
                 completed.fulfill()
             }
         XCTAssertNotNil(deadline)
@@ -683,6 +756,7 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(reads.count, 0, "Switch after admission must still produce zero AX calls")
     }
 
+    /// Rechecks worker identity after an actor snapshot even without other work.
     @MainActor func testSwitchAfterActorSnapshotWithoutOtherWorkSkipsAX() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -692,26 +766,33 @@ final class CaptureCoreTests: XCTestCase {
         let fixture = ForegroundFixture(allowed)
         let snapshots = DeliveryCount()
         let reads = DeliveryCount()
+        let completions = DeliveryCount()
         let completed = expectation(description: "worker rejects a switch after the actor snapshot")
         let target = CaptureCollector.CaptureTarget(pid: 101,
             bundleID: "com.example.allowed", bundleURL: allowedURL)
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { fixture.isTrusted() }, foregroundProvider: {
+            environment: .init(trusted: { fixture.isTrusted() }, foregroundProvider: {
                 let snapshot = fixture.snapshot()
                 if snapshots.increment() == 2 { fixture.update(excluded) }
                 return snapshot
             }, read: { _, _ in
                 _ = reads.increment()
                 return CaptureResult(state: .available, text: "unexpected")
-            }, workerAuthorized: { target in target.matches(fixture.snapshot()) }) { result in
-                XCTAssertNotEqual(result.state, .available)
+            }, workerAuthorized: { target in target.matches(fixture.snapshot()) },
+            seconds: 0.2)) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(result.error, "Allowed foreground application changed during AX read")
+                _ = completions.increment()
                 completed.fulfill()
             }
         XCTAssertNotNil(deadline)
         wait(for: [completed], timeout: 2)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertEqual(completions.count, 1, "Later timeout must not replace switch outcome")
         XCTAssertEqual(reads.count, 0, "Worker must check the current target before AX")
     }
 
+    /// Stops before AX when the identity recheck consumes the deadline.
     @MainActor func testExpiredWorkerIdentityCheckCannotStartAX() {
         let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
         let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
@@ -722,15 +803,16 @@ final class CaptureCoreTests: XCTestCase {
         let completed = expectation(description: "deadline is reported during a slow identity check")
         let drained = expectation(description: "slow worker exits before final AX assertion")
         let deadline = CaptureCollector.captureAllowedForeground(target: target,
-            trusted: { true }, foregroundProvider: { allowed },
+            environment: .init(trusted: { true }, foregroundProvider: { allowed },
             read: { _, _ in
                 _ = reads.increment()
                 return CaptureResult(state: .available, text: "unexpected")
             }, workerAuthorized: { _ in
                 Thread.sleep(forTimeInterval: 0.08)
                 return true
-            }, seconds: 0.03) { result in
-                XCTAssertNotEqual(result.state, .available)
+            }, seconds: 0.03)) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(result.error, "Accessibility capture deadline exceeded")
                 completed.fulfill()
             }
         XCTAssertNotNil(deadline)
