@@ -280,19 +280,71 @@ final class CaptureCoreTests: XCTestCase {
         DispatchQueue.main.async {
             let deadline = CaptureCollector.Deadline(seconds: 0.03)
             CaptureCollector.runAsync(deadline: deadline, seconds: 0.03, work: {
+                DispatchQueue.main.async {
+                    deadline.cancel()
+                    CaptureCollector.afterCaptureWorkerDrains {
+                        XCTAssertEqual(workerFinished.increment(), 2,
+                                       "Capture must stay disabled until the old AX work exits")
+                        drained.fulfill()
+                    }
+                }
                 Thread.sleep(forTimeInterval: 0.2)
                 _ = workerFinished.increment()
                 return CaptureResult(state: .readFailed)
             }) { _ in
                 // Delivery is intentionally ignored; only the worker drain orders the next request.
             }
-            deadline.cancel()
-            CaptureCollector.afterCaptureWorkerDrains {
-                XCTAssertEqual(workerFinished.increment(), 2,
-                               "Capture must stay disabled until the old AX work exits")
-                drained.fulfill()
-            }
         }
         wait(for: [drained], timeout: 1)
+    }
+
+    func testManualCaptureGetsFullDeadlineAfterSlowAutomaticWorkerDrains() {
+        let manualFinished = expectation(description: "manual capture inspects the new foreground source")
+        let started = Date()
+        DispatchQueue.main.async {
+            CaptureCollector.runAsync(deadline: .init(seconds: 0.03), seconds: 0.03, work: {
+                Thread.sleep(forTimeInterval: 0.18) // automatic AX work from the previous app
+                return CaptureResult(state: .available, text: "old app")
+            }) { _ in }
+            let manualDeadline = CaptureCollector.Deadline(seconds: 0.05, startWhenWorkerBegins: true)
+            CaptureCollector.runAsync(deadline: manualDeadline, seconds: 0.05, work: {
+                CaptureResult(state: .available, text: "new foreground app")
+            }) { result in
+                XCTAssertGreaterThan(Date().timeIntervalSince(started), 0.12)
+                XCTAssertEqual(result?.text, "new foreground app")
+                manualFinished.fulfill()
+            }
+        }
+        wait(for: [manualFinished], timeout: 1)
+    }
+
+    func testPausedQueuedCaptureSkipsAXAndLaterManualCaptureRuns() {
+        let pausedFinished = expectation(description: "paused request completes without AX")
+        let manualFinished = expectation(description: "manual request runs after worker drain")
+        let pausedReads = DeliveryCount()
+        DispatchQueue.main.async {
+            CaptureCollector.runAsync(deadline: .init(seconds: 0.03), seconds: 0.03, work: {
+                Thread.sleep(forTimeInterval: 0.15)
+                return CaptureResult(state: .available, text: "old app")
+            }) { _ in }
+            let pausedDeadline = CaptureCollector.Deadline(seconds: 0.05, startWhenWorkerBegins: true)
+            CaptureCollector.runAsync(deadline: pausedDeadline, seconds: 0.05, work: {
+                _ = pausedReads.increment()
+                return CaptureResult(state: .available, text: "paused content")
+            }) { result in
+                XCTAssertNil(result)
+                pausedFinished.fulfill()
+            }
+            pausedDeadline.cancel() // pause or foreground switch before AX admission
+            let manualDeadline = CaptureCollector.Deadline(seconds: 0.05, startWhenWorkerBegins: true)
+            CaptureCollector.runAsync(deadline: manualDeadline, seconds: 0.05, work: {
+                CaptureResult(state: .available, text: "fresh manual content")
+            }) { result in
+                XCTAssertEqual(result?.text, "fresh manual content")
+                XCTAssertEqual(pausedReads.increment(), 1, "cancelled request must not enter AX")
+                manualFinished.fulfill()
+            }
+        }
+        wait(for: [pausedFinished, manualFinished], timeout: 1)
     }
 }

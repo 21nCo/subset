@@ -103,17 +103,30 @@ public enum CaptureCollector {
     // The lock also prevents a late AX reply from publishing text after a deadline.
     public final class Deadline: @unchecked Sendable {
         private let lock = NSLock()
-        private let end: UInt64
+        private let duration: UInt64
+        private var end: UInt64?
         private var cancelled = false
 
-        public init(seconds: TimeInterval) {
-            end = DispatchTime.now().uptimeNanoseconds + UInt64(max(0, seconds) * 1_000_000_000)
+        public init(seconds: TimeInterval, startWhenWorkerBegins: Bool = false) {
+            duration = UInt64(max(0, seconds) * 1_000_000_000)
+            end = startWhenWorkerBegins ? nil : DispatchTime.now().uptimeNanoseconds + duration
         }
 
         public var expired: Bool {
             lock.lock()
             defer { lock.unlock() }
-            return cancelled || DispatchTime.now().uptimeNanoseconds >= end
+            return cancelled || (end.map { DispatchTime.now().uptimeNanoseconds >= $0 } ?? false)
+        }
+
+        // A queued menu request gets its AX budget only when the serial worker is free.
+        // Cancellation while queued prevents the worker from reading any AX content.
+        func beginWorker() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if cancelled { return false }
+            if end == nil { end = DispatchTime.now().uptimeNanoseconds + duration }
+            guard let end else { return false }
+            return DispatchTime.now().uptimeNanoseconds < end
         }
 
         public func cancel() {
@@ -150,7 +163,7 @@ public enum CaptureCollector {
             completion(CaptureResult(state: .noForegroundApplication, error: "No foreground application"))
             return nil
         }
-        let deadline = Deadline(seconds: captureTimeout)
+        let deadline = Deadline(seconds: captureTimeout, startWhenWorkerBegins: true)
         runAsync(deadline: deadline, seconds: captureTimeout, work: {
             performCapture(app, deadline: deadline)
         }) { result in
@@ -165,12 +178,16 @@ public enum CaptureCollector {
                                     completion: @escaping @MainActor @Sendable (CaptureResult?) -> Void) {
         let delivery = Delivery()
         captureQueue.async {
+            guard deadline.beginWorker() else {
+                DispatchQueue.main.async { delivery.deliver(nil, to: completion) }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                deadline.cancel()
+                delivery.deliver(nil, to: completion)
+            }
             let result = work()
             DispatchQueue.main.async { delivery.deliver(deadline.expired ? nil : result, to: completion) }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-            deadline.cancel()
-            delivery.deliver(nil, to: completion)
         }
     }
 
