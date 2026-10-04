@@ -5,14 +5,17 @@ import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
-  graphSnapshotSchema, parseGraphSnapshot, parseObservation, processingStatusSchema,
+  parseGraphSnapshot, parseObservation, processingStatusSchema,
   type GraphSnapshot, type Observation,
 } from '@subset/mgraph-contracts';
 
-export const STORE_SCHEMA_VERSION = 4;
+/** SQLite layout understood by writers and required by read-only clients. */
+export const STORE_SCHEMA_VERSION = 5;
 const uuid = z.uuid();
 const checkpointSchema = z.strictObject({ stage: z.string().min(1).max(128), cursor: z.string().max(4096).optional() });
+/** Persisted worker progress that survives lease expiry and process restart. */
 export type JobCheckpoint = z.infer<typeof checkpointSchema>;
+/** A claim scoped to one source revision and one expiring worker lease. */
 export type ProcessingJob = {
   jobId: string;
   workerId: string;
@@ -37,9 +40,12 @@ type JobRow = {
 type JsonRow = { payload: string };
 type IdRow = { source_id: string };
 
+/** A valid operation that conflicts with source identity, revision, or lease state. */
 export class StoreConflict extends Error { constructor(message: string) { super(message); this.name = 'StoreConflict'; } }
+/** A database or schema condition that prevents this process from serving the store. */
 export class StoreUnavailable extends Error { constructor(message: string) { super(message); this.name = 'StoreUnavailable'; } }
 
+/** Resolve the database path so aliases contend for the same writer sidecar. */
 function canonicalPath(filename: string): string {
   if (filename === ':memory:') throw new StoreUnavailable('Store requires a local database file');
   const full = resolve(filename);
@@ -50,6 +56,7 @@ function canonicalPath(filename: string): string {
   }
 }
 
+/** Hold an OS-released SQLite write lock for the writer handle's lifetime. */
 function acquireWriterLock(filename: string): DatabaseSync {
   // SQLite's OS lock is released on process death. Unlike a PID file, it cannot be
   // reclaimed by a racing opener while a new owner is initializing or closing.
@@ -67,30 +74,55 @@ function acquireWriterLock(filename: string): DatabaseSync {
   }
 }
 
+/** Hash the exact spelling stored by pre-v4 observation ledgers. */
 function rawIdHash(id: string): string { return createHash('sha256').update(id).digest('hex'); }
+/** Hash the canonical identity used by current writes. */
 function idHash(id: string): string { return rawIdHash(id.toLowerCase()); }
+/** Digest a validated graph for completion replay checks. */
 function graphHash(graph: GraphSnapshot): string { return createHash('sha256').update(JSON.stringify(graph)).digest('hex'); }
+/** Reject malformed UUIDs and fold accepted IDs for SQLite lookups. */
 function canonicalId(id: string): string { return uuid.parse(id).toLowerCase(); }
 const uuidFields = new Set(['sourceId', 'observationId', 'targetObservationId', 'passageId', 'claimId', 'profileId',
   'relationshipId', 'clusterId', 'fromProfileId', 'toProfileId']);
 const uuidArrays = new Set(['claimIds', 'memberProfileIds']);
 
-function canonicalPayload(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalPayload);
+/** Fold only declared UUID fields and reference arrays; schemas reject other input. */
+function canonicalPayload(value: unknown, ancestors = new Set<object>(), depth = 0): unknown {
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+  if (depth > 32 || ancestors.has(value)) throw new TypeError('Invalid cyclic or deeply nested graph');
+  ancestors.add(value);
+  const fold = (field: unknown): unknown => canonicalPayload(field, ancestors, depth + 1);
+  const result = Array.isArray(value) ? value.map(fold) : Object.fromEntries(Object.entries(value).map(([key, field]) => {
     if (uuidFields.has(key) && typeof field === 'string') return [key, field.toLowerCase()];
     if (uuidArrays.has(key) && Array.isArray(field)) return [key, field.map(item => typeof item === 'string' ? item.toLowerCase() : item)];
-    return [key, canonicalPayload(field)];
+    return [key, fold(field)];
   }));
+  ancestors.delete(value);
+  return result;
 }
 
-function canonicalObservation(input: unknown): Observation {
-  return parseObservation(canonicalPayload(parseObservation(input)));
+/** Fold UUIDs after one SET-5 validation; canonical spelling preserves content hashes. */
+function canonicalObservation(parsed: Observation): Observation {
+  return canonicalPayload(parsed) as Observation;
 }
 
+/** Fold UUID spelling before one graph validation so mixed-case references agree. */
 function canonicalGraph(input: unknown): GraphSnapshot {
-  return parseGraphSnapshot(canonicalPayload(graphSnapshotSchema.parse(input)));
+  return parseGraphSnapshot(canonicalPayload(input));
+}
+
+/** An opaque old hash without its UUID cannot prove case-insensitive identity. */
+function assertResolvableLegacyLedger(db: DatabaseSync, version: number): void {
+  const retained = new Set<string>();
+  for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
+    retained.add(rawIdHash(row.observation_id));
+    retained.add(idHash(row.observation_id));
+  }
+  for (const row of db.prepare('SELECT id_hash FROM observation_ids').all() as { id_hash: string }[]) {
+    if (!retained.has(row.id_hash)) {
+      throw new StoreUnavailable(`V${version} observation ID ledger has an unresolvable retired ID; restore a backup or start a new store`);
+    }
+  }
 }
 
 /** Reject aliases before legacy rows or the canonical ID ledger can collide. */
@@ -106,8 +138,8 @@ function assertNoCaseFoldCollisions(db: DatabaseSync): void {
 /** Normalize retained UUIDs and references before a v4 writer can serve requests. */
 function normalizePersistedIds(db: DatabaseSync): void {
   assertNoCaseFoldCollisions(db);
-  // Legacy v3 hashes for already purged IDs cannot be reversed. Reserve every
-  // retained observation under its canonical identity before changing rows.
+  // The preflight rejects unresolvable hashes. Reserve each retained observation
+  // under its canonical identity before changing its stored spelling.
   for (const row of db.prepare('SELECT observation_id FROM observations').all() as { observation_id: string }[]) {
     db.prepare('INSERT OR IGNORE INTO observation_ids(id_hash) VALUES (?)').run(idHash(row.observation_id.toLowerCase()));
   }
@@ -119,20 +151,20 @@ function normalizePersistedIds(db: DatabaseSync): void {
     UPDATE evidence SET source_id = lower(source_id), entity_id = lower(entity_id);
     UPDATE evidence_terms SET source_id = lower(source_id);`);
   for (const row of db.prepare('SELECT observation_id, payload FROM observations').all() as { observation_id: string; payload: string }[]) {
-    const payload = canonicalObservation(JSON.parse(row.payload));
+    const payload = canonicalObservation(parseObservation(JSON.parse(row.payload)));
     db.prepare('UPDATE observations SET payload = ? WHERE observation_id = ?').run(JSON.stringify(payload), row.observation_id);
   }
   for (const row of db.prepare('SELECT kind, entity_id, payload FROM evidence').all() as { kind: string; entity_id: string; payload: string }[]) {
     db.prepare('UPDATE evidence SET payload = ? WHERE kind = ? AND entity_id = ?')
       .run(JSON.stringify(canonicalPayload(JSON.parse(row.payload))), row.kind, row.entity_id);
   }
-  rebuildSearchTerms(db);
   for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
     .all() as { job_id: string; source_id: string; observation_id: string }[]) {
     db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?')
       .run(graphHash(storedCompletedGraph(db, row.source_id, row.observation_id)), row.job_id);
   }
 }
+/** Reconstruct a completion for provenance checks and replay digest migration. */
 function storedCompletedGraph(db: DatabaseSync, sourceId: string, observationId: string): GraphSnapshot {
   const observation = db.prepare('SELECT payload FROM observations WHERE source_id = ? AND observation_id = ?')
     .get(sourceId, observationId) as JsonRow | undefined;
@@ -144,6 +176,7 @@ function storedCompletedGraph(db: DatabaseSync, sourceId: string, observationId:
     relationships: entities('relationship'), clusters: entities('cluster'), statuses: [] });
 }
 
+/** Serialize a write; rollback failures must not hide the original exception. */
 function transaction<T>(db: DatabaseSync, fn: () => T): T {
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -156,17 +189,20 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
+/** Preserve the primary transaction failure if SQLite has already rolled back. */
 function rollbackQuietly(db: DatabaseSync): void {
   try { db.exec('ROLLBACK'); }
   catch { /* SQLite may already have ended the transaction; preserve the original error. */ }
 }
 
+/** Use only the store process clock for lease ownership decisions. */
 function leaseNow(): number {
   const at = Date.now();
   if (!Number.isSafeInteger(at) || at < 0) throw new StoreUnavailable('Invalid system clock');
   return at;
 }
 
+/** Keep source rows and derived evidence in one read snapshot. */
 function readTransaction<T>(db: DatabaseSync, fn: () => T): T {
   db.exec('BEGIN');
   try {
@@ -274,7 +310,6 @@ function upgradeToV3(db: DatabaseSync, version: number): void {
   }
   pruneObsoleteWork(db);
   for (const sourceId of rebuildSources) requeueLegacySource(db, sourceId);
-  rebuildSearchTerms(db);
   const update = db.prepare('UPDATE jobs SET graph_hash = ? WHERE job_id = ?');
   for (const row of db.prepare("SELECT job_id, source_id, observation_id FROM jobs WHERE state = 'complete'")
     .all() as { job_id: string; source_id: string; observation_id: string }[]) {
@@ -302,7 +337,7 @@ function migrate(db: DatabaseSync): void {
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
   if (version > STORE_SCHEMA_VERSION) throw new StoreUnavailable(`Store schema ${version} is newer than this binary`);
   if (version >= 1 && version < STORE_SCHEMA_VERSION) validateLegacyRows(db, version);
-  if ((version === 1 || version === 2 || version === 3) && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
+  if (version >= 1 && version < STORE_SCHEMA_VERSION && db.prepare(`SELECT 1 FROM sources s WHERE s.state NOT IN ('deleted', 'permissionRevoked')
     AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.source_id = s.source_id AND o.revision = s.revision)
     LIMIT 1`).get()) {
     throw new StoreUnavailable(`V${version} source needs reprocessing but has no current observation`);
@@ -311,6 +346,7 @@ function migrate(db: DatabaseSync): void {
   // A process exit during an upgrade must leave either the old schema or the
   // fully repaired new schema. No intermediate v2 commit may strand v1 work.
   transaction(db, () => {
+    if (version === 3 || version === 4) assertResolvableLegacyLedger(db, version);
     if (version < 1) {
       db.exec(`
         CREATE TABLE sources (
@@ -349,15 +385,6 @@ function migrate(db: DatabaseSync): void {
         CREATE INDEX evidence_terms_lookup ON evidence_terms(term, source_id);
         PRAGMA user_version = 2;
       `);
-      // Version 1 already held observations. Reindex them as part of the same upgrade transaction.
-      for (const row of db.prepare(`SELECT o.source_id, o.payload FROM observations o
-        JOIN sources s ON s.source_id = o.source_id AND s.revision = o.revision
-        WHERE s.state NOT IN ('deleted', 'permissionRevoked')`).all() as { source_id: string; payload: string }[]) {
-        const observation = parseObservation(JSON.parse(row.payload));
-        if (observation.state === 'complete' || observation.state === 'partial') {
-          indexText(db, row.source_id, 'observation', observation.content);
-        }
-      }
     }
     if (version < 3) upgradeToV3(db, version);
     if (version < 4) {
@@ -365,11 +392,21 @@ function migrate(db: DatabaseSync): void {
       normalizePersistedIds(db);
       db.exec('PRAGMA user_version = 4');
     }
+    if (version < 5) {
+      rebuildSearchTerms(db);
+      db.exec('PRAGMA user_version = 5');
+    }
   });
 }
 
 /** Refuse retained legacy rows that cannot be served after a successful upgrade. */
 function validateLegacyRows(db: DatabaseSync, version: number): void {
+  validateLegacySources(db, version);
+  validateLegacyJobs(db, version);
+}
+
+/** Check current source payloads before migration can rewrite or discard them. */
+function validateLegacySources(db: DatabaseSync, version: number): void {
   for (const source of db.prepare('SELECT * FROM sources').all() as SourceRow[]) {
     try { statusFrom(source); }
     catch { throw new StoreUnavailable(`V${version} source ${source.source_id} has invalid status`); }
@@ -381,7 +418,7 @@ function validateLegacyRows(db: DatabaseSync, version: number): void {
       .get(source.source_id, source.revision) as { observation_id: string; payload: string } | undefined;
     if (!current) continue; // The explicit missing-current-observation guard reports this below.
     let observation: Observation;
-    try { observation = canonicalObservation(JSON.parse(current.payload)); }
+    try { observation = canonicalObservation(parseObservation(JSON.parse(current.payload))); }
     catch { throw new StoreUnavailable(`V${version} source ${source.source_id} has invalid current observation`); }
     if (observation.observationId !== current.observation_id.toLowerCase() ||
         observation.source.sourceId !== source.source_id.toLowerCase() ||
@@ -392,6 +429,10 @@ function validateLegacyRows(db: DatabaseSync, version: number): void {
       throw new StoreUnavailable(`V${version} source ${source.source_id} has mismatched current observation`);
     }
   }
+}
+
+/** Check resumable jobs and leases before migration can change queue ownership. */
+function validateLegacyJobs(db: DatabaseSync, version: number): void {
   for (const job of db.prepare(`SELECT j.* FROM jobs j JOIN sources s ON s.source_id = j.source_id
     WHERE j.revision = s.revision AND s.state NOT IN ('deleted', 'permissionRevoked')
     AND EXISTS (SELECT 1 FROM observations o WHERE o.observation_id = j.observation_id
@@ -411,6 +452,7 @@ function validateLegacyRows(db: DatabaseSync, version: number): void {
   }
 }
 
+/** Validate a persisted status before returning it to a SET-5 consumer. */
 function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
   const base = { schemaVersion: 1 as const, sourceId: row.source_id, updatedAt: row.updated_at };
   let status: unknown;
@@ -425,6 +467,7 @@ function statusFrom(row: SourceRow): GraphSnapshot['statuses'][number] {
 }
 function nowIso(): string { return new Date().toISOString(); }
 function live(state: string): boolean { return state !== 'deleted' && state !== 'permissionRevoked'; }
+/** Compare full fractional timestamps without millisecond truncation. */
 function compareObservedAt(left: string, right: string): number {
   // The SET-5 schema permits arbitrary fractional precision and UTC offsets.
   // Date.parse truncates to milliseconds, so compare the seconds and fraction
@@ -468,12 +511,17 @@ function currentReplay(db: DatabaseSync, existing: SourceRow | undefined, observ
   throw new StoreConflict('Observation is older than the current source revision');
 }
 
-function terms(text: string): string[] { return [...new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []))]; }
+/** Apply one Unicode spelling to both indexed content and incoming queries. */
+function terms(text: string): string[] {
+  return [...new Set((text.toLowerCase().normalize('NFC').match(/[\p{L}\p{N}]+/gu) ?? []))];
+}
+/** Persist each distinct search token for one live source and evidence kind. */
 function indexText(db: DatabaseSync, sourceId: string, kind: string, body: string): void {
   const insert = db.prepare('INSERT OR IGNORE INTO evidence_terms(source_id, kind, term) VALUES (?, ?, ?)');
   for (const term of terms(body)) insert.run(sourceId, kind, term);
 }
 
+/** Select only the user-visible text field for each derived evidence kind. */
 function evidenceSearchText(kind: string, entity: unknown): string {
   const field = ({ passage: 'text', claim: 'statement', profile: 'name', relationship: 'kind', cluster: 'name' } as
     Record<string, string>)[kind];
@@ -499,6 +547,7 @@ function rebuildSearchTerms(db: DatabaseSync): void {
   }
 }
 
+/** Place a persisted evidence row in the matching SET-5 graph collection. */
 function appendEvidence(graph: GraphSnapshot, kind: string, payload: string): void {
   const entity = JSON.parse(payload);
   switch (kind) {
@@ -511,6 +560,7 @@ function appendEvidence(graph: GraphSnapshot, kind: string, payload: string): vo
   }
 }
 
+/** Local SET-5 persistence, queue, and read model; the host owns authorization. */
 export class MGraphStore {
   private readonly db: DatabaseSync;
   private readonly writerLock?: DatabaseSync;
@@ -542,6 +592,7 @@ export class MGraphStore {
     }
   }
 
+  /** Release the sidecar lock after the main handle has closed. */
   private releaseWriterLock(): void {
     if (!this.writerLock) return;
     this.writerLock.close();
@@ -553,13 +604,17 @@ export class MGraphStore {
     try { this.db.close(); }
     finally { this.releaseWriterLock(); }
   }
+  /** Reject mutations from a query-only client before starting a transaction. */
   private writable(): void { if (this.readOnly) throw new StoreUnavailable('Read-only client cannot mutate the store'); }
+  /** Find one canonical source row, including its terminal tombstone. */
   private source(sourceId: string): SourceRow | undefined {
     return this.db.prepare('SELECT * FROM sources WHERE source_id = ?').get(canonicalId(sourceId)) as SourceRow | undefined;
   }
+  /** Find a job by UUID independent of caller spelling. */
   private job(jobId: string): JobRow | undefined {
     return this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(canonicalId(jobId)) as JobRow | undefined;
   }
+  /** Erase payloads and terms while leaving source metadata to the caller. */
   private purgeContent(sourceId: string): void {
     this.db.prepare('DELETE FROM evidence_terms WHERE source_id = ?').run(sourceId);
     this.db.prepare('DELETE FROM evidence WHERE source_id = ?').run(sourceId);
@@ -577,10 +632,7 @@ export class MGraphStore {
       const existing = this.source(sourceId);
       const replay = currentReplay(this.db, existing, observation);
       if (replay) return { ...replay, observationId: supplied.observationId };
-      // Pre-v4 databases may retain a hash of an all-uppercase ID whose
-      // payload was already purged. Check that legacy spelling as well.
-      if (this.db.prepare('SELECT 1 FROM observation_ids WHERE id_hash IN (?, ?)').get(
-        idHash(observation.observationId), rawIdHash(observation.observationId.toUpperCase()))) {
+      if (this.db.prepare('SELECT 1 FROM observation_ids WHERE id_hash = ?').get(idHash(observation.observationId))) {
         throw new StoreConflict('Observation ID was already used');
       }
       // The old revision is removed before the new one is visible. Jobs for it cannot later commit.
@@ -640,6 +692,7 @@ export class MGraphStore {
     });
   }
 
+  /** Fence expired tokens and superseded source revisions before any job write. */
   private assertLease(jobId: string, leaseToken: string): JobRow {
     const job = this.job(uuid.parse(jobId));
     if (job?.state !== 'processing' || job.lease_token !== canonicalId(leaseToken) ||
@@ -738,6 +791,7 @@ export class MGraphStore {
     });
   }
 
+  /** Atomically erase live content and queue entries, then retain a tombstone. */
   private retire(sourceId: string, state: 'deleted' | 'permissionRevoked', reason: string | null): void {
     this.writable();
     sourceId = canonicalId(sourceId);
@@ -790,6 +844,7 @@ export class MGraphStore {
     transaction(this.db, () => rebuildSearchTerms(this.db));
   }
 
+  /** Add one live source's current observation, evidence, and status. */
   private appendSourceSnapshot(graph: GraphSnapshot, sourceId: string): void {
     const source = this.source(sourceId);
     if (!source || !live(source.state)) return;
@@ -802,6 +857,7 @@ export class MGraphStore {
     }
     graph.statuses.push(statusFrom(source));
   }
+  /** Validate the assembled SET-5 graph before returning it to a reader. */
   private snapshot(sourceIds: string[]): GraphSnapshot {
     const graph: GraphSnapshot = { schemaVersion: 1, observations: [], passages: [], claims: [], profiles: [], relationships: [], clusters: [], statuses: [] };
     for (const sourceId of sourceIds) this.appendSourceSnapshot(graph, sourceId);

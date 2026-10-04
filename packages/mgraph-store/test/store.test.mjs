@@ -83,6 +83,9 @@ function uppercaseUuids(value) {
     return [key, uppercaseUuids(field)];
   }));
 }
+function mixedUuid(id) {
+  return id.replace(/[a-f]/g, (letter, index) => index % 2 ? letter.toUpperCase() : letter);
+}
 function finish(store, observation) {
   const job = store.claimNextJob('test-worker');
   assert.ok(job);
@@ -152,6 +155,49 @@ test('snapshot and search retain every derived evidence kind', t => {
   assert.equal(store.queryMemory('Generous').graph.claims.length, 1);
   store.deleteSource(item.source.sourceId);
   assert.equal(store.queryMemory('Generous').graph.observations.length, 0);
+});
+
+test('Unicode-equivalent observation and evidence terms survive rebuild, reopen and v4 upgrade', t => {
+  const filename = fixture(t);
+  let store = new MGraphStore(filename);
+  const item = observation(randomUUID(), randomUUID(), 'Cafe\u0301 source');
+  store.submitObservation(item);
+  const graph = graphFor(item);
+  graph.claims[0].statement = 'Cafe\u0301 claim';
+  graph.profiles[0].name = 'Cafe\u0301 profile';
+  const peer = { schemaVersion: 1, profileId: randomUUID(), name: 'Peer', modelVersion: 'fixture-v1',
+    claimIds: [graph.claims[0].claimId] };
+  graph.profiles.push(peer);
+  graph.relationships.push({ schemaVersion: 1, relationshipId: randomUUID(), fromProfileId: graph.profiles[0].profileId,
+    toProfileId: peer.profileId, kind: 'Cafe\u0301 link', modelVersion: 'fixture-v1', claimIds: [graph.claims[0].claimId] });
+  graph.clusters.push({ schemaVersion: 1, clusterId: randomUUID(), name: 'Cafe\u0301 group',
+    memberProfileIds: [graph.profiles[0].profileId, peer.profileId], modelVersion: 'fixture-v1',
+    claimIds: [graph.claims[0].claimId] });
+  const job = store.claimNextJob('worker');
+  store.completeJob(job.jobId, job.leaseToken, graph);
+  const assertFound = () => {
+    for (const spelling of ['Café', 'Cafe\u0301']) {
+      const found = store.queryMemory(spelling).graph;
+      assert.deepEqual([found.observations.length, found.passages.length, found.claims.length,
+        found.profiles.length, found.relationships.length, found.clusters.length], [1, 1, 1, 2, 1, 1]);
+    }
+  };
+  assertFound();
+  store.rebuildSearchIndex();
+  assertFound();
+  store.close();
+  const old = new DatabaseSync(filename);
+  old.exec("PRAGMA user_version = 4; DELETE FROM evidence_terms");
+  old.prepare("INSERT INTO evidence_terms(source_id, kind, term) VALUES (?, 'observation', 'cafe')").run(item.source.sourceId);
+  old.close();
+  store = new MGraphStore(filename);
+  assertFound();
+  store.close();
+  store = new MGraphStore(filename);
+  assertFound();
+  store.deleteSource(item.source.sourceId);
+  assert.equal(store.queryMemory('Café').graph.observations.length, 0);
+  store.close();
 });
 
 test('derived entity IDs cannot be reused by another source and fail as a typed conflict', t => {
@@ -484,13 +530,15 @@ test('UUID casing is one identity for source, observation, graph, replay and ret
     source: { ...item.source, sourceId: item.source.sourceId.toUpperCase() } };
   assert.equal(store.submitObservation(uppercase).observationId, uppercase.observationId);
   assert.equal(store.submitObservation(item).replayed, true);
+  assert.equal(store.submitObservation({ ...item, observationId: mixedUuid(item.observationId),
+    source: { ...item.source, sourceId: mixedUuid(item.source.sourceId) } }).replayed, true);
   const job = store.claimNextJob('worker');
   assert.equal(job.sourceId, item.source.sourceId);
   const graph = graphFor(item);
   const upperGraph = structuredClone(graph);
   upperGraph.observations = [uppercase];
   upperGraph.passages[0].passageId = upperGraph.passages[0].passageId.toUpperCase();
-  upperGraph.passages[0].observationId = uppercase.observationId;
+  upperGraph.passages[0].observationId = item.observationId; // Mixed-case reference still names this observation.
   upperGraph.claims[0].claimId = upperGraph.claims[0].claimId.toUpperCase();
   upperGraph.claims[0].provenance[0].passageId = upperGraph.passages[0].passageId;
   upperGraph.claims[0].provenance[0].observationId = uppercase.observationId;
@@ -504,10 +552,14 @@ test('UUID casing is one identity for source, observation, graph, replay and ret
   store.submitObservation(next);
   assert.throws(() => store.submitObservation(observation(item.source.sourceId, item.observationId.toUpperCase(),
     'Reused after replacement', '2026-10-03T00:00:00Z')), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(item.source.sourceId, mixedUuid(item.observationId),
+    'Reused after replacement', '2026-10-03T00:00:00Z')), StoreConflict);
   store.deleteSource(item.source.sourceId.toUpperCase());
   assert.equal(store.queryMemory('Alice').graph.observations.length, 0);
   assert.throws(() => store.submitObservation(item), StoreConflict);
   assert.throws(() => store.submitObservation(observation(randomUUID(), item.observationId.toUpperCase(),
+    'Reused ID', '2026-10-02T00:00:00Z')), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(randomUUID(), mixedUuid(item.observationId),
     'Reused ID', '2026-10-02T00:00:00Z')), StoreConflict);
 });
 
@@ -562,18 +614,57 @@ test('v3 upgrade canonicalizes retained source, observation and evidence referen
     'Reused', '2026-10-02T00:00:00Z')), StoreConflict);
 });
 
-test('v3 ledger still fences a purged all-uppercase observation ID', t => {
+test('retained mixed-case v3 identity replays in every spelling and fences its old lease', t => {
   const filename = fixture(t);
   const old = createV3Database(filename);
-  const usedId = randomUUID();
+  const item = observation();
+  const legacy = { ...item, observationId: mixedUuid(item.observationId),
+    source: { ...item.source, sourceId: mixedUuid(item.source.sourceId) } };
+  const token = randomUUID().toUpperCase();
+  old.prepare("INSERT INTO sources(source_id, kind, locator, revision, observed_at, state, updated_at) VALUES (?, 'manual', ?, 1, ?, 'processing', ?)")
+    .run(legacy.source.sourceId, legacy.source.locator, legacy.observedAt, legacy.observedAt);
+  old.prepare('INSERT INTO observations VALUES (?, ?, 1, ?)')
+    .run(legacy.observationId, legacy.source.sourceId, JSON.stringify(legacy));
+  old.prepare("INSERT INTO jobs(job_id, source_id, revision, observation_id, state, attempts, lease_token, lease_until, worker_id) VALUES (?, ?, 1, ?, 'processing', 1, ?, ?, 'old')")
+    .run(legacy.observationId, legacy.source.sourceId, legacy.observationId, token, Date.now() + 60_000);
   old.prepare('INSERT INTO observation_ids VALUES (?)')
-    .run(createHash('sha256').update(usedId.toUpperCase()).digest('hex'));
+    .run(createHash('sha256').update(legacy.observationId).digest('hex'));
   old.close();
   const store = new MGraphStore(filename);
   t.after(() => store.close());
-  assert.throws(() => store.submitObservation(observation(randomUUID(), usedId,
-    'Reused purged ID', '2026-10-02T00:00:00Z')), StoreConflict);
-  assert.equal(store.getSnapshot().observations.length, 0);
+  for (const spelling of [legacy.observationId, item.observationId, item.observationId.toUpperCase()]) {
+    const replay = { ...item, observationId: spelling };
+    assert.equal(store.submitObservation(replay).replayed, true);
+  }
+  const newer = observation(item.source.sourceId, randomUUID(), 'New revision', '2026-10-02T00:00:00Z');
+  store.submitObservation(newer);
+  assert.throws(() => store.completeJob(legacy.observationId, token, graphFor(item)), StoreConflict);
+  assert.throws(() => store.submitObservation(observation(item.source.sourceId, legacy.observationId,
+    'Reused', '2026-10-03T00:00:00Z')), StoreConflict);
+  assert.equal(store.pendingJobs(), 1);
+  store.deleteSource(item.source.sourceId);
+  assert.equal(store.pendingJobs(), 0);
+  assert.throws(() => store.submitObservation(observation(randomUUID(), legacy.observationId,
+    'Retired reuse', '2026-10-04T00:00:00Z')), StoreConflict);
+});
+
+test('v3 and v4 upgrades refuse opaque purged UUID hashes atomically', t => {
+  for (const version of [3, 4]) {
+    const filename = fixture(t);
+    const old = createV3Database(filename);
+    const usedId = mixedUuid(randomUUID());
+    old.prepare('INSERT INTO observation_ids VALUES (?)')
+      .run(createHash('sha256').update(usedId).digest('hex'));
+    if (version === 4) old.exec('PRAGMA user_version = 4');
+    old.close();
+    assert.throws(() => new MGraphStore(filename), error => error instanceof StoreUnavailable &&
+      /unresolvable retired ID/.test(error.message));
+    const disk = new DatabaseSync(filename, { readOnly: true });
+    assert.equal(disk.prepare('PRAGMA user_version').get().user_version, version);
+    assert.equal(disk.prepare('SELECT count(*) AS n FROM observation_ids').get().n, 1);
+    assert.equal(disk.prepare('SELECT count(*) AS n FROM observations').get().n, 0);
+    disk.close();
+  }
 });
 
 test('malformed optional source scopes never expand into all-source reads', t => {
@@ -769,6 +860,10 @@ test('invalid graph, malformed query, revocation and failed-job retry', t => {
   const invalid = graphFor(item);
   invalid.passages[0].text = 'wrong excerpt';
   assert.throws(() => store.completeJob(job.jobId, job.leaseToken, invalid), /Passage mismatch/);
+  const cyclic = graphFor(item);
+  cyclic.unexpected = cyclic;
+  assert.throws(() => store.completeJob(job.jobId, job.leaseToken, cyclic), /cyclic or deeply nested/);
+  assert.equal(store.getStatus(item.source.sourceId)[0].state, 'processing');
   store.failJob(job.jobId, job.leaseToken, 'Extraction failed');
   assert.equal(store.getStatus(item.source.sourceId)[0].state, 'failed');
   store.retryJob(job.jobId);
