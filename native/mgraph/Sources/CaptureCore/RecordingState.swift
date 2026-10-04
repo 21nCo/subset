@@ -15,14 +15,14 @@ public struct RecordingSettings: Codable, Sendable {
 }
 
 public enum RecordingError: Error, LocalizedError, Equatable {
-    case invalidBundleIdentifier
+    case invalidBundleIdentifier(String)
     case damagedSettings
     case damagedArchive
     case recorderInUse
 
     public var errorDescription: String? {
         switch self {
-        case .invalidBundleIdentifier: "The foreground app has no valid bundle identifier."
+        case .invalidBundleIdentifier(let name): "The selected app \"\(name)\" has no valid bundle identifier."
         case .damagedSettings: "Recording settings could not be read. Recording is disabled until the file is repaired."
         case .damagedArchive: "Captured data could not be read. It was not overwritten."
         case .recorderInUse: "Another M Graph instance already owns foreground recording."
@@ -150,7 +150,7 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     public func allow(_ bundleIdentifier: String, at bundleURL: URL) throws {
         let path = Self.canonicalBundlePath(bundleURL)
         guard Self.validBundleIdentifier(bundleIdentifier), Self.validBundlePath(path) else {
-            throw RecordingError.invalidBundleIdentifier
+            throw RecordingError.invalidBundleIdentifier(bundleURL.lastPathComponent)
         }
         var next = settings
         next.allowedApps[bundleIdentifier] = path
@@ -217,7 +217,8 @@ public enum RecordingError: Error, LocalizedError, Equatable {
 }
 
 // Notifications, polling, and late worker completions share one monotonic gate.
-// Invalidating it fences a result after pause, exclusion, deletion, switch, or sleep.
+// Invalidating it fences a result after pause, exclusion, deletion, switch, or sleep
+// without resetting the process-wide attempt interval.
 @MainActor public final class RecordingGate {
     public static let minimumInterval: TimeInterval = 3
     private var generation: UInt64 = 0
@@ -246,6 +247,5 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     public func invalidate() {
         generation &+= 1
         inFlight = false
-        nextAllowed = 0
     }
 }

@@ -286,7 +286,39 @@ import XCTest
     XCTAssertNotNil(second)
     gate.invalidate()
     XCTAssertFalse(gate.finish(second!))
-    XCTAssertNotNil(gate.begin(at: 103.1), "Resume or app switch may capture immediately")
+    XCTAssertNil(gate.begin(at: 103.1), "A switch must not bypass the attempt interval")
+    XCTAssertNotNil(gate.begin(at: 106))
+  }
+
+  func testAllowedAppSwitchesAndControlTransitionsDoNotResetAttemptLimit() {
+    let gate = RecordingGate()
+    var pending = gate.begin(at: 100) // First allowed foreground app.
+    XCTAssertNotNil(pending)
+    for time in [100.1, 100.2, 100.3, 102.9] {
+      gate.invalidate() // Switch, pause/resume, exclusion, deletion, or sleep/wake.
+      if let pending { XCTAssertFalse(gate.finish(pending), "Late AX work is discarded") }
+      XCTAssertNil(gate.begin(at: time), "A control transition cannot start another AX read")
+    }
+    pending = gate.begin(at: 103) // Second allowed app may now be read.
+    XCTAssertNotNil(pending)
+    XCTAssertTrue(gate.finish(pending!))
+    for time in [103.01, 104, 105.99] {
+      XCTAssertNil(gate.begin(at: time), "Repeated AX notifications remain throttled")
+    }
+    XCTAssertNotNil(gate.begin(at: 106))
+  }
+
+  func testInvalidSelectedAppErrorNamesTheSelection() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let vault = try RecordingVault(directory: directory)
+    let selected = URL(fileURLWithPath: "/Applications/Invalid.app")
+    XCTAssertThrowsError(try vault.allow("bad_identifier", at: selected)) { error in
+      XCTAssertEqual(error as? RecordingError, .invalidBundleIdentifier("Invalid.app"))
+      XCTAssertEqual(error.localizedDescription,
+                     "The selected app \"Invalid.app\" has no valid bundle identifier.")
+    }
+    XCTAssertTrue(vault.settings.allowedApps.isEmpty)
   }
 
   func testObserverFailuresRetryOnHeartbeatAndRecoverAfterTransitions() {

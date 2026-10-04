@@ -252,7 +252,7 @@ if let command = arguments.first {
             panel.allowsMultipleSelection = false
             guard panel.runModal() == .OK, let url = panel.url else { return }
             guard url.pathExtension.lowercased() == "app", let bundleID = Bundle(url: url)?.bundleIdentifier else {
-                showError(RecordingError.invalidBundleIdentifier)
+                showError(RecordingError.invalidBundleIdentifier(url.lastPathComponent))
                 return
             }
             do { try recording.allow(bundleID, at: url) }
