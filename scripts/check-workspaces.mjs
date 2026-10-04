@@ -42,4 +42,5 @@ for (const manifest of workspaces) {
 assert.equal(names.has('@subset/catalog'), true);
 assert.equal(names.has('@subset/directory'), true);
 assert.equal(names.has('@subset/mgraph-contracts'), true);
+assert.equal(names.has('@subset/mgraph-store'), true);
 console.log(`Validated ${names.size} Subset workspaces.`);
