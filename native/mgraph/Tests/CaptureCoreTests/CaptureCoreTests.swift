@@ -11,6 +11,38 @@ private final class DeliveryCount: @unchecked Sendable {
         value += 1
         return value
     }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class ForegroundFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: CaptureCollector.Foreground
+    private var permission = true
+
+    init(_ initial: CaptureCollector.Foreground) { current = initial }
+
+    func snapshot() -> CaptureCollector.Foreground {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func isTrusted() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return permission
+    }
+
+    func update(_ foreground: CaptureCollector.Foreground, trusted: Bool = true) {
+        lock.lock()
+        current = foreground
+        permission = trusted
+        lock.unlock()
+    }
 }
 
 @MainActor private func verifyWorkerDrain(workerFinished: DeliveryCount, drained: XCTestExpectation) {
@@ -416,5 +448,111 @@ final class CaptureCoreTests: XCTestCase {
             }
         }
         wait(for: [pausedFinished, manualFinished], timeout: 1)
+    }
+
+    @MainActor func testAutomaticCaptureRejectsExcludedTargetBeforeAnyAXRead() {
+        let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
+        let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
+            bundleID: "com.example.allowed", bundlePath: allowedURL.path)
+        let excluded = CaptureCollector.Foreground(pid: 202, name: "Excluded",
+            bundleID: "com.example.excluded", bundlePath: "/Applications/Excluded.app")
+        let fixture = ForegroundFixture(allowed)
+        let blockerStarted = DispatchSemaphore(value: 0)
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        let axReads = DeliveryCount()
+        let completed = expectation(description: "switched automatic capture was rejected")
+        CaptureCollector.runAsync(deadline: .init(seconds: 0.05, startWhenWorkerBegins: true),
+                                  seconds: 0.05, work: {
+            blockerStarted.signal()
+            _ = releaseBlocker.wait(timeout: .now() + 1)
+            return CaptureResult(state: .readFailed)
+        }) { _ in
+            // The blocker only delays admission to the shared AX worker.
+        }
+        XCTAssertEqual(blockerStarted.wait(timeout: .now() + 1), .success)
+        let target = CaptureCollector.CaptureTarget(pid: allowed.pid,
+            bundleID: "com.example.allowed", bundleURL: allowedURL)
+        let deadline = CaptureCollector.captureAllowedForeground(target: target,
+            trusted: { fixture.isTrusted() }, foregroundProvider: {
+                XCTAssertTrue(Thread.isMainThread, "AppKit foreground reads must remain on the menu actor")
+                return fixture.snapshot()
+            },
+            read: { _, _ in
+                _ = axReads.increment()
+                return CaptureResult(state: .available, text: "unexpected text")
+            }) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                XCTAssertEqual(axReads.count, 0, "Excluded app must receive zero AX calls")
+                completed.fulfill()
+            }
+        XCTAssertNotNil(deadline)
+        fixture.update(excluded)
+        releaseBlocker.signal()
+        wait(for: [completed], timeout: 2)
+    }
+
+    @MainActor func testAutomaticCaptureRejectsPathSubstitutionAndRevokedPermission() {
+        let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
+        let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
+            bundleID: "com.example.allowed", bundlePath: allowedURL.path)
+        let fixture = ForegroundFixture(allowed)
+        let target = CaptureCollector.CaptureTarget(pid: 101,
+            bundleID: "com.example.allowed", bundleURL: allowedURL)
+        let axReads = DeliveryCount()
+        let otherPath = expectation(description: "same bundle ID at another path is rejected")
+        fixture.update(.init(pid: 101, name: "Substitute", bundleID: "com.example.allowed",
+                             bundlePath: "/Other/Allowed.app"))
+        let denied = CaptureCollector.captureAllowedForeground(target: target,
+            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            read: { _, _ in
+                _ = axReads.increment()
+                return CaptureResult(state: .available)
+            }) { result in
+                XCTAssertEqual(result.state, .readFailed)
+                otherPath.fulfill()
+            }
+        XCTAssertNil(denied)
+        wait(for: [otherPath], timeout: 1)
+        XCTAssertEqual(axReads.count, 0)
+
+        fixture.update(allowed, trusted: false)
+        let revoked = expectation(description: "revoked permission denies automatic capture")
+        let permissionDenied = CaptureCollector.captureAllowedForeground(target: target,
+            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            read: { _, _ in
+                _ = axReads.increment()
+                return CaptureResult(state: .available)
+            }) { result in
+                XCTAssertNotEqual(result.state, .available)
+                revoked.fulfill()
+            }
+        XCTAssertNil(permissionDenied)
+        wait(for: [revoked], timeout: 1)
+        XCTAssertEqual(axReads.count, 0)
+    }
+
+    @MainActor func testAutomaticCaptureReadsUnchangedAllowedTarget() {
+        let allowedURL = URL(fileURLWithPath: "/Applications/Allowed.app")
+        let allowed = CaptureCollector.Foreground(pid: 101, name: "Allowed",
+            bundleID: "com.example.allowed", bundlePath: allowedURL.path)
+        let fixture = ForegroundFixture(allowed)
+        let target = CaptureCollector.CaptureTarget(pid: 101,
+            bundleID: "com.example.allowed", bundleURL: allowedURL)
+        let reads = DeliveryCount()
+        let completed = expectation(description: "allowed target is read once")
+        let deadline = CaptureCollector.captureAllowedForeground(target: target,
+            trusted: { fixture.isTrusted() }, foregroundProvider: { fixture.snapshot() },
+            read: { app, _ in
+                _ = reads.increment()
+                return CaptureResult(state: .available,
+                    source: .init(bundleIdentifier: app.bundleID, processIdentifier: app.pid), text: "allowed")
+            }) { result in
+                XCTAssertEqual(result.state, .available)
+                XCTAssertEqual(result.text, "allowed")
+                completed.fulfill()
+            }
+        XCTAssertNotNil(deadline)
+        wait(for: [completed], timeout: 2)
+        XCTAssertEqual(reads.count, 1)
     }
 }

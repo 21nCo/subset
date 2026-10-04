@@ -13,6 +13,7 @@ public struct RecordingSettings: Codable, Sendable {
     public var mode: RecordingMode = .off
     public var allowedApps: [String: String] = [:]
 
+    /// Creates a default-deny policy in Off mode.
     public init() {}
 }
 
@@ -21,14 +22,17 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     case invalidBundleIdentifier(String)
     case damagedSettings
     case damagedArchive
+    case settingsTooLarge
     case archiveTooLarge
     case recorderInUse
 
+    /// Gives the menu a safe failure message without including captured content.
     public var errorDescription: String? {
         switch self {
         case .invalidBundleIdentifier(let name): "The selected app \"\(name)\" has no valid bundle identifier."
         case .damagedSettings: "Recording settings could not be read. Recording is disabled until the file is repaired."
         case .damagedArchive: "Captured data could not be read. It was not overwritten."
+        case .settingsTooLarge: "The selected apps exceed the private settings limit."
         case .archiveTooLarge: "Captured data exceeds the private archive limit. Recording is paused."
         case .recorderInUse: "Another M Graph instance already owns foreground recording."
         }
@@ -36,7 +40,7 @@ public enum RecordingError: Error, LocalizedError, Equatable {
 }
 
 /// Owns the single-writer allowlist and bounded private observation archive.
-/// File replacement is the commit point; no fallible work follows it.
+/// File replacement changes the live namespace; syncing its directory makes that change durable.
 @MainActor public final class RecordingVault {
     private let settingsURL: URL
     private let archiveURL: URL
@@ -44,36 +48,44 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     public private(set) var settings: RecordingSettings
     public private(set) var observations: [CaptureResult]
     public static let maximumObservations = 50
+    public static let maximumSettingsBytes = 32_768
     public static let maximumArchiveBytes = 4_000_000
-    enum StorageCheckpoint: Equatable { case beforeCommit, afterCommit }
-    // Test seam: post-commit diagnostics must never turn a committed write into a failure.
-    var storageCheckpoint: ((StorageCheckpoint) throws -> Void)?
+    enum StorageCheckpoint: Equatable { case beforeCommit, beforeDirectorySync, afterCommit }
+    // Fault injection distinguishes pre-rename, post-rename/pre-sync, and durable diagnostic failures.
+    var storageCheckpoint: ((StorageCheckpoint, URL) throws -> Void)?
 
+    /// Acquires exclusive recorder ownership before cleanup or file access.
     private static func acquireLock(in directory: URL) throws -> Int32 {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let lockURL = directory.appendingPathComponent("recording.lock")
         let fd = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw RecordingError.recorderInUse }
+        guard fd >= 0 else { throw posixError() }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let failure = errno
             Darwin.close(fd)
-            throw RecordingError.recorderInUse
+            if failure == EWOULDBLOCK || failure == EAGAIN { throw RecordingError.recorderInUse }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
         }
         do { try removeInterruptedWrites(in: directory) }
         catch { Darwin.close(fd); throw error }
         return fd
     }
 
+    /// Removes private staging files left by an interrupted write under the recorder lock.
     private static func removeInterruptedWrites(in directory: URL) throws {
         let staged = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        var removed = false
         for url in staged where url.lastPathComponent.hasSuffix(".tmp") &&
             (url.lastPathComponent.hasPrefix(".recording-settings.json.") ||
              url.lastPathComponent.hasPrefix(".captured-observations.json.")) {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             guard attributes[.type] as? FileAttributeType == .typeRegular else { continue }
             try FileManager.default.removeItem(at: url)
+            removed = true
         }
+        if removed { try syncDirectory(containing: directory.appendingPathComponent("recording.lock")) }
     }
 
     /// Opens a locked vault, validating existing files and starting in Off mode.
@@ -85,7 +97,7 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         settingsURL = directory.appendingPathComponent("recording-settings.json")
         archiveURL = directory.appendingPathComponent("captured-observations.json")
         if FileManager.default.fileExists(atPath: settingsURL.path) {
-            guard Self.isRegularFile(settingsURL, maximumBytes: 32_768),
+            guard Self.isRegularFile(settingsURL, maximumBytes: Self.maximumSettingsBytes),
                   let data = try? Data(contentsOf: settingsURL),
                   let decoded = try? JSONDecoder().decode(RecordingSettings.self, from: data),
                   decoded.allowedApps.allSatisfy({ Self.validBundleIdentifier($0.key) &&
@@ -129,6 +141,7 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         let archive = directory.appendingPathComponent("captured-observations.json")
         if FileManager.default.fileExists(atPath: archive.path) {
             try FileManager.default.removeItem(at: archive)
+            try syncDirectory(containing: archive)
         }
     }
 
@@ -143,14 +156,17 @@ public enum RecordingError: Error, LocalizedError, Equatable {
             of: "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$", options: .regularExpression) != nil
     }
 
+    /// Accepts only absolute app bundle paths for an allowlist entry.
     private static func validBundlePath(_ path: String) -> Bool {
         path.hasPrefix("/") && URL(fileURLWithPath: path).pathExtension.lowercased() == "app"
     }
 
+    /// Resolves symlinks so a second bundle with the same ID cannot inherit consent.
     private static func canonicalBundlePath(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    /// Rejects oversized or nonregular files before decoding persisted state.
     private static func isRegularFile(_ url: URL, maximumBytes: Int) -> Bool {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               attributes[.type] as? FileAttributeType == .typeRegular,
@@ -170,8 +186,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         var next = settings
         next.mode = mode
         if mode != .recording { settings.mode = mode }
-        do { try save(next, to: settingsURL) }
-        catch { pauseLiveRecording(); throw error }
+        var committed = false
+        do { try save(next, to: settingsURL, maximumBytes: Self.maximumSettingsBytes, committed: &committed) }
+        catch {
+            if committed { settings = next }
+            pauseLiveRecording()
+            throw error
+        }
         settings = next
     }
 
@@ -183,8 +204,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         }
         var next = settings
         next.allowedApps[bundleIdentifier] = path
-        do { try save(next, to: settingsURL) }
-        catch { pauseLiveRecording(); throw error }
+        var committed = false
+        do { try save(next, to: settingsURL, maximumBytes: Self.maximumSettingsBytes, committed: &committed) }
+        catch {
+            if committed { settings = next }
+            pauseLiveRecording()
+            throw error
+        }
         settings = next
     }
 
@@ -192,8 +218,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     public func exclude(_ bundleIdentifier: String) throws {
         var next = settings
         next.allowedApps.removeValue(forKey: bundleIdentifier)
-        do { try save(next, to: settingsURL) }
-        catch { pauseLiveRecording(); throw error }
+        var committed = false
+        do { try save(next, to: settingsURL, maximumBytes: Self.maximumSettingsBytes, committed: &committed) }
+        catch {
+            if committed { settings = next }
+            pauseLiveRecording()
+            throw error
+        }
         settings = next
     }
 
@@ -212,8 +243,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         if next.count > Self.maximumObservations {
             next.removeFirst(next.count - Self.maximumObservations)
         }
-        do { try save(next, to: archiveURL, maximumBytes: Self.maximumArchiveBytes) }
-        catch { pauseLiveRecording(); throw error }
+        var committed = false
+        do { try save(next, to: archiveURL, maximumBytes: Self.maximumArchiveBytes, committed: &committed) }
+        catch {
+            if committed { observations = next }
+            pauseLiveRecording()
+            throw error
+        }
         observations = next
     }
 
@@ -223,45 +259,75 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         if settings.mode == .recording { try setMode(.paused) }
         if let bundleIdentifier {
             let next = observations.filter { $0.bundleIdentifier != bundleIdentifier }
+            var committed = false
             do {
-                if next.isEmpty { try removeArchive() }
-                else { try save(next, to: archiveURL, maximumBytes: Self.maximumArchiveBytes) }
-            } catch { pauseLiveRecording(); throw error }
+                if next.isEmpty { try removeArchive(committed: &committed) }
+                else { try save(next, to: archiveURL, maximumBytes: Self.maximumArchiveBytes,
+                                committed: &committed) }
+            } catch {
+                if committed { observations = next }
+                pauseLiveRecording()
+                throw error
+            }
             observations = next
         } else {
-            do { try removeArchive() }
-            catch { pauseLiveRecording(); throw error }
+            var committed = false
+            do { try removeArchive(committed: &committed) }
+            catch {
+                if committed { observations = [] }
+                pauseLiveRecording()
+                throw error
+            }
             observations = []
         }
     }
 
+    /// Fails closed in memory after any storage error, including uncertain sync outcomes.
     private func pauseLiveRecording() {
         if settings.mode == .recording { settings.mode = .paused }
     }
 
-    private func removeArchive() throws {
+    /// Unlinks retained text and reports whether the namespace changed before a sync failure.
+    private func removeArchive(committed: inout Bool) throws {
         if FileManager.default.fileExists(atPath: archiveURL.path) {
-            try storageCheckpoint?(.beforeCommit)
+            try storageCheckpoint?(.beforeCommit, archiveURL)
             guard Darwin.unlink(archiveURL.path) == 0 else { throw Self.posixError() }
-            // The unlink is the commit point; diagnostic failures cannot restore text.
-            try? storageCheckpoint?(.afterCommit)
+            committed = true
+            try storageCheckpoint?(.beforeDirectorySync, archiveURL)
+            try Self.syncDirectory(containing: archiveURL)
+            try? storageCheckpoint?(.afterCommit, archiveURL)
         }
     }
 
+    /// Preserves the operating system failure code for vault callers.
     private static func posixError() -> NSError {
         NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
 
-    private func save<T: Encodable>(_ value: T, to url: URL, maximumBytes: Int? = nil) throws {
+    /// Makes a successful rename or unlink durable on supported macOS filesystems.
+    private static func syncDirectory(containing url: URL) throws {
+        let fd = Darwin.open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixError() }
+        defer { Darwin.close(fd) }
+        guard Darwin.fsync(fd) == 0 else { throw posixError() }
+    }
+
+    /// Stages bounded private JSON, then reports whether rename happened before any sync error.
+    private func save<T: Encodable>(_ value: T, to url: URL, maximumBytes: Int,
+                                     committed: inout Bool) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(value)
-        if let maximumBytes, data.count > maximumBytes { throw RecordingError.archiveTooLarge }
+        if data.count > maximumBytes {
+            throw url == settingsURL ? RecordingError.settingsTooLarge : RecordingError.archiveTooLarge
+        }
         let temporary = url.deletingLastPathComponent().appendingPathComponent(
             ".\(url.lastPathComponent).\(UUID().uuidString).tmp")
         let fd = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw Self.posixError() }
-        defer { _ = Darwin.unlink(temporary.path) }
+        defer {
+            if Darwin.unlink(temporary.path) == 0 { try? Self.syncDirectory(containing: url) }
+        }
         defer { Darwin.close(fd) }
         try data.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
@@ -274,10 +340,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
             }
         }
         guard Darwin.fsync(fd) == 0 else { throw Self.posixError() }
-        try storageCheckpoint?(.beforeCommit)
+        try storageCheckpoint?(.beforeCommit, url)
         guard Darwin.rename(temporary.path, url.path) == 0 else { throw Self.posixError() }
-        // All fallible preparation, including the 0600 mode, preceded rename.
-        try? storageCheckpoint?(.afterCommit)
+        committed = true
+        try storageCheckpoint?(.beforeDirectorySync, url)
+        try Self.syncDirectory(containing: url)
+        // Diagnostic failures after a durable commit never turn it into a rollback.
+        try? storageCheckpoint?(.afterCommit, url)
     }
 }
 

@@ -2,6 +2,7 @@ import AppKit
 import CaptureCore
 import Foundation
 
+/// Emits one structured CLI result without changing recording state.
 private func printJSON(_ result: CaptureResult) {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
@@ -141,6 +142,7 @@ if let command = arguments.first {
         private var statusItem: NSMenuItem!
         private var recordingItem: NSMenuItem!
         private var countItem: NSMenuItem!
+        private var recordingErrorItem: NSMenuItem!
         private var allowedMenu: NSMenu!
         private var captureItem: NSMenuItem!
         private var captureDeadline: CaptureCollector.Deadline?
@@ -150,6 +152,7 @@ if let command = arguments.first {
         private var recordingDirectory: URL!
         private var shownAppEntries: [String] = []
 
+        /// Starts the locked recorder and exposes explicit menu controls in Off mode.
         func applicationDidFinishLaunching(_ _: Notification) {
             recordingDirectory = checkRecordingDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory,
                                                                                       in: .userDomainMask)[0]
@@ -165,6 +168,9 @@ if let command = arguments.first {
             menu.addItem(recordingItem)
             countItem = NSMenuItem(title: "Captured observations: 0", action: nil, keyEquivalent: "")
             menu.addItem(countItem)
+            recordingErrorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            recordingErrorItem.isHidden = true
+            menu.addItem(recordingErrorItem)
             menu.addItem(NSMenuItem(title: "Start Recording", action: #selector(startRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Pause Recording", action: #selector(pauseRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: ""))
@@ -186,6 +192,7 @@ if let command = arguments.first {
             Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
         }
 
+        /// Opens one vault owner or records why automatic capture is unavailable.
         private func openRecording() {
             do {
                 recording = try RecordingController(vault: RecordingVault(directory: recordingDirectory))
@@ -196,12 +203,15 @@ if let command = arguments.first {
             }
         }
 
+        /// Reflects current trust, recording mode, retained count, and allowed app actions.
         @objc private func refresh() {
             statusItem.title = CaptureCollector.isTrusted() ? "Accessibility: Granted" : "Accessibility: Required"
             if let recording {
                 recordingItem.title = "Recording: \(recording.vault.settings.mode.rawValue.capitalized)"
-                countItem.title = (recording.lastError ?? recording.observerError).map { "Recording error: \($0)" } ??
-                    "Captured observations: \(recording.vault.observations.count)"
+                countItem.title = "Captured observations: \(recording.vault.observations.count)"
+                let error = recording.lastError ?? recording.observerError
+                recordingErrorItem.title = error.map { "Recording error: \($0)" } ?? ""
+                recordingErrorItem.isHidden = error == nil
                 let allowedApps = recording.vault.settings.allowedApps.keys.sorted()
                 let retainedApps = recording.vault.retainedAppIdentifiers
                 let appEntries = allowedApps.map { "allowed:\($0)" } + retainedApps.map { "retained:\($0)" }
@@ -228,10 +238,13 @@ if let command = arguments.first {
                 }
             } else {
                 recordingItem.title = "Recording: Unavailable"
-                countItem.title = recordingError ?? "Recording settings unavailable"
+                countItem.title = "Captured observations: unavailable"
+                recordingErrorItem.title = recordingError ?? "Recording settings unavailable"
+                recordingErrorItem.isHidden = false
             }
         }
 
+        /// Persists a user-selected mode and surfaces storage failures in the menu.
         private func changeMode(_ mode: RecordingMode) {
             guard let recording else { showRecordingUnavailable(); return }
             do { try recording.setMode(mode) }
@@ -243,6 +256,7 @@ if let command = arguments.first {
         @objc private func pauseRecording() { changeMode(.paused) }
         @objc private func stopRecording() { changeMode(.off) }
 
+        /// Grants recording only to the bundle selected through the local app picker.
         @objc private func allowApp() {
             guard let recording else { showRecordingUnavailable(); return }
             let panel = NSOpenPanel()
@@ -260,6 +274,7 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Removes a selected app from the allowlist while retaining old data for deletion.
         @objc private func excludeApp(_ sender: NSMenuItem) {
             guard let bundleID = sender.representedObject as? String else { return }
             guard let recording else { showRecordingUnavailable(); return }
@@ -268,6 +283,7 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Confirms and erases one app's retained observations.
         @objc private func deleteAppData(_ sender: NSMenuItem) {
             guard let bundleID = sender.representedObject as? String,
                   confirmDeletion("Delete all captured data for \(bundleID)?") else { return }
@@ -277,6 +293,7 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Erases every archived observation, including recovery from a damaged archive.
         @objc private func deleteData() {
             guard confirmDeletion("Delete all captured observations?") else { return }
             do {
@@ -291,6 +308,7 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Requires a local confirmation before captured text is removed.
         private func confirmDeletion(_ message: String) -> Bool {
             let alert = NSAlert()
             alert.messageText = message
@@ -300,6 +318,7 @@ if let command = arguments.first {
             return alert.runModal() == .alertFirstButtonReturn
         }
 
+        /// Displays the most recent retained result locally without exporting it.
         @objc private func showLastCapture() {
             guard let result = recording?.vault.observations.last else { return }
             let alert = NSAlert()
@@ -324,6 +343,7 @@ if let command = arguments.first {
             alert.runModal()
         }
 
+        /// Cancels a one-shot read before requesting the operating system AX grant.
         @objc private func request() {
             captureRequests.cancel()
             captureDeadline?.cancel()
@@ -336,6 +356,7 @@ if let command = arguments.first {
             refresh()
         }
 
+        /// Runs a separate manual diagnostic read and fences stale menu results.
         @objc private func capture() {
             guard captureItem.isEnabled else { return }
             let token = captureRequests.begin()
@@ -361,6 +382,7 @@ if let command = arguments.first {
             }
         }
 
+        /// Stops the recorder and cancels pending diagnostic capture on exit.
         @objc private func quit() {
             recording?.stop()
             captureRequests.cancel()

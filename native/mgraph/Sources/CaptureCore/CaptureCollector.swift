@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+/// Outcome of one bounded local Accessibility capture.
 public enum CaptureState: String, Codable, Sendable {
     case available
     case permissionRequired
@@ -10,7 +11,9 @@ public enum CaptureState: String, Codable, Sendable {
     case readFailed
 }
 
+/// Timestamped capture result with source identity and optional bounded text.
 public struct CaptureResult: Codable, Sendable {
+    /// Source metadata used to distinguish a capture from another app or window.
     public struct Source: Codable, Sendable {
         public let applicationName: String?
         public let bundleIdentifier: String?
@@ -18,6 +21,7 @@ public struct CaptureResult: Codable, Sendable {
         public let windowTitle: String?
         public let documentURL: String?
 
+        /// Builds source metadata; absent fields are retained as unknown rather than guessed.
         public init(applicationName: String? = nil, bundleIdentifier: String? = nil,
                     processIdentifier: Int32? = nil, windowTitle: String? = nil,
                     documentURL: String? = nil) {
@@ -38,6 +42,7 @@ public struct CaptureResult: Codable, Sendable {
     public let text: String?
     public let error: String?
 
+    /// Builds a result without inventing text for an unavailable or failed read.
     public init(state: CaptureState, observedAt: Date = Date(), source: Source = Source(),
                 text: String? = nil, error: String? = nil) {
         self.state = state
@@ -57,16 +62,20 @@ public struct CaptureResult: Codable, Sendable {
 @MainActor public final class CaptureRequestGate {
     private var current: UUID?
 
+    /// Starts with no live menu request.
     public init() {}
 
+    /// Makes a new menu request current and returns its completion token.
     public func begin() -> UUID {
         let token = UUID()
         current = token
         return token
     }
 
+    /// Prevents a cancelled worker from presenting a late result.
     public func cancel() { current = nil }
 
+    /// Accepts only the current request's first completion.
     public func finish(_ token: UUID) -> Bool {
         guard current == token else { return false }
         current = nil
@@ -78,14 +87,35 @@ public enum CaptureCollector {
     public static let captureTimeout: TimeInterval = 4
     private static let captureQueue = DispatchQueue(label: "dev.subset.mgraph.ax-capture", qos: .userInitiated)
 
+    /// Runs a menu callback after all previously queued AX work has exited.
     @MainActor public static func afterCaptureWorkerDrains(_ completion: @escaping @MainActor @Sendable () -> Void) {
         captureQueue.async { DispatchQueue.main.async(execute: completion) }
     }
 
-    private struct Foreground: Sendable {
+    struct Foreground: Sendable {
         let pid: pid_t
         let name: String?
         let bundleID: String?
+        let bundlePath: String?
+    }
+
+    struct CaptureTarget: Sendable {
+        let pid: pid_t
+        let bundleID: String
+        let bundlePath: String
+
+        /// Freezes the selected bundle's canonical identity at automatic dispatch.
+        init(pid: pid_t, bundleID: String, bundleURL: URL) {
+            self.pid = pid
+            self.bundleID = bundleID
+            bundlePath = bundleURL.standardizedFileURL.resolvingSymlinksInPath().path
+        }
+
+        /// Requires the same process, bundle identifier, and resolved bundle path.
+        func matches(_ app: Foreground?) -> Bool {
+            guard let app else { return false }
+            return app.pid == pid && app.bundleID == bundleID && app.bundlePath == bundlePath
+        }
     }
 
     // AX window elements identify separate windows even when their titles match.
@@ -107,11 +137,13 @@ public enum CaptureCollector {
         private var end: UInt64?
         private var cancelled = false
 
+        /// Creates a cancellable deadline, optionally deferring its budget until worker admission.
         public init(seconds: TimeInterval, startWhenWorkerBegins: Bool = false) {
             duration = UInt64(max(0, seconds) * 1_000_000_000)
             end = startWhenWorkerBegins ? nil : DispatchTime.now().uptimeNanoseconds + duration
         }
 
+        /// Returns true after cancellation or the elapsed monotonic deadline.
         public var expired: Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -129,6 +161,7 @@ public enum CaptureCollector {
             return DispatchTime.now().uptimeNanoseconds < end
         }
 
+        /// Fences late AX replies and queued work from yielding a result.
         public func cancel() {
             lock.lock()
             cancelled = true
@@ -136,16 +169,21 @@ public enum CaptureCollector {
         }
     }
 
+    /// Takes one foreground snapshot with its canonical bundle path.
     private static func foreground() -> Foreground? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        return Foreground(pid: app.processIdentifier, name: app.localizedName, bundleID: app.bundleIdentifier)
+        return Foreground(pid: app.processIdentifier, name: app.localizedName,
+                          bundleID: app.bundleIdentifier,
+                          bundlePath: app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path)
     }
 
+    /// Reports a failed read with source metadata but no captured text.
     private static func failed(_ app: Foreground?, _ message: String) -> CaptureResult {
         CaptureResult(state: .readFailed, source: .init(applicationName: app?.name,
                       bundleIdentifier: app?.bundleID, processIdentifier: app?.pid), error: message)
     }
 
+    /// Rejects a one-shot result after trust loss, deadline expiry, or PID switch.
     private static func validate(_ result: CaptureResult, app: Foreground?, deadline: Deadline) -> CaptureResult {
         if !isTrusted() { return status() }
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
@@ -157,6 +195,7 @@ public enum CaptureCollector {
 
     // Called on the main thread by both entry points. AX work never occupies the menu loop.
     @discardableResult
+    /// Runs the explicit one-shot menu capture without an automatic-recording allowlist.
     @MainActor public static func captureForeground(
         onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
         completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
@@ -176,6 +215,56 @@ public enum CaptureCollector {
         return deadline
     }
 
+    /// Automatically reads only the PID and canonical app bundle authorized by the controller.
+    /// A queued foreground switch is rejected on worker admission before any remote AX call.
+    @discardableResult
+    @MainActor public static func captureAllowedForeground(
+        pid: pid_t, bundleIdentifier: String, bundleURL: URL,
+        onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
+        completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
+    ) -> Deadline? {
+        captureAllowedForeground(target: .init(pid: pid, bundleID: bundleIdentifier, bundleURL: bundleURL),
+                                 trusted: { isTrusted() }, foregroundProvider: { foreground() },
+                                 read: { app, deadline in performCapture(app, deadline: deadline) },
+                                 onWorkerStart: onWorkerStart, completion: completion)
+    }
+
+    /// Shared automatic worker path; the injected reader runs only for an unchanged authorized target.
+    @discardableResult
+    @MainActor static func captureAllowedForeground(
+        target: CaptureTarget, trusted: @escaping @Sendable () -> Bool,
+        foregroundProvider: @escaping @MainActor @Sendable () -> Foreground?,
+        read: @escaping @Sendable (Foreground, Deadline) -> CaptureResult,
+        onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
+        completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
+    ) -> Deadline? {
+        guard trusted() else {
+            completion(CaptureResult(state: .permissionRequired, error: "Accessibility permission is unavailable"))
+            return nil
+        }
+        guard target.matches(foregroundProvider()) else {
+            completion(CaptureResult(state: .readFailed, error: "Allowed foreground application changed"))
+            return nil
+        }
+        let deadline = Deadline(seconds: captureTimeout, startWhenWorkerBegins: true)
+        runAsync(deadline: deadline, seconds: captureTimeout, onWorkerStart: onWorkerStart, work: {
+            // Resolve AppKit foreground state on the menu actor after queue admission.
+            let app = DispatchQueue.main.sync { MainActor.assumeIsolated { foregroundProvider() } }
+            guard trusted(), !deadline.expired, let app, target.matches(app) else {
+                return CaptureResult(state: .readFailed, error: "Allowed foreground application changed before AX read")
+            }
+            return read(app, deadline)
+        }) { result in
+            guard trusted(), !deadline.expired, target.matches(foregroundProvider()) else {
+                completion(CaptureResult(state: .readFailed, error: "Allowed foreground application changed during AX read"))
+                return
+            }
+            completion(result ?? CaptureResult(state: .readFailed, error: "Accessibility capture deadline exceeded"))
+        }
+        return deadline
+    }
+
+    /// Serializes AX work and gives a queued request its budget when admitted to the worker.
     @MainActor static func runAsync(deadline: Deadline, seconds: TimeInterval,
                                     onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
                                     work: @escaping @Sendable () -> CaptureResult,
@@ -214,19 +303,23 @@ public enum CaptureCollector {
             once { completion(result) }
         }
     }
+    /// Reads the current macOS Accessibility trust state without prompting.
     public static func isTrusted() -> Bool { AXIsProcessTrusted() }
 
+    /// Requests Accessibility access through the operating system prompt.
     @discardableResult
     public static func requestAccess() -> Bool {
         AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
+    /// Returns current permission status with no foreground content.
     public static func status() -> CaptureResult {
         let trusted = isTrusted()
         return CaptureResult(state: trusted ? .available : .permissionRequired,
                              error: trusted ? nil : "Grant Accessibility access in System Settings > Privacy & Security > Accessibility.")
     }
 
+    /// Converts explicit CLI consent and foreground availability into a failure before AX work.
     public static func cliConsentFailure(approved: Bool, foregroundAvailable: Bool) -> CaptureResult? {
         if !approved { return CaptureResult(state: .readFailed, error: "Command capture was not approved") }
         if !foregroundAvailable {
@@ -237,6 +330,7 @@ public enum CaptureCollector {
 
     // The native menu check may inspect alert text only for its own fixture.
     // Reject a foreground switch before the alert receives any captured body.
+    /// Suppresses fixture text if its expected app or exact window title changed before display.
     public static func bindFixture(_ result: CaptureResult, bundleIdentifier: String,
                                    windowTitle: String) -> CaptureResult {
         guard result.state == .available else { return result }
@@ -247,6 +341,7 @@ public enum CaptureCollector {
         return result
     }
 
+    /// Runs the confirmed CLI one-shot read, optionally bound to the pre-consent PID.
     public static func captureForeground(expectedProcessIdentifier: pid_t? = nil) -> CaptureResult {
         guard isTrusted() else { return status() }
         guard let app = foreground() else {
@@ -264,6 +359,7 @@ public enum CaptureCollector {
     }
 
     // The bounded runner is also exercised with a deliberately slow fake tree.
+    /// Waits at most the requested duration for serial AX work and discards a late result.
     static func runBounded(deadline: Deadline, seconds: TimeInterval,
                            work: @escaping @Sendable () -> CaptureResult) -> CaptureResult? {
         let semaphore = DispatchSemaphore(value: 0)
@@ -285,6 +381,7 @@ public enum CaptureCollector {
         }
     }
 
+    /// Reads only the supplied PID's focused AX window and verifies its source again afterward.
     private static func performCapture(_ app: Foreground, deadline: Deadline) -> CaptureResult {
         if deadline.expired { return failed(app, "Accessibility capture deadline exceeded") }
         let root = AXUIElementCreateApplication(app.pid)
@@ -335,6 +432,7 @@ public enum CaptureCollector {
                               confirmation: confirmation, final: finalRead.source, finalText: finalRead.text)
     }
 
+    /// Rebuilds focused source identity after extraction to detect window or tab changes.
     private static func focusedSource(root: AXUIElement, app: Foreground,
                                       deadline: Deadline) -> SourceIdentity? {
         guard let window = captureWindow(root, deadline: deadline) else { return nil }
@@ -344,12 +442,14 @@ public enum CaptureCollector {
                               deadline: deadline)
     }
 
+    /// Reads final content before final source identity so navigation cannot reuse old text.
     static func confirmAfterFinalText(readText: () -> String?,
                                       readSource: () -> SourceIdentity?) -> (text: String?, source: SourceIdentity?) {
         let text = readText()
         return (text, readSource())
     }
 
+    /// Publishes text only when every source and text observation agrees.
     static func checkedCapture(_ result: CaptureResult, initial: SourceIdentity,
                                current: SourceIdentity?, confirmation: String?,
                                final: SourceIdentity?, finalText: String?) -> CaptureResult {
@@ -364,10 +464,12 @@ public enum CaptureCollector {
         return result
     }
 
+    /// Distinguishes an empty readable tree from a usable observation.
     static func stateForText(_ text: String) -> CaptureState {
         text.isEmpty ? .unsupportedApplication : .available
     }
 
+    /// Bounds one remote AX attribute reply by the active deadline.
     private static func attribute(_ element: AXUIElement, _ name: String, deadline: Deadline) -> CFTypeRef? {
         guard !deadline.expired else { return nil }
         AXUIElementSetMessagingTimeout(element, 0.25)
@@ -377,6 +479,7 @@ public enum CaptureCollector {
         return result
     }
 
+    /// Rejects an oversized scalar before copying or normalizing its content.
     private static func stringAttribute(_ element: AXUIElement, _ name: String, deadline: Deadline) -> String? {
         // AX has a range API for some text controls, but not for arbitrary
         // scalar attributes (notably Chrome static text). Check the length
@@ -389,6 +492,7 @@ public enum CaptureCollector {
         return raw
     }
 
+    /// Prefers a bounded AX range read and falls back only when the scalar remains bounded.
     private static func textValue(_ element: AXUIElement, remaining: Int, deadline: Deadline) -> String? {
         guard remaining > 0, !deadline.expired else { return nil }
         AXUIElementSetMessagingTimeout(element, 0.25)
@@ -415,17 +519,20 @@ public enum CaptureCollector {
         return stringAttribute(element, kAXValueAttribute as String, deadline: deadline)
     }
 
+    /// Uses the focused window alone; background windows are outside the capture contract.
     private static func captureWindow(_ root: AXUIElement, deadline: Deadline) -> AXUIElement? {
         verifiedFocusedWindow { attribute(root, $0, deadline: deadline) }
     }
 
     // AXWindows contains background windows and its order does not identify the foreground source.
+    /// Accepts only an AX element returned as the focused window.
     static func verifiedFocusedWindow(_ readAttribute: (String) -> CFTypeRef?) -> AXUIElement? {
         guard let focused = readAttribute(kAXFocusedWindowAttribute as String),
               CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
         return (focused as! AXUIElement)
     }
 
+    /// Captures window, focused element, tab, and web-area identity for later comparison.
     private static func sourceIdentity(root: AXUIElement, target: AXUIElement, app: Foreground,
                                        title: String?, document: String?, deadline: Deadline) -> SourceIdentity? {
         let focused = attribute(root, kAXFocusedUIElementAttribute as String, deadline: deadline)
@@ -438,6 +545,7 @@ public enum CaptureCollector {
     // AXUIElementCopyAttributeValue materializes an entire child array. Query its
     // count first, then request only a bounded range. An oversized array fails
     // closed because a source hidden after the range could invalidate identity.
+    /// Reads a bounded AX element array without traversing an unbounded provider list.
     private static func elements(_ element: AXUIElement, _ name: String, maxCount: Int,
                                  deadline: Deadline) -> [AXUIElement]? {
         guard !deadline.expired else { return nil }
@@ -460,6 +568,7 @@ public enum CaptureCollector {
 
     // The injected count/range seam proves that a large provider array is
     // rejected without invoking its potentially expensive range read.
+    /// Rejects arrays whose provider-reported count exceeds the traversal budget.
     static func boundedElements<T>(maxCount: Int, count: () -> Int?,
                                    readRange: (Int) -> [T]?) -> [T]? {
         guard let length = count(), length >= 0, length <= maxCount else { return nil }
@@ -468,6 +577,7 @@ public enum CaptureCollector {
         return result
     }
 
+    /// Records selected tabs and active web areas for source-change detection.
     private static func activeContent(in root: AXUIElement, deadline: Deadline) -> (tabs: [CFHashCode], webAreas: [CFHashCode])? {
         var pending: [(AXUIElement, Int)] = [(root, 0)]
         var index = 0
@@ -499,6 +609,7 @@ public enum CaptureCollector {
     typealias ValueReader = (AXUIElement, Int, Deadline) -> String?
     typealias ChildrenReader = (AXUIElement, Int, Deadline) -> [AXUIElement]?
 
+    /// Reads AX role metadata without reading a sensitive field's value.
     private static func metadata(_ element: AXUIElement, _ key: String, _ deadline: Deadline) -> (AXError, String?) {
         guard !deadline.expired else { return (.cannotComplete, nil) }
         AXUIElementSetMessagingTimeout(element, 0.25)
@@ -508,6 +619,7 @@ public enum CaptureCollector {
         return (error, raw as? String)
     }
 
+    /// Fails closed when role or subrole cannot establish that an AX field is safe.
     static func safeRole(_ element: AXUIElement, deadline: Deadline,
                          read: MetadataReader) -> String? {
         let (roleError, role) = read(element, kAXRoleAttribute as String, deadline)
@@ -520,6 +632,7 @@ public enum CaptureCollector {
         return shouldSkip(role: role, subrole: subrole ?? "") ? nil : role
     }
 
+    /// Traverses a bounded focused tree, skipping protected roles before value reads.
     static func extractText(from root: AXUIElement, deadline: Deadline,
                             readMetadata: MetadataReader = metadata,
                             readString: StringReader = stringAttribute,
@@ -564,11 +677,13 @@ public enum CaptureCollector {
         return (String(snippets.joined(separator: "\n").prefix(6000)), count)
     }
 
+    /// Identifies secure or password roles whose content must never be requested.
     public static func shouldSkip(role: String, subrole: String) -> Bool {
         let combined = "\(role) \(subrole)".lowercased()
         return combined.contains("secure") || combined.contains("password")
     }
 
+    /// Normalizes readable text within the remaining per-capture character budget.
     public static func normalize(_ raw: String, remaining: Int) -> String {
         guard remaining > 0 else { return "" }
         var compact = ""

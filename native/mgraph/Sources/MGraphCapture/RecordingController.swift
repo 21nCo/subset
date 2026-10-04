@@ -19,6 +19,7 @@ import Foundation
     private(set) var lastError: String?
     private(set) var observerError: String?
 
+    /// Wires one locked vault to foreground, sleep, and AX events on the menu thread.
     init(vault: RecordingVault) {
         self.vault = vault
         let center = NSWorkspace.shared.notificationCenter
@@ -51,26 +52,33 @@ import Foundation
         foregroundChanged()
     }
 
+    /// Fences pending work before changing the durable recording mode.
     func setMode(_ mode: RecordingMode) throws {
         invalidate()
         detachObserver()
         try vault.setMode(mode)
+        lastError = nil
         foregroundChanged()
     }
 
+    /// Adds a selected app without implicitly starting recording.
     func allow(_ bundleIdentifier: String, at bundleURL: URL) throws {
         invalidate()
         try vault.allow(bundleIdentifier, at: bundleURL)
+        lastError = nil
         foregroundChanged()
     }
 
+    /// Cancels pending reads before removing an app from the allowlist.
     func exclude(_ bundleIdentifier: String) throws {
         invalidate()
         detachObserver()
         try vault.exclude(bundleIdentifier)
+        lastError = nil
         foregroundChanged()
     }
 
+    /// Fences results before deleting one app's archive rows or all captured data.
     func deleteCapturedData(bundleIdentifier: String? = nil) throws {
         invalidate()
         defer {
@@ -78,8 +86,10 @@ import Foundation
             foregroundPID = nil
         }
         try vault.deleteCapturedData(bundleIdentifier: bundleIdentifier)
+        lastError = nil
     }
 
+    /// Removes timers and observers when the menu host shuts down.
     func stop() {
         stopped = true
         invalidate()
@@ -90,12 +100,14 @@ import Foundation
         workspaceTokens.removeAll()
     }
 
+    /// Cancels queued AX work and rejects any in-flight result from an older generation.
     private func invalidate() {
         gate.invalidate()
         deadline?.cancel()
         deadline = nil
     }
 
+    /// Tears down the previous app observer before evaluating the newly frontmost app.
     private func foregroundChanged() {
         invalidate()
         detachObserver()
@@ -103,6 +115,7 @@ import Foundation
         tick()
     }
 
+    /// Rechecks trust, wake state, and the allowlist; heartbeat backs up missing AX events.
     private func tick() {
         guard !stopped, awake, CaptureCollector.isTrusted(),
               let app = NSWorkspace.shared.frontmostApplication,
@@ -134,6 +147,7 @@ import Foundation
         signal()
     }
 
+    /// Reserves one throttled automatic request for the currently authorized app identity.
     private func signal() {
         let uptime = ProcessInfo.processInfo.systemUptime
         guard !stopped, workerReady, awake, gate.canBegin(at: uptime),
@@ -145,7 +159,9 @@ import Foundation
               let token = gate.begin(at: uptime) else { return }
         let pid = app.processIdentifier
         workerReady = false
-        deadline = CaptureCollector.captureForeground(onWorkerStart: { [weak self] startedAt in
+        deadline = CaptureCollector.captureAllowedForeground(
+            pid: pid, bundleIdentifier: bundleIdentifier, bundleURL: bundleURL,
+            onWorkerStart: { [weak self] startedAt in
             self?.gate.recordCaptureStart(at: startedAt)
         }) { [weak self] result in
             guard let self else { return }
@@ -174,7 +190,11 @@ import Foundation
 
     // A failed partial registration must be removed before the next attempt.
     // Return a diagnostic only after the caller can safely retry on a heartbeat.
+    /// Registers both focus notifications or removes a partial registration for retry.
     private func attachObserver(pid: pid_t) -> String? {
+        // AXObserverCreate's CF_RETURNS_RETAINED out parameter imports as a
+        // Swift-managed AXObserver. Dropping `created` releases a failed setup;
+        // `self.observer = nil` releases a successful one after source removal.
         var created: AXObserver?
         let createError = AXObserverCreate(pid, { _, _, _, context in
             guard let context else { return }
@@ -208,6 +228,7 @@ import Foundation
         return nil
     }
 
+    /// Removes the current AX run-loop source and clears observer retry diagnostics.
     private func detachObserver() {
         if let observer {
             if let app = observedApplication {

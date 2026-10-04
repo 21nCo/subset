@@ -236,7 +236,7 @@ private enum TestStorageFailure: Error { case injected }
       try vault?.allow("com.example.first", at: firstApp)
       try vault?.setMode(.recording)
       let before = try Data(contentsOf: settingsURL)
-      vault?.storageCheckpoint = { phase in
+      vault?.storageCheckpoint = { phase, _ in
         if (phase == .afterCommit) == afterCommit { throw TestStorageFailure.injected }
       }
       if afterCommit { try vault?.exclude("com.example.first") }
@@ -260,7 +260,7 @@ private enum TestStorageFailure: Error { case injected }
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     var vault: RecordingVault? = try RecordingVault(directory: directory)
-    vault?.storageCheckpoint = { phase in
+    vault?.storageCheckpoint = { phase, _ in
       if phase == .beforeCommit { throw TestStorageFailure.injected }
     }
     XCTAssertThrowsError(try vault?.allow("com.example.first", at: firstApp))
@@ -272,6 +272,25 @@ private enum TestStorageFailure: Error { case injected }
     XCTAssertFalse(staged.contains { $0.hasSuffix(".tmp") }, "Failed staging must leave no private text")
     vault = nil
     XCTAssertTrue(try RecordingVault(directory: directory).settings.allowedApps.isEmpty)
+  }
+
+  func testOversizedSettingsWriteLeavesAllowlistReopenable() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var vault: RecordingVault? = try RecordingVault(directory: directory)
+    try vault?.allow("com.example.first", at: firstApp)
+    let settingsURL = directory.appendingPathComponent("recording-settings.json")
+    let before = try Data(contentsOf: settingsURL)
+    let oversizedApp = URL(fileURLWithPath: "/Applications/" + String(repeating: "a", count: 33_000) + ".app")
+    XCTAssertThrowsError(try vault?.allow("com.example.large", at: oversizedApp)) { error in
+      XCTAssertEqual(error as? RecordingError, .settingsTooLarge)
+    }
+    XCTAssertNil(vault?.settings.allowedApps["com.example.large"])
+    XCTAssertEqual(try Data(contentsOf: settingsURL), before)
+    vault = nil
+    let reopened = try RecordingVault(directory: directory)
+    XCTAssertNotNil(reopened.settings.allowedApps["com.example.first"])
+    XCTAssertNil(reopened.settings.allowedApps["com.example.large"])
   }
 
   func testArchiveCommitFailureCannotRestoreDeletedText() throws {
@@ -286,12 +305,17 @@ private enum TestStorageFailure: Error { case injected }
       try vault?.append(capture("com.example.new", text: "keep me"), from: newApp)
       let archive = directory.appendingPathComponent("captured-observations.json")
       let before = try Data(contentsOf: archive)
-      vault?.storageCheckpoint = { phase in
-        if (phase == .afterCommit) == afterCommit { throw TestStorageFailure.injected }
+      var reachedArchive = false
+      vault?.storageCheckpoint = { phase, url in
+        if url == archive {
+          reachedArchive = true
+          if (phase == .afterCommit) == afterCommit { throw TestStorageFailure.injected }
+        }
       }
       if afterCommit { try vault?.deleteCapturedData(bundleIdentifier: "com.example.first") }
       else { XCTAssertThrowsError(try vault?.deleteCapturedData(bundleIdentifier: "com.example.first")) }
       XCTAssertEqual(vault?.settings.mode, .paused)
+      XCTAssertTrue(reachedArchive, "The fault must occur during archive replacement after the pause commits")
       XCTAssertEqual(vault?.observations.map(\.text), afterCommit ? ["keep me"] : ["erase me", "keep me"])
       if !afterCommit { XCTAssertEqual(try Data(contentsOf: archive), before) }
       vault = nil
@@ -300,19 +324,105 @@ private enum TestStorageFailure: Error { case injected }
     }
   }
 
+  func testDirectorySyncFailureReconcilesLiveDiskAndReopen() throws {
+    for operation in ["exclude", "append", "per-app deletion", "all-data deletion"] {
+      let directory = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: directory) }
+      var vault: RecordingVault? = try RecordingVault(directory: directory)
+      try vault?.allow("com.example.first", at: firstApp)
+      try vault?.allow("com.example.new", at: newApp)
+      try vault?.setMode(.recording)
+      try vault?.append(capture("com.example.first", text: "erase me"), from: firstApp)
+      try vault?.append(capture("com.example.new", text: "keep me"), from: newApp)
+      let target = directory.appendingPathComponent(
+        operation == "exclude" ? "recording-settings.json" : "captured-observations.json")
+      vault?.storageCheckpoint = { phase, url in
+        if phase == .beforeDirectorySync && url == target { throw TestStorageFailure.injected }
+      }
+      switch operation {
+      case "exclude": XCTAssertThrowsError(try vault?.exclude("com.example.first"))
+      case "append": XCTAssertThrowsError(try vault?.append(capture("com.example.first", text: "new"), from: firstApp))
+      case "per-app deletion": XCTAssertThrowsError(try vault?.deleteCapturedData(bundleIdentifier: "com.example.first"))
+      default: XCTAssertThrowsError(try vault?.deleteCapturedData())
+      }
+      XCTAssertEqual(vault?.settings.mode, .paused)
+      let liveApps = vault?.settings.allowedApps
+      let liveText = vault?.observations.map(\.text)
+      if operation == "exclude" { XCTAssertNil(liveApps?["com.example.first"]) }
+      if operation.contains("deletion") { XCTAssertFalse(liveText?.contains("erase me") ?? true) }
+      vault = nil
+      let reopened = try RecordingVault(directory: directory)
+      XCTAssertEqual(reopened.settings.allowedApps, liveApps)
+      XCTAssertEqual(reopened.observations.map(\.text), liveText)
+    }
+  }
+
+  func testSettingsSyncFailureReconcilesAllowAndMode() throws {
+    for operation in ["allow", "start"] {
+      let directory = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: directory) }
+      var vault: RecordingVault? = try RecordingVault(directory: directory)
+      try vault?.allow("com.example.first", at: firstApp)
+      try vault?.setMode(operation == "allow" ? .recording : .paused)
+      let settingsURL = directory.appendingPathComponent("recording-settings.json")
+      vault?.storageCheckpoint = { phase, url in
+        if phase == .beforeDirectorySync && url == settingsURL { throw TestStorageFailure.injected }
+      }
+      if operation == "allow" {
+        XCTAssertThrowsError(try vault?.allow("com.example.new", at: newApp))
+        XCTAssertNotNil(vault?.settings.allowedApps["com.example.new"])
+      } else {
+        XCTAssertThrowsError(try vault?.setMode(.recording))
+      }
+      XCTAssertEqual(vault?.settings.mode, .paused)
+      XCTAssertFalse(vault!.allows("com.example.first", at: firstApp))
+      let disk = try JSONDecoder().decode(RecordingSettings.self, from: Data(contentsOf: settingsURL))
+      XCTAssertEqual(disk.allowedApps, vault?.settings.allowedApps)
+      vault = nil
+      let reopened = try RecordingVault(directory: directory)
+      XCTAssertEqual(reopened.settings.allowedApps, disk.allowedApps)
+      XCTAssertEqual(reopened.settings.mode, .off)
+    }
+  }
+
+  func testAllDataUnlinkPrecommitFailureLeavesArchiveAndPauses() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var vault: RecordingVault? = try RecordingVault(directory: directory)
+    try vault?.allow("com.example.first", at: firstApp)
+    try vault?.setMode(.recording)
+    try vault?.append(capture("com.example.first", text: "retain on unlink failure"), from: firstApp)
+    let archiveURL = directory.appendingPathComponent("captured-observations.json")
+    let before = try Data(contentsOf: archiveURL)
+    var reachedUnlink = false
+    vault?.storageCheckpoint = { phase, url in
+      if phase == .beforeCommit && url == archiveURL {
+        reachedUnlink = true
+        throw TestStorageFailure.injected
+      }
+    }
+    XCTAssertThrowsError(try vault?.deleteCapturedData())
+    XCTAssertTrue(reachedUnlink)
+    XCTAssertEqual(vault?.settings.mode, .paused)
+    XCTAssertEqual(try Data(contentsOf: archiveURL), before)
+    vault = nil
+    XCTAssertEqual(try RecordingVault(directory: directory).observations.map(\.text),
+                   ["retain on unlink failure"])
+  }
+
   func testAppendAndAllDataDeletionReconcileAtCommitPoint() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     var vault: RecordingVault? = try RecordingVault(directory: directory)
     try vault?.allow("com.example.first", at: firstApp)
     try vault?.setMode(.recording)
-    vault?.storageCheckpoint = { phase in
+    vault?.storageCheckpoint = { phase, _ in
       if phase == .beforeCommit { throw TestStorageFailure.injected }
     }
     XCTAssertThrowsError(try vault?.append(capture("com.example.first", text: "uncommitted"), from: firstApp))
     XCTAssertEqual(vault?.settings.mode, .paused)
     XCTAssertTrue(vault!.observations.isEmpty)
-    vault?.storageCheckpoint = { phase in
+    vault?.storageCheckpoint = { phase, _ in
       if phase == .afterCommit { throw TestStorageFailure.injected }
     }
     try vault?.setMode(.recording)
@@ -388,6 +498,20 @@ private enum TestStorageFailure: Error { case injected }
     let reopened = try RecordingVault(directory: directory)
     XCTAssertEqual(reopened.settings.mode, .off)
     XCTAssertNotNil(reopened.settings.allowedApps["com.example.first"])
+  }
+
+  func testLockFileOpenFailureIsNotReportedAsAnotherRecorder() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let lock = directory.appendingPathComponent("recording.lock")
+    try FileManager.default.createSymbolicLink(at: lock,
+        withDestinationURL: directory.appendingPathComponent("untrusted-target"))
+    XCTAssertThrowsError(try RecordingVault(directory: directory)) { error in
+      XCTAssertNotEqual(error as? RecordingError, .recorderInUse)
+      let posix = error as NSError
+      XCTAssertEqual(posix.domain, NSPOSIXErrorDomain)
+      XCTAssertEqual(posix.code, Int(ELOOP))
+    }
   }
 
   func testSecondInstanceCannotEraseLiveArchiveAndOwnerCannotRestoreDeletedText() throws {
