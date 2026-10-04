@@ -40,7 +40,7 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     public private(set) var observations: [CaptureResult]
     public static let maximumObservations = 50
 
-    public init(directory: URL) throws {
+    private static func acquireLock(in directory: URL) throws -> Int32 {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
@@ -51,6 +51,11 @@ public enum RecordingError: Error, LocalizedError, Equatable {
             Darwin.close(fd)
             throw RecordingError.recorderInUse
         }
+        return fd
+    }
+
+    public init(directory: URL) throws {
+        let fd = try Self.acquireLock(in: directory)
         lockFD = fd
         var initialized = false
         defer { if !initialized { Darwin.close(fd) } }
@@ -92,6 +97,21 @@ public enum RecordingError: Error, LocalizedError, Equatable {
     }
 
     deinit { Darwin.close(lockFD) }
+
+    // Allows recovery from a damaged archive without bypassing the live writer's lock.
+    // The owner must be closed before this can erase data it might still hold in memory.
+    public static func eraseArchiveWhileClosed(in directory: URL) throws {
+        let fd = try acquireLock(in: directory)
+        defer { Darwin.close(fd) }
+        let archive = directory.appendingPathComponent("captured-observations.json")
+        if FileManager.default.fileExists(atPath: archive.path) {
+            try FileManager.default.removeItem(at: archive)
+        }
+    }
+
+    public var retainedAppIdentifiers: [String] {
+        Array(Set(observations.compactMap(\.bundleIdentifier))).sorted()
+    }
 
     public static func validBundleIdentifier(_ identifier: String) -> Bool {
         identifier.count <= 255 && identifier.range(
@@ -206,8 +226,12 @@ public enum RecordingError: Error, LocalizedError, Equatable {
 
     public init() {}
 
+    public func canBegin(at uptime: TimeInterval) -> Bool {
+        !inFlight && uptime >= nextAllowed
+    }
+
     public func begin(at uptime: TimeInterval) -> UInt64? {
-        guard !inFlight, uptime >= nextAllowed else { return nil }
+        guard canBegin(at: uptime) else { return nil }
         inFlight = true
         nextAllowed = uptime + Self.minimumInterval
         return generation

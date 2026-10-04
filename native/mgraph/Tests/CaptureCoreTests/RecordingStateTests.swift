@@ -71,6 +71,8 @@ import XCTest
       XCTAssertEqual(vault.observations.count, 1)
       try vault.setMode(.recording)
       try vault.exclude("com.example.first")
+      XCTAssertEqual(vault.retainedAppIdentifiers, ["com.example.first"],
+                     "Exclusion must leave retained data visible for deletion")
       try vault.append(
         capture("com.example.first", text: "not recorded when excluded"), from: firstApp)
       XCTAssertEqual(vault.observations.count, 1)
@@ -149,13 +151,49 @@ import XCTest
     XCTAssertNotNil(reopened.settings.allowedApps["com.example.first"])
   }
 
+  func testSecondInstanceCannotEraseLiveArchiveAndOwnerCannotRestoreDeletedText() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let archive = directory.appendingPathComponent("captured-observations.json")
+    var owner: RecordingVault? = try RecordingVault(directory: directory)
+    try owner?.allow("com.example.first", at: firstApp)
+    try owner?.setMode(.recording)
+    try owner?.append(capture("com.example.first", text: "first"), from: firstApp)
+    XCTAssertThrowsError(try RecordingVault.eraseArchiveWhileClosed(in: directory)) { error in
+      XCTAssertEqual(error as? RecordingError, .recorderInUse)
+    }
+    XCTAssertTrue(try String(contentsOf: archive, encoding: .utf8).contains("first"))
+    try owner?.append(capture("com.example.first", text: "second"), from: firstApp)
+    XCTAssertEqual(owner?.observations.count, 2)
+    owner = nil
+    try RecordingVault.eraseArchiveWhileClosed(in: directory)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+    XCTAssertTrue(try RecordingVault(directory: directory).observations.isEmpty)
+  }
+
+  func testDamagedArchiveCanBeErasedOnlyAfterLockIsAcquired() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let archive = directory.appendingPathComponent("captured-observations.json")
+    try Data("malformed".utf8).write(to: archive)
+    XCTAssertThrowsError(try RecordingVault(directory: directory)) { error in
+      XCTAssertEqual(error as? RecordingError, .damagedArchive)
+    }
+    try RecordingVault.eraseArchiveWhileClosed(in: directory)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+    XCTAssertTrue(try RecordingVault(directory: directory).observations.isEmpty)
+  }
+
   func testThrottleAndInvalidationFenceLateResult() {
     let gate = RecordingGate()
     let first = gate.begin(at: 100)
     XCTAssertNotNil(first)
+    XCTAssertFalse(gate.canBegin(at: 100.1))
     XCTAssertNil(gate.begin(at: 100.1))
     XCTAssertTrue(gate.finish(first!))
+    XCTAssertFalse(gate.canBegin(at: 102.9))
     XCTAssertNil(gate.begin(at: 102.9))
+    XCTAssertTrue(gate.canBegin(at: 103))
     let second = gate.begin(at: 103)
     XCTAssertNotNil(second)
     gate.invalidate()

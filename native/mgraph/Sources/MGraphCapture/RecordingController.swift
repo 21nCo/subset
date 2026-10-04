@@ -9,7 +9,6 @@ import Foundation
     private var deadline: CaptureCollector.Deadline?
     private var observer: AXObserver?
     private var observedApplication: AXUIElement?
-    private var observedWindow: AXUIElement?
     private var observedPID: pid_t?
     private var awake = true
     private var workspaceTokens: [NSObjectProtocol] = []
@@ -114,12 +113,14 @@ import Foundation
     }
 
     private func signal() {
-        guard !stopped, workerReady, awake, CaptureCollector.isTrusted(),
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard !stopped, workerReady, awake, gate.canBegin(at: uptime),
+              CaptureCollector.isTrusted(),
               let app = NSWorkspace.shared.frontmostApplication,
               let bundleIdentifier = app.bundleIdentifier,
               let bundleURL = app.bundleURL,
               vault.allows(bundleIdentifier, at: bundleURL),
-              let token = gate.begin(at: ProcessInfo.processInfo.systemUptime) else { return }
+              let token = gate.begin(at: uptime) else { return }
         let pid = app.processIdentifier
         workerReady = false
         deadline = CaptureCollector.captureForeground { [weak self] result in
@@ -149,17 +150,17 @@ import Foundation
 
     private func attachObserver(pid: pid_t) {
         var created: AXObserver?
-        guard AXObserverCreate(pid, { _, _, notification, context in
+        guard AXObserverCreate(pid, { _, _, _, context in
             guard let context else { return }
             let controller = Unmanaged<RecordingController>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async {
-                if notification as String == kAXFocusedWindowChangedNotification as String {
-                    controller.attachWindowNotification()
-                }
+            // This source is installed on the main run loop. Handle the bounded
+            // signal there without enqueuing one main-queue block per AX event.
+            MainActor.assumeIsolated {
                 controller.signal()
             }
         }, &created) == .success, let created else { return }
         let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
         let context = Unmanaged.passUnretained(self).toOpaque()
         for notification in [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification] {
             _ = AXObserverAddNotification(created, app, notification as CFString, context)
@@ -168,23 +169,6 @@ import Foundation
         observedApplication = app
         observedPID = pid
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
-        attachWindowNotification()
-    }
-
-    private func attachWindowNotification() {
-        guard let observer, let app = observedApplication else { return }
-        if let old = observedWindow {
-            _ = AXObserverRemoveNotification(observer, old, kAXValueChangedNotification as CFString)
-            observedWindow = nil
-        }
-        var raw: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &raw) == .success,
-              let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return }
-        let window = raw as! AXUIElement
-        if AXObserverAddNotification(observer, window, kAXValueChangedNotification as CFString,
-                                     Unmanaged.passUnretained(self).toOpaque()) == .success {
-            observedWindow = window
-        }
     }
 
     private func detachObserver() {
@@ -194,13 +178,9 @@ import Foundation
                 _ = AXObserverRemoveNotification(observer, app, notification as CFString)
             }
         }
-        if let window = observedWindow {
-            _ = AXObserverRemoveNotification(observer, window, kAXValueChangedNotification as CFString)
-        }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         self.observer = nil
         observedApplication = nil
-        observedWindow = nil
         observedPID = nil
     }
 }

@@ -148,7 +148,7 @@ if let command = arguments.first {
         private var recording: RecordingController?
         private var recordingError: String?
         private var recordingDirectory: URL!
-        private var shownAllowedApps: [String] = []
+        private var shownAppEntries: [String] = []
 
         func applicationDidFinishLaunching(_ _: Notification) {
             recordingDirectory = checkRecordingDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory,
@@ -169,7 +169,7 @@ if let command = arguments.first {
             menu.addItem(NSMenuItem(title: "Pause Recording", action: #selector(pauseRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Allow App…", action: #selector(allowApp), keyEquivalent: ""))
-            let allowedItem = NSMenuItem(title: "Allowed Apps", action: nil, keyEquivalent: "")
+            let allowedItem = NSMenuItem(title: "Allowed Apps and Captured Data", action: nil, keyEquivalent: "")
             allowedMenu = NSMenu()
             allowedItem.submenu = allowedMenu
             menu.addItem(allowedItem)
@@ -203,21 +203,27 @@ if let command = arguments.first {
                 countItem.title = recording.lastError.map { "Recording error: \($0)" } ??
                     "Captured observations: \(recording.vault.observations.count)"
                 let allowedApps = recording.vault.settings.allowedApps.keys.sorted()
-                if shownAllowedApps != allowedApps || allowedMenu.items.isEmpty {
-                    shownAllowedApps = allowedApps
+                let retainedApps = recording.vault.retainedAppIdentifiers
+                let appEntries = allowedApps.map { "allowed:\($0)" } + retainedApps.map { "retained:\($0)" }
+                if shownAppEntries != appEntries || allowedMenu.items.isEmpty {
+                    shownAppEntries = appEntries
                     allowedMenu.removeAllItems()
-                    for bundleID in allowedApps {
-                        let exclude = NSMenuItem(title: "Exclude \(bundleID)", action: #selector(excludeApp(_:)), keyEquivalent: "")
-                        exclude.representedObject = bundleID
-                        exclude.target = self
-                        allowedMenu.addItem(exclude)
-                        let erase = NSMenuItem(title: "Delete Data: \(bundleID)", action: #selector(deleteAppData(_:)), keyEquivalent: "")
-                        erase.representedObject = bundleID
-                        erase.target = self
-                        allowedMenu.addItem(erase)
+                    for bundleID in Set(allowedApps + retainedApps).sorted() {
+                        if allowedApps.contains(bundleID) {
+                            let exclude = NSMenuItem(title: "Exclude \(bundleID)", action: #selector(excludeApp(_:)), keyEquivalent: "")
+                            exclude.representedObject = bundleID
+                            exclude.target = self
+                            allowedMenu.addItem(exclude)
+                        }
+                        if retainedApps.contains(bundleID) {
+                            let erase = NSMenuItem(title: "Delete Data: \(bundleID)", action: #selector(deleteAppData(_:)), keyEquivalent: "")
+                            erase.representedObject = bundleID
+                            erase.target = self
+                            allowedMenu.addItem(erase)
+                        }
                     }
                     if allowedMenu.items.isEmpty {
-                        allowedMenu.addItem(NSMenuItem(title: "No apps allowed", action: nil, keyEquivalent: ""))
+                        allowedMenu.addItem(NSMenuItem(title: "No allowed apps or captured data", action: nil, keyEquivalent: ""))
                     }
                 }
             } else {
@@ -256,7 +262,8 @@ if let command = arguments.first {
 
         @objc private func excludeApp(_ sender: NSMenuItem) {
             guard let bundleID = sender.representedObject as? String else { return }
-            do { try recording?.exclude(bundleID) }
+            guard let recording else { showRecordingUnavailable(); return }
+            do { try recording.exclude(bundleID) }
             catch { showError(error) }
             refresh()
         }
@@ -264,7 +271,8 @@ if let command = arguments.first {
         @objc private func deleteAppData(_ sender: NSMenuItem) {
             guard let bundleID = sender.representedObject as? String,
                   confirmDeletion("Delete all captured data for \(bundleID)?") else { return }
-            do { try recording?.deleteCapturedData(bundleIdentifier: bundleID) }
+            guard let recording else { showRecordingUnavailable(); return }
+            do { try recording.deleteCapturedData(bundleIdentifier: bundleID) }
             catch { showError(error) }
             refresh()
         }
@@ -275,10 +283,7 @@ if let command = arguments.first {
                 if let recording {
                     try recording.deleteCapturedData()
                 } else {
-                    let archive = recordingDirectory.appendingPathComponent("captured-observations.json")
-                    if FileManager.default.fileExists(atPath: archive.path) {
-                        try FileManager.default.removeItem(at: archive)
-                    }
+                    try RecordingVault.eraseArchiveWhileClosed(in: recordingDirectory)
                     openRecording()
                 }
             }
