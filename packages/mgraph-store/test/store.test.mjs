@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -131,10 +133,44 @@ test('missing reader files and directories report store unavailability', t => {
   const filename = fixture(t);
   assert.throws(() => new MGraphStore(filename, { readOnly: true }), StoreUnavailable);
   assert.throws(() => new MGraphStore(join(dirname(filename), 'missing', 'graph.sqlite')), StoreUnavailable);
+  assert.equal(existsSync(filename), false);
   const writer = new MGraphStore(filename);
+  assert.equal(existsSync(filename), true);
   writer.close();
   const reader = new MGraphStore(filename, { readOnly: true });
   reader.close();
+});
+
+test('existing directories are rejected as non-files before writer lock acquisition', t => {
+  const filename = fixture(t);
+  const directory = dirname(filename);
+  assert.throws(() => new MGraphStore(directory), error => error instanceof StoreUnavailable &&
+    /not a regular file/.test(error.message));
+  assert.throws(() => new MGraphStore(directory, { readOnly: true }), error => error instanceof StoreUnavailable &&
+    /not a regular file/.test(error.message));
+  assert.equal(existsSync(`${directory}.writer-lock.sqlite`), false);
+});
+
+test('read-only filesystem errors from both chmod paths are typed and release writer ownership', t => {
+  const filename = fixture(t);
+  const canonicalFile = join(realpathSync(dirname(filename)), basename(filename));
+  const original = fs.chmodSync;
+  for (const blocked of [`${canonicalFile}.writer-lock.sqlite`, canonicalFile]) {
+    fs.chmodSync = (path, mode) => {
+      if (path === blocked) throw Object.assign(new Error('read-only filesystem'), { code: 'EROFS' });
+      return original(path, mode);
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => new MGraphStore(filename), error => error instanceof StoreUnavailable &&
+        /read-only filesystem/.test(error.message));
+    } finally {
+      fs.chmodSync = original;
+      syncBuiltinESMExports();
+    }
+    const writer = new MGraphStore(filename);
+    writer.close();
+  }
 });
 
 test('invalid database schemas and lock sidecars report store unavailability', t => {

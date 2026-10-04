@@ -49,33 +49,31 @@ export class StoreUnavailable extends Error { constructor(message: string) { sup
 function canonicalPath(filename: string): string {
   if (filename === ':memory:') throw new StoreUnavailable('Store requires a local database file');
   const full = resolve(filename);
+  let path: string;
   try {
-    const path = realpathSync(full);
-    if (statSync(path).nlink !== 1) throw new StoreUnavailable('Hard-linked M Graph databases cannot be served safely');
-    return path;
+    path = realpathSync(full);
   } catch (error) {
-    if (error instanceof StoreUnavailable) throw error;
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'ENOENT') {
-      if (code === 'EACCES' || code === 'ENOTDIR') throw new StoreUnavailable(`Database path is unavailable: ${code}`);
-      throw error;
-    }
-    // A dangling symlink would acquire a lock under its alias, then create a
-    // target that future openers lock under a different pathname.
-    try {
-      if (lstatSync(full).isSymbolicLink()) throw new StoreUnavailable('Dangling M Graph database symlink');
-    } catch (linkError) {
-      if (linkError instanceof StoreUnavailable) throw linkError;
-      if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
-    }
-    try { return join(realpathSync(dirname(full)), basename(full)); } catch (parentError) {
-      const parentCode = (parentError as NodeJS.ErrnoException).code;
-      if (parentCode === 'ENOENT' || parentCode === 'EACCES' || parentCode === 'ENOTDIR') {
-        throw new StoreUnavailable(`Database directory is unavailable: ${parentCode}`);
-      }
-      throw parentError;
-    }
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throwStoreUnavailable(error);
+    return canonicalMissingPath(full);
   }
+  let entry: ReturnType<typeof statSync>;
+  try { entry = statSync(path); } catch (error) { throwStoreUnavailable(error); }
+  if (!entry.isFile()) throw new StoreUnavailable('M Graph database path is not a regular file');
+  if (entry.nlink !== 1) throw new StoreUnavailable('Hard-linked M Graph databases cannot be served safely');
+  return path;
+}
+
+/** Allow a new database file, but never create one through a dangling symlink. */
+function canonicalMissingPath(full: string): string {
+  try {
+    // A dangling symlink would lock its alias before creating the target.
+    if (lstatSync(full).isSymbolicLink()) throw new StoreUnavailable('Dangling M Graph database symlink');
+    throw new StoreUnavailable('M Graph database path could not be resolved');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throwStoreUnavailable(error);
+  }
+  try { return join(realpathSync(dirname(full)), basename(full)); }
+  catch (error) { throwStoreUnavailable(error); }
 }
 
 /** Preserve programmer errors while classifying SQLite and filesystem failures. */
@@ -83,7 +81,8 @@ function throwStoreUnavailable(error: unknown): never {
   if (error instanceof StoreUnavailable) throw error;
   if (error instanceof Error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ERR_SQLITE_ERROR' || code === 'EACCES' || code === 'EPERM' || code === 'ENOENT' || code === 'EISDIR') {
+    // Node's POSIX errno codes have no underscores; ERR_* argument errors do.
+    if (code === 'ERR_SQLITE_ERROR' || (typeof code === 'string' && /^E[A-Z0-9]+$/.test(code))) {
       throw new StoreUnavailable(`M Graph database is unavailable: ${error.message}`);
     }
   }
