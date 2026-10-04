@@ -145,7 +145,9 @@ import Foundation
               let token = gate.begin(at: uptime) else { return }
         let pid = app.processIdentifier
         workerReady = false
-        deadline = CaptureCollector.captureForeground { [weak self] result in
+        deadline = CaptureCollector.captureForeground(onWorkerStart: { [weak self] startedAt in
+            self?.gate.recordCaptureStart(at: startedAt)
+        }) { [weak self] result in
             guard let self else { return }
             CaptureCollector.afterCaptureWorkerDrains { [weak self] in
                 guard let self else { return }

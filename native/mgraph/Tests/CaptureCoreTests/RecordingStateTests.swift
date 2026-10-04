@@ -308,6 +308,17 @@ import XCTest
     XCTAssertNotNil(gate.begin(at: 106))
   }
 
+  func testDelayedWorkerAdmissionExtendsLimitEvenAfterInvalidation() {
+    let gate = RecordingGate()
+    let pending = gate.begin(at: 100)
+    XCTAssertNotNil(pending)
+    gate.invalidate() // Pause or switch can precede delivery of the worker-start callback.
+    gate.recordCaptureStart(at: 104.25) // Manual AX work delayed this automatic read.
+    XCTAssertFalse(gate.finish(pending!))
+    XCTAssertNil(gate.begin(at: 107.24), "The enqueue timestamp cannot bound a delayed AX start")
+    XCTAssertNotNil(gate.begin(at: 107.25))
+  }
+
   func testInvalidSelectedAppErrorNamesTheSelection() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

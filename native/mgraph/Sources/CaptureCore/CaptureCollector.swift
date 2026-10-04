@@ -157,14 +157,17 @@ public enum CaptureCollector {
 
     // Called on the main thread by both entry points. AX work never occupies the menu loop.
     @discardableResult
-    @MainActor public static func captureForeground(completion: @escaping @MainActor @Sendable (CaptureResult) -> Void) -> Deadline? {
+    @MainActor public static func captureForeground(
+        onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
+        completion: @escaping @MainActor @Sendable (CaptureResult) -> Void
+    ) -> Deadline? {
         guard isTrusted() else { completion(status()); return nil }
         guard let app = foreground() else {
             completion(CaptureResult(state: .noForegroundApplication, error: "No foreground application"))
             return nil
         }
         let deadline = Deadline(seconds: captureTimeout, startWhenWorkerBegins: true)
-        runAsync(deadline: deadline, seconds: captureTimeout, work: {
+        runAsync(deadline: deadline, seconds: captureTimeout, onWorkerStart: onWorkerStart, work: {
             performCapture(app, deadline: deadline)
         }) { result in
             completion(validate(result ?? failed(app, "Accessibility capture deadline exceeded"),
@@ -174,6 +177,7 @@ public enum CaptureCollector {
     }
 
     @MainActor static func runAsync(deadline: Deadline, seconds: TimeInterval,
+                                    onWorkerStart: (@MainActor @Sendable (TimeInterval) -> Void)? = nil,
                                     work: @escaping @Sendable () -> CaptureResult,
                                     completion: @escaping @MainActor @Sendable (CaptureResult?) -> Void) {
         let delivery = Delivery()
@@ -181,6 +185,10 @@ public enum CaptureCollector {
             guard deadline.beginWorker() else {
                 DispatchQueue.main.async { delivery.deliver(nil, to: completion) }
                 return
+            }
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            if let onWorkerStart {
+                DispatchQueue.main.async { onWorkerStart(startedAt) }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                 deadline.cancel()

@@ -318,6 +318,67 @@ final class CaptureCoreTests: XCTestCase {
         wait(for: [manualFinished], timeout: 1)
     }
 
+    func testAutomaticAXStartsStayThreeSecondsApartAfterManualContentionAndSwitch() {
+        let secondStarted = expectation(description: "second automatic AX worker starts after interval")
+        DispatchQueue.main.async {
+            let gate = RecordingGate()
+            let queuedAt = ProcessInfo.processInfo.systemUptime
+            // A cancelled manual request still occupies the serial AX worker until it returns.
+            CaptureCollector.runAsync(deadline: .init(seconds: 0.05, startWhenWorkerBegins: true),
+                                      seconds: 0.05, work: {
+                Thread.sleep(forTimeInterval: 3.15)
+                return CaptureResult(state: .readFailed)
+            }) { _ in }
+
+            guard let firstToken = gate.begin(at: queuedAt) else {
+                XCTFail("Fresh recording must admit its first request")
+                secondStarted.fulfill()
+                return
+            }
+            var firstStart: TimeInterval?
+            CaptureCollector.runAsync(deadline: .init(seconds: 0.2, startWhenWorkerBegins: true),
+                                      seconds: 0.2, onWorkerStart: { startedAt in
+                firstStart = startedAt
+                gate.recordCaptureStart(at: startedAt)
+            }, work: {
+                CaptureResult(state: .available, text: "first allowed app")
+            }) { _ in
+                XCTAssertTrue(gate.finish(firstToken))
+                guard let firstStart else {
+                    XCTFail("The first AX read must report its actual worker start")
+                    secondStarted.fulfill()
+                    return
+                }
+                XCTAssertGreaterThan(firstStart - queuedAt, 3,
+                                     "The manual worker must expose the queue-delay regression")
+                gate.invalidate() // App switch, pause/resume, sleep/wake, or exclusion.
+                for _ in 0..<10 {
+                    XCTAssertNil(gate.begin(at: ProcessInfo.processInfo.systemUptime),
+                                 "Notification storms must not bypass the worker-start limit")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.05) {
+                    guard let nextToken = gate.begin(at: ProcessInfo.processInfo.systemUptime) else {
+                        XCTFail("The next allowed app should become eligible after three seconds")
+                        secondStarted.fulfill()
+                        return
+                    }
+                    CaptureCollector.runAsync(deadline: .init(seconds: 0.2, startWhenWorkerBegins: true),
+                                              seconds: 0.2, onWorkerStart: { startedAt in
+                        gate.recordCaptureStart(at: startedAt)
+                        XCTAssertGreaterThanOrEqual(startedAt - firstStart, 3,
+                                                    "Actual automatic AX starts must be bounded")
+                    }, work: {
+                        CaptureResult(state: .available, text: "second allowed app")
+                    }) { _ in
+                        XCTAssertTrue(gate.finish(nextToken))
+                        secondStarted.fulfill()
+                    }
+                }
+            }
+        }
+        wait(for: [secondStarted], timeout: 8)
+    }
+
     func testPausedQueuedCaptureSkipsAXAndLaterManualCaptureRuns() {
         let pausedFinished = expectation(description: "paused request completes without AX")
         let manualFinished = expectation(description: "manual request runs after worker drain")

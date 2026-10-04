@@ -238,6 +238,13 @@ public enum RecordingError: Error, LocalizedError, Equatable {
         return generation
     }
 
+    // Queue admission may occur well after begin() if a manual AX read is ahead
+    // of this request. Bound actual automatic AX starts, even if this result is
+    // later invalidated by a foreground or recording-control transition.
+    public func recordCaptureStart(at uptime: TimeInterval) {
+        nextAllowed = max(nextAllowed, uptime + Self.minimumInterval)
+    }
+
     public func finish(_ token: UInt64) -> Bool {
         guard generation == token, inFlight else { return false }
         inFlight = false
