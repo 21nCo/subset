@@ -26,8 +26,9 @@ export const isSnapshotProvider = (provider: UsageProvider) => provider === 'cla
 /** Whether this account's values come from a collected CLI status-line snapshot rather than a live read. */
 export const isSnapshotAccount = (account: Pick<UsageAccount, 'provider' | 'source'>) => isSnapshotProvider(account.provider) && /status-line snapshot/.test(account.source);
 /** Used percentage, derived from the remaining percentage when only that was reported. */
+// Kept unrounded so thresholds agree everywhere; displays round.
 export const usedOf = (window: Pick<UsageWindow, 'usedPercent' | 'remainingPercent'>): number | null =>
-  window.usedPercent ?? (window.remainingPercent === null ? null : Math.round((100 - window.remainingPercent) * 10) / 10);
+  window.usedPercent ?? (window.remainingPercent === null ? null : 100 - window.remainingPercent);
 
 export function spanLabel(minutes: number): string {
   if (minutes === 1440) return 'Daily';
@@ -167,8 +168,10 @@ export type PercentMode = 'used' | 'remaining';
 
 /** The percentage to show for a window in the chosen mode, and whether that value is calculated rather than reported. */
 export function displayPercent(window: UsageWindow, mode: PercentMode): { value: number | null; calculated: boolean; tone: Tone } {
-  const value = mode === 'used' ? window.usedPercent : window.remainingPercent;
-  const calculated = mode === 'used' ? window.usedKind === 'calculated-estimate' : window.remainingKind === 'calculated-estimate';
+  // Used mode falls back to usage derived from the remaining percentage, marked calculated.
+  const derived = mode === 'used' && window.usedPercent === null && window.remainingPercent !== null;
+  const value = mode === 'used' ? usedOf(window) : window.remainingPercent;
+  const calculated = derived || (mode === 'used' ? window.usedKind === 'calculated-estimate' : window.remainingKind === 'calculated-estimate');
   return { value, calculated, tone: usedTone(usedOf(window)) };
 }
 

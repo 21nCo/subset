@@ -112,7 +112,7 @@
     catch { return fallback; }
   }
   function readList(key: string): string[] {
-    try { const value = JSON.parse(localStorage.getItem(key) ?? '[]'); return Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(0, 50) : []; }
+    try { const value = JSON.parse(localStorage.getItem(key) ?? '[]'); return Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(-50) : []; }
     catch { return []; }
   }
   function readSort(): SortMode {
@@ -120,8 +120,8 @@
     catch { return 'default'; }
   }
   function togglePin(id: string) {
-    // Capped like the stored list, so the session matches what a reload restores.
-    pinned = pinned.includes(id) ? pinned.filter((item) => item !== id) : [...pinned, id].slice(0, 50);
+    // At most 50 pins, like the stored list; a new pin replaces the oldest.
+    pinned = pinned.includes(id) ? pinned.filter((item) => item !== id) : [...pinned.slice(-49), id];
     savePreference('subset.usage.pinned', JSON.stringify(pinned));
   }
   function setSortMode(mode: SortMode) { sortMode = mode; savePreference('subset.usage.sort', mode); }

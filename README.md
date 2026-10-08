@@ -37,7 +37,7 @@ The current `@subset/*` workspaces are private. Any package later published to n
 
 ## Development
 
-Requires Node.js 22 or newer and npm 10.
+Requires Node.js 22.12 or newer and npm 10.
 
 ```bash
 npm ci

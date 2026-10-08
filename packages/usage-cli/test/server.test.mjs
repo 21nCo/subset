@@ -42,22 +42,24 @@ if [ -n "$CLAUDE_CONFIG_DIR" ]; then printf '%s\\n' '{"loggedIn":true,"authMetho
   };
   // The reserved port is released before the server binds; retry with a fresh one if another process takes it.
   let port, env, child, exited;
-  for (let attempt = 0; ; attempt++) {
-    port = await freePort();
-    env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PORT: String(port), SUBSET_USAGE_PROFILES_FILE: relative(hostDirectory, profilesFile), SUBSET_USAGE_DATA_DIR: root, SUBSET_USAGE_WEB_DIR: web };
-    child = spawn(process.execPath, ['src/server.mjs', 'serve', '--no-open'], { cwd: hostDirectory, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    exited = once(child, 'exit');
-    let stderr = '';
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-    const ready = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Server did not become ready. ${stderr}`)), 5000);
-      child.stdout.on('data', (data) => { if (data.toString().includes('Subset usage listening')) { clearTimeout(timer); resolve(true); } });
-      child.once('error', (error) => { clearTimeout(timer); reject(error); });
-      child.once('exit', () => { clearTimeout(timer); if (/in use/.test(stderr) && attempt < 3) resolve(false); else reject(new Error(`Server exited before readiness. ${stderr}`)); });
-    });
-    if (ready) break;
-  }
+  // Cleanup covers startup too, so a failed start never leaves a server or temp directory behind.
   try {
+    for (let attempt = 0; ; attempt++) {
+      port = await freePort();
+      env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PORT: String(port), SUBSET_USAGE_PROFILES_FILE: relative(hostDirectory, profilesFile), SUBSET_USAGE_DATA_DIR: root, SUBSET_USAGE_WEB_DIR: web };
+      child = spawn(process.execPath, ['src/server.mjs', 'serve', '--no-open'], { cwd: hostDirectory, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      exited = once(child, 'exit');
+      let stderr = '';
+      child.stderr.on('data', (data) => { stderr += data.toString(); });
+      const ready = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Server did not become ready. ${stderr}`)), 5000);
+        child.stdout.on('data', (data) => { if (data.toString().includes('Subset usage listening')) { clearTimeout(timer); resolve(true); } });
+        child.once('error', (error) => { clearTimeout(timer); reject(error); });
+        // 'close' fires after stderr is fully read, so the port-in-use message is seen.
+        child.once('close', () => { clearTimeout(timer); if (/in use/.test(stderr) && attempt < 3) resolve(false); else reject(new Error(`Server exited before readiness. ${stderr}`)); });
+      });
+      if (ready) break;
+    }
     const base = `http://127.0.0.1:${port}`;
     const request = (path, method = 'GET', body, origin = base, extra = { 'X-Subset-Request': '1' }) => fetch(`${base}${path}`, {
       method, headers: { ...(origin ? { Origin: origin } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...extra },
@@ -150,8 +152,8 @@ if [ -n "$CLAUDE_CONFIG_DIR" ]; then printf '%s\\n' '{"loggedIn":true,"authMetho
     assert.equal((await (await request('/api/status')).json()).accounts.length, 2);
     await assert.rejects(readFile(config[0].snapshotFile), { code: 'ENOENT' });
   } finally {
-    child.kill('SIGTERM');
-    await exited;
+    child?.kill('SIGTERM');
+    if (exited) await exited;
     await rm(root, { recursive: true, force: true });
   }
 });

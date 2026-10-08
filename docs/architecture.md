@@ -6,7 +6,7 @@ This document records the current stack and the decisions still needed for the t
 
 | Layer | Current choice | Status and boundary |
 | --- | --- | --- |
-| Workspace | npm workspaces, TypeScript, Node.js 22+ | Implemented scaffold. `packages/*` own reusable contracts and logic; `apps/*` own hosts. |
+| Workspace | npm workspaces, TypeScript, Node.js 22.12+ | Implemented scaffold. `packages/*` own reusable contracts and logic; `apps/*` own hosts. |
 | Directory | Svelte 5, Vite, Tailwind CSS 4 | Implemented local static preview. `@subset/catalog` owns metadata; the directory does not own capability data or credentials. |
 | Web delivery | Static assets first; Cloudflare intended | No deployment configured. Add Workers or storage only for a concrete capability need and after a Superfunctions reuse check. |
 | Reusable capability | `packages/<capability>/` | Planned. Domain operations, source adapters, typed inputs/outputs, and web view contracts belong here; a host wires auth, persistence, routes, and telemetry. |

@@ -16,7 +16,8 @@ const marks = {
 // Bodies are rendered with {@html}, so only static shapes are allowed: no scripts, event handlers,
 // embedded documents or images, animation that can retarget attributes, links, or references
 // other than same-document `#id` fragments.
-const ACTIVE_SVG = /<(?:script|foreignObject|image|iframe|embed|object|a|set|animate\w*|style)\b|\son[a-z]+\s*=|(?:xlink:)?href\s*=\s*(?!["']?\s*#)|javascript:|data:|url\(\s*(?!["']?\s*#)/i;
+// HTML media and document elements are listed too: inside inline SVG they break out into HTML content.
+const ACTIVE_SVG = /<(?:script|foreignObject|image|img|iframe|frame|embed|object|video|audio|source|track|picture|canvas|link|meta|base|form|input|a|set|animate\w*|style)\b|\son[a-z]+\s*=|(?:xlink:)?href\s*=\s*(?!["']?\s*#)|javascript:|data:|url\(\s*(?!["']?\s*#)/i;
 const assertStatic = (name, svg) => { if (ACTIVE_SVG.test(svg)) throw new Error(`${name} contains active or external content.`); };
 
 const entries = Object.entries(marks).map(([provider, [name, mono]]) => {

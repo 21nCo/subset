@@ -5,7 +5,11 @@ export const USAGE_PROVIDERS = ['codex-chatgpt', 'claude-code', 'antigravity', '
 export type UsageProvider = (typeof USAGE_PROVIDERS)[number];
 /** Longest account label the status contract accepts; readers trim to it. */
 export const MAX_ACCOUNT_LABEL = 80;
-export const accountLabel = (value: string): string => value.slice(0, MAX_ACCOUNT_LABEL);
+/** Trims to the contract's UTF-16 length without leaving half of a surrogate pair. */
+export const accountLabel = (value: string): string => {
+  const cut = value.slice(0, MAX_ACCOUNT_LABEL);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+};
 /** Agent harnesses that read another service's subscription through a login they store. */
 export const HARNESS_PROVIDERS: readonly UsageProvider[] = ['pi', 'opencode', 'omp', 'hermes'];
 
@@ -201,11 +205,17 @@ export function usageText(status: UsageStatus, now = new Date()): string {
     const limits = (account.limitAccess ?? []).map((limit) => `${limit.label}: reached-limit reason ${limit.rateLimitReachedType ?? 'unavailable'}; spend control ${limit.spendControlReached === null ? 'unavailable' : limit.spendControlReached ? 'reached' : 'not reached'}`);
     const freshness = usageFreshness(account.observedAt, now.getTime());
     const snapshot = /status-line snapshot/.test(account.source) ? '; last collected CLI snapshot, not a live provider read' : '';
-    const balances = (account.balances ?? []).map((balance) => `${balance.label}: ${balance.currency === 'USD' ? `USD ${balance.amount.toFixed(2)}` : `${balance.amount} credits`}${balance.note ? ` (${balance.note})` : ''}`);
+    const balances = (account.balances ?? []).map((balance) => {
+      const unlimited = balance.note === 'Unlimited';
+      const amount = unlimited ? 'unlimited' : balance.currency === 'USD' ? `USD ${balance.amount.toFixed(2)}` : `${balance.amount} credits`;
+      return `${balance.label}: ${amount}${balance.note && !unlimited ? ` (${balance.note})` : ''}`;
+    });
     return `${account.label || `${account.provider} account`} (${account.provider}; ${account.state}; source ${account.source}; observed ${account.observedAt ?? 'never'}; ${freshness}${freshness === 'Stale' ? ' (older than 5 minutes)' : ''}${snapshot}): ${[permission, ...limits, ...windows, spend, ...balances, ...errors].filter(Boolean).join('; ') || 'usage unavailable'}`;
   }).join('\n');
 }
 
 export function agentUsageResult(status: UsageStatus) {
-  return { structuredContent: status, text: usageText(status), viewId: USAGE_VIEW_ID };
+  // Host-internal fields never reach an agent, even if a host forgot to remove them.
+  const structuredContent: UsageStatus = { ...status, accounts: status.accounts.map(({ workspaceId: _workspace, ...account }) => account) };
+  return { structuredContent, text: usageText(structuredContent), viewId: USAGE_VIEW_ID };
 }

@@ -581,3 +581,28 @@ test('keeps an account whose collector cannot be removed', async (t) => {
   await assert.rejects(accounts.removeProfile(added.id), /Could not restore the CLI status line/);
   assert.ok((await accounts.list()).some((profile) => profile.id === added.id));
 });
+
+test('a capped Antigravity snapshot stays partial through capture and read', async (t) => {
+  const { accounts } = await fixture(t);
+  const added = await accounts.addProvider({ provider: 'antigravity', label: 'Many buckets' });
+  const quota = Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`b${index}-5h`, { remaining_fraction: 0.5, reset_in_seconds: 600 }]));
+  await accounts.captureSnapshot(added.id, { quota });
+  const profile = (await accounts.profiles()).find((item) => item.id === added.id);
+  const read = await readSnapshotProfile(profile);
+  assert.equal(read.windows.length, 32);
+  assert.equal(read.state, 'partial');
+});
+
+test('writes to the destination of a dangling settings symlink', async (t) => {
+  const { accounts, root } = await fixture(t);
+  const { lstat, symlink } = await import('node:fs/promises');
+  const configDir = join(root, 'claude');
+  const dotfiles = join(root, 'dotfiles');
+  await mkdir(configDir);
+  await mkdir(dotfiles);
+  await symlink(join(dotfiles, 'settings.json'), join(configDir, 'settings.json'));
+  const added = await accounts.addProvider({ provider: 'claude-code', label: 'Dangling', claudeConfigDir: configDir });
+  await accounts.installCollector(added.id, `collect --account ${added.id}`);
+  assert.equal((await lstat(join(configDir, 'settings.json'))).isSymbolicLink(), true);
+  assert.equal(JSON.parse(await readFile(join(dotfiles, 'settings.json'), 'utf8')).statusLine.command, `collect --account ${added.id}`);
+});

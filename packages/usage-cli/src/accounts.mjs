@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -36,6 +36,13 @@ const configDirOf = (value) => {
   return isAbsolute(expanded) ? resolve(expanded) : null;
 };
 const canonical = async (path) => { try { return await realpath(path); } catch { return resolve(path); } };
+// The file a settings path writes to: a symlink's destination, even when that destination does not exist yet.
+const settingsTarget = async (path) => {
+  try { return await realpath(path); }
+  catch {
+    try { return resolve(dirname(path), await readlink(path)); } catch { return resolve(path); }
+  }
+};
 // Claude Code stores session transcripts under <config dir>/projects/<project>/<session>.jsonl.
 const transcriptConfigDir = (input) => {
   const path = object(input)?.transcript_path;
@@ -443,7 +450,7 @@ export function createAccounts({
   async function writeSettings(path, value) {
     // Write through a symlink (for example a settings.json managed in a dotfiles repository)
     // instead of replacing the link with a regular file.
-    const file = await canonical(path);
+    const file = await settingsTarget(path);
     let mode = 0o600;
     try { mode = (await stat(file)).mode & 0o777; } catch { /* new file */ }
     const temporary = `${file}.subset-${randomUUID()}.tmp`;

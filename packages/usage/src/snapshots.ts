@@ -77,6 +77,8 @@ export function sanitizeSnapshot(profile: SnapshotProfile, input: unknown): unkn
     clean[key] = item;
   }
   result.quota = clean;
+  // A snapshot sanitized once keeps its truncation marker when sanitized again on read.
+  if (own(raw, 'quota_truncated') === true) result.quota_truncated = true;
   return result;
 }
 

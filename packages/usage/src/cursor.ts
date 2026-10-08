@@ -1,4 +1,4 @@
-import type { CursorProfile, UsageAccount } from './index.js';
+import { MAX_ACCOUNT_LABEL, type CursorProfile, type UsageAccount } from './index.js';
 
 const ENDPOINT = 'https://api.cursor.com/teams/spend';
 const PAGE_SIZE = 100;
@@ -14,7 +14,7 @@ const timestamp = (value: unknown): string | null => {
 };
 const validProfile = (profile: CursorProfile): boolean => profile.provider === 'cursor'
   && typeof profile.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(profile.id)
-  && typeof profile.label === 'string' && profile.label.length <= 80 && !/[\x00-\x1f\x7f]/.test(profile.label)
+  && typeof profile.label === 'string' && profile.label.length <= MAX_ACCOUNT_LABEL && !/[\x00-\x1f\x7f]/.test(profile.label)
   && typeof profile.credentialEnv === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(profile.credentialEnv)
   && typeof profile.cursorUserId === 'string' && /^user_[A-Za-z0-9_-]{1,251}$/.test(profile.cursorUserId);
 

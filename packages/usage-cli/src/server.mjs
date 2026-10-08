@@ -24,7 +24,9 @@ import { createAccounts } from './accounts.mjs';
 // Source (src/server.mjs) and bundle (dist/cli.mjs) both sit one level below the package root.
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const webOption = process.argv.indexOf('--web-dir');
-const web = resolve(webOption > 0 && process.argv[webOption + 1] ? process.argv[webOption + 1] : process.env.SUBSET_USAGE_WEB_DIR ?? resolve(packageRoot, 'web'));
+const webValue = webOption > 0 ? process.argv[webOption + 1] : undefined;
+if (webOption > 0 && (!webValue || webValue.startsWith('--'))) { process.stderr.write('--web-dir needs a path.\n'); process.exit(2); }
+const web = resolve(webValue ?? process.env.SUBSET_USAGE_WEB_DIR ?? resolve(packageRoot, 'web'));
 const profilesFile = resolve(process.env.SUBSET_USAGE_PROFILES_FILE ?? process.env.SUBSET_CODEX_PROFILES_FILE ?? resolve(homedir(), '.config/subset/codex-profiles.json'));
 const dataDirectory = process.env.SUBSET_USAGE_DATA_DIR ? resolve(process.env.SUBSET_USAGE_DATA_DIR) : null;
 // `claude auth status` can take seconds; reuse each directory's answer briefly. The live Claude
@@ -76,18 +78,21 @@ async function throttled(key, minIntervalMs, read) {
   const entry = liveCache.get(key);
   if (entry?.account && now - entry.at < minIntervalMs) return entry.account;
   if (entry?.cooldownUntil > now) return entry.account ?? entry.error;
+  // The shared promise includes the cache and rate-limit handling, so every concurrent caller gets the same answer.
   if (inFlight.has(key)) return inFlight.get(key);
-  const pending = read().finally(() => inFlight.delete(key));
+  const pending = (async () => {
+    const result = await read();
+    const limited = result.errors?.some((error) => /rate_limited$/.test(error.code));
+    if (limited) {
+      liveCache.set(key, { ...entry, error: result, cooldownUntil: now + (result.retryAfterMs ?? 5 * 60_000) });
+      return entry?.account ?? result;
+    }
+    if (result.observedAt && ['ok', 'partial'].includes(result.state)) liveCache.set(key, { account: result, at: now });
+    else liveCache.delete(key);
+    return result;
+  })().finally(() => inFlight.delete(key));
   inFlight.set(key, pending);
-  const result = await pending;
-  const limited = result.errors?.some((error) => /rate_limited$/.test(error.code));
-  if (limited) {
-    liveCache.set(key, { ...entry, error: result, cooldownUntil: now + (result.retryAfterMs ?? 5 * 60_000) });
-    return entry?.account ?? result;
-  }
-  if (result.observedAt && ['ok', 'partial'].includes(result.state)) liveCache.set(key, { account: result, at: now });
-  else liveCache.delete(key);
-  return result;
+  return pending;
 }
 // Readers attach retryAfterMs for the throttle and workspaceId for login matching; neither is sent.
 const publicAccount = ({ retryAfterMs: _retry, workspaceId: _workspace, ...account }) => account;
@@ -121,7 +126,8 @@ async function status({ persist = true } = {}) {
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
   const identities = await claudeIdentities();
-  let identitiesChanged = false;
+  // Only the entries this read changed are written back; others may have been updated concurrently.
+  const changedIdentities = new Set();
   const boundToIdentity = (profile, snapshot, auth) => {
     const email = auth?.email?.toLowerCase();
     if (!email) return snapshot;
@@ -129,7 +135,7 @@ async function status({ persist = true } = {}) {
     if (!known || known.email !== email) {
       // First sighting adopts existing snapshots; a change starts a new identity period.
       identities[profile.id] = { email, since: known ? Date.now() : 0 };
-      identitiesChanged = true;
+      changedIdentities.add(profile.id);
     }
     const since = identities[profile.id].since;
     if (!snapshot.observedAt || Date.parse(snapshot.observedAt) >= since) return snapshot;
@@ -255,14 +261,15 @@ async function status({ persist = true } = {}) {
       if (profile.provider !== current.provider) results.set(ownerId, { ...current, alsoIn: [...new Set([...(current.alsoIn ?? []), profile.provider])] });
     }
   }));
-  if (persist && identitiesChanged) {
+  if (persist && changedIdentities.size) {
     // Atomic and serialized: a torn file would reset identities and re-attribute old snapshots.
     identityQueue = identityQueue.then(async () => {
       await mkdir(dirname(identitiesFile), { recursive: true, mode: 0o700 });
       const current = await claudeIdentities();
       const temporary = `${identitiesFile}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, JSON.stringify({ ...current, ...identities }), { mode: 0o600, flag: 'wx' });
+        const updates = Object.fromEntries([...changedIdentities].map((id) => [id, identities[id]]));
+        await writeFile(temporary, JSON.stringify({ ...current, ...updates }), { mode: 0o600, flag: 'wx' });
         await rename(temporary, identitiesFile);
       } finally { await rm(temporary, { force: true }).catch(() => {}); }
     }).catch(() => {});

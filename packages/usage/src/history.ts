@@ -51,7 +51,7 @@ export function recordUsageHistory(history: UsageHistory, status: UsageStatus, n
   for (const account of status.accounts) {
     const observed = account.observedAt ? Date.parse(account.observedAt) : NaN;
     if (!Number.isFinite(observed) || observed < cutoff || observed > now) continue;
-    const windows = series[account.id] ?? Object.create(null);
+    const windows: Record<string, Array<[number, number]>> = series[account.id] ?? Object.create(null);
     for (const window of account.windows) {
       if (window.usedPercent === null) continue;
       const key = historyWindowKey(window);

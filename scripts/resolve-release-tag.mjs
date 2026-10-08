@@ -93,7 +93,8 @@ await writeOutputs({
   pkg_name: target.name,
   pkg_version: packageJson.version,
   pkg_path: target.path,
-  npm_tag: version.includes('-') ? 'next' : 'latest',
+  // Only a hyphen before `+build` metadata marks a prerelease.
+  npm_tag: version.split('+', 1)[0].includes('-') ? 'next' : 'latest',
 });
 
 console.log(
