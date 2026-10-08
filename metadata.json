@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.11.3",
+  "checkpoint_id": "01M4E1W6G8CDWA9M1TSXV37GRD",
+  "strategy": "manual-commit",
+  "branch": "usage-dashboard-cli",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "apps/usage/src/App.svelte",
+    "docs/architecture.md",
+    "package-lock.json",
+    "package.json",
+    "packages/usage-cli/src/accounts.mjs",
+    "packages/usage-cli/src/server.mjs",
+    "packages/usage-cli/test/profiles.test.mjs",
+    "packages/usage-cli/test/server.test.mjs",
+    "packages/usage/src/cursor.ts",
+    "packages/usage/src/history.ts",
+    "packages/usage/src/index.ts",
+    "packages/usage/src/present.ts",
+    "packages/usage/src/snapshots.ts",
+    "packages/usage/test/review-round.test.mjs",
+    "scripts/generate-provider-logos.mjs",
+    "scripts/resolve-release-tag.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 31019,
+    "cache_read_tokens": 8919734,
+    "output_tokens": 19351,
+    "api_call_count": 21
+  }
+}
