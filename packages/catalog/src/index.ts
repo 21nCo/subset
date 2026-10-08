@@ -20,6 +20,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'clipboard',
+    name: 'Clipboard',
+    summary: 'Keep a private, searchable history of what you copy and paste any earlier item back, on the Mac or from an iPhone keyboard.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
+  },
+  {
     id: 'pdf-review',
     name: 'PDF annotation and review',
     summary: 'Annotate a PDF and review marked passages in a focused workspace.',
