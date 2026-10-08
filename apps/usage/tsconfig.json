@@ -1,0 +1,4 @@
+{
+  "extends": "../../apps/directory/tsconfig.json",
+  "include": ["src/**/*.ts", "src/**/*.svelte", "../../packages/usage/src/**/*.svelte"]
+}

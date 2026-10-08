@@ -1,0 +1,79 @@
+name: Publish tagged package
+
+# Push a tag like usage-v0.1.0 (slug from release-packages.json, version matching the
+# package.json) to build, test, and publish that one package to npm.
+on:
+  push:
+    tags:
+      - '*-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag in the form <package-slug>-v<version>'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      # A manual run builds the requested tag, never the branch it was dispatched from.
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Verify checkout matches the tag
+        run: |
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$tag_commit" != "$head_commit" ]; then
+            echo "HEAD ${head_commit} is not tag ${RELEASE_TAG} (${tag_commit})." >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Resolve publish target
+        id: resolve
+        run: node ./scripts/resolve-release-tag.mjs "${RELEASE_TAG}"
+
+      # Published packages bundle private workspaces (for example the CLI bundles
+      # @subset/usage and the built dashboard), so install and build from the root.
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Check workspaces
+        run: npm run check
+
+      - name: Build workspaces
+        run: npm run build
+
+      - name: Test package
+        run: npm test --workspace=${{ steps.resolve.outputs.pkg_name }}
+
+      - name: Pack package
+        working-directory: ${{ steps.resolve.outputs.pkg_path }}
+        run: npm pack --json
+
+      - name: Publish package
+        working-directory: ${{ steps.resolve.outputs.pkg_path }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -39,6 +39,25 @@ for (const manifest of workspaces) {
   }
 }
 
+// Publishable packages are listed for the tag workflow, bundle private workspaces instead of
+// depending on them at runtime, and declare which files they ship.
+const releaseTargets = readJson('release-packages.json');
+const publicPackages = workspaces.filter((manifest) => manifest.private === false);
+for (const manifest of publicPackages) {
+  const target = releaseTargets.find((entry) => entry.name === manifest.name);
+  assert.ok(target, `${manifest.name} is public but missing from release-packages.json`);
+  assert.equal(readJson(join(target.path, 'package.json')).name, manifest.name, `release-packages.json points ${target.slug} at the wrong path`);
+  assert.ok(Array.isArray(manifest.files) && manifest.files.length, `${manifest.name} must list its published files`);
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    const workspace = workspaces.find((item) => item.name === dependency);
+    assert.ok(!workspace || workspace.private === false, `${manifest.name} cannot depend at runtime on private ${dependency}; bundle it instead`);
+  }
+}
+for (const target of releaseTargets) {
+  assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
+  assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
+}
+
 assert.equal(names.has('@subset/catalog'), true);
 assert.equal(names.has('@subset/directory'), true);
 console.log(`Validated ${names.size} Subset workspaces.`);

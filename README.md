@@ -2,7 +2,7 @@
 
 Subset is a collection of small, independently useful apps. Each app solves one focused problem and can, where its platform allows, also serve as a capability inside 21n products or as an interface returned by an AI agent.
 
-The first proposed pilots are a **usage dashboard** and a **PDF annotation and review tool**. They are plans, not released apps. The directory scaffold labels them accordingly.
+The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as the `subset-usage` CLI (`@sub-set/usage`, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
 
 ## Product model
 
@@ -56,7 +56,7 @@ Before implementing auth, billing, storage, uploads, MCP, UI primitives, or obse
 
 ## Current status
 
-The monorepo and directory are an initial scaffold. Neither pilot is implemented, no downloadable binaries are published, and `subset.dev` deployment has not been configured. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
+The monorepo and directory are an initial scaffold. The [usage package](packages/usage/README.md) and local standalone preview are under development, with no public or agent surface verified. No downloadable binaries are published, and `subset.dev` deployment has not been configured. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
 
 ## License
 

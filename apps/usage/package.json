@@ -1,0 +1,23 @@
+{
+  "name": "@subset/usage-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "build": "vite build",
+    "status": "npm run status --workspace=@sub-set/usage",
+    "serve": "SUBSET_USAGE_WEB_DIR=\"$PWD/dist\" npm run serve --workspace=@sub-set/usage"
+  },
+  "dependencies": {
+    "@21n/fonts": "1.0.1",
+    "@subset/usage": "*",
+    "svelte": "^5.57.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte-check": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1"
+  }
+}

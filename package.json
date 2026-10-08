@@ -4,11 +4,17 @@
   "version": "0.0.0",
   "type": "module",
   "packageManager": "npm@10.8.2",
-  "engines": { "node": ">=20.19.0" },
-  "workspaces": ["packages/*", "apps/*"],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "dev": "npm run build --workspace=@subset/catalog && npm run dev --workspace=@subset/directory",
-    "check": "node scripts/check-workspaces.mjs && npm run build --workspace=@subset/catalog && npm run check --workspace=@subset/directory",
-    "build": "npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/directory"
+    "check": "node scripts/check-workspaces.mjs && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run check --workspace=@subset/usage && npm run check --workspace=@subset/directory && npm run check --workspace=@subset/usage-web && node --check packages/usage-cli/src/server.mjs && node --check packages/usage-cli/src/accounts.mjs",
+    "build": "npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run build --workspace=@subset/directory && npm run build --workspace=@subset/usage-web && npm run build --workspace=@sub-set/usage",
+    "test": "npm test --workspace=@subset/usage --if-present && npm test --workspace=@sub-set/usage"
   }
 }
