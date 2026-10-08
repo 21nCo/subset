@@ -35,3 +35,7 @@ add the logos to the repo and render in the header logo based on query param log
 
 1. use the logo from 21n repo - subset-landing new usage landing page
 2. update the packages org scope to use @subset.dev instead of @sub-set everywhere including AGENTS.md or rules
+
+---
+
+commit and push to the PR
