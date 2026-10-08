@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.11.3",
+  "checkpoint_id": "01M4EJG8HHBWR8GYBG0Y5BJ90M",
+  "strategy": "manual-commit",
+  "branch": "usage-dashboard-cli",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "AGENTS.md",
+    "README.md",
+    "apps/usage/index.html",
+    "apps/usage/package.json",
+    "apps/usage/public/favicon-32.png",
+    "apps/usage/public/favicon.svg",
+    "apps/usage/src/App.svelte",
+    "apps/usage/src/BrandMark.svelte",
+    "docs/architecture.md",
+    "package-lock.json",
+    "package.json",
+    "packages/usage-cli/README.md",
+    "packages/usage-cli/package.json",
+    "packages/usage-cli/src/server.mjs",
+    "packages/usage/README.md",
+    "release-packages.json",
+    "scripts/check-workspaces.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1356,
+    "cache_creation_tokens": 2275329,
+    "cache_read_tokens": 304122064,
+    "output_tokens": 728122,
+    "api_call_count": 678,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    }
+  }
+}
