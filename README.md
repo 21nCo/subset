@@ -37,7 +37,7 @@ The current `@subset/*` workspaces are private. Any package later published to n
 
 ## Development
 
-Requires Node.js 22.12 or newer and npm 10.
+Requires Node.js 22.13 or newer and npm 10.
 
 ```bash
 npm ci
@@ -56,7 +56,7 @@ Before implementing auth, billing, storage, uploads, MCP, UI primitives, or obse
 
 ## Current status
 
-The monorepo and directory are an initial scaffold. The [usage package](packages/usage/README.md) and local standalone preview are under development, with no public or agent surface verified. No downloadable binaries are published, and `subset.dev` deployment has not been configured. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
+The monorepo and directory are an initial scaffold. The [usage package](packages/usage/README.md) and local standalone preview are under development, with no public or agent surface verified. No downloadable binaries are published, and `subset.dev` deployment has not been configured. A local [M Graph macOS capture spike](native/mgraph/README.md) tests Accessibility collection and development packaging without adding a catalog availability claim. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
 
 ## License
 

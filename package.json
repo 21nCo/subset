@@ -4,17 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "packageManager": "npm@10.8.2",
-  "engines": {
-    "node": ">=22.12.0"
-  },
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
+  "engines": { "node": ">=22.13.0" },
+  "workspaces": ["packages/*", "apps/*"],
   "scripts": {
     "dev": "npm run build --workspace=@subset/catalog && npm run dev --workspace=@subset/directory",
-    "check": "node scripts/check-workspaces.mjs && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run check --workspace=@subset/usage && npm run check --workspace=@subset/directory && npm run check --workspace=@subset/usage-web && node --check packages/usage-cli/src/server.mjs && node --check packages/usage-cli/src/accounts.mjs",
-    "build": "npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run build --workspace=@subset/directory && npm run build --workspace=@subset/usage-web && npm run build --workspace=@subset.dev/usage",
+    "check": "npm run check:workspaces && npm run test --workspace=@subset/mgraph-contracts && npm run test --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run check --workspace=@subset/usage && npm run check --workspace=@subset/directory && npm run check --workspace=@subset/usage-web && node --check packages/usage-cli/src/server.mjs && node --check packages/usage-cli/src/accounts.mjs",
+    "build": "npm run build --workspace=@subset/mgraph-contracts && npm run build --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run build --workspace=@subset/directory && npm run build --workspace=@subset/usage-web && npm run build --workspace=@subset.dev/usage",
+    "check:workspaces": "node scripts/check-workspaces.mjs",
     "test": "npm test --workspace=@subset/usage --if-present && npm test --workspace=@subset.dev/usage"
   }
 }
