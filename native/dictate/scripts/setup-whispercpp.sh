@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Fetches the pinned upstream whisper.cpp Apple XCFramework into native/dictate/.build/.
+# The XCFramework and any Whisper model files are never committed.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DICTATE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+WHISPER_TAG="${WHISPER_TAG:-v1.8.1}"
+# SHA-256 of whisper-v1.8.1-xcframework.zip from the upstream GitHub release.
+WHISPER_ZIP_SHA256="${WHISPER_ZIP_SHA256:-fc02a7efe6ede7a73c032ee2e67027766e49e3ff8cb35aa8651519ec1ab97cb7}"
+FORCE_DOWNLOAD="${FORCE_DOWNLOAD:-0}"
+
+BUILD_DIR="${DICTATE_ROOT}/.build"
+WHISPER_FRAMEWORK="${BUILD_DIR}/whisper.xcframework"
+WHISPER_XCFRAMEWORK_URL="https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_TAG}/whisper-${WHISPER_TAG}-xcframework.zip"
+VENDOR_DIR="${DICTATE_ROOT}/whisper/vendor"
+MACOS_HEADERS="${WHISPER_FRAMEWORK}/macos-arm64_x86_64/whisper.framework/Versions/A/Headers"
+
+for tool in curl ditto shasum; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        echo "Missing required tool: ${tool}" >&2
+        exit 1
+    fi
+done
+
+if [[ "${FORCE_DOWNLOAD}" == "1" || ! -d "${WHISPER_FRAMEWORK}" ]]; then
+    archive_path="$(mktemp -t whisper-xcframework.XXXXXX)"
+    trap 'rm -f "${archive_path}"' EXIT
+
+    echo "Downloading whisper.xcframework ${WHISPER_TAG}"
+    curl -fL --progress-bar "${WHISPER_XCFRAMEWORK_URL}" -o "${archive_path}"
+
+    actual_sha="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
+    if [[ "${actual_sha}" != "${WHISPER_ZIP_SHA256}" ]]; then
+        echo "Checksum mismatch for ${WHISPER_XCFRAMEWORK_URL}" >&2
+        echo "expected ${WHISPER_ZIP_SHA256}" >&2
+        echo "actual   ${actual_sha}" >&2
+        exit 1
+    fi
+
+    staging="$(mktemp -d -t whisper-xcframework)"
+    ditto -xk "${archive_path}" "${staging}"
+    rm -rf "${WHISPER_FRAMEWORK}"
+    mkdir -p "${BUILD_DIR}"
+    mv "${staging}/build-apple/whisper.xcframework" "${WHISPER_FRAMEWORK}"
+    rm -rf "${staging}"
+else
+    echo "Reusing existing XCFramework at ${WHISPER_FRAMEWORK}"
+fi
+
+if [[ ! -d "${MACOS_HEADERS}" ]]; then
+    echo "Expected macOS headers were not found at ${MACOS_HEADERS}" >&2
+    exit 1
+fi
+
+# The vendored headers are for indexing only; the build uses the framework headers.
+for header in whisper.h ggml.h ggml-alloc.h ggml-backend.h ggml-blas.h ggml-cpu.h ggml-metal.h gguf.h; do
+    if ! cmp -s "${MACOS_HEADERS}/${header}" "${VENDOR_DIR}/${header}"; then
+        echo "Vendored ${header} differs from ${WHISPER_TAG}; updating it."
+        cp "${MACOS_HEADERS}/${header}" "${VENDOR_DIR}/${header}"
+    fi
+done
+
+echo "whisper.cpp setup complete: ${WHISPER_FRAMEWORK}"

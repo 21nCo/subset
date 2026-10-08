@@ -26,5 +26,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'dictate',
+    name: 'Dictate',
+    summary: 'Hold fn, speak, and insert locally transcribed text into the app where your cursor is.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
