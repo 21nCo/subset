@@ -26,5 +26,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'record',
+    name: 'Record',
+    summary: 'Record audio with a live waveform, keep clips on your device, and see the timer from anywhere.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
