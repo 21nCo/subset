@@ -3,7 +3,7 @@
   "checkpoint_id": "01M4DXBGYC4E21KZ9QTBB80EAH",
   "strategy": "manual-commit",
   "branch": "usage-dashboard-cli",
-  "checkpoints_count": 29,
+  "checkpoints_count": 33,
   "files_touched": [
     ".github/workflows/publish-tag.yml",
     ".gitignore",
@@ -46,14 +46,21 @@
       "compact_transcript": "/1/transcript.jsonl",
       "content_hash": "/1/content_hash.txt",
       "prompt": "/1/prompt.txt"
+    },
+    {
+      "metadata": "/2/metadata.json",
+      "transcript": "/2/full.jsonl",
+      "compact_transcript": "/2/transcript.jsonl",
+      "content_hash": "/2/content_hash.txt",
+      "prompt": "/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 334861,
-    "cache_creation_tokens": 1161162,
-    "cache_read_tokens": 243770702,
-    "output_tokens": 629751,
-    "api_call_count": 568,
+    "input_tokens": 334879,
+    "cache_creation_tokens": 1192738,
+    "cache_read_tokens": 244213163,
+    "output_tokens": 634843,
+    "api_call_count": 577,
     "subagent_tokens": {
       "input_tokens": 62,
       "cache_creation_tokens": 114259,

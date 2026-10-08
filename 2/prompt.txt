@@ -1,0 +1,157 @@
+perform a thorough read-only code review of all current local changes in this worktree
+
+---
+
+<task-notification>
+<task-id>a5003746740543051</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-serro-Documents-dev-n-subset/ffb64677-c2a8-46b5-8e0d-802e08e3f079/tasks/a5003746740543051.output</output-file>
+<status>completed</status>
+<summary>Agent "/code-review high" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>```json
+[
+  {
+    "file": "packages/usage/src/history.ts",
+    "line": 54,
+    "summary": "recordUsageHistory rebuilds each account's series only from the windows in the current read, so any account whose read comes back with no windows has its whole history deleted.",
+    "failure_scenario": "A Claude, Factory, Devin or ChatGPT read hits a 401, a 429 with nothing cached, a network timeout, or an expired token, and returns `windows: []`. The next GET /api/status calls recordHistory, `series[account.id]` is never set, and up to eight days of trend points for that account are dropped from usage-history.json. A window that is missing from one response loses its series the same way. The comment says only removed accounts are pruned, but every transient failure prunes too."
+  },
+  {
+    "file": "apps/usage/server.mjs",
+    "line": 283,
+    "summary": "GET /api/stored-logins reads the Pi, OpenCode, omp and Hermes credential stores (including token JWT email claims) even when Use local sign-ins is turned off.",
+    "failure_scenario": "The user turns local sign-ins off and opens Add account. openAdd() calls /api/stored-logins, and listStoredLogins runs readEntries: it opens auth.json, runs sqlite3 on omp's agent.db and decodes access tokens to get emails. That reads stored sign-ins the user disabled. AGENTS.md says 'Only while it is on may it read ... sign-ins'. The status path checks `localCredentials`; this endpoint does not."
+  },
+  {
+    "file": "apps/usage/server.mjs",
+    "line": 93,
+    "summary": "Breaks the AGENTS.md local sign-in exception: credential stores and undocumented endpoints are used for Cursor, Devin, Pi, OpenCode, omp, Hermes and Antigravity, not just Claude Code and Factory Droid.",
+    "failure_scenario": "/Users/serro/Documents/dev/n/subset/AGENTS.md says: 'Only while it is on may it read the Claude Code and Factory Droid sign-ins ... Keep every other source on documented paths.' Instead, readCursorLocalProfile reads the `cursor-access-token` keychain item and calls DashboardService. readStoredLoginProfile reads Pi/OpenCode/omp/Hermes tokens and calls chatgpt.com/backend-api/wham/usage and opencode zen. readDevinProfile reads credentials.toml and calls GetUserStatus. readAntigravityEmail reads the oauth token file. The Settings text (App.svelte:541) tells the user only Claude and Factory Droid sign-ins are read."
+  },
+  {
+    "file": "apps/usage/server.mjs",
+    "line": 109,
+    "summary": "A live Claude OAuth result that has no windows still replaces the status-line snapshot, so collected quota windows disappear.",
+    "failure_scenario": "normalizeClaudeOAuthUsage returns `state: 'partial'` with an observedAt and `windows: []` (missing_quota) when the endpoint returns an object without five_hour or seven_day. Because `live.observedAt` is truthy, the server returns the empty live account and drops `snapshot.windows`, even though the collector has valid quota. The empty result is also cached for 5 minutes, and history for the account is wiped (see the history.ts finding)."
+  },
+  {
+    "file": "apps/usage/accounts.mjs",
+    "line": 338,
+    "summary": "Writes to the preferences file are read-modify-write and are not serialized, so concurrent updates can lose a change, including the local sign-ins opt-out.",
+    "failure_scenario": "setUsagePreferences and setDefaultClaudeDismissed (called from ensureDefaultClaude({force}) and removeProfile) each read preferences(), merge and write, outside writeQueue. Example: PUT /api/preferences {localCredentials:false} runs alongside POST /api/profiles/claude-default or a profile removal. The later rename writes the stale `localCredentials` value back, so credential reads silently resume against the user's choice, or `defaultClaudeDismissed` is reverted."
+  },
+  {
+    "file": "apps/usage/server.mjs",
+    "line": 276,
+    "summary": "GET endpoints that have side effects (/api/status, /api/profiles) skip the origin/CSRF check, so any website can trigger keychain reads, provider API calls and profile-file writes.",
+    "failure_scenario": "A page on any site loads `&lt;img src=http://127.0.0.1:4174/api/status&gt;`. The Host header matches and no Origin is sent for a no-cors GET, so status() runs: macOS keychain prompts appear, live requests go to Anthropic, Factory, Cursor and ChatGPT and use up their rate limits (triggering 5-minute cooldowns), and history is written. /api/profiles calls ensureDefaultClaude, which can append a profile. Checking `Sec-Fetch-Site` or requiring a custom header would block this."
+  },
+  {
+    "file": "packages/usage/src/claude-oauth.ts",
+    "line": 116,
+    "summary": "The live reader labels legacy windows 'Seven-day opus quota' (lowercase), while the snapshot uses 'Seven-day Opus quota'. History keys include the label, so trend series split or reset when the source changes.",
+    "failure_scenario": "historyWindowKey is `limitId + label`. One Claude account alternates between the live read ('Seven-day opus quota' or the scoped display name) and the snapshot fallback ('Seven-day Opus quota'). Each switch gives the same limitId a different key, so recordUsageHistory drops the old series. The same happens when a harness fallback (server.mjs:148) swaps in Pi or OpenCode windows."
+  },
+  {
+    "file": "apps/usage/server.mjs",
+    "line": 138,
+    "summary": "Harness logins are read one at a time in a loop, and each one reads its credential store twice.",
+    "failure_scenario": "Each harness profile awaits storedLoginEmail (readEntries: file read or sqlite3 spawn) and then readOne, which runs readEntries again plus up to a 15s network fetch. With 4 to 8 harness logins, /api/status takes the sum of all fetches instead of the longest one. Reading the entries once per tool and running the reads with Promise.all would remove this."
+  },
+  {
+    "file": "packages/usage/src/cursor-local.ts",
+    "line": 97,
+    "summary": "GetCreditGrantsBalance, GetPlanInfo and two sqlite3 state reads are independent but run one after another.",
+    "failure_scenario": "Every Cursor read waits for 2 HTTP round trips (up to 15s timeout each) and 2 sqlite3 process spawns in sequence after the usage call, which adds latency to /api/status. A single Promise.all over the four would do the same work concurrently."
+  },
+  {
+    "file": "packages/usage/README.md",
+    "line": 1,
+    "summary": "The new usage capability README has no section listing the Superfunctions packages evaluated. The root README and architecture.md still say personal Cursor quota is not supported, but cursor-local implements it.",
+    "failure_scenario": "/Users/serro/Documents/dev/n/subset/AGENTS.md says: 'For each new capability, add a short README.md section naming the Superfunctions packages evaluated, the package/version actually used, and any gap.' A search for 'superfunctions' in packages/usage/README.md finds nothing. It also says 'Update docs and metadata together', but README.md line 5 ('Personal Cursor subscription quota is not supported') and docs/architecture.md ('personal Cursor subscriptions ... are not implemented') contradict the shipped cursor-local provider."
+  }
+]
+```</result>
+<usage><subagent_tokens>139802</subagent_tokens><tool_uses>14</tool_uses><duration_ms>135797</duration_ms></usage>
+</task-notification>
+
+---
+
+rereview new changes
+
+---
+
+<task-notification>
+<task-id>aa8a51028c4996c22</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-serro-Documents-dev-n-subset/ffb64677-c2a8-46b5-8e0d-802e08e3f079/tasks/aa8a51028c4996c22.output</output-file>
+<status>completed</status>
+<summary>Agent "/code-review high" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>```json
+[
+  {
+    "file": "AGENTS.md",
+    "line": 72,
+    "summary": "The diff rewrites the owner-directed local sign-ins exception to cover itself. Code now reads stored credentials for Cursor, Devin, Pi, OpenCode, omp, Hermes and Antigravity and calls their undocumented endpoints (wham/usage, Cursor DashboardService, zen/go/v1/usage, Codeium seat status). The setting also ships off by default.",
+    "failure_scenario": "The instructions loaded for this repo (AGENTS.md) say the setting is 'on by default at the owner's request' and allow only 'the Claude Code and Factory Droid sign-ins', and require: 'Keep every other source on documented paths.' The new paragraph says 'Adding a tool to this list needs the owner's direction', yet the same diff adds six tools and flips the default to off (accounts.mjs:349 `value.localCredentials === true`). Unless the owner explicitly directed this, stored-logins.ts, cursor-local.ts, devin.ts and local-auth.ts:79 read keychain items and token files for tools nobody approved."
+  },
+  {
+    "file": "apps/usage/src/App.svelte",
+    "line": 320,
+    "summary": "Each click on 'use a reset' generates a new idempotency key, so retrying after an error can spend a second banked Codex reset.",
+    "failure_scenario": "The consume call succeeds at Codex, but the response is lost (timeout, child killed, or server returns 'Codex could not use a reset.'). The user sees the error and clicks 'Use 1 reset now' again, which sends a new randomUUID. Codex treats it as a new request and redeems a second credit. The idempotency that consumeCodexResetCredit documents ('makes a retried request safe') never applies, because the key is not kept across retries for the same intent."
+  },
+  {
+    "file": "packages/usage-cli/src/server.mjs",
+    "line": 84,
+    "summary": "status() calls accounts.ensureDefaultClaude(), which writes a new claude_default profile into the profiles file. So `subset-usage status` and GET /api/status are not read-only.",
+    "failure_scenario": "An agent runs the 'read-only' `subset-usage status` and it silently appends a claude_default profile to ~/.config/subset/codex-profiles.json (and spawns `claude auth status`). This breaks the AGENTS.md rules 'plan a read-only `status --json` command' and 'Separate read actions from mutations'. GET /api/status also writes usage-history.json (line 343)."
+  },
+  {
+    "file": "packages/usage-cli/src/server.mjs",
+    "line": 152,
+    "summary": "Harness logins are merged into one card by email alone, ignoring the ChatGPT account or workspace ID, so logins for different workspaces under the same email collapse into one card.",
+    "failure_scenario": "A user has a Personal Codex home and a Pi login to a Team workspace, both under the same email. owners/groups key on `codex-chatgpt|email`, so the Pi profile goes into `merged` and is dropped from the output. Its separate Team quota is never shown, and when the owner card has no windows, the Team workspace's numbers appear on the Personal card. Two codex-chatgpt profiles with the same email also overwrite each other in `owners` (line 147)."
+  },
+  {
+    "file": "packages/usage/src/factory.ts",
+    "line": 131,
+    "summary": "With local sign-ins on, the Droid sign-in stored in the Factory home always wins over the API key the profile explicitly configured.",
+    "failure_scenario": "The user adds two factory-droid profiles on the same home: [home, null] and [home, FACTORY_KEY_B] for account B. The duplicate check allows this. With local sign-ins on, readFactoryLocalAuth returns account A for both, so the 'account B' card shows account A's limits under B's label. Devin does the opposite and puts the env key first, so the two providers are inconsistent."
+  },
+  {
+    "file": "packages/usage/src/devin.ts",
+    "line": 82,
+    "summary": "A Devin profile configured with credentialEnv for another account quietly falls back to the local `devin auth login` key when that variable is missing.",
+    "failure_scenario": "The profile names DEVIN_KEY_WORK, but the server was started without it. Instead of a 'key variable not set' error, apiKey falls through to credentials.toml (the default account). The 'Work' card then shows the personal account's quota with state ok, a mislabeled account rather than a visible failure."
+  },
+  {
+    "file": "packages/usage-cli/src/accounts.mjs",
+    "line": 408,
+    "summary": "Every Antigravity profile shares one global settings.json, so installing one account's collector replaces another's. The dashboard then offers 'Reinstall', which flips it back.",
+    "failure_scenario": "Two Antigravity accounts A and B. Installing B's collector overwrites statusLine.command with B's shim. A's collectorStatus becomes 'replaced', and accountHint offers 'Reinstall', which replaces B in turn. Only one account ever collects, and snapshots from whichever CLI login is active go to whichever account last 'won', with no config-directory check (unlike Claude)."
+  },
+  {
+    "file": "apps/usage/src/App.svelte",
+    "line": 190,
+    "summary": "refresh() returns immediately when a refresh is already running, so toggling local sign-ins (line 252) or redeeming a reset (line 321) can leave the dashboard showing results computed under the old state.",
+    "failure_scenario": "An auto-refresh or keyboard 'r' read is in flight when the user turns on local sign-ins. setLocalCredentials awaits refresh(), which returns at once. The in-flight read was computed with localCredentials=false, so the cards keep saying 'Turn on local sign-ins in Settings' until the next interval, up to 30 minutes."
+  },
+  {
+    "file": "packages/usage-cli/src/server.mjs",
+    "line": 111,
+    "summary": "Every status read spawns `claude auth status` once per Claude profile, and again through ensureDefaultClaude on both /api/status and /api/profiles, even when local sign-ins are off and only the snapshot is used.",
+    "failure_scenario": "reloadAll() calls /api/profiles and /api/status concurrently. Each one runs ensureDefaultClaude (re-reading prefs and profiles, and spawning the claude CLI while the default is not yet added), then status() spawns `claude auth status` (up to a 10 s timeout) for each bound profile on every refresh. Auth status could be cached or throttled like the live reads, and skipped when its result is unused."
+  },
+  {
+    "file": "packages/usage-cli/src/accounts.mjs",
+    "line": 57,
+    "summary": "readClaudeAuth passes `{ defaultConfigDir }`, but readClaudeAuthStatus only accepts `builtInConfigDir`, so the option is silently ignored. server.mjs (lines 116 and 194) also re-derives the default Claude directory instead of using accounts.defaultClaudeConfigDir.",
+    "failure_scenario": "This is dead, misleading code. A maintainer who 'fixes' the name to builtInConfigDir would remove CLAUDE_CONFIG_DIR for a CLAUDE_CONFIG_DIR-based default, and `claude auth status` would report ~/.claude's account. Meanwhile server.mjs keeps its own `resolve(homedir(), '.claude')` copies that can drift from accounts.mjs."
+  }
+]
+```</result>
+<usage><subagent_tokens>191253</subagent_tokens><tool_uses>23</tool_uses><duration_ms>243561</duration_ms></usage>
+</task-notification>
