@@ -1,0 +1,12 @@
+# Bot runtime
+BotRuntime/node_modules/
+BotRuntime/dist/
+BotRuntime/.env
+BotRuntime/.profiles/
+BotRuntime/recordings/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
+build/

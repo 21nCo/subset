@@ -26,5 +26,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'minutes',
+    name: 'Minutes',
+    summary: 'Send a visible notetaker bot to a Google Meet or Zoom call and keep the meeting audio locally.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
