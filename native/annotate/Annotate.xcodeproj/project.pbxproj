@@ -1,0 +1,524 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 46;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		4F44F6CDA8098B20C06D4F2C /* PDFDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */; };
+		53FEF111E03372092C9DA207 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E385F4E06DB6EE866D5C191C /* Foundation.framework */; };
+		5E39A1A60178D7B553EDA518 /* AnnotateApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */; };
+		7329F94B3D8989525394ABF1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1524E3F6906864603F52C209 /* ContentView.swift */; };
+		BCDE1437215861FD06B15E75 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E385F4E06DB6EE866D5C191C /* Foundation.framework */; };
+		D1BA17B4BD8091F3F6BCE328 /* PDFAnnotatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */; };
+		E43E330B69EBB0988D43D4F3 /* AnnotateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F50A1D866F871CA1371D2A /* AnnotateTests.swift */; };
+		F1D6786A1C82C2D654D65CE4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		91F91ED91368E7FA460C849B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1C05B9B5369269A2DDF2E9D3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1F123471F66E91D195EAF80F;
+			remoteInfo = Annotate;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1524E3F6906864603F52C209 /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFDocumentStore.swift; sourceTree = "<group>"; };
+		4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateApp.swift; sourceTree = "<group>"; };
+		78F50A1D866F871CA1371D2A /* AnnotateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateTests.swift; sourceTree = "<group>"; };
+		983B553F48BE0D8ADA9FD304 /* Annotate.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Annotate.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFAnnotatorView.swift; sourceTree = "<group>"; };
+		D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E385F4E06DB6EE866D5C191C /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AnnotateTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		734C9B63B7DD818717E16BAB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BCDE1437215861FD06B15E75 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C1D408F2F8BDD75499FC522A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				53FEF111E03372092C9DA207 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		092613E6CCAD3D297CFD4FDE /* Annotate */ = {
+			isa = PBXGroup;
+			children = (
+				F73EAA55FCD49E3E9CCB8468 /* Features */,
+				4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */,
+				1524E3F6906864603F52C209 /* ContentView.swift */,
+				D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */,
+			);
+			name = Annotate;
+			path = Annotate;
+			sourceTree = "<group>";
+		};
+		22650E5087E6E3FF6970C607 = {
+			isa = PBXGroup;
+			children = (
+				B16E513BC25B569CF14E5077 /* Products */,
+				A27E0EAE8552366AB4D129F9 /* Frameworks */,
+				092613E6CCAD3D297CFD4FDE /* Annotate */,
+				EC41CE3C6A92485F648A1948 /* Tests */,
+			);
+			sourceTree = "<group>";
+		};
+		5D780A8950D511CDA5F799E7 /* PDFAnnotation */ = {
+			isa = PBXGroup;
+			children = (
+				B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */,
+				43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */,
+			);
+			name = PDFAnnotation;
+			path = PDFAnnotation;
+			sourceTree = "<group>";
+		};
+		A27E0EAE8552366AB4D129F9 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F4DB87A3C660CB441B5B9C72 /* iOS */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		B16E513BC25B569CF14E5077 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				983B553F48BE0D8ADA9FD304 /* Annotate.app */,
+				FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		EC41CE3C6A92485F648A1948 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				78F50A1D866F871CA1371D2A /* AnnotateTests.swift */,
+			);
+			name = Tests;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		F4DB87A3C660CB441B5B9C72 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				E385F4E06DB6EE866D5C191C /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
+		F73EAA55FCD49E3E9CCB8468 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				5D780A8950D511CDA5F799E7 /* PDFAnnotation */,
+			);
+			name = Features;
+			path = Features;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		16F02360383A7F86345CCCDA /* AnnotateTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B3EF5264CD0044DB2CE0AEA /* Build configuration list for PBXNativeTarget "AnnotateTests" */;
+			buildPhases = (
+				706AF2EDDAEA9EF4AE6B6F18 /* Sources */,
+				C1D408F2F8BDD75499FC522A /* Frameworks */,
+				ECB71B764074609D96C0DDDC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0A197FE5CCC4606771696EE3 /* PBXTargetDependency */,
+			);
+			name = AnnotateTests;
+			productName = AnnotateTests;
+			productReference = FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		1F123471F66E91D195EAF80F /* Annotate */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6A92872C281C03EE0E494612 /* Build configuration list for PBXNativeTarget "Annotate" */;
+			buildPhases = (
+				72F20897B8150F05649EB75F /* Sources */,
+				734C9B63B7DD818717E16BAB /* Frameworks */,
+				2206130A826F2C85ABD3DE35 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Annotate;
+			productName = Annotate;
+			productReference = 983B553F48BE0D8ADA9FD304 /* Annotate.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1C05B9B5369269A2DDF2E9D3 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					16F02360383A7F86345CCCDA = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 1F123471F66E91D195EAF80F;
+					};
+					1F123471F66E91D195EAF80F = {
+						CreatedOnToolsVersion = 26.4;
+					};
+				};
+			};
+			buildConfigurationList = 68D9A8C0CDBF80762F57E8D6 /* Build configuration list for PBXProject "Annotate" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 22650E5087E6E3FF6970C607;
+			minimizedProjectReferenceProxies = 0;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = B16E513BC25B569CF14E5077 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1F123471F66E91D195EAF80F /* Annotate */,
+				16F02360383A7F86345CCCDA /* AnnotateTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2206130A826F2C85ABD3DE35 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1D6786A1C82C2D654D65CE4 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ECB71B764074609D96C0DDDC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		706AF2EDDAEA9EF4AE6B6F18 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E43E330B69EBB0988D43D4F3 /* AnnotateTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		72F20897B8150F05649EB75F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5E39A1A60178D7B553EDA518 /* AnnotateApp.swift in Sources */,
+				7329F94B3D8989525394ABF1 /* ContentView.swift in Sources */,
+				D1BA17B4BD8091F3F6BCE328 /* PDFAnnotatorView.swift in Sources */,
+				4F44F6CDA8098B20C06D4F2C /* PDFDocumentStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0A197FE5CCC4606771696EE3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = Annotate;
+			target = 1F123471F66E91D195EAF80F /* Annotate */;
+			targetProxy = 91F91ED91368E7FA460C849B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0F049D7E741F5192BB1CFA18 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		362BD1FA4CA4FF10008C17E0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Annotate.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Annotate";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3C11A0D100BA36AAA6360287 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Annotate.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Annotate";
+			};
+			name = Debug;
+		};
+		47CF0341233AEA16BFC68F21 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
+				PRODUCT_NAME = Annotate;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		5659D543DB0809FD2AD57EA3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
+				PRODUCT_NAME = Annotate;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		99D4EF816EC26F6B8DBE2EDC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		68D9A8C0CDBF80762F57E8D6 /* Build configuration list for PBXProject "Annotate" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				99D4EF816EC26F6B8DBE2EDC /* Debug */,
+				0F049D7E741F5192BB1CFA18 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		6A92872C281C03EE0E494612 /* Build configuration list for PBXNativeTarget "Annotate" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5659D543DB0809FD2AD57EA3 /* Release */,
+				47CF0341233AEA16BFC68F21 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8B3EF5264CD0044DB2CE0AEA /* Build configuration list for PBXNativeTarget "AnnotateTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				362BD1FA4CA4FF10008C17E0 /* Release */,
+				3C11A0D100BA36AAA6360287 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1C05B9B5369269A2DDF2E9D3 /* Project object */;
+}
