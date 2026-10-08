@@ -29,7 +29,7 @@ The directory imports metadata; it does not own feature logic, credentials, or t
 
 Packages must not import from `apps/`. Apps may import packages through package exports, not through relative paths into sibling source trees. A capability must not import Nucleus, Outright, or another consuming product. Put product-specific adapters in the consuming product or in an explicitly named integration package, with the dependency pointing toward the capability. Do not move domain logic into Nucleus's domain-free `@21n/ui` package. If Subset needs generic primitives, evaluate `@uifn/*` and `@21n/ui` according to their actual portability and ownership contracts before creating new ones.
 
-Packages published to npm must use the `@sub-set/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication.
+Packages published to npm must use the `@subset.dev/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication.
 
 Do not create a cross-platform abstraction merely to make two examples look alike. Share the operation and data contract when that is the stable seam; make separate web or native views when platform behavior differs.
 

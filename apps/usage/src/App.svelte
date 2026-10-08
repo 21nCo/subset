@@ -16,6 +16,7 @@
   import XIcon from 'phosphor-svelte/lib/XIcon';
   import UsageDashboard from '@subset/usage/view';
   import ProviderIcon from '@subset/usage/provider-icon';
+  import BrandMark from './BrandMark.svelte';
   import { createUsageStatus, isUsageStatus, type UsageAccount, type UsageProvider, type UsageStatus } from '@subset/usage';
   import { emptyUsageHistory, isUsageHistory, type UsageHistory } from '@subset/usage/history';
   import { accountBadge, accountName, agoText, providerMeta, type PercentMode, type SortMode } from '@subset/usage/present';
@@ -508,7 +509,7 @@
     <div class="appbar-wrap">
     <header class="appbar">
       <div class="brand">
-        <span class="logo" aria-hidden="true"><i></i><i></i><i></i></span>
+        <BrandMark size={26} />
         <span class="name">Usage</span>
         {#if loaded}<span class="count" aria-label={`${status.accounts.length} accounts`}>{status.accounts.length}</span>{/if}
       </div>
@@ -860,9 +861,7 @@
   .brand { display: flex; align-items: center; gap: 10px; }
   .brand .name { font-size: 1.35rem; font-weight: 600; letter-spacing: -.02em; }
   .count { font-size: .78rem; font-weight: 500; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; }
-  .logo { display: inline-flex; align-items: flex-end; gap: 3px; height: 20px; }
-  .logo i { width: 5px; border-radius: 2px; background: var(--accent); }
-  .logo i:nth-child(1) { height: 45%; } .logo i:nth-child(2) { height: 100%; } .logo i:nth-child(3) { height: 70%; }
+  .brand :global(.brand-mark) { flex: none; color: var(--text); }
   .tabs { display: flex; gap: 4px; padding: 3px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line); }
   .tabs button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font: inherit; font-size: .88rem; font-weight: 500; cursor: pointer; }
   .tabs button[aria-current='page'] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }

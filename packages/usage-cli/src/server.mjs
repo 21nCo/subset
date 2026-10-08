@@ -417,7 +417,7 @@ if (flag('--help') || flag('-h')) {
   try { await readFile(resolve(web, 'index.html')); }
   catch { process.stderr.write(`The dashboard files were not found in ${web}. Build the web app first.\n`); process.exit(1); }
   await writeCollectorShim().catch(() => process.stderr.write('Could not write the collector shim; installed status lines may not collect.\n'));
-  const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
+  const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
   const server = createServer(async (request, response) => {
     const host = request.headers.host;
     if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) { response.writeHead(403).end(); return; }

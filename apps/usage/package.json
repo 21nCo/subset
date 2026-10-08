@@ -6,8 +6,8 @@
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "build": "vite build",
-    "status": "npm run status --workspace=@sub-set/usage",
-    "serve": "npm run serve --workspace=@sub-set/usage -- --web-dir ../../apps/usage/dist"
+    "status": "npm run status --workspace=@subset.dev/usage",
+    "serve": "npm run serve --workspace=@subset.dev/usage -- --web-dir ../../apps/usage/dist"
   },
   "dependencies": {
     "@21n/fonts": "1.0.1",

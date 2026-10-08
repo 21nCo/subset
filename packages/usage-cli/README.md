@@ -1,4 +1,4 @@
-# @sub-set/usage
+# @subset.dev/usage
 
 A local dashboard and CLI for AI subscription usage: ChatGPT (Codex), Claude, Cursor, Factory Droid, Amp, Devin, Antigravity, and logins stored by Pi, OpenCode, omp, and Hermes. It runs on your computer, binds only to `127.0.0.1`, and sends nothing to Subset.
 
@@ -12,13 +12,13 @@ Until the first release, install from the repository:
 
 ```sh
 npm ci && npm run build                     # at the repository root
-cd packages/usage-cli && npm pack           # builds and writes sub-set-usage-<version>.tgz
-npm install -g ./sub-set-usage-*.tgz        # installs the subset-usage command
+cd packages/usage-cli && npm pack           # builds and writes subset.dev-usage-<version>.tgz
+npm install -g ./subset.dev-usage-*.tgz        # installs the subset-usage command
 subset-usage                                # open the dashboard
 subset-usage status                         # current usage as JSON, read-only
 ```
 
-After a release is published, the registry commands work too: `npx @sub-set/usage`, or `npm install -g @sub-set/usage`.
+After a release is published, the registry commands work too: `npx @subset.dev/usage`, or `npm install -g @subset.dev/usage`.
 
 Collectors and status-line chaining use a POSIX shell script, so they are supported on macOS and Linux; reading the Cursor app sign-in is not supported on Windows.
 
@@ -39,8 +39,8 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 
 ## Development
 
-From the repository root, `npm run build` builds `@subset/usage`, the `apps/usage` view, and this package: `dist/cli.mjs` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `npm test --workspace=@sub-set/usage` runs the CLI tests. `npm run serve --workspace=@sub-set/usage` runs the source without bundling.
+From the repository root, `npm run build` builds `@subset/usage`, the `apps/usage` view, and this package: `dist/cli.mjs` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `npm test --workspace=@subset.dev/usage` runs the CLI tests. `npm run serve --workspace=@subset.dev/usage` runs the source without bundling.
 
 ## Release
 
-Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes with the organization `NPM_TOKEN`. `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx @sub-set/usage@<version> --version`, then a real `serve`) before listing it as available anywhere.
+Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes with the organization `NPM_TOKEN`. `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx @subset.dev/usage@<version> --version`, then a real `serve`) before listing it as available anywhere.

@@ -19,9 +19,9 @@ for (const kind of ['packages', 'apps']) {
       assert.match(manifest.name, /^@subset\/[a-z0-9-]+$/);
       assert.equal(manifest.private, true, `${manifest.name} is an app host and must remain private`);
     } else if (manifest.private) {
-      assert.match(manifest.name, /^@(subset|sub-set)\/[a-z0-9-]+$/);
+      assert.match(manifest.name, /^@(subset|subset\.dev)\/[a-z0-9-]+$/);
     } else {
-      assert.match(manifest.name, /^@sub-set\/[a-z0-9-]+$/, `${manifest.name} must use the @sub-set npm scope to publish`);
+      assert.match(manifest.name, /^@subset\.dev\/[a-z0-9-]+$/, `${manifest.name} must use the @subset.dev npm scope to publish`);
     }
     assert.equal(names.has(manifest.name), false, `Duplicate workspace ${manifest.name}`);
     names.add(manifest.name);

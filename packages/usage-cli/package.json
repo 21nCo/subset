@@ -1,5 +1,5 @@
 {
-  "name": "@sub-set/usage",
+  "name": "@subset.dev/usage",
   "version": "0.1.0",
   "description": "Local dashboard and CLI for AI subscription usage: ChatGPT/Codex, Claude, Cursor, Factory, Amp, Devin, and more",
   "license": "MIT",

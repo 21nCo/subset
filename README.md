@@ -2,7 +2,7 @@
 
 Subset is a collection of small, independently useful apps. Each app solves one focused problem and can, where its platform allows, also serve as a capability inside 21n products or as an interface returned by an AI agent.
 
-The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as the `subset-usage` CLI (`@sub-set/usage`, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
+The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as the `subset-usage` CLI (`@subset.dev/usage`, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
 
 ## Product model
 
@@ -33,7 +33,7 @@ scripts/
 
 Future capability packages belong under `packages/<capability>/`; their standalone hosts belong under `apps/<app>/`. Native Swift packages and app targets may live under `native/` and are validated through Xcode rather than npm workspaces. The directory is a discovery and distribution surface, not the runtime owner of every capability.
 
-The current `@subset/*` workspaces are private. Any package later published to npm uses the `@sub-set/<name>` scope; app hosts remain private. No npm package is published from this scaffold.
+The current `@subset/*` workspaces are private. Any package later published to npm uses the `@subset.dev/<name>` scope; app hosts remain private. No npm package is published from this scaffold.
 
 ## Development
 
