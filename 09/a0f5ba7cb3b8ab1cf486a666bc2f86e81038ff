@@ -1,0 +1,27 @@
+packages/usage-cli/test/server.test.mjs
+  s_e41552db7a7823::t_8c6b62af28e6db 194-242
+packages/usage-cli/src/server.mjs
+  s_e41552db7a7823::t_2f694701cff340 208-215,218-219,224-225,232
+  s_e41552db7a7823::t_dfdf8733a40536 202-203
+packages/usage/README.md
+  s_e41552db7a7823::t_dfdf8733a40536 32
+  s_e41552db7a7823::t_26ede0acbe6183 74
+.github/workflows/publish-tag.yml
+  s_e41552db7a7823::t_26ede0acbe6183 32,47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "09a0f5ba7cb3b8ab1cf486a666bc2f86e81038ff",
+  "prompts": {},
+  "sessions": {
+    "s_e41552db7a7823": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf55d8d-6176-4456-a8a3-555947c35bfe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
