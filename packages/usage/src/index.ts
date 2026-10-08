@@ -216,6 +216,10 @@ export function usageText(status: UsageStatus, now = new Date()): string {
 
 export function agentUsageResult(status: UsageStatus) {
   // Host-internal fields never reach an agent, even if a host forgot to remove them.
-  const structuredContent: UsageStatus = { ...status, accounts: status.accounts.map(({ workspaceId: _workspace, ...account }) => account) };
+  const structuredContent: UsageStatus = { ...status, accounts: status.accounts.map((account) => {
+    // Readers may attach throttling hints (`retryAfterMs`) outside the contract type.
+    const { workspaceId: _workspace, retryAfterMs: _retry, ...rest } = account as UsageAccount & { retryAfterMs?: number };
+    return rest;
+  }) };
   return { structuredContent, text: usageText(structuredContent), viewId: USAGE_VIEW_ID };
 }

@@ -204,8 +204,8 @@ test('labels trim without splitting surrogate pairs, and agents never see host-i
   const label = accountLabel(`${'a'.repeat(79)}😀`);
   assert.equal(label, 'a'.repeat(79));
   assert.equal(/[\uD800-\uDFFF]/.test(label), false);
-  const result = agentUsageResult(createUsageStatus([account({ workspaceId: 'ws_secret', balances: [{ kind: 'provider-reported-balance', currency: 'credits', amount: 0, label: 'Credits', note: 'Unlimited' }] })]));
-  assert.doesNotMatch(JSON.stringify(result), /ws_secret/);
+  const result = agentUsageResult(createUsageStatus([account({ workspaceId: 'ws_secret', retryAfterMs: 90_000, balances: [{ kind: 'provider-reported-balance', currency: 'credits', amount: 0, label: 'Credits', note: 'Unlimited' }] })]));
+  assert.doesNotMatch(JSON.stringify(result), /ws_secret|retryAfterMs/);
   assert.match(result.text, /Credits: unlimited/);
   assert.doesNotMatch(result.text, /0 credits/);
 });
