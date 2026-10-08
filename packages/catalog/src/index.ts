@@ -20,6 +20,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'launcher',
+    name: 'Launcher',
+    summary: 'Open apps and files, run shortcuts, arrange windows, pick emoji, calculate, and jot quick notes from one keyboard bar on the Mac.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'pdf-review',
     name: 'PDF annotation and review',
     summary: 'Annotate a PDF and review marked passages in a focused workspace.',
