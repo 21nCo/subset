@@ -26,5 +26,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'breaks',
+    name: 'Breaks',
+    summary: 'Take well-timed screen breaks on iPhone and iPad, with optional Screen Time shields and on-device history.',
+    state: 'building',
+    proposedSurfaces: ['ios'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
