@@ -3,17 +3,34 @@
   "checkpoint_id": "01M4DXBGYC4E21KZ9QTBB80EAH",
   "strategy": "manual-commit",
   "branch": "usage-dashboard-cli",
-  "checkpoints_count": 2,
+  "checkpoints_count": 29,
   "files_touched": [
+    ".github/workflows/publish-tag.yml",
     ".gitignore",
     "AGENTS.md",
     "README.md",
     "apps/directory/src/App.svelte",
+    "apps/usage/src/App.svelte",
     "docs/architecture.md",
     "package-lock.json",
     "package.json",
     "packages/catalog/src/index.ts",
-    "scripts/check-workspaces.mjs"
+    "packages/usage-cli/README.md",
+    "packages/usage-cli/package.json",
+    "packages/usage-cli/scripts/build.mjs",
+    "packages/usage-cli/src/accounts.mjs",
+    "packages/usage-cli/src/server.mjs",
+    "packages/usage-cli/test/accounts.test.mjs",
+    "packages/usage-cli/test/profiles.test.mjs",
+    "packages/usage-cli/test/server.test.mjs",
+    "packages/usage/src/UsageDashboard.svelte",
+    "packages/usage/src/UsageTrend.svelte",
+    "packages/usage/src/claude.ts",
+    "packages/usage/src/history.ts",
+    "packages/usage/src/present.ts",
+    "release-packages.json",
+    "scripts/check-workspaces.mjs",
+    "scripts/resolve-release-tag.mjs"
   ],
   "sessions": [
     {
@@ -22,14 +39,27 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": "/0/prompt.txt"
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": "/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 333827,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 5312896,
-    "output_tokens": 28215,
-    "api_call_count": 51,
-    "subagent_tokens_complete": true
+    "input_tokens": 334861,
+    "cache_creation_tokens": 1161162,
+    "cache_read_tokens": 243770702,
+    "output_tokens": 629751,
+    "api_call_count": 568,
+    "subagent_tokens": {
+      "input_tokens": 62,
+      "cache_creation_tokens": 114259,
+      "cache_read_tokens": 2184604,
+      "output_tokens": 15209,
+      "api_call_count": 31
+    }
   }
 }
