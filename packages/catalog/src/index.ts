@@ -20,6 +20,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'screenshot',
+    name: 'Screenshot',
+    summary: 'Capture, record, annotate, and pin what is on screen from the macOS menu bar, with optional self-hosted share links.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'pdf-review',
     name: 'PDF annotation and review',
     summary: 'Annotate a PDF and review marked passages in a focused workspace.',

@@ -1,0 +1,7 @@
+.derived-data/
+share-worker/node_modules/
+share-worker/.wrangler/
+share-worker/.dev.vars
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+.DS_Store
