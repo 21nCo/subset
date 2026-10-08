@@ -54,6 +54,15 @@ export function jwtClaims(token: string): Record<string, unknown> | null {
   } catch { return null; }
 }
 
+/** Retry-After as delay-seconds or an HTTP date, capped at one hour. */
+export function retryAfterOf(value: string | null, now = Date.now()): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^\d{1,6}$/.test(trimmed)) return Math.min(Number(trimmed) * 1000, 3_600_000);
+  const date = Date.parse(trimmed);
+  return Number.isFinite(date) ? Math.max(0, Math.min(date - now, 3_600_000)) : null;
+}
+
 /** Fetches JSON from a fixed HTTPS origin with a timeout, no redirects, and a response size bound. */
 export async function fetchJson(url: string, init: { headers: Record<string, string>; method?: string; body?: string },
   options: { fetch?: typeof globalThis.fetch; timeoutMs?: number; maxBytes?: number } = {}): Promise<{ status: number; json: unknown; retryAfterMs: number | null }> {
@@ -61,11 +70,24 @@ export async function fetchJson(url: string, init: { headers: Record<string, str
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 15_000);
   try {
     const response = await (options.fetch ?? globalThis.fetch)(url, { ...init, redirect: 'error', credentials: 'omit', signal: controller.signal });
-    const retryAfter = response.headers.get('retry-after');
-    const seconds = retryAfter && /^\d{1,6}$/.test(retryAfter.trim()) ? Number(retryAfter) : NaN;
-    const retryAfterMs = Number.isFinite(seconds) ? Math.min(seconds * 1000, 3_600_000) : null;
-    const text = await response.text();
-    if (text.length > (options.maxBytes ?? 512 * 1024)) return { status: response.status, json: null, retryAfterMs };
+    const retryAfterMs = retryAfterOf(response.headers.get('retry-after'));
+    // Stream the body and stop at the byte limit, so an oversized response is never fully buffered.
+    const maxBytes = options.maxBytes ?? 512 * 1024;
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    const reader = response.body?.getReader();
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) { await reader.cancel().catch(() => {}); return { status: response.status, json: null, retryAfterMs }; }
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
     let json: unknown = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
     return { status: response.status, json, retryAfterMs };

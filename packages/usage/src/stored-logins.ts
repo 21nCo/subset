@@ -91,7 +91,8 @@ async function readEntries(tool: StoredLoginTool, dataDir?: string): Promise<Sto
   return (Object.entries(KEYS[tool]) as Array<[StoredLoginKind, string[]]>).flatMap(([kind, keys]) => {
     const entry = keys.map((key) => object(store?.[key])).find(Boolean);
     if (!entry) return [];
-    const token = text(entry.access) ?? text(entry.key);
+    // Subscription logins are OAuth (`access`); an API key stored under the same name is not a subscription.
+    const token = kind === 'opencode-go' ? text(entry.access) ?? text(entry.key) : text(entry.access);
     return [{ kind, token, accountId: text(entry.accountId, 128), expires: typeof entry.expires === 'number' ? entry.expires : null,
       email: tokenEmail(token) ?? undefined, reloginRequired: false }];
   });
@@ -124,23 +125,28 @@ function windowFrom(limitId: string, label: string, minutes: number, used: numbe
   };
 }
 
-export function normalizeChatgptUsage(input: unknown, now: number): { windows: UsageWindow[]; plan: string | null; email: string | null } {
+export function normalizeChatgptUsage(input: unknown, now: number): { windows: UsageWindow[]; plan: string | null; email: string | null; incomplete: boolean } {
   const root = object(input);
   const rate = object(root?.rate_limit);
   const windows: UsageWindow[] = [];
+  let incomplete = false;
   for (const [key, id] of [['primary_window', 'primary'], ['secondary_window', 'secondary']] as const) {
     const window = object(rate?.[key]);
     if (!window) continue;
+    const used = percent(window.used_percent);
     const seconds = typeof window.limit_window_seconds === 'number' && window.limit_window_seconds > 0 ? window.limit_window_seconds : null;
     const resetAt = typeof window.reset_at === 'number' ? window.reset_at * 1000
       : typeof window.reset_after_seconds === 'number' ? now + window.reset_after_seconds * 1000 : NaN;
     // Same IDs and labels as Codex app-server windows, so merged and fallback reads share history.
-    windows.push(windowFrom('codex', `codex · ${id}`, seconds ? Math.round(seconds / 60) : 0, percent(window.used_percent),
-      Number.isFinite(resetAt) && resetAt > 0 ? new Date(resetAt).toISOString() : null));
+    const resetsAt = Number.isFinite(resetAt) && resetAt > 0 ? new Date(resetAt).toISOString() : null;
+    // A window without usage is unusable; one missing usage or reset time makes the read partial.
+    if (used === null) { incomplete = true; continue; }
+    if (resetsAt === null) incomplete = true;
+    windows.push(windowFrom('codex', `codex · ${id}`, seconds ? Math.round(seconds / 60) : 0, used, resetsAt));
   }
   const plan = text(root?.plan_type, 40);
   const email = root?.email;
-  return { windows: windows.map((window) => ({ ...window, durationMinutes: window.durationMinutes || null })), plan, email: isEmail(email) ? email : null };
+  return { windows: windows.map((window) => ({ ...window, durationMinutes: window.durationMinutes || null })), plan, email: isEmail(email) ? email : null, incomplete };
 }
 
 export function normalizeOpencodeGoUsage(input: unknown): UsageWindow[] {
@@ -165,8 +171,8 @@ export async function readStoredLoginProfile(profile: StoredLoginProfile, option
   const entry = (await (options.entries ?? readEntries)(profile.provider, profile.dataDir)).find((item) => item.kind === profile.login && (!profile.entryId || item.entryId === profile.entryId)) ?? null;
   if (!entry) return fail('stored_login_missing', `${tool} has no ${profile.login === 'opencode-go' ? 'OpenCode Go key' : `${profile.login === 'chatgpt' ? 'ChatGPT' : 'Claude'} login`} stored. Sign in from ${tool}.`, 'unauthorized');
   const token = entry.token;
-  if (!token) return fail('stored_login_unreadable', `${tool}'s stored login could not be read.`);
   if (entry.reloginRequired) return fail('stored_login_relogin', `${tool} needs you to sign in again.`, 'unauthorized');
+  if (!token) return fail('stored_login_unreadable', `${tool}'s stored login could not be read.`);
   const now = options.now?.() ?? Date.now();
   if (entry.expires !== null && entry.expires > 0 && entry.expires <= now) {
     return fail('stored_login_expired', `${tool}'s stored login has expired. Open ${tool} to refresh it.`, 'unauthorized');
@@ -188,8 +194,9 @@ export async function readStoredLoginProfile(profile: StoredLoginProfile, option
       const usage = normalizeChatgptUsage(response.json, now);
       const claims = jwtClaims(token);
       const email = usage.email ?? (isEmail(object(claims?.['https://api.openai.com/profile'])?.email) ? object(claims?.['https://api.openai.com/profile'])!.email as string : null);
-      return { ...base, service: 'codex-chatgpt', source, plan: usage.plan, email: email ?? entry.email ?? null, observedAt: new Date().toISOString(), state: usage.windows.length ? 'ok' : 'partial', windows: usage.windows,
-        errors: usage.windows.length ? [] : [{ code: 'missing_limits', message: 'ChatGPT returned no usage windows for this login.' }] };
+      return { ...base, service: 'codex-chatgpt', source, plan: usage.plan, email: email ?? entry.email ?? null, observedAt: new Date().toISOString(), state: usage.windows.length && !usage.incomplete ? 'ok' : 'partial', windows: usage.windows,
+        errors: !usage.windows.length ? [{ code: 'missing_limits', message: 'ChatGPT returned no usage windows for this login.' }]
+          : usage.incomplete ? [{ code: 'partial_limits', message: 'ChatGPT returned a usage window without usage or a reset time.' }] : [] };
     }
     const response = await fetchJson('https://opencode.ai/zen/go/v1/usage', { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }, { fetch: options.fetch });
     if (response.status === 401 || response.status === 403) return fail('opencode_unauthorized', 'OpenCode rejected the Go key.', 'unauthorized');

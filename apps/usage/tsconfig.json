@@ -1,4 +1,9 @@
 {
   "extends": "../../apps/directory/tsconfig.json",
-  "include": ["src/**/*.ts", "src/**/*.svelte", "../../packages/usage/src/**/*.svelte"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "../../packages/usage/src/**/*.svelte",
+    "vite.config.ts"
+  ]
 }

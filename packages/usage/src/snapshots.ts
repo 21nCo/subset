@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import type { SnapshotProfile, UsageAccount, UsageWindow } from './index.js';
+import { accountLabel, type SnapshotProfile, type UsageAccount, type UsageWindow } from './index.js';
 
 const MAX_BYTES = 64 * 1024;
 const MAX_WINDOWS = 32;
@@ -37,7 +37,10 @@ const secondsTime = (value: unknown): string | null => {
 
 // Antigravity names buckets `<group>-<span>`, such as `gemini-5h` or `3p-weekly`.
 const ANTIGRAVITY_SPANS: Record<string, number> = { '5h': 300, hourly: 60, daily: 1440, '24h': 1440, weekly: 10080, '7d': 10080, monthly: 43200 };
-export const antigravitySpan = (key: string): number | null => ANTIGRAVITY_SPANS[key.split('-').pop()?.toLowerCase() ?? ''] ?? null;
+export const antigravitySpan = (key: string): number | null => {
+  const suffix = key.split('-').pop()?.toLowerCase() ?? '';
+  return Object.hasOwn(ANTIGRAVITY_SPANS, suffix) ? ANTIGRAVITY_SPANS[suffix] : null;
+};
 
 export function sanitizeSnapshot(profile: SnapshotProfile, input: unknown): unknown {
   const raw = object(input);
@@ -65,7 +68,8 @@ export function sanitizeSnapshot(profile: SnapshotProfile, input: unknown): unkn
   let count = 0;
   for (const key of Object.keys(quota)) {
     if (!safeName(key)) continue;
-    if (count++ >= MAX_WINDOWS) break;
+    // Record truncation, so a source with exactly 32 buckets is not mistaken for a capped one.
+    if (count++ >= MAX_WINDOWS) { result.quota_truncated = true; break; }
     const bucket = object(own(quota, key));
     const item: JsonObject = { remaining_fraction: boundedNumber(own(bucket, 'remaining_fraction'), 1) };
     if (has(bucket, 'reset_time')) item.reset_time = isoTime(own(bucket, 'reset_time'));
@@ -78,7 +82,7 @@ export function sanitizeSnapshot(profile: SnapshotProfile, input: unknown): unkn
 
 function emptyAccount(profile: SnapshotProfile): UsageAccount {
   return {
-    id: profile.id.slice(0, 64), label: profile.label.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 128), provider: profile.provider,
+    id: profile.id.slice(0, 64), label: accountLabel(profile.label.replace(/[\x00-\x1f\x7f]/g, '')), provider: profile.provider,
     source: profile.provider === 'claude-code' ? 'Claude Code status-line snapshot' : 'Antigravity CLI status-line snapshot',
     plan: null, observedAt: null, state: 'unavailable', windows: [], resetCredits: null, errors: []
   };
@@ -112,7 +116,7 @@ function normalize(profile: SnapshotProfile, input: unknown, observedAt: Date): 
     account.plan = safeName(own(data, 'plan_tier'));
     const quota = object(own(data, 'quota'));
     const entries = quota ? Object.entries(quota) : [];
-    if (entries.length >= MAX_WINDOWS) incomplete = true;
+    if (own(data, 'quota_truncated') === true) incomplete = true;
     for (const [key, value] of entries) {
       const raw = object(value);
       const fraction = boundedNumber(own(raw, 'remaining_fraction'), 1);

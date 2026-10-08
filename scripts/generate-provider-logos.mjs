@@ -13,6 +13,12 @@ const marks = {
   'codex-chatgpt': ['openai-icon', true], 'claude-code': ['claude-icon', false], antigravity: ['antigravity', false], cursor: ['cursor-icon', true], 'cursor-local': ['cursor-icon', true],
   devin: ['devin', true], opencode: ['opencode-icon', true],
 };
+// Bodies are rendered with {@html}, so only static shapes are allowed: no scripts, event handlers,
+// embedded documents or images, animation that can retarget attributes, links, or references
+// other than same-document `#id` fragments.
+const ACTIVE_SVG = /<(?:script|foreignObject|image|iframe|embed|object|a|set|animate\w*|style)\b|\son[a-z]+\s*=|(?:xlink:)?href\s*=\s*(?!["']?\s*#)|javascript:|data:|url\(\s*(?!["']?\s*#)/i;
+const assertStatic = (name, svg) => { if (ACTIVE_SVG.test(svg)) throw new Error(`${name} contains active or external content.`); };
+
 const entries = Object.entries(marks).map(([provider, [name, mono]]) => {
   const data = getIconData(icons, name);
   if (!data) throw new Error(`Missing icon ${name}`);
@@ -20,13 +26,15 @@ const entries = Object.entries(marks).map(([provider, [name, mono]]) => {
   let body = svg.body.replace(/fill="#(?:000|000000|26251e|211e1e|131010|0a0a0a|1a1a1a)"/gi, 'fill="currentColor"');
   // Element IDs (gradients, masks) are made unique per rendered instance by ProviderIcon.
   if (mono && !/fill=/.test(body)) body = `<g fill="currentColor">${body}</g>`;
+  assertStatic(`logos:${name}`, body);
   return `  '${provider}': { icon: 'logos:${name}', viewBox: '${svg.attributes.viewBox}', body: ${JSON.stringify(body)} },`;
 });
+
 
 // Marks not in the Iconify set are vendored as reviewed, script-free SVG files in scripts/logos.
 for (const [provider, file] of [['factory-droid', 'factory-droid.svg'], ['amp', 'amp.svg'], ['pi', 'pi.svg'], ['omp', 'omp.svg'], ['hermes', 'hermes.svg']]) {
   const svg = await readFile(new URL(`./logos/${file}`, import.meta.url), 'utf8');
-  if (/<script|\son[a-z]+=|<foreignObject|<image|href="http/i.test(svg)) throw new Error(`${file} contains active or external content.`);
+  assertStatic(file, svg);
   const viewBox = /viewBox="([^"]+)"/.exec(svg)?.[1];
   const body = /<svg[^>]*>([\s\S]*)<\/svg>/.exec(svg)?.[1]?.trim();
   if (!viewBox || !body) throw new Error(`${file} is not a single SVG.`);

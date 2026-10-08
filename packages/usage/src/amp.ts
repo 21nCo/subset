@@ -41,13 +41,13 @@ export function readAmpProfile(profile: AmpProfile, options: { ampBinary?: strin
     env.AMP_API_KEY = key;
   }
   return new Promise((resolve) => {
-    execFile(options.ampBinary ?? 'amp', ['usage'], { env, encoding: 'utf8', timeout: options.timeoutMs ?? 20_000, maxBuffer: 64 * 1024, killSignal: 'SIGKILL' }, (error, stdout) => {
+    execFile(options.ampBinary ?? 'amp', ['usage'], { env, encoding: 'utf8', timeout: options.timeoutMs ?? 20_000, maxBuffer: 64 * 1024, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
       if (error) {
-        // Never surface CLI output: it can include account details.
-        resolve((error as NodeJS.ErrnoException).code === 'ENOENT'
-          ? fail('amp_missing_cli', 'The amp CLI is not installed for the usage server.')
-          : /not (signed|logged) in|login/i.test(String(stdout)) ? fail('amp_signed_out', 'Amp is not signed in. Run amp login.', 'unauthorized')
-            : fail('amp_failed', 'amp usage did not finish successfully.'));
+        // Never surface CLI output: it can include account details. It is only classified.
+        const signedOut = /not (signed|logged) in|login/i.test(`${stdout}\n${stderr}`);
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') resolve(fail('amp_missing_cli', 'The amp CLI is not installed for the usage server.'));
+        else if (signedOut) resolve(fail('amp_signed_out', 'Amp is not signed in. Run amp login.', 'unauthorized'));
+        else resolve(fail('amp_failed', 'amp usage did not finish successfully.'));
         return;
       }
       resolve(normalizeAmpUsage(profile, stdout, new Date()));

@@ -120,7 +120,8 @@
     catch { return 'default'; }
   }
   function togglePin(id: string) {
-    pinned = pinned.includes(id) ? pinned.filter((item) => item !== id) : [...pinned, id];
+    // Capped like the stored list, so the session matches what a reload restores.
+    pinned = pinned.includes(id) ? pinned.filter((item) => item !== id) : [...pinned, id].slice(0, 50);
     savePreference('subset.usage.pinned', JSON.stringify(pinned));
   }
   function setSortMode(mode: SortMode) { sortMode = mode; savePreference('subset.usage.sort', mode); }
@@ -472,7 +473,7 @@
     <div class="banner" role="region" aria-label="Local sign-ins">
       <div>
         <strong>Read the sign-ins already on this computer?</strong>
-        <p>Subset can show live usage from the logins Claude, Factory Droid, Cursor, Devin, Pi, OpenCode, omp, and Hermes keep locally, and the Antigravity account email. Tokens are read, never changed or sent anywhere except each provider's own usage endpoint. You can change this in Settings.</p>
+        <p>Subset can show live usage from the logins Claude, Factory Droid, Cursor, Devin, Pi, OpenCode, omp, and Hermes keep locally, and the Antigravity account email. Tokens are read, never changed, and sent only to the usage endpoints those tools use. Their makers do not document these endpoints, so they may change or stop working. You can change this in Settings.</p>
       </div>
       <div class="banner-actions">
         <button type="button" class="btn primary" disabled={savingLocal} onclick={() => setLocalCredentials(true)}>Use local sign-ins</button>
@@ -497,7 +498,7 @@
 {/snippet}
 
 {#snippet emptyAction()}
-  <button type="button" class="btn primary" onclick={openAdd}>Add your first account</button>
+  <button type="button" class="btn primary" onclick={openAdd} disabled={signInActive || recoveringConnection}>Add your first account</button>
 {/snippet}
 
 <main>
@@ -628,7 +629,7 @@
         <legend class="label">Provider</legend>
         {#each providers as provider (provider.id)}
           <label class="provider" class:selected={newProvider === provider.id}>
-            <input type="radio" name="provider" value={provider.id} bind:group={newProvider} />
+            <input type="radio" name="provider" value={provider.id} bind:group={newProvider} onchange={() => { storedLogin = ''; }} />
             <ProviderIcon provider={provider.id} size={34} />
             <span><strong>{provider.title}</strong><small>{provider.detail}</small></span>
           </label>

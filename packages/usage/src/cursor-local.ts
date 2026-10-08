@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { isEmail, type UsageAccount } from './index.js';
+import { accountLabel, isEmail, type UsageAccount } from './index.js';
 import { fetchJson, jwtClaims, readKeychainSecret, type SecretReader } from './local-auth.js';
 
 /**
@@ -25,12 +25,12 @@ export function cursorStateDb(): string {
     : join(homedir(), '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb');
 }
 
-/** Reads one key from Cursor's state database without writing to it. */
+/** Reads one key from Cursor's state database without writing to it. Rejects when the database can't be read; resolves null when the key is absent. */
 function readStateValue(key: string, file = cursorStateDb()): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('/usr/bin/sqlite3', ['-readonly', file, `select value from ItemTable where key = '${key.replace(/'/g, "''")}' limit 1;`], {
+  return new Promise((resolve, reject) => {
+    execFile('/usr/bin/sqlite3', ['-readonly', file, `select value from ItemTable where key = '${key.replaceAll("'", "''")}' limit 1;`], {
       encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024, killSignal: 'SIGKILL', env: { PATH: '/usr/bin:/bin' },
-    }, (error, stdout) => resolve(error ? null : stdout.trim() || null));
+    }, (error, stdout) => { if (error) reject(new Error('cursor_state_unreadable')); else resolve(stdout.trim() || null); });
   });
 }
 
@@ -61,13 +61,14 @@ export function normalizeCursorLocalUsage(profile: CursorLocalProfile, usageInpu
   const totalCredits = cents(credits?.totalCents);
   const balances: NonNullable<UsageAccount['balances']> = [];
   if (bonus !== null && bonus > 0) balances.push({ kind: 'provider-reported-amount', currency: 'USD', amount: bonus, label: 'Bonus usage', note: 'Beyond included usage, at no charge' });
-  if (individualLimit !== null && individualLimit > 0) balances.push({ kind: 'provider-reported-amount', currency: 'USD', amount: individualRemaining !== null ? Math.max(0, individualLimit - individualRemaining) : 0, label: 'On-demand spend', note: `Limit $${individualLimit.toFixed(2)}` });
+  // Spend is shown only when Cursor reports both the limit and what remains of it.
+  if (individualLimit !== null && individualLimit > 0 && individualRemaining !== null) balances.push({ kind: 'provider-reported-amount', currency: 'USD', amount: Math.max(0, individualLimit - individualRemaining), label: 'On-demand spend', note: `Limit $${individualLimit.toFixed(2)}` });
   if (pooled !== null && pooled > 0 && spendLimit?.limitType === 'team') balances.push({ kind: 'provider-reported-amount', currency: 'USD', amount: pooled, label: 'Team pooled spend', note: 'All members this cycle' });
   if (credits?.hasCreditGrants !== false && totalCredits !== null && totalCredits > 0) {
     balances.push({ kind: 'provider-reported-balance', currency: 'USD', amount: Math.max(0, totalCredits - (cents(credits?.usedCents) ?? 0)), label: 'Credits remaining', note: `of $${totalCredits.toFixed(2)} granted` });
   }
   return {
-    id: profile.id, label: profile.label, provider: 'cursor-local', source: 'Cursor dashboard (local sign-in)', plan: extra.plan, email: extra.email,
+    id: profile.id, label: accountLabel(profile.label), provider: 'cursor-local', source: 'Cursor dashboard (local sign-in)', plan: extra.plan, email: extra.email,
     observedAt: observedAt.toISOString(), state: windows.length ? 'ok' : 'partial', windows, resetCredits: null,
     ...(included !== null ? { spend: {
       kind: 'provider-reported-spend' as const, currency: 'USD' as const, label: 'Included usage', used: included, limit: includedLimit, includedUsed: null,
@@ -82,8 +83,15 @@ export async function readCursorLocalProfile(profile: CursorLocalProfile, option
   const fail = (code: string, message: string, state: UsageAccount['state'] = 'unavailable'): UsageAccount => ({
     id: profile.id, label: profile.label, provider: 'cursor-local', source: 'Cursor dashboard (local sign-in)', plan: null, observedAt: null, state, windows: [], resetCredits: null, errors: [{ code, message }],
   });
+  // The keychain is macOS-only and the state database is read with the system sqlite3, which Windows lacks.
+  if (process.platform === 'win32' && !options.readState) return fail('cursor_unsupported_platform', 'Reading the Cursor app sign-in is not supported on Windows.', 'unsupported');
   const readState = options.readState ?? ((key: string) => readStateValue(key));
-  const token = (await (options.readSecret ?? readKeychainSecret)('cursor-access-token')) ?? await readState('cursorAuth/accessToken');
+  const optionalState = (key: string) => readState(key).catch(() => null);
+  let token = await (options.readSecret ?? readKeychainSecret)('cursor-access-token');
+  if (!token) {
+    try { token = await readState('cursorAuth/accessToken'); }
+    catch { return fail('cursor_state_unreadable', 'Cursor\'s local state could not be read, so its sign-in is unknown.'); }
+  }
   if (!token || token.length > 16_384) return fail('cursor_signed_out', 'Cursor is not signed in on this computer.', 'unauthorized');
   const claims = jwtClaims(token);
   if (typeof claims?.exp === 'number' && claims.exp * 1000 <= Date.now()) return fail('cursor_token_expired', 'Cursor\'s sign-in has expired. Open Cursor to refresh it.', 'unauthorized');
@@ -97,8 +105,8 @@ export async function readCursorLocalProfile(profile: CursorLocalProfile, option
     const [credits, planInfo, membership, email] = await Promise.all([
       fetchJson(`${API}/GetCreditGrantsBalance`, { method: 'POST', headers, body: '{}' }, { fetch: options.fetch }).catch(() => null),
       fetchJson(`${API}/GetPlanInfo`, { method: 'POST', headers, body: '{}' }, { fetch: options.fetch }).catch(() => null),
-      readState('cursorAuth/stripeMembershipType'),
-      readState('cursorAuth/cachedEmail'),
+      optionalState('cursorAuth/stripeMembershipType'),
+      optionalState('cursorAuth/cachedEmail'),
     ]);
     const planName = object(object(planInfo?.json)?.planInfo)?.planName;
     const plan = typeof planName === 'string' && planName.length <= 40 ? planName : membership && /^[a-z_]{1,40}$/i.test(membership) ? membership : null;

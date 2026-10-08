@@ -63,6 +63,8 @@ export async function readClaudeAuthStatus(configDir: string, options: { claudeB
 export function withClaudeAuth(account: UsageAccount, auth: ClaudeAuthStatus | null): UsageAccount {
   if (!auth) return account;
   const next: UsageAccount = { ...account, plan: account.plan ?? auth.subscriptionType, ...(auth.email ? { email: auth.email } : {}), errors: [...account.errors] };
+  // Signed-out or non-subscription directories have no current quota; earlier values are not shown beside that state.
+  if (!auth.loggedIn || auth.authMethod !== 'claude.ai') { next.windows = []; next.observedAt = null; }
   if (!auth.loggedIn) {
     next.state = 'unauthorized';
     next.errors.unshift({ code: 'claude_signed_out', message: 'Claude Code is not signed in for this config directory. Run claude and use /login.' });

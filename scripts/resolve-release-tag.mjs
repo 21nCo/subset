@@ -93,6 +93,7 @@ await writeOutputs({
   pkg_name: target.name,
   pkg_version: packageJson.version,
   pkg_path: target.path,
+  npm_tag: version.includes('-') ? 'next' : 'latest',
 });
 
 console.log(

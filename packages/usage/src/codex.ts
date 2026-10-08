@@ -29,6 +29,8 @@ export function normalizeCodexRead(profile: UsageProfile, accountResult: unknown
     plan: string(account?.planType, 80), email: isEmail(account?.email) ? account.email : null, observedAt: observedAt.toISOString(), state: 'ok', windows: [], resetCredits: null,
     ordinaryUsageAllowed: null, limitAccess: [], errors: []
   };
+  const workspaceId = string(object(object(accountResult)?.workspaceRouting)?.chatgptAccountId, 128);
+  if (workspaceId) base.workspaceId = workspaceId;
   if (!account || account.type !== 'chatgpt') {
     base.state = account ? 'unsupported' : 'unauthorized';
     base.errors.push({ code: base.state, message: account ? 'Profile is not signed in with ChatGPT.' : 'Profile is not signed in.' });
@@ -94,7 +96,11 @@ export function normalizeCodexRead(profile: UsageProfile, accountResult: unknown
   const resetCredits = object(result?.rateLimitResetCredits);
   const availableCount = number(resetCredits?.availableCount);
   if (availableCount !== null && Number.isSafeInteger(availableCount) && availableCount >= 0) {
-    const expiry = Array.isArray(resetCredits?.credits) ? resetCredits.credits.map((item) => timestamp(object(item)?.expiresAt)).filter((item): item is string => item !== null).sort()[0] ?? null : null;
+    // Only available credits count, matching the listed credits and the one a reset redeems.
+    const expiry = Array.isArray(resetCredits?.credits) ? resetCredits.credits.map(object)
+      .filter((item): item is RecordValue => !!item && (item.status === undefined || item.status === 'available'))
+      .map((item) => timestamp(item.expiresAt)).filter((item): item is string => item !== null)
+      .sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null : null;
     // Display details only; opaque credit IDs stay out of the status.
     const credits = Array.isArray(resetCredits?.credits) ? resetCredits.credits.slice(0, 20).map(object).filter((item) => item && (item.status === undefined || item.status === 'available')).map((item) => ({
       title: string(item!.title, 120), description: string(item!.description, 300), grantedAt: timestamp(item!.grantedAt), expiresAt: timestamp(item!.expiresAt),
@@ -131,8 +137,8 @@ export type CodexResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alrea
 
 /**
  * Redeems the next available banked reset through the documented app-server method
- * `account/rateLimitResetCredit/consume`. The backend picks the credit; the idempotency key
- * makes a retried request safe.
+ * `account/rateLimitResetCredit/consume` for the available credit that expires first (the
+ * backend chooses when the read lists no IDs); the idempotency key makes a retried request safe.
  */
 export async function consumeCodexResetCredit(profile: UsageProfile, options: { codexBinary?: string; idempotencyKey: string; timeoutMs?: number }): Promise<CodexResetOutcome> {
   const home = resolve(profile.codexHome);
@@ -142,28 +148,42 @@ export async function consumeCodexResetCredit(profile: UsageProfile, options: { 
   delete env.CODEX_ACCESS_TOKEN;
   const child = spawn(options.codexBinary ?? 'codex', ['app-server', '--listen', 'stdio://'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const waiting = new Map<number, (message: RecordValue) => void>();
+  const waiting = new Map<number, { resolve: (message: RecordValue) => void; reject: (error: Error) => void }>();
+  let closed: Error | null = null;
+  // Every pending request settles when the process fails to start, exits, or times out.
+  const failAll = (error: Error) => {
+    closed ??= error;
+    for (const waiter of waiting.values()) waiter.reject(closed);
+    waiting.clear();
+  };
   let nextId = 1;
   lines.on('line', (line) => {
     let message: RecordValue | null = null;
     try { message = object(JSON.parse(line)); } catch { return; }
     const id = message && message.method === undefined ? number(message.id) : null;
-    if (id !== null) waiting.get(id)?.(message!);
+    if (id === null) return;
+    const waiter = waiting.get(id);
+    waiting.delete(id);
+    waiter?.resolve(message!);
   });
   const request = (method: string, params?: RecordValue) => new Promise<RecordValue>((resolveRequest, reject) => {
+    if (closed) { reject(closed); return; }
     const id = nextId++;
-    waiting.set(id, resolveRequest);
-    child.once('exit', () => reject(new Error('Codex app-server closed.')));
-    child.stdin.write(`${JSON.stringify({ id, method, ...(params ? { params } : {}) })}\n`, (error) => { if (error) reject(new Error('Codex app-server closed.')); });
+    waiting.set(id, { resolve: resolveRequest, reject });
+    child.stdin.write(`${JSON.stringify({ id, method, ...(params ? { params } : {}) })}\n`, (error) => { if (error) failAll(new Error('Codex app-server closed.')); });
   });
-  const timer = setTimeout(() => child.kill(), options.timeoutMs ?? 30_000);
-  child.on('error', () => {});
-  child.stdin.on('error', () => {});
+  const timer = setTimeout(() => { failAll(new Error('Codex app-server timed out.')); child.kill(); }, options.timeoutMs ?? 30_000);
+  child.on('error', () => failAll(new Error('Codex app-server could not start.')));
+  child.on('exit', () => failAll(new Error('Codex app-server closed.')));
+  child.stdin.on('error', () => failAll(new Error('Codex app-server closed.')));
   try {
     await request('initialize', { clientInfo: { name: 'subset_usage', title: 'Subset Usage', version: '0.0.0' } });
     child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`);
     // Use the credit that expires first, the same one the dashboard names, instead of the backend's choice.
+    // If the credits can't be read, stop: redeeming without an ID would let the backend pick another credit.
     const limits = await request('account/rateLimits/read');
+    if (limits.error !== undefined || !object(limits.result)) throw new Error('Codex could not use a reset.');
+    // When the read lists no credit IDs, the documented method picks the credit itself.
     const creditId = nextResetCredit(object(object(limits.result)?.rateLimitResetCredits)?.credits)?.id ?? null;
     const response = await request('account/rateLimitResetCredit/consume', { idempotencyKey: options.idempotencyKey, ...(creditId ? { creditId } : {}) });
     const outcome = object(response.result)?.outcome;
@@ -235,7 +255,7 @@ export async function readCodexProfile(profile: UsageProfile, options: { codexBi
       });
     } catch (error) {
       fail(error instanceof Error ? error : new Error('Codex app-server closed.'));
-      reject(transportError);
+      reject(transportError ?? new Error('Codex app-server closed.'));
     }
   });
   const request = (method: string, params?: RecordValue): Promise<unknown> => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accountBadge, compactDuration, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
+import { accountBadge, compactDuration, needsAttention, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
 import { createUsageStatus } from '../dist/index.js';
 
 const now = Date.parse('2026-10-08T12:00:00Z');
@@ -46,7 +46,11 @@ test('maps states to badges and summarizes attention, next reset, and highest us
   assert.deepEqual(accountBadge(account(), now), { label: 'Up to date', tone: 'good' });
   assert.equal(accountBadge(account({ observedAt: new Date(now - 10 * 60_000).toISOString() }), now).label, 'Stale');
   assert.equal(accountBadge(account({ provider: 'claude-code', state: 'unavailable', observedAt: null, windows: [], errors: [{ code: 'claude_awaiting_snapshot', message: '' }] }), now).label, 'Waiting for data');
-  assert.equal(accountBadge(account({ provider: 'claude-code', observedAt: new Date(now - 3_600_000).toISOString() }), now).label, 'Seen 1h ago');
+  assert.equal(accountBadge(account({ provider: 'claude-code', source: 'Claude Code status-line snapshot', observedAt: new Date(now - 3_600_000).toISOString() }), now).label, 'Seen 1h ago');
+  // A live Claude read is not a snapshot: when old, it is stale and needs attention.
+  const staleLive = account({ provider: 'claude-code', source: 'Claude usage (local sign-in)', observedAt: new Date(now - 3_600_000).toISOString() });
+  assert.equal(accountBadge(staleLive, now).label, 'Stale');
+  assert.equal(needsAttention(staleLive, now), true);
   assert.equal(accountBadge(account({ state: 'blocked' }), now).tone, 'bad');
   assert.equal(usedTone(59), 'good');
   assert.equal(usedTone(85), 'bad');

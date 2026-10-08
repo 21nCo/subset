@@ -1,8 +1,11 @@
 export const USAGE_SCHEMA_VERSION = 1 as const;
 export const USAGE_VIEW_ID = 'subset.usage.dashboard@1' as const;
 
-export type UsageProvider = 'codex-chatgpt' | 'claude-code' | 'antigravity' | 'cursor' | 'cursor-local' | 'factory-droid' | 'amp' | 'devin' | 'pi' | 'opencode' | 'omp' | 'hermes';
-export const USAGE_PROVIDERS: readonly UsageProvider[] = ['codex-chatgpt', 'claude-code', 'antigravity', 'cursor', 'cursor-local', 'factory-droid', 'amp', 'devin', 'pi', 'opencode', 'omp', 'hermes'];
+export const USAGE_PROVIDERS = ['codex-chatgpt', 'claude-code', 'antigravity', 'cursor', 'cursor-local', 'factory-droid', 'amp', 'devin', 'pi', 'opencode', 'omp', 'hermes'] as const;
+export type UsageProvider = (typeof USAGE_PROVIDERS)[number];
+/** Longest account label the status contract accepts; readers trim to it. */
+export const MAX_ACCOUNT_LABEL = 80;
+export const accountLabel = (value: string): string => value.slice(0, MAX_ACCOUNT_LABEL);
 /** Agent harnesses that read another service's subscription through a login they store. */
 export const HARNESS_PROVIDERS: readonly UsageProvider[] = ['pi', 'opencode', 'omp', 'hermes'];
 
@@ -34,6 +37,8 @@ export interface UsageAccount {
   alsoIn?: UsageProvider[];
   source: string;
   plan: string | null;
+  /** Host-internal ChatGPT workspace ID, used only to match the same login across harnesses; hosts remove it before rendering or returning status. */
+  workspaceId?: string;
   /** Sign-in email when the provider's local tool reports one. Omitted from the agent text fallback. */
   email?: string | null;
   observedAt: string | null;
@@ -107,7 +112,16 @@ export interface FactoryDroidProfile {
 
 export type ProviderProfile = UsageProfile | SnapshotProfile | CursorProfile | FactoryDroidProfile;
 
-export const isEmail = (value: unknown): value is string => typeof value === 'string' && value.length <= 254 && /^[^\s@<>()\x00-\x1f]+@[^\s@<>()\x00-\x1f]+\.[^\s@<>()\x00-\x1f]+$/.test(value);
+// Split rather than one pattern, so validation stays linear on any input.
+const emailPart = /^[^\s@<>()\x00-\x1f.]+$/;
+export const isEmail = (value: unknown): value is string => {
+  if (typeof value !== 'string' || value.length > 254) return false;
+  const at = value.indexOf('@');
+  if (at <= 0 || at !== value.lastIndexOf('@')) return false;
+  const local = value.slice(0, at).split('.');
+  const domain = value.slice(at + 1).split('.');
+  return domain.length >= 2 && [...local, ...domain].every((part) => emailPart.test(part));
+};
 
 export function isUsageStatus(value: unknown): value is UsageStatus {
   const record = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item);
@@ -121,7 +135,7 @@ export function isUsageStatus(value: unknown): value is UsageStatus {
   const ids = new Set<string>();
   return value.accounts.every((account) => {
     if (!record(account) || !text(account.id, 64) || !/^[a-zA-Z0-9_-]+$/.test(account.id) || ids.has(account.id)
-      || !text(account.label, 80) || !text(account.provider, 32) || !USAGE_PROVIDERS.includes(account.provider as UsageProvider)
+      || !text(account.label, MAX_ACCOUNT_LABEL) || !text(account.provider, 32) || !USAGE_PROVIDERS.includes(account.provider as UsageProvider)
       || !text(account.source) || !(account.plan === null || text(account.plan, 80)) || !date(account.observedAt)
       || !text(account.state, 32) || !['ok', 'partial', 'blocked', 'unauthorized', 'unavailable', 'unsupported'].includes(account.state)
       || !Array.isArray(account.windows) || account.windows.length > 100 || !Array.isArray(account.errors) || account.errors.length > 20) return false;
@@ -186,8 +200,9 @@ export function usageText(status: UsageStatus, now = new Date()): string {
     const permission = account.ordinaryUsageAllowed === undefined ? '' : `ordinary included usage ${account.ordinaryUsageAllowed === null ? 'permission unavailable' : account.ordinaryUsageAllowed ? 'allowed by provider' : 'blocked by provider (quota percentages do not override this denial)'}`;
     const limits = (account.limitAccess ?? []).map((limit) => `${limit.label}: reached-limit reason ${limit.rateLimitReachedType ?? 'unavailable'}; spend control ${limit.spendControlReached === null ? 'unavailable' : limit.spendControlReached ? 'reached' : 'not reached'}`);
     const freshness = usageFreshness(account.observedAt, now.getTime());
-    const snapshot = account.provider === 'claude-code' || account.provider === 'antigravity' ? '; last collected CLI snapshot, not a live provider read' : '';
-    return `${account.label || `${account.provider} account`} (${account.provider}; ${account.state}; source ${account.source}; observed ${account.observedAt ?? 'never'}; ${freshness}${freshness === 'Stale' ? ' (older than 5 minutes)' : ''}${snapshot}): ${[permission, ...limits, ...windows, spend, ...errors].filter(Boolean).join('; ') || 'usage unavailable'}`;
+    const snapshot = /status-line snapshot/.test(account.source) ? '; last collected CLI snapshot, not a live provider read' : '';
+    const balances = (account.balances ?? []).map((balance) => `${balance.label}: ${balance.currency === 'USD' ? `USD ${balance.amount.toFixed(2)}` : `${balance.amount} credits`}${balance.note ? ` (${balance.note})` : ''}`);
+    return `${account.label || `${account.provider} account`} (${account.provider}; ${account.state}; source ${account.source}; observed ${account.observedAt ?? 'never'}; ${freshness}${freshness === 'Stale' ? ' (older than 5 minutes)' : ''}${snapshot}): ${[permission, ...limits, ...windows, spend, ...balances, ...errors].filter(Boolean).join('; ') || 'usage unavailable'}`;
   }).join('\n');
 }
 

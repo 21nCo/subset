@@ -89,7 +89,8 @@ export function normalizeFactoryLimits(profile: FactoryProfile, input: unknown, 
     observedAt: observedAt.toISOString(), state: 'ok', windows: [], resetCredits: null, errors: [],
   };
   const standard = object(limits?.standard);
-  if (root?.usesTokenRateLimitsBilling === false || !standard) {
+  // Only Factory's explicit flag means the plan has no rate limits; a missing group is incomplete data.
+  if (root?.usesTokenRateLimitsBilling === false) {
     return { ...base, state: 'unsupported', errors: [{ code: 'factory_no_rate_limits', message: 'This Factory organization does not report personal rate limits.' }] };
   }
   const windows: UsageWindow[] = [];
@@ -157,7 +158,7 @@ export async function readFactoryProfile(profile: FactoryProfile, options: {
       Authorization: `Bearer ${auth.token}`, Accept: 'application/json', ...(auth.orgId ? { 'X-Factory-Org-Id': auth.orgId } : {}),
     } }, { fetch: options.fetch });
     if (response.status === 401 || response.status === 403) return fail('factory_unauthorized', 'Factory rejected this sign-in. Run droid to sign in again.', 'unauthorized');
-    if (response.status === 429) return fail('factory_rate_limited', 'Factory is rate-limiting usage checks. Try again later.');
+    if (response.status === 429) return { ...fail('factory_rate_limited', 'Factory is rate-limiting usage checks. Try again later.'), retryAfterMs: response.retryAfterMs } as UsageAccount;
     if (response.status !== 200 || !object(response.json)) return fail('factory_request_failed', 'Could not read Factory rate limits.');
     return normalizeFactoryLimits(profile, response.json, new Date(), { email: auth.email, source });
   } catch {

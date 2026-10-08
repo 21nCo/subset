@@ -8,12 +8,19 @@ A local dashboard and CLI for AI subscription usage: ChatGPT (Codex), Claude, Cu
 
 Requires Node.js 22 or later.
 
+Until the first release, install from the repository:
+
 ```sh
-npx @sub-set/usage            # open the dashboard
-npm install -g @sub-set/usage # or install the subset-usage command
-subset-usage serve --port 4174 --no-open
-subset-usage status           # current usage as JSON, read-only
+npm ci && npm run build                     # at the repository root
+cd packages/usage-cli && npm pack           # builds and writes sub-set-usage-<version>.tgz
+npm install -g ./sub-set-usage-*.tgz        # installs the subset-usage command
+subset-usage                                # open the dashboard
+subset-usage status                         # current usage as JSON, read-only
 ```
+
+After a release is published, the registry commands work too: `npx @sub-set/usage`, or `npm install -g @sub-set/usage`.
+
+Collectors and status-line chaining use a POSIX shell script, so they are supported on macOS and Linux; reading the Cursor app sign-in is not supported on Windows.
 
 | Command | What it does |
 | --- | --- |

@@ -1,5 +1,5 @@
 import { usageFreshness, type UsageAccount, type UsageProvider, type UsageStatus, type UsageWindow } from './index.js';
-import type { UsageHistory } from './history.js';
+import { historyWindowKey, type UsageHistory } from './history.js';
 
 /** Presentation helpers shared by usage views. They never invent provider data; estimates are labeled by callers. */
 export type Tone = 'good' | 'warn' | 'bad' | 'muted';
@@ -23,6 +23,11 @@ export const providerMeta: Record<UsageProvider, { name: string; mark: string }>
 export const accountService = (account: Pick<UsageAccount, 'provider' | 'service'>): UsageProvider => account.service ?? account.provider;
 
 export const isSnapshotProvider = (provider: UsageProvider) => provider === 'claude-code' || provider === 'antigravity';
+/** Whether this account's values come from a collected CLI status-line snapshot rather than a live read. */
+export const isSnapshotAccount = (account: Pick<UsageAccount, 'provider' | 'source'>) => isSnapshotProvider(account.provider) && /status-line snapshot/.test(account.source);
+/** Used percentage, derived from the remaining percentage when only that was reported. */
+export const usedOf = (window: Pick<UsageWindow, 'usedPercent' | 'remainingPercent'>): number | null =>
+  window.usedPercent ?? (window.remainingPercent === null ? null : Math.round((100 - window.remainingPercent) * 10) / 10);
 
 export function spanLabel(minutes: number): string {
   if (minutes === 1440) return 'Daily';
@@ -35,7 +40,9 @@ export function spanLabel(minutes: number): string {
 
 export function windowTitle(account: UsageAccount, window: UsageWindow): string {
   const span = window.durationMinutes ? `${spanLabel(window.durationMinutes)} usage` : null;
-  const model = account.provider === 'claude-code' ? /^seven_day_([a-z]+)$/.exec(window.limitId)?.[1] : undefined;
+  // Claude's model-scoped weekly limits (also when read through a harness) carry the model in their label.
+  const model = accountService(account) === 'claude-code' && window.limitId.startsWith('seven_day_')
+    ? /^Seven-day (.+) quota$/.exec(window.label)?.[1] ?? window.limitId.slice('seven_day_'.length) : undefined;
   if (model) return `Weekly ${model.charAt(0).toUpperCase()}${model.slice(1)} usage`;
   // Cursor's windows all span the billing cycle; their own labels say what they measure.
   if (account.provider === 'cursor-local') return window.label;
@@ -107,18 +114,18 @@ export function accountBadge(account: UsageAccount, now: number): { label: strin
     case 'unauthorized': return { label: 'Signed out', tone: 'bad' };
     case 'unsupported': return { label: 'Unsupported', tone: 'muted' };
     case 'unavailable':
-      return account.errors.some((error) => error.code === 'claude_awaiting_snapshot') || (isSnapshotProvider(account.provider) && account.observedAt === null)
+      return account.errors.some((error) => error.code === 'claude_awaiting_snapshot') || (isSnapshotAccount(account) && account.observedAt === null)
         ? { label: 'Waiting for data', tone: 'warn' } : { label: 'Unavailable', tone: 'warn' };
     case 'partial': return { label: 'Partial data', tone: 'warn' };
     default:
-      if (isSnapshotProvider(account.provider)) return stale ? { label: `Seen ${agoText(account.observedAt, now)}`, tone: 'muted' } : { label: 'Up to date', tone: 'good' };
+      if (isSnapshotAccount(account)) return stale ? { label: `Seen ${agoText(account.observedAt, now)}`, tone: 'muted' } : { label: 'Up to date', tone: 'good' };
       return stale ? { label: 'Stale', tone: 'warn' } : { label: 'Up to date', tone: 'good' };
   }
 }
 
 export function needsAttention(account: UsageAccount, now: number): boolean {
   const tone = accountBadge(account, now).tone;
-  return tone === 'bad' || tone === 'warn' || account.windows.some((window) => usedTone(window.usedPercent) === 'bad');
+  return tone === 'bad' || tone === 'warn' || account.windows.some((window) => usedTone(usedOf(window)) === 'bad');
 }
 
 export interface UsageSummary {
@@ -126,7 +133,7 @@ export interface UsageSummary {
   attention: number;
   nextReset: { account: string; provider: string; window: string; at: string } | null;
   /** The soonest upcoming resets, at most three. */
-  nextResets: Array<{ accountId: string; account: string; provider: string; window: string; at: string }>;
+  nextResets: Array<{ accountId: string; key: string; account: string; provider: string; window: string; at: string }>;
   highest: { account: string; provider: string; window: string; used: number; calculated: boolean } | null;
 }
 
@@ -139,8 +146,9 @@ export function summarize(status: UsageStatus, now: number): UsageSummary {
       if (Number.isFinite(reset) && reset > now && (!nextReset || reset < Date.parse(nextReset.at))) {
         nextReset = { account: accountName(account), provider: providerMeta[account.provider].name, window: windowTitle(account, window), at: window.resetsAt! };
       }
-      if (window.usedPercent !== null && (!highest || window.usedPercent > highest.used)) {
-        highest = { account: accountName(account), provider: providerMeta[account.provider].name, window: windowTitle(account, window), used: window.usedPercent, calculated: window.usedKind === 'calculated-estimate' };
+      const used = usedOf(window);
+      if (used !== null && (!highest || used > highest.used)) {
+        highest = { account: accountName(account), provider: providerMeta[account.provider].name, window: windowTitle(account, window), used, calculated: window.usedPercent === null || window.usedKind === 'calculated-estimate' };
       }
     }
   }
@@ -148,7 +156,7 @@ export function summarize(status: UsageStatus, now: number): UsageSummary {
     const groups = windowGroups(account);
     return account.windows.filter((window) => window.resetsAt && Date.parse(window.resetsAt) > now).map((window) => {
       const group = groups?.find((item) => item.windows.includes(window));
-      return { accountId: account.id, account: accountName(account), provider: providerMeta[account.provider].name,
+      return { accountId: account.id, key: `${account.id}\u0000${historyWindowKey(window)}`, account: accountName(account), provider: providerMeta[account.provider].name,
         window: group ? `${group.label} · ${windowTitle(account, window)}` : windowTitle(account, window), at: window.resetsAt! };
     });
   }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(0, 3);
@@ -161,7 +169,7 @@ export type PercentMode = 'used' | 'remaining';
 export function displayPercent(window: UsageWindow, mode: PercentMode): { value: number | null; calculated: boolean; tone: Tone } {
   const value = mode === 'used' ? window.usedPercent : window.remainingPercent;
   const calculated = mode === 'used' ? window.usedKind === 'calculated-estimate' : window.remainingKind === 'calculated-estimate';
-  return { value, calculated, tone: usedTone(window.usedPercent) };
+  return { value, calculated, tone: usedTone(usedOf(window)) };
 }
 
 export interface ResetDetails {
@@ -202,8 +210,9 @@ export function planName(plan: string): string {
 }
 
 /** Reset label that distinguishes a window that has not started from a missing reset time. */
-export function windowResetText(window: UsageWindow, now: number): string {
-  if (!window.resetsAt && window.usedPercent === 0) return 'Starts on first use';
+/** Only Factory reports unused windows without an end because they start on first use; elsewhere a missing reset is unknown. */
+export function windowResetText(window: Pick<UsageWindow, 'usedPercent' | 'resetsAt'>, now: number, provider?: UsageProvider): string {
+  if (!window.resetsAt && window.usedPercent === 0 && provider === 'factory-droid') return 'Starts on first use';
   return resetText(window.resetsAt, now);
 }
 
@@ -262,9 +271,10 @@ export interface ActivityCell {
  * day (row), the sum of usage increases across the given accounts' windows.
  */
 export function activityGrid(history: UsageHistory | undefined, accounts: UsageAccount[], now: number, days = 7): { cells: ActivityCell[][]; max: number; dayStarts: number[] } {
-  const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  const dayStarts = Array.from({ length: days }, (_, index) => today.getTime() - (days - 1 - index) * 86_400_000);
+  // Local midnights by calendar arithmetic, so days that are 23 or 25 hours long (DST) stay aligned.
+  const midnight = (offset: number) => { const date = new Date(now); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() + offset); return date.getTime(); };
+  const dayStarts = Array.from({ length: days }, (_, index) => midnight(index - (days - 1)));
+  const dayEnds = [...dayStarts.slice(1), midnight(1)];
   const totals = DAY_PARTS.map(() => dayStarts.map(() => new Map<string, number>()));
   for (const account of accounts) {
     const name = accountName(account);
@@ -273,7 +283,7 @@ export function activityGrid(history: UsageHistory | undefined, accounts: UsageA
         const increase = points[index][1] - points[index - 1][1];
         if (increase <= 0) continue;
         const time = points[index][0];
-        const day = dayStarts.findIndex((start) => time >= start && time < start + 86_400_000);
+        const day = dayStarts.findIndex((start, index) => time >= start && time < dayEnds[index]);
         const hour = new Date(time).getHours();
         const part = DAY_PARTS.findIndex((item) => hour >= item.from && hour < item.to);
         if (day < 0 || part < 0) continue;
@@ -313,7 +323,7 @@ export function windowGroups(account: UsageAccount): WindowGroup[] | null {
   return [...groups].sort((a, b) => (order.includes(b[0]) ? 1 : 0) - (order.includes(a[0]) ? 1 : 0)).map(([id, windows]) => ({ id, label: GROUP_LABELS[id] ?? `${id.charAt(0).toUpperCase()}${id.slice(1)}`, windows }));
 }
 
-export interface LimitItem { accountId: string; account: string; provider: string; window: string; used: number; resetsAt: string | null }
+export interface LimitItem { accountId: string; key: string; account: string; provider: string; window: string; used: number; resetsAt: string | null; providerId: UsageProvider }
 
 /** Windows with no quota left, and windows at 85% or more, across the given accounts. */
 export function limitAlerts(accounts: UsageAccount[]): { exhausted: LimitItem[]; low: LimitItem[] } {
@@ -325,7 +335,7 @@ export function limitAlerts(accounts: UsageAccount[]): { exhausted: LimitItem[];
       const used = window.usedPercent ?? (window.remainingPercent === null ? null : 100 - window.remainingPercent);
       if (used === null) continue;
       const group = groups?.find((item) => item.windows.includes(window));
-      const item = { accountId: account.id, account: accountName(account), provider: providerMeta[account.provider].name,
+      const item = { accountId: account.id, key: historyWindowKey(window), providerId: account.provider, account: accountName(account), provider: providerMeta[account.provider].name,
         window: group ? `${group.label} · ${windowTitle(account, window)}` : windowTitle(account, window), used, resetsAt: window.resetsAt };
       if (used >= 100) exhausted.push(item); else if (used >= 85) low.push(item);
     }

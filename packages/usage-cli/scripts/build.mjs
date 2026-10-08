@@ -9,10 +9,11 @@ const webSource = fileURLToPath(new URL('../../../apps/usage/dist/', import.meta
 const exists = (path) => stat(path).then(() => true, () => false);
 
 if (process.argv.includes('--check')) {
-  // prepack: refuse to pack without both halves.
-  for (const file of ['dist/cli.mjs', 'web/index.html']) {
-    if (!(await exists(`${root}${file}`))) { console.error(`Missing ${file}. Run npm run build at the repository root first.`); process.exit(1); }
-  }
+  // prepack runs the build first, then this check refuses to pack without both halves.
+  const files = ['dist/cli.mjs', 'web/index.html'];
+  const present = await Promise.all(files.map((file) => exists(`${root}${file}`)));
+  const missing = files.filter((_, index) => !present[index]);
+  if (missing.length) { console.error(`Missing ${missing.join(', ')}. Run npm run build at the repository root first.`); process.exit(1); }
   const head = (await readFile(`${root}dist/cli.mjs`, 'utf8')).slice(0, 40);
   if (!head.startsWith('#!/usr/bin/env node')) { console.error('dist/cli.mjs has no shebang.'); process.exit(1); }
   process.exit(0);

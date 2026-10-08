@@ -103,7 +103,9 @@ test('names plans and tiers and labels windows that have not started', () => {
   assert.equal(claudeTierName('default_claude_max_20x'), 'Max 20x');
   assert.equal(claudeTierName('default_claude_max_5x'), 'Max 5x');
   assert.equal(claudeTierName('something_else'), null);
-  assert.equal(windowResetText({ usedPercent: 0, resetsAt: null }, Date.now()), 'Starts on first use');
+  assert.equal(windowResetText({ usedPercent: 0, resetsAt: null }, Date.now(), 'factory-droid'), 'Starts on first use');
+  // Elsewhere a missing reset is unknown, not a window that has not started.
+  assert.equal(windowResetText({ usedPercent: 0, resetsAt: null }, Date.now(), 'codex-chatgpt'), 'Reset time unavailable');
   assert.equal(windowResetText({ usedPercent: 4, resetsAt: null }, Date.now()), 'Reset time unavailable');
 });
 

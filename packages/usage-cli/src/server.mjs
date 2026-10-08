@@ -23,7 +23,8 @@ import { createAccounts } from './accounts.mjs';
 
 // Source (src/server.mjs) and bundle (dist/cli.mjs) both sit one level below the package root.
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
-const web = resolve(process.env.SUBSET_USAGE_WEB_DIR ?? resolve(packageRoot, 'web'));
+const webOption = process.argv.indexOf('--web-dir');
+const web = resolve(webOption > 0 && process.argv[webOption + 1] ? process.argv[webOption + 1] : process.env.SUBSET_USAGE_WEB_DIR ?? resolve(packageRoot, 'web'));
 const profilesFile = resolve(process.env.SUBSET_USAGE_PROFILES_FILE ?? process.env.SUBSET_CODEX_PROFILES_FILE ?? resolve(homedir(), '.config/subset/codex-profiles.json'));
 const dataDirectory = process.env.SUBSET_USAGE_DATA_DIR ? resolve(process.env.SUBSET_USAGE_DATA_DIR) : null;
 // `claude auth status` can take seconds; reuse each directory's answer briefly. The live Claude
@@ -68,12 +69,17 @@ function updateHistory(change) {
 // result, and after a 429 keep showing the last values (with their original observation time) until
 // the provider's Retry-After, or five minutes, has passed.
 const liveCache = new Map();
+// Reads already in flight are shared, so concurrent refreshes call each provider once.
+const inFlight = new Map();
 async function throttled(key, minIntervalMs, read) {
   const now = Date.now();
   const entry = liveCache.get(key);
   if (entry?.account && now - entry.at < minIntervalMs) return entry.account;
   if (entry?.cooldownUntil > now) return entry.account ?? entry.error;
-  const result = await read();
+  if (inFlight.has(key)) return inFlight.get(key);
+  const pending = read().finally(() => inFlight.delete(key));
+  inFlight.set(key, pending);
+  const result = await pending;
   const limited = result.errors?.some((error) => /rate_limited$/.test(error.code));
   if (limited) {
     liveCache.set(key, { ...entry, error: result, cooldownUntil: now + (result.retryAfterMs ?? 5 * 60_000) });
@@ -83,8 +89,8 @@ async function throttled(key, minIntervalMs, read) {
   else liveCache.delete(key);
   return result;
 }
-// Readers attach retryAfterMs for the throttle; it is not part of the status contract.
-const publicAccount = ({ retryAfterMs: _retry, ...account }) => account;
+// Readers attach retryAfterMs for the throttle and workspaceId for login matching; neither is sent.
+const publicAccount = ({ retryAfterMs: _retry, workspaceId: _workspace, ...account }) => account;
 const needsLocalSignIns = (profile, tool) => ({
   id: profile.id, label: profile.label, provider: profile.provider, source: `${tool} sign-in`, plan: null, observedAt: null, state: 'unauthorized', windows: [], resetCredits: null,
   errors: [{ code: 'local_sign_ins_off', message: `Turn on local sign-ins in Settings to read ${tool}'s stored login.` }],
@@ -94,6 +100,7 @@ const needsLocalSignIns = (profile, tool) => ({
 // account was signed in as; a snapshot observed before a sign-in change belongs to the previous
 // account and is not shown under the new one.
 const identitiesFile = resolve(dataRoot, 'claude-identities.json');
+let identityQueue = Promise.resolve();
 async function claudeIdentities() {
   try { const value = JSON.parse(await readFile(identitiesFile, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
   catch { return {}; }
@@ -206,7 +213,7 @@ async function status({ persist = true } = {}) {
     const service = profile.login === 'chatgpt' ? 'codex-chatgpt' : 'claude-code';
     const email = login?.email?.toLowerCase();
     const key = email ? `${service}|${email}|${login.workspace ?? ''}` : `profile|${profile.id}`;
-    if (!groups.has(key)) groups.set(key, { service, email, plan: login?.plan ?? null, members: [] });
+    if (!groups.has(key)) groups.set(key, { service, email, plan: login?.plan ?? null, workspace: login?.workspace ?? null, members: [] });
     groups.get(key).members.push(profile);
     if (email) workspacesByEmail.set(`${service}|${email}`, new Set([...(workspacesByEmail.get(`${service}|${email}`) ?? []), login.workspace ?? '']));
   }
@@ -215,7 +222,10 @@ async function status({ persist = true } = {}) {
     if (!group.email) return undefined;
     const ownerId = owners.get(`${group.service}|${group.email}`);
     if (!ownerId) return undefined;
-    const ownerPlan = results.get(ownerId)?.plan ?? null;
+    // Workspace IDs, when both sides report one, decide; plans are only a fallback heuristic.
+    const owner = results.get(ownerId);
+    if (owner?.workspaceId && group.workspace) return owner.workspaceId === group.workspace ? ownerId : undefined;
+    const ownerPlan = owner?.plan ?? null;
     if (ownerPlan && group.plan) return samePlan(ownerPlan, group.plan) ? ownerId : undefined;
     return (workspacesByEmail.get(`${group.service}|${group.email}`)?.size ?? 0) <= 1 ? ownerId : undefined;
   };
@@ -246,15 +256,25 @@ async function status({ persist = true } = {}) {
     }
   }));
   if (persist && identitiesChanged) {
-    await mkdir(dirname(identitiesFile), { recursive: true, mode: 0o700 }).catch(() => {});
-    await writeFile(identitiesFile, JSON.stringify(identities), { mode: 0o600 }).catch(() => {});
+    // Atomic and serialized: a torn file would reset identities and re-attribute old snapshots.
+    identityQueue = identityQueue.then(async () => {
+      await mkdir(dirname(identitiesFile), { recursive: true, mode: 0o700 });
+      const current = await claudeIdentities();
+      const temporary = `${identitiesFile}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ ...current, ...identities }), { mode: 0o600, flag: 'wx' });
+        await rename(temporary, identitiesFile);
+      } finally { await rm(temporary, { force: true }).catch(() => {}); }
+    }).catch(() => {});
+    await identityQueue;
   }
-  return createUsageStatus(configured.filter((profile) => !merged.has(profile.id)).map((profile) => results.get(profile.id)));
+  return createUsageStatus(configured.filter((profile) => !merged.has(profile.id)).map((profile) => publicAccount(results.get(profile.id))));
 }
 
 function runStatusLine(command, input) {
   return new Promise((resolveExit) => {
-    const child = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'inherit', 'inherit'] });
+    // The platform shell (sh, or cmd on Windows) runs the previous status line as the CLI would.
+    const child = spawn(command, { shell: true, stdio: ['pipe', 'inherit', 'inherit'] });
     child.on('error', () => resolveExit(1));
     child.on('close', (code) => resolveExit(code ?? 1));
     child.stdin.on('error', () => {});
@@ -340,6 +360,7 @@ const publicErrors = new Set([
   'Enter the Factory home as an absolute or ~/ path.', 'Invalid settings.',
   'Choose which stored login to read.', 'Invalid reset request.', 'Codex could not use a reset.',
   "Another account's collector uses this CLI's status line. Uninstall it from that account first.",
+  'Could not restore the CLI status line for this account. Fix its settings.json, then remove the account again.',
 ]);
 
 const usage = `Usage: subset-usage [serve|status|collect] [options]
@@ -347,6 +368,7 @@ const usage = `Usage: subset-usage [serve|status|collect] [options]
   serve                 Open the local usage dashboard (default)
     --port <number>     Port on 127.0.0.1 (default 4174, or the next free one)
     --no-open           Do not open a browser
+    --web-dir <path>    Serve the dashboard from another build (development)
   status                Print current usage as JSON
   collect --account <id>
                         Save a quota snapshot from a CLI status line (used by installed collectors)

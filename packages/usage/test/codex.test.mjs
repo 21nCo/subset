@@ -261,6 +261,8 @@ setTimeout(() => process.exit(0), 2000);
 `, { mode: 0o755 });
     const account = await readCodexProfile({ id: 'closed', label: 'Closed', codexHome: root }, { codexBinary: binary, timeoutMs: 1000 });
     assert.equal(account.state, 'unavailable');
+    // The closed pipe is detected directly, not by waiting for the timeout.
+    assert.notEqual(account.errors[0].message, 'Codex app-server timed out.');
     assert.equal(account.errors[0].code, 'unavailable');
     validStatus([account]);
   } finally { await rm(root, { recursive: true, force: true }); }

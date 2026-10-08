@@ -351,7 +351,8 @@ test('adds the signed-in default Claude Code account once and remembers removal'
   assert.deepEqual(await accounts.list(), []);
   assert.equal((await accounts.ensureDefaultClaude({ force: true })).id, 'claude_default');
   await accounts.removeProfile('claude_default');
-  await assert.rejects(accounts.addProvider({ provider: 'claude-code', label: 'Manual default', claudeConfigDir: defaultClaudeConfigDir }).then(() => accounts.addProvider({ provider: 'claude-code', label: 'Again', claudeConfigDir: defaultClaudeConfigDir })), /already uses this config directory/);
+  assert.ok(await accounts.addProvider({ provider: 'claude-code', label: 'Manual default', claudeConfigDir: defaultClaudeConfigDir }));
+  await assert.rejects(accounts.addProvider({ provider: 'claude-code', label: 'Again', claudeConfigDir: defaultClaudeConfigDir }), /already uses this config directory/);
   assert.equal((await accounts.ensureDefaultClaude()), null);
 });
 
@@ -550,4 +551,33 @@ test('migrates installed collectors to the current command only while they are s
   await writeFile(settingsFile, JSON.stringify({ statusLine: { type: 'command', command: 'other-tool' } }));
   assert.deepEqual(await accounts.migrateCollectors((id) => `new ${id}`), []);
   assert.equal(JSON.parse(await readFile(settingsFile, 'utf8')).statusLine.command, 'other-tool');
+});
+
+test('writes through a symlinked settings file instead of replacing the link', async (t) => {
+  const { accounts, root } = await fixture(t);
+  const { lstat, readlink, symlink } = await import('node:fs/promises');
+  const configDir = join(root, 'claude');
+  const dotfiles = join(root, 'dotfiles');
+  await mkdir(configDir);
+  await mkdir(dotfiles);
+  await writeFile(join(dotfiles, 'settings.json'), JSON.stringify({ model: 'opus' }));
+  await symlink(join(dotfiles, 'settings.json'), join(configDir, 'settings.json'));
+  const added = await accounts.addProvider({ provider: 'claude-code', label: 'Linked', claudeConfigDir: configDir });
+  await accounts.installCollector(added.id, `collect --account ${added.id}`);
+  assert.equal((await lstat(join(configDir, 'settings.json'))).isSymbolicLink(), true);
+  assert.equal(await readlink(join(configDir, 'settings.json')), join(dotfiles, 'settings.json'));
+  assert.equal(JSON.parse(await readFile(join(dotfiles, 'settings.json'), 'utf8')).statusLine.command, `collect --account ${added.id}`);
+  await accounts.uninstallCollector(added.id);
+  assert.deepEqual(JSON.parse(await readFile(join(dotfiles, 'settings.json'), 'utf8')), { model: 'opus' });
+});
+
+test('keeps an account whose collector cannot be removed', async (t) => {
+  const { accounts, root } = await fixture(t);
+  const configDir = join(root, 'claude');
+  await mkdir(configDir);
+  const added = await accounts.addProvider({ provider: 'claude-code', label: 'Broken later', claudeConfigDir: configDir });
+  await accounts.installCollector(added.id, `collect --account ${added.id}`);
+  await writeFile(join(configDir, 'settings.json'), '{ not json');
+  await assert.rejects(accounts.removeProfile(added.id), /Could not restore the CLI status line/);
+  assert.ok((await accounts.list()).some((profile) => profile.id === added.id));
 });

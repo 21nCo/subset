@@ -14,7 +14,7 @@ const timestamp = (value: unknown): string | null => {
 };
 const validProfile = (profile: CursorProfile): boolean => profile.provider === 'cursor'
   && typeof profile.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(profile.id)
-  && typeof profile.label === 'string' && profile.label.length <= 120 && !/[\x00-\x1f\x7f]/.test(profile.label)
+  && typeof profile.label === 'string' && profile.label.length <= 80 && !/[\x00-\x1f\x7f]/.test(profile.label)
   && typeof profile.credentialEnv === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(profile.credentialEnv)
   && typeof profile.cursorUserId === 'string' && /^user_[A-Za-z0-9_-]{1,251}$/.test(profile.cursorUserId);
 
@@ -100,6 +100,11 @@ export async function readCursorProfile(profile: CursorProfile, options: {
       reject(new Error('timeout'));
     }, timeoutMs);
   });
+  // Invalid UTF-8 is a malformed response, not a transport failure.
+  const decodeChunk = (decoder: TextDecoder, value?: Uint8Array) => {
+    try { return value ? decoder.decode(value, { stream: true }) : decoder.decode(); }
+    catch { throw new Error('malformed_response'); }
+  };
   const read = async (): Promise<UsageAccount> => {
     let totalBytes = 0;
     let totalRows = 0;
@@ -135,9 +140,9 @@ export async function readCursorProfile(profile: CursorProfile, options: {
           pageBytes += chunk.value.byteLength;
           totalBytes += chunk.value.byteLength;
           if (pageBytes > MAX_PAGE_BYTES || totalBytes > MAX_TOTAL_BYTES) throw new Error('response_too_large');
-          text += decoder.decode(chunk.value, { stream: true });
+          text += decodeChunk(decoder, chunk.value);
         }
-        text += decoder.decode();
+        text += decodeChunk(decoder);
       } finally {
         void reader.cancel().catch(() => {});
         reader.releaseLock();

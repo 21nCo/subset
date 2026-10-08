@@ -48,13 +48,15 @@ for (const manifest of publicPackages) {
   assert.ok(target, `${manifest.name} is public but missing from release-packages.json`);
   assert.equal(readJson(join(target.path, 'package.json')).name, manifest.name, `release-packages.json points ${target.slug} at the wrong path`);
   assert.ok(Array.isArray(manifest.files) && manifest.files.length, `${manifest.name} must list its published files`);
-  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
-    const workspace = workspaces.find((item) => item.name === dependency);
-    assert.ok(!workspace || workspace.private === false, `${manifest.name} cannot depend at runtime on private ${dependency}; bundle it instead`);
+  // Any installed dependency field counts. A workspace dependency is pinned to "*", which npm would
+  // publish unchanged, so public packages bundle workspaces instead of depending on them.
+  for (const dependency of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
+    assert.ok(!names.has(dependency), `${manifest.name} cannot depend at runtime on workspace ${dependency}; bundle it instead`);
   }
 }
 for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
+  assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
   assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
 }
 

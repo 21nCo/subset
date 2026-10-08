@@ -95,7 +95,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       for (let index = 0; index < 30 && accounts.connection(login.id).state !== 'error'; index++) await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal(accounts.connection(login.id).state, 'error');
       assert.equal(accounts.connection(login.id).error, 'ChatGPT sign-in timed out.');
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Home removal finishes asynchronously after the error state; wait for it rather than a fixed delay.
+      for (let index = 0; index < 100 && (await readdir(managedRoot)).length; index++) await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.deepEqual(await readdir(managedRoot), []);
     assert.equal(accounts.activeConnection(), null);

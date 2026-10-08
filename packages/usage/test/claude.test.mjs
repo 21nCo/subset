@@ -43,16 +43,19 @@ test('reads auth status through the CLI per config directory without token overr
   const binary = join(root, 'fake-claude');
   const log = join(root, 'env.log');
   await writeFile(binary, `#!/bin/sh
-printf '%s|%s|%s\\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${ANTHROPIC_API_KEY-unset}" "$*" >> '${log}'
+printf '%s|%s|%s\\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${ANTHROPIC_API_KEY-unset}\${ANTHROPIC_AUTH_TOKEN-unset}\${CLAUDE_CODE_OAUTH_TOKEN-unset}" "$*" >> '${log}'
 printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","configDirectory":"%s","email":"private@example.com"}\\n' "\${CLAUDE_CONFIG_DIR-/default}"
 `, { mode: 0o700 });
   const defaultDir = join(root, 'default');
   const workDir = join(root, 'work');
   await mkdir(defaultDir);
   await mkdir(workDir);
-  const previous = process.env.ANTHROPIC_API_KEY;
-  process.env.ANTHROPIC_API_KEY = 'secret-key';
-  t.after(() => { if (previous === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previous; });
+  // All three token variables would report their own account; each must be removed.
+  for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+    const previous = process.env[name];
+    process.env[name] = 'secret-key';
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+  }
   const work = await readClaudeAuthStatus(workDir, { claudeBinary: binary, builtInConfigDir: defaultDir });
   assert.deepEqual(work, { loggedIn: true, email: 'private@example.com', authMethod: 'claude.ai', subscriptionType: 'max', configDirectory: workDir });
   assert.equal(withClaudeAuth(account(), work).email, 'private@example.com');
@@ -61,5 +64,5 @@ printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","conf
   await readClaudeAuthStatus(workDir, { claudeBinary: binary });
   assert.equal(await readClaudeAuthStatus(join(root, 'missing'), { claudeBinary: binary }), null);
   assert.equal(await readClaudeAuthStatus(workDir, { claudeBinary: join(root, 'no-such-binary') }), null);
-  assert.deepEqual((await readFile(log, 'utf8')).trim().split('\n'), [`${workDir}|unset|auth status --json`, 'unset|unset|auth status --json', `${workDir}|unset|auth status --json`]);
+  assert.deepEqual((await readFile(log, 'utf8')).trim().split('\n'), [`${workDir}|unsetunsetunset|auth status --json`, 'unset|unsetunsetunset|auth status --json', `${workDir}|unsetunsetunset|auth status --json`]);
 });

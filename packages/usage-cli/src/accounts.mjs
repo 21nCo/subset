@@ -221,7 +221,9 @@ export function createAccounts({
       const profile = existing.find((item) => item.id === id);
       if (!profile) throw new Error('Account was not found.');
       // Restore the CLI's previous status line before forgetting the account.
-      await uninstallCollector(id).catch(() => {});
+      // Keep the account when its collector can't be removed, so no status line runs a collector for a forgotten account.
+      try { await uninstallCollector(id); }
+      catch { throw new Error('Could not restore the CLI status line for this account. Fix its settings.json, then remove the account again.'); }
       await rm(runFile(id), { force: true }).catch(() => {});
       await save(existing.filter((item) => item.id !== id));
       if (profile.claudeConfigDir === defaultClaudeConfigDir) await setDefaultClaudeDismissed(true);
@@ -438,7 +440,10 @@ export function createAccounts({
     return value;
   }
 
-  async function writeSettings(file, value) {
+  async function writeSettings(path, value) {
+    // Write through a symlink (for example a settings.json managed in a dotfiles repository)
+    // instead of replacing the link with a regular file.
+    const file = await canonical(path);
     let mode = 0o600;
     try { mode = (await stat(file)).mode & 0o777; } catch { /* new file */ }
     const temporary = `${file}.subset-${randomUUID()}.tmp`;

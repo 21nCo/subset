@@ -19,7 +19,7 @@
   import { historyWindowKey, type UsageHistory } from './history.js';
   import { createUsageStatus, usageFreshness, type UsageAccount, type UsageProvider, type UsageStatus, type UsageWindow } from './index.js';
   import {
-    accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, isSnapshotProvider, planName, providerMeta, resetDetails, spanLabel, summarize,
+    accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, planName, providerMeta, resetDetails, spanLabel, summarize,
     sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
   } from './present.js';
 
@@ -354,7 +354,7 @@
         <dt><ClockIcon size={14} weight="bold" />Upcoming resets</dt>
         <dd class="resets-dd" bind:this={resetsList}>
           {#if summary.nextResets.length > 1}<span class="timeline-line" aria-hidden="true" style={timelineStyle}></span>{/if}
-          {#each summary.nextResets as reset (`${reset.accountId}-${reset.window}`)}
+          {#each summary.nextResets as reset (reset.key)}
             <button type="button" class="reset-row" onclick={() => jumpTo(reset.accountId)} title={`${reset.account} · ${reset.provider} · ${reset.window}\n${exactTime(reset.at)}`}>
               <strong>{compactDuration(Date.parse(reset.at) - now)}</strong>
               <span class="rail" aria-hidden="true"><i></i></span>
@@ -450,7 +450,7 @@
                         {:else if pace}
                           <span class="pace" title="Estimate from the average rate since this window started">On pace · {Math.min(pace.projectedPercent, 100)}% by reset</span>
                         {/if}
-                        <button type="button" class="reset" onclick={() => showResets(account, window)} title={exactTime(window.resetsAt)}>{windowResetText(window, now)}</button>
+                        <button type="button" class="reset" onclick={() => showResets(account, window)} title={exactTime(window.resetsAt)}>{windowResetText(window, now, account.provider)}</button>
                       </span>
                     </li>
                   {/each}
@@ -620,10 +620,10 @@
               <strong>{group.account}</strong><small>{group.provider} · {group.items.length} {group.items.length === 1 ? 'window' : 'windows'}</small>
             </button>
             <ul>
-              {#each group.items as item (item.window)}
+              {#each group.items as item (item.key)}
                 <li>
                   <span>{item.window}</span>
-                  <span class="alert-side"><b class={alertKind === 'exhausted' ? 'tone-bad' : 'tone-warn'}>{percent(Math.max(0, 100 - item.used))} left</b><small>{windowResetText({ usedPercent: item.used, resetsAt: item.resetsAt } as UsageWindow, now)}</small></span>
+                  <span class="alert-side"><b class={alertKind === 'exhausted' ? 'tone-bad' : 'tone-warn'}>{percent(Math.max(0, 100 - item.used))} left</b><small>{windowResetText({ usedPercent: item.used, resetsAt: item.resetsAt }, now, item.providerId)}</small></span>
                 </li>
               {/each}
             </ul>

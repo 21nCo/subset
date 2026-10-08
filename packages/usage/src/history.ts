@@ -37,10 +37,11 @@ export function isUsageHistory(value: unknown): value is UsageHistory {
  */
 export function recordUsageHistory(history: UsageHistory, status: UsageStatus, now = Date.now()): UsageHistory {
   const cutoff = now - HISTORY_MAX_AGE_MS;
-  const series: UsageHistory['series'] = {};
+  // Prototype-free maps, so an ID such as `__proto__` is an ordinary key.
+  const series: UsageHistory['series'] = Object.create(null);
   // Start from everything already recorded, pruned to the retention window.
   for (const [accountId, windows] of Object.entries(history.series)) {
-    const kept: Record<string, Array<[number, number]>> = {};
+    const kept: Record<string, Array<[number, number]>> = Object.create(null);
     for (const [key, points] of Object.entries(windows)) {
       const recent = points.filter(([time]) => time >= cutoff && time <= now);
       if (recent.length) kept[key] = recent;
@@ -50,7 +51,7 @@ export function recordUsageHistory(history: UsageHistory, status: UsageStatus, n
   for (const account of status.accounts) {
     const observed = account.observedAt ? Date.parse(account.observedAt) : NaN;
     if (!Number.isFinite(observed) || observed < cutoff || observed > now) continue;
-    const windows = series[account.id] ?? {};
+    const windows = series[account.id] ?? Object.create(null);
     for (const window of account.windows) {
       if (window.usedPercent === null) continue;
       const key = historyWindowKey(window);

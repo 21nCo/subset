@@ -27,26 +27,37 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 `, { mode: 0o700 });
   // Keep the developer's real Claude Code sign-in out of this test's dashboard.
   await writeFile(join(bin, 'claude'), `#!/bin/sh
-printf '%s\\n' '{"loggedIn":false,"authMethod":"none"}'
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}'; else printf '%s\\n' '{"loggedIn":false,"authMethod":"none"}'; fi
 `, { mode: 0o700 });
-  const socket = createServer();
-  socket.listen(0, '127.0.0.1');
-  await once(socket, 'listening');
-  const port = socket.address().port;
-  await new Promise((resolve) => socket.close(resolve));
   const web = join(root, 'web');
   await mkdir(web);
   await writeFile(join(web, 'index.html'), '<!doctype html><title>Usage</title>');
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PORT: String(port), SUBSET_USAGE_PROFILES_FILE: relative(hostDirectory, profilesFile), SUBSET_USAGE_DATA_DIR: root, SUBSET_USAGE_WEB_DIR: web };
-  const child = spawn(process.execPath, ['src/server.mjs', 'serve', '--no-open'], { cwd: hostDirectory, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const exited = once(child, 'exit');
-  try {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Server did not become ready.')), 5000);
-      child.stdout.on('data', (data) => { if (data.toString().includes('Subset usage listening')) { clearTimeout(timer); resolve(); } });
+  const freePort = async () => {
+    const socket = createServer();
+    socket.listen(0, '127.0.0.1');
+    await once(socket, 'listening');
+    const free = socket.address().port;
+    await new Promise((resolve) => socket.close(resolve));
+    return free;
+  };
+  // The reserved port is released before the server binds; retry with a fresh one if another process takes it.
+  let port, env, child, exited;
+  for (let attempt = 0; ; attempt++) {
+    port = await freePort();
+    env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PORT: String(port), SUBSET_USAGE_PROFILES_FILE: relative(hostDirectory, profilesFile), SUBSET_USAGE_DATA_DIR: root, SUBSET_USAGE_WEB_DIR: web };
+    child = spawn(process.execPath, ['src/server.mjs', 'serve', '--no-open'], { cwd: hostDirectory, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    exited = once(child, 'exit');
+    let stderr = '';
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+    const ready = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Server did not become ready. ${stderr}`)), 5000);
+      child.stdout.on('data', (data) => { if (data.toString().includes('Subset usage listening')) { clearTimeout(timer); resolve(true); } });
       child.once('error', (error) => { clearTimeout(timer); reject(error); });
-      child.once('exit', () => { clearTimeout(timer); reject(new Error('Server exited before readiness.')); });
+      child.once('exit', () => { clearTimeout(timer); if (/in use/.test(stderr) && attempt < 3) resolve(false); else reject(new Error(`Server exited before readiness. ${stderr}`)); });
     });
+    if (ready) break;
+  }
+  try {
     const base = `http://127.0.0.1:${port}`;
     const request = (path, method = 'GET', body, origin = base, extra = { 'X-Subset-Request': '1' }) => fetch(`${base}${path}`, {
       method, headers: { ...(origin ? { Origin: origin } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...extra },

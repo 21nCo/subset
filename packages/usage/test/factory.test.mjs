@@ -36,7 +36,11 @@ test('decrypts the v2 store and rejects tampering', () => {
   const key = randomBytes(32);
   const contents = encrypt({ access_token: 'a' }, key);
   assert.deepEqual(decryptFactoryCredential(contents, key), { access_token: 'a' });
-  assert.equal(decryptFactoryCredential(contents.replace(/.$/, (c) => c === 'A' ? 'B' : 'A'), key), null);
+  // Flip one bit of the ciphertext itself, so only GCM authentication can detect it.
+  const [iv, tag, data] = contents.split(':');
+  const tampered = Buffer.from(data, 'base64');
+  tampered[0] ^= 1;
+  assert.equal(decryptFactoryCredential([iv, tag, tampered.toString('base64')].join(':'), key), null);
   assert.equal(decryptFactoryCredential(contents, randomBytes(32)), null);
 });
 
