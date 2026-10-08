@@ -1,0 +1,54 @@
+packages/usage/src/snapshots.ts
+  s_e41552db7a7823::t_0f5a64f0898e73 80-81
+docs/architecture.md
+  s_e41552db7a7823::t_3f49e6a3fa43c1 9
+scripts/resolve-release-tag.mjs
+  s_e41552db7a7823::t_3f49e6a3fa43c1 96-97
+packages/usage-cli/test/server.test.mjs
+  s_e41552db7a7823::t_f84043d41cce7a 45,155
+  s_e41552db7a7823::t_4b09346ad06523 47-62,156
+packages/usage/src/history.ts
+  s_e41552db7a7823::t_0f5a64f0898e73 54
+README.md
+  s_e41552db7a7823::t_3f49e6a3fa43c1 40
+apps/usage/src/App.svelte
+  s_e41552db7a7823::t_3f49e6a3fa43c1 115,123-124
+packages/usage/src/present.ts
+  s_e41552db7a7823::t_0f5a64f0898e73 29,31,171-174
+packages/usage/src/index.ts
+  s_e41552db7a7823::t_0f5a64f0898e73 8-12,208-212,218-220
+packages/usage/src/cursor.ts
+  s_e41552db7a7823::t_88c84da1580d21 1
+  s_e41552db7a7823::t_0f5a64f0898e73 17
+package.json
+  s_e41552db7a7823::t_3f49e6a3fa43c1 8
+packages/usage-cli/src/accounts.mjs
+  s_e41552db7a7823::t_3f49e6a3fa43c1 3
+  s_e41552db7a7823::t_f2a76186465f22 39-45,453
+packages/usage-cli/test/profiles.test.mjs
+  s_e41552db7a7823::t_d99979e9a81dcd 584-608
+packages/usage-cli/src/server.mjs
+  s_e41552db7a7823::t_f2a76186465f22 27-29,81,83-93,95,129-130,138,264,271-272
+scripts/generate-provider-logos.mjs
+  s_e41552db7a7823::t_3f49e6a3fa43c1 19-20
+packages/usage/test/review-round.test.mjs
+  s_e41552db7a7823::t_05547baac7ca1f 6,8,88-100,192-211
+package-lock.json
+  s_e41552db7a7823::t_091840565cd50e 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "312c4ba816e6874e8fd0e85c8d07ec9e5b43cfef",
+  "prompts": {},
+  "sessions": {
+    "s_e41552db7a7823": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf55d8d-6176-4456-a8a3-555947c35bfe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
