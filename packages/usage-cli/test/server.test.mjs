@@ -191,3 +191,52 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   assert.deepEqual(JSON.parse(await readFile(join(root, 'claude-identities.json'), 'utf8')), { claude_work: { email: 'old@example.com', since: 0 } });
   await assert.rejects(readFile(join(root, 'usage-history.json')), { code: 'ENOENT' });
 });
+
+test('logins join one card only with a proven account identity', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'subset-usage-identity-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  await mkdir(bin);
+  // Codex app-server: workspaceRouting comes from WORKSPACE (omitted when empty, as older versions do).
+  await writeFile(join(bin, 'codex'), `#!/usr/bin/env node
+import readline from 'node:readline';
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const message = JSON.parse(line);
+  if (!message.id) continue;
+  let result = {};
+  if (message.method === 'account/read') result = { account: { type: 'chatgpt', email: 'same@example.com', planType: 'team' }, ...(process.env.WORKSPACE ? { workspaceRouting: { chatgptAccountId: process.env.WORKSPACE } } : {}) };
+  if (message.method === 'account/rateLimits/read') result = { rateLimits: { limitId: 'codex', primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1900000000 } } };
+  process.stdout.write(JSON.stringify({ id: message.id, result }) + '\\n');
+}
+`, { mode: 0o755 });
+  const codexHome = join(root, 'codex-home');
+  await mkdir(codexHome);
+  const piDir = join(root, 'pi');
+  await mkdir(piDir);
+  const config = join(root, 'config');
+  await mkdir(config);
+  await writeFile(join(config, 'profiles.json'), JSON.stringify([
+    { id: 'direct', label: 'Direct', codexHome },
+    { id: 'pi_login', label: '', provider: 'pi', managed: false, login: 'chatgpt', dataDir: piDir },
+  ]));
+  await writeFile(join(config, 'usage-preferences.json'), JSON.stringify({ localCredentials: true, defaultClaudeDismissed: true }));
+  const jwt = (workspace) => `h.${Buffer.from(JSON.stringify({ 'https://api.openai.com/profile': { email: 'same@example.com' }, 'https://api.openai.com/auth': { ...(workspace ? { chatgpt_account_id: workspace } : {}), chatgpt_plan_type: 'team' } })).toString('base64url')}.s`;
+  // Expired, so the Pi login is never sent to ChatGPT during the test.
+  const piLogin = (workspace) => writeFile(join(piDir, 'auth.json'), JSON.stringify({ 'openai-codex': { type: 'oauth', access: jwt(workspace), expires: Date.now() - 60_000 } }));
+  const status = (workspace) => {
+    const result = spawnSync(process.execPath, ['src/server.mjs', 'status'], { cwd: hostDirectory, encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, WORKSPACE: workspace, SUBSET_USAGE_PROFILES_FILE: join(config, 'profiles.json'), SUBSET_USAGE_DATA_DIR: join(root, 'data'), CLAUDE_CONFIG_DIR: join(root, 'no-claude') } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).accounts.map((account) => [account.id, account.alsoIn ?? []]);
+  };
+  // Direct workspace unknown, harness in another workspace: same email and plan are not proof.
+  await piLogin('ws_team_b');
+  assert.deepEqual(status(''), [['direct', []], ['pi_login', []]]);
+  // Harness workspace unknown: no proof either.
+  await piLogin('');
+  assert.deepEqual(status('ws_team_a'), [['direct', []], ['pi_login', []]]);
+  // Different known workspaces stay apart; the same workspace is one card.
+  await piLogin('ws_team_b');
+  assert.deepEqual(status('ws_team_a'), [['direct', []], ['pi_login', []]]);
+  assert.deepEqual(status('ws_team_b'), [['direct', ['pi']]]);
+});

@@ -199,47 +199,37 @@ async function status({ persist = true } = {}) {
     return readCodexProfile(profile);
   };
 
-  // One account signed in to several harnesses gets one card: the direct ChatGPT or Claude
-  // account (or the first harness) is read, and the others are listed in `alsoIn`. Another
+  // One account signed in to several harnesses gets one card when its identity is proven: the
+  // direct ChatGPT or Claude account (or the first harness) is read, and the others are listed in `alsoIn`. Another
   // harness is read only as a fallback when the main read has no usage, and never over an
   // explicit access denial.
   const results = new Map();
   await Promise.all(configured.filter((profile) => !isHarnessLogin(profile)).map(async (profile) => { results.set(profile.id, await readOne(profile)); }));
+  // A login joins another's card only with a proven identity: for ChatGPT the email and the
+  // ChatGPT workspace ID, both required; for Claude, which has no workspace, the email. Missing
+  // identity data keeps cards separate, never merges them.
+  const identityKey = (service, email, workspace) => {
+    if (!email) return null;
+    if (service === 'codex-chatgpt') return workspace ? `${service}|${email.toLowerCase()}|${workspace}` : null;
+    return service === 'claude-code' ? `${service}|${email.toLowerCase()}` : null;
+  };
   const owners = new Map();
   for (const [id, account] of results) {
-    if ((account.provider === 'codex-chatgpt' || account.provider === 'claude-code') && account.email) owners.set(`${account.provider}|${account.email.toLowerCase()}`, id);
+    const key = identityKey(account.provider, account.email, account.workspaceId);
+    if (key && !owners.has(key)) owners.set(key, id);
   }
-  // Harness logins group by email and workspace, so a Personal and a Team workspace under one
-  // email stay separate cards. A group joins a direct account only when the email matches and the
-  // plans agree (or the email has a single workspace and either plan is unknown).
   const groups = new Map();
-  const workspacesByEmail = new Map();
   for (const profile of configured.filter(isHarnessLogin)) {
     const login = logins.get(profile.id);
-    const service = profile.login === 'chatgpt' ? 'codex-chatgpt' : 'claude-code';
-    const email = login?.email?.toLowerCase();
-    const key = email ? `${service}|${email}|${login.workspace ?? ''}` : `profile|${profile.id}`;
-    if (!groups.has(key)) groups.set(key, { service, email, plan: login?.plan ?? null, workspace: login?.workspace ?? null, members: [] });
+    const key = identityKey(profile.login === 'chatgpt' ? 'codex-chatgpt' : 'claude-code', login?.email, login?.workspace) ?? `profile|${profile.id}`;
+    if (!groups.has(key)) groups.set(key, { key, members: [] });
     groups.get(key).members.push(profile);
-    if (email) workspacesByEmail.set(`${service}|${email}`, new Set([...(workspacesByEmail.get(`${service}|${email}`) ?? []), login.workspace ?? '']));
   }
-  const samePlan = (a, b) => a.toLowerCase().replace(/[^a-z0-9]/g, '') === b.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const ownerFor = (group) => {
-    if (!group.email) return undefined;
-    const ownerId = owners.get(`${group.service}|${group.email}`);
-    if (!ownerId) return undefined;
-    // Workspace IDs, when both sides report one, decide; plans are only a fallback heuristic.
-    const owner = results.get(ownerId);
-    if (owner?.workspaceId && group.workspace) return owner.workspaceId === group.workspace ? ownerId : undefined;
-    const ownerPlan = owner?.plan ?? null;
-    if (ownerPlan && group.plan) return samePlan(ownerPlan, group.plan) ? ownerId : undefined;
-    return (workspacesByEmail.get(`${group.service}|${group.email}`)?.size ?? 0) <= 1 ? ownerId : undefined;
-  };
   const merged = new Set();
   const usable = (account) => account.windows.length > 0 && ['ok', 'partial'].includes(account.state);
   await Promise.all([...groups.values()].map(async (group) => {
     const { members } = group;
-    let ownerId = ownerFor(group);
+    let ownerId = owners.get(group.key);
     let rest = members;
     if (!ownerId) {
       ownerId = members[0].id;
