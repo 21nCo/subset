@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct MinutesApp: App {
-    @StateObject private var bot = BotRuntimeController()
+    @StateObject private var bot = MinutesController()
 
     var body: some Scene {
         Window("Minutes", id: "main") {

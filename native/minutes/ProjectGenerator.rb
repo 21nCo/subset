@@ -1,5 +1,6 @@
 # Regenerates Minutes.xcodeproj. Run from this directory: `ruby ProjectGenerator.rb`.
-# Requires the `xcodeproj` gem. BotRuntime/ is a sidecar Node.js runtime and is not part of the Xcode target.
+# Requires the `xcodeproj` gem. The bot itself is the shared `subset-minutes` CLI (packages/minutes-cli);
+# the "Embed Minutes CLI" phase copies its staged app-runtime/ into the app's Resources.
 require "xcodeproj"
 require "fileutils"
 
@@ -35,10 +36,34 @@ mac_target.build_configurations.each do |config|
   )
 end
 
-refs = %w[MinutesApp.swift ContentView.swift BotRuntimeController.swift].map { |name| mac_group.new_file(name) }
+refs = %w[MinutesApp.swift ContentView.swift MinutesController.swift MinutesCLI.swift].map { |name| mac_group.new_file(name) }
 mac_target.add_file_references(refs)
 mac_group.new_file("macOS-Info.plist")
 mac_target.add_resources([mac_group.new_file("Assets.xcassets")])
+
+# Copies packages/minutes-cli/app-runtime (built by `npm run build` at the repository root) into
+# Minutes.app/Contents/Resources/minutes-cli. A Release build fails without it; a Debug build warns
+# and the app falls back to the repository build of the CLI.
+embed = mac_target.new_shell_script_build_phase("Embed Minutes CLI")
+embed.shell_path = "/bin/sh"
+embed.input_paths = ["$(SRCROOT)/../../packages/minutes-cli/app-runtime"]
+embed.output_paths = ["$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/minutes-cli"]
+embed.always_out_of_date = "1"
+embed.shell_script = <<~'SH'
+  set -eu
+  SRC="${SRCROOT}/../../packages/minutes-cli/app-runtime"
+  DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/minutes-cli"
+  rm -rf "${DEST}"
+  if [ ! -f "${SRC}/dist/cli.mjs" ]; then
+    if [ "${CONFIGURATION}" = "Release" ]; then
+      echo "error: ${SRC} is missing. Run npm ci && npm run build at the repository root first."
+      exit 1
+    fi
+    echo "warning: ${SRC} is missing; this Debug app will use packages/minutes-cli/dist from the repository."
+    exit 0
+  fi
+  ditto "${SRC}" "${DEST}"
+SH
 
 project.save
 

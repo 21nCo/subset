@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9AC9B80E116CC1BD32E17714"
+               BlueprintIdentifier = "3D9D28B6E5118306C0AF5996"
                BuildableName = "Minutes.app"
                BlueprintName = "Minutes"
                ReferencedContainer = "container:Minutes.xcodeproj">
@@ -30,7 +30,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "9AC9B80E116CC1BD32E17714"
+            BlueprintIdentifier = "3D9D28B6E5118306C0AF5996"
             BuildableName = "Minutes.app"
             BlueprintName = "Minutes"
             ReferencedContainer = "container:Minutes.xcodeproj">
@@ -53,7 +53,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "9AC9B80E116CC1BD32E17714"
+            BlueprintIdentifier = "3D9D28B6E5118306C0AF5996"
             BuildableName = "Minutes.app"
             BlueprintName = "Minutes"
             ReferencedContainer = "container:Minutes.xcodeproj">
@@ -70,7 +70,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "9AC9B80E116CC1BD32E17714"
+            BlueprintIdentifier = "3D9D28B6E5118306C0AF5996"
             BuildableName = "Minutes.app"
             BlueprintName = "Minutes"
             ReferencedContainer = "container:Minutes.xcodeproj">

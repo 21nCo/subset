@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = new URL('../', import.meta.url);
@@ -53,7 +53,35 @@ for (const manifest of publicPackages) {
   for (const dependency of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
     assert.ok(!names.has(dependency), `${manifest.name} cannot depend at runtime on workspace ${dependency}; bundle it instead`);
   }
+  // External runtime dependencies of a published package are pinned, so a release installs what was tested.
+  for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
+    assert.match(String(version), /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `${manifest.name} must pin ${dependency} to an exact version (found ${version})`);
+  }
 }
+
+// Native targets reuse capability packages (for example by running their CLI); they do not carry a
+// second Node.js implementation with its own manifest or lockfile.
+const nativeRoot = new URL('native/', root);
+const skipped = new Set(['node_modules', 'build', 'DerivedData', '.build']);
+function findNodeManifests(directory) {
+  const found = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (skipped.has(entry.name) || entry.name.endsWith('.xcodeproj')) continue;
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory);
+    if (entry.isDirectory()) found.push(...findNodeManifests(child));
+    else if (['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].includes(entry.name)) found.push(child.pathname);
+  }
+  return found;
+}
+if (existsSync(nativeRoot)) {
+  assert.deepEqual(findNodeManifests(nativeRoot), [], 'Native targets must not contain their own Node.js package; use a packages/ workspace');
+}
+
+// The Minutes macOS app decodes the CLI's NDJSON contract; its supported version must match the package's.
+const minutesContract = readFileSync(new URL('packages/minutes/src/contract.ts', root), 'utf8').match(/MINUTES_CONTRACT_VERSION = (\d+) as const/);
+const minutesSwift = readFileSync(new URL('native/minutes/MacApp/MinutesCLI.swift', root), 'utf8').match(/supportedContractVersion = (\d+)/);
+assert.ok(minutesContract && minutesSwift, 'Could not find the Minutes contract version in TypeScript and Swift');
+assert.equal(minutesSwift[1], minutesContract[1], 'native/minutes supports a different Minutes contract version than @subset/minutes');
 for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
   assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
@@ -64,4 +92,5 @@ assert.equal(names.has('@subset/catalog'), true);
 assert.equal(names.has('@subset/directory'), true);
 assert.equal(names.has('@subset/mgraph-contracts'), true);
 assert.equal(names.has('@subset/mgraph-store'), true);
+assert.equal(names.has('@subset/minutes'), true);
 console.log(`Validated ${names.size} Subset workspaces.`);

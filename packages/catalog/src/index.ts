@@ -32,7 +32,7 @@ export const capabilities = [
     name: 'Minutes',
     summary: 'Send a visible notetaker bot to a Google Meet or Zoom call and keep the meeting audio locally.',
     state: 'building',
-    proposedSurfaces: ['macos'],
+    proposedSurfaces: ['macos', 'agent-cli'],
     availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];

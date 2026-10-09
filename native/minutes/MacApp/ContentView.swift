@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject private var bot: BotRuntimeController
+    @EnvironmentObject private var bot: MinutesController
 
     @AppStorage("displayName") private var displayName = "Minutes Notetaker"
     @AppStorage("recordingDirectory") private var recordingDirectory = ContentView.defaultRecordingDirectory
@@ -26,12 +26,15 @@ struct ContentView: View {
             Divider()
             sessionPanel
         }
-        .onAppear { bot.refreshReadiness() }
+        .onAppear { bot.refreshReadiness(outputDirectory: recordingDirectory) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if !bot.isRunning { bot.refreshReadiness() }
+            if !bot.isRunning { bot.refreshReadiness(outputDirectory: recordingDirectory) }
         }
         .fileImporter(isPresented: $isChoosingSaveDirectory, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result { recordingDirectory = url.path }
+            if case .success(let url) = result {
+                recordingDirectory = url.path
+                bot.refreshReadiness(outputDirectory: url.path)
+            }
         }
     }
 
@@ -122,24 +125,30 @@ struct ContentView: View {
         return Section {
             SetupRow(
                 title: "Node.js",
-                detail: readiness.nodePath ?? "Not found. Install Node.js 18 or later.",
+                detail: readiness.nodePath ?? "Not found. Install Node.js \(NodeLocator.minimumMajorVersion) or later (for example `brew install node`).",
                 isDone: readiness.nodePath != nil
             )
             SetupRow(
-                title: "Google Chrome",
-                detail: readiness.chromePath == nil ? "Not found. The bot drives a Chrome window." : "Installed.",
-                isDone: readiness.chromePath != nil
+                title: "Minutes CLI",
+                detail: cliDetail(readiness),
+                isDone: readiness.cli != nil && readiness.doctorError == nil
             )
-            SetupRow(
-                title: "Bot runtime",
-                detail: runtimeDetail(readiness),
-                isDone: readiness.hasSources && readiness.hasDependencies
-            )
+            if let doctor = readiness.doctor {
+                ForEach(doctor.checks.filter { $0.id != "node" || !$0.ok }) { check in
+                    SetupRow(
+                        title: Self.checkTitles[check.id] ?? check.id,
+                        detail: [check.detail, check.fix].compactMap { $0 }.joined(separator: " "),
+                        isDone: check.ok,
+                        isOptional: !check.required
+                    )
+                }
+            }
             HStack {
                 Button("Set Up Google Sign-In…") { bot.openBotSignIn() }
+                    .disabled(readiness.cli == nil || readiness.nodePath == nil)
                     .help("Open Chrome with the bot's own profile so it can join Meet as a signed-in user instead of waiting as a guest")
                 Spacer()
-                Button(bot.isCheckingReadiness ? "Checking…" : "Check Again") { bot.refreshReadiness() }
+                Button(bot.isCheckingReadiness ? "Checking…" : "Check Again") { bot.refreshReadiness(outputDirectory: recordingDirectory) }
                     .disabled(bot.isCheckingReadiness || bot.isRunning)
             }
             .controlSize(.small)
@@ -148,14 +157,20 @@ struct ContentView: View {
         }
     }
 
-    private func runtimeDetail(_ readiness: BotRuntimeReadiness) -> String {
-        if !readiness.hasSources {
-            return "BotRuntime not found at \(readiness.runtimeDirectory). Set MINUTES_BOT_RUNTIME_DIR."
+    private static let checkTitles = [
+        "node": "Node.js version",
+        "chrome": "Google Chrome",
+        "profile": "Bot Google sign-in (optional)",
+        "profile_lock": "Bot profile not in use",
+        "output_directory": "Output folder"
+    ]
+
+    private func cliDetail(_ readiness: MinutesReadiness) -> String {
+        guard let cli = readiness.cli else {
+            return "subset-minutes not found. Build it with `npm ci && npm run build` at the repository root, or set MINUTES_CLI_PATH."
         }
-        if !readiness.hasDependencies {
-            return "Dependencies missing. Run `pnpm install` in \(readiness.runtimeDirectory)."
-        }
-        return "Ready at \(readiness.runtimeDirectory)."
+        if let error = readiness.doctorError { return error }
+        return "\(cli.source.rawValue): \(cli.scriptPath)"
     }
 
     private var startStopButton: some View {
@@ -277,7 +292,7 @@ struct ContentView: View {
     private var statusDetail: String {
         switch bot.phase {
         case .idle:
-            return "Paste a meeting link and send the bot. It joins in a Chrome window, mutes itself, and records the other participants' audio to a WebM file."
+            return "Paste a meeting link and send the bot. Minutes runs the subset-minutes CLI, which joins in a Chrome window, mutes itself, and records the other participants' audio to a WebM file."
         case .launching:
             return "Opening Chrome and joining. If the meeting has a waiting room, admit the bot."
         case .inMeeting:
@@ -385,11 +400,12 @@ private struct SetupRow: View {
     let title: String
     let detail: String
     let isDone: Bool
+    var isOptional = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: isDone ? "checkmark.circle.fill" : "exclamationmark.circle")
-                .foregroundStyle(isDone ? Color.green : Color.orange)
+            Image(systemName: isDone ? "checkmark.circle.fill" : isOptional ? "info.circle" : "exclamationmark.circle")
+                .foregroundStyle(isDone ? Color.green : isOptional ? Color.secondary : Color.orange)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -402,6 +418,6 @@ private struct SetupRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title): \(isDone ? "ready" : "action needed"). \(detail)")
+        .accessibilityLabel("\(title): \(isDone ? "ready" : isOptional ? "optional" : "action needed"). \(detail)")
     }
 }
