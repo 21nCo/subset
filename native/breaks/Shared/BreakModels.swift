@@ -7,6 +7,39 @@ enum BreakPhase: String, Codable, CaseIterable, Sendable {
     case paused
 }
 
+/// Why reminders are paused. Only a manual pause waits for the user; every other reason resumes on its own.
+enum PauseReason: String, Codable, CaseIterable, Sendable {
+    case manual
+    case idle
+    case focus
+    case meeting
+    case media
+    case app
+    case game
+
+    var isAutomatic: Bool { self != .manual }
+
+    /// Reasons that come from a live activity signal and resume after the smart-pause grace period.
+    var isSmartPause: Bool {
+        switch self {
+        case .meeting, .media, .app, .game: true
+        case .manual, .idle, .focus: false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .manual: "Paused"
+        case .idle: "Away from the computer"
+        case .focus: "Focus is on"
+        case .meeting: "Microphone or camera in use"
+        case .media: "An app is keeping the display awake"
+        case .app: "A pause app is in front"
+        case .game: "A game is in front"
+        }
+    }
+}
+
 enum BreakKind: String, Codable, CaseIterable, Sendable {
     case short
     case long
@@ -122,6 +155,7 @@ struct PlannedBreak: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct SmartPauseSettings: Codable, Equatable, Sendable {
+    /// iOS: Focus Filter. macOS: unused (no Focus Filter on the Mac target yet).
     var focusMode = true
     var meetingsAndCalls = true
     var mediaPlayback = true
@@ -173,6 +207,39 @@ struct AutomationSettings: Codable, Equatable, Sendable {
     var runEndShortcut = false
 }
 
+/// An app that pauses reminders while it is frontmost (macOS).
+struct PauseApp: Codable, Equatable, Hashable, Identifiable, Sendable {
+    var bundleID: String
+    var name: String
+
+    var id: String { bundleID }
+}
+
+enum OverlayStyle: String, Codable, CaseIterable, Identifiable, Sendable {
+    case blur
+    case dim
+
+    var id: String { rawValue }
+    var title: String { self == .blur ? "Blur" : "Dim" }
+}
+
+struct IdleSettings: Codable, Equatable, Sendable {
+    var isEnabled = true
+    /// Pause the focus timer after this much time without keyboard, mouse, or trackpad input.
+    var pauseAfter: TimeInterval = 60
+    /// Treat an absence this long as a break and start a fresh focus interval on return.
+    var resetAfter: TimeInterval = 5 * 60
+}
+
+/// Settings that only the desktop (macOS) target reads. Kept in the shared model so one store and one
+/// schema hold every setting; the iOS target ignores them.
+struct DesktopSettings: Codable, Equatable, Sendable {
+    var idle = IdleSettings()
+    var pauseApps: [PauseApp] = []
+    var overlayStyle: OverlayStyle = .blur
+    var showsMenuBarCountdown = true
+}
+
 struct BreakSettings: Codable, Equatable, Sendable {
     var workInterval: TimeInterval = 20 * 60
     var shortBreakDuration: TimeInterval = 20
@@ -192,6 +259,38 @@ struct BreakSettings: Codable, Equatable, Sendable {
     var wellness = WellnessSettings()
     var customization = CustomizationSettings()
     var automation = AutomationSettings()
+    var desktop = DesktopSettings()
+}
+
+extension BreakSettings {
+    /// Decodes settings saved by older builds: missing keys fall back to defaults instead of
+    /// discarding the user's whole configuration.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BreakSettings()
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) throws -> T {
+            try container.decodeIfPresent(T.self, forKey: key) ?? fallback
+        }
+        workInterval = try value(.workInterval, defaults.workInterval)
+        shortBreakDuration = try value(.shortBreakDuration, defaults.shortBreakDuration)
+        longBreakEnabled = try value(.longBreakEnabled, defaults.longBreakEnabled)
+        longBreakDuration = try value(.longBreakDuration, defaults.longBreakDuration)
+        longBreakFrequency = try value(.longBreakFrequency, defaults.longBreakFrequency)
+        discipline = try value(.discipline, defaults.discipline)
+        snoozesAllowedPerDay = try value(.snoozesAllowedPerDay, defaults.snoozesAllowedPerDay)
+        allowEarlyEnd = try value(.allowEarlyEnd, defaults.allowEarlyEnd)
+        earlyEndProgress = try value(.earlyEndProgress, defaults.earlyEndProgress)
+        screenTimeEnforcement = try value(.screenTimeEnforcement, defaults.screenTimeEnforcement)
+        shieldEveryAppAndWebsite = try value(.shieldEveryAppAndWebsite, defaults.shieldEveryAppAndWebsite)
+        officeHours = try value(.officeHours, defaults.officeHours)
+        plannedBreaks = try value(.plannedBreaks, defaults.plannedBreaks)
+        reminder = try value(.reminder, defaults.reminder)
+        smartPause = try value(.smartPause, defaults.smartPause)
+        wellness = try value(.wellness, defaults.wellness)
+        customization = try value(.customization, defaults.customization)
+        automation = try value(.automation, defaults.automation)
+        desktop = try value(.desktop, defaults.desktop)
+    }
 }
 
 struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
@@ -202,6 +301,9 @@ struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
     var kind: BreakKind
     var completed: Bool
     var skipped: Bool
+
+    /// The most records kept on the device.
+    static let historyLimit = 400
 
     var actualDuration: TimeInterval { max(0, endedAt.timeIntervalSince(startedAt)) }
 }
@@ -215,11 +317,15 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var breakEndsAt: Date?
     var activeKind: BreakKind?
     var activePlannedBreakName: String?
+    /// Short breaks completed since the last long break.
     var completedShortBreaks = 0
     var snoozesUsedToday = 0
     var snoozeDay = Calendar.current.startOfDay(for: Date())
     var deliveredHeadsUpFor: Date?
     var deliveredPlannedOccurrences: [String: Date] = [:]
+    var pauseReason: PauseReason?
+    /// A timed manual pause resumes at this instant.
+    var pausedUntil: Date?
 }
 
 struct DashboardStats: Equatable, Sendable {

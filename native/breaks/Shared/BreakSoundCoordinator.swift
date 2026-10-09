@@ -46,9 +46,11 @@ final class BreakSoundCoordinator {
         }
 
         do {
+            #if os(iOS)
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
+            #endif
             if !isConnected {
                 engine.attach(player)
                 engine.connect(player, to: engine.mainMixerNode, format: format)

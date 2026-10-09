@@ -1,27 +1,49 @@
-# Breaks (iOS and iPadOS)
+# Breaks (macOS, iOS, and iPadOS)
 
-Breaks is a break reminder for iPhone and iPad. It runs focus intervals with short and long breaks, office hours, planned breaks, and limited snoozes. You can choose one of three enforcement levels. During a break it shows a full-screen ambient break view. With Screen Time authorization, it can shield chosen apps, categories, and websites while a break is running. It also has a Live Activity and Dynamic Island countdown, on-device history with a Screen Score, App Intents, Shortcuts actions, and a Focus Filter.
+Breaks is a break reminder for Mac, iPhone, and iPad. It runs focus intervals with short and long breaks, office hours, planned breaks, and limited snoozes, with three discipline levels (Casual, Balanced, Hardcore).
 
-This is a port of a proof of concept. It is not signed, not released, and not listed as available.
+- **macOS:** a menu bar app modelled on [LookAway](https://lookaway.com). It shows a countdown in the menu bar, a heads-up notice before each break, and a full-screen break overlay on every display that blurs or dims the screen. It pauses during calls, video playback, games, and chosen apps, and when you are away from the computer. It also shows blink and posture nudges and can open at login.
+- **iOS and iPadOS:** a full-screen ambient break view. With Screen Time authorization it can shield chosen apps, categories, and websites during a break. It also has a Live Activity, App Intents, Shortcuts actions, and a Focus Filter.
+
+Both platforms keep history and a Screen Score on the device.
+
+This is a port of a proof of concept plus a new Mac target. It is not signed, not notarized, not released, and not listed as available.
 
 ## Capability boundary
 
 | | |
 | --- | --- |
 | User outcome | Take regular, well-timed screen breaks, with optional system enforcement, without an account or a server. |
-| Source of truth | `BreakEngine` state and settings, persisted by `BreakRepository`. Persistence uses the `group.dev.subset.breaks` app group defaults and container, so the app, the Device Activity monitor, and the shield extensions share the schedule, selection, and history. Nothing leaves the device. |
+| Source of truth | `BreakScheduler` state (settings, snapshot, history), persisted by `BreakRepository`. On iOS, persistence uses the `group.dev.subset.breaks` app group defaults and container, so the app, the Device Activity monitor, and the shield extensions share the schedule, selection, and history. On macOS there are no extensions, and the app uses its own standard defaults (`dev.subset.breaks`). Nothing leaves the device. |
 | Network | None. There is no analytics, advertising, or account. |
+
+### Code layout: shared and platform code
+
+| Path | Platforms | Contents |
+| --- | --- | --- |
+| `Shared/BreakModels.swift` | iOS, macOS, extensions | Settings model (including `DesktopSettings` for Mac-only options), snapshot, history records, Screen Score and stats (`BreakMath`). |
+| `Shared/BreakScheduler.swift` | iOS, macOS | The schedule as a pure value type: intervals, heads-up, long-break cadence, planned breaks, office hours, snooze allowance, discipline rules, manual and timed pauses, smart pause with grace period, idle pause and reset, and blink and posture cadence. It returns events and does not touch UI or system APIs. |
+| `Shared/BreakPersistence.swift` | iOS, macOS, extensions | `BreakRepository` and `SharedStore`. Uses the app group on iOS and standard defaults on macOS. |
+| `Shared/BreakSoundCoordinator.swift` | iOS, macOS | Synthesized chimes (the `AVAudioSession` setup is iOS-only). |
+| `Shared/BreakEngine.swift` and the other `Shared/*Coordinator.swift` files | iOS | Runs the scheduler and performs the iOS effects: Screen Time shields, notifications, the Live Activity, and Shortcuts. |
+| `App/`, `DeviceActivityMonitor/`, `Shield*/`, `WidgetExtension/` | iOS | SwiftUI app and extensions. |
+| `Mac/` | macOS | `MacBreakController` (runs the scheduler), `ActivitySignals` (idle and smart-pause signals), the break overlay, the heads-up and wellness panels, the menu bar, and Settings. |
+| `Tests/` | iOS and macOS | `BreakSchedulerTests` and `BreaksTests`. The Mac test bundle compiles the shared sources directly and runs without a host app. |
+
+The two platforms share the operations and the data model. They do not share views or enforcement. Screen Time shielding stays on iOS. It was not verified on macOS, so it is not used there. The Mac overlay window is Mac-only.
 
 ### Operations
 
-| Operation | UI | Shortcut / intent |
+| Operation | iOS / iPadOS | macOS |
 | --- | --- | --- |
-| Start a break now | **Start break** | ⌘B; App Intent “Start a Mindful Break” |
-| Snooze 1, 5, or 15 minutes (daily limit) | **+1m / +5m / +15m** | ⌘1, ⌘5, ⌘0 |
-| Pause / resume reminders | Header button | ⇧⌘P; “Pause/Resume Break Reminders” intents |
-| End or skip an active break (depends on enforcement level) | Break screen | Return ends a break that can end early; Esc skips when allowed |
-| Focus Filter | Settings > Focus | “Breaks Focus Filter” |
-| Configure intervals, office hours, planned breaks, messages, backgrounds, sounds, haptics, Screen Time selection, and Shortcut automations | Settings | — |
+| Start a break now | **Start break**, ⌘B, App Intent “Start a Mindful Break” | Menu bar **Start break now** (⌘B while the menu is open); **Start now** on the heads-up notice |
+| Snooze the next break 1, 5, or 15 minutes (daily limit) | **+1m / +5m / +15m**, ⌘1, ⌘5, ⌘0 | Menu bar **Snooze next break**; heads-up notice **Snooze** |
+| Snooze a running break 1 or 5 minutes (not recorded as skipped) | — | Break overlay **Snooze**, when skipping is allowed |
+| Skip the next break (not in Hardcore) | — | Menu bar and heads-up notice **Skip** |
+| Pause / resume reminders | Header button, ⇧⌘P, intents | Menu bar: for 30 minutes, 1 hour, 2 hours, or until resumed |
+| End or skip an active break (depends on discipline) | Break screen: Return ends, Esc skips | Break overlay: Return ends, Esc skips |
+| Focus Filter | Settings > Focus | Not implemented |
+| Configure | Settings | Settings window (General, Reminders, Smart Pause, Schedule, Stats) |
 
 ### Targets and consuming surfaces
 
@@ -33,9 +55,51 @@ This is a port of a proof of concept. It is not signed, not released, and not li
 | `BreakShieldAction` | `dev.subset.breaks.ShieldAction` | Compiles. Handles shield button actions. |
 | `BreakLiveActivity` | `dev.subset.breaks.LiveActivity` | Compiles. Live Activity and Dynamic Island. |
 | `BreaksTests` | `dev.subset.breaks.Tests` | Compiles. Not run on this host. |
-| macOS, web, embed, agent surfaces | — | Not proposed. Screen Time shielding is iOS/iPadOS-specific. |
+| `BreaksMac` (macOS menu bar app, product `Breaks.app`, module `BreaksMac`) | `dev.subset.breaks` | Proposed. Builds, its unit tests pass, and it launches on this host; see Verification. macOS 14 or later. |
+| `BreaksMacTests` | `dev.subset.breaks.MacTests` | 27 tests pass (scheduler and shared model). |
+| Web, embed, agent surfaces | — | Not proposed. |
+
+The Mac and iOS apps share the bundle identifier `dev.subset.breaks`, as separate platform apps would for a universal purchase. Separate identifiers are not needed until a store route is chosen.
+
+## macOS features
+
+Modelled on LookAway's [site](https://lookaway.com) and [docs](https://lookaway.app/docs/introduction).
+
+| Feature | Status | How |
+| --- | --- | --- |
+| Menu bar app with countdown | Implemented | `MenuBarExtra`, no Dock icon (`LSUIElement`). Shows the time to the next break, the break time left, “Paused”, or “Off hours”. The countdown text can be turned off. |
+| Heads-up notice before a break | Implemented | A floating, non-activating panel at the top of the display under the pointer. It shows a countdown with **Start now**, **Snooze** (1, 5, or 15 minutes, with the daily allowance), **Skip** (except Hardcore), and dismiss. You can set the lead time and position. |
+| Full-screen break overlay on all displays | Implemented | One borderless window per display at screen-saver level, on all Spaces and over full-screen apps. Blur (`NSVisualEffectView`, behind-window) or dim. It shows a countdown, a message, and progress. Displays are rebuilt when they change during a break. |
+| Discipline levels on the overlay | Implemented | Casual: skip and snooze anytime. Balanced: skip and snooze after 5 seconds. Hardcore: no skip or snooze. **End break** unlocks at 80% when early end is allowed. |
+| Smart pause: meetings and calls | Implemented | Another process is capturing microphone input (per-process Core Audio `kAudioProcessPropertyIsRunningInput`, macOS 14.2+; on 14.0–14.1, any input device running), or any camera is running (`kCMIODevicePropertyDeviceIsRunningSomewhere`). Breaks records nothing and needs no microphone or camera permission. |
+| Smart pause: video playback | Implemented, approximate | Another process holds a display-sleep power assertion (`IOPMCopyAssertionsByProcess`). Video players and browsers playing video do this. So do presentation apps, call apps, and keep-awake utilities such as `caffeinate`, which also pause reminders. |
+| Smart pause: games | Implemented, approximate | The frontmost app declares a games `LSApplicationCategoryType`. Full-screen state is not checked. |
+| Smart pause: chosen apps | Implemented | The frontmost app's bundle ID is on your list (Settings > Smart Pause > Add App…). |
+| Smart pause grace period | Implemented | Reminders resume after the signal has been gone for the grace period (default 1 minute). The remaining focus time is kept. |
+| Idle detection | Implemented | `CGEventSource.secondsSinceLastEventType` (no Input Monitoring permission). After 1 minute away the timer pauses, and the time already counted is given back. After 5 minutes away it starts a fresh interval when you return. Both thresholds are adjustable. A running call or video takes priority over idle. |
+| Blink and posture reminders | Implemented | Short, non-interactive notes that fade after 6 seconds and do not take focus. They are also announced to VoiceOver. They wait while paused, during breaks, and near the next break. |
+| Launch at login | Implemented, unverified for release | `SMAppService.mainApp`. Shows the “requires approval” state with a link to Login Items. Registration depends on a signed app in a stable location, which was not tested. |
+| Settings | Implemented | Intervals, long breaks, discipline, snoozes, early end, overlay style, sound and volume, menu bar countdown, login item, heads-up, blink and posture, messages, smart pause, idle, office hours, planned breaks, today's stats, and recent history. Smart Pause also shows the signals detected right now. |
+| Planned breaks, office hours, long breaks, stats | Implemented | Shared scheduler and model. |
+| Reduce Motion | Implemented | Overlay and panel fades and the countdown transition are skipped when Reduce Motion is on. |
+| Screen sharing or screen recording detection | Not implemented | macOS has no public API that reports another app capturing the screen. Calls that share the screen still pause through the microphone or camera signal. |
+| Calendar events, Focus mode / Focus Filter | Not implemented on macOS | Hidden in Mac Settings. |
+| Floating countdown that follows the pointer, global keyboard shortcuts | Not implemented | — |
+| Custom break images or wallpapers, custom sounds | Not implemented on macOS | The Mac uses blur or dim and the synthesized sounds. |
+| AppleScript or Shortcuts at break start or end | Not implemented on macOS | — |
+| Live Activity, sync with iPhone or iPad | Not implemented | Each device keeps its own schedule and history. |
+| Per-app exclusions for meeting detection | Not implemented | — |
+| Onboarding, Notification Center alerts | Not implemented on macOS | The Mac uses its own panels instead of notifications. |
 
 ## Permissions and entitlements
+
+### macOS
+
+- **No privacy permissions.** Idle time, microphone, camera, and power-assertion state, and the frontmost app are read through public APIs that need no TCC prompt. Breaks never opens an audio or video stream and does not read window contents.
+- **No entitlements and no App Sandbox** for now (direct distribution like LookAway, which installs through Homebrew). Hardened Runtime is on so the app can be notarized later. Before choosing the Mac App Store, the signals above must be verified under the sandbox.
+- **Login item** through `SMAppService`. The user can approve or remove it in System Settings > General > Login Items.
+
+### iOS and iPadOS
 
 - **Family Controls** (`com.apple.developer.family-controls`) on the app and the three Screen Time extensions. The app requests individual authorization. Shielding works only on a physical device. Distribution requires Apple to grant the Family Controls (Distribution) entitlement for each App ID.
 - **App group** `group.dev.subset.breaks` on the app and all four extensions.
@@ -47,14 +111,20 @@ This is a port of a proof of concept. It is not signed, not released, and not li
 Requires Xcode 26+ and the `xcodeproj` gem only to regenerate the project.
 
 ```sh
-ruby ProjectGenerator.rb   # optional: regenerates Breaks.xcodeproj and its shared scheme
+ruby ProjectGenerator.rb   # optional: regenerates Breaks.xcodeproj and the Breaks and BreaksMac schemes
+
+# macOS
+xcodebuild -project Breaks.xcodeproj -scheme BreaksMac -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project Breaks.xcodeproj -scheme BreaksMac -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+
+# iOS
 xcodebuild -project Breaks.xcodeproj -scheme Breaks -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project Breaks.xcodeproj -scheme Breaks -destination 'platform=iOS Simulator,name=<device>' CODE_SIGNING_ALLOWED=NO test
 ```
 
-Building the asset catalog needs the iOS Simulator runtime that matches the installed SDK. To run on a device, set a development team whose App IDs (app plus extensions) have the Family Controls and App Groups capabilities.
+The Mac app is the `Breaks.app` product of the `BreaksMac` scheme. It appears only in the menu bar. Building the iOS asset catalog needs the iOS Simulator runtime that matches the installed SDK. To run on a device, set a development team whose App IDs (app plus extensions) have the Family Controls and App Groups capabilities.
 
-## UI/UX changes from the POC
+## iOS UI/UX changes from the POC
 
 Reference products: [LookAway](https://lookaway.app), [Time Out by Dejal](https://www.dejal.com/timeout/), and [Stretchly](https://hovancik.net/stretchly/).
 
@@ -72,6 +142,15 @@ Reference products: [LookAway](https://lookaway.app), [Time Out by Dejal](https:
 2. **Visible snooze allowance.** The POC silently disabled the snooze buttons once the daily limit was used. The dashboard and the heads-up sheet now say how many snoozes are left, or explain that the limit is reached and resets tomorrow. (Time Out and Stretchly make postpone limits explicit.)
 3. **VoiceOver labels.** The countdowns now read as spoken durations (“Break starts in 4 minutes, 30 seconds”) and update as they change. The snooze buttons read as “Snooze 5 minutes” with the remaining count. Pause and skip have hints, and the focus progress bar has a label.
 4. **Reduce Motion.** The continuously drifting ambient gradient behind every screen freezes when Reduce Motion is on. This is calmer for motion-sensitive users and stops the per-frame redraws. (LookAway's calm, low-distraction break screens.)
+
+## Changes to shared behavior with the Mac target
+
+Moving the schedule into `BreakScheduler` fixed two findings from the automated review of the iOS port. Both platforms get the fixes:
+
+- **Long-break cadence.** After the first long break, every later break was long. The counter now resets after a long break, so with “every 3 breaks” the order is short, short, long, then repeats. This is covered by a test.
+- **Start now from the heads-up sheet** starts the scheduled kind (short or long). Before, it always started a short break.
+
+Snoozing now resets the daily allowance before checking it, so the first snooze on a new day is not refused. Settings saved by earlier builds still decode: missing keys fall back to their defaults instead of discarding the stored settings.
 
 ## Provenance
 
@@ -104,12 +183,24 @@ Reviewed in `/Users/ar/dev/superfunctions` (local checkout at `9cf3812`) and the
 | `billfn` | Paid tiers | No billing. Not used. |
 | `filefn`, `mcpfn`, `plugfn`, `apifn`, `uifn`, observability | Not applicable | No uploads, agent tools, connectors, web UI, or telemetry, which matches the privacy stance. |
 
-Package/version used: none. Gap: there is no Superfunctions package for Screen Time (Family Controls, Managed Settings, Device Activity), Live Activities, or App Intents.
+Package/version used: none. Gap: there is no Superfunctions package for Screen Time (Family Controls, Managed Settings, Device Activity), Live Activities, App Intents, or the macOS activity signals (idle time, device-in-use, power assertions). The macOS target adds no dependencies.
+
+## Verification
+
+On this host (Xcode 26.4, macOS 26):
+
+- `BreaksMac` builds with `xcodebuild` (`CODE_SIGNING_ALLOWED=NO`), including its asset catalog and app icon.
+- `BreaksMacTests` passes 27 tests: 24 scheduler tests and the 3 existing model and repository tests. The scheduler tests cover the heads-up, break start and completion, long-break cadence, office hours, planned breaks, discipline levels, early end, snooze allowance and day rollover, snoozing a running break, skipping, timed pauses, idle pause and reset, smart pause with grace period, manual pause overriding signals, wellness cadence, restore after relaunch, legacy settings decoding, and the history cap.
+- The built app launched from DerivedData and quit through `osascript` without a crash. A break restored from saved state completed and was recorded. An idle pause was then recorded correctly while the host had no input.
+- The iOS app, its four extensions, and `BreaksTests` compiled for the iOS Simulator SDK from a scratch copy without `App/Assets.xcassets` (see below).
 
 ## Unverified
 
-- **The full scheme build on this host.** The installed Xcode 26.4 has the iOS 26.4 SDK but only the iOS 18.3 Simulator runtime. `actool` therefore cannot compile `App/Assets.xcassets`. The original POC has the same catalog and is affected the same way. The app, the four extensions, and the test bundle were compiled from a scratch copy of the project with only that asset catalog omitted.
-- **Unit tests** (`BreaksTests`: office-hours windows and Screen Score). They compile but did not run, because Xcode 26.4 offered no eligible simulator destination.
+- **macOS on screen:** the overlay's look on several displays and over full-screen apps, the heads-up and nudge panels, keyboard handling on the overlay, the menu bar label, and the Settings window were not inspected visually. Each smart-pause signal against real calls, video, and games. The login item with a signed build. Behavior under App Sandbox.
+- **macOS distribution:** signing, notarization, and any download or store route.
+- **The full iOS scheme build on this host.** The installed Xcode 26.4 has the iOS 26.4 SDK but only the iOS 18.3 Simulator runtime. `actool` therefore cannot compile `App/Assets.xcassets`. The original POC has the same catalog and is affected the same way. The app, the four extensions, and the test bundle were compiled from a scratch copy of the project with only that asset catalog omitted.
+- **iOS unit tests.** `BreaksTests` and `BreakSchedulerTests` compile for iOS but did not run there, because Xcode 26.4 offered no eligible simulator destination. The same test sources pass on macOS against the shared code.
+- **iOS behavior after the scheduler refactor.** `BreakEngine` now delegates to `BreakScheduler`. It compiles, but it was not exercised on a device or simulator.
 - **Screen Time.** Authorization, shields, and Device Activity schedules need a signed device build with Family Controls. They cannot be checked in Simulator.
 - **Live Activity, notifications, sounds, haptics, App Intents, and the Focus Filter on device.**
 - **Distribution.** Signing, the Family Controls distribution entitlement, TestFlight or App Store, and any release route.

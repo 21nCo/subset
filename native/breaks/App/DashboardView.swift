@@ -153,11 +153,7 @@ struct DashboardView: View {
     }
 
     private var nextKindTitle: String {
-        if engine.settings.longBreakEnabled,
-           (engine.snapshot.completedShortBreaks + 1).isMultiple(of: max(1, engine.settings.longBreakFrequency)) {
-            return "Long"
-        }
-        return "Short"
+        engine.upcomingBreakKind == .long ? "Long" : "Short"
     }
 
     private var nextBreakDuration: TimeInterval {
@@ -192,7 +188,7 @@ struct HeadsUpView: View {
             HStack(spacing: 8) {
                 Button("Start now") {
                     dismiss()
-                    engine.startBreak(kind: .short)
+                    engine.startBreak(kind: engine.upcomingBreakKind)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.white)

@@ -97,7 +97,7 @@ struct BreakExperienceView: View {
     private var skipButtonTitle: String {
         guard engine.settings.discipline == .balanced, !engine.canSkipBreak else { return "Skip break" }
         let elapsed = engine.now.timeIntervalSince(engine.snapshot.breakStartedAt ?? engine.now)
-        return "Skip available in \(max(1, 5 - Int(elapsed)))s"
+        return "Skip available in \(max(1, Int(BreakScheduler.balancedSkipDelay) - Int(elapsed)))s"
     }
 }
 

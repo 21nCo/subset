@@ -1,19 +1,10 @@
 import Combine
 import Foundation
-import UIKit
 
 @MainActor
 final class BreakEngine: ObservableObject {
-    @Published var settings: BreakSettings {
-        didSet {
-            normalizeSettings()
-            save()
-            notifications.schedule(settings: settings, snapshot: snapshot, now: now)
-            screenTime.refreshSchedules(settings: settings)
-        }
-    }
-    @Published private(set) var snapshot: EngineSnapshot
-    @Published private(set) var records: [BreakRecord]
+    /// The shared schedule (`BreakScheduler`) is the source of truth; this class performs its iOS effects.
+    @Published private var core: BreakScheduler
     @Published private(set) var now = Date()
     @Published var isBreakPresented = false
     @Published var isHeadsUpPresented = false
@@ -39,11 +30,12 @@ final class BreakEngine: ObservableObject {
         self.screenTime = screenTime ?? ScreenTimeCoordinator()
 
         let loadedSettings = repository.loadSettings()
-        settings = loadedSettings
-        snapshot = repository.loadSnapshot(settings: loadedSettings)
-        records = repository.loadRecords()
+        core = BreakScheduler(
+            settings: loadedSettings,
+            snapshot: repository.loadSnapshot(settings: loadedSettings),
+            records: repository.loadRecords()
+        )
         activeMessage = loadedSettings.customization.messages.first ?? "Take a slow breath."
-        isBreakPresented = snapshot.phase == .breaking && (snapshot.breakEndsAt ?? .distantPast) > .now
 
         reconcileRestoredState()
     }
@@ -52,53 +44,30 @@ final class BreakEngine: ObservableObject {
         timer?.invalidate()
     }
 
-    var phase: BreakPhase { snapshot.phase }
-
-    var nextBreakRemaining: TimeInterval {
-        max(0, snapshot.nextBreakAt.timeIntervalSince(now))
-    }
-
-    var breakRemaining: TimeInterval {
-        max(0, (snapshot.breakEndsAt ?? now).timeIntervalSince(now))
-    }
-
-    var focusElapsed: TimeInterval {
-        switch snapshot.phase {
-        case .paused:
-            max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
-        case .focusing, .headsUp, .breaking:
-            max(0, min(settings.workInterval, now.timeIntervalSince(snapshot.focusStartedAt)))
+    var settings: BreakSettings {
+        get { core.settings }
+        set {
+            core.settings = newValue
+            core.normalizeSettings()
+            save()
+            notifications.schedule(settings: core.settings, snapshot: snapshot, now: now)
+            screenTime.refreshSchedules(settings: core.settings)
         }
     }
 
-    var breakProgress: Double {
-        guard let started = snapshot.breakStartedAt, let end = snapshot.breakEndsAt, end > started else { return 0 }
-        return min(1, max(0, now.timeIntervalSince(started) / end.timeIntervalSince(started)))
-    }
-
-    var snoozesRemaining: Int {
-        max(0, settings.snoozesAllowedPerDay - snapshot.snoozesUsedToday)
-    }
-
-    var canSkipBreak: Bool {
-        switch settings.discipline {
-        case .casual: true
-        case .balanced: now.timeIntervalSince(snapshot.breakStartedAt ?? now) >= 5
-        case .hardcore: false
-        }
-    }
-
-    var canEndEarly: Bool {
-        settings.allowEarlyEnd && breakProgress >= settings.earlyEndProgress
-    }
-
-    var dashboardStats: DashboardStats {
-        BreakMath.stats(records: records, snapshot: snapshot, now: now)
-    }
-
-    var nextPlannedBreak: (PlannedBreak, Date)? {
-        BreakMath.nextPlannedBreak(settings: settings, after: now)
-    }
+    var snapshot: EngineSnapshot { core.snapshot }
+    var records: [BreakRecord] { core.records }
+    var phase: BreakPhase { core.phase }
+    var nextBreakRemaining: TimeInterval { core.nextBreakRemaining(now: now) }
+    var breakRemaining: TimeInterval { core.breakRemaining(now: now) }
+    var focusElapsed: TimeInterval { core.focusElapsed(now: now) }
+    var breakProgress: Double { core.breakProgress(now: now) }
+    var snoozesRemaining: Int { core.snoozesRemaining }
+    var canSkipBreak: Bool { core.canSkipBreak(now: now) }
+    var canEndEarly: Bool { core.canEndEarly(now: now) }
+    var upcomingBreakKind: BreakKind { core.upcomingBreakKind }
+    var dashboardStats: DashboardStats { core.stats(now: now) }
+    var nextPlannedBreak: (PlannedBreak, Date)? { core.nextPlannedBreak(after: now) }
 
     func start() {
         guard timer == nil else { return }
@@ -135,7 +104,7 @@ final class BreakEngine: ObservableObject {
     func processPendingCommand() {
         guard let command = repository.takeCommand() else { return }
         if command == "start" || command == "open" {
-            startBreak(kind: nextBreakKind())
+            startBreak(kind: core.upcomingBreakKind)
         } else if command.hasPrefix("snooze:"), let minutes = Int(command.split(separator: ":").last ?? "") {
             snooze(minutes: minutes)
         } else if command == "pause" {
@@ -143,8 +112,8 @@ final class BreakEngine: ObservableObject {
         } else if command == "resume" {
             resume()
         } else if command == "focus:on", settings.smartPause.focusMode {
-            pause()
-        } else if command == "focus:off", snapshot.phase == .paused {
+            perform { $0.pause(reason: .focus, now: $1) }
+        } else if command == "focus:off", snapshot.phase == .paused, snapshot.pauseReason != .manual {
             resume()
         } else if command.hasPrefix("planned:"),
                   let id = UUID(uuidString: String(command.dropFirst("planned:".count))),
@@ -155,149 +124,37 @@ final class BreakEngine: ObservableObject {
     }
 
     func startBreak(kind: BreakKind = .manual, duration: TimeInterval? = nil, plannedName: String? = nil) {
-        guard snapshot.phase != .breaking else { return }
-        let startedAt = Date()
-        let resolvedDuration = duration ?? durationForBreak(kind)
-        let endsAt = startedAt.addingTimeInterval(resolvedDuration)
-
-        now = startedAt
-        snapshot.phase = .breaking
-        snapshot.breakStartedAt = startedAt
-        snapshot.breakEndsAt = endsAt
-        snapshot.activeKind = kind
-        snapshot.activePlannedBreakName = plannedName
-        isHeadsUpPresented = false
-        isBreakPresented = true
-        activeMessage = settings.customization.messages.randomElement() ?? "Let your eyes rest."
-        screenTime.applyShield(settings: settings)
-        sounds.play(
-            name: settings.customization.soundName,
-            volume: settings.customization.soundVolume,
-            customFilename: settings.customization.customSoundFilename,
-            isCompletion: false
-        )
-        notifications.notifyBreakStarted(duration: resolvedDuration)
-        SharedStore.defaults.set(endsAt, forKey: SharedStore.activeBreakEndKey)
-        save()
-
-        if settings.automation.runStartShortcut {
-            shortcuts.run(named: settings.automation.startShortcutName)
-        }
-        Task {
-            await liveActivity.start(kind: kind, startedAt: startedAt, endsAt: endsAt, message: activeMessage)
-        }
+        perform { $0.startBreak(kind: kind, duration: duration, plannedName: plannedName, now: $1) }
     }
 
     func endBreak(completed: Bool = true) {
-        guard snapshot.phase == .breaking else { return }
-        let endedAt = Date()
-        let startedAt = snapshot.breakStartedAt ?? endedAt
-        let kind = snapshot.activeKind ?? .manual
-        let plannedDuration = max(0, (snapshot.breakEndsAt ?? endedAt).timeIntervalSince(startedAt))
-
-        records.append(BreakRecord(
-            startedAt: startedAt,
-            endedAt: endedAt,
-            plannedDuration: plannedDuration,
-            kind: kind,
-            completed: completed,
-            skipped: !completed
-        ))
-        if completed && kind == .short {
-            snapshot.completedShortBreaks += 1
-        }
-
-        snapshot.phase = .focusing
-        snapshot.focusStartedAt = endedAt
-        snapshot.nextBreakAt = endedAt.addingTimeInterval(settings.workInterval)
-        snapshot.breakStartedAt = nil
-        snapshot.breakEndsAt = nil
-        snapshot.activeKind = nil
-        snapshot.activePlannedBreakName = nil
-        snapshot.deliveredHeadsUpFor = nil
-        isBreakPresented = false
-        screenTime.clearShield()
-        sounds.play(
-            name: settings.customization.soundName,
-            volume: settings.customization.soundVolume,
-            customFilename: settings.customization.customSoundFilename,
-            isCompletion: true
-        )
-        SharedStore.defaults.removeObject(forKey: SharedStore.activeBreakEndKey)
-        notifications.schedule(settings: settings, snapshot: snapshot, now: endedAt)
-        save()
-
-        if settings.automation.runEndShortcut {
-            shortcuts.run(named: settings.automation.endShortcutName)
-        }
-        Task { await liveActivity.end() }
+        perform { $0.endBreak(completed: completed, now: $1) }
     }
 
     @discardableResult
     func skipActiveBreak() -> Bool {
-        guard canSkipBreak else { return false }
-        endBreak(completed: false)
-        return true
+        let events = perform { $0.skipActiveBreak(now: $1) }
+        return !events.isEmpty
     }
 
     func snooze(minutes: Int) {
-        guard snapshot.phase != .breaking, snoozesRemaining > 0 else { return }
-        resetDailyCountersIfNeeded()
-        snapshot.snoozesUsedToday += 1
-        snapshot.phase = .focusing
-        snapshot.nextBreakAt = Date().addingTimeInterval(TimeInterval(minutes * 60))
-        snapshot.deliveredHeadsUpFor = nil
-        isHeadsUpPresented = false
-        save()
-        notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+        perform { $0.snooze(minutes: minutes, now: $1) }
     }
 
     func skipUpcomingBreak() {
-        guard settings.discipline != .hardcore else { return }
-        let instant = Date()
-        records.append(BreakRecord(
-            startedAt: instant,
-            endedAt: instant,
-            plannedDuration: durationForBreak(nextBreakKind()),
-            kind: nextBreakKind(),
-            completed: false,
-            skipped: true
-        ))
-        snapshot.phase = .focusing
-        snapshot.focusStartedAt = instant
-        snapshot.nextBreakAt = instant.addingTimeInterval(settings.workInterval)
-        snapshot.deliveredHeadsUpFor = nil
-        isHeadsUpPresented = false
-        save()
-        notifications.schedule(settings: settings, snapshot: snapshot, now: instant)
+        perform { $0.skipUpcomingBreak(now: $1) }
     }
 
     func pause() {
-        guard snapshot.phase != .breaking, snapshot.phase != .paused else { return }
-        snapshot.pausedRemaining = nextBreakRemaining
-        snapshot.phase = .paused
-        isHeadsUpPresented = false
-        save()
-        notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+        perform { $0.pause(now: $1) }
     }
 
     func resume() {
-        guard snapshot.phase == .paused else { return }
-        let remaining = snapshot.pausedRemaining ?? settings.workInterval
-        snapshot.phase = .focusing
-        snapshot.focusStartedAt = Date().addingTimeInterval(-(settings.workInterval - remaining))
-        snapshot.nextBreakAt = Date().addingTimeInterval(remaining)
-        snapshot.pausedRemaining = nil
-        save()
-        notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+        perform { $0.resume(now: $1) }
     }
 
     func resetToday() {
-        let start = Calendar.current.startOfDay(for: Date())
-        records.removeAll { $0.startedAt >= start }
-        snapshot.snoozesUsedToday = 0
-        snapshot.snoozeDay = start
-        snapshot.completedShortBreaks = 0
+        core.resetToday(now: .now)
         save()
     }
 
@@ -312,115 +169,110 @@ final class BreakEngine: ObservableObject {
 
     private func tick() {
         now = .now
-        resetDailyCountersIfNeeded()
         processPendingCommand()
-
-        if snapshot.phase == .breaking {
-            if now >= snapshot.breakEndsAt ?? .distantFuture {
-                endBreak(completed: true)
-            }
-            return
-        }
-
-        guard snapshot.phase != .paused else { return }
-        guard settings.officeHours.contains(now) else {
-            if snapshot.nextBreakAt <= now {
-                snapshot.focusStartedAt = now
-                snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
-                save()
-            }
-            return
-        }
-
-        if let (planned, occurrence) = duePlannedBreak(at: now) {
-            snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
-            startBreak(kind: .planned, duration: planned.duration, plannedName: planned.name)
-            return
-        }
-
-        let headsUpAt = snapshot.nextBreakAt.addingTimeInterval(-settings.reminder.headsUpLeadTime)
-        if settings.reminder.headsUpEnabled,
-           now >= headsUpAt,
-           now < snapshot.nextBreakAt,
-           snapshot.deliveredHeadsUpFor != snapshot.nextBreakAt {
-            snapshot.phase = .headsUp
-            snapshot.deliveredHeadsUpFor = snapshot.nextBreakAt
-            isHeadsUpPresented = true
-            save()
-        }
-
-        if now >= snapshot.nextBreakAt {
-            startBreak(kind: nextBreakKind())
-        }
+        let before = core.snapshot
+        let events = core.tick(now: now)
+        handle(events)
+        if core.snapshot != before { save() }
     }
 
-    private func nextBreakKind() -> BreakKind {
-        guard settings.longBreakEnabled else { return .short }
-        return (snapshot.completedShortBreaks + 1).isMultiple(of: max(1, settings.longBreakFrequency)) ? .long : .short
-    }
-
-    private func durationForBreak(_ kind: BreakKind) -> TimeInterval {
-        switch kind {
-        case .short: settings.shortBreakDuration
-        case .long: settings.longBreakDuration
-        case .planned: settings.plannedBreaks.first?.duration ?? settings.longBreakDuration
-        case .manual: settings.shortBreakDuration
-        }
-    }
-
-    private func duePlannedBreak(at date: Date) -> (PlannedBreak, Date)? {
-        for planned in settings.plannedBreaks where planned.isEnabled {
-            guard let occurrence = planned.occurrence(on: date) else { continue }
-            let alreadyDelivered = snapshot.deliveredPlannedOccurrences[planned.id.uuidString]
-            if date >= occurrence,
-               date < occurrence.addingTimeInterval(60),
-               alreadyDelivered.map({ !Calendar.current.isDate($0, inSameDayAs: occurrence) }) ?? true {
-                return (planned, occurrence)
-            }
-        }
-        return nil
-    }
-
-    private func resetDailyCountersIfNeeded() {
-        let today = Calendar.current.startOfDay(for: now)
-        guard snapshot.snoozeDay != today else { return }
-        snapshot.snoozeDay = today
-        snapshot.snoozesUsedToday = 0
-        snapshot.deliveredPlannedOccurrences = [:]
+    @discardableResult
+    private func perform(_ operation: (inout BreakScheduler, Date) -> [BreakScheduler.Event]) -> [BreakScheduler.Event] {
+        now = .now
+        let events = operation(&core, now)
+        guard !events.isEmpty else { return events }
+        handle(events)
         save()
+        return events
+    }
+
+    private func handle(_ events: [BreakScheduler.Event]) {
+        for event in events {
+            switch event {
+            case .breakStarted(let kind, let duration):
+                didStartBreak(kind: kind, duration: duration)
+            case .breakEnded(let completed):
+                didEndBreak(completed: completed)
+            case .breakSnoozed(_, let duringBreak):
+                isHeadsUpPresented = false
+                if duringBreak { didLeaveBreak() }
+                notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+            case .upcomingBreakSkipped:
+                isHeadsUpPresented = false
+                notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+            case .headsUp:
+                isHeadsUpPresented = true
+            case .paused, .resumed:
+                isHeadsUpPresented = false
+                notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+            case .focusReset, .wellness:
+                // iOS delivers posture and blink reminders as scheduled notifications.
+                break
+            }
+        }
+    }
+
+    private func didStartBreak(kind: BreakKind, duration: TimeInterval) {
+        let startedAt = snapshot.breakStartedAt ?? now
+        let endsAt = snapshot.breakEndsAt ?? now.addingTimeInterval(duration)
+        isHeadsUpPresented = false
+        isBreakPresented = true
+        activeMessage = settings.customization.messages.randomElement() ?? "Let your eyes rest."
+        screenTime.applyShield(settings: settings)
+        sounds.play(
+            name: settings.customization.soundName,
+            volume: settings.customization.soundVolume,
+            customFilename: settings.customization.customSoundFilename,
+            isCompletion: false
+        )
+        notifications.notifyBreakStarted(duration: duration)
+        SharedStore.defaults.set(endsAt, forKey: SharedStore.activeBreakEndKey)
+
+        if settings.automation.runStartShortcut {
+            shortcuts.run(named: settings.automation.startShortcutName)
+        }
+        let message = activeMessage
+        Task {
+            await liveActivity.start(kind: kind, startedAt: startedAt, endsAt: endsAt, message: message)
+        }
+    }
+
+    private func didEndBreak(completed: Bool) {
+        isHeadsUpPresented = false
+        didLeaveBreak()
+        sounds.play(
+            name: settings.customization.soundName,
+            volume: settings.customization.soundVolume,
+            customFilename: settings.customization.customSoundFilename,
+            isCompletion: true
+        )
+        notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+
+        if settings.automation.runEndShortcut {
+            shortcuts.run(named: settings.automation.endShortcutName)
+        }
+    }
+
+    private func didLeaveBreak() {
+        isBreakPresented = false
+        screenTime.clearShield()
+        SharedStore.defaults.removeObject(forKey: SharedStore.activeBreakEndKey)
+        Task { await liveActivity.end() }
     }
 
     private func reconcileRestoredState() {
         now = .now
-        if snapshot.phase == .breaking {
-            if let end = snapshot.breakEndsAt, end > now {
-                isBreakPresented = true
-                screenTime.applyShield(settings: settings)
-            } else {
-                snapshot.phase = .focusing
-                snapshot.breakStartedAt = nil
-                snapshot.breakEndsAt = nil
-                snapshot.activeKind = nil
-                snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
-                isBreakPresented = false
-                screenTime.clearShield()
-            }
-        } else if snapshot.nextBreakAt < now.addingTimeInterval(-settings.workInterval) {
-            snapshot.focusStartedAt = now
-            snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
+        if core.reconcileRestoredState(now: now) {
+            isBreakPresented = true
+            screenTime.applyShield(settings: settings)
+        } else {
+            isBreakPresented = false
+            screenTime.clearShield()
         }
         save()
     }
 
-    private func normalizeSettings() {
-        settings.workInterval = max(60, settings.workInterval)
-        settings.shortBreakDuration = max(5, settings.shortBreakDuration)
-        settings.longBreakDuration = max(60, settings.longBreakDuration)
-        settings.longBreakFrequency = max(1, settings.longBreakFrequency)
-        settings.snoozesAllowedPerDay = max(0, settings.snoozesAllowedPerDay)
-    }
-
     private func save() {
-        repository.save(settings: settings, snapshot: snapshot, records: records)
+        repository.save(settings: core.settings, snapshot: core.snapshot, records: core.records)
     }
 }

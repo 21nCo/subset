@@ -14,9 +14,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "87EDC779A17E19C16E3BA16B"
+               BlueprintIdentifier = "303F4B769285D796EA8F706B"
                BuildableName = "Breaks.app"
-               BlueprintName = "Breaks"
+               BlueprintName = "BreaksMac"
                ReferencedContainer = "container:Breaks.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -28,9 +28,9 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "BCFAC9932CE7CBD30E2B68FD"
-               BuildableName = "BreaksTests.xctest"
-               BlueprintName = "BreaksTests"
+               BlueprintIdentifier = "D58CF3CB0E3C1AC0C935CCF2"
+               BuildableName = "BreaksMacTests.xctest"
+               BlueprintName = "BreaksMacTests"
                ReferencedContainer = "container:Breaks.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -44,9 +44,9 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "87EDC779A17E19C16E3BA16B"
+            BlueprintIdentifier = "303F4B769285D796EA8F706B"
             BuildableName = "Breaks.app"
-            BlueprintName = "Breaks"
+            BlueprintName = "BreaksMac"
             ReferencedContainer = "container:Breaks.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
@@ -55,9 +55,9 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "BCFAC9932CE7CBD30E2B68FD"
-               BuildableName = "BreaksTests.xctest"
-               BlueprintName = "BreaksTests"
+               BlueprintIdentifier = "D58CF3CB0E3C1AC0C935CCF2"
+               BuildableName = "BreaksMacTests.xctest"
+               BlueprintName = "BreaksMacTests"
                ReferencedContainer = "container:Breaks.xcodeproj">
             </BuildableReference>
          </TestableReference>
@@ -77,9 +77,9 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "87EDC779A17E19C16E3BA16B"
+            BlueprintIdentifier = "303F4B769285D796EA8F706B"
             BuildableName = "Breaks.app"
-            BlueprintName = "Breaks"
+            BlueprintName = "BreaksMac"
             ReferencedContainer = "container:Breaks.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -94,9 +94,9 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "87EDC779A17E19C16E3BA16B"
+            BlueprintIdentifier = "303F4B769285D796EA8F706B"
             BuildableName = "Breaks.app"
-            BlueprintName = "Breaks"
+            BlueprintName = "BreaksMac"
             ReferencedContainer = "container:Breaks.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

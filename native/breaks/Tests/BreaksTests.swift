@@ -1,5 +1,7 @@
 import XCTest
+#if os(iOS)
 @testable import Breaks
+#endif
 
 final class BreaksTests: XCTestCase {
     func testOfficeHoursSupportsRegularAndOvernightWindows() throws {

@@ -10,8 +10,14 @@ enum SharedStore {
     static let activeBreakEndKey = "break.active-end"
     static let notificationCategory = "BREAK_REMINDER"
 
+    /// iOS shares state with its extensions through the app group. The macOS app has no extensions and
+    /// uses its own defaults, which avoids the macOS prompt for undeclared group containers.
     static var defaults: UserDefaults {
+        #if os(macOS)
+        .standard
+        #else
         UserDefaults(suiteName: suiteName) ?? .standard
+        #endif
     }
 }
 
@@ -32,9 +38,11 @@ enum AppGroupAssets {
     }
 
     private static func baseDirectory() -> URL? {
+        #if !os(macOS)
         if let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.suiteName) {
             return group.appendingPathComponent("CustomAssets", isDirectory: true)
         }
+        #endif
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
         return support.appendingPathComponent("Breaks/CustomAssets", isDirectory: true)
     }
@@ -65,7 +73,7 @@ struct BreakRepository {
     func save(settings: BreakSettings, snapshot: EngineSnapshot, records: [BreakRecord]) {
         encode(settings, key: SharedStore.settingsKey)
         encode(snapshot, key: SharedStore.snapshotKey)
-        encode(Array(records.suffix(400)), key: SharedStore.recordsKey)
+        encode(Array(records.suffix(BreakRecord.historyLimit)), key: SharedStore.recordsKey)
     }
 
     func setCommand(_ command: String) {
