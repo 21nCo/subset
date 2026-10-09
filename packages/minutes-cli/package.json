@@ -1,0 +1,43 @@
+{
+  "name": "@subset.dev/minutes",
+  "version": "0.1.0",
+  "description": "Send a visible notetaker bot to a Google Meet or Zoom meeting from the command line and keep the audio locally",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "subset-minutes": "dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/21nCo/subset.git",
+    "directory": "packages/minutes-cli"
+  },
+  "homepage": "https://github.com/21nCo/subset/tree/main/packages/minutes-cli#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
+  },
+  "dependencies": {
+    "playwright-core": "1.59.1"
+  },
+  "devDependencies": {
+    "@subset/minutes": "*",
+    "rolldown": "1.2.11"
+  }
+}
