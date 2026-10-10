@@ -63,15 +63,30 @@ final class DictateTests: XCTestCase {
         let guardian = PasteboardGuard(pasteboard)
         guardian.write("transcript")
         XCTAssertEqual(pasteboard.string(forType: .string), "transcript")
-        guardian.restore(after: 0)
 
         let restored = expectation(description: "restored")
-        DispatchQueue.main.async {
-            XCTAssertEqual(pasteboard.string(forType: .string), "rich")
-            XCTAssertEqual(pasteboard.data(forType: customType), Data([1, 2, 3]))
-            restored.fulfill()
-        }
+        guardian.restore(after: 0) { restored.fulfill() }
         wait(for: [restored], timeout: 2)
+        XCTAssertEqual(pasteboard.string(forType: .string), "rich")
+        XCTAssertEqual(pasteboard.data(forType: customType), Data([1, 2, 3]))
+    }
+
+    func testPasteboardGuardSnapshotsAtFirstWrite() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("DictateTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("old", forType: .string)
+
+        let guardian = PasteboardGuard(pasteboard)
+        // The user copies something while earlier insertion attempts run.
+        pasteboard.clearContents()
+        pasteboard.setString("copied meanwhile", forType: .string)
+        guardian.write("transcript")
+
+        let restored = expectation(description: "restored")
+        guardian.restore(after: 0) { restored.fulfill() }
+        wait(for: [restored], timeout: 2)
+        XCTAssertEqual(pasteboard.string(forType: .string), "copied meanwhile")
     }
 
     func testPasteboardGuardKeepsNewerClipboardContent() {
@@ -82,17 +97,14 @@ final class DictateTests: XCTestCase {
 
         let guardian = PasteboardGuard(pasteboard)
         guardian.write("transcript")
-        guardian.restore(after: 0)
+        let checked = expectation(description: "checked")
+        guardian.restore(after: 0) { checked.fulfill() }
         // The user copies something before the delayed restore fires.
         pasteboard.clearContents()
         pasteboard.setString("newer", forType: .string)
 
-        let checked = expectation(description: "checked")
-        DispatchQueue.main.async {
-            XCTAssertEqual(pasteboard.string(forType: .string), "newer")
-            checked.fulfill()
-        }
         wait(for: [checked], timeout: 2)
+        XCTAssertEqual(pasteboard.string(forType: .string), "newer")
     }
 
     func testSystemEventsScriptCompilesWithEveryHandler() throws {
@@ -103,5 +115,15 @@ final class DictateTests: XCTestCase {
                 "missing handler \(handler.rawValue)"
             )
         }
+    }
+
+    func testSpeechGateSeesShortSpeechInsideALongPause() {
+        let sampleRate = 16_000
+        // 60 s of silence with 1 s of speech-level signal in the middle.
+        var samples = [Float](repeating: 0, count: sampleRate * 60)
+        for index in (sampleRate * 30)..<(sampleRate * 31) { samples[index] = index.isMultiple(of: 2) ? 0.02 : -0.02 }
+        let overall = sqrt(samples.reduce(Float.zero) { $0 + $1 * $1 } / Float(samples.count))
+        XCTAssertLessThan(overall, 0.0035)
+        XCTAssertGreaterThan(WhisperCppBackend.peakWindowRMS(samples, windowSize: sampleRate / 2), 0.0035)
     }
 }

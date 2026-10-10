@@ -2,7 +2,7 @@
 
 Dictate is a macOS push-to-talk dictation app. Hold `fn`, speak, and release: Dictate transcribes the audio on the Mac with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and inserts the text into the field that had focus in the frontmost app. It lives in the menu bar, shows a small floating capsule while it listens, and keeps the last transcript in memory so it can be copied again until the app quits.
 
-This is a port of a proof of concept. It builds locally; it is not signed, notarized, or released, and the catalog lists no available surface.
+This is a port of a proof of concept. It builds locally; no signed or notarized build has been released (a signed, un-notarized build was only verified locally), and the catalog lists no available surface.
 
 ## Capability boundary
 

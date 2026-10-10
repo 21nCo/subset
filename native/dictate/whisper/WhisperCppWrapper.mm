@@ -327,10 +327,14 @@ struct whisper_full_params {
     wparams.offset_ms = 0;
     wparams.no_timestamps = !enableTimestamps;
     wparams.no_context = true;
-    wparams.single_segment = true;
+    // Live partials use at most 20 s of audio and stay single-segment with a short token cap.
+    // Longer audio (the final pass over a whole session) is decoded without either limit so
+    // long dictations are not truncated.
+    const bool isLongForm = pcmf32.size() > (size_t)(20 * 16000);
+    wparams.single_segment = !isLongForm;
     wparams.suppress_blank = true;
     wparams.suppress_nst = true;
-    wparams.max_tokens = 96;
+    wparams.max_tokens = isLongForm ? 0 : 96;
     wparams.no_speech_thold = 0.65f;
     wparams.logprob_thold = -1.0f;
     wparams.entropy_thold = 2.4f;

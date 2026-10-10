@@ -10,6 +10,7 @@ enum ActiveAppTextInjectorError: LocalizedError {
     case automationPermissionMissing
     case failedToGenerateKeyboardEvents
     case failedToInsertText
+    case targetApplicationUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +24,8 @@ enum ActiveAppTextInjectorError: LocalizedError {
             return "Failed to send paste keyboard events to the active app."
         case .failedToInsertText:
             return "Couldn't insert text into the focused field of the target app."
+        case .targetApplicationUnavailable:
+            return "The app you were dictating into is no longer running. Copy the transcript instead."
         }
     }
 }
@@ -108,6 +111,10 @@ enum ActiveAppTextInjector {
         }
 
         let targetApplication = resolveApplication(for: target?.application)
+        // A remembered target that has quit must not fall back to whatever app now has focus.
+        if target?.application != nil, targetApplication == nil {
+            throw ActiveAppTextInjectorError.targetApplicationUnavailable
+        }
         let shouldBypassAccessibility = shouldBypassAccessibilityReplacement(
             for: targetApplication,
             target: target
@@ -508,11 +515,12 @@ enum ActiveAppTextInjector {
             }
         }
 
+        // The system-wide focus is considered only when it belongs to the target app.
         let systemWide = AXUIElementCreateSystemWide()
-        if let focused = copyFocusedElement(from: systemWide) {
-            if !elements.contains(where: { CFEqual($0, focused) }) {
-                elements.append(focused)
-            }
+        if let focused = copyFocusedElement(from: systemWide),
+           targetPID == nil || processIdentifier(of: focused) == targetPID,
+           !elements.contains(where: { CFEqual($0, focused) }) {
+            elements.append(focused)
         }
 
         return elements
@@ -924,36 +932,46 @@ enum ActiveAppTextInjector {
 @MainActor
 final class PasteboardGuard {
     private let pasteboard: NSPasteboard
-    private let savedItems: [[(NSPasteboard.PasteboardType, Data)]]
+    private var savedItems: [[(NSPasteboard.PasteboardType, Data)]] = []
     private var ownChangeCount: Int?
 
     init(_ pasteboard: NSPasteboard) {
         self.pasteboard = pasteboard
-        savedItems = (pasteboard.pasteboardItems ?? []).map { item in
-            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
-        }
     }
 
+    /// Snapshots the clipboard at the moment Dictate first overwrites it, so anything the user
+    /// copied while earlier insertion attempts ran is what gets restored.
     func write(_ text: String) {
+        if ownChangeCount == nil {
+            savedItems = (pasteboard.pasteboardItems ?? []).map { item in
+                item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+            }
+        }
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         ownChangeCount = pasteboard.changeCount
     }
 
-    func restore(after delay: TimeInterval = 0.2) {
-        guard let expected = ownChangeCount else { return }
+    func restore(after delay: TimeInterval = 0.2, completion: (@MainActor () -> Void)? = nil) {
+        guard let expected = ownChangeCount else {
+            completion?()
+            return
+        }
         ownChangeCount = nil
         let pasteboard = pasteboard
         let items = savedItems
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard pasteboard.changeCount == expected else { return }
-            pasteboard.clearContents()
-            let restored = items.map { entries -> NSPasteboardItem in
-                let item = NSPasteboardItem()
-                for (type, data) in entries { item.setData(data, forType: type) }
-                return item
+            MainActor.assumeIsolated {
+                defer { completion?() }
+                guard pasteboard.changeCount == expected else { return }
+                pasteboard.clearContents()
+                let restored = items.map { entries -> NSPasteboardItem in
+                    let item = NSPasteboardItem()
+                    for (type, data) in entries { item.setData(data, forType: type) }
+                    return item
+                }
+                if !restored.isEmpty { pasteboard.writeObjects(restored) }
             }
-            if !restored.isEmpty { pasteboard.writeObjects(restored) }
         }
     }
 }

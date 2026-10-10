@@ -47,6 +47,9 @@ final class DictationAppController: ObservableObject {
             },
             onCancel: { [weak self] in
                 guard let self, pressStartedSession else { return }
+                // Esc and the following fn release both cancel; only the first may act, so a
+                // session started from the window in between is not cancelled.
+                pressStartedSession = false
                 manager.cancelDictation()
             }
         )

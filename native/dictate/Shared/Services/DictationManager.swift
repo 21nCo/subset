@@ -139,6 +139,9 @@ final class DictationManager: ObservableObject {
             stopDictation()
         } else if !isBusy {
             rememberInsertionTarget()
+            // Start from an empty buffer so a session without speech does not present the
+            // previous result as new; the previous result stays in `lastTranscript`.
+            clearTranscript()
             startDictation()
         }
     }
@@ -297,7 +300,12 @@ final class DictationManager: ObservableObject {
         case accessibility = "Privacy_Accessibility"
     }
 
-    func clearTranscript() {
+    /// Clears the session buffer. The Clear control also forgets the last transcript so
+    /// Copy and the transcript card cannot bring cleared text back.
+    func clearTranscript(forgetLastTranscript: Bool = false) {
+        if forgetLastTranscript {
+            lastTranscript = ""
+        }
         transcriptState.committedText = ""
         transcriptState.partialText = ""
         transcriptState.segments = []

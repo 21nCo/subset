@@ -125,7 +125,7 @@ struct MacRootView: View {
             .help("Copy the last transcript (⇧⌘C)")
 
             Button("Clear") {
-                manager.clearTranscript()
+                manager.clearTranscript(forgetLastTranscript: true)
             }
             .buttonStyle(.bordered)
             .keyboardShortcut("k", modifiers: .command)

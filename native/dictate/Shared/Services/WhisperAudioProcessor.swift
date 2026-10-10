@@ -1,6 +1,14 @@
 import AVFoundation
 import Foundation
 
+enum WhisperAudioProcessorError: LocalizedError {
+    case noUsableInput
+
+    var errorDescription: String? {
+        "No usable microphone input is available. Check the input device in System Settings > Sound."
+    }
+}
+
 final class WhisperAudioProcessor {
     private let audioEngine = AVAudioEngine()
     private let processingQueue = DispatchQueue(label: "dev.subset.dictate.whisper.audio")
@@ -21,16 +29,27 @@ final class WhisperAudioProcessor {
     private var samplesSinceLastEmit = 0
     private var onLevel: ((Float) -> Void)?
     private var onChunk: (([Float], Int) -> Void)?
+    private var onSessionLimitReached: (() -> Void)?
 
-    func start(onLevel: @escaping (Float) -> Void, onChunk: @escaping ([Float], Int) -> Void) throws {
+    func start(
+        onLevel: @escaping (Float) -> Void,
+        onChunk: @escaping ([Float], Int) -> Void,
+        onSessionLimitReached: @escaping () -> Void = {}
+    ) throws {
         stop()
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        // A missing or disconnected input reports an empty format; installing a tap with it
+        // raises an AVAudioEngine exception instead of a catchable error.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw WhisperAudioProcessorError.noUsableInput
+        }
         processingQueue.sync {
             self.sampleRate = format.sampleRate
             self.onLevel = onLevel
             self.onChunk = onChunk
+            self.onSessionLimitReached = onSessionLimitReached
         }
 
         inputNode.removeTap(onBus: 0)
@@ -60,6 +79,7 @@ final class WhisperAudioProcessor {
             let rate = Int(sampleRate)
             onLevel = nil
             onChunk = nil
+            onSessionLimitReached = nil
             samplesSinceLastEmit = 0
             bufferedSamples.removeAll(keepingCapacity: false)
             sessionSamples.removeAll(keepingCapacity: false)
@@ -98,8 +118,13 @@ final class WhisperAudioProcessor {
 
             guard onChunk != nil else { return }
             bufferedSamples.append(contentsOf: monoSamples)
-            if Double(sessionSamples.count) < maximumSessionDuration * sampleRate {
+            let maximumSessionSamples = Int(maximumSessionDuration * sampleRate)
+            if sessionSamples.count < maximumSessionSamples {
                 sessionSamples.append(contentsOf: monoSamples)
+                if sessionSamples.count >= maximumSessionSamples {
+                    // Reported once, so the user knows later speech is not in the final text.
+                    onSessionLimitReached?()
+                }
             }
             samplesSinceLastEmit += monoSamples.count
             onLevel?(rmsLevel(for: monoSamples))

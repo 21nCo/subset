@@ -111,6 +111,12 @@ final class WhisperCppBackend: DictationBackend {
             Task { @MainActor [weak self] in
                 self?.transcribeChunk(samples: samples, sampleRate: sampleRate)
             }
+        }, onSessionLimitReached: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.continuation?.yield(.status(
+                    "Reached the 15-minute recording limit. Speech after this point is not transcribed; release fn to finish."
+                ))
+            }
         })
     }
 
@@ -183,8 +189,9 @@ final class WhisperCppBackend: DictationBackend {
             partial + (sample * sample)
         } / Float(samples.count))
 
-        // Drop almost-silent chunks before whisper hallucinates text.
-        guard rms > 0.0035 else { return nil }
+        // Drop almost-silent chunks before whisper hallucinates text. The gate uses the loudest
+        // half-second window, so long pauses in a full session do not hide its speech.
+        guard peakWindowRMS(samples, windowSize: max(sampleRate / 2, 1)) > 0.0035 else { return nil }
 
         let edgeThreshold: Float = max(0.008, rms * 0.45)
         let paddingSamples = max(Int(Double(sampleRate) * 0.15), 1)
@@ -201,6 +208,19 @@ final class WhisperCppBackend: DictationBackend {
         let trimmed = Array(samples[start...end])
         let minimumSpeechSamples = max(Int(Double(sampleRate) * 0.35), 1)
         return trimmed.count >= minimumSpeechSamples ? trimmed : nil
+    }
+
+    nonisolated static func peakWindowRMS(_ samples: [Float], windowSize: Int) -> Float {
+        var peak: Float = 0
+        var start = 0
+        while start < samples.count {
+            let end = min(start + windowSize, samples.count)
+            var sum: Float = 0
+            for index in start..<end { sum += samples[index] * samples[index] }
+            peak = max(peak, sqrt(sum / Float(end - start)))
+            start = end
+        }
+        return peak
     }
 
     fileprivate nonisolated static func sanitizeTranscript(_ text: String) -> String {

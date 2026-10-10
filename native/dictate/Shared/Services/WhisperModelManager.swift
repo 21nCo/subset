@@ -93,8 +93,12 @@ struct WhisperModelManager {
                     try? store.fileManager.removeItem(at: archiveURL)
                     currentSnapshot = try snapshot(for: descriptor)
                 } catch is CancellationError {
+                    removePartialCoreMLEncoder(for: descriptor)
                     throw CancellationError()
                 } catch {
+                    // A failed extraction can leave a partial encoder directory, which would
+                    // otherwise look cached and be handed to whisper on the next start.
+                    removePartialCoreMLEncoder(for: descriptor)
                     statusHandler?("Core ML encoder download failed: \(error.localizedDescription)")
                 }
             }
@@ -111,6 +115,14 @@ struct WhisperModelManager {
             modelURL: modelURL,
             coreMLModelURL: coreMLModelURL
         )
+    }
+
+    private func removePartialCoreMLEncoder(for descriptor: WhisperModelDescriptor) {
+        for (name, isDirectory) in [(descriptor.coreMLDirectoryName, true), (descriptor.coreMLArchiveFilename, false)] {
+            if let url = try? store.localFileURL(named: name, isDirectory: isDirectory) {
+                try? store.fileManager.removeItem(at: url)
+            }
+        }
     }
 
     private func snapshot(for descriptor: WhisperModelDescriptor) throws -> WhisperModelSnapshot {
