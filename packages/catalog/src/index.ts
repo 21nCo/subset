@@ -1,13 +1,34 @@
 export type Surface = 'web' | 'macos' | 'ios' | 'embed' | 'agent-cli' | 'agent-view';
 export type ReleaseState = 'planned' | 'building' | 'available';
+export type HttpsUrl = `https://${string}`;
+
+/**
+ * A surface whose artifact and route have been verified (AGENTS.md rule 4). Add one only after the
+ * release check passes; `scripts/check-workspaces.mjs` validates the shape.
+ */
+export interface AvailableSurface {
+  surface: Surface;
+  /** Released version, for example `0.1.0`. */
+  version: string;
+  /** Direct link to the verified artifact (download, store listing, or hosted app). */
+  url: HttpsUrl;
+  /** Release page with notes and checksums. */
+  releaseUrl: HttpsUrl;
+  /** SHA-256 of the artifact at `url`, when it is a file. */
+  sha256?: string;
+  /** Short system requirements, for example `macOS 14 or later`. */
+  requirements?: string;
+}
 
 export interface CapabilityListing {
   id: string;
   name: string;
   summary: string;
+  /** `available` once at least one surface is available; other proposed surfaces may still be in progress. */
   state: ReleaseState;
+  /** Every surface intended for this capability, including the available ones. */
   proposedSurfaces: readonly Surface[];
-  availableSurfaces: readonly Surface[];
+  availableSurfaces: readonly AvailableSurface[];
 }
 
 export const capabilities = [
@@ -63,9 +84,18 @@ export const capabilities = [
     id: 'breaks',
     name: 'Breaks',
     summary: 'Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.',
-    state: 'building',
+    state: 'available',
     proposedSurfaces: ['macos', 'ios'],
-    availableSurfaces: []
+    availableSurfaces: [
+      {
+        surface: 'macos',
+        version: '0.1.0',
+        url: 'https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg',
+        releaseUrl: 'https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0',
+        sha256: '5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e',
+        requirements: 'macOS 14 or later, Apple silicon or Intel'
+      }
+    ]
   },
   {
     id: 'minutes',

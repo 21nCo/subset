@@ -7,7 +7,7 @@ Breaks is a break reminder for Mac, iPhone, and iPad. It runs focus intervals wi
 
 Both platforms keep history and a Screen Score on the device.
 
-This is a port of a proof of concept plus a new Mac target. It is not signed, not notarized, not released, and not listed as available.
+This is a port of a proof of concept plus a new Mac target. The macOS app is released as [Breaks 0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), signed with Developer ID and notarized; see [Release (macOS)](#release-macos). The iOS and iPadOS app is not signed, not released, and not listed as available.
 
 ## Capability boundary
 
@@ -55,7 +55,7 @@ The two platforms share the operations and the data model. They do not share vie
 | `BreakShieldAction` | `dev.subset.breaks.ShieldAction` | Compiles. Handles shield button actions. |
 | `BreakLiveActivity` | `dev.subset.breaks.LiveActivity` | Compiles. Live Activity and Dynamic Island. |
 | `BreaksTests` | `dev.subset.breaks.Tests` | Compiles. Not run on this host. |
-| `BreaksMac` (macOS menu bar app, product `Breaks.app`, module `BreaksMac`) | `dev.subset.breaks` | Proposed. Builds, its unit tests pass, and it launches on this host; see Verification. macOS 14 or later. |
+| `BreaksMac` (macOS menu bar app, product `Breaks.app`, module `BreaksMac`) | `dev.subset.breaks` | Available: [0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), Developer ID signed and notarized, universal (Apple silicon and Intel), macOS 14 or later. See [Release (macOS)](#release-macos). |
 | `BreaksMacTests` | `dev.subset.breaks.MacTests` | 36 tests pass (scheduler and shared model). |
 | Web, embed, agent surfaces | — | Not proposed. |
 
@@ -196,7 +196,24 @@ Package/version used: none. Gap: there is no Superfunctions package for Screen T
 
 ## Release (macOS)
 
-`macos-release.json` opts the `BreaksMac` scheme into the signed macOS release flow; see [docs/macos-release.md](../../docs/macos-release.md). A signed, not notarized, build of version 0.1.0 with this manifest was produced locally. Nothing has been released, and the catalog lists no available surface.
+`macos-release.json` opts the `BreaksMac` scheme into the signed macOS release flow; see [docs/macos-release.md](../../docs/macos-release.md).
+
+### Breaks 0.1.0 for macOS
+
+- Release: [macos/breaks/v0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), built by the **Release macOS app** workflow (run 38075115184) from the tag at commit `313b064`.
+- Download: [Breaks-0.1.0.dmg](https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg). The release also has `Breaks-0.1.0.zip` (the stapled app) and `SHA256SUMS`.
+- DMG SHA-256: `5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e`. The same value is in the release's [SHA256SUMS](https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/SHA256SUMS) and in `@subset/catalog`.
+- Version 0.1.0, bundle ID `dev.subset.breaks`, macOS 14 or later, universal binary (arm64 and x86_64).
+- Signed by Developer ID Application: Blank labs private limited (SAZVPX4CAA), with the hardened runtime. The DMG and the app are notarized, and both have stapled tickets.
+
+To install:
+
+1. Download `Breaks-0.1.0.dmg` and, optionally, check it: `shasum -a 256 Breaks-0.1.0.dmg` must print the SHA-256 above (or run `shasum -a 256 -c SHA256SUMS --ignore-missing` next to the downloaded `SHA256SUMS`).
+2. Open the DMG and drag **Breaks** to **Applications**.
+3. Open Breaks from Applications and confirm the standard notice for an app downloaded from the internet. The app is notarized, so there is no unidentified-developer warning. Breaks has no Dock icon; it appears in the menu bar.
+4. Optional: turn on **Open Breaks at login** in Breaks Settings > General. macOS may ask you to allow it in System Settings > General > Login Items.
+
+Release check for 0.1.0: the release is published (not a draft); the assets were downloaded anonymously and match `SHA256SUMS`; with the DMG quarantined, `spctl` reports "Notarized Developer ID" for the DMG and the app, and both stapled tickets validate; `codesign` shows the Developer ID signature with the hardened runtime; and the app launched, ran, and quit without errors or crash reports. The catalog lists macOS as the only available Breaks surface; iOS remains proposed.
 
 ## Verification
 
@@ -210,7 +227,7 @@ On this host (Xcode 26.4, macOS 26):
 ## Unverified
 
 - **macOS on screen:** the overlay's look on several displays and over full-screen apps, the heads-up and nudge panels, keyboard handling on the overlay, the menu bar label, and the Settings window were not inspected visually. Each smart-pause signal against real calls, video, and games. The login item with a signed build. Behavior under App Sandbox.
-- **macOS distribution:** signing, notarization, and any download or store route.
+- **macOS distribution:** the 0.1.0 Developer ID download is verified (see [Release (macOS)](#release-macos)). The login item in the released build and any Mac App Store route are not.
 - **The full iOS scheme build on this host.** The installed Xcode 26.4 has the iOS 26.4 SDK but only the iOS 18.3 Simulator runtime. `actool` therefore cannot compile `App/Assets.xcassets`. The original POC has the same catalog and is affected the same way. The app, the four extensions, and the test bundle were compiled from a scratch copy of the project with only that asset catalog omitted.
 - **iOS unit tests.** `BreaksTests` and `BreakSchedulerTests` compile for iOS but did not run there, because Xcode 26.4 offered no eligible simulator destination. The same test sources pass on macOS against the shared code.
 - **iOS behavior after the scheduler refactor.** `BreakEngine` now delegates to `BreakScheduler`. It compiles, but it was not exercised on a device or simulator.
