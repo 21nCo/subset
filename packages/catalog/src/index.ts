@@ -44,6 +44,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'dictate',
+    name: 'Dictate',
+    summary: 'Hold fn, speak, and insert locally transcribed text into the app where your cursor is.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'breaks',
     name: 'Breaks',
     summary: 'Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.',
