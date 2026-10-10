@@ -150,7 +150,7 @@ enum NodeLocator {
 
     /// Runs a short command and returns its stdout, or nil if it could not start or did not finish in time.
     /// The process is terminated after `timeout` seconds (a slow login shell must not block readiness). One second
-    /// later the caller gets nil and the pipe is closed, even if a descendant that inherited stdout keeps it open.
+    /// later the caller gets nil and reading stops, even if a descendant that inherited stdout keeps the pipe open.
     /// Reads never block a thread, so a timed-out run leaves no worker behind.
     static func run(_ executable: String, _ arguments: [String], environment: [String: String]? = nil,
                     timeout: TimeInterval = 20) async -> String? {
@@ -183,7 +183,7 @@ enum NodeLocator {
     }
 
     /// The state of one `run`: output so far, and whether stdout reached EOF and the process exited. It resumes
-    /// the caller once, with the output when both happened or with nil on timeout, and then releases the pipe.
+    /// the caller once, with the output when both happened or with nil on timeout, and then stops reading.
     private final class ShortRun: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<String?, Never>?
@@ -231,8 +231,9 @@ enum NodeLocator {
             continuation = nil
             lock.unlock()
             guard let pending else { return }
+            // Not closed here: a handler call already in flight may still read, and reading a closed handle
+            // raises. The handle closes its descriptor when the last reference to it is released.
             reader.readabilityHandler = nil
-            try? reader.close()
             pending.resume(returning: value)
         }
     }
