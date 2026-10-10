@@ -214,7 +214,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     ) {
         let record = appState.history.records.first { !baselineRecordIDs.contains($0.id) }
         let complete = record != nil && (!waitsForUpload || record?.cloudShareURL != nil)
-        if !complete, appState.lastError == nil, attemptsRemaining > 0 {
+        // A non-upload error (such as a history warning) must not end the wait while the upload
+        // is still running; AppState sets progress to 0 at start, 1 on success, nil on failure.
+        let uploadInFlight = waitsForUpload && record != nil && !complete && appState.uploadProgress == 0
+        if !complete, appState.lastError == nil || uploadInFlight, attemptsRemaining > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.pollRuntimeResult(
                     to: path,
