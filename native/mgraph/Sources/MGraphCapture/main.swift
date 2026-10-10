@@ -151,6 +151,7 @@ if let command = arguments.first {
         private let captureRequests = CaptureRequestGate()
         private var recording: RecordingController?
         private var recordingError: String?
+        private var recordingSettingsDamaged = false
         private var recordingDirectory: URL!
         private var shownAppEntries: [String] = []
 
@@ -199,9 +200,11 @@ if let command = arguments.first {
             do {
                 recording = try RecordingController(vault: RecordingVault(directory: recordingDirectory))
                 recordingError = nil
+                recordingSettingsDamaged = false
             } catch {
                 recording = nil
                 recordingError = error.localizedDescription
+                recordingSettingsDamaged = error as? RecordingError == .damagedSettings
             }
         }
 
@@ -298,14 +301,19 @@ if let command = arguments.first {
             refresh()
         }
 
-        /// Erases every archived observation, including recovery from a damaged archive.
+        /// Erases every archived observation, including recovery from a damaged archive or settings file.
         @objc private func deleteData() {
-            guard confirmDeletion("Delete all captured observations?") else { return }
+            let resetSettings = recording == nil && recordingSettingsDamaged
+            let message = resetSettings
+                ? "Delete all captured observations and reset the unreadable allowed-app settings?"
+                : "Delete all captured observations?"
+            guard confirmDeletion(message) else { return }
             do {
                 if let recording {
                     try recording.deleteCapturedData()
                 } else {
-                    try RecordingVault.eraseArchiveWhileClosed(in: recordingDirectory)
+                    try RecordingVault.eraseArchiveWhileClosed(in: recordingDirectory,
+                                                               resettingSettings: resetSettings)
                     openRecording()
                 }
             }

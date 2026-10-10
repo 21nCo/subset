@@ -590,6 +590,23 @@ private enum TestStorageFailure: Error { case injected }
     XCTAssertTrue(try RecordingVault(directory: directory).observations.isEmpty)
   }
 
+  func testClosedEraseCanResetDamagedSettingsOnlyWhenRequested() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let settings = directory.appendingPathComponent("recording-settings.json")
+    try Data("malformed".utf8).write(to: settings)
+    try RecordingVault.eraseArchiveWhileClosed(in: directory)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: settings.path))
+    XCTAssertThrowsError(try RecordingVault(directory: directory)) { error in
+      XCTAssertEqual(error as? RecordingError, .damagedSettings)
+    }
+    try RecordingVault.eraseArchiveWhileClosed(in: directory, resettingSettings: true)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: settings.path))
+    let reopened = try RecordingVault(directory: directory)
+    XCTAssertEqual(reopened.settings.mode, .off)
+    XCTAssertTrue(reopened.settings.allowedApps.isEmpty)
+  }
+
   func testThrottleAndInvalidationFenceLateResult() {
     let gate = RecordingGate()
     let first = gate.begin(at: 100)

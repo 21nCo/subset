@@ -135,10 +135,17 @@ public enum RecordingError: Error, LocalizedError, Equatable {
 
     /// Erases a damaged archive only when no live recorder owns its directory.
     /// The owner must be closed first so it cannot restore deleted observations.
-    public static func eraseArchiveWhileClosed(in directory: URL) throws {
+    /// `resettingSettings` also removes unreadable settings, returning to Off with an empty allowlist.
+    public static func eraseArchiveWhileClosed(in directory: URL, resettingSettings: Bool = false) throws {
         let fd = try acquireLock(in: directory)
         defer { Darwin.close(fd) }
         let archive = directory.appendingPathComponent("captured-observations.json")
+        if resettingSettings {
+            let settings = directory.appendingPathComponent("recording-settings.json")
+            if FileManager.default.fileExists(atPath: settings.path) {
+                try FileManager.default.removeItem(at: settings)
+            }
+        }
         if FileManager.default.fileExists(atPath: archive.path) {
             try FileManager.default.removeItem(at: archive)
         }
