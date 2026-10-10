@@ -31,7 +31,9 @@ final class LauncherAppState: ObservableObject {
     private let emojiSearchService = EmojiSearchService()
     private let windowManagementService = WindowManagementService()
     private var fileSearchTask: Task<Void, Never>?
-    private var catalogTask: Task<Void, Never>?
+    private var initialFilesScan: Task<[SearchResult], Never>?
+    private var appsTask: Task<Void, Never>?
+    private var shortcutsTask: Task<Void, Never>?
 
     init() {
         quickNotes = persistenceController.fetchRecentNotes(limit: Self.quickNotesLimit)
@@ -44,31 +46,43 @@ final class LauncherAppState: ObservableObject {
 
     /// Lists recent Downloads/Desktop/Documents items off the main actor. Reading those folders
     /// can wait on a macOS privacy prompt, which must not block launch or the launcher panel.
-    /// Uses `fileSearchTask`, so a newer query search cancels it.
+    /// Uses `fileSearchTask`, so a newer query search cancels publishing. The folder scan itself
+    /// is single-flight: while one is running (possibly waiting on a prompt), later calls reuse it.
     private func loadInitialFiles() {
         fileSearchTask?.cancel()
+        let scan = initialFilesScan ?? Task.detached(priority: .userInitiated) {
+            FileSearchService().initialFiles()
+        }
+        initialFilesScan = scan
         fileSearchTask = Task { [weak self] in
-            let results = await Task.detached(priority: .userInitiated) {
-                FileSearchService().initialFiles()
-            }.value
+            let results = await scan.value
+            guard let self else { return }
+            if self.initialFilesScan == scan { self.initialFilesScan = nil }
             guard !Task.isCancelled else { return }
-            self?.files = results
+            self.files = results
         }
     }
 
-    /// Reloads apps and Siri Shortcuts off the main actor; `shortcuts list` can take a while.
+    /// Reloads apps and Siri Shortcuts off the main actor. They load independently, so a slow
+    /// `shortcuts list` neither delays app results nor blocks a later app refresh.
     private func refreshCatalogs() {
-        guard catalogTask == nil else { return }
-        let appSearchService = appSearchService
-        let shortcutSearchService = shortcutSearchService
-        catalogTask = Task { [weak self] in
-            async let loadedApps = Task.detached(priority: .utility) { appSearchService.loadApps() }.value
-            async let loadedShortcuts = Task.detached(priority: .utility) { shortcutSearchService.loadShortcuts() }.value
-            let (apps, shortcuts) = await (loadedApps, loadedShortcuts)
-            guard let self else { return }
-            self.apps = apps
-            self.shortcuts = shortcuts
-            self.catalogTask = nil
+        if appsTask == nil {
+            let appSearchService = appSearchService
+            appsTask = Task { [weak self] in
+                let apps = await Task.detached(priority: .utility) { appSearchService.loadApps() }.value
+                guard let self else { return }
+                self.apps = apps
+                self.appsTask = nil
+            }
+        }
+        if shortcutsTask == nil {
+            let shortcutSearchService = shortcutSearchService
+            shortcutsTask = Task { [weak self] in
+                let shortcuts = await Task.detached(priority: .utility) { shortcutSearchService.loadShortcuts() }.value
+                guard let self else { return }
+                self.shortcuts = shortcuts
+                self.shortcutsTask = nil
+            }
         }
     }
 

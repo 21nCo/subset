@@ -98,6 +98,19 @@ final class WindowManagementService {
 
     private func targetWindows() -> [WindowTarget] {
         let visibleTargets = visibleWindowTargets()
+
+        // The app that was frontmost when Launcher opened is the only valid target. If it has no
+        // on-screen window, target it anyway (the move then reports a failure) rather than a
+        // background app the user did not choose.
+        if let targetProcessIdentifier,
+           let rememberedApp = NSRunningApplication(processIdentifier: targetProcessIdentifier),
+           isEligibleTargetApplication(rememberedApp) {
+            let rememberedTargets = visibleTargets.filter { $0.app.processIdentifier == targetProcessIdentifier }
+            return rememberedTargets.isEmpty
+                ? [WindowTarget(app: rememberedApp, windowTitle: nil, windowFrame: nil)]
+                : rememberedTargets
+        }
+
         if !visibleTargets.isEmpty {
             return visibleTargets
         }

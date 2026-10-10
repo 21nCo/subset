@@ -648,9 +648,12 @@ private enum TimeConversionCalculator {
         // Say when the destination time falls on another calendar day.
         var destinationCalendar = Calendar(identifier: .gregorian)
         destinationCalendar.timeZone = destinationTimeZone
+        // Both sides use Gregorian components; `Calendar.current` may be Buddhist, Japanese, etc.
+        var sourceDayCalendar = Calendar(identifier: .gregorian)
+        sourceDayCalendar.timeZone = sourceTimeZone
         var dayCalendar = Calendar(identifier: .gregorian)
         dayCalendar.timeZone = TimeZone(identifier: "UTC") ?? .current
-        let sourceDay = dayCalendar.date(from: calendar.dateComponents([.year, .month, .day], from: sourceDate))
+        let sourceDay = dayCalendar.date(from: sourceDayCalendar.dateComponents([.year, .month, .day], from: sourceDate))
         let destinationDay = dayCalendar.date(from: destinationCalendar.dateComponents([.year, .month, .day], from: sourceDate))
         let dayOffset = sourceDay.flatMap { source in
             destinationDay.flatMap { dayCalendar.dateComponents([.day], from: source, to: $0).day }
