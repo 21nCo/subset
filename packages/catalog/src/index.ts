@@ -28,6 +28,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'breaks',
+    name: 'Breaks',
+    summary: 'Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
+  },
+  {
     id: 'minutes',
     name: 'Minutes',
     summary: 'Send a visible notetaker bot to a Google Meet or Zoom call and keep the meeting audio locally.',
