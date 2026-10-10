@@ -207,11 +207,13 @@ embed_phase.symbol_dst_subfolder_spec = :plug_ins
 end
 tests_target.add_dependency(app_target)
 
-# The gem points Foundation at one fixed iOS SDK version under DEVELOPER_DIR; make it relative to each
-# target's SDK so the path exists on any Xcode.
-project.files.select { |ref| ref.path.to_s.end_with?("Foundation.framework") }.each do |ref|
-  ref.path = "System/Library/Frameworks/Foundation.framework"
-  ref.source_tree = "SDKROOT"
+# The gem points Foundation and Cocoa at one fixed SDK version under DEVELOPER_DIR; make them relative to
+# each target's SDK so the path exists on any Xcode.
+%w[Foundation Cocoa].each do |name|
+  project.files.select { |ref| ref.path.to_s.end_with?("#{name}.framework") }.each do |ref|
+    ref.path = "System/Library/Frameworks/#{name}.framework"
+    ref.source_tree = "SDKROOT"
+  end
 end
 
 project.save
