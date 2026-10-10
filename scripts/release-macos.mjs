@@ -131,8 +131,8 @@ function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
-function main() {
-  const options = parseArgs(process.argv.slice(2));
+// Reads and checks the app's manifest and Xcode settings; returns what the build needs.
+function loadRelease(options) {
   const appDir = path.join(repoRoot, 'native', options.appId);
   const manifestPath = path.join(appDir, 'macos-release.json');
   if (!existsSync(manifestPath)) throw new Error(`Missing ${path.relative(repoRoot, manifestPath)}`);
@@ -142,8 +142,6 @@ function main() {
 
   const team = options.team ?? process.env.APPLE_TEAM_ID ?? manifest.team;
   if (!team || !teamPattern.test(team)) throw new Error('Set the Apple team ID with "team" in the manifest, --team, or APPLE_TEAM_ID');
-  // Resolve credentials before the slow build so a missing setup fails fast.
-  const authArgs = options.skipNotarize ? null : notaryAuthArgs(options);
 
   const project = path.join(appDir, manifest.project);
   const settings = JSON.parse(
@@ -159,18 +157,12 @@ function main() {
   if (options.version && options.version !== version) {
     throw new Error(`Requested version ${options.version} but ${manifest.scheme} has MARKETING_VERSION ${version}`);
   }
+  return { manifest, team, project, version };
+}
 
-  const outDir = path.resolve(options.out ?? path.join(repoRoot, 'dist', 'macos', options.appId, version));
-  const outDirProblem = unsafeOutDirReason(outDir, repoRoot, process.env.HOME);
-  if (outDirProblem) throw new Error(`Refusing to use ${outDir} as --out: ${outDirProblem}`);
-  // Only remove what this script writes; --out may be a folder with other files in it.
-  const workDir = path.join(outDir, '.release-macos-work');
-  const base = `${manifest.app.replace(/\s+/g, '-')}-${version}`;
-  const zipPath = path.join(outDir, `${base}.zip`);
-  const dmgPath = path.join(outDir, `${base}.dmg`);
-  for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
-  mkdirSync(workDir, { recursive: true });
-
+// Archives and exports the app with the Developer ID identity, then refuses anything not signed by this team's
+// Developer ID with the hardened runtime. Returns the exported app and its signature details.
+function buildSignedApp({ manifest, team, project }, workDir) {
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
   run('xcodebuild', [
     'archive',
@@ -208,23 +200,50 @@ function main() {
   const appPath = path.join(exportDir, `${manifest.app}.app`);
   if (!existsSync(appPath)) throw new Error(`Export did not produce ${manifest.app}.app`);
 
-  // Refuse to ship anything not signed by this team's Developer ID with the hardened runtime.
-  run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
+  run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   // codesign prints signature details on stderr.
-  const details = spawnSync('codesign', ['-dvv', appPath], { encoding: 'utf8' });
+  const details = spawnSync('/usr/bin/codesign', ['-dvv', appPath], { encoding: 'utf8' });
   if (details.status !== 0) throw new Error(`codesign -dvv failed: ${details.stderr.trim()}`);
   const signature = details.stdout + details.stderr;
   if (!signature.includes(`Authority=Developer ID Application:`) || !signature.includes(`TeamIdentifier=${team}`)) {
     throw new Error('App is not signed with a Developer ID Application certificate for the expected team');
   }
   if (!hasHardenedRuntime(signature)) throw new Error('App is not signed with the hardened runtime');
+  return { appPath, signature };
+}
+
+// Submits `submission` for notarization, then staples the ticket to `target` (an app is submitted as a zip but
+// stapled as the .app; a DMG is both).
+function notarizeAndStaple(submission, target, authArgs, workDir) {
+  notarize(submission, authArgs, workDir);
+  run('xcrun', ['stapler', 'staple', target]);
+  run('xcrun', ['stapler', 'validate', target]);
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const release = loadRelease(options);
+  const { manifest, version } = release;
+  // Resolve credentials before the slow build so a missing setup fails fast.
+  const authArgs = options.skipNotarize ? null : notaryAuthArgs(options);
+
+  const outDir = path.resolve(options.out ?? path.join(repoRoot, 'dist', 'macos', options.appId, version));
+  const outDirProblem = unsafeOutDirReason(outDir, repoRoot, process.env.HOME);
+  if (outDirProblem) throw new Error(`Refusing to use ${outDir} as --out: ${outDirProblem}`);
+  // Only remove what this script writes; --out may be a folder with other files in it.
+  const workDir = path.join(outDir, '.release-macos-work');
+  const base = `${manifest.app.replace(/\s+/g, '-')}-${version}`;
+  const zipPath = path.join(outDir, `${base}.zip`);
+  const dmgPath = path.join(outDir, `${base}.dmg`);
+  for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
+  mkdirSync(workDir, { recursive: true });
+
+  const { appPath, signature } = buildSignedApp(release, workDir);
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);
     run('ditto', ['-c', '-k', '--keepParent', appPath, submitZip]);
-    notarize(submitZip, authArgs, workDir);
-    run('xcrun', ['stapler', 'staple', appPath]);
-    run('xcrun', ['stapler', 'validate', appPath]);
+    notarizeAndStaple(submitZip, appPath, authArgs, workDir);
   }
 
   // The zip holds the stapled app, so it opens offline without a Gatekeeper lookup.
@@ -235,12 +254,10 @@ function main() {
   run('ditto', [appPath, path.join(dmgRoot, `${manifest.app}.app`)]);
   symlinkSync('/Applications', path.join(dmgRoot, 'Applications'));
   run('hdiutil', ['create', '-volname', manifest.app, '-srcfolder', dmgRoot, '-fs', 'HFS+', '-format', 'UDZO', '-ov', dmgPath]);
-  run('codesign', ['--sign', signingIdentity(signature), '--timestamp', dmgPath]);
+  run('/usr/bin/codesign', ['--sign', signingIdentity(signature), '--timestamp', dmgPath]);
 
   if (authArgs) {
-    notarize(dmgPath, authArgs, workDir);
-    run('xcrun', ['stapler', 'staple', dmgPath]);
-    run('xcrun', ['stapler', 'validate', dmgPath]);
+    notarizeAndStaple(dmgPath, dmgPath, authArgs, workDir);
     // Gatekeeper's own verdict on what a downloader gets.
     run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appPath]);
     run('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', '--verbose=4', dmgPath]);
