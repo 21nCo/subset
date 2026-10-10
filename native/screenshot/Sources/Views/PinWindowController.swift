@@ -67,10 +67,17 @@ private struct PinView: View {
             if hovering {
                 HStack(spacing: 4) {
                     Button { toggleLock() } label: { Image(systemName: locked ? "lock.fill" : "lock.open") }
+                        .help(locked ? "Unlock position" : "Lock position")
+                        .accessibilityLabel("Lock position")
+                        .accessibilityValue(locked ? "Locked" : "Unlocked")
                     Button {
                         NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects([image])
                     } label: { Image(systemName: "doc.on.doc") }
+                        .help("Copy to Clipboard")
+                        .accessibilityLabel("Copy to Clipboard")
                     Button(action: onClose) { Image(systemName: "xmark") }
+                        .help("Close")
+                        .accessibilityLabel("Close pin")
                 }
                 .buttonStyle(.plain)
                 .padding(7)

@@ -3,6 +3,7 @@ import Foundation
 
 struct ShortcutRegistration {
     let id: UInt32
+    let name: String
     let keyCode: UInt32
     let modifiers: UInt32
     let handler: () -> Void
@@ -15,8 +16,9 @@ final class GlobalShortcutMonitor {
     private var handlers: [UInt32: () -> Void] = [:]
     private var eventHandler: EventHandlerRef?
 
+    /// Registers the shortcuts and returns the names of any that could not be registered.
     @discardableResult
-    func start(_ registrations: [ShortcutRegistration]) -> Bool {
+    func start(_ registrations: [ShortcutRegistration]) -> [String] {
         stop()
         let eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: OSType(kEventHotKeyPressed))
         let status = InstallEventHandler(
@@ -43,7 +45,8 @@ final class GlobalShortcutMonitor {
             Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )
-        guard status == noErr else { return false }
+        guard status == noErr else { return registrations.map(\.name) }
+        var failed: [String] = []
 
         for registration in registrations {
             var ref: EventHotKeyRef?
@@ -59,9 +62,11 @@ final class GlobalShortcutMonitor {
             if result == noErr, let ref {
                 hotKeyRefs.append(ref)
                 handlers[registration.id] = registration.handler
+            } else {
+                failed.append(registration.name)
             }
         }
-        return !hotKeyRefs.isEmpty
+        return failed
     }
 
     func stop() {

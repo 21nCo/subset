@@ -34,7 +34,7 @@ final class RegionCaptureController {
         self.completion = completion
 
         for screen in NSScreen.screens {
-            let panel = NSPanel(
+            let panel = SelectionPanel(
                 contentRect: screen.frame,
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
@@ -59,6 +59,9 @@ final class RegionCaptureController {
             panel.makeFirstResponder(view)
         }
         NSApp.activate(ignoringOtherApps: true)
+        // Make the panel under the pointer key so Escape reaches its view.
+        let pointer = NSEvent.mouseLocation
+        (panels.first(where: { $0.frame.contains(pointer) }) ?? panels.first)?.makeKey()
     }
 
     func cancel() {
@@ -76,6 +79,11 @@ final class RegionCaptureController {
             callback?(rect)
         }
     }
+}
+
+/// Borderless windows cannot become key by default, which would keep Escape from cancelling.
+private final class SelectionPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 private final class RegionSelectionView: NSView {
@@ -120,13 +128,17 @@ private final class RegionSelectionView: NSView {
             if let snappedGlobalRect { onComplete?(snappedGlobalRect) }
             return
         }
+        window?.makeKey()
         dragStart = event.locationInWindow
         currentPoint = event.locationInWindow
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        currentPoint = event.locationInWindow
+        // One panel covers one display and a capture targets one display, so keep the
+        // selection on the display where the drag started.
+        let point = event.locationInWindow
+        currentPoint = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX), y: min(max(point.y, bounds.minY), bounds.maxY))
         needsDisplay = true
     }
 

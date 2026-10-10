@@ -50,17 +50,17 @@ export default {
       }
 
       if (url.pathname === "/api/uploads" && request.method === "POST") {
-        requireAuthorization(request, env);
+        await requireAuthorization(request, env);
         return cors(await createUpload(request, env, url));
       }
       if (url.pathname === "/api/uploads" && request.method === "GET") {
-        requireAuthorization(request, env);
+        await requireAuthorization(request, env);
         return cors(await listUploads(env));
       }
 
       const uploadMatch = url.pathname.match(/^\/api\/uploads\/([a-zA-Z0-9_-]+)$/);
       if (uploadMatch) {
-        requireAuthorization(request, env);
+        await requireAuthorization(request, env);
         if (request.method === "PATCH") return cors(await updateUpload(request, env, uploadMatch[1]));
         if (request.method === "DELETE") return cors(await deleteUpload(env, uploadMatch[1]));
       }
@@ -137,9 +137,12 @@ async function updateUpload(request: Request, env: Env, id: string): Promise<Res
   const name = payload.name === undefined ? current.name : sanitizeName(payload.name);
   const passwordHash = payload.password === undefined
     ? current.password_hash
-    : payload.password ? await sha256(payload.password) : null;
+    : payload.password ? await hashPassword(payload.password) : null;
   const expiresAt = payload.expiresAt === undefined ? current.expires_at : payload.expiresAt;
   if (expiresAt && Number.isNaN(Date.parse(expiresAt))) throw new HTTPError(400, "Invalid expiration date");
+  if (payload.tags !== undefined && (!Array.isArray(payload.tags) || payload.tags.some((tag) => typeof tag !== "string"))) {
+    throw new HTTPError(400, "Tags must be an array of strings");
+  }
   const tags = payload.tags === undefined ? current.tags : JSON.stringify(payload.tags.slice(0, 24).map(sanitizeName));
   const updatedAt = new Date().toISOString();
   await env.DB.prepare(
@@ -217,8 +220,11 @@ async function serveMedia(request: Request, env: Env, id: string, download: bool
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
-  headers.set("cache-control", row.password_hash ? "private, no-store" : "public, max-age=86400");
+  // Access can change at any time (expiry, a new password, deletion), so shared caches must
+  // never serve media without going back through verifyPublicAccess.
+  headers.set("cache-control", row.password_hash || row.expires_at ? "private, no-store" : "private, no-cache");
   headers.set("content-security-policy", "default-src 'none'");
+  headers.set("x-content-type-options", "nosniff");
   if (download) {
     headers.set("content-disposition", `attachment; filename="${asciiFileName(row.name)}.${row.extension}"`);
     await env.DB.prepare("UPDATE media SET downloads = downloads + 1 WHERE id = ?").bind(id).run();
@@ -246,13 +252,21 @@ async function verifyPublicAccess(row: MediaRow, url: URL): Promise<void> {
   }
 }
 
-function requireAuthorization(request: Request, env: Env): void {
+async function requireAuthorization(request: Request, env: Env): Promise<void> {
+  // Fail closed: a deployment without the secret must not accept `Bearer undefined`.
+  if (typeof env.UPLOAD_TOKEN !== "string" || env.UPLOAD_TOKEN.length === 0) {
+    throw new HTTPError(503, "Uploads are not configured");
+  }
   const header = request.headers.get("authorization") || "";
-  if (header !== `Bearer ${env.UPLOAD_TOKEN}`) throw new HTTPError(401, "Unauthorized");
+  if (!(await constantTimeEqual(header, `Bearer ${env.UPLOAD_TOKEN}`))) throw new HTTPError(401, "Unauthorized");
 }
 
 async function passwordMatches(row: MediaRow, password: string | null): Promise<boolean> {
-  return Boolean(password && row.password_hash && await sha256(password) === row.password_hash);
+  if (!password || !row.password_hash) return false;
+  const [scheme, iterations, salt, expected] = row.password_hash.split("$");
+  if (scheme !== "pbkdf2" || !iterations || !salt || !expected) return false;
+  const actual = await pbkdf2(password, hexToBytes(salt), Number(iterations));
+  return timingSafeEqualBytes(encoder.encode(actual), encoder.encode(expected));
 }
 
 function isExpired(row: MediaRow): boolean {
@@ -261,9 +275,10 @@ function isExpired(row: MediaRow): boolean {
 
 function parseRange(value: string, size: number): { offset: number; length: number } | undefined {
   const match = value.match(/^bytes=(\d*)-(\d*)$/);
-  if (!match) return undefined;
-  const start = match[1] ? Number(match[1]) : 0;
-  const end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+  if (!match || (!match[1] && !match[2])) return undefined;
+  // `bytes=-N` is a suffix range: the last N bytes (RFC 9110 section 14.1.1).
+  const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+  const end = match[1] && match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
   if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return undefined;
   return { offset: start, length: end - start + 1 };
 }
@@ -342,13 +357,49 @@ function cors(response: Response): Response {
   return next;
 }
 
-async function sha256(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+// Workers cap PBKDF2 at 100,000 iterations.
+const passwordIterations = 100_000;
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return `pbkdf2$${passwordIterations}$${bytesToHex(salt)}$${await pbkdf2(password, salt, passwordIterations)}`;
 }
 
+async function pbkdf2(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<string> {
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > passwordIterations) return "";
+  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256);
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function constantTimeEqual(left: string, right: string): Promise<boolean> {
+  // Hash both sides so the comparison runs over equal-length digests regardless of input length.
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(left)),
+    crypto.subtle.digest("SHA-256", encoder.encode(right)),
+  ]);
+  return timingSafeEqualBytes(new Uint8Array(a), new Uint8Array(b));
+}
+
+function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  let difference = 0;
+  for (let index = 0; index < a.byteLength; index += 1) difference |= a[index] ^ b[index];
+  return difference === 0;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const pairs = value.match(/^(?:[0-9a-f]{2})+$/i) ? value.match(/../g)! : [];
+  return new Uint8Array(pairs.map((pair) => parseInt(pair, 16)));
+}
+
+/** Share IDs are bearer secrets for unprotected links, so keep all 122 random bits of the UUID. */
 function compactID(): string {
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  return crypto.randomUUID().replace(/-/g, "");
 }
 
 function sanitizeName(value: string): string {

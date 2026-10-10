@@ -5,3 +5,4 @@ share-worker/.dev.vars
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 .DS_Store
+share-worker/.test-build/

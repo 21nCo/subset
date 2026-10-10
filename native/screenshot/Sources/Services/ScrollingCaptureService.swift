@@ -10,29 +10,41 @@ final class ScrollingCaptureService {
         self.captureService = captureService
     }
 
-    func capture(area: CGRect, frameCount: Int = 7) async -> NSImage? {
+    /// Fraction of the selection that each synthetic scroll advances. Stitching uses the same
+    /// fraction, so each frame contributes exactly the content the scroll revealed.
+    private let stepRatio: CGFloat = 0.66
+
+    func capture(area: CGRect, maximumFrames: Int = 40) async -> NSImage? {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else { return nil }
 
         var frames: [NSImage] = []
-        if let first = await captureService.capture(area: area) { frames.append(first) }
+        guard let first = await captureService.capture(area: area) else { return nil }
+        frames.append(first)
+        var previousData = first.tiffRepresentation
         let center = CGPoint(x: area.midX, y: area.midY)
+        let scrollPoints = max(1, (area.height * stepRatio).rounded(.down))
 
-        for _ in 1..<max(2, frameCount) {
+        // Scroll until the content stops changing (the bottom was reached) or the cap is hit.
+        while frames.count < max(2, maximumFrames) {
             guard let event = CGEvent(
                 scrollWheelEvent2Source: nil,
                 units: .pixel,
                 wheelCount: 1,
-                wheel1: -Int32(max(180, area.height * 0.62)),
+                wheel1: -Int32(scrollPoints),
                 wheel2: 0,
                 wheel3: 0
-            ) else { continue }
-            event.location = CGPoint(x: center.x, y: (NSScreen.screens.map(\.frame.maxY).max() ?? area.maxY) - center.y)
+            ) else { break }
+            event.location = CGPoint(x: center.x, y: ScreenCaptureService.primaryDisplayHeight - center.y)
             event.post(tap: .cghidEventTap)
             try? await Task.sleep(for: .milliseconds(360))
-            if let frame = await captureService.capture(area: area, remember: false) { frames.append(frame) }
+            guard let frame = await captureService.capture(area: area, remember: false) else { break }
+            let data = frame.tiffRepresentation
+            if data != nil, data == previousData { break }
+            previousData = data
+            frames.append(frame)
         }
-        return stitchVertically(frames, overlapRatio: 0.34)
+        return stitchVertically(frames, overlapRatio: 1 - stepRatio)
     }
 
     private func stitchVertically(_ images: [NSImage], overlapRatio: CGFloat) -> NSImage? {

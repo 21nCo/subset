@@ -21,12 +21,24 @@ final class OCRResultPanel {
 }
 
 private struct OCRResultView: View {
+    let original: String
     @State var text: String
+
+    init(text: String) {
+        original = text
+        _text = State(initialValue: text)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Copied to clipboard", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                if text == original {
+                    Label("Copied to clipboard", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Label("Edited; press Copy to update the clipboard", systemImage: "pencil.circle")
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Copy") {
                     NSPasteboard.general.clearContents()

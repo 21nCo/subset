@@ -22,9 +22,13 @@ final class ScreenCaptureService {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let resolved = displayID ?? displayUnderPointer() ?? CGMainDisplayID()
             guard let display = content.displays.first(where: { $0.displayID == resolved }) ?? content.displays.first else { return nil }
+            // SCDisplay reports points; capture at the display's backing scale.
+            let scale = NSScreen.screens.first(where: {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID
+            })?.backingScaleFactor ?? 1
             let configuration = SCStreamConfiguration()
-            configuration.width = display.width
-            configuration.height = display.height
+            configuration.width = Int(CGFloat(display.width) * scale)
+            configuration.height = Int(CGFloat(display.height) * scale)
             configuration.showsCursor = AppPreferences.shared.includeCursor
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
@@ -45,7 +49,7 @@ final class ScreenCaptureService {
             let configuration = SCStreamConfiguration()
             configuration.sourceRect = CGRect(
                 x: cocoaRect.minX - display.frame.minX,
-                y: globalDesktopHeight - cocoaRect.maxY - display.frame.minY,
+                y: Self.primaryDisplayHeight - cocoaRect.maxY - display.frame.minY,
                 width: cocoaRect.width,
                 height: cocoaRect.height
             )
@@ -70,7 +74,7 @@ final class ScreenCaptureService {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
-        let quartzPoint = CGPoint(x: cocoaPoint.x, y: globalDesktopHeight - cocoaPoint.y)
+        let quartzPoint = CGPoint(x: cocoaPoint.x, y: Self.primaryDisplayHeight - cocoaPoint.y)
         for window in windows {
             guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
                   let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
@@ -95,11 +99,14 @@ final class ScreenCaptureService {
             .map { CGDirectDisplayID($0.uint32Value) }
     }
 
-    private var globalDesktopHeight: CGFloat {
-        NSScreen.screens.map(\.frame.maxY).max() ?? NSScreen.main?.frame.height ?? 0
+    /// Quartz (CoreGraphics/ScreenCaptureKit) global coordinates have their origin at the
+    /// top-left of the primary display, so flipping Cocoa Y uses that display's height, not
+    /// the height of the whole desktop.
+    static var primaryDisplayHeight: CGFloat {
+        NSScreen.screens.first?.frame.maxY ?? NSScreen.main?.frame.height ?? 0
     }
 
     private func cocoaGlobalRect(from quartzRect: CGRect) -> CGRect {
-        CGRect(x: quartzRect.minX, y: globalDesktopHeight - quartzRect.maxY, width: quartzRect.width, height: quartzRect.height)
+        CGRect(x: quartzRect.minX, y: Self.primaryDisplayHeight - quartzRect.maxY, width: quartzRect.width, height: quartzRect.height)
     }
 }

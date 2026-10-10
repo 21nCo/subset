@@ -127,7 +127,12 @@ private struct QuickAccessView: View {
         .contextMenu {
             Button("Copy to Clipboard") { withRecord(appState.copy) }
             Button("Open Annotate") { withRecord(appState.openEditor) }
-            if appState.preferences.isCloudConfigured {
+            if let url = controller.uploadedURL {
+                // Already shared: copy the link instead of creating a second hosted copy.
+                Button("Copy Share Link") {
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                }
+            } else if appState.preferences.isCloudConfigured {
                 Button("Upload and Copy Link") { withRecord(appState.upload) }
             } else {
                 Button("Set Up Hosted Sharing…") { appState.showSettings(.cloud) }

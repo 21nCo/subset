@@ -45,7 +45,9 @@ app_target.build_configurations.each do |config|
     "GENERATE_INFOPLIST_FILE" => "NO",
     "INFOPLIST_FILE" => "MacApp/Info.plist",
     "LD_RUNPATH_SEARCH_PATHS" => ["$(inherited)", "@executable_path/../Frameworks"],
-    "MARKETING_VERSION" => "1.0",
+    "MARKETING_VERSION" => "1.0.0",
+    "CODE_SIGN_ENTITLEMENTS" => "MacApp/Screenshot.entitlements",
+    "ENABLE_HARDENED_RUNTIME" => "YES",
     "CURRENT_PROJECT_VERSION" => "1",
     "CODE_SIGN_STYLE" => "Automatic",
     "ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS" => "YES",
@@ -111,13 +113,22 @@ frameworks = %w[
 
 frameworks.each do |framework|
   ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}")
+  ref.source_tree = "SDKROOT"
   app_target.frameworks_build_phase.add_file_reference(ref)
+end
+
+# xcodeproj adds Cocoa.framework under DEVELOPER_DIR with a pinned SDK version; resolve it
+# through the selected SDK instead so the project builds with any installed macOS SDK.
+project.files.each do |ref|
+  next unless ref.path.to_s.end_with?("Cocoa.framework")
+  ref.path = "System/Library/Frameworks/Cocoa.framework"
+  ref.source_tree = "SDKROOT"
 end
 
 project.save
 
 scheme = Xcodeproj::XCScheme.new
-scheme.configure_with_targets(app_target, test_target)
+scheme.configure_with_targets(app_target, test_target, launch_target: true)
 scheme.save_as(project_path, "Screenshot", true)
 
 puts "Generated #{project_path}"

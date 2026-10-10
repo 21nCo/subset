@@ -5,7 +5,7 @@ import SwiftUI
 
 @MainActor
 final class VideoEditorWindowController {
-    private var controllers: [NSWindowController] = []
+    private var controllers: [ObjectIdentifier: (controller: NSWindowController, observer: NSObjectProtocol)] = [:]
 
     func show(url: URL) {
         let model = VideoEditorModel(url: url)
@@ -17,7 +17,16 @@ final class VideoEditorWindowController {
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        controllers.append(controller)
+        // Stop playback and release the player when the window closes.
+        let key = ObjectIdentifier(window)
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                model.close()
+                guard let self, let entry = self.controllers.removeValue(forKey: key) else { return }
+                NotificationCenter.default.removeObserver(entry.observer)
+            }
+        }
+        controllers[key] = (controller, observer)
     }
 }
 
@@ -29,6 +38,8 @@ private final class VideoEditorModel: ObservableObject {
     @Published var start: Double = 0
     @Published var end: Double = 1
     @Published var exporting = false
+    @Published var exportError: String?
+    private var boundaryObserver: Any?
 
     init(url: URL) {
         self.url = url
@@ -42,23 +53,56 @@ private final class VideoEditorModel: ObservableObject {
         }
     }
 
+    /// Plays from the selection start and pauses at the selection end.
+    func playSelection() {
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
+        let endTime = CMTime(seconds: end, preferredTimescale: 600)
+        boundaryObserver = player.addBoundaryTimeObserver(forTimes: [NSValue(time: endTime)], queue: .main) { [weak self] in
+            MainActor.assumeIsolated { self?.player.pause() }
+        }
+        player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.play()
+    }
+
+    func close() {
+        player.pause()
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
+        boundaryObserver = nil
+        player.replaceCurrentItem(with: nil)
+    }
+
     func export() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + " trimmed.mp4"
         guard panel.runModal() == .OK, let output = panel.url else { return }
         exporting = true
+        exportError = nil
         Task {
             defer { exporting = false }
             let asset = AVURLAsset(url: url)
-            guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else { return }
-            try? FileManager.default.removeItem(at: output)
-            let range = CMTimeRange(
+            guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+                exportError = "This video cannot be exported."
+                return
+            }
+            session.timeRange = CMTimeRange(
                 start: CMTime(seconds: start, preferredTimescale: 600),
                 duration: CMTime(seconds: max(0.1, end - start), preferredTimescale: 600)
             )
-            session.timeRange = range
-            try? await session.export(to: output, as: .mp4)
+            // Export to a temporary file and replace the destination only after success, so a
+            // failed export never deletes the file the user chose to overwrite.
+            let temporary = output.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).mp4")
+            do {
+                try await session.export(to: temporary, as: .mp4)
+                if FileManager.default.fileExists(atPath: output.path) {
+                    _ = try FileManager.default.replaceItemAt(output, withItemAt: temporary)
+                } else {
+                    try FileManager.default.moveItem(at: temporary, to: output)
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: temporary)
+                exportError = error.localizedDescription
+            }
         }
     }
 }
@@ -78,11 +122,11 @@ private struct VideoEditorView: View {
                 }
                 Slider(value: $model.end, in: min(model.duration, model.start + 0.1)...max(model.duration, model.start + 0.1))
                 HStack {
-                    Button("Play Selection") {
-                        model.player.seek(to: CMTime(seconds: model.start, preferredTimescale: 600))
-                        model.player.play()
-                    }
+                    Button("Play Selection", action: model.playSelection)
                     Spacer()
+                    if let error = model.exportError {
+                        Text("Export failed: \(error)").font(.caption).foregroundStyle(.red).lineLimit(2)
+                    }
                     if model.exporting { ProgressView().controlSize(.small) }
                     Button("Export Trimmed Video", action: model.export)
                         .buttonStyle(.borderedProminent)

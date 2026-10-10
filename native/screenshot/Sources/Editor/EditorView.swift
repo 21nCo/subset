@@ -42,6 +42,7 @@ struct EditorView: View {
             if session.selectedTool == .text {
                 TextField("Text", text: $session.textDraft).frame(width: 180)
                     .onSubmit { session.updateSelectedText(session.textDraft) }
+                    .accessibilityLabel("Annotation text")
             }
             Spacer()
             Menu("Background") {
@@ -97,11 +98,13 @@ struct EditorView: View {
 
     @MainActor
     private func renderedImage() -> NSImage? {
+        // Render at the capture's own size (plus the canvas padding EditorCanvas applies) and at
+        // the image's pixel density, so Copy and Export keep every source pixel.
         let base = session.image.size
-        let padding = session.background.style == .transparent ? 24 : session.background.padding
-        let target = CGSize(width: min(1800, max(640, base.width + padding * 2)), height: min(1200, max(420, base.height + padding * 2)))
-        let renderer = ImageRenderer(content: EditorCanvas(session: session).frame(width: target.width, height: target.height))
-        renderer.scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
+        let padding = session.background.style == .transparent ? 24 : max(24, session.background.padding)
+        let target = CGSize(width: base.width + padding * 2, height: base.height + padding * 2)
+        let renderer = ImageRenderer(content: EditorCanvas(session: session, showsSelection: false).frame(width: target.width, height: target.height))
+        renderer.scale = max(1, session.image.pixelSize.width / max(1, base.width))
         return renderer.nsImage
     }
 

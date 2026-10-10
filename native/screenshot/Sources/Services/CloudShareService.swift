@@ -52,7 +52,7 @@ final class CloudShareService {
         guard !preferences.uploadToken.isEmpty else { throw CloudShareError.missingToken }
         let fileURL = FileManager.default.fileExists(atPath: record.fileURL.path) ? record.fileURL : record.thumbnailURL
         guard let fileURL else { throw CocoaError(.fileNoSuchFile) }
-        let data = try Data(contentsOf: fileURL)
+        let byteCount = (try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
 
         var components = URLComponents(url: baseURL.appendingPathComponent("api/uploads"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "name", value: record.displayName)]
@@ -60,14 +60,14 @@ final class CloudShareService {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.httpBody = data
         request.timeoutInterval = 180
         request.setValue("Bearer \(preferences.uploadToken)", forHTTPHeaderField: "Authorization")
         request.setValue(mimeType(for: fileURL), forHTTPHeaderField: "Content-Type")
         request.setValue(fileURL.pathExtension, forHTTPHeaderField: "X-File-Extension")
-        request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
+        request.setValue(String(byteCount), forHTTPHeaderField: "Content-Length")
 
-        let (responseData, response) = try await session.data(for: request)
+        // Stream from disk: recordings can be hundreds of megabytes.
+        let (responseData, response) = try await session.upload(for: request, fromFile: fileURL)
         guard let http = response as? HTTPURLResponse else { throw CloudShareError.invalidResponse }
         guard 200..<300 ~= http.statusCode else {
             throw CloudShareError.rejected(http.statusCode, String(data: responseData, encoding: .utf8) ?? "Unknown error")
@@ -76,7 +76,13 @@ final class CloudShareService {
     }
 
     @MainActor
-    func update(id: String, password: String?, expiresAt: Date?, tags: [String], preferences: AppPreferences) async throws {
+    func update(
+        id: String,
+        password: ShareFieldChange<String>,
+        expiresAt: ShareFieldChange<Date>,
+        tags: [String],
+        preferences: AppPreferences
+    ) async throws {
         guard let baseURL = Self.validatedBaseURL(preferences.cloudBaseURL) else { throw CloudShareError.invalidBaseURL }
         guard !preferences.uploadToken.isEmpty else { throw CloudShareError.missingToken }
         var request = URLRequest(url: baseURL.appendingPathComponent("api/uploads/\(id)"))
@@ -110,19 +116,18 @@ final class CloudShareService {
         }
     }
 
-    private struct UpdatePayload: Encodable {
-        let password: String?
-        let expiresAt: Date?
+    struct UpdatePayload: Encodable {
+        let password: ShareFieldChange<String>
+        let expiresAt: ShareFieldChange<Date>
         let tags: [String]
 
         enum CodingKeys: String, CodingKey { case password, expiresAt, tags }
 
+        /// The Worker keeps a field that is absent and clears one that is `null`.
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
-            if let password { try container.encode(password, forKey: .password) }
-            else { try container.encodeNil(forKey: .password) }
-            if let expiresAt { try container.encode(expiresAt, forKey: .expiresAt) }
-            else { try container.encodeNil(forKey: .expiresAt) }
+            try password.encode(in: &container, forKey: .password)
+            try expiresAt.encode(in: &container, forKey: .expiresAt)
             try container.encode(tags, forKey: .tags)
         }
     }
@@ -132,6 +137,21 @@ final class CloudShareService {
         guard let http = response as? HTTPURLResponse else { throw CloudShareError.invalidResponse }
         guard 200..<300 ~= http.statusCode else {
             throw CloudShareError.rejected(http.statusCode, String(data: data, encoding: .utf8) ?? "Unknown error")
+        }
+    }
+}
+
+/// An edit to one share setting: leave it as stored, remove it, or replace it.
+enum ShareFieldChange<Value: Encodable & Equatable>: Equatable {
+    case keep
+    case clear
+    case set(Value)
+
+    func encode<Key: CodingKey>(in container: inout KeyedEncodingContainer<Key>, forKey key: Key) throws {
+        switch self {
+        case .keep: break
+        case .clear: try container.encodeNil(forKey: key)
+        case let .set(value): try container.encode(value, forKey: key)
         }
     }
 }

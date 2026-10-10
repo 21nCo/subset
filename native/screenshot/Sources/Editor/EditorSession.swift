@@ -1,10 +1,13 @@
 import AppKit
+import CoreImage
 import Foundation
 import SwiftUI
 
 @MainActor
 final class EditorSession: ObservableObject {
-    @Published var image: NSImage
+    @Published var image: NSImage {
+        didSet { pixelatedCache = [:] }
+    }
     @Published var annotations: [AnnotationItem] = []
     @Published var selectedTool: AnnotationTool = .arrow
     @Published var selectedColor: Color = .purple
@@ -25,6 +28,10 @@ final class EditorSession: ObservableObject {
     private var activeID: UUID?
     private var selectionStart: CGPoint?
     private var selectionOriginal: AnnotationItem?
+    /// The text annotation whose current edit already has an undo entry.
+    private var textEditID: UUID?
+    private var pixelatedCache: [CGFloat: NSImage] = [:]
+    private static let ciContext = CIContext()
 
     init(image: NSImage, record: CaptureRecord?) {
         self.image = image
@@ -144,8 +151,30 @@ final class EditorSession: ObservableObject {
     }
 
     func updateSelectedText(_ text: String) {
-        guard let selectedAnnotationID, let index = annotations.firstIndex(where: { $0.id == selectedAnnotationID }) else { return }
+        guard let selectedAnnotationID, let index = annotations.firstIndex(where: { $0.id == selectedAnnotationID }),
+              annotations[index].text != text else { return }
+        // One undo entry per editing pass on an annotation, not one per keystroke.
+        if textEditID != selectedAnnotationID {
+            snapshot()
+            textEditID = selectedAnnotationID
+        }
         annotations[index].text = text
+    }
+
+    /// The image run through CIPixellate, cached per scale because the canvas redraws often.
+    func pixelatedImage(scale: CGFloat) -> NSImage? {
+        if let cached = pixelatedCache[scale] { return cached }
+        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let filter = CIFilter(name: "CIPixellate") else { return nil }
+        let input = CIImage(cgImage: source)
+        filter.setValue(input, forKey: kCIInputImageKey)
+        filter.setValue(scale, forKey: kCIInputScaleKey)
+        filter.setValue(CIVector(x: input.extent.midX, y: input.extent.midY), forKey: kCIInputCenterKey)
+        guard let output = filter.outputImage?.cropped(to: input.extent),
+              let cgImage = Self.ciContext.createCGImage(output, from: input.extent) else { return nil }
+        let result = NSImage(cgImage: cgImage, size: image.size)
+        pixelatedCache[scale] = result
+        return result
     }
 
     func combine(with other: NSImage) {
@@ -173,6 +202,7 @@ final class EditorSession: ObservableObject {
     }
 
     private func snapshot() {
+        textEditID = nil
         undoStack.append(currentSnapshot())
         if undoStack.count > 100 { undoStack.removeFirst() }
         redoStack = []
@@ -184,17 +214,19 @@ final class EditorSession: ObservableObject {
 
     private func restore(_ snapshot: Snapshot) {
         image = snapshot.image.copy() as? NSImage ?? snapshot.image
+        textEditID = nil
         annotations = snapshot.annotations
         background = snapshot.background
         selectedAnnotationID = nil
     }
 
-    private func crop(to normalizedRect: CGRect) {
+    func crop(to normalizedRect: CGRect) {
         guard normalizedRect.width > 0.01, normalizedRect.height > 0.01,
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         let pixelRect = CGRect(
             x: normalizedRect.minX * CGFloat(cgImage.width),
-            y: (1 - normalizedRect.maxY) * CGFloat(cgImage.height),
+            // Normalized editor coordinates and CGImage rows both start at the top.
+            y: normalizedRect.minY * CGFloat(cgImage.height),
             width: normalizedRect.width * CGFloat(cgImage.width),
             height: normalizedRect.height * CGFloat(cgImage.height)
         ).integral

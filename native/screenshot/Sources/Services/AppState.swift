@@ -27,62 +27,80 @@ final class AppState: ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var lastError: String?
     @Published var uploadProgress: Double?
+    /// Global shortcuts that macOS refused to register at launch.
+    @Published var unavailableShortcuts: [String] = []
     var presentsErrors = true
 
-    func captureArea(action: AfterCaptureAction? = nil) {
+    func captureArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
+        // Read the source app before the selection overlay activates Screenshot.
+        let source = captureService.activeApplicationMetadata()
         regionController.select(mode: .area) { [weak self] rect in
             guard let self, let rect else { return }
             Task {
-                guard let image = await self.captureService.capture(area: rect) else { return }
-                self.finishImage(image, kind: .area, forcedAction: action)
+                guard let image = await self.captureService.capture(area: rect) else {
+                    self.showError(Self.captureFailedMessage)
+                    return
+                }
+                self.finishImage(image, kind: .area, forcedAction: action, allowsUpload: allowsUpload, source: source)
             }
         }
     }
 
-    func captureWindow(action: AfterCaptureAction? = nil) {
+    func captureWindow(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
+        let source = captureService.activeApplicationMetadata()
         regionController.select(mode: .window) { [weak self] rect in
             guard let self, let rect else { return }
             Task {
-                guard let image = await self.captureService.capture(area: rect) else { return }
-                self.finishImage(image, kind: .window, forcedAction: action)
+                guard let image = await self.captureService.capture(area: rect) else {
+                    self.showError(Self.captureFailedMessage)
+                    return
+                }
+                self.finishImage(image, kind: .window, forcedAction: action, allowsUpload: allowsUpload, source: source)
             }
         }
     }
 
-    func captureFullscreen(action: AfterCaptureAction? = nil, preferredDirectory: URL? = nil) {
+    func captureFullscreen(action: AfterCaptureAction? = nil, preferredDirectory: URL? = nil, allowsUpload: Bool = true) {
+        let source = captureService.activeApplicationMetadata()
         Task {
             guard let image = await captureService.captureFullscreen() else {
                 showError("Screen access is required before Screenshot can capture the display.")
                 return
             }
-            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory)
+            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory, allowsUpload: allowsUpload, source: source)
         }
     }
 
-    func capturePreviousArea(action: AfterCaptureAction? = nil) {
+    func capturePreviousArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
+        let source = captureService.activeApplicationMetadata()
         Task {
             guard let image = await captureService.capturePreviousArea() else {
                 showError("Capture an area first, then use Capture Previous Area.")
                 return
             }
-            finishImage(image, kind: .previousArea, forcedAction: action)
+            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source)
         }
     }
 
     func captureWithTimer(seconds: Int = 5) {
+        let source = captureService.activeApplicationMetadata()
         regionController.select(mode: .area) { [weak self] rect in
             guard let self, let rect else { return }
             SelfTimerOverlay.shared.start(seconds: seconds) { [weak self] in
                 guard let self else { return }
                 Task {
-                    guard let image = await self.captureService.capture(area: rect) else { return }
-                    self.finishImage(image, kind: .area, forcedAction: nil)
+                    guard let image = await self.captureService.capture(area: rect) else {
+                        self.showError(Self.captureFailedMessage)
+                        return
+                    }
+                    self.finishImage(image, kind: .area, forcedAction: nil, source: source)
                 }
             }
         }
     }
 
-    func captureScrolling() {
+    func captureScrolling(allowsUpload: Bool = true) {
+        let source = captureService.activeApplicationMetadata()
         regionController.select(mode: .scrolling) { [weak self] rect in
             guard let self, let rect else { return }
             Task {
@@ -90,7 +108,7 @@ final class AppState: ObservableObject {
                     self.showError("Automatic scrolling needs Accessibility and Screen Recording permission.")
                     return
                 }
-                self.finishImage(image, kind: .scrolling, forcedAction: nil)
+                self.finishImage(image, kind: .scrolling, forcedAction: nil, allowsUpload: allowsUpload, source: source)
             }
         }
     }
@@ -99,9 +117,17 @@ final class AppState: ObservableObject {
         regionController.select(mode: .text) { [weak self] rect in
             guard let self, let rect else { return }
             Task {
-                guard let image = await self.captureService.capture(area: rect, remember: false) else { return }
+                guard let image = await self.captureService.capture(area: rect, remember: false) else {
+                    self.showError(Self.captureFailedMessage)
+                    return
+                }
                 do {
                     let result = try await self.ocrService.recognize(image: image, preserveLineBreaks: preserveLineBreaks)
+                    // Leave the user's clipboard alone when nothing was recognized.
+                    guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        self.showError("No text was recognized in the selected area.")
+                        return
+                    }
                     self.ocrService.copyToClipboard(result.text)
                     OCRResultPanel.shared.show(text: result.text)
                 } catch {
@@ -122,11 +148,7 @@ final class AppState: ObservableObject {
         Task {
             do {
                 let result = try await recordingService.stop()
-                isRecording = false
-                recordingDuration = 0
-                recordingControlsController?.hide()
-                cameraController?.hide()
-                inputOverlayController?.stop()
+                tearDownRecordingUI()
                 guard let result else { return }
                 let record = try history.saveRecording(at: result.url, kind: result.format == .gif ? .gif : .recording, pixelSize: result.pixelSize)
                 quickAccessController?.show(record: record, image: result.thumbnail)
@@ -134,10 +156,18 @@ final class AppState: ObservableObject {
                     videoEditorController?.show(url: result.url)
                 }
             } catch {
-                isRecording = false
+                tearDownRecordingUI()
                 showError(error.localizedDescription)
             }
         }
+    }
+
+    private func tearDownRecordingUI() {
+        isRecording = false
+        recordingDuration = 0
+        recordingControlsController?.hide()
+        cameraController?.hide()
+        inputOverlayController?.stop()
     }
 
     func recordFullscreen(
@@ -150,8 +180,11 @@ final class AppState: ObservableObject {
             return
         }
         let directory = preferredDirectory ?? preferences.exportDirectory
-        let destination = directory.appendingPathComponent(preferences.formattedFileName(suffix: "Recording") + ".mp4")
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = HistoryStore.uniqueURL(
+            in: directory,
+            fileName: preferences.formattedFileName(suffix: "Recording") + ".mp4",
+            reservingExtensions: format == .gif ? ["gif"] : []
+        )
 
         Task {
             do {
@@ -224,7 +257,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    func updateShare(record: CaptureRecord, password: String?, expiresAt: Date?, tags: [String]) async throws {
+    func updateShare(
+        record: CaptureRecord,
+        password: ShareFieldChange<String>,
+        expiresAt: ShareFieldChange<Date>,
+        tags: [String]
+    ) async throws {
         guard let cloudID = record.cloudID else { return }
         try await cloudService.update(
             id: cloudID,
@@ -255,15 +293,24 @@ final class AppState: ObservableObject {
 
     private func beginRecording(area: CGRect, format: RecordingFormat) async {
         do {
-            let destination = preferences.exportDirectory.appendingPathComponent(
-                preferences.formattedFileName() + "." + (format == .gif ? "mp4" : "mp4")
+            // Both formats record to an MP4 first; GIF is converted from it when recording stops.
+            // A unique name keeps earlier recordings (and their history entries) intact.
+            let destination = HistoryStore.uniqueURL(
+                in: preferences.exportDirectory,
+                fileName: preferences.formattedFileName() + ".mp4",
+                reservingExtensions: format == .gif ? ["gif"] : []
             )
+            recordingService.onUnexpectedStop = { [weak self] in self?.stopRecording() }
             try await recordingService.start(area: area, destination: destination, format: format, preferences: preferences)
             isRecording = true
             if preferences.showRecordingControls { recordingControlsController?.show(area: area) }
             if preferences.showCamera { cameraController?.show() }
             if preferences.showKeystrokes || preferences.highlightClicks {
-                inputOverlayController?.start(showKeystrokes: preferences.showKeystrokes, highlightClicks: preferences.highlightClicks)
+                inputOverlayController?.start(
+                    showKeystrokes: preferences.showKeystrokes,
+                    highlightClicks: preferences.highlightClicks,
+                    area: area
+                )
             }
         } catch {
             showError(error.localizedDescription)
@@ -274,18 +321,22 @@ final class AppState: ObservableObject {
         _ image: NSImage,
         kind: CaptureKind,
         forcedAction: AfterCaptureAction?,
-        preferredDirectory: URL? = nil
+        preferredDirectory: URL? = nil,
+        allowsUpload: Bool = true,
+        source: (application: String?, window: String?)
     ) {
         do {
-            let metadata = captureService.activeApplicationMetadata()
+            var actions = forcedAction.map { Set([$0]) } ?? preferences.afterCaptureActions
+            if !allowsUpload { actions.remove(.upload) }
             let record = try history.saveImage(
                 image,
                 kind: kind,
                 preferredDirectory: preferredDirectory,
-                sourceApplication: metadata.application,
-                sourceWindow: metadata.window
+                // An explicit directory (automation) always saves; otherwise honor the Save action.
+                savesToExportLocation: actions.contains(.save) || preferredDirectory != nil,
+                sourceApplication: source.application,
+                sourceWindow: source.window
             )
-            let actions = forcedAction.map { Set([$0]) } ?? preferences.afterCaptureActions
             if actions.contains(.copy) { copy(record: record) }
             if actions.contains(.annotate) { openEditor(image: image, record: record) }
             if actions.contains(.upload) { upload(record: record) }
@@ -295,6 +346,8 @@ final class AppState: ObservableObject {
             showError(error.localizedDescription)
         }
     }
+
+    private static let captureFailedMessage = "The capture failed. Check that Screenshot has Screen Recording permission in System Settings > Privacy & Security."
 
     func showError(_ message: String) {
         lastError = message

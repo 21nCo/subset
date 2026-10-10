@@ -6,15 +6,15 @@ Screenshot is a native macOS menu-bar app for capturing, annotating, and sharing
 
 **User outcome:** capture an area, window, display, scrolling region, or recording; mark it up; then copy, save, pin, or (optionally) share it, without leaving the current app.
 
-**Source of truth:** the user's screen through ScreenCaptureKit and CoreGraphics. Captures are written to the chosen export folder (Desktop by default) and indexed in `~/Library/Application Support/dev.subset.screenshot/history.json` with thumbnails under `Media/`. Editable annotations are saved as `.ssproject` JSON files (UTType `dev.subset.screenshot.project`). Nothing leaves the Mac unless the user configures a share Worker and chooses Upload.
+**Source of truth:** the user's screen through ScreenCaptureKit and CoreGraphics. Captures are written to the chosen export folder (Desktop by default) and indexed in `~/Library/Application Support/dev.subset.screenshot/history.json` with thumbnails under `Media/`. Editable annotations are saved as `.ssproject` JSON files (UTType `dev.subset.screenshot.project`); reopening a saved project in Annotate is not implemented yet. When "Save to Export Location" is off, a capture is kept only in the history archive. Nothing leaves the Mac unless the user configures a share Worker and chooses Upload.
 
 **Explicit operations**
 
 | Operation | Kind | Entry points |
 | --- | --- | --- |
-| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts, `subset-screenshot://` URLs |
-| Record screen (MP4) or GIF | read (screen, optional mic/camera) + local write | menu bar, ⌥⇧R, URLs |
-| Capture text (OCR via Vision) | read + clipboard write | ⌥⇧O, URL |
+| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts (⌃⌥S, ⌃⌥⇧S), `subset-screenshot://` URLs |
+| Record screen (MP4) or GIF | read (screen, optional mic/camera) + local write | menu bar, ⌃⌥⇧R, URLs |
+| Capture text (OCR via Vision) | read + clipboard write | ⌃⌥⇧O, URL |
 | Annotate (arrow, line, rectangle, ellipse, pencil, highlighter, text, pixelate, blur, spotlight, counter, crop, background) | local edit | Quick Access, History, menu |
 | Copy, save, export, pin, restore last capture | local write | Quick Access, editor, History |
 | Upload, update share (password, expiry, tags), delete hosted copy | **mutation on a remote service**; needs a user-configured Worker URL and upload token | Quick Access, History |
@@ -60,11 +60,16 @@ xcodebuild -project Screenshot.xcodeproj -scheme Screenshot \
 
 No `DEVELOPMENT_TEAM` is set. To run with stable TCC grants, open the project in Xcode and pick your own signing team. The app is an `LSUIElement` menu-bar app (viewfinder icon).
 
+### Release
+
+`macos-release.json` opts the `Screenshot` scheme into the signed Developer ID release flow described in [docs/macos-release.md](../../docs/macos-release.md). The hardened-runtime build carries `MacApp/Screenshot.entitlements` (camera and microphone input, both unrestricted). A signed, un-notarized build was verified locally; nothing has been notarized or published.
+
 ### Permissions
 
 - **Screen Recording**: required for every capture and recording. macOS prompts on first capture; Settings > General links to System Settings.
 - **Accessibility**: scrolling capture (synthetic scroll) and keystroke/click display while recording.
-- **Microphone / Camera**: only when narration or the camera overlay is enabled in Recording settings.
+- **Microphone**: only when narration is enabled in Recording settings. Microphone capture uses ScreenCaptureKit's microphone output, which needs macOS 15 or later; on macOS 14 recordings have no narration.
+- **Camera**: only when the camera overlay is enabled in Recording settings.
 - **Keychain**: the optional upload token is stored under service `dev.subset.screenshot.cloud`.
 
 ## UI/UX changes in this port
@@ -77,6 +82,8 @@ Informed by CleanShot X (Quick Access overlay with configurable auto-close, filt
 4. **Editor keyboard shortcuts.** ⌘Z / ⇧⌘Z undo/redo, ⌘S save project, ⇧⌘C copy image, ⌘E export, ⌘⌫ delete the selected annotation, with tooltips and accessibility labels on icon-only controls and the selected-tool trait on the tool bar.
 5. **Shortcut discoverability.** Settings > Shortcuts lists global shortcuts, editor shortcuts, and the `subset-screenshot://` automation URLs, and states that rebinding is not implemented.
 6. **History empty states.** An empty history shows the capture shortcuts and a Capture Area button; a search or filter with no results offers "Clear Filters". Hover actions have labels and tooltips.
+
+Global shortcuts include Control because macOS 15 rejects hot keys whose only modifiers are Option or Option-Shift; shortcuts that fail to register are reported at launch and in Settings > Shortcuts. Captures started from a `subset-screenshot://` URL never run the Upload after-capture action, because any web page or app can open those URLs.
 
 Global shortcut rebinding, a multi-display Quick Access position choice, and swipe gestures are competitor features that remain unimplemented.
 

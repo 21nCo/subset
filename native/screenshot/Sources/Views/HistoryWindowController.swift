@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 @MainActor
@@ -62,7 +63,7 @@ private struct HistoryView: View {
                 ContentUnavailableView {
                     Label("No Captures Yet", systemImage: "camera.viewfinder")
                 } description: {
-                    Text("Screenshots and recordings appear here. Press ⌥S to capture an area or ⌥⇧S to capture a window.")
+                    Text("Screenshots and recordings appear here. Press ⌃⌥S to capture an area or ⌃⌥⇧S to capture a window.")
                 } actions: {
                     Button("Capture Area") { appState.captureArea() }
                 }
@@ -104,6 +105,7 @@ private struct HistoryCard: View {
     @ObservedObject var appState: AppState
     @State private var hovering = false
     @State private var managingShare = false
+    @State private var image: NSImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -155,13 +157,28 @@ private struct HistoryCard: View {
             Button("Delete", role: .destructive) { appState.history.delete(record) }
         }
         .onTapGesture(count: 2) { appState.openEditor(record: record) }
+        // Decode a small thumbnail once, off the main actor, instead of the full file per render.
+        .task(id: record.fileURL) { image = await Self.thumbnail(for: record) }
         .sheet(isPresented: $managingShare) {
             CloudShareManagerView(record: record, appState: appState)
         }
     }
 
-    private var image: NSImage? {
-        NSImage(contentsOf: record.fileURL) ?? record.thumbnailURL.flatMap(NSImage.init(contentsOf:))
+    private static func thumbnail(for record: CaptureRecord) async -> NSImage? {
+        let candidates = [record.fileURL, record.thumbnailURL].compactMap { $0 }
+        let cgImage = await Task.detached(priority: .utility) { () -> CGImage? in
+            for url in candidates {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { continue }
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 480,
+                ]
+                if let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) { return thumbnail }
+            }
+            return nil
+        }.value
+        return cgImage.map { NSImage(cgImage: $0, size: .zero) }
     }
 
     private func cardButton(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
@@ -172,12 +189,15 @@ private struct HistoryCard: View {
     }
 }
 
+private enum ExpirationChange: Hashable { case keep, never, date }
+
 private struct CloudShareManagerView: View {
     let record: CaptureRecord
     @ObservedObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var password = ""
-    @State private var expires = false
+    @State private var removePassword = false
+    @State private var expirationChange = ExpirationChange.keep
     @State private var expiration = Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date()
     @State private var tags = ""
     @State private var isWorking = false
@@ -204,10 +224,16 @@ private struct CloudShareManagerView: View {
             }
             GroupBox("Access") {
                 VStack(alignment: .leading, spacing: 12) {
-                    SecureField("New password (leave blank for none)", text: $password)
+                    SecureField("New password (leave blank to keep the current one)", text: $password)
                         .textFieldStyle(.roundedBorder)
-                    Toggle("Expire this link", isOn: $expires)
-                    if expires { DatePicker("Expiration", selection: $expiration, in: Date()...) }
+                        .disabled(removePassword)
+                    Toggle("Remove password", isOn: $removePassword)
+                    Picker("Expiration", selection: $expirationChange) {
+                        Text("Keep current").tag(ExpirationChange.keep)
+                        Text("Never expire").tag(ExpirationChange.never)
+                        Text("Expire on date").tag(ExpirationChange.date)
+                    }
+                    if expirationChange == .date { DatePicker("Expires", selection: $expiration, in: Date()...) }
                 }.padding(4)
             }
             GroupBox("Organization") {
@@ -245,11 +271,12 @@ private struct CloudShareManagerView: View {
             do {
                 try await appState.updateShare(
                     record: record,
-                    password: password.isEmpty ? nil : password,
-                    expiresAt: expires ? expiration : nil,
+                    password: removePassword ? .clear : (password.isEmpty ? .keep : .set(password)),
+                    expiresAt: expirationChange == .keep ? .keep : (expirationChange == .never ? .clear : .set(expiration)),
                     tags: parsedTags
                 )
                 status = "Share settings updated."
+                password = ""
             } catch { status = error.localizedDescription }
             isWorking = false
         }

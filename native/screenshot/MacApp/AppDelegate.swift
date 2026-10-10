@@ -23,13 +23,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appState.settingsOpener = { [weak self] tab in self?.showSettings(tab: tab) }
         statusMenuController = StatusMenuController(appState: appState)
 
-        GlobalShortcutMonitor.shared.start([
-            ShortcutRegistration(id: 1, keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(optionKey), handler: { [weak self] in self?.appState.captureArea() }),
-            ShortcutRegistration(id: 2, keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(optionKey | shiftKey), handler: { [weak self] in self?.appState.captureWindow() }),
-            ShortcutRegistration(id: 3, keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(optionKey | shiftKey), handler: { [weak self] in self?.appState.startRecording() }),
-            ShortcutRegistration(id: 4, keyCode: UInt32(kVK_ANSI_O), modifiers: UInt32(optionKey | shiftKey), handler: { [weak self] in self?.appState.captureText() }),
-            ShortcutRegistration(id: 5, keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(optionKey | shiftKey), handler: { [weak self] in self?.appState.openHistory() })
+        // macOS 15 rejects hot keys whose only modifiers are Option or Option-Shift, so every
+        // default includes Control. Failures are reported instead of silently dropped.
+        let failedShortcuts = GlobalShortcutMonitor.shared.start([
+            ShortcutRegistration(id: 1, name: "Capture Area (⌃⌥S)", keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey), handler: { [weak self] in self?.appState.captureArea() }),
+            ShortcutRegistration(id: 2, name: "Capture Window (⌃⌥⇧S)", keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.captureWindow() }),
+            ShortcutRegistration(id: 3, name: "Record Screen (⌃⌥⇧R)", keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.startRecording() }),
+            ShortcutRegistration(id: 4, name: "Capture Text (⌃⌥⇧O)", keyCode: UInt32(kVK_ANSI_O), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.captureText() }),
+            ShortcutRegistration(id: 5, name: "Capture History (⌃⌥⇧H)", keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.openHistory() })
         ])
+        appState.unavailableShortcuts = failedShortcuts
+        if !failedShortcuts.isEmpty, ProcessInfo.processInfo.arguments.count <= 1 {
+            DispatchQueue.main.async { [weak self] in
+                self?.appState.showError("These global shortcuts could not be registered, usually because another app already uses them: \(failedShortcuts.joined(separator: ", ")). Use the menu bar icon instead.")
+            }
+        }
 
         let arguments = ProcessInfo.processInfo.arguments
         handleLaunchActions(arguments)
@@ -257,11 +265,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard url.scheme?.lowercased() == "subset-screenshot" else { return }
         let action = (url.host ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))).lowercased()
         switch action {
-        case "all-in-one", "capture-area": appState.captureArea()
-        case "capture-window": appState.captureWindow()
-        case "capture-fullscreen": appState.captureFullscreen()
-        case "capture-previous-area": appState.capturePreviousArea()
-        case "scrolling-capture": appState.captureScrolling()
+        // Any web page or app can open these URLs, so URL-triggered captures never run the
+        // Upload after-capture action; the user can still upload from Quick Access or History.
+        case "all-in-one", "capture-area": appState.captureArea(allowsUpload: false)
+        case "capture-window": appState.captureWindow(allowsUpload: false)
+        case "capture-fullscreen": appState.captureFullscreen(allowsUpload: false)
+        case "capture-previous-area": appState.capturePreviousArea(allowsUpload: false)
+        case "scrolling-capture": appState.captureScrolling(allowsUpload: false)
         case "record-screen": appState.startRecording()
         case "record-gif": appState.startRecording(format: .gif)
         case "capture-text": appState.captureText()

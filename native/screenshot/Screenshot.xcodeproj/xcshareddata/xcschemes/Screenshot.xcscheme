@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "0793D57755709E1F6EB1DEEC"
+               BlueprintIdentifier = "6C856B2511ED06DB62E32293"
                BuildableName = "Screenshot.app"
                BlueprintName = "Screenshot"
                ReferencedContainer = "container:Screenshot.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2893817957B61376D5F356EF"
+               BlueprintIdentifier = "6958FF53ECC1E98FDE1AED26"
                BuildableName = "ScreenshotTests.xctest"
                BlueprintName = "ScreenshotTests"
                ReferencedContainer = "container:Screenshot.xcodeproj">
@@ -41,12 +41,21 @@
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "6C856B2511ED06DB62E32293"
+            BuildableName = "Screenshot.app"
+            BlueprintName = "Screenshot"
+            ReferencedContainer = "container:Screenshot.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
       <Testables>
          <TestableReference
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2893817957B61376D5F356EF"
+               BlueprintIdentifier = "6958FF53ECC1E98FDE1AED26"
                BuildableName = "ScreenshotTests.xctest"
                BlueprintName = "ScreenshotTests"
                ReferencedContainer = "container:Screenshot.xcodeproj">
@@ -64,6 +73,16 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "6C856B2511ED06DB62E32293"
+            BuildableName = "Screenshot.app"
+            BlueprintName = "Screenshot"
+            ReferencedContainer = "container:Screenshot.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -71,6 +90,16 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "6C856B2511ED06DB62E32293"
+            BuildableName = "Screenshot.app"
+            BlueprintName = "Screenshot"
+            ReferencedContainer = "container:Screenshot.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

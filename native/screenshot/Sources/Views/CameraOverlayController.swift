@@ -5,17 +5,25 @@ import AppKit
 final class CameraOverlayController {
     private var panel: NSPanel?
     private var session: AVCaptureSession?
+    /// Incremented by `hide()`, so a permission answer that arrives after recording stopped
+    /// does not open the overlay.
+    private var generation = 0
 
     func show() {
         hide()
         guard AVCaptureDevice.authorizationStatus(for: .video) != .denied else { return }
+        let requested = generation
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard granted else { return }
-            Task { @MainActor in self?.startSession() }
+            Task { @MainActor in
+                guard let self, self.generation == requested else { return }
+                self.startSession()
+            }
         }
     }
 
     func hide() {
+        generation += 1
         session?.stopRunning()
         session = nil
         panel?.orderOut(nil)

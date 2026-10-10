@@ -33,6 +33,7 @@ final class HistoryStore: ObservableObject {
         _ image: NSImage,
         kind: CaptureKind,
         preferredDirectory: URL? = nil,
+        savesToExportLocation: Bool = true,
         sourceApplication: String? = nil,
         sourceWindow: String? = nil
     ) throws -> CaptureRecord {
@@ -40,11 +41,17 @@ final class HistoryStore: ObservableObject {
         let id = UUID()
         let extensionName = preferences.imageFormat.lowercased() == "jpeg" ? "jpg" : "png"
         let fileName = preferences.formattedFileName(at: Date()) + "." + extensionName
-        let exportURL = uniqueURL(in: preferredDirectory ?? preferences.exportDirectory, fileName: fileName)
         let archiveURL = mediaDirectory.appendingPathComponent("\(id.uuidString).\(extensionName)")
         let data = try image.encodedData(format: extensionName, quality: preferences.jpegQuality)
-        try data.write(to: exportURL, options: .atomic)
         try data.write(to: archiveURL, options: .atomic)
+        // Without the Save action the capture lives only in the history archive.
+        let exportURL: URL
+        if savesToExportLocation {
+            exportURL = Self.uniqueURL(in: preferredDirectory ?? preferences.exportDirectory, fileName: fileName, fileManager: fileManager)
+            try data.write(to: exportURL, options: .atomic)
+        } else {
+            exportURL = archiveURL
+        }
 
         let pixels = image.pixelSize
         let record = CaptureRecord(
@@ -94,6 +101,7 @@ final class HistoryStore: ObservableObject {
         )
         records.insert(record, at: 0)
         persist()
+        pruneExpired()
         return record
     }
 
@@ -167,15 +175,28 @@ final class HistoryStore: ObservableObject {
         persist()
     }
 
-    private func uniqueURL(in directory: URL, fileName: String) -> URL {
+    /// Returns a path in `directory` that does not overwrite an existing file. When
+    /// `reservingExtensions` is set, the same base name must also be free with each of those
+    /// extensions (a GIF recording is converted next to its intermediate MP4).
+    nonisolated static func uniqueURL(
+        in directory: URL,
+        fileName: String,
+        reservingExtensions: [String] = [],
+        fileManager: FileManager = .default
+    ) -> URL {
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let proposed = directory.appendingPathComponent(fileName)
-        guard fileManager.fileExists(atPath: proposed.path) else { return proposed }
         let base = proposed.deletingPathExtension().lastPathComponent
         let ext = proposed.pathExtension
+        let isFree: (URL) -> Bool = { candidate in
+            ([ext] + reservingExtensions).allSatisfy { other in
+                !fileManager.fileExists(atPath: candidate.deletingPathExtension().appendingPathExtension(other).path)
+            }
+        }
+        if isFree(proposed) { return proposed }
         for index in 2...10_000 {
             let candidate = directory.appendingPathComponent("\(base) \(index).\(ext)")
-            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+            if isFree(candidate) { return candidate }
         }
         return directory.appendingPathComponent("\(UUID().uuidString).\(ext)")
     }

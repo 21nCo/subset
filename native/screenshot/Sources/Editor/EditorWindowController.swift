@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 final class EditorWindowController {
     private let appState: AppState
-    private var controllers: [NSWindowController] = []
+    private var controllers: [ObjectIdentifier: (controller: NSWindowController, observer: NSObjectProtocol)] = [:]
 
     init(appState: AppState) {
         self.appState = appState
@@ -21,7 +21,14 @@ final class EditorWindowController {
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        controllers.append(controller)
-        controllers.removeAll { $0.window == nil }
+        // Release the session (image plus undo snapshots) when its window closes.
+        let key = ObjectIdentifier(window)
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let entry = self.controllers.removeValue(forKey: key) else { return }
+                NotificationCenter.default.removeObserver(entry.observer)
+            }
+        }
+        controllers[key] = (controller, observer)
     }
 }

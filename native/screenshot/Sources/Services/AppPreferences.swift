@@ -101,8 +101,7 @@ final class AppPreferences: ObservableObject {
     @Published var cloudBaseURL: String { didSet { defaults.set(cloudBaseURL, forKey: Key.cloudBaseURL) } }
     @Published var uploadToken: String {
         didSet {
-            Self.storeUploadToken(uploadToken)
-            defaults.removeObject(forKey: Key.uploadToken)
+            if Self.storeUploadToken(uploadToken) { defaults.removeObject(forKey: Key.uploadToken) }
         }
     }
     @Published var selectedSettingsTab: SettingsTab { didSet { defaults.set(selectedSettingsTab.rawValue, forKey: Key.selectedSettingsTab) } }
@@ -134,8 +133,8 @@ final class AppPreferences: ObservableObject {
         cloudBaseURL = defaults.string(forKey: Key.cloudBaseURL) ?? ""
         let migratedToken = defaults.string(forKey: Key.uploadToken)
         uploadToken = Self.storedUploadToken() ?? migratedToken ?? ""
-        if let migratedToken, !migratedToken.isEmpty {
-            Self.storeUploadToken(migratedToken)
+        // Keep the legacy defaults copy until the Keychain write succeeds.
+        if let migratedToken, !migratedToken.isEmpty, Self.storeUploadToken(migratedToken) {
             defaults.removeObject(forKey: Key.uploadToken)
         }
         selectedSettingsTab = SettingsTab(rawValue: defaults.string(forKey: Key.selectedSettingsTab) ?? "general") ?? .general
@@ -185,15 +184,16 @@ final class AppPreferences: ObservableObject {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func storeUploadToken(_ token: String) {
+    @discardableResult
+    private static func storeUploadToken(_ token: String) -> Bool {
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: tokenService,
             kSecAttrAccount as String: tokenAccount,
         ]
         if token.isEmpty {
-            SecItemDelete(identity as CFDictionary)
-            return
+            let status = SecItemDelete(identity as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
         }
         let attributes: [String: Any] = [
             kSecValueData as String: Data(token.utf8),
@@ -203,7 +203,9 @@ final class AppPreferences: ObservableObject {
         if status == errSecItemNotFound {
             var item = identity
             attributes.forEach { item[$0.key] = $0.value }
-            SecItemAdd(item as CFDictionary, nil)
+            return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
         }
+        if status != errSecSuccess { NSLog("Screenshot: storing the upload token in the Keychain failed (%d)", status) }
+        return status == errSecSuccess
     }
 }

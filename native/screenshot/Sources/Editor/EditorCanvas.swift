@@ -4,7 +4,10 @@ import SwiftUI
 
 struct EditorCanvas: View {
     @ObservedObject var session: EditorSession
+    /// False when rendering for Copy/Export, so editor chrome stays out of the image.
+    var showsSelection = true
     @State private var dragStart: CGPoint?
+    @State private var ignoresDrag = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -22,19 +25,26 @@ struct EditorCanvas: View {
                     let normalized = normalize(value.location, in: rect)
                     if dragStart == nil {
                         dragStart = value.location
+                        // A drag that starts in the margin would clamp to the image edge; ignore it.
+                        ignoresDrag = !rect.insetBy(dx: -1, dy: -1).contains(value.location)
+                        if ignoresDrag { return }
                         if session.selectedTool == .select { session.beginSelection(at: normalized) }
                         else { session.begin(at: normalized) }
-                    } else {
+                    } else if !ignoresDrag {
                         if session.selectedTool == .select { session.updateSelection(to: normalized) }
                         else { session.update(to: normalized) }
                     }
                 }
                 .onEnded { value in
+                    defer {
+                        dragStart = nil
+                        ignoresDrag = false
+                    }
+                    guard !ignoresDrag else { return }
                     let rect = fittedImageRect(canvasSize: canvas)
                     let normalized = normalize(value.location, in: rect)
                     if session.selectedTool == .select { session.endSelection(at: normalized) }
                     else { session.end(at: normalized) }
-                    dragStart = nil
                 }
             )
             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -69,7 +79,8 @@ struct EditorCanvas: View {
         let rect = CGRect(origin: .zero, size: size)
         switch session.background.style {
         case .transparent:
-            context.fill(Path(rect), with: .color(Color(nsColor: .controlBackgroundColor)))
+            // Leave the padding unfilled so Copy and Export keep the alpha channel.
+            break
         case .solid:
             context.fill(Path(rect), with: .color(Color(nsColor: session.background.primaryColor.nsColor)))
         case .gradient, .wallpaper:
@@ -114,7 +125,7 @@ struct EditorCanvas: View {
         case .text:
             context.draw(Text(item.text).font(.system(size: max(14, item.lineWidth * 6), weight: .semibold)).foregroundStyle(color), at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
         case .pixelate:
-            if let filtered = pixelatedImage(scale: max(7, item.lineWidth * 3)) {
+            if let filtered = session.pixelatedImage(scale: max(7, item.lineWidth * 3)) {
                 context.drawLayer { layer in
                     layer.clip(to: Path(rect))
                     layer.draw(Image(nsImage: filtered), in: imageRect)
@@ -142,7 +153,7 @@ struct EditorCanvas: View {
             break
         }
 
-        if session.selectedAnnotationID == item.id {
+        if showsSelection, session.selectedAnnotationID == item.id {
             context.stroke(Path(rect.insetBy(dx: -4, dy: -4)), with: .color(.white.opacity(0.8)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
     }
@@ -153,17 +164,5 @@ struct EditorCanvas: View {
 
     private func denormalize(_ normalized: CGRect, in rect: CGRect) -> CGRect {
         CGRect(x: rect.minX + normalized.minX * rect.width, y: rect.minY + normalized.minY * rect.height, width: normalized.width * rect.width, height: normalized.height * rect.height)
-    }
-
-    private func pixelatedImage(scale: CGFloat) -> NSImage? {
-        guard let source = session.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let filter = CIFilter(name: "CIPixellate") else { return nil }
-        let input = CIImage(cgImage: source)
-        filter.setValue(input, forKey: kCIInputImageKey)
-        filter.setValue(scale, forKey: kCIInputScaleKey)
-        filter.setValue(CIVector(x: input.extent.midX, y: input.extent.midY), forKey: kCIInputCenterKey)
-        guard let output = filter.outputImage?.cropped(to: input.extent),
-              let image = CIContext().createCGImage(output, from: input.extent) else { return nil }
-        return NSImage(cgImage: image, size: session.image.size)
     }
 }

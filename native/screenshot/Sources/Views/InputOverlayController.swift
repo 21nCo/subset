@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 @MainActor
@@ -8,9 +9,16 @@ final class InputOverlayController: ObservableObject {
     private var keyPanel: NSPanel?
     private var clearTask: Task<Void, Never>?
 
-    func start(showKeystrokes: Bool, highlightClicks: Bool) {
+    private var area: CGRect?
+
+    func start(showKeystrokes: Bool, highlightClicks: Bool, area: CGRect? = nil) {
         stop()
-        if showKeystrokes {
+        self.area = area
+        // Global key-event monitors receive nothing without Accessibility trust; ask for it
+        // instead of showing an overlay that silently never appears.
+        if showKeystrokes, !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) {
+            NSLog("Screenshot: keystroke display needs Accessibility permission")
+        } else if showKeystrokes {
             let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
                 Task { @MainActor in self?.show(event: event) }
             }
@@ -73,10 +81,17 @@ final class InputOverlayController: ObservableObject {
 
     private func ensureKeyPanel() {
         guard keyPanel == nil else { return }
-        let visible = NSScreen.main?.visibleFrame ?? .zero
-        let frame = CGRect(x: visible.midX - 170, y: visible.minY + 90, width: 340, height: 68)
+        // Keep the keystrokes inside the recorded area so they appear in the recording.
+        let frame: CGRect
+        if let area, area.width >= 360, area.height >= 120 {
+            frame = CGRect(x: area.midX - 170, y: area.minY + 24, width: 340, height: 68)
+        } else {
+            let visible = NSScreen.main?.visibleFrame ?? .zero
+            frame = CGRect(x: visible.midX - 170, y: visible.minY + 90, width: 340, height: 68)
+        }
         let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
+        panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
         panel.backgroundColor = .clear

@@ -57,7 +57,7 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         permissionRow("Screen Recording", granted: screenRecordingGranted, pane: "Privacy_ScreenCapture")
                         permissionRow("Accessibility (scrolling capture and keystrokes only)", granted: accessibilityGranted, pane: "Privacy_Accessibility")
-                        Text("Try it: press ⌥S to capture an area, or open the menu bar icon.")
+                        Text("Try it: press ⌃⌥S to capture an area, or open the menu bar icon.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -75,12 +75,12 @@ struct SettingsView: View {
                 HStack {
                     Text("Keep captures for")
                     Spacer()
-                    Picker("", selection: $preferences.historyDays) {
+                    Picker("Keep captures for", selection: $preferences.historyDays) {
                         Text("1 day").tag(1)
                         Text("1 week").tag(7)
                         Text("1 month").tag(30)
                         Text("Forever").tag(36_500)
-                    }.frame(width: 150)
+                    }.labelsHidden().frame(width: 150)
                 }
             }
         }
@@ -89,7 +89,6 @@ struct SettingsView: View {
     private var wallpaper: some View {
         settingsGroup("Desktop capture") {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Hide desktop icons while capturing", isOn: $preferences.hideDesktopIcons)
                 Text("Window captures can be placed on a wallpaper in the Annotate Background tool.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 12) {
@@ -105,17 +104,21 @@ struct SettingsView: View {
         VStack(spacing: 14) {
             settingsGroup("Global shortcuts") {
                 VStack(alignment: .leading, spacing: 0) {
-                    shortcutRow("Capture Area", "⌥S")
+                    shortcutRow("Capture Area", "⌃⌥S")
                     Divider()
-                    shortcutRow("Capture Window", "⌥⇧S")
+                    shortcutRow("Capture Window", "⌃⌥⇧S")
                     Divider()
-                    shortcutRow("Record Screen", "⌥⇧R")
+                    shortcutRow("Record Screen", "⌃⌥⇧R")
                     Divider()
-                    shortcutRow("Capture Text", "⌥⇧O")
+                    shortcutRow("Capture Text", "⌃⌥⇧O")
                     Divider()
-                    shortcutRow("Capture History", "⌥⇧H")
+                    shortcutRow("Capture History", "⌃⌥⇧H")
                     Text("These shortcuts work from any app. They are fixed in this build; rebinding is not implemented yet.")
                         .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
+                    if !appState.unavailableShortcuts.isEmpty {
+                        Text("Not registered (another app may use them): \(appState.unavailableShortcuts.joined(separator: ", ")).")
+                            .font(.caption).foregroundStyle(.orange).padding(.top, 4)
+                    }
                 }
             }
             settingsGroup("Annotate editor") {
@@ -155,12 +158,12 @@ struct SettingsView: View {
                     HStack {
                         Text("Close automatically")
                         Spacer()
-                        Picker("", selection: $preferences.quickAccessAutoCloseSeconds) {
+                        Picker("Close automatically", selection: $preferences.quickAccessAutoCloseSeconds) {
                             Text("Never").tag(0)
                             Text("After 5 seconds").tag(5)
                             Text("After 10 seconds").tag(10)
                             Text("After 30 seconds").tag(30)
-                        }.frame(width: 170)
+                        }.labelsHidden().frame(width: 170)
                     }
                     Text("Hovering over the overlay pauses the countdown.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -206,10 +209,10 @@ struct SettingsView: View {
                     HStack {
                         Text("Format")
                         Spacer()
-                        Picker("", selection: $preferences.imageFormat) {
+                        Picker("Format", selection: $preferences.imageFormat) {
                             Text("PNG").tag("png")
                             Text("JPEG").tag("jpeg")
-                        }.frame(width: 120)
+                        }.labelsHidden().frame(width: 120)
                     }
                     HStack {
                         Text("File name")
@@ -306,12 +309,19 @@ struct SettingsView: View {
                 .resizable().frame(width: 96, height: 96)
                 .accessibilityHidden(true)
             Text("Screenshot").font(.system(size: 28, weight: .bold, design: .rounded))
-            Text("Version 1.0 (1)").foregroundStyle(.secondary)
+            Text(versionString).foregroundStyle(.secondary)
             Text("Native capture, recording, annotation, OCR, history, pinning, and hosted sharing for macOS.")
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 56)
+    }
+
+    private var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "Version \(version) (\(build))"
     }
 
     private func settingsGroup<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
