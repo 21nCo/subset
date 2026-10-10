@@ -102,9 +102,12 @@ final class WindowManagementService {
         // The app that was frontmost when Launcher opened is the only valid target. If it has no
         // on-screen window, target it anyway (the move then reports a failure) rather than a
         // background app the user did not choose.
-        if let targetProcessIdentifier,
-           let rememberedApp = NSRunningApplication(processIdentifier: targetProcessIdentifier),
-           isEligibleTargetApplication(rememberedApp) {
+        // If that app has quit, there is no valid target.
+        if let targetProcessIdentifier {
+            guard let rememberedApp = NSRunningApplication(processIdentifier: targetProcessIdentifier),
+                  isEligibleTargetApplication(rememberedApp) else {
+                return []
+            }
             let rememberedTargets = visibleTargets.filter { $0.app.processIdentifier == targetProcessIdentifier }
             return rememberedTargets.isEmpty
                 ? [WindowTarget(app: rememberedApp, windowTitle: nil, windowFrame: nil)]
@@ -229,21 +232,22 @@ final class WindowManagementService {
         }
 
         candidates.append(contentsOf: windows(from: appElement))
+        candidates = candidates.deduplicatedAXElements()
 
-        let movableCandidates = candidates.deduplicatedAXElements().filter { isMovableWindow($0) }
-
-        if let title,
-           !title.isEmpty,
-           let titleMatch = movableCandidates.first(where: { stringAttribute(kAXTitleAttribute, from: $0) == title }) {
-            return titleMatch
+        // Pick the one intended window (the on-screen match, else the focused/main/front window).
+        // If it cannot be moved, return nil so the command reports a failure instead of moving a
+        // different window.
+        var intended: AXUIElement?
+        if let title, !title.isEmpty {
+            intended = candidates.first { stringAttribute(kAXTitleAttribute, from: $0) == title }
         }
-
-        if let approximateFrame,
-           let frameMatch = movableCandidates.first(where: { frameDistance(currentFrame(for: $0), approximateFrame) < 80 }) {
-            return frameMatch
+        if intended == nil, let approximateFrame {
+            intended = candidates.first { frameDistance(currentFrame(for: $0), approximateFrame) < 80 }
         }
-
-        return movableCandidates.first
+        guard let window = intended ?? candidates.first, isMovableWindow(window) else {
+            return nil
+        }
+        return window
     }
 
     private func isMovableWindow(_ window: AXUIElement) -> Bool {
