@@ -20,6 +20,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'clipboard',
+    name: 'Clipboard',
+    summary: 'Keep a private, searchable history of everything you copy, and paste any earlier item back on the Mac or from an iPhone keyboard.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
+  },
+  {
     id: 'screenshot',
     name: 'Screenshot',
     summary: 'Capture, record, annotate, and pin what is on screen from the macOS menu bar, with optional self-hosted share links.',
