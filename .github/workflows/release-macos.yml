@@ -39,6 +39,19 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:
+      # The environment's tag policy is checked against github.ref, so the code that runs with the signing
+      # secrets must be that ref. A manual run must be dispatched from the tag it names.
+      - name: Check the release tag
+        run: |
+          case "$RELEASE_TAG" in
+            macos/*/v*.*.*) ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z>." >&2; exit 1 ;;
+          esac
+          if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
+            echo "Run this workflow from tag $RELEASE_TAG (Use workflow from), not $GITHUB_REF." >&2
+            exit 1
+          fi
+
       # A manual run builds the requested tag, never the branch it was dispatched from.
       - name: Checkout release tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -86,8 +99,10 @@ jobs:
           keychain="$RUNNER_TEMP/release.keychain-db"
           keychain_password="$(openssl rand -base64 32)"
           security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
+          # No auto-lock: notarization can wait longer than an hour before the DMG is signed.
+          security set-keychain-settings "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          umask 077
           printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/xcodebuild
           rm -f "$RUNNER_TEMP/cert.p12"
@@ -116,13 +131,6 @@ jobs:
           node scripts/release-macos.mjs "${{ steps.tag.outputs.app_id }}"
           --version "${{ steps.tag.outputs.version }}"
           --out "$RUNNER_TEMP/release"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-${{ steps.tag.outputs.app_id }}-${{ steps.tag.outputs.version }}
-          path: ${{ steps.build.outputs.out_dir }}
-          if-no-files-found: error
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.

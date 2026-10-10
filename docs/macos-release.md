@@ -1,6 +1,6 @@
 # Signed macOS releases
 
-`scripts/release-macos.mjs` turns one native app into a download that opens on another Mac without Gatekeeper warnings: it archives the app with the team's **Developer ID Application** certificate and the hardened runtime, exports it, checks the signature, notarizes and staples the app, then builds, signs, notarizes, and staples a DMG. It writes `<App>-<version>.dmg`, `<App>-<version>.zip` (the stapled app), and `SHA256SUMS`. It never uploads or publishes anything.
+`scripts/release-macos.mjs` turns one native app into a download that passes Gatekeeper's signature and notarization checks on another Mac, with no untrusted-developer warning: it archives the app with the team's **Developer ID Application** certificate and the hardened runtime, exports it, checks the signature, notarizes and staples the app, then builds, signs, notarizes, and staples a DMG. It writes `<App>-<version>.dmg`, `<App>-<version>.zip` (the stapled app), and `SHA256SUMS`. It never uploads or publishes anything. `--out` may be an existing folder: the script replaces only its own files there (the DMG, the zip, `SHA256SUMS`, and a temporary `.release-macos-work` folder) and refuses the filesystem root, the home folder, and any folder containing the repository.
 
 ## Opting an app in
 
@@ -40,6 +40,6 @@ node scripts/release-macos.mjs breaks --notary-profile subset-notary   # dist/ma
 node scripts/release-macos.mjs breaks --skip-notarize                  # signed-only build to test signing
 ```
 
-From CI, push a tag `macos/<app-id>/v<version>` (the version must equal `MARKETING_VERSION`), or run **Release macOS app** manually with that tag. The slashes keep these tags out of the npm `publish-tag.yml` trigger. The workflow uploads the files as a build artifact and attaches them to a **draft** GitHub Release.
+From CI, push a tag `macos/<app-id>/v<version>` (the version must equal `MARKETING_VERSION`), or run **Release macOS app** manually from that tag (choose the tag under *Use workflow from* and enter the same tag; the run fails if they differ, so the environment's tag policy always covers the code that runs). The slashes keep these tags out of the npm `publish-tag.yml` trigger. The workflow attaches the files to a **draft** GitHub Release only; it uploads no public workflow artifact.
 
 A draft is not a release. Before publishing it and before any catalog `availableSurfaces` entry or landing page links it (see [AGENTS.md](../AGENTS.md)): download the DMG on a Mac that has never run the app, confirm it opens without a Gatekeeper prompt beyond the standard "downloaded from the internet" notice, check the checksum, and run the app's first-launch and permission flows.

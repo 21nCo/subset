@@ -42,6 +42,28 @@ export function validateManifest(manifest, appId) {
   return problems;
 }
 
+// codesign lists every CodeDirectory flag, e.g. flags=0x12000(library-validation,runtime).
+export function hasHardenedRuntime(signature) {
+  return /flags=0x[0-9a-f]+\(([^)]*)\)/.exec(signature)?.[1].split(',').includes('runtime') ?? false;
+}
+
+// Pick the build settings of the app the manifest names, not just the first .app in the scheme.
+export function selectAppSettings(settings, appName) {
+  return settings.find(
+    (entry) => entry.buildSettings?.WRAPPER_EXTENSION === 'app' && entry.buildSettings?.FULL_PRODUCT_NAME === `${appName}.app`
+  )?.buildSettings;
+}
+
+// The script clears release files inside --out; refuse folders where a typo would be costly.
+export function unsafeOutDirReason(outDir, repoRoot, home) {
+  const resolved = path.resolve(outDir);
+  if (resolved === path.parse(resolved).root) return 'it is the filesystem root';
+  if (home && resolved === path.resolve(home)) return 'it is the home folder';
+  const root = path.resolve(repoRoot);
+  if (resolved === root || root.startsWith(resolved + path.sep)) return 'it contains the repository';
+  return null;
+}
+
 export function parseArgs(argv) {
   const options = { skipNotarize: false };
   const rest = [];
@@ -127,17 +149,26 @@ function main() {
   const settings = JSON.parse(
     run('xcodebuild', ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS'], { capture: true })
   );
-  const appSettings = settings.find((entry) => entry.buildSettings?.WRAPPER_EXTENSION === 'app')?.buildSettings;
-  if (!appSettings) throw new Error(`Scheme ${manifest.scheme} does not build an .app`);
+  const appSettings = selectAppSettings(settings, manifest.app);
+  if (!appSettings) throw new Error(`Scheme ${manifest.scheme} does not build ${manifest.app}.app`);
   if (appSettings.PLATFORM_NAME !== 'macosx') throw new Error(`Scheme ${manifest.scheme} builds for ${appSettings.PLATFORM_NAME}, not macOS`);
   const version = appSettings.MARKETING_VERSION;
+  if (!versionPattern.test(version ?? '')) {
+    throw new Error(`${manifest.scheme} must set MARKETING_VERSION as x.y.z, got ${JSON.stringify(version)}`);
+  }
   if (options.version && options.version !== version) {
     throw new Error(`Requested version ${options.version} but ${manifest.scheme} has MARKETING_VERSION ${version}`);
   }
 
   const outDir = path.resolve(options.out ?? path.join(repoRoot, 'dist', 'macos', options.appId, version));
-  const workDir = path.join(outDir, 'work');
-  rmSync(outDir, { recursive: true, force: true });
+  const outDirProblem = unsafeOutDirReason(outDir, repoRoot, process.env.HOME);
+  if (outDirProblem) throw new Error(`Refusing to use ${outDir} as --out: ${outDirProblem}`);
+  // Only remove what this script writes; --out may be a folder with other files in it.
+  const workDir = path.join(outDir, '.release-macos-work');
+  const base = `${manifest.app.replace(/\s+/g, '-')}-${version}`;
+  const zipPath = path.join(outDir, `${base}.zip`);
+  const dmgPath = path.join(outDir, `${base}.dmg`);
+  for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
 
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
@@ -184,11 +215,7 @@ function main() {
   if (!signature.includes(`Authority=Developer ID Application:`) || !signature.includes(`TeamIdentifier=${team}`)) {
     throw new Error('App is not signed with a Developer ID Application certificate for the expected team');
   }
-  if (!/flags=0x[0-9a-f]*\(runtime\)/.test(signature)) throw new Error('App is not signed with the hardened runtime');
-
-  const base = `${manifest.app.replace(/\s+/g, '-')}-${version}`;
-  const zipPath = path.join(outDir, `${base}.zip`);
-  const dmgPath = path.join(outDir, `${base}.dmg`);
+  if (!hasHardenedRuntime(signature)) throw new Error('App is not signed with the hardened runtime');
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);
