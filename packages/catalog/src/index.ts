@@ -20,6 +20,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'launcher',
+    name: 'Launcher',
+    summary: 'Open apps and files, run shortcuts, arrange windows, pick emoji, calculate, and jot quick notes from one keyboard bar on the Mac.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'clipboard',
     name: 'Clipboard',
     summary: 'Keep a private, searchable history of everything you copy, and paste any earlier item back on the Mac or from an iPhone keyboard.',
