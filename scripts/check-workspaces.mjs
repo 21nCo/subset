@@ -93,6 +93,44 @@ for (const target of releaseTargets) {
   assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
 }
 
+// Catalog availability (AGENTS.md rule 4 and workflow item 5). The check:workspaces script builds the catalog
+// first. Every available surface was proposed, appears once, and links a real HTTPS artifact and release page
+// for its version; the listing's state agrees with whether anything is available.
+const { capabilities } = await import(new URL('packages/catalog/dist/index.js', root));
+const catalogIds = new Set();
+const isHttpsUrl = (value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname !== 'localhost' && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+};
+for (const capability of capabilities) {
+  assert.equal(catalogIds.has(capability.id), false, `Duplicate catalog id ${capability.id}`);
+  catalogIds.add(capability.id);
+  const available = capability.availableSurfaces;
+  assert.equal(capability.state === 'available', available.length > 0, `${capability.id}: state must be 'available' exactly when a surface is available`);
+  const seen = new Set();
+  for (const release of available) {
+    const label = `${capability.id} ${release.surface}`;
+    assert.ok(capability.proposedSurfaces.includes(release.surface), `${label} is available but not proposed`);
+    assert.equal(seen.has(release.surface), false, `${label} is listed as available more than once`);
+    seen.add(release.surface);
+    assert.match(release.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `${label} needs a release version`);
+    assert.ok(isHttpsUrl(release.url), `${label} needs an https artifact URL`);
+    assert.ok(isHttpsUrl(release.releaseUrl), `${label} needs an https release page URL`);
+    if (release.sha256 !== undefined) assert.match(release.sha256, /^[0-9a-f]{64}$/, `${label} has a malformed sha256`);
+    if (release.surface === 'macos') {
+      // Downloads are versioned files; a link that names another version is out of sync with the metadata.
+      assert.ok(new URL(release.url).pathname.endsWith(`-${release.version}.dmg`), `${label} must link the ${release.version} DMG`);
+      // Release tags are macos/<app-id>/v<version> (docs/macos-release.md), so the release page names the version too.
+      assert.ok(new URL(release.releaseUrl).pathname.endsWith(`/v${release.version}`), `${label} must link the v${release.version} release page`);
+      assert.ok(release.sha256, `${label} must record the DMG checksum`);
+    }
+  }
+}
+
 assert.equal(names.has('@subset/catalog'), true);
 assert.equal(names.has('@subset/directory'), true);
 assert.equal(names.has('@subset/mgraph-contracts'), true);
