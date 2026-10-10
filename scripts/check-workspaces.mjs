@@ -19,9 +19,9 @@ for (const kind of ['packages', 'apps']) {
       assert.match(manifest.name, /^@subset\/[a-z0-9-]+$/);
       assert.equal(manifest.private, true, `${manifest.name} is an app host and must remain private`);
     } else if (manifest.private) {
-      assert.match(manifest.name, /^@(subset|sub-set)\/[a-z0-9-]+$/);
+      assert.match(manifest.name, /^@(subset|subset\.dev)\/[a-z0-9-]+$/);
     } else {
-      assert.match(manifest.name, /^@sub-set\/[a-z0-9-]+$/, `${manifest.name} must use the @sub-set npm scope to publish`);
+      assert.match(manifest.name, /^@subset\.dev\/[a-z0-9-]+$/, `${manifest.name} must use the @subset.dev npm scope to publish`);
     }
     assert.equal(names.has(manifest.name), false, `Duplicate workspace ${manifest.name}`);
     names.add(manifest.name);
@@ -37,6 +37,27 @@ for (const manifest of workspaces) {
   for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
     if (names.has(dependency)) assert.equal(version, '*', `${manifest.name} must use an npm workspace dependency for ${dependency}`);
   }
+}
+
+// Publishable packages are listed for the tag workflow, bundle private workspaces instead of
+// depending on them at runtime, and declare which files they ship.
+const releaseTargets = readJson('release-packages.json');
+const publicPackages = workspaces.filter((manifest) => manifest.private === false);
+for (const manifest of publicPackages) {
+  const target = releaseTargets.find((entry) => entry.name === manifest.name);
+  assert.ok(target, `${manifest.name} is public but missing from release-packages.json`);
+  assert.equal(readJson(join(target.path, 'package.json')).name, manifest.name, `release-packages.json points ${target.slug} at the wrong path`);
+  assert.ok(Array.isArray(manifest.files) && manifest.files.length, `${manifest.name} must list its published files`);
+  // Any installed dependency field counts. A workspace dependency is pinned to "*", which npm would
+  // publish unchanged, so public packages bundle workspaces instead of depending on them.
+  for (const dependency of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
+    assert.ok(!names.has(dependency), `${manifest.name} cannot depend at runtime on workspace ${dependency}; bundle it instead`);
+  }
+}
+for (const target of releaseTargets) {
+  assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
+  assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
+  assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
 }
 
 assert.equal(names.has('@subset/catalog'), true);
