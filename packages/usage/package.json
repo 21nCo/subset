@@ -1,0 +1,84 @@
+{
+  "name": "@subset/usage",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./codex": {
+      "types": "./dist/codex.d.ts",
+      "default": "./dist/codex.js"
+    },
+    "./snapshots": {
+      "types": "./dist/snapshots.d.ts",
+      "default": "./dist/snapshots.js"
+    },
+    "./cursor": {
+      "types": "./dist/cursor.d.ts",
+      "default": "./dist/cursor.js"
+    },
+    "./claude": {
+      "types": "./dist/claude.d.ts",
+      "default": "./dist/claude.js"
+    },
+    "./present": {
+      "types": "./dist/present.d.ts",
+      "default": "./dist/present.js"
+    },
+    "./history": {
+      "types": "./dist/history.d.ts",
+      "default": "./dist/history.js"
+    },
+    "./amp": {
+      "types": "./dist/amp.d.ts",
+      "default": "./dist/amp.js"
+    },
+    "./devin": {
+      "types": "./dist/devin.d.ts",
+      "default": "./dist/devin.js"
+    },
+    "./stored-logins": {
+      "types": "./dist/stored-logins.d.ts",
+      "default": "./dist/stored-logins.js"
+    },
+    "./cursor-local": {
+      "types": "./dist/cursor-local.d.ts",
+      "default": "./dist/cursor-local.js"
+    },
+    "./provider-icon": "./src/ProviderIcon.svelte",
+    "./factory": {
+      "types": "./dist/factory.d.ts",
+      "default": "./dist/factory.js"
+    },
+    "./claude-oauth": {
+      "types": "./dist/claude-oauth.d.ts",
+      "default": "./dist/claude-oauth.js"
+    },
+    "./local-auth": {
+      "types": "./dist/local-auth.d.ts",
+      "default": "./dist/local-auth.js"
+    },
+    "./view": "./src/UsageDashboard.svelte"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@iconify-json/logos": "1.2.15",
+    "@iconify/utils": "3.1.7",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "svelte": "^5.57.1"
+  },
+  "dependencies": {
+    "echarts": "6.1.0",
+    "phosphor-svelte": "3.1.0"
+  }
+}

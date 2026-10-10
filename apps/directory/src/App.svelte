@@ -33,7 +33,7 @@
       <section aria-labelledby="catalog-heading" class="pb-24">
         <div class="mb-7 flex items-end justify-between gap-4 border-b border-[#d4d8d0] pb-4">
           <h2 id="catalog-heading" class="text-2xl font-semibold tracking-tight">In the works</h2>
-          <p class="text-sm text-[#667168]">Pilots are being planned</p>
+          <p class="text-sm text-[#667168]">Pilots are in development</p>
         </div>
         <div class="grid gap-4 md:grid-cols-2">
           {#each capabilities as capability (capability.id)}

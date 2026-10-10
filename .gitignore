@@ -4,3 +4,4 @@ dist/
 .wrangler/
 .DS_Store
 *.tsbuildinfo
+packages/usage-cli/web/
