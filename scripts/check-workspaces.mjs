@@ -124,6 +124,8 @@ for (const capability of capabilities) {
     if (release.surface === 'macos') {
       // Downloads are versioned files; a link that names another version is out of sync with the metadata.
       assert.ok(new URL(release.url).pathname.endsWith(`-${release.version}.dmg`), `${label} must link the ${release.version} DMG`);
+      // Release tags are macos/<app-id>/v<version> (docs/macos-release.md), so the release page names the version too.
+      assert.ok(new URL(release.releaseUrl).pathname.endsWith(`/v${release.version}`), `${label} must link the v${release.version} release page`);
       assert.ok(release.sha256, `${label} must record the DMG checksum`);
     }
   }
