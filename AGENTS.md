@@ -29,7 +29,7 @@ The directory imports metadata; it does not own feature logic, credentials, or t
 
 Packages must not import from `apps/`. Apps may import packages through package exports, not through relative paths into sibling source trees. A capability must not import Nucleus, Outright, or another consuming product. Put product-specific adapters in the consuming product or in an explicitly named integration package, with the dependency pointing toward the capability. Do not move domain logic into Nucleus's domain-free `@21n/ui` package. If Subset needs generic primitives, evaluate `@uifn/*` and `@21n/ui` according to their actual portability and ownership contracts before creating new ones.
 
-Packages published to npm must use the `@sub-set/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication.
+Packages published to npm must use the `@subset.dev/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication.
 
 Do not create a cross-platform abstraction merely to make two examples look alike. Share the operation and data contract when that is the stable seam; make separate web or native views when platform behavior differs.
 
@@ -68,6 +68,8 @@ MCP Apps is an adapter candidate for external hosts; it does not replace the cap
 ### Usage dashboard
 
 Distinguish provider-reported quota or reset time, locally measured token usage or cost, calculated estimates, and unavailable values. Outright's existing run usage events are one potential measured source, not proof of remaining subscription quota. Use a provider-specific adapter only with a legitimate, reliable source and clear account authorization. Use only credential paths and endpoints approved for this integration. Never claim all subscriptions are covered when only some sources are supported. Show account, source, observation time, freshness, and partial failures per provider. A browser-only app cannot read local CLI state; a local connector or authorized provider connection is required for that data.
+
+Exception, directed by the repository owner on 2026-10-08: the local usage host has a **Use local sign-ins** setting. It stays off until the user answers a first-run question on the dashboard, and can be changed in Settings. Only while it is on may it read, read-only, the sign-ins these tools already store on that computer (keychain, credential files, or their own state databases): Claude Code, Factory Droid, the Cursor app, Devin, Pi, OpenCode, omp, and Hermes, plus the Antigravity CLI's signed-in email. It may call only the usage endpoints those tools use. It must never refresh, write, log, or return those tokens; it must not list stored logins while the setting is off; and the UI must name these tools and say the endpoints are undocumented. Adding a tool to this list needs the owner's direction and an update here. Keep every other source on documented paths.
 
 The usage pilot's source selection and interface plan live in [SET-1](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and its linked planning documents. Treat these as plans until the relevant package and host checks pass.
 

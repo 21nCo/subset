@@ -1,0 +1,39 @@
+{
+  "name": "@subset.dev/usage",
+  "version": "0.1.0",
+  "description": "Local dashboard and CLI for AI subscription usage: ChatGPT/Codex, Claude, Cursor, Factory, Amp, Devin, and more",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "subset-usage": "dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "web",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/21nCo/subset.git",
+    "directory": "packages/usage-cli"
+  },
+  "homepage": "https://github.com/21nCo/subset/tree/main/packages/usage-cli#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "status": "node src/server.mjs status",
+    "serve": "node src/server.mjs serve --no-open",
+    "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
+  },
+  "devDependencies": {
+    "@subset/usage": "*",
+    "rolldown": "1.2.11"
+  }
+}
