@@ -125,5 +125,9 @@ final class DictateTests: XCTestCase {
         let overall = sqrt(samples.reduce(Float.zero) { $0 + $1 * $1 } / Float(samples.count))
         XCTAssertLessThan(overall, 0.0035)
         XCTAssertGreaterThan(WhisperCppBackend.peakWindowRMS(samples, windowSize: sampleRate / 2), 0.0035)
+        // The production preparation path keeps the speech and trims the silence around it.
+        let prepared = WhisperCppBackend.prepareSamplesForDictation(samples, sampleRate: sampleRate)
+        XCTAssertNotNil(prepared)
+        XCTAssertLessThan(prepared?.count ?? .max, sampleRate * 2)
     }
 }

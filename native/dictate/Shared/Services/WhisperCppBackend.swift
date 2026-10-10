@@ -182,7 +182,7 @@ final class WhisperCppBackend: DictationBackend {
         }
     }
 
-    fileprivate nonisolated static func prepareSamplesForDictation(_ samples: [Float], sampleRate: Int) -> [Float]? {
+    nonisolated static func prepareSamplesForDictation(_ samples: [Float], sampleRate: Int) -> [Float]? {
         guard !samples.isEmpty, sampleRate > 0 else { return nil }
 
         let rms = sqrt(samples.reduce(Float.zero) { partial, sample in

@@ -140,7 +140,11 @@ final class DictationManager: ObservableObject {
         } else if !isBusy {
             rememberInsertionTarget()
             // Start from an empty buffer so a session without speech does not present the
-            // previous result as new; the previous result stays in `lastTranscript`.
+            // previous result as new; the previous result stays in `lastTranscript`, including
+            // a result restored from the saved state after relaunch.
+            if lastTranscript.isEmpty {
+                lastTranscript = transcriptState.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             clearTranscript()
             startDictation()
         }

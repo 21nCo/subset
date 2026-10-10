@@ -129,6 +129,8 @@ struct MacRootView: View {
             }
             .buttonStyle(.bordered)
             .keyboardShortcut("k", modifiers: .command)
+            // A session's pending final transcript would bring cleared text back.
+            .disabled(manager.isBusy)
             .help("Clear the transcript buffer (⌘K)")
         }
     }
