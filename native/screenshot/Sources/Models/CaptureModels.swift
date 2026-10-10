@@ -180,6 +180,23 @@ struct AnnotationItem: Codable, Identifiable, Hashable {
     var lineWidth: Double
     var text: String
     var counter: Int?
+
+    /// The area the item covers in normalized image coordinates (points and rect).
+    var boundingRect: CGRect {
+        points.reduce(rect.cgRect.standardized) { $0.union(CGRect(origin: $1.cgPoint, size: .zero)) }
+    }
+
+    /// Returns a copy whose points and rect are moved by `transform`, an axis-aligned
+    /// scale-and-offset in normalized image coordinates.
+    func mapped(_ transform: (CGPoint) -> CGPoint) -> AnnotationItem {
+        var copy = self
+        copy.points = points.map { CodablePoint(transform($0.cgPoint)) }
+        let r = rect.cgRect
+        let a = transform(CGPoint(x: r.minX, y: r.minY))
+        let b = transform(CGPoint(x: r.maxX, y: r.maxY))
+        copy.rect = CodableRect(CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y)))
+        return copy
+    }
 }
 
 struct EditorProject: Codable {

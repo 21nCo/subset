@@ -31,7 +31,7 @@ Uploads use `Authorization: Bearer <UPLOAD_TOKEN>` and send media bytes directly
 ## Security behavior
 
 - Authenticated routes fail closed with `503` when `UPLOAD_TOKEN` is unset or empty, and the bearer token is compared in constant time.
-- Share passwords are stored as salted PBKDF2-SHA256 (100,000 iterations, the Workers maximum) and compared in constant time. Every protected media request, including each video range request, re-derives the hash, which costs Worker CPU time.
+- Share passwords are stored as salted PBKDF2-SHA256 (100,000 iterations, the Workers maximum) and compared in constant time. Every protected media request, including each video range request, re-derives the hash, which costs Worker CPU time. Unsalted SHA-256 hashes written by the ScreenshotPOC Worker are not accepted: before pointing this Worker at a POC database, remove or reset the passwords on those shares (`PATCH /api/uploads/:id` with a new `password`).
 - Share IDs keep all 122 random bits of a UUID, because an unprotected link is only as private as its ID.
 - Media responses are `private`: `no-store` when the share has a password or expiry, otherwise `no-cache`, so no shared cache can serve a capture after it expires, gains a password, or is deleted.
 - `PATCH /api/uploads/:id` changes only the fields present in the body; omit `password` or `expiresAt` to keep them, send `null` to remove them.

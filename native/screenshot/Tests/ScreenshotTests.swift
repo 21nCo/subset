@@ -227,6 +227,62 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(session.annotations.first?.text, "After!")
     }
 
+    func testCropKeepsRedactionsInTheCroppedArea() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 100, height: 100, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        let session = EditorSession(image: NSImage(cgImage: try XCTUnwrap(context.makeImage()), size: .zero), record: nil)
+        session.selectedTool = .blur
+        session.begin(at: CGPoint(x: 0.6, y: 0.6))
+        session.end(at: CGPoint(x: 0.8, y: 0.8))
+        session.selectedTool = .rectangle
+        session.begin(at: CGPoint(x: 0.05, y: 0.05))
+        session.end(at: CGPoint(x: 0.1, y: 0.1))
+
+        session.selectedTool = .crop
+        session.begin(at: CGPoint(x: 0.5, y: 0.5))
+        session.end(at: CGPoint(x: 1, y: 1))
+
+        XCTAssertEqual(session.annotations.count, 1)
+        let blur = try XCTUnwrap(session.annotations.first)
+        XCTAssertEqual(blur.tool, .blur)
+        XCTAssertEqual(blur.rect.x, 0.2, accuracy: 0.02)
+        XCTAssertEqual(blur.rect.y, 0.2, accuracy: 0.02)
+        XCTAssertEqual(blur.rect.width, 0.4, accuracy: 0.02)
+        XCTAssertEqual(blur.rect.height, 0.4, accuracy: 0.02)
+    }
+
+    func testCombineKeepsAnnotationsOnTheOriginalImage() throws {
+        let session = EditorSession(image: NSImage(size: CGSize(width: 100, height: 100)), record: nil)
+        session.selectedTool = .pixelate
+        session.begin(at: CGPoint(x: 0, y: 0))
+        session.end(at: CGPoint(x: 1, y: 1))
+
+        session.combine(with: NSImage(size: CGSize(width: 100, height: 80)))
+
+        let item = try XCTUnwrap(session.annotations.first)
+        XCTAssertEqual(item.rect.x, 0, accuracy: 0.001)
+        XCTAssertEqual(item.rect.y, 0, accuracy: 0.001)
+        XCTAssertEqual(item.rect.width, 1, accuracy: 0.001)
+        XCTAssertEqual(item.rect.height, 0.5, accuracy: 0.001)
+    }
+
+    func testCounterNumbersContinueAfterDeletion() {
+        let session = EditorSession(image: NSImage(size: CGSize(width: 100, height: 100)), record: nil)
+        session.selectedTool = .counter
+        for x in [0.2, 0.4] {
+            session.begin(at: CGPoint(x: x, y: 0.5))
+            session.end(at: CGPoint(x: x, y: 0.5))
+        }
+        session.selectedAnnotationID = session.annotations.first?.id
+        session.removeSelected()
+        session.begin(at: CGPoint(x: 0.6, y: 0.5))
+        session.end(at: CGPoint(x: 0.6, y: 0.5))
+
+        XCTAssertEqual(session.annotations.compactMap(\.counter), [2, 3])
+    }
+
     func testShareUpdateOmitsUnchangedRestrictions() throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys

@@ -54,7 +54,8 @@ final class EditorSession: ObservableObject {
             color: selectedTool == .highlighter ? .yellow : color,
             lineWidth: lineWidth,
             text: selectedTool == .text ? textDraft : "",
-            counter: selectedTool == .counter ? annotations.filter { $0.tool == .counter }.count + 1 : nil
+            // Continue after the highest number so deleting an earlier counter cannot duplicate one.
+            counter: selectedTool == .counter ? (annotations.compactMap { $0.tool == .counter ? $0.counter : nil }.max() ?? 0) + 1 : nil
         )
         annotations.append(item)
         activeID = id
@@ -188,8 +189,13 @@ final class EditorSession: ObservableObject {
         other.draw(at: CGPoint(x: (newSize.width - other.size.width) / 2, y: 0), from: .zero, operation: .copy, fraction: 1)
         image.draw(at: CGPoint(x: (newSize.width - image.size.width) / 2, y: other.size.height + gap), from: .zero, operation: .copy, fraction: 1)
         combined.unlockFocus()
+        // Keep annotations (including blur and pixelate redactions) on the original image,
+        // which now occupies the top of the combined canvas.
+        let scaleX = image.size.width / newSize.width
+        let scaleY = image.size.height / newSize.height
+        let offsetX = (newSize.width - image.size.width) / 2 / newSize.width
+        annotations = annotations.map { $0.mapped { CGPoint(x: offsetX + $0.x * scaleX, y: $0.y * scaleY) } }
         image = combined
-        annotations = []
     }
 
     func makeProject() throws -> EditorProject {
@@ -232,6 +238,16 @@ final class EditorSession: ObservableObject {
         ).integral
         guard let cropped = cgImage.cropping(to: pixelRect) else { return }
         image = NSImage(cgImage: cropped, size: .zero)
-        annotations = []
+        // Move annotations into the cropped space so redactions inside the kept area survive.
+        let kept = CGRect(
+            x: pixelRect.minX / CGFloat(cgImage.width),
+            y: pixelRect.minY / CGFloat(cgImage.height),
+            width: pixelRect.width / CGFloat(cgImage.width),
+            height: pixelRect.height / CGFloat(cgImage.height)
+        )
+        annotations = annotations
+            .filter { kept.intersects($0.boundingRect.insetBy(dx: -0.001, dy: -0.001)) }
+            .map { $0.mapped { CGPoint(x: ($0.x - kept.minX) / kept.width, y: ($0.y - kept.minY) / kept.height) } }
+        selectedAnnotationID = nil
     }
 }

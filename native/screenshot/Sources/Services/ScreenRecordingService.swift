@@ -49,6 +49,10 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
     private var pauseBeganAt: CMTime?
     private(set) var isPaused = false
     private(set) var isCapturing = false
+    /// Reserve start and stop across their awaits, so a repeated request cannot set up a second
+    /// stream or finalize the same writer twice (both only touched on the main actor).
+    @MainActor private var isStarting = false
+    @MainActor private var isStopping = false
     /// Called on the main actor when ScreenCaptureKit stops the stream on its own (display
     /// removed, permission revoked), so the owner can finish and report the recording.
     @MainActor var onUnexpectedStop: (() -> Void)?
@@ -60,7 +64,9 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
         format: RecordingFormat,
         preferences: AppPreferences
     ) async throws {
-        guard !isCapturing, stream == nil else { throw ScreenRecordingError.alreadyRecording }
+        guard !isStarting, !isStopping, !isCapturing, stream == nil else { throw ScreenRecordingError.alreadyRecording }
+        isStarting = true
+        defer { isStarting = false }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         // Quartz global coordinates start at the top-left of the primary display.
         let primaryHeight = ScreenCaptureService.primaryDisplayHeight
@@ -157,10 +163,14 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
         }
     }
 
+    /// Returns nil when no session is active or another stop is already finalizing it.
+    @MainActor
     func stop() async throws -> ScreenRecordingResult? {
         // `stream` (not `isCapturing`) marks an active session: a stream that ScreenCaptureKit
         // stopped on its own still has a writer to cancel and an error to report.
-        guard let stream, let destination else { return nil }
+        guard !isStarting, !isStopping, let stream, let destination else { return nil }
+        isStopping = true
+        defer { isStopping = false }
         // ScreenCaptureKit may emit a terminal, non-display sample while stopping.
         // Close the append gate first so that sample cannot poison the writer.
         let wasCapturing = isCapturing

@@ -121,7 +121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.appState.captureFullscreen(action: action, preferredDirectory: directory)
             }
             if let resultPath = value("result") {
-                writeRuntimeResult(to: resultPath, after: 1, baselineRecordIDs: baselineRecordIDs)
+                writeRuntimeResult(
+                    to: resultPath,
+                    after: 1,
+                    baselineRecordIDs: baselineRecordIDs,
+                    waitsForUpload: action == .upload
+                )
             }
         }
 
@@ -181,15 +186,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// `waitsForUpload` keeps polling until the new record has a share URL or an error is
+    /// reported, so an upload automation never reports success before the upload finishes.
     private func writeRuntimeResult(
         to path: String,
         after delay: TimeInterval,
-        baselineRecordIDs: Set<UUID>
+        baselineRecordIDs: Set<UUID>,
+        waitsForUpload: Bool = false
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.pollRuntimeResult(
                 to: path,
                 baselineRecordIDs: baselineRecordIDs,
+                waitsForUpload: waitsForUpload,
                 attemptsRemaining: 120
             )
         }
@@ -198,14 +207,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func pollRuntimeResult(
         to path: String,
         baselineRecordIDs: Set<UUID>,
+        waitsForUpload: Bool,
         attemptsRemaining: Int
     ) {
         let record = appState.history.records.first { !baselineRecordIDs.contains($0.id) }
-        if record == nil, appState.lastError == nil, attemptsRemaining > 0 {
+        let complete = record != nil && (!waitsForUpload || record?.cloudShareURL != nil)
+        if !complete, appState.lastError == nil, attemptsRemaining > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.pollRuntimeResult(
                     to: path,
                     baselineRecordIDs: baselineRecordIDs,
+                    waitsForUpload: waitsForUpload,
                     attemptsRemaining: attemptsRemaining - 1
                 )
             }
@@ -213,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let payload: [String: Any] = [
-            "ok": record != nil && appState.lastError == nil,
+            "ok": complete && appState.lastError == nil,
             "error": appState.lastError ?? NSNull(),
             "recording": appState.isRecording,
             "record": record.map { record in

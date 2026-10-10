@@ -125,7 +125,9 @@ private final class RegionSelectionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if mode == .window {
-            if let snappedGlobalRect { onComplete?(snappedGlobalRect) }
+            // Resolve at the click point: the pointer may not have moved since the overlay opened.
+            let global = window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
+            if let rect = resolveWindow?(global) { onComplete?(rect) }
             return
         }
         window?.makeKey()

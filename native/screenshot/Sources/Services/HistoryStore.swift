@@ -1,6 +1,17 @@
 import AppKit
 import Foundation
 
+enum HistoryStoreError: LocalizedError {
+    case indexWriteFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .indexWriteFailed(detail):
+            "The capture was saved, but the capture history could not be updated: \(detail)"
+        }
+    }
+}
+
 @MainActor
 final class HistoryStore: ObservableObject {
     static let shared = HistoryStore()
@@ -71,7 +82,9 @@ final class HistoryStore: ObservableObject {
             isFavorite: false
         )
         records.insert(record, at: 0)
-        persist()
+        // The capture file is already written; report an index failure instead of losing the
+        // entry silently on the next launch.
+        try writeIndex()
         pruneExpired()
         return record
     }
@@ -100,7 +113,9 @@ final class HistoryStore: ObservableObject {
             isFavorite: false
         )
         records.insert(record, at: 0)
-        persist()
+        // The capture file is already written; report an index failure instead of losing the
+        // entry silently on the next launch.
+        try writeIndex()
         pruneExpired()
         return record
     }
@@ -159,8 +174,15 @@ final class HistoryStore: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? encoder.encode(records) else { return }
-        try? data.write(to: indexURL, options: .atomic)
+        do { try writeIndex() } catch { NSLog("Screenshot: saving the capture history failed: %@", error.localizedDescription) }
+    }
+
+    private func writeIndex() throws {
+        do {
+            try encoder.encode(records).write(to: indexURL, options: .atomic)
+        } catch {
+            throw HistoryStoreError.indexWriteFailed(error.localizedDescription)
+        }
     }
 
     private func pruneExpired() {
