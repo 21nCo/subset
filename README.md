@@ -1,5 +1,21 @@
-# Subset
+<div align="center">
+  <h1>Subset</h1>
+  <p><strong>The useful subset of everything.</strong></p>
+ <p>Growing directory of focused apps: Use it yourself. Build it in. Give it to your agent.</p>
+</div>
+<div align="center">
+  
+<br />
 
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](/LICENSE)
+[![Discord](https://img.shields.io/discord/831815510563749889?logo=discord&amp;logoColor=white)](https://discord.com/invite/9HJqKYTZKg)
+[![YouTube](https://img.shields.io/youtube/channel/views/UCEE8Uvy4krxIGXAGy2q5wrA?style=flat&logo=youtube&logoColor=white&color=FF0000&label=@21nCo)](https://www.youtube.com/@21nCo)
+
+
+</div>
+
+---
 Subset is a collection of small, independently useful apps. Each app solves one focused problem and can, where its platform allows, also serve as a capability inside 21n products or as an interface returned by an AI agent.
 
 The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as the `subset-usage` CLI (`@subset.dev/usage`, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
