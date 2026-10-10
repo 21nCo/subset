@@ -141,19 +141,24 @@ test('--profile must be inside the home folder', async (t) => {
   assert.equal(run(['doctor', '--json', '--profile', '~/dangling/profile'], env).status, 2);
 });
 
-/** Runs `main` in-process with a stdin that never sends the link. */
-async function joinFromIdleStdin(t, signal, extraArgs = []) {
+/**
+ * Runs `main` in-process with a stdin that never sends the link. `onWaiting` runs once `main` is reading
+ * stdin (it resumes the stream after installing its listeners).
+ */
+async function joinFromIdleStdin(t, signal, { onWaiting } = {}) {
   const { directory, env } = await sandbox(t);
+  const stdin = new PassThrough();
+  if (onWaiting) stdin.once('resume', () => setImmediate(onWaiting));
   const out = [];
   let drivers = 0;
   const code = await main({
-    argv: ['join', '--link-from-stdin', '--json', '--out', path.join(directory, 'out'), ...extraArgs],
+    argv: ['join', '--link-from-stdin', '--json', '--out', path.join(directory, 'out')],
     env,
     home: directory,
     stdout: (text) => out.push(text),
     stderr: () => {},
     signal,
-    stdin: new PassThrough(),
+    stdin,
     createDriver: async () => { drivers += 1; throw new Error('the driver must not start'); },
   });
   return { code, drivers, events: lines(out.join('')) };
@@ -161,8 +166,11 @@ async function joinFromIdleStdin(t, signal, extraArgs = []) {
 
 test('a Stop while waiting for the stdin link ends without joining', async (t) => {
   const stop = new AbortController();
-  setTimeout(() => stop.abort(), 50);
-  const { code, drivers, events } = await joinFromIdleStdin(t, stop.signal);
+  let waited = false;
+  const { code, drivers, events } = await joinFromIdleStdin(t, stop.signal, {
+    onWaiting: () => { waited = true; stop.abort(); },
+  });
+  assert.equal(waited, true);
   assert.equal(code, 0);
   assert.equal(drivers, 0);
   assert.deepEqual(events.map((event) => [event.type, event.reason, event.session]), [['ended', 'stopped', null]]);

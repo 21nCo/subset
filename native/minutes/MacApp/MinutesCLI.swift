@@ -167,7 +167,13 @@ enum NodeLocator {
             process.terminationHandler = { _ in run.markExited() }
             output.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
-                if chunk.isEmpty { run.markEndOfFile() } else { run.append(chunk) }
+                guard !chunk.isEmpty else {
+                    // EOF: detach, or the handler keeps firing with empty reads until the process exits.
+                    handle.readabilityHandler = nil
+                    run.markEndOfFile()
+                    return
+                }
+                run.append(chunk)
             }
             do {
                 try process.run()
