@@ -9,7 +9,7 @@
 // API key (APPLE_API_KEY_PATH, APPLE_API_KEY_ID, APPLE_API_ISSUER). Credentials are never printed.
 //
 // Output: <out>/<App>-<version>.dmg, <App>-<version>.zip, and SHA256SUMS. Nothing is uploaded or published.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -211,7 +211,9 @@ function main() {
   // Refuse to ship anything not signed by this team's Developer ID with the hardened runtime.
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   // codesign prints signature details on stderr.
-  const signature = execFileSync('sh', ['-c', 'codesign -dvv "$1" 2>&1', 'sh', appPath], { encoding: 'utf8' });
+  const details = spawnSync('codesign', ['-dvv', appPath], { encoding: 'utf8' });
+  if (details.status !== 0) throw new Error(`codesign -dvv failed: ${details.stderr.trim()}`);
+  const signature = details.stdout + details.stderr;
   if (!signature.includes(`Authority=Developer ID Application:`) || !signature.includes(`TeamIdentifier=${team}`)) {
     throw new Error('App is not signed with a Developer ID Application certificate for the expected team');
   }
