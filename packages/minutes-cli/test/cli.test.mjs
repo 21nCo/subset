@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { isMinutesDoctor, isMinutesEvent, isMinutesStatus } from '@subset/minutes';
+import { main } from '../src/main.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = path.join(root, 'dist/cli.mjs');
@@ -134,4 +136,42 @@ test('--profile must be inside the home folder', async (t) => {
   const inside = run(['doctor', '--json', '--profile', '~/bot-profile', '--out', directory], env);
   assert.notEqual(inside.status, 2);
   assert.ok(isMinutesDoctor(JSON.parse(inside.stdout)));
+  // A dangling symlink inside home could lead anywhere once Chrome creates the profile through it.
+  await symlink(path.join(directory, '..', 'minutes-elsewhere'), path.join(directory, 'dangling'));
+  assert.equal(run(['doctor', '--json', '--profile', '~/dangling/profile'], env).status, 2);
+});
+
+/** Runs `main` in-process with a stdin that never sends the link. */
+async function joinFromIdleStdin(t, signal, extraArgs = []) {
+  const { directory, env } = await sandbox(t);
+  const out = [];
+  let drivers = 0;
+  const code = await main({
+    argv: ['join', '--link-from-stdin', '--json', '--out', path.join(directory, 'out'), ...extraArgs],
+    env,
+    home: directory,
+    stdout: (text) => out.push(text),
+    stderr: () => {},
+    signal,
+    stdin: new PassThrough(),
+    createDriver: async () => { drivers += 1; throw new Error('the driver must not start'); },
+  });
+  return { code, drivers, events: lines(out.join('')) };
+}
+
+test('a Stop while waiting for the stdin link ends without joining', async (t) => {
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 50);
+  const { code, drivers, events } = await joinFromIdleStdin(t, stop.signal);
+  assert.equal(code, 0);
+  assert.equal(drivers, 0);
+  assert.deepEqual(events.map((event) => [event.type, event.reason, event.session]), [['ended', 'stopped', null]]);
+  assert.ok(events.every(isMinutesEvent));
+});
+
+test('a Stop that arrived before join starts ends without joining', async (t) => {
+  const { code, drivers, events } = await joinFromIdleStdin(t, AbortSignal.abort());
+  assert.equal(code, 0);
+  assert.equal(drivers, 0);
+  assert.equal(events.at(-1).reason, 'stopped');
 });

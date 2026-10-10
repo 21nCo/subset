@@ -1,6 +1,6 @@
 // The subset-minutes command. `cli.mjs` calls `main` with the real process; tests pass a fake driver.
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -58,7 +58,10 @@ const commandOptions = {
 
 const expandHome = (value, home) => (value === '~' ? home : value.startsWith('~/') ? path.join(home, value.slice(2)) : value);
 
-/** The absolute path with symlinks resolved in its longest existing prefix (the rest may not exist yet). */
+/**
+ * The absolute path with symlinks resolved in its longest existing prefix (the rest may not exist yet), or
+ * null when an entry on the way exists but cannot be resolved (a dangling symlink could lead anywhere).
+ */
 function canonical(value) {
   const absolute = path.resolve(value);
   let existing = absolute;
@@ -66,10 +69,20 @@ function canonical(value) {
     try {
       return path.join(realpathSync(existing), path.relative(existing, absolute));
     } catch {
+      if (!isMissing(existing)) return null;
       const parent = path.dirname(existing);
       if (parent === existing) return absolute;
       existing = parent;
     }
+  }
+}
+
+/** Whether nothing exists at `value` (not even a dangling symlink). Any other lstat error counts as present. */
+function isMissing(value) {
+  try {
+    return lstatSync(value, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    return false;
   }
 }
 
@@ -80,7 +93,9 @@ function canonical(value) {
 function profileInsideHome(value, home) {
   const resolved = canonical(path.resolve(expandHome(value, home)));
   const base = canonical(home);
-  return resolved.startsWith(base + path.sep) ? resolved : null;
+  if (!resolved || !base || !resolved.startsWith(base + path.sep)) return null;
+  // No control characters: the path becomes part of a Chrome argument.
+  return /^[^\0-\x1f\x7f]+$/.test(resolved) ? resolved : null;
 }
 
 /**
@@ -196,17 +211,26 @@ async function signIn(io, profileDirectory) {
   return 0;
 }
 
-/** Reads one line from `stream` (without its newline). Resolves null if the stream ends first with nothing. */
-function readFirstLine(stream) {
+/**
+ * Reads one line from `stream` (without its newline). Resolves null if the stream ends first with nothing,
+ * or when `signal` aborts (a Stop while waiting for the link).
+ */
+function readFirstLine(stream, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(null);
+      return;
+    }
     let text = '';
     const finish = (value) => {
       stream.off('data', onData);
       stream.off('end', onEnd);
       stream.off('close', onEnd);
+      signal?.removeEventListener('abort', onAbort);
       stream.pause();
       resolve(value);
     };
+    const onAbort = () => finish(null);
     const onData = (chunk) => {
       text += chunk;
       const newline = text.indexOf('\n');
@@ -218,6 +242,7 @@ function readFirstLine(stream) {
     stream.on('data', onData);
     stream.once('end', onEnd);
     stream.once('close', onEnd);
+    signal?.addEventListener('abort', onAbort, { once: true });
     stream.resume();
   });
 }
@@ -244,7 +269,14 @@ async function join(io, positionals, values, { environment, profileDirectory, ou
     io.stdin.once('end', () => { stdinClosed = true; });
     io.stdin.once('close', () => { stdinClosed = true; });
   }
-  const rawLink = fromStdin ? ((await readFirstLine(io.stdin)) ?? '') : positionals[0];
+  const rawLink = fromStdin ? ((await readFirstLine(io.stdin, io.signal)) ?? '') : positionals[0];
+  // A Stop that arrived before the session (for example while waiting for the stdin link) ends the command
+  // without launching Chrome.
+  if (io.signal?.aborted) {
+    if (json) io.stdout(`${JSON.stringify(createEvent(null, { type: 'ended', reason: 'stopped', path: null, bytes: null }))}\n`);
+    else io.stdout('Stopped before joining. No recording was written.\n');
+    return 0;
+  }
   const parsed = parseMeetingLink(rawLink);
   if (!parsed.ok) {
     if (json) {

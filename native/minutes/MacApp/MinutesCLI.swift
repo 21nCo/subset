@@ -149,12 +149,12 @@ enum NodeLocator {
     }
 
     /// Runs a short command and returns its stdout, or nil if it could not start or did not finish in time.
-    /// The process is terminated after `timeout` seconds (a slow login shell must not block readiness), and the
-    /// caller stops waiting one second later even if a descendant that inherited stdout keeps the pipe open.
+    /// The process is terminated after `timeout` seconds (a slow login shell must not block readiness). One second
+    /// later the caller gets nil and the pipe is closed, even if a descendant that inherited stdout keeps it open.
+    /// Reads never block a thread, so a timed-out run leaves no worker behind.
     static func run(_ executable: String, _ arguments: [String], environment: [String: String]? = nil,
                     timeout: TimeInterval = 20) async -> String? {
         await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            let result = OneShotResult(continuation)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
@@ -163,40 +163,77 @@ enum NodeLocator {
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             process.standardInput = FileHandle.nullDevice
+            let run = ShortRun(continuation, reader: output.fileHandleForReading)
+            process.terminationHandler = { _ in run.markExited() }
+            output.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty { run.markEndOfFile() } else { run.append(chunk) }
+            }
             do {
                 try process.run()
             } catch {
-                result.resume(nil)
+                run.finish(nil)
                 return
-            }
-            let reader = output.fileHandleForReading
-            DispatchQueue.global(qos: .utility).async {
-                let data = reader.readDataToEndOfFile()
-                process.waitUntilExit()
-                result.resume(String(data: data, encoding: .utf8))
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
                 if process.isRunning { process.terminate() }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { result.resume(nil) }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { run.finish(nil) }
             }
         }
     }
 
-    /// Resumes a continuation once: whichever of the reader and the timeout finishes first wins.
-    private final class OneShotResult: @unchecked Sendable {
+    /// The state of one `run`: output so far, and whether stdout reached EOF and the process exited. It resumes
+    /// the caller once, with the output when both happened or with nil on timeout, and then releases the pipe.
+    private final class ShortRun: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<String?, Never>?
+        private let reader: FileHandle
+        private var data = Data()
+        private var reachedEndOfFile = false
+        private var exited = false
 
-        init(_ continuation: CheckedContinuation<String?, Never>) {
+        init(_ continuation: CheckedContinuation<String?, Never>, reader: FileHandle) {
             self.continuation = continuation
+            self.reader = reader
         }
 
-        func resume(_ value: String?) {
+        func append(_ chunk: Data) {
+            lock.lock()
+            data.append(chunk)
+            lock.unlock()
+        }
+
+        func markEndOfFile() {
+            lock.lock()
+            reachedEndOfFile = true
+            lock.unlock()
+            finishIfComplete()
+        }
+
+        func markExited() {
+            lock.lock()
+            exited = true
+            lock.unlock()
+            finishIfComplete()
+        }
+
+        private func finishIfComplete() {
+            lock.lock()
+            let complete = reachedEndOfFile && exited
+            let text = String(data: data, encoding: .utf8)
+            lock.unlock()
+            if complete { finish(text) }
+        }
+
+        func finish(_ value: String?) {
             lock.lock()
             let pending = continuation
             continuation = nil
             lock.unlock()
-            pending?.resume(returning: value)
+            guard let pending else { return }
+            reader.readabilityHandler = nil
+            try? reader.close()
+            pending.resume(returning: value)
         }
     }
 

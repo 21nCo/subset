@@ -188,14 +188,15 @@ export async function installAudioCapture(page: Page, outputPath: string): Promi
     },
     stop() {
       stopped ??= (async () => {
-        // Nothing to flush when recording never began, or the page already closed (the meeting ended).
+        // Nothing to flush when recording never began. Once it began, only the recorder's own confirmation
+        // counts: a page that closed took its last, undelivered slice with it.
         let flushed = true;
-        if (begun && !page.isClosed()) {
-          const result = await Promise.race([
+        if (begun) {
+          const result = page.isClosed() ? 'closed' : await Promise.race([
             page.evaluate('window.__minutesCapture__ ? window.__minutesCapture__.stop() : false').catch(() => 'error'),
             new Promise((resolve) => setTimeout(() => resolve('timeout'), 10_000).unref()),
           ]);
-          flushed = result === true || page.isClosed();
+          flushed = result === true;
         }
         await new Promise<void>((resolve) => stream.end(() => resolve()));
         if (writeError) throw new MinutesError('capture_failed', `Writing the recording failed: ${(writeError as Error).message}`);

@@ -8,13 +8,24 @@ import { installAudioCapture } from '../dist/audio/capture.js';
 /** A page stand-in: records the exposed bindings and answers the two evaluate calls the capture makes. */
 function fakePage() {
   const bindings = new Map();
-  return {
+  const page = {
     bindings,
+    closed: false,
     exposeFunction: async (name, fn) => { bindings.set(name, fn); },
     addInitScript: async () => {},
     evaluate: async (expression) => expression.includes('.start()') || expression.includes('.stop()'),
-    isClosed: () => false,
+    isClosed: () => page.closed,
   };
+  return page;
+}
+
+/** A begun capture with one remote track and one delivered slice. */
+async function begunCapture(page, outputPath) {
+  const capture = await installAudioCapture(page, outputPath);
+  await capture.begin();
+  await page.bindings.get('__minutesAudioTrack__')();
+  await page.bindings.get('__minutesAudioChunk__')(Buffer.from('audio').toString('base64'));
+  return capture;
 }
 
 async function setup(t) {
@@ -43,4 +54,21 @@ test('a recording with a connected remote track returns its size', async (t) => 
   await page.bindings.get('__minutesAudioTrack__')();
   await page.bindings.get('__minutesAudioChunk__')(Buffer.from('audio').toString('base64'));
   assert.equal(await capture.stop(), 5);
+});
+
+test('a page that closed before stop is an incomplete recording, not a success', async (t) => {
+  const outputPath = await setup(t);
+  const page = fakePage();
+  const capture = await begunCapture(page, outputPath);
+  page.closed = true;
+  await assert.rejects(capture.stop(), (error) => error.code === 'capture_failed' && /did not hand over/.test(error.message));
+  assert.equal(await readFile(outputPath, 'utf8'), 'audio');
+});
+
+test('a page that closes while stop is pending is an incomplete recording', async (t) => {
+  const outputPath = await setup(t);
+  const page = fakePage();
+  const capture = await begunCapture(page, outputPath);
+  page.evaluate = async () => { page.closed = true; throw new Error('Target page, context or browser has been closed'); };
+  await assert.rejects(capture.stop(), (error) => error.code === 'capture_failed');
 });
