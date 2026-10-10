@@ -63,12 +63,16 @@ for (const manifest of publicPackages) {
 // second Node.js implementation with its own manifest or lockfile.
 const nativeRoot = new URL('native/', root);
 const skipped = new Set(['node_modules', 'build', 'DerivedData', '.build']);
+// Documented exceptions, relative to native/. The Screenshot share Worker is a self-hosted Cloudflare Worker
+// kept out of the workspaces until a deployment is authorized (see its README); it is not a bot or app runtime.
+const allowedNodeProjects = new Set(['screenshot/share-worker/']);
 function findNodeManifests(directory) {
   const found = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (skipped.has(entry.name) || entry.name.endsWith('.xcodeproj')) continue;
     // Encode the name: a "#" or "?" in a folder name would otherwise end the URL path.
     const child = new URL(`${encodeURIComponent(entry.name)}${entry.isDirectory() ? '/' : ''}`, directory);
+    if (entry.isDirectory() && allowedNodeProjects.has(decodeURIComponent(child.pathname.slice(nativeRoot.pathname.length)))) continue;
     if (entry.isDirectory()) found.push(...findNodeManifests(child));
     else if (['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].includes(entry.name)) found.push(decodeURIComponent(child.pathname));
   }
