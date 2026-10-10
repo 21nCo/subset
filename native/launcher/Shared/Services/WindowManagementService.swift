@@ -405,11 +405,15 @@ final class WindowManagementService {
             return true
         }
 
-        if runSystemEventsFallback(
-            frame: frame,
-            appName: appName,
-            windowTitle: stringAttribute(kAXTitleAttribute, from: window) ?? ""
+        var processIdentifier: pid_t = 0
+        let appWindowTitles = AXUIElementGetPid(window, &processIdentifier) == .success
+            ? windows(from: AXUIElementCreateApplication(processIdentifier)).map { stringAttribute(kAXTitleAttribute, from: $0) }
+            : []
+        if let fallbackTitle = Self.uniqueFallbackTitle(
+            selectedTitle: stringAttribute(kAXTitleAttribute, from: window),
+            appWindowTitles: appWindowTitles
         ),
+           runSystemEventsFallback(frame: frame, appName: appName, windowTitle: fallbackTitle),
            didApply(frame: frame, to: window) {
             return true
         }
@@ -464,11 +468,9 @@ final class WindowManagementService {
         tell application "System Events"
             tell process appName
                 set frontmost to true
-                if windowTitle is not "" then
-                    set targetWindow to window windowTitle
-                else
-                    set targetWindow to window 1
-                end if
+                set matchingWindows to every window whose name is windowTitle
+                if (count of matchingWindows) is not 1 then error "The selected window title is not unique."
+                set targetWindow to item 1 of matchingWindows
                 set position of targetWindow to {x, y}
                 set size of targetWindow to {w, h}
             end tell
@@ -476,8 +478,16 @@ final class WindowManagementService {
     end moveFrontWindow
     """
 
-    /// Targets the selected window by its title (the front window only when it has none). A
-    /// missing window raises an AppleScript error, which is reported as a failure.
+    /// Returns the title the System Events fallback may use to address the selected window: only
+    /// a non-empty title that exactly one of the app's windows has. Otherwise the fallback is
+    /// skipped, because it could move a different window.
+    static func uniqueFallbackTitle(selectedTitle: String?, appWindowTitles: [String?]) -> String? {
+        guard let selectedTitle, !selectedTitle.isEmpty else { return nil }
+        return appWindowTitles.filter { $0 == selectedTitle }.count == 1 ? selectedTitle : nil
+    }
+
+    /// Moves the window with `windowTitle`, which must be unique (see `uniqueFallbackTitle`). The
+    /// script re-checks uniqueness and raises an error, reported as a failure, before moving anything.
     private func runSystemEventsFallback(frame: CGRect, appName: String, windowTitle: String) -> Bool {
         guard let script = NSAppleScript(source: Self.systemEventsFallbackSource) else {
             return false

@@ -50,4 +50,13 @@ final class LauncherTests: XCTestCase {
         persistence.delete(notes[0])
         XCTAssertTrue(persistence.fetchRecentNotes().isEmpty)
     }
+
+    func testSystemEventsFallbackNeedsAUniqueNonEmptyTitle() {
+        let unique = WindowManagementService.uniqueFallbackTitle
+        XCTAssertEqual(unique("Report", ["Report", "Notes", nil]), "Report")
+        XCTAssertNil(unique("Report", ["Report", "Report"]), "duplicate titles are ambiguous")
+        XCTAssertNil(unique("", ["", "Notes"]), "empty titles cannot identify a window")
+        XCTAssertNil(unique(nil, ["Notes"]), "unreadable titles cannot identify a window")
+        XCTAssertNil(unique("Report", ["Notes"]), "the selected title must belong to an app window")
+    }
 }
