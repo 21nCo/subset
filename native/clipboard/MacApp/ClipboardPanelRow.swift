@@ -25,7 +25,8 @@ struct ClipboardPanelRow: View {
         let reservedDetailHeight = isCompactCard ? 60.0 : 88.0
         let availablePreviewHeight = cardSize.height - headerHeight - reservedDetailHeight
         let proposedHeight = isCompactCard ? cardSize.height * 0.31 : cardSize.height * 0.40
-        return max(isCompactCard ? 44 : 60, min(proposedHeight, availablePreviewHeight))
+        // Never exceed the space the header and details leave, or the card's content clips.
+        return max(0, min(max(isCompactCard ? 44 : 60, proposedHeight), availablePreviewHeight))
     }
 
     private var cardShape: RoundedRectangle {

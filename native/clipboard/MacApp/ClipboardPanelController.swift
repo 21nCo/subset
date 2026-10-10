@@ -14,7 +14,8 @@ final class ClipboardPanelController {
     private var presentationTarget: ActiveAppTarget?
     private var presentationToken = UUID()
 
-    private(set) var isPresented = false
+    /// Derived from the panel itself: AppKit hides it on deactivation without calling hide().
+    var isPresented: Bool { panel?.isVisible == true }
     private(set) var currentPlacement: ClipboardShelfPlacement = .bottom
 
     init(manager: ClipboardManager) {
@@ -35,12 +36,10 @@ final class ClipboardPanelController {
         NSApplication.shared.activate(ignoringOtherApps: true)
         panel.orderFrontRegardless()
         panel.makeKey()
-        isPresented = true
     }
 
     func hide() {
         panel?.orderOut(nil)
-        isPresented = false
     }
 
     private func panelInstance() -> ClipboardPanel {
@@ -128,7 +127,19 @@ final class ClipboardPanelController {
             return nil
         }
 
-        return NSScreen.screens.max(by: { overlapArea(between: $0.frame, and: windowFrame) < overlapArea(between: $1.frame, and: windowFrame) })
+        // kCGWindowBounds uses Quartz coordinates (origin at the primary display's top-left,
+        // y down); NSScreen frames use Cocoa coordinates (y up).
+        let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
+        let cocoaFrame = CGRect(
+            x: windowFrame.minX,
+            y: primaryHeight - windowFrame.maxY,
+            width: windowFrame.width,
+            height: windowFrame.height
+        )
+        let best = NSScreen.screens.max(by: { overlapArea(between: $0.frame, and: cocoaFrame) < overlapArea(between: $1.frame, and: cocoaFrame) })
+        // No overlap means the window is off-screen; fall back to the pointer's screen.
+        guard let best, overlapArea(between: best.frame, and: cocoaFrame) > 0 else { return nil }
+        return best
     }
 
     private func frontmostWindowFrame(for processIdentifier: pid_t) -> CGRect? {
@@ -142,7 +153,8 @@ final class ClipboardPanelController {
         let ownerPIDKey = kCGWindowOwnerPID as String
         let layerKey = kCGWindowLayer as String
 
-        let candidateWindows = infoList.compactMap { info -> CGRect? in
+        // The window list is ordered front to back, so the first match is the app's frontmost window.
+        return infoList.lazy.compactMap { info -> CGRect? in
             guard
                 let ownerPIDValue = info[ownerPIDKey] as? NSNumber,
                 ownerPIDValue.int32Value == processIdentifier,
@@ -158,9 +170,7 @@ final class ClipboardPanelController {
             }
 
             return bounds
-        }
-
-        return candidateWindows.max(by: { ($0.width * $0.height) < ($1.width * $1.height) })
+        }.first
     }
 
     private func overlapArea(between lhs: CGRect, and rhs: CGRect) -> CGFloat {

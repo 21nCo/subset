@@ -26,7 +26,8 @@ struct ClipboardKeyboardRootView: View {
                 title: "Clipboard",
                 subtitle: controller.subtitle,
                 emptyTitle: "Copy something first",
-                emptyDescription: "Copy text, a link, or a photo, then open this keyboard again."
+                emptyDescription: "Copy text, a link, or a photo, then open this keyboard again.",
+                showsSearch: false
             ) { item in
                 onSelect(item)
             }
@@ -60,6 +61,7 @@ struct ClipboardKeyboardRootView: View {
                         .background(Color.white.opacity(0.92), in: Circle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Next keyboard")
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -83,6 +85,7 @@ struct ClipboardKeyboardRootView: View {
                     .background(Color.white.opacity(0.92), in: Circle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Reload clipboard history")
         }
     }
 
@@ -149,6 +152,7 @@ struct ClipboardKeyboardRootView: View {
                     .background(Color(uiColor: .systemBlue), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete")
         }
     }
 }

@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "8DDC8139CC8994FF318D9256"
+               BlueprintIdentifier = "EFDD836A0E9A4DA9D7F91849"
                BuildableName = "ClipboardiOS.app"
                BlueprintName = "ClipboardiOS"
                ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -30,7 +30,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "8DDC8139CC8994FF318D9256"
+            BlueprintIdentifier = "EFDD836A0E9A4DA9D7F91849"
             BuildableName = "ClipboardiOS.app"
             BlueprintName = "ClipboardiOS"
             ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -53,7 +53,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "8DDC8139CC8994FF318D9256"
+            BlueprintIdentifier = "EFDD836A0E9A4DA9D7F91849"
             BuildableName = "ClipboardiOS.app"
             BlueprintName = "ClipboardiOS"
             ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -70,7 +70,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "8DDC8139CC8994FF318D9256"
+            BlueprintIdentifier = "EFDD836A0E9A4DA9D7F91849"
             BuildableName = "ClipboardiOS.app"
             BlueprintName = "ClipboardiOS"
             ReferencedContainer = "container:Clipboard.xcodeproj">

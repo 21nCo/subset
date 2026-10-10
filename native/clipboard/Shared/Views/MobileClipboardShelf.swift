@@ -48,6 +48,8 @@ struct MobileClipboardShelfView: View {
     let subtitle: String
     let emptyTitle: String
     let emptyDescription: String
+    /// False in the keyboard extension, which has no character keys to type a query with.
+    var showsSearch = true
     let onSelect: (ClipboardItem) -> Void
 
     @State private var searchQuery = ""
@@ -68,17 +70,20 @@ struct MobileClipboardShelfView: View {
         GeometryReader { geometry in
             let isPad = geometry.size.width >= 700
             let isWide = geometry.size.width >= 420
-            let topBarHeight: CGFloat = isWide ? 48 : 94
+            // The top bar is a single row at every width, so cards keep their height on phones.
+            let topBarHeight: CGFloat = 48
             let filterHeight: CGFloat = 38
-            let chromeHeight = topBarHeight + filterHeight + 46
+            let chromeHeight = topBarHeight + filterHeight + 48
             let cardWidth = min(max(geometry.size.width * (isPad ? 0.26 : 0.46), 150), isPad ? 246 : 186)
-            let cardHeight = min(max(geometry.size.height - chromeHeight, isPad ? 132 : 142), isPad ? 212 : 192)
+            let cardHeight = min(max(geometry.size.height - chromeHeight, 110), isPad ? 212 : 192)
 
             VStack(alignment: .leading, spacing: 12) {
                 topBar(isWide: isWide)
                 filterBar
 
-                if filteredItems.isEmpty {
+                if filteredItems.isEmpty, !items.isEmpty {
+                    noResultsState
+                } else if filteredItems.isEmpty {
                     emptyState
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -109,18 +114,11 @@ struct MobileClipboardShelfView: View {
         )
     }
 
-    @ViewBuilder
     private func topBar(isWide: Bool) -> some View {
-        if isWide {
-            HStack(spacing: 10) {
-                searchField
-                titleBadge
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                searchField
-                titleBadge
-            }
+        HStack(spacing: 10) {
+            if showsSearch { searchField }
+            titleBadge(showsSubtitle: isWide || !showsSearch)
+            if !showsSearch { Spacer(minLength: 0) }
         }
     }
 
@@ -139,7 +137,7 @@ struct MobileClipboardShelfView: View {
         .background(Color.white.opacity(0.82), in: Capsule())
     }
 
-    private var titleBadge: some View {
+    private func titleBadge(showsSubtitle: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 12, weight: .bold))
@@ -149,10 +147,12 @@ struct MobileClipboardShelfView: View {
                 .font(.system(size: 14, weight: .bold, design: .rounded))
                 .foregroundStyle(Color.black.opacity(0.80))
 
-            Text(subtitle)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color.black.opacity(0.46))
-                .lineLimit(1)
+            if showsSubtitle {
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.black.opacity(0.46))
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -182,9 +182,32 @@ struct MobileClipboardShelfView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("\(filter.title), \(items.filter { filter.matches($0) }.count) items")
+                    .accessibilityAddTraits(selectedFilter == filter ? .isSelected : [])
                 }
             }
         }
+    }
+
+    /// History exists, but the search or filter matches nothing.
+    private var noResultsState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No matching clips")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.black.opacity(0.82))
+
+            Button("Show all clips") {
+                searchQuery = ""
+                selectedFilter = .all
+            }
+            .font(.system(size: 13, weight: .bold, design: .rounded))
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+        )
     }
 
     private var emptyState: some View {
@@ -238,8 +261,9 @@ private struct MobileClipboardCard: View {
         max(56, min(size.height * 0.34, 84))
     }
 
+    /// The preview takes whatever the header and details leave, so the card never overflows.
     private var previewHeight: CGFloat {
-        max(54, size.height - headerHeight - detailHeight)
+        max(0, size.height - headerHeight - detailHeight)
     }
 
     var body: some View {

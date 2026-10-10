@@ -56,15 +56,17 @@ struct IOSClipboardHostView: View {
                 }
             }
             .onAppear {
-                manager.refresh(forceSync: true)
+                manager.refresh(forceSync: false)
                 refreshSetupStatus()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 guard newPhase == .active else { return }
-                manager.refresh(forceSync: true)
+                // Change-count gated: an unchanged clipboard is not re-read on every foreground.
+                manager.refresh(forceSync: false)
                 refreshSetupStatus()
             }
-            .sheet(isPresented: $showSetupGuide) {
+            // Swiping the guide away counts as seeing it, so it does not reappear every launch.
+            .sheet(isPresented: $showSetupGuide, onDismiss: markSetupGuideSeen) {
                 setupGuideSheet
             }
         }
@@ -166,7 +168,7 @@ struct IOSClipboardHostView: View {
                 .foregroundStyle(Color.black.opacity(0.84))
 
             Button {
-                manager.applySelectionToDraft(preview)
+                manager.copyToClipboard(preview)
             } label: {
                 HStack(spacing: 12) {
                     currentClipboardThumbnail(for: preview)
@@ -210,7 +212,7 @@ struct IOSClipboardHostView: View {
                 emptyTitle: "Copy something first",
                 emptyDescription: "Saved clips will appear here automatically."
             ) { item in
-                manager.applySelectionToDraft(item)
+                manager.copyToClipboard(item)
             }
             .frame(height: 254)
         }

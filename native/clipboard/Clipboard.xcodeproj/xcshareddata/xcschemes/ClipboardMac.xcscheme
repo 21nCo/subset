@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "06C018B705A1A039B123A030"
+               BlueprintIdentifier = "30D4DCA51DFD5EF705FE013D"
                BuildableName = "ClipboardMac.app"
                BlueprintName = "ClipboardMac"
                ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "173CED9C83F0DB7946FC7AAA"
+               BlueprintIdentifier = "EEC28D90BD4405EDE92FFCAD"
                BuildableName = "ClipboardMacTests.xctest"
                BlueprintName = "ClipboardMacTests"
                ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "06C018B705A1A039B123A030"
+            BlueprintIdentifier = "30D4DCA51DFD5EF705FE013D"
             BuildableName = "ClipboardMac.app"
             BlueprintName = "ClipboardMac"
             ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "173CED9C83F0DB7946FC7AAA"
+               BlueprintIdentifier = "EEC28D90BD4405EDE92FFCAD"
                BuildableName = "ClipboardMacTests.xctest"
                BlueprintName = "ClipboardMacTests"
                ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -77,7 +77,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "06C018B705A1A039B123A030"
+            BlueprintIdentifier = "30D4DCA51DFD5EF705FE013D"
             BuildableName = "ClipboardMac.app"
             BlueprintName = "ClipboardMac"
             ReferencedContainer = "container:Clipboard.xcodeproj">
@@ -94,7 +94,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "06C018B705A1A039B123A030"
+            BlueprintIdentifier = "30D4DCA51DFD5EF705FE013D"
             BuildableName = "ClipboardMac.app"
             BlueprintName = "ClipboardMac"
             ReferencedContainer = "container:Clipboard.xcodeproj">

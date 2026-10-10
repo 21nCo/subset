@@ -6,7 +6,6 @@ import UIKit
 final class MobileClipboardManager: ObservableObject {
     @Published private(set) var items: [ClipboardItem]
     @Published private(set) var pasteboardPreview: ClipboardItem?
-    @Published var draftText = ""
     @Published var statusMessage = "Clipboard syncs automatically when this app or keyboard opens."
 
     private static let maximumHistoryCount = 200
@@ -23,9 +22,10 @@ final class MobileClipboardManager: ObservableObject {
         self.store = store
         self.autoSync = ClipboardAutoSync(store: store, maximumHistoryCount: Self.maximumHistoryCount)
         self.items = store.load().sorted { $0.capturedAt > $1.capturedAt }
-        self.pasteboardPreview = items.first
         registerAutomaticSyncObservers()
-        refresh(forceSync: true)
+        // Automatic syncs are gated on the pasteboard change count, so an unchanged clipboard
+        // is not re-read (each read can show the iOS "Allow Paste" prompt).
+        refresh(forceSync: false)
     }
 
     var keyboardSubtitle: String {
@@ -34,7 +34,7 @@ final class MobileClipboardManager: ObservableObject {
 
     func refresh(forceSync: Bool = false) {
         let syncResult = autoSync.syncIfNeeded(force: forceSync)
-        reloadItems(preferredPreview: syncResult.syncedItem)
+        reloadItems(syncResult: syncResult)
         updateStatus(from: syncResult, forceSync: forceSync)
     }
 
@@ -44,35 +44,28 @@ final class MobileClipboardManager: ObservableObject {
 
     func clearHistory() {
         items.removeAll(keepingCapacity: false)
-        store.save(items)
+        let saved = store.save(items)
         pasteboardPreview = nil
-        statusMessage = "Cleared the shared iPhone/iPad clipboard history."
+        statusMessage = saved
+            ? "Cleared the shared iPhone/iPad clipboard history."
+            : "Could not update the shared history file."
     }
 
-    func applySelectionToDraft(_ item: ClipboardItem) {
+    /// Copies a saved clip back to the system clipboard so it can be pasted in any app.
+    func copyToClipboard(_ item: ClipboardItem) {
+        guard item.write(to: UIPasteboard.general) else {
+            statusMessage = "Could not restore that \(item.kind.displayName.lowercased()) to the clipboard."
+            return
+        }
+        // Our own write must not come back as a new or re-timed history entry.
+        autoSync.markCurrentPasteboardSynced()
         switch item.kind {
         case .text, .url:
-            guard let textContent = item.textContent else {
-                statusMessage = "This card does not contain text yet."
-                return
-            }
-
-            if draftText.isEmpty {
-                draftText = textContent
-            } else {
-                draftText += draftText.hasSuffix(" ") ? textContent : " \(textContent)"
-            }
-
-            statusMessage = "Inserted \(item.kind.displayName.lowercased()) into the composer preview."
-
-        case .image, .files:
-            if item.write(to: UIPasteboard.general) {
-                statusMessage = item.kind == .image
-                    ? "Photo copied to the clipboard."
-                    : "File copied to the clipboard."
-            } else {
-                statusMessage = "Could not restore that \(item.kind.displayName.lowercased()) to the clipboard."
-            }
+            statusMessage = "Copied \(item.kind.displayName.lowercased()) to the clipboard. Paste it anywhere."
+        case .image:
+            statusMessage = "Photo copied to the clipboard."
+        case .files:
+            statusMessage = "File link copied. Other apps can open it only if they can access that location."
         }
     }
 
@@ -86,7 +79,7 @@ final class MobileClipboardManager: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.refresh(forceSync: true)
+                    self?.refresh(forceSync: false)
                 }
             }
         )
@@ -104,9 +97,15 @@ final class MobileClipboardManager: ObservableObject {
         )
     }
 
-    private func reloadItems(preferredPreview: ClipboardItem? = nil) {
+    private func reloadItems(syncResult: ClipboardAutoSyncResult) {
         items = store.load().sorted { $0.capturedAt > $1.capturedAt }
-        pasteboardPreview = preferredPreview ?? items.first
+        // "Current Clipboard" shows only what was actually read from the pasteboard; when the
+        // pasteboard was not re-read, keep the previous preview instead of a historical clip.
+        if let synced = syncResult.syncedItem {
+            pasteboardPreview = synced
+        } else if syncResult.didReadPasteboard {
+            pasteboardPreview = nil
+        }
     }
 
     private func updateStatus(from result: ClipboardAutoSyncResult, forceSync: Bool) {

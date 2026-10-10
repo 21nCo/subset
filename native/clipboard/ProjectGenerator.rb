@@ -5,8 +5,8 @@ project_path = File.join(__dir__, "Clipboard.xcodeproj")
 FileUtils.rm_rf(project_path) if File.exist?(project_path)
 project = Xcodeproj::Project.new(project_path)
 
-project.root_object.attributes["LastSwiftUpdateCheck"] = "1640"
-project.root_object.attributes["LastUpgradeCheck"] = "1640"
+project.root_object.attributes["LastSwiftUpdateCheck"] = "2640"
+project.root_object.attributes["LastUpgradeCheck"] = "2640"
 project.root_object.attributes["TargetAttributes"] = {}
 
 main_group = project.main_group
@@ -73,7 +73,7 @@ apply_common_settings(mac_target) do |config|
   config.build_settings["INFOPLIST_FILE"] = "MacApp/macOS-Info.plist"
   config.build_settings["MACOSX_DEPLOYMENT_TARGET"] = "14.0"
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/../Frameworks"]
-  config.build_settings["MARKETING_VERSION"] = "1.0"
+  config.build_settings["MARKETING_VERSION"] = "1.0.0"
   config.build_settings["CURRENT_PROJECT_VERSION"] = "1"
   config.build_settings["SUPPORTED_PLATFORMS"] = "macosx"
 end
@@ -87,7 +87,7 @@ apply_common_settings(ios_target) do |config|
   config.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0"
   config.build_settings["TARGETED_DEVICE_FAMILY"] = "1,2"
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/Frameworks"]
-  config.build_settings["MARKETING_VERSION"] = "1.0"
+  config.build_settings["MARKETING_VERSION"] = "1.0.0"
   config.build_settings["CURRENT_PROJECT_VERSION"] = "1"
   config.build_settings["SUPPORTED_PLATFORMS"] = "iphoneos iphonesimulator"
   config.build_settings["CODE_SIGN_ENTITLEMENTS"] = "iOSApp/ClipboardiOS.entitlements"
@@ -101,7 +101,7 @@ apply_common_settings(keyboard_target) do |config|
   config.build_settings["TARGETED_DEVICE_FAMILY"] = "1,2"
   config.build_settings["APPLICATION_EXTENSION_API_ONLY"] = "YES"
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks"]
-  config.build_settings["MARKETING_VERSION"] = "1.0"
+  config.build_settings["MARKETING_VERSION"] = "1.0.0"
   config.build_settings["CURRENT_PROJECT_VERSION"] = "1"
   config.build_settings["SUPPORTED_PLATFORMS"] = "iphoneos iphonesimulator"
   config.build_settings["SKIP_INSTALL"] = "YES"
@@ -200,12 +200,25 @@ add_project_files(mac_group, ["macOS-Info.plist"])
 add_project_files(ios_group, ["iOS-Info.plist", "ClipboardiOS.entitlements"])
 add_project_files(keyboard_group, ["Keyboard-Info.plist", "ClipboardKeyboard.entitlements"])
 
+# xcodeproj adds platform frameworks (Cocoa, Foundation, UIKit) under DEVELOPER_DIR with pinned
+# SDK versions; resolve them through each target's selected SDK instead.
+project.files.each do |ref|
+  path = ref.path.to_s
+  next unless path.include?(".sdk/System/Library/Frameworks/")
+  ref.path = path.sub(%r{\A.*\.sdk/}, "")
+  ref.source_tree = "SDKROOT"
+end
+
 project.save
 
 mac_scheme = Xcodeproj::XCScheme.new
 mac_scheme.configure_with_targets(mac_target, mac_tests_target, launch_target: true)
 mac_scheme.save_as(project_path, mac_target.name, true)
 
-[ios_target, keyboard_target].each do |target|
-  save_shared_scheme(project_path, target)
-end
+save_shared_scheme(project_path, ios_target)
+
+# A keyboard extension cannot be launched on its own; its scheme only builds it. Run
+# ClipboardiOS and switch to the keyboard to try it.
+keyboard_scheme = Xcodeproj::XCScheme.new
+keyboard_scheme.configure_with_targets(keyboard_target, nil, launch_target: false)
+keyboard_scheme.save_as(project_path, keyboard_target.name, true)

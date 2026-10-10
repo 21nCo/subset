@@ -44,7 +44,7 @@ final class KeyboardClipboardController: ObservableObject {
 
         statusMessage = items.isEmpty
             ? "Copy something, then open this keyboard again."
-            : "Tap a text or link card to paste."
+            : "Tap text or a link to insert it; tap a photo or file to copy it."
     }
 
     func updateSetupState(fullAccess: Bool) {
@@ -71,6 +71,7 @@ final class KeyboardClipboardController: ObservableObject {
 
         case .image:
             if item.write(to: UIPasteboard.general) {
+                autoSync.markCurrentPasteboardSynced()
                 statusMessage = "Photo copied. Long-press the field and tap Paste."
             } else {
                 statusMessage = "Could not copy that photo."
@@ -78,7 +79,8 @@ final class KeyboardClipboardController: ObservableObject {
 
         case .files:
             if item.write(to: UIPasteboard.general) {
-                statusMessage = "File copied. Use Paste if the current app supports files."
+                autoSync.markCurrentPasteboardSynced()
+                statusMessage = "File link copied. It pastes only where the app can open that file location."
             } else {
                 statusMessage = "Could not restore that file."
             }

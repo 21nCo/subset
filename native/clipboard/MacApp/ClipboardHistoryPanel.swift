@@ -551,7 +551,8 @@ struct ClipboardHistoryPanel: View {
     }
 
     private var headerSubtitle: String {
-        displayedItems.isEmpty ? "Nothing ready yet" : "\(displayedItems.count) ready to paste"
+        let verb = manager.hasAccessibilityPermission ? "paste" : "copy"
+        return displayedItems.isEmpty ? "Nothing ready yet" : "\(displayedItems.count) ready to \(verb)"
     }
 
     private var emptyTitle: String {
@@ -714,9 +715,12 @@ struct ClipboardHistoryPanel: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
-        guard NSApp.keyWindow != nil else { return false }
+        // Only keys aimed at the visible shelf: the monitor outlives orderOut, and other windows
+        // (such as the clear-history alert) must keep their own Return and Esc.
+        guard let window = event.window as? ClipboardPanel, window.isVisible else { return false }
 
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Caps Lock is part of deviceIndependentFlagsMask; ignore it so ⌘ shortcuts still match.
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
 
         if modifiers == [.command],
            event.keyCode == UInt16(kVK_ANSI_F) {

@@ -24,6 +24,7 @@ final class ClipboardManager: ObservableObject {
         self.store = store
         self.monitor = monitor
         self.items = store.load().sorted { $0.capturedAt > $1.capturedAt }
+        if let loadIssue = store.lastLoadIssue { statusMessage = loadIssue }
 
         observeActiveApplications()
         refreshPermissionStatus()
@@ -57,21 +58,21 @@ final class ClipboardManager: ObservableObject {
 
     func clearHistory() {
         items.removeAll(keepingCapacity: false)
-        store.save(items)
-        report(status: "Clipboard history cleared.")
+        let saved = store.save(items)
+        report(status: saved ? "Clipboard history cleared." : "History was cleared here, but the history file could not be updated.")
     }
 
     func delete(_ item: ClipboardItem) {
         items.removeAll { $0.id == item.id }
-        store.save(items)
-        report(status: "Removed \(item.kind.displayName.lowercased()) from history.")
+        let saved = store.save(items)
+        report(status: saved ? "Removed \(item.kind.displayName.lowercased()) from history." : "Removed here, but the history file could not be updated.")
     }
 
     func paste(_ item: ClipboardItem, to target: ActiveAppTarget?) async {
-        monitor.ignoreNextCapture(for: item)
-
         do {
-            try await ActiveAppPasteService.paste(item: item, to: target ?? currentPasteTarget())
+            try await ActiveAppPasteService.paste(item: item, to: target ?? currentPasteTarget()) { [monitor] changeCount in
+                monitor.ignoreChange(changeCount)
+            }
             report(status: "Pasted \(item.kind.displayName.lowercased()) into the previously active app.")
         } catch {
             report(status: error.localizedDescription)
@@ -115,8 +116,10 @@ final class ClipboardManager: ObservableObject {
             items.removeLast(items.count - maximumHistoryCount)
         }
 
-        store.save(items)
-        report(status: "Saved \(item.kind.displayName.lowercased()) from \(item.sourceAppName ?? "another app").")
+        let saved = store.save(items)
+        report(status: saved
+            ? "Saved \(item.kind.displayName.lowercased()) from \(item.sourceAppName ?? "another app")."
+            : "Captured \(item.kind.displayName.lowercased()), but the history file could not be written.")
     }
 
     private func observeActiveApplications() {

@@ -90,11 +90,18 @@ enum ActiveAppPasteService {
         return false
     }
 
-    static func paste(item: ClipboardItem, to target: ActiveAppTarget?) async throws {
+    /// `didWrite` receives the pasteboard change count of Clipboard's own write, before any
+    /// await, so the monitor can skip exactly that change.
+    static func paste(
+        item: ClipboardItem,
+        to target: ActiveAppTarget?,
+        didWrite: (Int) -> Void = { _ in }
+    ) async throws {
         let pasteboard = NSPasteboard.general
         guard item.write(to: pasteboard) else {
             throw ActiveAppPasteServiceError.clipboardWriteFailed
         }
+        didWrite(pasteboard.changeCount)
 
         try? await Task.sleep(for: .milliseconds(80))
 

@@ -59,9 +59,10 @@ final class ClipboardAppController: ObservableObject {
     }
 
     private func bindState() {
+        // permissionStatus is included so the menu updates when Accessibility trust changes.
         manager.$items
-            .combineLatest(manager.$isCapturePaused, manager.$statusMessage)
-            .sink { [weak self] items, isCapturePaused, statusMessage in
+            .combineLatest(manager.$isCapturePaused, manager.$statusMessage, manager.$permissionStatus)
+            .sink { [weak self] items, isCapturePaused, statusMessage, _ in
                 self?.statusBarController.refresh(
                     itemCount: items.count,
                     isCapturePaused: isCapturePaused,

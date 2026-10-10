@@ -16,6 +16,9 @@ final class ClipboardKeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         controller.updateSetupState(fullAccess: hasFullAccess)
+        // needsInputModeSwitchKey is reliable only once the keyboard is about to appear;
+        // rebuild the root view so the globe key shows when the device needs it.
+        hostingController?.rootView = makeRootView()
 
         guard !hasPerformedInitialSync else {
             DispatchQueue.main.async { [weak self] in
