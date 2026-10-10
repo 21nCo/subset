@@ -397,7 +397,8 @@ final class PDFDocumentStore: ObservableObject {
         switch intent {
         case .close: closeDocument()
         case .openAnother:
-            hasUnexportedChanges = false
+            // Keep the dirty flag: loadDocument(from:) clears it only after a new PDF loads,
+            // so cancelling the picker or a failed load still guards the current edits.
             isImporterPresented = true
         case nil: break
         }
@@ -529,6 +530,10 @@ final class PDFDocumentStore: ObservableObject {
         if isSelectionActionTool(selectedTool) {
             if selectedTool == .link {
                 return "Select text to add a link immediately."
+            }
+
+            if selectedTool == .redaction {
+                return selectedTool.instruction
             }
 
             return "Select text and \(selectedTool.title.lowercased()) will be applied automatically."
@@ -998,15 +1003,20 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
+        // PDFKit ink paths are in annotation space, relative to the annotation's bounds origin.
+        // The bounds cover the media box, whose origin is not always (0, 0).
+        let annotationBounds = page.bounds(for: .mediaBox)
+        let origin = annotationBounds.origin
+        let annotationPoints = pagePoints.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
         let path = UIBezierPath()
-        path.move(to: pagePoints[0])
+        path.move(to: annotationPoints[0])
 
-        for point in pagePoints.dropFirst() {
+        for point in annotationPoints.dropFirst() {
             path.addLine(to: point)
         }
 
         let annotation = PDFAnnotation(
-            bounds: page.bounds(for: .mediaBox),
+            bounds: annotationBounds,
             forType: .ink,
             withProperties: nil
         )
@@ -1040,6 +1050,11 @@ final class PDFDocumentStore: ObservableObject {
                 text: inputText.trimmingCharacters(in: .whitespacesAndNewlines)
             )
         case .link:
+            // Keep the sheet and its values so the user can correct the address.
+            guard isPendingLinkURLValid else {
+                return
+            }
+
             if let selection = pendingAnnotationInput.selection {
                 addLinkAnnotations(
                     for: selection,
@@ -1116,7 +1131,9 @@ final class PDFDocumentStore: ObservableObject {
             }
         }
 
-        guard let document = PDFDocument(url: url) else {
+        // Read the bytes while security-scoped access is held. PDFDocument(url:) reads page
+        // streams lazily, which can fail after access is revoked for provider-backed files.
+        guard let data = try? Data(contentsOf: url), let document = PDFDocument(data: data) else {
             errorMessage = "This file could not be parsed as a PDF."
             return
         }
@@ -1411,7 +1428,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     private func addLinkAnnotation(on page: PDFPage, at point: CGPoint, label: String, urlString: String) {
-        guard let url = URL(string: urlString), !urlString.isEmpty else {
+        guard let url = Self.validatedLinkURL(urlString) else {
             errorMessage = "Enter a valid URL for the link annotation."
             return
         }
@@ -1431,7 +1448,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     private func addLinkAnnotations(for selection: PDFSelection, label: String, urlString: String) {
-        guard let url = URL(string: urlString), !urlString.isEmpty else {
+        guard let url = Self.validatedLinkURL(urlString) else {
             errorMessage = "Enter a valid URL for the link annotation."
             return
         }
@@ -1861,8 +1878,9 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     private func resolvedURL(for annotation: PDFAnnotation) -> URL? {
+        // Links come from untrusted PDFs, so only web and mail links are opened.
         if let url = annotation.url {
-            return url
+            return Self.validatedLinkURL(url.absoluteString)
         }
 
         guard let userName = annotation.userName, userName.hasPrefix("link:") else {
@@ -1871,7 +1889,31 @@ final class PDFDocumentStore: ObservableObject {
 
         let payload = String(userName.dropFirst(5))
         let urlString = payload.split(separator: "|", maxSplits: 1).first.map(String.init) ?? payload
-        return URL(string: urlString)
+        return Self.validatedLinkURL(urlString)
+    }
+
+    /// Accepts only absolute http(s) URLs with a host, or mailto URLs with an address.
+    /// Rejects relative input such as `example.com`, the bare `https://` default, and
+    /// schemes such as file:, tel:, or app-specific schemes.
+    static func validatedLinkURL(_ string: String) -> URL? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() else {
+            return nil
+        }
+
+        switch scheme {
+        case "http", "https":
+            guard let host = url.host, !host.isEmpty else { return nil }
+            return url
+        case "mailto":
+            return url.absoluteString.count > "mailto:".count ? url : nil
+        default:
+            return nil
+        }
+    }
+
+    var isPendingLinkURLValid: Bool {
+        Self.validatedLinkURL(linkURLString) != nil
     }
 
     private func annotationEntries(for annotation: PDFAnnotation) -> [(page: PDFPage, annotation: PDFAnnotation)] {
@@ -2167,7 +2209,11 @@ final class PDFDocumentStore: ObservableObject {
             return []
         }
 
-        let nsText = pageText as NSString
+        return Self.wordRanges(in: pageText as NSString, limitedTo: selectionRange)
+    }
+
+    /// Splits `selectionRange` of `nsText` into whitespace-separated UTF-16 word ranges.
+    static func wordRanges(in nsText: NSString, limitedTo selectionRange: NSRange) -> [NSRange] {
         guard selectionRange.location != NSNotFound, NSMaxRange(selectionRange) <= nsText.length else {
             return []
         }
@@ -2177,18 +2223,20 @@ final class PDFDocumentStore: ObservableObject {
         var index = selectionRange.location
         let endIndex = NSMaxRange(selectionRange)
 
+        // UTF-16 surrogate halves have no UnicodeScalar; treat them as word characters so
+        // the loops always advance (emoji and other non-BMP text would otherwise hang here).
+        func isWhitespace(at index: Int) -> Bool {
+            UnicodeScalar(nsText.character(at: index)).map(whitespace.contains) ?? false
+        }
+
         while index < endIndex {
-            while index < endIndex,
-                  let scalar = UnicodeScalar(nsText.character(at: index)),
-                  whitespace.contains(scalar) {
+            while index < endIndex, isWhitespace(at: index) {
                 index += 1
             }
 
             let start = index
 
-            while index < endIndex,
-                  let scalar = UnicodeScalar(nsText.character(at: index)),
-                  !whitespace.contains(scalar) {
+            while index < endIndex, !isWhitespace(at: index) {
                 index += 1
             }
 

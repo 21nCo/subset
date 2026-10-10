@@ -316,7 +316,7 @@ private struct ZoomControlPanel: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ZoomButton(systemImage: "minus") {
+            ZoomButton(systemImage: "minus", label: "Zoom Out") {
                 store.requestZoomOut()
             }
 
@@ -325,7 +325,7 @@ private struct ZoomControlPanel: View {
                 .foregroundStyle(.primary)
                 .frame(minWidth: 52)
 
-            ZoomButton(systemImage: "plus") {
+            ZoomButton(systemImage: "plus", label: "Zoom In") {
                 store.requestZoomIn()
             }
 
@@ -352,6 +352,7 @@ private struct ZoomControlPanel: View {
 
 private struct ZoomButton: View {
     let systemImage: String
+    let label: String
     let action: () -> Void
 
     var body: some View {
@@ -363,6 +364,8 @@ private struct ZoomButton: View {
                 .background(Color.white.opacity(0.82), in: Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 
@@ -639,7 +642,9 @@ private struct InlineSelectionBar: View {
                     inlineButton(
                         systemImage: tool.systemImage,
                         isSelected: store.isToolSelected(tool),
-                        accessibilityLabel: tool.title
+                        accessibilityLabel: tool == .redaction
+                            ? "Cover (not secure redaction: the text stays in the file)"
+                            : tool.title
                     ) {
                         store.performInlineSelectionAction(tool)
                     }
@@ -769,6 +774,7 @@ private struct InlineSelectionBar: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)
+        .help(accessibilityLabel)
     }
 }
 
@@ -782,10 +788,20 @@ private struct FloatingInlineSelectionBar: View {
     var body: some View {
         GeometryReader { proxy in
             if let targetRect = store.inlineSelectionViewRect {
-                InlineSelectionBar(store: store)
-                    .fixedSize()
-                    .position(position(for: targetRect, in: proxy.size))
-                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                // On compact widths (an iPhone in portrait) the bar is wider than the screen,
+                // so it scrolls horizontally instead of being pushed off-screen.
+                ViewThatFits(in: .horizontal) {
+                    InlineSelectionBar(store: store)
+                        .fixedSize()
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        InlineSelectionBar(store: store)
+                            .fixedSize()
+                    }
+                }
+                .frame(maxWidth: max(proxy.size.width - edgePadding * 2, 0))
+                .fixedSize(horizontal: false, vertical: true)
+                .position(position(for: targetRect, in: proxy.size))
+                .transition(.scale(scale: 0.96).combined(with: .opacity))
             }
         }
     }
@@ -799,7 +815,7 @@ private struct FloatingInlineSelectionBar: View {
         let maxY = containerSize.height - edgePadding - halfHeight
 
         let preferredX = targetRect.midX
-        let x = min(max(preferredX, minX), maxX)
+        let x = maxX < minX ? containerSize.width / 2 : min(max(preferredX, minX), maxX)
 
         let preferredTopY = targetRect.minY - verticalGap - halfHeight
         if preferredTopY >= minY {
@@ -950,11 +966,15 @@ private struct AnnotationInputSheet: View {
                         }
                     }
 
-                    Section("URL") {
+                    Section {
                         TextField("https://example.com", text: $store.linkURLString)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
+                    } header: {
+                        Text("URL")
+                    } footer: {
+                        Text("Use a full https://, http://, or mailto: address.")
                     }
                 default:
                     EmptyView()
@@ -972,6 +992,7 @@ private struct AnnotationInputSheet: View {
                     Button("Add") {
                         store.submitPendingAnnotationInput()
                     }
+                    .disabled(pendingInput.tool == .link && !store.isPendingLinkURLValid)
                 }
             }
         }

@@ -85,4 +85,65 @@ final class AnnotateTests: XCTestCase {
         XCTAssertEqual(exported.page(at: 1)?.annotations.count, 1)
         XCTAssertEqual(exported.page(at: 0)?.annotations.count, 0)
     }
+
+    func testClosingWithoutChangesClosesImmediately() throws {
+        let store = PDFDocumentStore()
+        store.importDocument(from: .success(try makePDF()))
+
+        store.requestClose()
+        XCTAssertNil(store.pendingDiscard)
+        XCTAssertNil(store.document)
+    }
+
+    func testOpenAnotherKeepsChangesGuardedUntilANewDocumentLoads() throws {
+        let store = PDFDocumentStore()
+        store.importDocument(from: .success(try makePDF()))
+        let page = try XCTUnwrap(store.document?.page(at: 0))
+        store.commitInkStroke(on: page, pagePoints: [CGPoint(x: 10, y: 10), CGPoint(x: 50, y: 50)])
+
+        store.requestOpenAnother()
+        XCTAssertEqual(store.pendingDiscard, .openAnother)
+        XCTAssertFalse(store.isImporterPresented)
+
+        store.confirmDiscard()
+        XCTAssertTrue(store.isImporterPresented)
+        // The picker is cancelled: the current edits are still loaded and still unexported.
+        store.isImporterPresented = false
+        XCTAssertNotNil(store.document)
+        XCTAssertTrue(store.hasUnexportedChanges)
+        store.requestClose()
+        XCTAssertEqual(store.pendingDiscard, .close)
+    }
+
+    func testInkPathIsRelativeToAnOffsetMediaBox() throws {
+        let store = PDFDocumentStore()
+        store.importDocument(from: .success(try makePDF()))
+        let page = try XCTUnwrap(store.document?.page(at: 0))
+        page.setBounds(CGRect(x: 50, y: 40, width: 500, height: 700), for: .mediaBox)
+
+        store.commitInkStroke(on: page, pagePoints: [CGPoint(x: 100, y: 100), CGPoint(x: 200, y: 240)])
+
+        let annotation = try XCTUnwrap(page.annotations.first)
+        let pathBounds = try XCTUnwrap(annotation.paths?.first?.bounds)
+        XCTAssertEqual(pathBounds.origin.x, 50, accuracy: 0.5)
+        XCTAssertEqual(pathBounds.origin.y, 60, accuracy: 0.5)
+        XCTAssertEqual(annotation.bounds.origin, CGPoint(x: 50, y: 40))
+    }
+
+    func testWordRangesAdvancePastNonBMPCharacters() {
+        let text = "a \u{1D44E}\u{1F600}b  c" as NSString
+        let ranges = PDFDocumentStore.wordRanges(in: text, limitedTo: NSRange(location: 0, length: text.length))
+        XCTAssertEqual(ranges.map { text.substring(with: $0) }, ["a", "\u{1D44E}\u{1F600}b", "c"])
+    }
+
+    func testLinkURLsMustBeAbsoluteWebOrMailAddresses() {
+        XCTAssertNotNil(PDFDocumentStore.validatedLinkURL("https://example.com/path"))
+        XCTAssertNotNil(PDFDocumentStore.validatedLinkURL(" http://example.com "))
+        XCTAssertNotNil(PDFDocumentStore.validatedLinkURL("mailto:someone@example.com"))
+        XCTAssertNil(PDFDocumentStore.validatedLinkURL("https://"))
+        XCTAssertNil(PDFDocumentStore.validatedLinkURL("example.com"))
+        XCTAssertNil(PDFDocumentStore.validatedLinkURL("file:///etc/hosts"))
+        XCTAssertNil(PDFDocumentStore.validatedLinkURL("tel:5551234"))
+        XCTAssertNil(PDFDocumentStore.validatedLinkURL("mailto:"))
+    }
 }

@@ -7,7 +7,6 @@ Annotate opens a PDF from Files, lets you mark it up, and exports an annotated c
 - comments
 - free text
 - circles, squares, and arrows
-- stamps
 - links
 - opaque cover boxes
 
@@ -31,7 +30,7 @@ The original file is never modified. This is the native candidate for the catalo
 | --- | --- | --- |
 | Open PDF | read (user-picked file) | ⌘O; confirms first if unexported changes would be lost |
 | Navigate, outline, zoom in/out/fit | read | |
-| Add ink, markup, comment, free text, shape, stamp, link, cover | in-memory mutation | Recorded on an undo stack (⌘Z) |
+| Add ink, markup, comment, free text, shape, link, cover | in-memory mutation | Recorded on an undo stack (⌘Z). Links accept only absolute `http`/`https` URLs with a host, or `mailto:` |
 | Select, edit, delete one annotation | in-memory mutation | |
 | Remove all annotations | in-memory mutation | Confirms first and states the count. This includes annotations the PDF already had. Undoable. |
 | Export annotated copy | write to a new user-chosen file | ⇧⌘S; default name `<title>-annotated.pdf` |
@@ -44,7 +43,7 @@ The UI and the domain logic are not yet separated: `PDFDocumentStore` (about 2,2
 | Surface | Status |
 | --- | --- |
 | iOS/iPadOS app (`Annotate`) | Proposed. Swift sources compile and link for the `iphonesimulator` and `iphoneos` SDKs. The asset catalog step is excluded in this environment (see Verification). Not run on a device or simulator. |
-| macOS via Mac Catalyst | Proposed. Full build including the icon catalog, and 4/4 unit tests pass. Interactive use is not verified. |
+| macOS via Mac Catalyst | Proposed. Full build including the icon catalog, and the unit tests pass. Interactive use is not verified. |
 | Web, embed, agent view | Proposed in the catalog; not built. |
 
 Unverified:
@@ -57,7 +56,7 @@ Unverified:
 
 ### Verification (2026-10-09, Xcode 26.4)
 
-- `xcodebuild -scheme Annotate -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO test`: **TEST SUCCEEDED**, 4/4.
+- `xcodebuild -scheme Annotate -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO test`: **TEST SUCCEEDED**, 9/9 (re-run 2026-10-10 after the review fixes).
 - `xcodebuild -target Annotate -sdk iphonesimulator|iphoneos EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets ... build`: **BUILD SUCCEEDED** for both.
 - Without that exclusion, `actool` fails on this machine. It needs the iOS 26.4 simulator runtime, and only iOS 18.3 is installed. The scheme-based `generic/platform=iOS Simulator` build fails for the same reason.
 
@@ -68,11 +67,15 @@ cd native/annotate
 ruby ProjectGenerator.rb   # optional; regenerates Annotate.xcodeproj (xcodeproj gem)
 xcodebuild -project Annotate.xcodeproj -scheme Annotate \
   -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO test
+# Needs an installed iOS simulator runtime matching the SDK for the asset catalog step;
+# see Verification. Add EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets to compile without it.
 xcodebuild -project Annotate.xcodeproj -scheme Annotate \
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
 ```
 
 No `DEVELOPMENT_TEAM` is set. **Permissions:** none beyond the system document picker. Files are accessed only through the security-scoped URLs that the user picks.
+
+**Release:** the macOS release tooling (`scripts/release-macos.mjs`, see `docs/macos-release.md`) builds a native macOS scheme. Annotate's Mac surface is Mac Catalyst, which that script does not support yet, so this app has no `macos-release.json` and no signed or notarized Mac build.
 
 ## POC audit (required by AGENTS.md before transferring POC code)
 
@@ -98,16 +101,21 @@ Audited on 2026-10-09 against `poc/ios/PDFAnnotation` at `21nCo/21n@4d2923b`.
 - **Export re-serializes the whole PDF** with `dataRepresentation()`. It does not use an incremental update. This can change object structure and invalidate existing digital signatures. That is not yet surfaced to the user.
 - **The POC's "Redact" tool was not redaction.** It draws an opaque square annotation, so the underlying text stays in the content stream and can be copied or extracted, and the box can be deleted in any viewer. The port renames the tool to **Cover** and states this in its instruction. True redaction (removing page content) is not implemented.
 - There was no warning before losing work, and "trash" removed every annotation, including pre-existing ones, without confirmation. Both are fixed (see UI/UX).
-- Link annotations open URLs through the system `openURL`. Links in untrusted PDFs follow PDFKit's default behavior.
+- Link annotations open URLs through the system `openURL`. Because PDFs are untrusted, only absolute `http`/`https` links with a host and `mailto:` links are opened or created; `file:`, `tel:`, and app-specific schemes are ignored.
 
 **Test coverage**
 - The POC had **no tests**; its README said so.
-- The port adds `AnnotateTests` (4 tests, run on Mac Catalyst):
+- The port adds `AnnotateTests` (9 tests, run on Mac Catalyst):
   - the Cover tool is not labelled as redaction
   - an ink stroke marks unexported changes, leaves the source file byte-identical, and is undoable
-  - closing with unexported changes requires confirmation
+  - ink paths are placed correctly on pages whose media box does not start at (0, 0)
+  - closing with unexported changes requires confirmation; closing without them does not
+  - opening another PDF keeps the unexported-changes guard if the picker is cancelled
   - exported data contains the annotation on the correct page only
-- Untested: markup on text selections, shapes, stamps, links, comments, free text, outline navigation, zoom, and the PDFKit view bridge (`PDFAnnotatorView`, about 950 lines).
+  - word splitting for text markup advances past emoji and other non-BMP characters
+  - link URLs must be absolute web or mail addresses
+- Untested: markup on text selections, shapes, link creation in the UI, comments, free text, outline navigation, zoom, and the PDFKit view bridge (`PDFAnnotatorView`, about 950 lines).
+- Inherited from the POC and not reachable from the UI: a stamp tool, a tap-to-place link mode, and a drag-to-size shape draft flow. They are not advertised as available.
 
 **Conclusion:** the POC is a reasonable native starting point for the iOS and Mac Catalyst surfaces. Before an embed, web, or agent surface, or any release, it needs:
 - extraction of a documented operation contract
@@ -131,7 +139,7 @@ These are informed by PDF Expert (true redaction is clearly separate from drawin
    - ⌘Z Undo
    - ⌘W Close
    - Esc Stop the current tool
-5. **Accessibility labels and tooltips** on every icon-only control: Contents, Open, Export, Stop tool, Undo, Remove All, and Close. Previously these were unlabelled to VoiceOver.
+5. **Accessibility labels and tooltips** on the icon-only controls: Contents, Open, Export, Stop tool, Undo, Remove All, Close, Zoom In, Zoom Out, and the inline selection actions. Previously these were unlabelled to VoiceOver. No VoiceOver pass has been done.
 6. **Clearer start screen.** "Upload PDF" became **Open PDF**, because nothing is uploaded. The footnote explains that the original is never changed and that Export saves a copy.
 
 Competitor features that remain unimplemented: true redaction, signatures and forms, page organization (reorder, rotate, delete), search, and an annotation list or summary for review.

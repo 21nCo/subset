@@ -7,161 +7,147 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		4F44F6CDA8098B20C06D4F2C /* PDFDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */; };
-		53FEF111E03372092C9DA207 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E385F4E06DB6EE866D5C191C /* Foundation.framework */; };
-		5E39A1A60178D7B553EDA518 /* AnnotateApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */; };
-		7329F94B3D8989525394ABF1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1524E3F6906864603F52C209 /* ContentView.swift */; };
-		BCDE1437215861FD06B15E75 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E385F4E06DB6EE866D5C191C /* Foundation.framework */; };
-		D1BA17B4BD8091F3F6BCE328 /* PDFAnnotatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */; };
-		E43E330B69EBB0988D43D4F3 /* AnnotateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F50A1D866F871CA1371D2A /* AnnotateTests.swift */; };
-		F1D6786A1C82C2D654D65CE4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */; };
+		4ADF57EE61CA800760D5C44D /* AnnotateApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C74A64549B006483C4580BB /* AnnotateApp.swift */; };
+		643D554354A768D3C7138401 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2A6874FF418E2A6356CCBBD /* Assets.xcassets */; };
+		6F03874A49C7C837FF6001FB /* AnnotateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BAB1F5424EB2BA8F3FFDFBF /* AnnotateTests.swift */; };
+		7EF5936BBE42CD9582AE7C76 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 415221B2B5F96E1B60CF81CF /* ContentView.swift */; };
+		D9610F1682A3B485E9CBDCE8 /* PDFAnnotatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1279EFC47B686284F7B25C5 /* PDFAnnotatorView.swift */; };
+		F9D93EEFEC837C2DC3121D99 /* PDFDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EC45A64B266F31E320B9E57 /* PDFDocumentStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		91F91ED91368E7FA460C849B /* PBXContainerItemProxy */ = {
+		6E9FDBB588CF31A5B02B4C43 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = 1C05B9B5369269A2DDF2E9D3 /* Project object */;
+			containerPortal = 325951E981F2C456015201FE /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = 1F123471F66E91D195EAF80F;
+			remoteGlobalIDString = 8252F8E12CAFF168430D3CE9;
 			remoteInfo = Annotate;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		1524E3F6906864603F52C209 /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFDocumentStore.swift; sourceTree = "<group>"; };
-		4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateApp.swift; sourceTree = "<group>"; };
-		78F50A1D866F871CA1371D2A /* AnnotateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateTests.swift; sourceTree = "<group>"; };
-		983B553F48BE0D8ADA9FD304 /* Annotate.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Annotate.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFAnnotatorView.swift; sourceTree = "<group>"; };
-		D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		E385F4E06DB6EE866D5C191C /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
-		FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AnnotateTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0C74A64549B006483C4580BB /* AnnotateApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateApp.swift; sourceTree = "<group>"; };
+		3CCB0AF678830CBE14D0428B /* Annotate.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Annotate.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		415221B2B5F96E1B60CF81CF /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		6BAB1F5424EB2BA8F3FFDFBF /* AnnotateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnnotateTests.swift; sourceTree = "<group>"; };
+		7EC45A64B266F31E320B9E57 /* PDFDocumentStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFDocumentStore.swift; sourceTree = "<group>"; };
+		C12AC97D1EE08D0052604C0F /* AnnotateTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AnnotateTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1279EFC47B686284F7B25C5 /* PDFAnnotatorView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PDFAnnotatorView.swift; sourceTree = "<group>"; };
+		E2A6874FF418E2A6356CCBBD /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		734C9B63B7DD818717E16BAB /* Frameworks */ = {
+		47BD7D8E7024AE2D7A606C6E /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BCDE1437215861FD06B15E75 /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C1D408F2F8BDD75499FC522A /* Frameworks */ = {
+		76C590865625D7BBF58AB98A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				53FEF111E03372092C9DA207 /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		092613E6CCAD3D297CFD4FDE /* Annotate */ = {
+		161B677AEFC2455E1A829C95 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F73EAA55FCD49E3E9CCB8468 /* Features */,
-				4A2721A43366CDB7BF295C23 /* AnnotateApp.swift */,
-				1524E3F6906864603F52C209 /* ContentView.swift */,
-				D3F4F7DD2766C1C3BD59EF4E /* Assets.xcassets */,
-			);
-			name = Annotate;
-			path = Annotate;
-			sourceTree = "<group>";
-		};
-		22650E5087E6E3FF6970C607 = {
-			isa = PBXGroup;
-			children = (
-				B16E513BC25B569CF14E5077 /* Products */,
-				A27E0EAE8552366AB4D129F9 /* Frameworks */,
-				092613E6CCAD3D297CFD4FDE /* Annotate */,
-				EC41CE3C6A92485F648A1948 /* Tests */,
-			);
-			sourceTree = "<group>";
-		};
-		5D780A8950D511CDA5F799E7 /* PDFAnnotation */ = {
-			isa = PBXGroup;
-			children = (
-				B09C4E2B68F9C08C300F6E99 /* PDFAnnotatorView.swift */,
-				43B1D7ED2CA33C1DA113B8E8 /* PDFDocumentStore.swift */,
-			);
-			name = PDFAnnotation;
-			path = PDFAnnotation;
-			sourceTree = "<group>";
-		};
-		A27E0EAE8552366AB4D129F9 /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-				F4DB87A3C660CB441B5B9C72 /* iOS */,
-			);
-			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		B16E513BC25B569CF14E5077 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				983B553F48BE0D8ADA9FD304 /* Annotate.app */,
-				FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */,
+				3CCB0AF678830CBE14D0428B /* Annotate.app */,
+				C12AC97D1EE08D0052604C0F /* AnnotateTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-		EC41CE3C6A92485F648A1948 /* Tests */ = {
+		1D6FB017E9BE4B111714305B /* Features */ = {
 			isa = PBXGroup;
 			children = (
-				78F50A1D866F871CA1371D2A /* AnnotateTests.swift */,
-			);
-			name = Tests;
-			path = Tests;
-			sourceTree = "<group>";
-		};
-		F4DB87A3C660CB441B5B9C72 /* iOS */ = {
-			isa = PBXGroup;
-			children = (
-				E385F4E06DB6EE866D5C191C /* Foundation.framework */,
-			);
-			name = iOS;
-			sourceTree = "<group>";
-		};
-		F73EAA55FCD49E3E9CCB8468 /* Features */ = {
-			isa = PBXGroup;
-			children = (
-				5D780A8950D511CDA5F799E7 /* PDFAnnotation */,
+				5F1DCD4A4781C6DE5E4A8F6A /* PDFAnnotation */,
 			);
 			name = Features;
 			path = Features;
 			sourceTree = "<group>";
 		};
+		2C5A91E5239E660A7CCB73FD /* Annotate */ = {
+			isa = PBXGroup;
+			children = (
+				1D6FB017E9BE4B111714305B /* Features */,
+				0C74A64549B006483C4580BB /* AnnotateApp.swift */,
+				415221B2B5F96E1B60CF81CF /* ContentView.swift */,
+				E2A6874FF418E2A6356CCBBD /* Assets.xcassets */,
+			);
+			name = Annotate;
+			path = Annotate;
+			sourceTree = "<group>";
+		};
+		4B9FE001C763A0FBA5A838C4 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		5F1DCD4A4781C6DE5E4A8F6A /* PDFAnnotation */ = {
+			isa = PBXGroup;
+			children = (
+				D1279EFC47B686284F7B25C5 /* PDFAnnotatorView.swift */,
+				7EC45A64B266F31E320B9E57 /* PDFDocumentStore.swift */,
+			);
+			name = PDFAnnotation;
+			path = PDFAnnotation;
+			sourceTree = "<group>";
+		};
+		698897CC8B94F0FCE155F397 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				6BAB1F5424EB2BA8F3FFDFBF /* AnnotateTests.swift */,
+			);
+			name = Tests;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		E204E6CC287E0FAD12052F74 = {
+			isa = PBXGroup;
+			children = (
+				161B677AEFC2455E1A829C95 /* Products */,
+				4B9FE001C763A0FBA5A838C4 /* Frameworks */,
+				2C5A91E5239E660A7CCB73FD /* Annotate */,
+				698897CC8B94F0FCE155F397 /* Tests */,
+			);
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		16F02360383A7F86345CCCDA /* AnnotateTests */ = {
+		6B541994F5E9444A4603DFFC /* AnnotateTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 8B3EF5264CD0044DB2CE0AEA /* Build configuration list for PBXNativeTarget "AnnotateTests" */;
+			buildConfigurationList = 502BA4BC5F4041D84185886B /* Build configuration list for PBXNativeTarget "AnnotateTests" */;
 			buildPhases = (
-				706AF2EDDAEA9EF4AE6B6F18 /* Sources */,
-				C1D408F2F8BDD75499FC522A /* Frameworks */,
-				ECB71B764074609D96C0DDDC /* Resources */,
+				5FE49D8A626F3F4897BA7E67 /* Sources */,
+				76C590865625D7BBF58AB98A /* Frameworks */,
+				05936F9A60F90BEA93CF95CD /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				0A197FE5CCC4606771696EE3 /* PBXTargetDependency */,
+				2617367B3387D8B0C5269E48 /* PBXTargetDependency */,
 			);
 			name = AnnotateTests;
 			productName = AnnotateTests;
-			productReference = FDF65CBA9777C32C32645310 /* AnnotateTests.xctest */;
+			productReference = C12AC97D1EE08D0052604C0F /* AnnotateTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		1F123471F66E91D195EAF80F /* Annotate */ = {
+		8252F8E12CAFF168430D3CE9 /* Annotate */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 6A92872C281C03EE0E494612 /* Build configuration list for PBXNativeTarget "Annotate" */;
+			buildConfigurationList = 49E5A9296BE990EBB676DA1C /* Build configuration list for PBXNativeTarget "Annotate" */;
 			buildPhases = (
-				72F20897B8150F05649EB75F /* Sources */,
-				734C9B63B7DD818717E16BAB /* Frameworks */,
-				2206130A826F2C85ABD3DE35 /* Resources */,
+				067F3119621484D6A294FF55 /* Sources */,
+				47BD7D8E7024AE2D7A606C6E /* Frameworks */,
+				3ABADEB7DE2A556E6194639E /* Resources */,
 			);
 			buildRules = (
 			);
@@ -169,28 +155,28 @@
 			);
 			name = Annotate;
 			productName = Annotate;
-			productReference = 983B553F48BE0D8ADA9FD304 /* Annotate.app */;
+			productReference = 3CCB0AF678830CBE14D0428B /* Annotate.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		1C05B9B5369269A2DDF2E9D3 /* Project object */ = {
+		325951E981F2C456015201FE /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
-					16F02360383A7F86345CCCDA = {
+					6B541994F5E9444A4603DFFC = {
 						CreatedOnToolsVersion = 26.4;
-						TestTargetID = 1F123471F66E91D195EAF80F;
+						TestTargetID = 8252F8E12CAFF168430D3CE9;
 					};
-					1F123471F66E91D195EAF80F = {
+					8252F8E12CAFF168430D3CE9 = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
 			};
-			buildConfigurationList = 68D9A8C0CDBF80762F57E8D6 /* Build configuration list for PBXProject "Annotate" */;
+			buildConfigurationList = 52B07142A36F9EB05BC46128 /* Build configuration list for PBXProject "Annotate" */;
 			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -198,70 +184,135 @@
 				en,
 				Base,
 			);
-			mainGroup = 22650E5087E6E3FF6970C607;
+			mainGroup = E204E6CC287E0FAD12052F74;
 			minimizedProjectReferenceProxies = 0;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = B16E513BC25B569CF14E5077 /* Products */;
+			productRefGroup = 161B677AEFC2455E1A829C95 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				1F123471F66E91D195EAF80F /* Annotate */,
-				16F02360383A7F86345CCCDA /* AnnotateTests */,
+				8252F8E12CAFF168430D3CE9 /* Annotate */,
+				6B541994F5E9444A4603DFFC /* AnnotateTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		2206130A826F2C85ABD3DE35 /* Resources */ = {
+		05936F9A60F90BEA93CF95CD /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F1D6786A1C82C2D654D65CE4 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		ECB71B764074609D96C0DDDC /* Resources */ = {
+		3ABADEB7DE2A556E6194639E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				643D554354A768D3C7138401 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		706AF2EDDAEA9EF4AE6B6F18 /* Sources */ = {
+		067F3119621484D6A294FF55 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E43E330B69EBB0988D43D4F3 /* AnnotateTests.swift in Sources */,
+				4ADF57EE61CA800760D5C44D /* AnnotateApp.swift in Sources */,
+				7EF5936BBE42CD9582AE7C76 /* ContentView.swift in Sources */,
+				D9610F1682A3B485E9CBDCE8 /* PDFAnnotatorView.swift in Sources */,
+				F9D93EEFEC837C2DC3121D99 /* PDFDocumentStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		72F20897B8150F05649EB75F /* Sources */ = {
+		5FE49D8A626F3F4897BA7E67 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				5E39A1A60178D7B553EDA518 /* AnnotateApp.swift in Sources */,
-				7329F94B3D8989525394ABF1 /* ContentView.swift in Sources */,
-				D1BA17B4BD8091F3F6BCE328 /* PDFAnnotatorView.swift in Sources */,
-				4F44F6CDA8098B20C06D4F2C /* PDFDocumentStore.swift in Sources */,
+				6F03874A49C7C837FF6001FB /* AnnotateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		0A197FE5CCC4606771696EE3 /* PBXTargetDependency */ = {
+		2617367B3387D8B0C5269E48 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = Annotate;
-			target = 1F123471F66E91D195EAF80F /* Annotate */;
-			targetProxy = 91F91ED91368E7FA460C849B /* PBXContainerItemProxy */;
+			target = 8252F8E12CAFF168430D3CE9 /* Annotate */;
+			targetProxy = 6E9FDBB588CF31A5B02B4C43 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		0F049D7E741F5192BB1CFA18 /* Release */ = {
+		60C154C4BF8BE05CA10DDD09 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
+				PRODUCT_NAME = Annotate;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		6DD7D02C30CAF9A185659665 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
+				PRODUCT_NAME = Annotate;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		904CB333AF5B556ED45F1F06 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -315,30 +366,7 @@
 			};
 			name = Release;
 		};
-		362BD1FA4CA4FF10008C17E0 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CLANG_ENABLE_MODULES = YES;
-				CLANG_ENABLE_OBJC_WEAK = NO;
-				CODE_SIGNING_ALLOWED = NO;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SUPPORTS_MACCATALYST = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Annotate.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Annotate";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		3C11A0D100BA36AAA6360287 /* Debug */ = {
+		980A04D744A4C8F8754BC6C7 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
@@ -360,74 +388,7 @@
 			};
 			name = Debug;
 		};
-		47CF0341233AEA16BFC68F21 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CLANG_ENABLE_OBJC_WEAK = NO;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
-				PRODUCT_NAME = Annotate;
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SUPPORTS_MACCATALYST = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		5659D543DB0809FD2AD57EA3 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CLANG_ENABLE_OBJC_WEAK = NO;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Annotate;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate;
-				PRODUCT_NAME = Annotate;
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SUPPORTS_MACCATALYST = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				VALIDATE_PRODUCT = YES;
-			};
-			name = Release;
-		};
-		99D4EF816EC26F6B8DBE2EDC /* Debug */ = {
+		BC20D7B6369B4612AC3F71C6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -488,37 +449,60 @@
 			};
 			name = Debug;
 		};
+		F270349595A19DAF47920E7C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.annotate.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Annotate.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Annotate";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		68D9A8C0CDBF80762F57E8D6 /* Build configuration list for PBXProject "Annotate" */ = {
+		49E5A9296BE990EBB676DA1C /* Build configuration list for PBXNativeTarget "Annotate" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				99D4EF816EC26F6B8DBE2EDC /* Debug */,
-				0F049D7E741F5192BB1CFA18 /* Release */,
+				6DD7D02C30CAF9A185659665 /* Release */,
+				60C154C4BF8BE05CA10DDD09 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		6A92872C281C03EE0E494612 /* Build configuration list for PBXNativeTarget "Annotate" */ = {
+		502BA4BC5F4041D84185886B /* Build configuration list for PBXNativeTarget "AnnotateTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				5659D543DB0809FD2AD57EA3 /* Release */,
-				47CF0341233AEA16BFC68F21 /* Debug */,
+				F270349595A19DAF47920E7C /* Release */,
+				980A04D744A4C8F8754BC6C7 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		8B3EF5264CD0044DB2CE0AEA /* Build configuration list for PBXNativeTarget "AnnotateTests" */ = {
+		52B07142A36F9EB05BC46128 /* Build configuration list for PBXProject "Annotate" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				362BD1FA4CA4FF10008C17E0 /* Release */,
-				3C11A0D100BA36AAA6360287 /* Debug */,
+				BC20D7B6369B4612AC3F71C6 /* Debug */,
+				904CB333AF5B556ED45F1F06 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = 1C05B9B5369269A2DDF2E9D3 /* Project object */;
+	rootObject = 325951E981F2C456015201FE /* Project object */;
 }

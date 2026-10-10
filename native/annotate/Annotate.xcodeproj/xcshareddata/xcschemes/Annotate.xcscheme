@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "1F123471F66E91D195EAF80F"
+               BlueprintIdentifier = "8252F8E12CAFF168430D3CE9"
                BuildableName = "Annotate.app"
                BlueprintName = "Annotate"
                ReferencedContainer = "container:Annotate.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "16F02360383A7F86345CCCDA"
+               BlueprintIdentifier = "6B541994F5E9444A4603DFFC"
                BuildableName = "AnnotateTests.xctest"
                BlueprintName = "AnnotateTests"
                ReferencedContainer = "container:Annotate.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "1F123471F66E91D195EAF80F"
+            BlueprintIdentifier = "8252F8E12CAFF168430D3CE9"
             BuildableName = "Annotate.app"
             BlueprintName = "Annotate"
             ReferencedContainer = "container:Annotate.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "16F02360383A7F86345CCCDA"
+               BlueprintIdentifier = "6B541994F5E9444A4603DFFC"
                BuildableName = "AnnotateTests.xctest"
                BlueprintName = "AnnotateTests"
                ReferencedContainer = "container:Annotate.xcodeproj">
@@ -77,7 +77,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "1F123471F66E91D195EAF80F"
+            BlueprintIdentifier = "8252F8E12CAFF168430D3CE9"
             BuildableName = "Annotate.app"
             BlueprintName = "Annotate"
             ReferencedContainer = "container:Annotate.xcodeproj">
@@ -94,7 +94,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "1F123471F66E91D195EAF80F"
+            BlueprintIdentifier = "8252F8E12CAFF168430D3CE9"
             BuildableName = "Annotate.app"
             BlueprintName = "Annotate"
             ReferencedContainer = "container:Annotate.xcodeproj">

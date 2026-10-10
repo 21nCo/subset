@@ -4,7 +4,6 @@ require "fileutils"
 # Regenerates Annotate.xcodeproj. The POC shipped a hand-written project; this keeps its
 # settings (iOS 17, iPhone and iPad, Mac Catalyst) and adds an asset catalog and tests.
 project_path = File.join(__dir__, "Annotate.xcodeproj")
-FileUtils.rm_rf(project_path) if File.exist?(project_path)
 project = Xcodeproj::Project.new(project_path)
 project.root_object.attributes["LastSwiftUpdateCheck"] = "2640"
 project.root_object.attributes["LastUpgradeCheck"] = "2640"
@@ -17,6 +16,12 @@ tests_group = project.main_group.new_group("Tests", "Tests")
 app = project.new_target(:application, "Annotate", :ios, "17.0")
 tests = project.new_target(:unit_test_bundle, "AnnotateTests", :ios, "17.0")
 tests.add_dependency(app)
+
+# new_target links Foundation through a DEVELOPER_DIR path pinned to one iOS SDK version.
+# Swift links system frameworks automatically, so drop that reference.
+[app, tests].each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
+project.frameworks_group.recursive_children.select { |child| child.isa == "PBXFileReference" }.each(&:remove_from_project)
+project.frameworks_group.groups.each(&:remove_from_project)
 project.root_object.attributes["TargetAttributes"][app.uuid] = { "CreatedOnToolsVersion" => "26.4" }
 project.root_object.attributes["TargetAttributes"][tests.uuid] = {
   "CreatedOnToolsVersion" => "26.4",
@@ -36,6 +41,8 @@ common = {
 
 app.build_configurations.each do |config|
   common.each { |key, value| config.build_settings[key] = value }
+  # The asset catalog has no AccentColor set.
+  config.build_settings.delete("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME")
   config.build_settings.merge!(
     "PRODUCT_NAME" => "Annotate",
     "PRODUCT_BUNDLE_IDENTIFIER" => "dev.subset.annotate",
@@ -73,6 +80,8 @@ end
 app.resources_build_phase.add_file_reference(app_group.new_file("Assets.xcassets"))
 tests.add_file_references([tests_group.new_file("AnnotateTests.swift")])
 
+# Remove the old project only after generation has succeeded, so a failure leaves it intact.
+FileUtils.rm_rf(project_path) if File.exist?(project_path)
 project.save
 
 scheme = Xcodeproj::XCScheme.new

@@ -408,7 +408,8 @@ final class AnnotatablePDFContainerView: UIView {
         }
 
         lastKnownFitScale = fitScale
-        pdfView.minScaleFactor = max(fitScale * 0.75, 0.35)
+        // Keep a 0.35 floor, but never above the fit scale, so large-format pages can still fit.
+        pdfView.minScaleFactor = min(fitScale, max(fitScale * 0.75, 0.35))
         pdfView.maxScaleFactor = max(fitScale * 6, fitScale + 4)
         return true
     }
