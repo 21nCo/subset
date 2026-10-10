@@ -28,11 +28,43 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'clipboard',
+    name: 'Clipboard',
+    summary: 'Keep a private, searchable history of everything you copy, and paste any earlier item back on the Mac or from an iPhone keyboard.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
+  },
+  {
+    id: 'screenshot',
+    name: 'Screenshot',
+    summary: 'Capture, record, annotate, and pin what is on screen from the macOS menu bar, with optional self-hosted share links.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'pdf-review',
     name: 'PDF annotation and review',
     summary: 'Annotate a PDF and review marked passages in a focused workspace.',
     state: 'planned',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
+    availableSurfaces: []
+  },
+  {
+    id: 'breaks',
+    name: 'Breaks',
+    summary: 'Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
+    availableSurfaces: []
+  },
+  {
+    id: 'minutes',
+    name: 'Minutes',
+    summary: 'Send a visible notetaker bot to a Google Meet or Zoom call and keep the meeting audio locally.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'agent-cli'],
     availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
