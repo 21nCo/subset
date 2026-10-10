@@ -28,7 +28,6 @@ final class LauncherAppState: ObservableObject {
 
     private let appSearchService = AppSearchService()
     private let shortcutSearchService = ShortcutSearchService()
-    private let fileSearchService = FileSearchService()
     private let emojiSearchService = EmojiSearchService()
     private let windowManagementService = WindowManagementService()
     private var fileSearchTask: Task<Void, Never>?
@@ -39,8 +38,22 @@ final class LauncherAppState: ObservableObject {
     }
 
     func refreshSearchData() {
-        files = fileSearchService.initialFiles()
+        loadInitialFiles()
         refreshCatalogs()
+    }
+
+    /// Lists recent Downloads/Desktop/Documents items off the main actor. Reading those folders
+    /// can wait on a macOS privacy prompt, which must not block launch or the launcher panel.
+    /// Uses `fileSearchTask`, so a newer query search cancels it.
+    private func loadInitialFiles() {
+        fileSearchTask?.cancel()
+        fileSearchTask = Task { [weak self] in
+            let results = await Task.detached(priority: .userInitiated) {
+                FileSearchService().initialFiles()
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.files = results
+        }
     }
 
     /// Reloads apps and Siri Shortcuts off the main actor; `shortcuts list` can take a while.
@@ -76,8 +89,7 @@ final class LauncherAppState: ObservableObject {
         query = ""
         noteSaveError = nil
         // A search from the previous session must not replace the fresh suggestions.
-        fileSearchTask?.cancel()
-        files = fileSearchService.initialFiles()
+        loadInitialFiles()
         reloadQuickNotes()
         refreshCatalogs()
         onOpenLauncher?(mode)
@@ -184,7 +196,11 @@ final class LauncherAppState: ObservableObject {
         }
 
         guard normalizedQuery.count > 1 else {
-            files = normalizedQuery.isEmpty ? fileSearchService.initialFiles() : []
+            if normalizedQuery.isEmpty {
+                loadInitialFiles()
+            } else {
+                files = []
+            }
             return
         }
 

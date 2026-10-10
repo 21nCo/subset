@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 
 @MainActor
 final class WindowManagementService {
@@ -435,28 +436,47 @@ final class WindowManagementService {
             && abs(currentFrame.height - targetFrame.height) <= sizeTolerance
     }
 
-    private func runSystemEventsFallback(frame: CGRect, appName: String) -> Bool {
-        let escapedAppName = appName
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let x = Int(frame.minX.rounded())
-        let y = Int(frame.minY.rounded())
-        let width = Int(frame.width.rounded())
-        let height = Int(frame.height.rounded())
-        let script = """
+    /// Constant AppleScript source. Values are passed as Apple event parameters to the
+    /// `moveFrontWindow` handler, so the app name is never interpolated into script text.
+    private static let systemEventsFallbackSource = """
+    on moveFrontWindow(appName, x, y, w, h)
         tell application "System Events"
-            tell process "\(escapedAppName)"
+            tell process appName
                 set frontmost to true
                 if exists window 1 then
-                    set position of window 1 to {\(x), \(y)}
-                    set size of window 1 to {\(width), \(height)}
+                    set position of window 1 to {x, y}
+                    set size of window 1 to {w, h}
                 end if
             end tell
         end tell
-        """
+    end moveFrontWindow
+    """
+
+    private func runSystemEventsFallback(frame: CGRect, appName: String) -> Bool {
+        guard let script = NSAppleScript(source: Self.systemEventsFallbackSource) else {
+            return false
+        }
+
+        let parameters = NSAppleEventDescriptor.list()
+        parameters.insert(NSAppleEventDescriptor(string: appName), at: 1)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minX.rounded())), at: 2)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minY.rounded())), at: 3)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.width.rounded())), at: 4)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.height.rounded())), at: 5)
+
+        let event = NSAppleEventDescriptor(
+            eventClass: AEEventClass(kASAppleScriptSuite),
+            eventID: AEEventID(kASSubroutineEvent),
+            targetDescriptor: .currentProcess(),
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        // AppleScript stores handler names in lowercase.
+        event.setParam(NSAppleEventDescriptor(string: "movefrontwindow"), forKeyword: AEKeyword(keyASSubroutineName))
+        event.setParam(parameters, forKeyword: keyDirectObject)
 
         var error: NSDictionary?
-        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        script.executeAppleEvent(event, error: &error)
         return error == nil
     }
 

@@ -65,7 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if appState.isAvatarVisible {
             avatarController?.show()
         }
-        appState.refreshSearchData()
+        // The test host must not read the user's folders (which can raise privacy prompts).
+        if !PersistenceController.isRunningUnitTests { appState.refreshSearchData() }
         observeActiveApplications()
     }
 
