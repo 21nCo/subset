@@ -56,7 +56,7 @@ Unverified:
 
 ### Verification (2026-10-09, Xcode 26.4)
 
-- `xcodebuild -scheme Annotate -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO test`: **TEST SUCCEEDED**, 10/10 (re-run 2026-10-10 after the second round of review fixes).
+- `xcodebuild -scheme Annotate -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO test`: **TEST SUCCEEDED**, 11/11 (re-run 2026-10-10 after the third round of review fixes).
 - `xcodebuild -target Annotate -sdk iphonesimulator|iphoneos EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets ... build`: **BUILD SUCCEEDED** for both.
 - Without that exclusion, `actool` fails on this machine. It needs the iOS 26.4 simulator runtime, and only iOS 18.3 is installed. The scheme-based `generic/platform=iOS Simulator` build fails for the same reason.
 
@@ -105,11 +105,12 @@ Audited on 2026-10-09 against `poc/ios/PDFAnnotation` at `21nCo/21n@4d2923b`.
 
 **Test coverage**
 - The POC had **no tests**; its README said so.
-- The port adds `AnnotateTests` (10 tests, run on Mac Catalyst):
+- The port adds `AnnotateTests` (11 tests, run on Mac Catalyst):
   - the Cover tool is not labelled as redaction
   - an ink stroke marks unexported changes, leaves the source file byte-identical, and is undoable
   - ink paths are placed correctly on pages whose media box does not start at (0, 0)
-  - an ink stroke's bounds cover only the stroke, so taps elsewhere on the page do not select it
+  - an ink stroke's bounds are sized to the stroke rather than the whole page, so taps outside that rectangle do not select it
+  - an export clears the "Not exported" flag only if nothing changed while the exporter was open
   - closing with unexported changes requires confirmation; closing without them does not
   - opening another PDF keeps the unexported-changes guard if the picker is cancelled
   - exported data contains the annotation on the correct page only
@@ -133,7 +134,7 @@ These are informed by PDF Expert (true redaction is clearly separate from drawin
 2. **No silent data loss.**
    - Closing (⌘W) or opening another PDF with unexported annotations asks first, with three choices: Discard, Export First…, and Cancel.
    - The top bar shows "Not exported" while there are unexported changes.
-   - While there are unexported changes, the system window close control (Mac Catalyst title bar, iPad Stage Manager) is disabled through `UIWindowScene.windowingBehaviors`, so the in-app Close, which asks first, is the way out. Not verified by hand on a Catalyst window. Quitting the app (⌘Q) or the system ending it still loses unexported annotations: there is no autosave or state restoration yet.
+   - On Mac Catalyst, while there are unexported changes, the title bar close button is disabled through `UIWindowScene.windowingBehaviors`, so the in-app Close, which asks first, is the way out. Not verified by hand on a Catalyst window. Unexported annotations are still lost when an iPad window is closed from the system (Stage Manager, the app switcher), when the app quits (⌘Q), or when the system ends it: there is no autosave or state restoration yet.
 3. **Confirmed Remove All.** The trash button now confirms, names how many annotations will be removed, and warns that pre-existing annotations are included. It is disabled when there are none.
 4. **Keyboard shortcuts** for iPad hardware keyboards and Mac Catalyst:
    - ⌘O Open

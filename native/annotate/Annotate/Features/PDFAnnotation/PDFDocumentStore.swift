@@ -372,6 +372,10 @@ final class PDFDocumentStore: ObservableObject {
     /// True after any annotation change that has not been exported. The source file is never
     /// modified; export always writes a separate copy chosen by the user.
     @Published private(set) var hasUnexportedChanges = false
+    /// Bumped on every annotation change, so an export only clears `hasUnexportedChanges`
+    /// when nothing changed while the exporter was open.
+    private var changeRevision = 0
+    private var exportRevision: Int?
     /// Set when closing or replacing the document would discard unexported annotations.
     @Published var pendingDiscard: DiscardIntent?
     @Published var isClearAllConfirmationPresented = false
@@ -806,7 +810,7 @@ final class PDFDocumentStore: ObservableObject {
         }
 
         canUndo = !undoStack.isEmpty
-        hasUnexportedChanges = true
+        markUnexportedChange()
         finishDocumentMutation()
     }
 
@@ -1123,6 +1127,7 @@ final class PDFDocumentStore: ObservableObject {
         }
 
         exportFile = AnnotatedPDFFile(data: data)
+        exportRevision = changeRevision
         isExporterPresented = true
     }
 
@@ -1130,7 +1135,12 @@ final class PDFDocumentStore: ObservableObject {
         do {
             _ = try result.get()
             exportFile = nil
-            hasUnexportedChanges = false
+            // Edits made while the exporter was open (for example a pending auto-apply) are not
+            // in the exported copy, so they stay unexported.
+            if exportRevision == changeRevision {
+                hasUnexportedChanges = false
+            }
+            exportRevision = nil
         } catch {
             errorMessage = "The annotated PDF could not be exported. \(error.localizedDescription)"
         }
@@ -2336,6 +2346,11 @@ final class PDFDocumentStore: ObservableObject {
 
         undoStack.append(AnnotationMutation(kind: kind, entries: entries))
         canUndo = true
+        markUnexportedChange()
+    }
+
+    private func markUnexportedChange() {
+        changeRevision += 1
         hasUnexportedChanges = true
     }
 

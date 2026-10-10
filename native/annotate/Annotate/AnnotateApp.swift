@@ -22,10 +22,10 @@ private struct DocumentWindow: View {
     }
 }
 
-/// The store holds the only copy of unexported annotations, and the system window close control
-/// (Mac Catalyst title bar, iPad Stage Manager) would destroy it without the discard prompt.
-/// While there are unexported changes the window is not closable, so the in-app Close (⌘W),
-/// which asks first, is the way out.
+/// The store holds the only copy of unexported annotations, and the Mac Catalyst title bar close
+/// button would destroy it without the discard prompt. While there are unexported changes the
+/// window is not closable there, so the in-app Close (⌘W), which asks first, is the way out.
+/// `windowingBehaviors` is nil outside Mac Catalyst, so this does not protect iPad windows.
 private struct WindowCloseGuard: UIViewRepresentable {
     let isClosable: Bool
 

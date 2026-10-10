@@ -86,6 +86,22 @@ final class AnnotateTests: XCTestCase {
         XCTAssertEqual(exported.page(at: 0)?.annotations.count, 0)
     }
 
+    func testExportKeepsEditsMadeWhileTheExporterWasOpenUnexported() throws {
+        let store = PDFDocumentStore()
+        store.importDocument(from: .success(try makePDF()))
+        let page = try XCTUnwrap(store.document?.page(at: 0))
+        store.commitInkStroke(on: page, pagePoints: [CGPoint(x: 10, y: 10), CGPoint(x: 80, y: 90)])
+
+        store.prepareExport()
+        store.commitInkStroke(on: page, pagePoints: [CGPoint(x: 100, y: 100), CGPoint(x: 150, y: 150)])
+        store.finishExport(result: .success(directory.appendingPathComponent("exported.pdf")))
+        XCTAssertTrue(store.hasUnexportedChanges)
+
+        store.prepareExport()
+        store.finishExport(result: .success(directory.appendingPathComponent("exported.pdf")))
+        XCTAssertFalse(store.hasUnexportedChanges)
+    }
+
     func testClosingWithoutChangesClosesImmediately() throws {
         let store = PDFDocumentStore()
         store.importDocument(from: .success(try makePDF()))
