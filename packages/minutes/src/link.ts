@@ -69,8 +69,15 @@ export function parseMeetingLink(raw: string): MeetingLinkResult {
 export function redactUrl(raw: string): string {
   try {
     const url = new URL(raw);
+    // Non-special schemes (for example zoommtg://) have an opaque "null" origin that would drop the host.
+    if (url.origin === 'null') return '(unparsed link)';
     return `${url.origin}${url.pathname}`;
   } catch {
     return '(unparsed link)';
   }
+}
+
+/** Redacts every http(s) URL inside free text, such as a browser error that echoes the page it was opening. */
+export function redactUrlsInText(text: string): string {
+  return text.replace(/https?:\/\/[^\s"'<>]+/gi, (match) => redactUrl(match));
 }

@@ -2,7 +2,7 @@
 // external runtime dependency: it resolves files relative to its own install and does not survive
 // bundling. The build also stages app-runtime/, the self-contained copy the macOS app embeds
 // (dist plus playwright-core); app-runtime/ is not part of the npm package.
-import { chmod, cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,19 +34,28 @@ const cliFile = path.join(root, 'dist/cli.mjs');
 await writeFile(cliFile, `#!/usr/bin/env node\n${await readFile(cliFile, 'utf8')}`);
 await chmod(cliFile, 0o755);
 
-// Stage the macOS app runtime: the same bundle plus its one runtime dependency.
+// Stage the macOS app runtime: the same bundle plus its one runtime dependency. It is assembled in a
+// temporary folder and renamed into place only when complete, so the app never embeds a partial copy.
 const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const runtime = path.join(root, 'app-runtime');
-await rm(runtime, { recursive: true, force: true });
-await mkdir(path.join(runtime, 'node_modules'), { recursive: true });
-await cp(path.join(root, 'dist'), path.join(runtime, 'dist'), { recursive: true });
-await writeFile(path.join(runtime, 'package.json'), `${JSON.stringify({ name: manifest.name, version: manifest.version, private: true, type: 'module' }, null, 2)}\n`);
-const require = createRequire(path.join(root, 'package.json'));
-const playwrightRoot = path.dirname(require.resolve('playwright-core/package.json'));
-// Skip playwright-core's browser installer scripts; Minutes uses the system Chrome.
-const installers = path.join(playwrightRoot, 'bin');
-await cp(playwrightRoot, path.join(runtime, 'node_modules/playwright-core'), {
-  recursive: true,
-  dereference: true,
-  filter: (source) => source !== installers && !source.startsWith(`${installers}${path.sep}`),
-});
+const staging = path.join(root, `.app-runtime-${process.pid}`);
+await rm(staging, { recursive: true, force: true });
+try {
+  await mkdir(path.join(staging, 'node_modules'), { recursive: true });
+  await cp(path.join(root, 'dist'), path.join(staging, 'dist'), { recursive: true });
+  await writeFile(path.join(staging, 'package.json'), `${JSON.stringify({ name: manifest.name, version: manifest.version, private: true, type: 'module' }, null, 2)}\n`);
+  const require = createRequire(path.join(root, 'package.json'));
+  const playwrightRoot = path.dirname(require.resolve('playwright-core/package.json'));
+  // Skip playwright-core's browser installer scripts; Minutes uses the system Chrome.
+  const installers = path.join(playwrightRoot, 'bin');
+  await cp(playwrightRoot, path.join(staging, 'node_modules/playwright-core'), {
+    recursive: true,
+    dereference: true,
+    filter: (source) => source !== installers && !source.startsWith(`${installers}${path.sep}`),
+  });
+  await rm(runtime, { recursive: true, force: true });
+  await rename(staging, runtime);
+} catch (error) {
+  await rm(staging, { recursive: true, force: true });
+  throw error;
+}

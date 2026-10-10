@@ -101,6 +101,16 @@ const isOneOf = <T extends string>(list: readonly T[], value: unknown): value is
 const hasOnly = (value: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(value).every((key) => keys.includes(key));
 const isSessionId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+/** A redacted meeting link: an https URL with no credentials, query, or fragment (a Zoom `pwd` is a passcode). */
+const isRedactedLink = (value: unknown): value is string => {
+  if (!isNonEmptyText(value, 2_048) || /[?#]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+};
 
 const eventKeys: Record<MinutesEventType, readonly string[]> = {
   started: ['platform', 'meeting', 'displayName', 'outputDirectory'],
@@ -114,12 +124,13 @@ const eventKeys: Record<MinutesEventType, readonly string[]> = {
 export function isMinutesEvent(value: unknown): value is MinutesEvent {
   if (!isRecord(value)) return false;
   if (value.v !== MINUTES_CONTRACT_VERSION || !isTime(value.at)) return false;
-  if (value.session !== null && !isSessionId(value.session)) return false;
   if (!isOneOf(Object.keys(eventKeys) as MinutesEventType[], value.type)) return false;
+  // Only a failure before any session existed (error, then ended) has no session id.
+  if (value.session === null ? value.type !== 'error' && value.type !== 'ended' : !isSessionId(value.session)) return false;
   if (!hasOnly(value, ['v', 'at', 'session', 'type', ...eventKeys[value.type]])) return false;
   switch (value.type) {
     case 'started':
-      return isOneOf(platforms, value.platform) && isNonEmptyText(value.meeting, 2_048)
+      return isOneOf(platforms, value.platform) && isRedactedLink(value.meeting)
         && isText(value.displayName, 200) && isNonEmptyText(value.outputDirectory);
     case 'state':
       return isOneOf(sessionStates, value.state);
@@ -130,9 +141,10 @@ export function isMinutesEvent(value: unknown): value is MinutesEvent {
     case 'error':
       return isOneOf(errorCodes, value.code) && isText(value.message);
     case 'ended':
+      // A file and its size come together; both are null when no file was kept.
       return isOneOf(endReasons, value.reason)
-        && (value.path === null || isNonEmptyText(value.path))
-        && (value.bytes === null || (Number.isSafeInteger(value.bytes) && (value.bytes as number) >= 0));
+        && ((value.path === null && value.bytes === null)
+          || (isNonEmptyText(value.path) && Number.isSafeInteger(value.bytes) && (value.bytes as number) >= 0));
   }
 }
 
@@ -194,7 +206,7 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
   return isSessionId(value.id)
     && Number.isSafeInteger(value.pid) && (value.pid as number) > 0
     && isOneOf(platforms, value.platform)
-    && isNonEmptyText(value.meeting, 2_048)
+    && isRedactedLink(value.meeting)
     && isOneOf(sessionStates, value.state)
     && (value.outputPath === null || isNonEmptyText(value.outputPath))
     && isTime(value.startedAt) && isTime(value.updatedAt)
@@ -212,7 +224,10 @@ export function isMinutesStatus(value: unknown): value is MinutesStatus {
   return value.sessions.every((session) => {
     if (!isRecord(session)) return false;
     const { alive, stale, ...record } = session;
-    return typeof alive === 'boolean' && typeof stale === 'boolean' && isSessionRecord(record);
+    if (typeof alive !== 'boolean' || typeof stale !== 'boolean' || !isSessionRecord(record)) return false;
+    // An active session is either alive or stale; a finished one is neither.
+    const active = record.state !== 'ended' && record.state !== 'failed';
+    return active ? alive !== stale : !alive && !stale;
   });
 }
 
@@ -222,6 +237,14 @@ export function isMinutesStatus(value: unknown): value is MinutesStatus {
 
 export const checkIds = ['node', 'chrome', 'profile', 'profile_lock', 'output_directory'] as const;
 export type CheckId = (typeof checkIds)[number];
+/** Which checks block `join`. A report must contain every check, with these flags. */
+export const requiredChecks: Readonly<Record<CheckId, boolean>> = {
+  node: true,
+  chrome: true,
+  profile: false,
+  profile_lock: false,
+  output_directory: true,
+};
 
 export interface DoctorCheck {
   id: CheckId;
@@ -254,9 +277,10 @@ export function isMinutesDoctor(value: unknown): value is MinutesDoctor {
     if (!isRecord(check) || !hasOnly(check, ['id', 'ok', 'required', 'detail', 'fix'])) return false;
     if (!isOneOf(checkIds, check.id) || seen.has(check.id)) return false;
     seen.add(check.id);
-    if (typeof check.ok !== 'boolean' || typeof check.required !== 'boolean' || !isText(check.detail)) return false;
+    if (typeof check.ok !== 'boolean' || check.required !== requiredChecks[check.id] || !isText(check.detail)) return false;
     if (check.fix !== null && !isText(check.fix)) return false;
   }
+  if (seen.size !== checkIds.length) return false;
   const requiredOk = (value.checks as DoctorCheck[]).every((check) => check.ok || !check.required);
   return value.ok === requiredOk;
 }

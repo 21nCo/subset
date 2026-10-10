@@ -118,7 +118,12 @@ final class MinutesController: ObservableObject {
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutBuffer = Data()
+    private var stderrBuffer = Data()
     private var stopRequested = false
+    /// The CLI's last `error` event; its `ended` event (reason `failed`) follows.
+    private var lastErrorMessage: String?
+    /// A folder chosen while a readiness check was running; checked again when it finishes.
+    private var pendingReadinessDirectory: String?
     private let logger = Logger(subsystem: "dev.subset.minutes", category: "cli")
 
     /// The bot's Chrome profile. Matches the CLI default on macOS (`~/Library/Application Support/Subset Minutes`)
@@ -138,7 +143,11 @@ final class MinutesController: ObservableObject {
 
     /// Finds Node.js and the CLI, then runs `subset-minutes doctor --json` for the Chrome, profile, and folder checks.
     func refreshReadiness(outputDirectory: String) {
-        guard !isCheckingReadiness else { return }
+        guard !isCheckingReadiness else {
+            // Do not drop the request: the checklist must describe the folder that will be used.
+            pendingReadinessDirectory = outputDirectory
+            return
+        }
         isCheckingReadiness = true
         Task { @MainActor in
             var next = MinutesReadiness()
@@ -165,6 +174,10 @@ final class MinutesController: ObservableObject {
             }
             readiness = next
             isCheckingReadiness = false
+            if let pending = pendingReadinessDirectory {
+                pendingReadinessDirectory = nil
+                refreshReadiness(outputDirectory: pending)
+            }
         }
     }
 
@@ -181,11 +194,15 @@ final class MinutesController: ObservableObject {
         recordingPath = nil
         joinedAt = nil
         lastErrorCode = nil
+        lastErrorMessage = nil
         stopRequested = false
         stdoutBuffer.removeAll()
+        stderrBuffer.removeAll()
 
-        // The link goes to the CLI as an argument and is never logged here; the CLI reports only a redacted form.
-        var arguments = [cli.scriptPath, "join", link.url.absoluteString, "--json", "--stop-on-stdin-close",
+        // The link goes to the CLI on stdin, not as an argument: arguments are visible to every process
+        // (`ps`), and a Zoom link can carry its passcode. It is never logged here; the CLI reports only a
+        // redacted form.
+        var arguments = [cli.scriptPath, "join", "--link-from-stdin", "--json", "--stop-on-stdin-close",
                          "--profile", Self.botProfileDirectory]
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty { arguments += ["--name", name] }
@@ -220,20 +237,18 @@ final class MinutesController: ObservableObject {
                 handle.readabilityHandler = nil
                 return
             }
-            guard let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor [weak self] in
-                for line in text.split(whereSeparator: \.isNewline) {
-                    self?.appendLog(String(line), isError: true)
-                }
-            }
+            Task { @MainActor [weak self] in self?.consumeStderr(data) }
         }
         process.terminationHandler = { [weak self] finished in
             let status = finished.terminationStatus
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
             let rest = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorRest = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             Task { @MainActor [weak self] in
                 if !rest.isEmpty { self?.consumeStdout(rest) }
+                if !errorRest.isEmpty { self?.consumeStderr(errorRest) }
+                self?.consumeStderr(Data("\n".utf8))
                 self?.handleTermination(status: status)
             }
         }
@@ -242,6 +257,7 @@ final class MinutesController: ObservableObject {
             try process.run()
             self.process = process
             self.stdinPipe = stdinPipe
+            try? stdinPipe.fileHandleForWriting.write(contentsOf: Data((link.url.absoluteString + "\n").utf8))
             phase = .launching
             logger.info("Spawned subset-minutes join (pid \(process.processIdentifier, privacy: .public))")
             appendLog("Started subset-minutes for \(link.platformName) (PID \(process.processIdentifier)).")
@@ -320,6 +336,8 @@ final class MinutesController: ObservableObject {
             case "launching", "joining":
                 if phase != .stopping { phase = .launching }
             case "in_meeting":
+                // A join that completes after Stop must not re-enable Leave and Stop.
+                guard !stopRequested else { break }
                 phase = .inMeeting
                 joinedAt = .now
                 appendLog("Joined the meeting.")
@@ -334,14 +352,16 @@ final class MinutesController: ObservableObject {
             recordingPath = event.path
             appendLog("Writing audio to \(event.path ?? "an unknown file").")
         case .error:
+            // The session is still finishing (the recording is being closed); the ended event follows.
             lastErrorCode = event.code
+            lastErrorMessage = event.message
             logger.error("CLI error \(event.code ?? "unknown", privacy: .public)")
-            fail(event.message ?? "Unknown error.", code: event.code)
+            appendLog("[\(event.code ?? "error")] \(event.message ?? "Unknown error.")", isError: true)
         case .ended:
-            if let path = event.path { recordingPath = path }
+            recordingPath = event.path
             let reason = event.reason ?? "ended"
             if reason == "failed" {
-                if case .failed = phase {} else { phase = .failed("The bot stopped with an error. See Details for its log.") }
+                phase = .failed(lastErrorMessage ?? "The bot stopped with an error. See Details for its log.")
             } else {
                 phase = .ended(reason)
             }
@@ -354,20 +374,39 @@ final class MinutesController: ObservableObject {
         stdinPipe = nil
         appendLog("subset-minutes exited with status \(status).", isError: status != 0 && !stopRequested)
         switch phase {
-        case .failed, .ended:
+        case .failed:
             break
+        case .ended where status == 0:
+            break
+        case .ended:
+            // The CLI said it ended but then exited abnormally (for example the 15-second forced stop).
+            phase = .failed("subset-minutes exited with status \(status) while finishing. The recording may be incomplete.")
         default:
-            if status == 0 || stopRequested {
+            if status == 0 {
                 phase = .ended(stopRequested ? "stopped" : "exited")
+            } else if stopRequested {
+                phase = .failed("The bot was stopped, but subset-minutes exited with status \(status) before finishing. The recording may be incomplete.")
             } else {
                 phase = .failed("subset-minutes exited with status \(status). See Details for its log.")
             }
         }
     }
 
-    private func fail(_ message: String, code: String? = nil) {
-        phase = .failed(message)
-        appendLog(code.map { "[\($0)] \(message)" } ?? message, isError: true)
+    /// Reports a failure in the app itself. While a session runs, the session's own state wins.
+    private func fail(_ message: String) {
+        if !phase.isActive { phase = .failed(message) }
+        appendLog(message, isError: true)
+    }
+
+    private func consumeStderr(_ data: Data) {
+        stderrBuffer.append(data)
+        while let newline = stderrBuffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = stderrBuffer[stderrBuffer.startIndex..<newline]
+            stderrBuffer.removeSubrange(stderrBuffer.startIndex...newline)
+            if let line = String(data: lineData, encoding: .utf8), !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                appendLog(line, isError: true)
+            }
+        }
     }
 
     private func appendLog(_ text: String, isError: Bool = false) {
@@ -385,12 +424,12 @@ enum BrowserTabReader {
         ("com.apple.Safari", "tell application id \"com.apple.Safari\" to if (count of documents) > 0 then return URL of front document")
     ]
 
-    @MainActor
-    static func frontMeetingLink() -> MeetingLink? {
+    /// Runs each script with `osascript` off the main thread, so a slow browser or the first Automation
+    /// consent prompt does not freeze the window.
+    static func frontMeetingLink() async -> MeetingLink? {
         for script in scripts where !NSRunningApplication.runningApplications(withBundleIdentifier: script.bundleID).isEmpty {
-            var error: NSDictionary?
-            let result = NSAppleScript(source: script.source)?.executeAndReturnError(&error)
-            if let value = result?.stringValue, let link = MeetingLink(value) {
+            let output = await NodeLocator.run("/usr/bin/osascript", ["-e", script.source], timeout: 30)
+            if let value = output?.trimmingCharacters(in: .whitespacesAndNewlines), let link = MeetingLink(value) {
                 return link
             }
         }

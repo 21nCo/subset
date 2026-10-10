@@ -65,6 +65,13 @@ embed.shell_script = <<~'SH'
   ditto "${SRC}" "${DEST}"
 SH
 
+# The gem points Cocoa at one fixed macOS SDK version under DEVELOPER_DIR; make it SDK-relative so the
+# path exists on any Xcode.
+project.files.select { |ref| ref.path.to_s.end_with?("Cocoa.framework") }.each do |ref|
+  ref.path = "System/Library/Frameworks/Cocoa.framework"
+  ref.source_tree = "SDKROOT"
+end
+
 project.save
 
 scheme = Xcodeproj::XCScheme.new

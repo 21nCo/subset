@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -7,10 +7,12 @@ import {
   MinutesError,
   canTransition,
   isMinutesEvent,
+  isSessionProcessAlive,
   isSessionRecord,
   parseMeetingLink,
   readStatus,
   recordingFileName,
+  reserveRecordingPath,
   resolveRecordingPath,
   runMeetingSession,
   sessionStates,
@@ -56,15 +58,21 @@ function fakeDriver(script = {}) {
         async join(link, name) {
           calls.push(`join:${name}`);
           if (script.joinError) throw script.joinError;
+          script.onJoin?.();
           if (script.joinHangs) await new Promise(() => {});
         },
         async waitForEnd(signal) {
           calls.push('waitForEnd');
+          script.onWait?.();
           if (script.end) return script.end;
           if (signal.aborted) return 'aborted';
           return new Promise((resolve) => signal.addEventListener('abort', () => resolve('aborted'), { once: true }));
         },
-        async stopCapture() { calls.push('stopCapture'); return 4; },
+        async stopCapture() {
+          calls.push('stopCapture');
+          if (script.stopError) throw script.stopError;
+          return 4;
+        },
         async leave() { calls.push('leave'); },
         async close() { calls.push('close'); },
       };
@@ -115,9 +123,7 @@ test('a meeting that ends on its own finalizes the recording', async (t) => {
 
 test('a stop request in the meeting leaves and ends with reason stopped', async (t) => {
   const controller = new AbortController();
-  const pending = run(t, {}, { signal: controller.signal });
-  setTimeout(() => controller.abort(), 20);
-  const { events, driver, result } = await pending;
+  const { events, driver, result } = await run(t, { onWait: () => controller.abort() }, { signal: controller.signal });
   assert.deepEqual(states(events), ['launching', 'joining', 'in_meeting', 'stopping', 'ended']);
   assert.equal(result.reason, 'stopped');
   assert.deepEqual(driver.calls.slice(-3), ['stopCapture', 'leave', 'close']);
@@ -125,9 +131,7 @@ test('a stop request in the meeting leaves and ends with reason stopped', async 
 
 test('a stop request while joining still finalizes the file', async (t) => {
   const controller = new AbortController();
-  const pending = run(t, { joinHangs: true }, { signal: controller.signal });
-  setTimeout(() => controller.abort(), 20);
-  const { events, result } = await pending;
+  const { events, result } = await run(t, { joinHangs: true, onJoin: () => controller.abort() }, { signal: controller.signal });
   assert.deepEqual(states(events), ['launching', 'joining', 'stopping', 'ended']);
   assert.equal(result.reason, 'stopped');
   assert.equal(result.bytes, 4);
@@ -152,11 +156,39 @@ test('a join failure reports a coded error, keeps the partial file, and fails', 
 });
 
 test('a launch failure has no recording and maps unknown errors to internal', async (t) => {
-  const { events, result } = await run(t, { openError: new Error('boom') });
+  const { events, result, root } = await run(t, { openError: new Error('boom') });
   assert.deepEqual(states(events), ['launching', 'failed']);
   assert.equal(events.find((event) => event.type === 'error').code, 'internal');
   assert.deepEqual([result.path, result.bytes], [null, null]);
   assert.equal(events.some((event) => event.type === 'recording'), false);
+  assert.deepEqual(await readdir(path.join(root, 'out')), [], 'the reserved recording file is removed');
+});
+
+test('browser errors are reported without the Zoom passcode', async (t) => {
+  const { events, result } = await run(t, { joinError: new Error('page.goto: Timeout 30000ms exceeded.\nnavigating to "https://zoom.us/wc/join/1234567890?pwd=secret"') });
+  assert.equal(result.error.code, 'internal');
+  assert.match(result.error.message, /https:\/\/zoom\.us\/wc\/join\/1234567890"/);
+  assert.equal(JSON.stringify(events).includes('secret'), false);
+});
+
+test('a recording that cannot be finalized fails the session and reports the bytes on disk', async (t) => {
+  const { events, result } = await run(t, { end: 'meeting_ended', stopError: new MinutesError('capture_failed', 'disk full') });
+  assert.deepEqual(states(events), ['launching', 'joining', 'in_meeting', 'stopping', 'failed']);
+  assert.equal(result.state, 'failed');
+  assert.equal(result.error.code, 'capture_failed');
+  assert.match(result.error.message, /incomplete \(4 bytes saved\): disk full/);
+  const ended = events.at(-1);
+  assert.deepEqual([ended.type, ended.reason, ended.bytes], ['ended', 'failed', 4]);
+  assert.equal(ended.path, result.path);
+  for (const event of events) assert.equal(isMinutesEvent(event), true, JSON.stringify(event));
+});
+
+test('two sessions started in the same second get different files', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'minutes-reserve-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const startedAt = new Date('2026-10-09T10:15:30.000Z');
+  const paths = await Promise.all([1, 2, 3].map(() => reserveRecordingPath(root, 'zoom', startedAt)));
+  assert.equal(new Set(paths).size, 3);
 });
 
 test('status marks an active record whose process is gone as stale and skips bad files', async (t) => {
@@ -173,4 +205,11 @@ test('status marks an active record whose process is gone as stale and skips bad
   assert.equal(status.unreadable, 2);
   assert.deepEqual((await readStatus(path.join(root, 'missing'))).sessions, []);
   await assert.rejects(writeSessionRecord(root, { ...base, id: '../x', state: 'ended' }), /invalid session record/);
+});
+
+test('a running pid that started after the session is not the session (pid reuse)', async () => {
+  const base = { id: 'x', pid: process.pid, platform: 'zoom', meeting: 'https://zoom.us/j/1234567890', state: 'in_meeting', outputPath: null, updatedAt: new Date().toISOString(), joinedAt: null, endedAt: null, endReason: null, error: null };
+  assert.equal(await isSessionProcessAlive({ ...base, startedAt: new Date().toISOString() }), true);
+  assert.equal(await isSessionProcessAlive({ ...base, startedAt: '2001-01-01T00:00:00.000Z' }), false);
+  assert.equal(await isSessionProcessAlive({ ...base, pid: 999999, startedAt: new Date().toISOString() }), false);
 });

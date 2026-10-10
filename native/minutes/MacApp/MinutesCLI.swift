@@ -123,17 +123,29 @@ struct MinutesCLILocation: Equatable {
 enum NodeLocator {
     static let minimumMajorVersion = 22
 
-    /// Common install locations, then the user's login shell (covers nvm, fnm, and similar managers).
+    /// The first Node.js \(minimumMajorVersion)+ in the common install locations, then in the user's login shell
+    /// (covers nvm, fnm, and similar managers). An older Node in one place does not hide a newer one elsewhere.
     static func find() async -> String? {
-        let candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
-        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return found
+        for candidate in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
+            if await isSupported(candidate) { return candidate }
         }
-        let output = await run("/bin/zsh", ["-ilc", "command -v node"], timeout: 5)
-        return output?
+        let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.hasPrefix("/") ? $0 : nil } ?? "/bin/zsh"
+        let output = await run(shell, ["-ilc", "command -v node"], timeout: 5)
+        let fromShell = output?
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .last { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }
+            .last { $0.hasPrefix("/") }
+        if let fromShell, await isSupported(fromShell) { return fromShell }
+        return nil
+    }
+
+    /// Whether `path` is an executable Node.js whose major version is at least `minimumMajorVersion`.
+    static func isSupported(_ path: String) async -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: path),
+              let version = await run(path, ["--version"], timeout: 5)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              version.hasPrefix("v"),
+              let major = Int(version.dropFirst().split(separator: ".").first ?? "") else { return false }
+        return major >= minimumMajorVersion
     }
 
     /// Runs a short command and returns its stdout, or nil if it could not start.

@@ -67,9 +67,10 @@ function findNodeManifests(directory) {
   const found = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (skipped.has(entry.name) || entry.name.endsWith('.xcodeproj')) continue;
-    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory);
+    // Encode the name: a "#" or "?" in a folder name would otherwise end the URL path.
+    const child = new URL(`${encodeURIComponent(entry.name)}${entry.isDirectory() ? '/' : ''}`, directory);
     if (entry.isDirectory()) found.push(...findNodeManifests(child));
-    else if (['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].includes(entry.name)) found.push(child.pathname);
+    else if (['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].includes(entry.name)) found.push(decodeURIComponent(child.pathname));
   }
   return found;
 }

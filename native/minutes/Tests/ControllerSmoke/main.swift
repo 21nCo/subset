@@ -8,7 +8,8 @@ import Foundation
 func runHarness() async {
     let controller = MinutesController()
     controller.refreshReadiness(outputDirectory: NSTemporaryDirectory() + "minutes-harness-out")
-    while controller.isCheckingReadiness || controller.readiness == MinutesReadiness() {
+    // isCheckingReadiness brackets the whole check, even when nothing is found.
+    while controller.isCheckingReadiness {
         try? await Task.sleep(nanoseconds: 100_000_000)
     }
     let r = controller.readiness

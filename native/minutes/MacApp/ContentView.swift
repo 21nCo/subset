@@ -30,6 +30,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if !bot.isRunning { bot.refreshReadiness(outputDirectory: recordingDirectory) }
         }
+        // A stale "no tab found" message must not stay after the link is typed or pasted.
+        .onChange(of: meetingURL) { _, _ in
+            if tabLookupMessage != nil, meetingLink != nil { tabLookupMessage = nil }
+        }
         .fileImporter(isPresented: $isChoosingSaveDirectory, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 recordingDirectory = url.path
@@ -74,7 +78,7 @@ struct ContentView: View {
                     .disabled(bot.isRunning)
                     .accessibilityLabel("Name the bot uses in the meeting")
 
-                Label("Everyone in the meeting will see “\(displayName.isEmpty ? "Recording Bot" : displayName)” join. Tell participants you are recording, and follow the recording rules that apply to you.", systemImage: "person.wave.2")
+                Label(nameDisclosure, systemImage: "person.wave.2")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -131,7 +135,8 @@ struct ContentView: View {
             SetupRow(
                 title: "Minutes CLI",
                 detail: cliDetail(readiness),
-                isDone: readiness.cli != nil && readiness.doctorError == nil
+                // The CLI is only proven to run once doctor ran, which needs Node.js.
+                isDone: readiness.cli != nil && readiness.nodePath != nil && readiness.doctorError == nil
             )
             if let doctor = readiness.doctor {
                 ForEach(doctor.checks.filter { $0.id != "node" || !$0.ok }) { check in
@@ -145,7 +150,8 @@ struct ContentView: View {
             }
             HStack {
                 Button("Set Up Google Sign-In…") { bot.openBotSignIn() }
-                    .disabled(readiness.cli == nil || readiness.nodePath == nil)
+                    // A running bot is using this profile.
+                    .disabled(readiness.cli == nil || readiness.nodePath == nil || bot.isRunning)
                     .help("Open Chrome with the bot's own profile so it can join Meet as a signed-in user instead of waiting as a guest")
                 Spacer()
                 Button(bot.isCheckingReadiness ? "Checking…" : "Check Again") { bot.refreshReadiness(outputDirectory: recordingDirectory) }
@@ -300,7 +306,8 @@ struct ContentView: View {
         case .stopping:
             return "Finishing the audio file."
         case .ended(let reason):
-            return reason == "meeting_ended" ? "The meeting ended. The audio file is below." : "The bot left the meeting. The audio file is below."
+            let headline = reason == "meeting_ended" ? "The meeting ended." : "The bot left the meeting."
+            return headline + (bot.recordingPath == nil ? " No audio file was produced." : " The audio file is below.")
         case .failed(let message):
             return message
         }
@@ -353,7 +360,8 @@ struct ContentView: View {
                 .padding(8)
             }
             .frame(minHeight: 160, maxHeight: 320)
-            .onChange(of: bot.logs.count) { _, _ in
+            // The log is capped, so its count stops changing; follow the newest entry instead.
+            .onChange(of: bot.logs.last?.id) { _, _ in
                 if let last = bot.logs.last {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
@@ -376,12 +384,22 @@ struct ContentView: View {
     }
 
     private func useCurrentTab() {
-        if let link = BrowserTabReader.frontMeetingLink() {
-            meetingURL = link.url.absoluteString
-            tabLookupMessage = nil
-        } else {
-            tabLookupMessage = "No Google Meet or Zoom tab was found in the front Chrome or Safari window, or Automation access was denied."
+        tabLookupMessage = "Reading the front browser tab…"
+        Task { @MainActor in
+            if let link = await BrowserTabReader.frontMeetingLink() {
+                meetingURL = link.url.absoluteString
+                tabLookupMessage = nil
+            } else {
+                tabLookupMessage = "No Google Meet or Zoom tab was found in the front Chrome or Safari window, or Automation access was denied."
+            }
         }
+    }
+
+    /// Signed-in Meet sessions show the bot's Google account name, not this field.
+    private var nameDisclosure: String {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "Minutes Notetaker" : trimmed
+        return "Everyone in the meeting will see the bot join as “\(name)” (in Google Meet, as the bot's Google account name when it is signed in). Tell participants you are recording, and follow the recording rules that apply to you."
     }
 
     private func openRecordingDirectory() {

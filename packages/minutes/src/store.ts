@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -33,12 +34,32 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
+/** When a process started, from `ps -o lstart=` (macOS and Linux), or null when unknown. */
+export function processStartedAt(pid: number): Promise<Date | null> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
+      const time = error ? Number.NaN : Date.parse(stdout.trim());
+      resolve(Number.isNaN(time) ? null : new Date(time));
+    });
+  });
+}
+
+/**
+ * Whether the CLI that wrote `record` is still running. A pid can be reused after the CLI exits, so a
+ * process that started after the session did is not the session's.
+ */
+export async function isSessionProcessAlive(record: SessionRecord): Promise<boolean> {
+  if (!isProcessAlive(record.pid)) return false;
+  const started = await processStartedAt(record.pid);
+  return started === null || started.getTime() <= Date.parse(record.startedAt) + 60_000;
+}
+
 /** Reads session records without changing anything. A missing state directory is an empty status. */
 export async function readStatus(
   stateDirectory: string,
-  options: { now?: Date; alive?: (pid: number) => boolean } = {},
+  options: { now?: Date; alive?: (pid: number, record: SessionRecord) => boolean | Promise<boolean> } = {},
 ): Promise<MinutesStatus> {
-  const alive = options.alive ?? isProcessAlive;
+  const alive = options.alive ?? ((_pid: number, record: SessionRecord) => isSessionProcessAlive(record));
   let names: string[] = [];
   try {
     names = (await readdir(stateDirectory)).filter((name) => /^[A-Za-z0-9_-]{1,64}\.json$/.test(name));
@@ -64,12 +85,12 @@ export async function readStatus(
     kind: 'minutes.status',
     observedAt: (options.now ?? new Date()).toISOString(),
     stateDirectory,
-    sessions: records.slice(0, STATUS_SESSION_LIMIT).map((record) => {
+    sessions: await Promise.all(records.slice(0, STATUS_SESSION_LIMIT).map(async (record) => {
       // A finished session's pid may have been reused, so only an active record is checked.
       const active = !isTerminal(record.state);
-      const running = active && alive(record.pid);
+      const running = active && (await alive(record.pid, record));
       return { ...record, alive: running, stale: active && !running };
-    }),
+    })),
     unreadable,
   };
 }

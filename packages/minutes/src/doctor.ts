@@ -1,8 +1,9 @@
 import { constants } from 'node:fs';
-import { access, lstat, readFile } from 'node:fs/promises';
+import { access, lstat, readFile, readlink, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { MINUTES_CONTRACT_VERSION, type DoctorCheck, type MinutesDoctor } from './contract.js';
+import { isProcessAlive } from './store.js';
 
 export const MINIMUM_NODE_MAJOR = 22;
 
@@ -13,8 +14,13 @@ export interface DoctorProbe {
   env: Record<string, string | undefined>;
   isExecutable: (file: string) => Promise<boolean>;
   exists: (file: string) => Promise<boolean>;
+  /** True for a directory this user can create files in (write and search permission). */
   isWritable: (directory: string) => Promise<boolean>;
   readText: (file: string) => Promise<string | null>;
+  /** Symlink target, or null. Chrome's SingletonLock points at `<hostname>-<pid>`. */
+  readLink?: (file: string) => Promise<string | null>;
+  hostname?: string;
+  isAlive?: (pid: number) => boolean;
 }
 
 export const systemProbe = (): DoctorProbe => ({
@@ -25,9 +31,29 @@ export const systemProbe = (): DoctorProbe => ({
   isExecutable: (file) => access(file, constants.X_OK).then(() => true, () => false),
   // lstat, so a dangling symlink such as Chrome's SingletonLock still counts.
   exists: (file) => lstat(file).then(() => true, () => false),
-  isWritable: (directory) => access(directory, constants.W_OK).then(() => true, () => false),
+  isWritable: async (directory) => {
+    const info = await stat(directory).catch(() => null);
+    if (!info?.isDirectory()) return false;
+    return access(directory, constants.W_OK | constants.X_OK).then(() => true, () => false);
+  },
   readText: (file) => readFile(file, 'utf8').catch(() => null),
+  readLink: (file) => readlink(file).catch(() => null),
+  hostname: os.hostname(),
+  isAlive: isProcessAlive,
 });
+
+/**
+ * Whether Chrome holds the profile. A `SingletonLock` left by a crashed Chrome on this host, whose process
+ * is gone, does not count: Chrome replaces it on the next launch.
+ */
+async function profileInUse(profileDirectory: string, probe: DoctorProbe): Promise<boolean> {
+  const lock = path.join(profileDirectory, 'SingletonLock');
+  if (!(await probe.exists(lock))) return false;
+  const target = probe.readLink ? await probe.readLink(lock) : null;
+  const match = target?.match(/^(.*)-(\d+)$/);
+  if (!match || !probe.hostname || !probe.isAlive || match[1] !== probe.hostname) return true;
+  return probe.isAlive(Number(match[2]));
+}
 
 export function chromeCandidates(platform: NodeJS.Platform, home: string): string[] {
   if (platform === 'darwin') {
@@ -122,7 +148,7 @@ export async function runDoctor(options: DoctorOptions, probe: DoctorProbe = sys
     fix: signedIn ? null : 'Run `subset-minutes sign-in` and sign in with the bot\'s Google account, then quit that Chrome window.',
   });
 
-  const locked = profileExists && (await probe.exists(path.join(options.profileDirectory, 'SingletonLock')));
+  const locked = profileExists && (await profileInUse(options.profileDirectory, probe));
   checks.push({
     id: 'profile_lock',
     ok: !locked,
@@ -137,7 +163,7 @@ export async function runDoctor(options: DoctorOptions, probe: DoctorProbe = sys
     id: 'output_directory',
     ok: writable,
     required: true,
-    detail: writable ? `Recordings go to ${options.outputDirectory}.` : `${existing} is not writable.`,
+    detail: writable ? `Recordings go to ${options.outputDirectory}.` : `${existing} is not a folder you can write to.`,
     fix: writable ? null : 'Choose another folder with --out.',
   });
 

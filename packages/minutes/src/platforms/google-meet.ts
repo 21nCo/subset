@@ -2,6 +2,7 @@ import type { Page } from 'playwright-core';
 import { MinutesError } from '../driver.js';
 import type { MeetingLink } from '../link.js';
 import type { PlatformAdapter } from './adapter.js';
+import { waitForAdmission } from './admission.js';
 
 type Log = (message: string) => void;
 
@@ -148,11 +149,10 @@ async function waitForCallUI(page: Page, log: Log): Promise<void> {
     '[jsname="A5il2e"]',
     '[data-call-ended="false"]',
   ];
-  const found = await Promise.race([
-    ...inCallSelectors.map((selector) => page.waitForSelector(selector, { timeout: 10 * 60_000 }).then(() => true, () => false)),
-    page.waitForEvent('close', { timeout: 10 * 60_000 }).then(() => false, () => false),
-  ]);
-  if (!found) {
+  // A rejection shown while waiting fails the join right away.
+  const result = await waitForAdmission(page, inCallSelectors, 10 * 60_000, () => throwIfMeetRejected(page));
+  if (result === 'closed') throw new MinutesError('join_failed', 'The Google Meet page closed before the bot was admitted.');
+  if (result === 'timeout') {
     await throwIfMeetRejected(page);
     throw new MinutesError('join_failed', 'The bot was not admitted to the Google Meet call within 10 minutes.');
   }

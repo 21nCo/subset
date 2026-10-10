@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseMeetingLink, redactUrl } from '../dist/index.js';
+import { parseMeetingLink, redactUrl, redactUrlsInText } from '../dist/index.js';
 
 test('accepts Google Meet codes and lookup links', () => {
   const result = parseMeetingLink('  https://meet.google.com/abc-defg-hij?authuser=1  ');
@@ -57,4 +57,9 @@ test('rejects anything that is not an https Meet or Zoom meeting link', () => {
 test('redactUrl drops query and fragment', () => {
   assert.equal(redactUrl('https://zoom.us/j/1?pwd=x#y'), 'https://zoom.us/j/1');
   assert.equal(redactUrl('nope'), '(unparsed link)');
+  assert.equal(redactUrl('zoommtg://zoom.us/join?confno=1&pwd=x'), '(unparsed link)');
+  assert.equal(
+    redactUrlsInText('page.goto: net::ERR_ABORTED at https://zoom.us/wc/join/1234567890?pwd=secret\nCall log: navigating to "https://zoom.us/wc/join/1234567890?pwd=secret"'),
+    'page.goto: net::ERR_ABORTED at https://zoom.us/wc/join/1234567890\nCall log: navigating to "https://zoom.us/wc/join/1234567890"',
+  );
 });

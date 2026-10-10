@@ -14,6 +14,7 @@ import {
   findChrome,
   parseMeetingLink,
   readStatus,
+  redactUrlsInText,
   runDoctor,
   runMeetingSession,
   writeSessionRecord,
@@ -28,6 +29,8 @@ Tell participants you are recording, and follow the recording rules that apply t
 
 Commands
   join <link>           Join and record until the meeting ends or Ctrl-C
+    --link-from-stdin   Read the link from the first line of stdin instead (keeps a Zoom
+                        passcode out of the process list)
     --out <dir>         Folder for the recording (default ~/Documents/Minutes Recordings)
     --name <name>       Name shown in the meeting (default "${DEFAULT_DISPLAY_NAME}")
     --max-minutes <n>   Leave after n minutes in the meeting (default 240)
@@ -46,7 +49,7 @@ Exit status: 0 success, 1 the session or a check failed, 2 invalid command or me
 `;
 
 const commandOptions = {
-  join: { out: { type: 'string' }, name: { type: 'string' }, 'max-minutes': { type: 'string' }, json: { type: 'boolean' }, profile: { type: 'string' }, 'stop-on-stdin-close': { type: 'boolean' } },
+  join: { out: { type: 'string' }, name: { type: 'string' }, 'max-minutes': { type: 'string' }, json: { type: 'boolean' }, profile: { type: 'string' }, 'stop-on-stdin-close': { type: 'boolean' }, 'link-from-stdin': { type: 'boolean' } },
   status: { json: { type: 'boolean' } },
   doctor: { json: { type: 'boolean' }, out: { type: 'string' }, profile: { type: 'string' } },
   'sign-in': { profile: { type: 'string' } },
@@ -79,7 +82,8 @@ export async function main(io) {
 
   const [command, ...rest] = argv;
   const json = rest.includes('--json');
-  const options = commandOptions[command];
+  // Own properties only, so names such as "constructor" are unknown commands.
+  const options = Object.hasOwn(commandOptions, command) ? commandOptions[command] : undefined;
   if (!options) return usageError(io, json, `Unknown command "${command}". Run subset-minutes --help.`);
 
   let parsed;
@@ -162,19 +166,56 @@ async function signIn(io, profileDirectory) {
   return 0;
 }
 
+/** Reads one line from `stream` (without its newline). Resolves null if the stream ends first with nothing. */
+function readFirstLine(stream) {
+  return new Promise((resolve) => {
+    let text = '';
+    const finish = (value) => {
+      stream.off('data', onData);
+      stream.off('end', onEnd);
+      stream.off('close', onEnd);
+      stream.pause();
+      resolve(value);
+    };
+    const onData = (chunk) => {
+      text += chunk;
+      const newline = text.indexOf('\n');
+      if (newline >= 0) finish(text.slice(0, newline));
+      else if (text.length > 4_096) finish(text);
+    };
+    const onEnd = () => finish(text.length ? text : null);
+    stream.setEncoding('utf8');
+    stream.on('data', onData);
+    stream.once('end', onEnd);
+    stream.once('close', onEnd);
+    stream.resume();
+  });
+}
+
 async function join(io, positionals, values, { environment, profileDirectory, outputDirectory }) {
   const json = Boolean(values.json);
-  if (positionals.length !== 1) return usageError(io, json, 'join needs exactly one meeting link.');
+  const fromStdin = Boolean(values['link-from-stdin']);
+  if (fromStdin ? positionals.length !== 0 : positionals.length !== 1) {
+    return usageError(io, json, fromStdin ? 'join --link-from-stdin takes no link argument.' : 'join needs exactly one meeting link.');
+  }
+  if (fromStdin && !io.stdin) return usageError(io, json, 'join --link-from-stdin needs stdin.');
   let maxDurationMs;
   if (values['max-minutes'] !== undefined) {
     const minutes = Number(values['max-minutes']);
-    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 24 * 60) return usageError(io, json, '--max-minutes must be between 1 and 1440.');
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60) return usageError(io, json, '--max-minutes must be between 1 and 1440.');
     maxDurationMs = minutes * 60_000;
   }
   const name = values.name ?? DEFAULT_DISPLAY_NAME;
   if (name.length > 100) return usageError(io, json, '--name must be 100 characters or fewer.');
 
-  const parsed = parseMeetingLink(positionals[0]);
+  // Track stdin closing from the start: with --link-from-stdin the parent may write the link and close.
+  let stdinClosed = false;
+  if (io.stdin && (fromStdin || values['stop-on-stdin-close'])) {
+    io.stdin.once('end', () => { stdinClosed = true; });
+    io.stdin.once('close', () => { stdinClosed = true; });
+  }
+  const rawLink = fromStdin ? ((await readFirstLine(io.stdin)) ?? '') : positionals[0];
+  const parsed = parseMeetingLink(rawLink);
   if (!parsed.ok) {
     if (json) {
       io.stdout(`${JSON.stringify(createEvent(null, { type: 'error', code: 'invalid_link', message: parsed.message }))}\n`);
@@ -189,6 +230,7 @@ async function join(io, positionals, values, { environment, profileDirectory, ou
   const stop = new AbortController();
   io.signal?.addEventListener('abort', () => stop.abort(), { once: true });
   if (values['stop-on-stdin-close'] && io.stdin) {
+    if (stdinClosed) stop.abort();
     io.stdin.on('end', () => stop.abort());
     io.stdin.on('close', () => stop.abort());
     io.stdin.resume();
@@ -240,7 +282,9 @@ function humanPrinter(io) {
 export async function runCli({ createDriver } = {}) {
   const stop = new AbortController();
   let signals = 0;
-  for (const name of ['SIGINT', 'SIGTERM']) {
+  // SIGHUP (the terminal closed) too: Playwright's handlers are off, so without it Chrome is left running
+  // and the recording is not finalized.
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(name, () => {
       signals += 1;
       if (signals > 1) process.exit(130);
@@ -250,16 +294,23 @@ export async function runCli({ createDriver } = {}) {
   // A closed stdout (for example `| head`) must not crash a running session.
   process.stdout.on('error', () => {});
 
-  const code = await main({
-    argv: process.argv.slice(2),
-    env: process.env,
-    home: os.homedir(),
-    stdout: (text) => process.stdout.write(text),
-    stderr: (text) => process.stderr.write(text),
-    stdin: process.stdin,
-    signal: stop.signal,
-    createDriver,
-  });
+  const argv = process.argv.slice(2);
+  const stdout = (text) => process.stdout.write(text);
+  const stderr = (text) => process.stderr.write(text);
+  let code;
+  try {
+    code = await main({ argv, env: process.env, home: os.homedir(), stdout, stderr, stdin: process.stdin, signal: stop.signal, createDriver });
+  } catch (error) {
+    // Keep the documented output even for an unexpected failure (a broken install, an unreadable folder).
+    const message = redactUrlsInText(error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+    if (argv[0] === 'join' && argv.includes('--json')) {
+      stdout(`${JSON.stringify(createEvent(null, { type: 'error', code: 'internal', message }))}\n`);
+      stdout(`${JSON.stringify(createEvent(null, { type: 'ended', reason: 'failed', path: null, bytes: null }))}\n`);
+    } else {
+      stderr(`subset-minutes: ${message}\n`);
+    }
+    code = 1;
+  }
   // Playwright can leave handles open after the browser closes, so exit explicitly once
   // buffered output is flushed (pipe writes are asynchronous on macOS).
   process.exitCode = code;

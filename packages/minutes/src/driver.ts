@@ -20,7 +20,10 @@ export interface OpenOptions {
 export type EndSignal = 'meeting_ended' | 'page_closed' | 'aborted';
 
 export interface MeetingPage {
-  /** Installs audio capture before navigation and starts writing WebM to `outputPath`. */
+  /**
+   * Opens `outputPath` (already created empty by the session) and installs audio capture before navigation.
+   * Recording starts in `join`, after the meeting is joined, so the file holds one WebM stream.
+   */
   startCapture(outputPath: string): Promise<void>;
   /** Navigates to the meeting and completes the platform's join flow. */
   join(link: MeetingLink, displayName: string, signal: AbortSignal): Promise<void>;

@@ -59,17 +59,18 @@ The validators accept only these shapes and reject unknown fields. A reader must
 
 ### Privacy and secrets
 
-- Events, session records, and logs carry only the **redacted** meeting link: the origin and path, without the query or fragment. A Zoom `pwd` passcode therefore never leaves the process. The full link goes only to Chrome.
+- Events, session records, and logs carry only the **redacted** meeting link: the origin and path, without the query or fragment. URLs inside error messages (for example a browser navigation error) are redacted the same way, and the validators reject a `meeting` field that still has a query. The full link, including any Zoom `pwd` passcode, is passed to Chrome to join. The CLI can read it from stdin (`--link-from-stdin`) so it is not in the process list.
 - `doctor` reports whether the bot profile has a Google account signed in. It reads Chrome's `Local State` for this but never returns or prints the account name.
 - No credentials are read, stored, or sent. The bot's Google sign-in lives only in its Chrome profile.
 
 ## Browser behavior
 
-The Chrome driver launches the installed Google Chrome (or `SUBSET_MINUTES_CHROME_PATH`) with `--use-fake-ui-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, without the Chrome sandbox-disabling flags the proof of concept used. Playwright's own signal handlers are turned off, so a stop request can finalize the file before Chrome closes.
+The Chrome driver launches the installed Google Chrome (or `SUBSET_MINUTES_CHROME_PATH`) with `--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream` with a silent fake microphone, and `--autoplay-policy=no-user-gesture-required`. The bot's camera and microphone are therefore Chrome's fake devices: it never captures this computer's real camera or microphone, even if a mute click fails. Chrome runs with its sandbox (`chromiumSandbox: true`; Playwright otherwise adds `--no-sandbox`). Playwright's own signal handlers are turned off, so a stop request can finalize the file before Chrome closes.
 
-- Meet uses a persistent profile (default `~/Library/Application Support/Subset Minutes/google-meet-bot-profile` on macOS, `~/.local/share/subset/minutes/` elsewhere). Zoom uses a fresh context.
+- Meet uses a persistent profile (default `~/Library/Application Support/Subset Minutes/google-meet-bot-profile` on macOS; elsewhere `$XDG_DATA_HOME/subset/minutes/google-meet-bot-profile`, or `~/.local/share/subset/minutes/google-meet-bot-profile` when `XDG_DATA_HOME` is unset). Zoom uses a fresh context.
 - Audio capture is an init script that hooks `RTCPeerConnection` track events, mixes the remote audio tracks with a silent source, and records with `MediaRecorder` (WebM/Opus). Only the top-level document records, and recording starts after the join. The file therefore holds a single WebM stream, and pages loaded during the join flow add nothing. If the meeting page reloads after the join, the session logs that later audio is missing rather than appending a second stream.
-- The join flows wait up to 10 minutes to be admitted. A rejected or never-admitted bot fails with `join_rejected` or `join_failed` instead of reporting that it joined.
+- The join flows wait up to 10 minutes to be admitted. A rejected or never-admitted bot fails with `join_rejected` or `join_failed` instead of reporting that it joined. Meet rejections are noticed while waiting, and a page that closes is reported as such rather than as a timeout.
+- The session reserves the recording file name atomically, removes the file when no audio was captured, and reports `capture_failed` (with the bytes on disk) when the recording could not be flushed completely.
 
 ## Tests
 
@@ -99,7 +100,7 @@ The join flows and the capture hook come from the `BotRuntime/` sidecar in this 
 
 ## Superfunctions reuse review
 
-Reviewed on 2026-10-09 against `/Users/ar/dev/superfunctions` (checkout `9cf3812`) and the npm registry.
+Reviewed on 2026-10-09 against the local Superfunctions reference checkout (commit `9cf3812`) and the npm registry.
 
 | Package | Version | What it offers | Decision and gap |
 | --- | --- | --- | --- |

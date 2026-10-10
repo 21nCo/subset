@@ -2,6 +2,7 @@ import type { Page } from 'playwright-core';
 import { MinutesError } from '../driver.js';
 import type { MeetingLink } from '../link.js';
 import type { PlatformAdapter } from './adapter.js';
+import { waitForAdmission } from './admission.js';
 
 type Log = (message: string) => void;
 
@@ -104,35 +105,38 @@ async function clickJoin(page: Page, log: Log): Promise<void> {
 async function waitForMeetingRoom(page: Page, log: Log): Promise<void> {
   log('Waiting for the Zoom meeting room…');
   const inRoomSelectors = ['#wc-footer', '.meeting-client-inner', '[data-testid="meeting-info-container"]', 'button[aria-label="Leave"]'];
-  const found = await Promise.race([
-    ...inRoomSelectors.map((selector) => page.waitForSelector(selector, { timeout: 10 * 60_000 }).then(() => true, () => false)),
-    page.waitForEvent('close', { timeout: 10 * 60_000 }).then(() => false, () => false),
-  ]);
-  if (!found) throw new MinutesError('join_failed', 'The bot did not reach the Zoom meeting room within 10 minutes.');
+  const result = await waitForAdmission(page, inRoomSelectors, 10 * 60_000);
+  if (result === 'closed') throw new MinutesError('join_failed', 'The Zoom page closed before the bot reached the meeting room.');
+  if (result === 'timeout') throw new MinutesError('join_failed', 'The bot did not reach the Zoom meeting room within 10 minutes.');
   log('Inside the Zoom meeting room.');
 }
 
 async function handleAudioDialog(page: Page, log: Log): Promise<void> {
-  // Zoom asks how to join audio on entry: use computer audio so remote tracks arrive.
+  // Zoom asks how to join audio on entry: use computer audio so remote tracks arrive. The prompt can mount
+  // after the room, so wait for it (isVisible() checks only once and ignores its timeout).
+  const appears = (selector: string, timeout: number) =>
+    page.locator(selector).first().waitFor({ state: 'visible', timeout }).then(() => true, () => false);
   try {
-    const joinAudio = page.locator('[data-testid="join-audio-by-voip"], button:has-text("Join Audio by Computer")').first();
-    if (await joinAudio.isVisible({ timeout: 5_000 })) {
-      await joinAudio.click();
+    const joinAudio = '[data-testid="join-audio-by-voip"], button:has-text("Join Audio by Computer")';
+    if (await appears(joinAudio, 10_000)) {
+      await page.locator(joinAudio).first().click();
       log('Joined computer audio.');
+    } else {
+      log('No "Join Audio by Computer" prompt appeared; participant audio may not be recorded.');
     }
   } catch { /* not shown */ }
   // Prefix matches only: "Unmute" and "Start video" labels must never be clicked.
   try {
-    const muteMic = page.locator('button[aria-label^="mute" i]').first();
-    if (await muteMic.isVisible({ timeout: 3_000 })) {
-      await muteMic.click();
+    const muteMic = 'button[aria-label^="mute" i]';
+    if (await appears(muteMic, 3_000)) {
+      await page.locator(muteMic).first().click();
       log('Muted the microphone.');
     }
   } catch { /* already muted */ }
   try {
-    const stopVideo = page.locator('button[aria-label^="stop video" i], button[aria-label^="stop my video" i]').first();
-    if (await stopVideo.isVisible({ timeout: 3_000 })) {
-      await stopVideo.click();
+    const stopVideo = 'button[aria-label^="stop video" i], button[aria-label^="stop my video" i]';
+    if (await appears(stopVideo, 3_000)) {
+      await page.locator(stopVideo).first().click();
       log('Turned off the camera.');
     }
   } catch { /* already off */ }

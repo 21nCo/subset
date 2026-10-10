@@ -49,7 +49,14 @@ test('rejects unknown versions, types, values, and extra fields', () => {
     { ...ended, reason: 'done' },
     { ...ended, bytes: -1 },
     { ...ended, bytes: 1.5 },
+    { ...ended, bytes: null },
+    { ...ended, path: null, bytes: 1 },
     { ...state, extra: true },
+    // A passcode must never pass as a redacted link, and only pre-session failures lack a session.
+    { ...started, meeting: 'https://zoom.us/j/1234567890?pwd=secret' },
+    { ...started, meeting: 'zoom.us/j/1234567890' },
+    { ...state, session: null },
+    { ...recording, session: null },
   ];
   for (const value of invalid) assert.equal(isMinutesEvent(value), false, JSON.stringify(value));
   assert.equal(parseEventLine('not json'), null);
@@ -72,6 +79,13 @@ test('validates session records and status', () => {
   assert.equal(isMinutesStatus({ ...status, sessions: [record] }), false);
   assert.equal(isMinutesStatus({ ...status, kind: 'minutes.doctor' }), false);
   assert.equal(isMinutesStatus({ ...status, sessions: Array(21).fill(status.sessions[0]) }), false);
+  assert.equal(isSessionRecord({ ...record, meeting: 'https://zoom.us/j/1234567890?pwd=secret' }), false);
+  // alive and stale must agree with the state: an active session is exactly one of them, a finished one neither.
+  assert.equal(isMinutesStatus({ ...status, sessions: [{ ...record, alive: true, stale: false }] }), false);
+  const active = { ...record, state: 'in_meeting', endedAt: null, endReason: null };
+  assert.equal(isMinutesStatus({ ...status, sessions: [{ ...active, alive: true, stale: false }] }), true);
+  assert.equal(isMinutesStatus({ ...status, sessions: [{ ...active, alive: false, stale: false }] }), false);
+  assert.equal(isMinutesStatus({ ...status, sessions: [{ ...active, alive: true, stale: true }] }), false);
 });
 
 test('validates doctor output and its ok summary', () => {
@@ -82,10 +96,18 @@ test('validates doctor output and its ok summary', () => {
       { id: 'node', ok: true, required: true, detail: 'Node.js 22.13.0', fix: null },
       { id: 'chrome', ok: false, required: true, detail: 'missing', fix: 'install' },
       { id: 'profile', ok: false, required: false, detail: 'guest', fix: 'sign in' },
+      { id: 'profile_lock', ok: true, required: false, detail: 'free', fix: null },
+      { id: 'output_directory', ok: true, required: true, detail: 'ok', fix: null },
     ],
   };
   assert.equal(isMinutesDoctor(doctor), true);
   assert.equal(isMinutesDoctor({ ...doctor, ok: true }), false);
   assert.equal(isMinutesDoctor({ ...doctor, checks: [...doctor.checks, doctor.checks[0]] }), false);
-  assert.equal(isMinutesDoctor({ ...doctor, checks: [{ ...doctor.checks[0], id: 'disk' }] }), false);
+  const passing = doctor.checks.map((check) => ({ ...check, ok: true }));
+  assert.equal(isMinutesDoctor({ ...doctor, ok: true, checks: passing }), true);
+  // Each of these is invalid only because of the check list, since ok: true matches the passing checks.
+  assert.equal(isMinutesDoctor({ ...doctor, ok: true, checks: [{ ...passing[0], id: 'disk' }, ...passing.slice(1)] }), false);
+  assert.equal(isMinutesDoctor({ ...doctor, ok: true, checks: [] }), false);
+  assert.equal(isMinutesDoctor({ ...doctor, ok: true, checks: passing.slice(1) }), false);
+  assert.equal(isMinutesDoctor({ ...doctor, ok: true, checks: [{ ...passing[0], ok: false, required: false }, ...passing.slice(1)] }), false);
 });

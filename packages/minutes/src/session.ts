@@ -1,4 +1,4 @@
-import { access, mkdir } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import {
   createEvent,
   type EndReason,
@@ -9,8 +9,8 @@ import {
   type SessionState,
 } from './contract.js';
 import { MinutesError, type MeetingDriver, type MeetingPage } from './driver.js';
-import type { MeetingLink } from './link.js';
-import { createSessionId, resolveRecordingPath } from './paths.js';
+import { redactUrlsInText, type MeetingLink } from './link.js';
+import { createSessionId, reserveRecordingPath } from './paths.js';
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -55,7 +55,6 @@ export interface RunSessionOptions {
   sessionId?: string;
   pid?: number;
   now?: () => Date;
-  fileExists?: (path: string) => Promise<boolean>;
 }
 
 export interface SessionResult {
@@ -69,8 +68,6 @@ export interface SessionResult {
 
 export const DEFAULT_MAX_DURATION_MS = 4 * 60 * 60 * 1_000;
 export const DEFAULT_DISPLAY_NAME = 'Minutes Notetaker';
-
-const defaultExists = (file: string) => access(file).then(() => true, () => false);
 
 class Aborted extends Error {}
 
@@ -92,18 +89,29 @@ function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/** Maps any error to a contract error. URLs in the message are redacted: a browser error can echo the Zoom link with its passcode. */
 export function errorDetails(error: unknown): { code: ErrorCode; message: string } {
-  if (error instanceof MinutesError) return { code: error.code, message: error.message };
+  if (error instanceof MinutesError) return { code: error.code, message: redactUrlsInText(error.message).slice(0, 2_000) };
   const message = error instanceof Error ? error.message : String(error);
-  return { code: 'internal', message: message.slice(0, 2_000) };
+  return { code: 'internal', message: redactUrlsInText(message).slice(0, 2_000) };
 }
+
+/** Resolves true if `work` settles successfully within `ms`, false otherwise. */
+function settlesWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    work.then(() => true, () => false),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+const fileSize = (file: string) => stat(file).then((info) => info.size, () => 0);
 
 /** Runs one bot session from launch to a finalized recording. Never throws; the result and events describe failures. */
 export async function runMeetingSession(options: RunSessionOptions): Promise<SessionResult> {
   const now = options.now ?? (() => new Date());
   const id = options.sessionId ?? createSessionId(now());
   const signal = options.signal ?? new AbortController().signal;
-  const exists = options.fileExists ?? defaultExists;
   const { link, driver } = options;
   const displayName = options.displayName.trim() || DEFAULT_DISPLAY_NAME;
 
@@ -152,6 +160,7 @@ export async function runMeetingSession(options: RunSessionOptions): Promise<Ses
   let timer: NodeJS.Timeout | undefined;
 
   let page: MeetingPage | undefined;
+  let starting: Promise<void> | undefined;
   let capturing = false;
   let bytes: number | null = null;
   let reason: EndReason = 'stopped';
@@ -160,13 +169,21 @@ export async function runMeetingSession(options: RunSessionOptions): Promise<Ses
   try {
     try {
       await mkdir(options.outputDirectory, { recursive: true });
-      record.outputPath = await resolveRecordingPath(options.outputDirectory, link.platform, startedAt, exists);
+      record.outputPath = await reserveRecordingPath(options.outputDirectory, link.platform, startedAt);
     } catch (error) {
       throw new MinutesError('output_unwritable', `Cannot write to the output folder ${options.outputDirectory}: ${errorDetails(error).message}`);
     }
 
-    page = await raceAbort(driver.open({ platform: link.platform, profileDirectory: options.profileDirectory, log: status }), stop);
-    await raceAbort(page.startCapture(record.outputPath), stop);
+    const opening = driver.open({ platform: link.platform, profileDirectory: options.profileDirectory, log: status });
+    try {
+      page = await raceAbort(opening, stop);
+    } catch (error) {
+      // A stop during launch: close the browser if it finishes opening later.
+      opening.then((late) => late.close().catch(() => {}), () => {});
+      throw error;
+    }
+    starting = page.startCapture(record.outputPath);
+    await raceAbort(starting, stop);
     capturing = true;
     emit({ type: 'recording', path: record.outputPath });
     persist();
@@ -190,31 +207,49 @@ export async function runMeetingSession(options: RunSessionOptions): Promise<Ses
     clearTimeout(timer);
   }
 
+  const reportFailure = (details: { code: ErrorCode; message: string }) => {
+    failure = details;
+    reason = 'failed';
+    emit({ type: 'error', ...details });
+    record.error = details;
+  };
   if (failure) {
-    emit({ type: 'error', ...failure });
-    record.error = failure;
+    reportFailure(failure);
   } else {
     moveTo('stopping');
   }
+  const shouldLeave = !failure && reason !== 'meeting_ended' && reason !== 'page_closed';
 
-  // Finalize: flush the recording first, then leave and close. Each step is best-effort.
-  if (page && capturing) {
+  // A stop that arrived while capture was being installed: let the install finish so its file is closed.
+  if (page && starting && !capturing) capturing = await settlesWithin(starting, 10_000);
+
+  // Finalize: flush the recording first, then leave and close.
+  if (page && capturing && record.outputPath) {
     try {
       bytes = await page.stopCapture();
-      status(`Saved ${bytes} bytes of audio.`);
+      if (bytes > 0) status(`Saved ${bytes} bytes of audio.`);
     } catch (error) {
-      status(`Could not finalize the recording cleanly: ${errorDetails(error).message}`);
+      // A recording that could not be flushed is not a success; report what is on disk.
+      bytes = await fileSize(record.outputPath);
+      const details = errorDetails(error);
+      reportFailure({ code: 'capture_failed', message: `The recording may be incomplete (${bytes} bytes saved): ${details.message}` });
     }
   }
   if (page) {
-    if (!failure && reason !== 'meeting_ended' && reason !== 'page_closed') await page.leave().catch(() => {});
+    if (shouldLeave) await page.leave().catch(() => {});
     await page.close().catch(() => {});
   }
 
+  // No audio was captured (stopped or failed before recording began): remove the empty reserved file.
+  if (record.outputPath && (!capturing || bytes === 0)) {
+    await rm(record.outputPath, { force: true }).catch(() => {});
+    record.outputPath = null;
+    bytes = null;
+  }
+
   record.endReason = reason;
-  if (!capturing) record.outputPath = null;
   moveTo(failure ? 'failed' : 'ended');
-  const path = capturing ? record.outputPath : null;
+  const path = record.outputPath;
   emit({ type: 'ended', reason, path, bytes: path ? bytes ?? 0 : null });
   await persistQueue;
 

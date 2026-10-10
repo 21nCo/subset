@@ -28,6 +28,9 @@ test('--help, --version, and unknown commands', () => {
   assert.match(run(['--version'], process.env).stdout, /^\d+\.\d+\.\d+\n$/);
   assert.equal(run([], process.env).status, 2);
   assert.equal(run(['record'], process.env).status, 2);
+  const inherited = run(['constructor'], process.env);
+  assert.equal(inherited.status, 2);
+  assert.match(inherited.stderr, /Unknown command/);
 });
 
 test('join rejects an invalid link with a structured error and exit 2', async (t) => {
@@ -45,6 +48,9 @@ test('join rejects an invalid link with a structured error and exit 2', async (t
   const usage = run(['join', '--json', '--bogus'], env);
   assert.equal(usage.status, 2);
   assert.equal(lines(usage.stdout)[0].code, 'usage');
+  const tooShort = run(['join', 'https://zoom.us/j/1234567890', '--json', '--max-minutes', '0.1'], env);
+  assert.equal(tooShort.status, 2);
+  assert.match(lines(tooShort.stdout)[0].message, /--max-minutes/);
 });
 
 test('status --json is valid and read-only; doctor --json is valid', async (t) => {
@@ -59,25 +65,30 @@ test('status --json is valid and read-only; doctor --json is valid', async (t) =
   assert.equal(isMinutesDoctor(JSON.parse(doctor.stdout)), true);
 });
 
-async function startFake(t, extraArgs = []) {
+async function startFake(t, extraArgs = [], { link = 'https://zoom.us/j/1234567890?pwd=secret' } = {}) {
   const { directory, env } = await sandbox(t);
-  const child = spawn(process.execPath, [fake, 'join', 'https://zoom.us/j/1234567890?pwd=secret', '--json', '--out', path.join(directory, 'out'), ...extraArgs], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const args = link ? [fake, 'join', link] : [fake, 'join'];
+  const child = spawn(process.execPath, [...args, '--json', '--out', path.join(directory, 'out'), ...extraArgs], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   const events = [];
-  const inMeeting = new Promise((resolve) => {
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+  // 'close' follows the end of stdout, so every event has been read by then.
+  const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+  const inMeeting = new Promise((resolve, reject) => {
     readline.createInterface({ input: child.stdout }).on('line', (line) => {
       const event = JSON.parse(line);
       events.push(event);
       if (event.type === 'state' && event.state === 'in_meeting') resolve();
     });
+    exited.then((code) => reject(new Error(`The fake CLI exited (${code}) before joining.\n${stderr}`)));
   });
-  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
-  await inMeeting;
-  return { child, events, exited, env };
+  return { child, events, exited, env, inMeeting };
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   test(`${signal} stops cleanly and finalizes the recording`, async (t) => {
-    const { child, events, exited, env } = await startFake(t);
+    const { child, events, exited, env, inMeeting } = await startFake(t);
+    await inMeeting;
     child.kill(signal);
     assert.equal(await exited, 0);
     assert.ok(events.every(isMinutesEvent));
@@ -94,8 +105,20 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 test('--stop-on-stdin-close stops when the parent closes stdin', async (t) => {
-  const { child, events, exited } = await startFake(t, ['--stop-on-stdin-close']);
+  const { child, events, exited, inMeeting } = await startFake(t, ['--stop-on-stdin-close']);
+  await inMeeting;
   child.stdin.end();
   assert.equal(await exited, 0);
   assert.equal(events.at(-1).reason, 'stopped');
+});
+
+test('--link-from-stdin reads the link from stdin, so it is not in the arguments', async (t) => {
+  const { child, events, exited, inMeeting } = await startFake(t, ['--link-from-stdin', '--stop-on-stdin-close'], { link: null });
+  child.stdin.write('https://zoom.us/j/1234567890?pwd=secret\n');
+  await inMeeting;
+  assert.equal(events[0].meeting, 'https://zoom.us/j/1234567890');
+  child.stdin.end();
+  assert.equal(await exited, 0);
+  assert.equal(events.at(-1).reason, 'stopped');
+  assert.equal(JSON.stringify(events).includes('secret'), false);
 });

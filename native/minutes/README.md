@@ -2,7 +2,7 @@
 
 Minutes sends a notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio. This SwiftUI app is one host for the capability. It checks the local setup, accepts a meeting link, and runs the shared **`subset-minutes` CLI** ([`@subset.dev/minutes`](../../packages/minutes-cli/README.md)), which bundles the capability package [`@subset/minutes`](../../packages/minutes/README.md). The app shows the CLI's state (joining, in meeting, finished, failed) with a meeting timer and points to the finished audio file. The bot itself drives a visible Google Chrome window, mutes itself, and writes WebM/Opus audio.
 
-The app contains no meeting logic. Link validation, the Meet and Zoom join flows, audio capture, the session lifecycle, and file naming all live in `@subset/minutes`. The app talks to them only through the CLI's versioned NDJSON contract.
+The app owns only a lightweight link pre-check for the form. Strict link validation, the Meet and Zoom join flows, audio capture, the session lifecycle, and file naming all live in `@subset/minutes`. The app runs the CLI and reads its documented outputs: the versioned `join` NDJSON stream and the `doctor --json` report. It passes the meeting link on stdin (`--link-from-stdin`), so a Zoom passcode is not visible in the process list.
 
 This app was ported from a proof of concept. It builds locally, but it does not transcribe or summarize. It is not released, and no surface is listed as available.
 
@@ -12,7 +12,7 @@ This app was ported from a proof of concept. It builds locally, but it does not 
 | --- | --- |
 | User outcome | An audio recording of a Google Meet or Zoom meeting, made by a visible bot participant, without installing a meeting-platform SDK. |
 | Source of truth | The meeting page as the bot's Chrome session observes it, reported by the CLI. The output is the `.webm` file in the chosen folder (default `~/Documents/Minutes Recordings`). The app keeps only the bot name and output folder in `UserDefaults`. |
-| Bot identity | A dedicated Chrome profile at `~/Library/Application Support/Subset Minutes/google-meet-bot-profile`. This is the CLI's default on macOS, and the app passes it explicitly with `--profile`. The app and a terminal session therefore share one signed-in bot. |
+| Bot identity | A dedicated Chrome profile at `~/Library/Application Support/Subset Minutes/google-meet-bot-profile`. This is the CLI's default on macOS unless `SUBSET_MINUTES_PROFILE_DIR` or `SUBSET_MINUTES_DATA_DIR` is set. The app always passes this path with `--profile`, so those overrides do not change the app's profile; without them, the app and a terminal session share one signed-in bot. |
 | Network | Only the bot's Chrome session, which talks to the meeting platform. Neither the app nor the CLI makes other requests. |
 | Not included | Transcription, speaker labels, notes, calendar integration, or upload. |
 
@@ -22,7 +22,7 @@ This app was ported from a proof of concept. It builds locally, but it does not 
 | --- | --- | --- |
 | Check setup | On launch, on app activation, on choosing a folder, and on **Check Again** | Finds Node.js (Homebrew paths first, then the login shell with a 5-second limit, which covers nvm). Then it locates the CLI and runs `subset-minutes doctor --json --out <folder> --profile <profile>`. The checklist shows each doctor check: Chrome, the bot's Google sign-in (optional), whether the profile is in use, and the output folder. |
 | Fill link | Type, **Paste**, or **Use Current Tab** | Pre-checks for an `https` link on a Google Meet or Zoom host. **Use Current Tab** reads the front tab of a running Chrome or Safari through Apple Events, only when clicked. The CLI does the strict validation. |
-| Send bot | **Send Bot to Meeting** (⌘↩) | Runs `node <cli.mjs> join <link> --json --stop-on-stdin-close --profile <profile> --name <name> --out <folder>`. |
+| Send bot | **Send Bot to Meeting** (⌘↩) | Runs `node <cli.mjs> join --link-from-stdin --json --stop-on-stdin-close --profile <profile> --name <name> --out <folder>` and writes the link to its stdin. |
 | Stop | **Leave and Stop** (⌘.) | Sends SIGINT, which makes the CLI flush the recording, leave, and exit. If the CLI is still running after 15 seconds, the app sends SIGTERM to that same process. |
 | Quit during a session | Quitting or a crash closes the CLI's stdin | With `--stop-on-stdin-close`, the CLI finalizes the recording as if it had been stopped. |
 | Set up sign-in | **Set Up Google Sign-In…** | Runs `subset-minutes sign-in --profile <profile>`, which opens Chrome with the bot profile at accounts.google.com. Quit that window before you start the bot. |
@@ -92,7 +92,7 @@ Reference products: [Granola](https://www.granola.ai) and [Otter](https://otter.
 1. **Setup checklist.** It shows Node.js, the Minutes CLI and where it was found, and each `doctor` check with its fix-it text, plus **Set Up Google Sign-In…** for the bot profile. Optional checks such as sign-in show as advice, not blockers. The POC reported missing pieces only after a failed start. (Modeled on Otter's guided notetaker setup.)
 2. **Link pre-check and Use Current Tab.** The link field shows the detected platform or why a link is rejected. **Paste** and **Use Current Tab** fill the link from the clipboard or from the front Chrome or Safari tab. (Modeled on Granola's meeting detection, kept as an explicit action.)
 3. **Session status instead of a raw log.** A status card shows Ready, Joining, In meeting (with a timer), Leaving, Finished, or Failed with the coded error. The process log moved into a collapsible **Details** section with **Copy Log**. The audio file appears as a card with **Show in Finder**.
-4. **Consent notice.** The form states that participants will see the bot join under its name, and that the user should tell them they are recording. (Modeled on Otter's visible-notetaker disclosure.)
+4. **Consent notice.** The form states that participants will see the bot join under its name (in Google Meet, under the bot's Google account name when it is signed in), and that the user should tell them they are recording. (Modeled on Otter's visible-notetaker disclosure.)
 5. **Shortcuts, persistence, and accessibility.** ⌘↩ sends the bot and ⌘. stops it, and both have tooltips. The bot name and output folder persist. Setup rows, the status card, and the output file have VoiceOver labels.
 
 ## Provenance
@@ -108,6 +108,10 @@ Ported from `21nCo/21n`, branch `dev`, path `poc/ios/MeetingRecordingPOC`, last 
 ## Superfunctions reuse review
 
 See [`packages/minutes/README.md`](../../packages/minutes/README.md#superfunctions-reuse-review). That review re-evaluated `@recfn/meet` 0.1.1, `@recfn/browser-core` 0.1.2, `@recfn/zoom` 0.1.0, `@recfn/core` 0.1.1, `@clifn/core` 0.1.0, and the private RecFn Swift SDKs. No Superfunctions package is used, and the review records each gap.
+
+## Release (macOS)
+
+`macos-release.json` opts the `Minutes` scheme into the signed macOS release flow; see [docs/macos-release.md](../../docs/macos-release.md). Run `npm ci && npm run build` first, because a Release build embeds `packages/minutes-cli/app-runtime`. A Developer ID-signed, not notarized, build of 0.1.0 with this manifest was produced locally, with the CLI embedded and the hardened runtime on. Node.js is still a separate install. Nothing has been released, and the catalog lists no available surface.
 
 ## Verified
 
