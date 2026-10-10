@@ -125,9 +125,26 @@ final class AnnotateTests: XCTestCase {
 
         let annotation = try XCTUnwrap(page.annotations.first)
         let pathBounds = try XCTUnwrap(annotation.paths?.first?.bounds)
-        XCTAssertEqual(pathBounds.origin.x, 50, accuracy: 0.5)
-        XCTAssertEqual(pathBounds.origin.y, 60, accuracy: 0.5)
-        XCTAssertEqual(annotation.bounds.origin, CGPoint(x: 50, y: 40))
+        // Path points are relative to the annotation's bounds, which start just outside the stroke.
+        XCTAssertEqual(annotation.bounds.origin.x + pathBounds.origin.x, 100, accuracy: 0.5)
+        XCTAssertEqual(annotation.bounds.origin.y + pathBounds.origin.y, 100, accuracy: 0.5)
+        XCTAssertEqual(pathBounds.width, 100, accuracy: 0.5)
+        XCTAssertEqual(pathBounds.height, 140, accuracy: 0.5)
+    }
+
+    func testInkBoundsCoverOnlyTheStroke() throws {
+        let store = PDFDocumentStore()
+        store.importDocument(from: .success(try makePDF()))
+        let page = try XCTUnwrap(store.document?.page(at: 0))
+
+        store.commitInkStroke(on: page, pagePoints: [CGPoint(x: 100, y: 100), CGPoint(x: 200, y: 240)])
+
+        let annotation = try XCTUnwrap(page.annotations.first)
+        XCTAssertTrue(annotation.bounds.contains(CGPoint(x: 100, y: 100)))
+        XCTAssertTrue(annotation.bounds.contains(CGPoint(x: 200, y: 240)))
+        XCTAssertLessThan(annotation.bounds.width, 120)
+        XCTAssertNil(page.annotation(at: CGPoint(x: 400, y: 600)))
+        XCTAssertNotNil(page.annotation(at: CGPoint(x: 150, y: 170)))
     }
 
     func testWordRangesAdvancePastNonBMPCharacters() {

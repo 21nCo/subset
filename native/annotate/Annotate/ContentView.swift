@@ -78,7 +78,9 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             Button("Remove All", role: .destructive) { store.removeAllAnnotations() }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                // Dismissing the dialog is the whole action.
+            }
         } message: {
             Text("This includes annotations the PDF already had when you opened it. You can undo this.")
         }
@@ -147,15 +149,24 @@ struct ContentView: View {
             .shadow(color: Color.black.opacity(0.12), radius: 24, y: 14)
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
-            .overlay(alignment: .topLeading) {
-                LoadedTopBar(store: store)
-                    .padding(.top, 16)
-                    .padding(.leading, 18)
-            }
-            .overlay(alignment: .topTrailing) {
-                ZoomControlPanel(store: store)
-                    .padding(.top, 16)
-                    .padding(.trailing, 18)
+            .overlay(alignment: .top) {
+                // One layout for both panels, so on compact widths the zoom panel stacks
+                // under the document bar instead of covering its title and export status.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        LoadedTopBar(store: store)
+                        Spacer(minLength: 0)
+                        ZoomControlPanel(store: store)
+                    }
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        LoadedTopBar(store: store)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ZoomControlPanel(store: store)
+                    }
+                }
+                .padding(.top, 16)
+                .padding(.horizontal, 18)
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
@@ -417,14 +428,15 @@ private struct AnnotationControlsView: View {
             }
 
             if let instruction = store.activeToolInstruction {
+                // Wraps rather than truncating: the Cover instruction carries a safety warning.
                 Text(instruction)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color(red: 0.18, green: 0.28, blue: 0.42))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.86), in: Capsule())
+                    .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
             if store.shouldShowShapeSaveButton {
@@ -1005,7 +1017,7 @@ private struct AnnotationInputSheet: View {
         case .freeText:
             return "Add Text"
         case .link:
-            return pendingInput.selection != nil ? "Add Link" : "Add Link"
+            return "Add Link"
         default:
             return "Annotation"
         }

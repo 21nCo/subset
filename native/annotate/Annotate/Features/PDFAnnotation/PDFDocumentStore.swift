@@ -1004,8 +1004,9 @@ final class PDFDocumentStore: ObservableObject {
         }
 
         // PDFKit ink paths are in annotation space, relative to the annotation's bounds origin.
-        // The bounds cover the media box, whose origin is not always (0, 0).
-        let annotationBounds = page.bounds(for: .mediaBox)
+        // The bounds cover only the stroke (plus its width), not the whole page, so tapping blank
+        // space, links, or other annotations elsewhere on the page does not select this stroke.
+        let annotationBounds = Self.inkAnnotationBounds(for: pagePoints, lineWidth: strokeWidth)
         let origin = annotationBounds.origin
         let annotationPoints = pagePoints.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
         let path = UIBezierPath()
@@ -1029,6 +1030,18 @@ final class PDFDocumentStore: ObservableObject {
 
         addAnnotations([(page: page, annotation: annotation)])
         finishDocumentMutation()
+    }
+
+    static func inkAnnotationBounds(for pagePoints: [CGPoint], lineWidth: CGFloat) -> CGRect {
+        let xs = pagePoints.map(\.x)
+        let ys = pagePoints.map(\.y)
+        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else {
+            return .zero
+        }
+
+        let outset = max(lineWidth, 1) / 2 + 2
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            .insetBy(dx: -outset, dy: -outset)
     }
 
     func submitPendingAnnotationInput() {
