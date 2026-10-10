@@ -70,7 +70,7 @@ The Chrome driver launches the installed Google Chrome (or `SUBSET_MINUTES_CHROM
 - Meet uses a persistent profile (default `~/Library/Application Support/Subset Minutes/google-meet-bot-profile` on macOS; elsewhere `$XDG_DATA_HOME/subset/minutes/google-meet-bot-profile`, or `~/.local/share/subset/minutes/google-meet-bot-profile` when `XDG_DATA_HOME` is unset). Zoom uses a fresh context.
 - Audio capture is an init script that hooks `RTCPeerConnection` track events, mixes the remote audio tracks with a silent source, and records with `MediaRecorder` (WebM/Opus). Only the top-level document records, and recording starts after the join. The file therefore holds a single WebM stream, and pages loaded during the join flow add nothing. If the meeting page reloads after the join, the session logs that later audio is missing rather than appending a second stream.
 - The join flows wait up to 10 minutes to be admitted. A rejected or never-admitted bot fails with `join_rejected` or `join_failed` instead of reporting that it joined. Meet rejections are noticed while waiting, and a page that closes is reported as such rather than as a timeout.
-- The session reserves the recording file name atomically, removes the file when no audio was captured, and reports `capture_failed` (with the bytes on disk) when the recording could not be flushed completely.
+- The session reserves the recording file name atomically, removes the file when no audio was captured, and reports `capture_failed` (with the bytes on disk) when the recording could not be flushed completely or no remote audio track ever reached the recorder (for example, a meeting client that does not deliver audio through `RTCPeerConnection` tracks).
 
 ## Tests
 

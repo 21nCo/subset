@@ -385,9 +385,11 @@ struct ContentView: View {
 
     private func useCurrentTab() {
         tabLookupMessage = "Reading the front browser tab…"
+        // A link typed or pasted while the lookup runs wins over the browser's.
+        let linkAtStart = meetingURL
         Task { @MainActor in
             if let link = await BrowserTabReader.frontMeetingLink() {
-                meetingURL = link.url.absoluteString
+                if meetingURL == linkAtStart { meetingURL = link.url.absoluteString }
                 tabLookupMessage = nil
             } else {
                 tabLookupMessage = "No Google Meet or Zoom tab was found in the front Chrome or Safari window, or Automation access was denied."

@@ -122,3 +122,16 @@ test('--link-from-stdin reads the link from stdin, so it is not in the arguments
   assert.equal(events.at(-1).reason, 'stopped');
   assert.equal(JSON.stringify(events).includes('secret'), false);
 });
+
+test('--profile must be inside the home folder', async (t) => {
+  const { directory, env } = await sandbox(t);
+  const outside = run(['doctor', '--json', '--profile', path.join(directory, '..')], env);
+  assert.equal(outside.status, 2);
+  const events = lines(outside.stdout);
+  assert.equal(events[0].code, 'usage');
+  assert.match(events[0].message, /inside your home folder/);
+  assert.equal(run(['doctor', '--json', '--profile', '~'], env).status, 2);
+  const inside = run(['doctor', '--json', '--profile', '~/bot-profile', '--out', directory], env);
+  assert.notEqual(inside.status, 2);
+  assert.ok(isMinutesDoctor(JSON.parse(inside.stdout)));
+});

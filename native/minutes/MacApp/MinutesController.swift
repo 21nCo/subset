@@ -222,47 +222,44 @@ final class MinutesController: ObservableObject {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        // An empty read means EOF; clear the handler so it does not fire in a loop.
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            Task { @MainActor [weak self] in self?.consumeStdout(data) }
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            Task { @MainActor [weak self] in self?.consumeStderr(data) }
-        }
-        process.terminationHandler = { [weak self] finished in
-            let status = finished.terminationStatus
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            let rest = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorRest = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            Task { @MainActor [weak self] in
-                if !rest.isEmpty { self?.consumeStdout(rest) }
-                if !errorRest.isEmpty { self?.consumeStderr(errorRest) }
-                self?.consumeStderr(Data("\n".utf8))
-                self?.handleTermination(status: status)
-            }
-        }
+        // Finalize only after the process exited and both pipes reached EOF, so every chunk of output is
+        // handled first. Each reader delivers its chunks to the main queue in the order it read them.
+        let finished = DispatchGroup()
+        finished.enter()
+        process.terminationHandler = { _ in finished.leave() }
 
         do {
             try process.run()
-            self.process = process
-            self.stdinPipe = stdinPipe
-            try? stdinPipe.fileHandleForWriting.write(contentsOf: Data((link.url.absoluteString + "\n").utf8))
-            phase = .launching
-            logger.info("Spawned subset-minutes join (pid \(process.processIdentifier, privacy: .public))")
-            appendLog("Started subset-minutes for \(link.platformName) (PID \(process.processIdentifier)).")
         } catch {
+            finished.leave()
             fail("Could not start the Minutes CLI: \(error.localizedDescription)")
+            return
+        }
+        self.process = process
+        self.stdinPipe = stdinPipe
+        Self.readUntilEndOfFile(stdoutPipe.fileHandleForReading, group: finished) { [weak self] data in self?.consumeStdout(data) }
+        Self.readUntilEndOfFile(stderrPipe.fileHandleForReading, group: finished) { [weak self] data in self?.consumeStderr(data) }
+        finished.notify(queue: .main) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.consumeStderr(Data("\n".utf8))
+                self?.handleTermination(status: process.terminationStatus)
+            }
+        }
+        try? stdinPipe.fileHandleForWriting.write(contentsOf: Data((link.url.absoluteString + "\n").utf8))
+        phase = .launching
+        logger.info("Spawned subset-minutes join (pid \(process.processIdentifier, privacy: .public))")
+        appendLog("Started subset-minutes for \(link.platformName) (PID \(process.processIdentifier)).")
+    }
+
+    /// Reads `handle` on a background queue until EOF and hands each chunk to `deliver` on the main queue, in order.
+    private nonisolated static func readUntilEndOfFile(_ handle: FileHandle, group: DispatchGroup,
+                                                       deliver: @escaping @MainActor @Sendable (Data) -> Void) {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            while case let data = handle.availableData, !data.isEmpty {
+                DispatchQueue.main.async { MainActor.assumeIsolated { deliver(data) } }
+            }
+            group.leave()
         }
     }
 

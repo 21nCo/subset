@@ -51,7 +51,7 @@ An agent should use `status --json` and `doctor --json` to read state. `join` st
 ## Data and permissions
 
 - Recordings: `--out`, or `~/Documents/Minutes Recordings`. File names are `minutes-<platform>-<UTC time>.webm`, and files are created with mode 0600.
-- Data folder: `~/Library/Application Support/Subset Minutes` on macOS, or `~/.local/share/subset/minutes` (or `$XDG_DATA_HOME/subset/minutes`) elsewhere. `SUBSET_MINUTES_DATA_DIR` overrides it. The folder holds `google-meet-bot-profile/` (the bot's Chrome profile; `--profile` or `SUBSET_MINUTES_PROFILE_DIR` overrides it) and `sessions/<id>.json` (one record per session, mode 0600).
+- Data folder: `~/Library/Application Support/Subset Minutes` on macOS, or `~/.local/share/subset/minutes` (or `$XDG_DATA_HOME/subset/minutes`) elsewhere. `SUBSET_MINUTES_DATA_DIR` overrides it. The folder holds `google-meet-bot-profile/` (the bot's Chrome profile; `--profile`, which must be inside the home folder, or `SUBSET_MINUTES_PROFILE_DIR` overrides it) and `sessions/<id>.json` (one record per session, mode 0600).
 - `SUBSET_MINUTES_CHROME_PATH` selects a Chrome or Chromium binary.
 - Output, logs, and session records show only the redacted meeting link (no query string), so a Zoom passcode is never printed or stored. `doctor` does not print the bot's Google account.
 - The CLI records remote meeting audio only. The bot's camera and microphone are Chrome's fake devices (with a silent microphone), so it never opens this computer's real camera or microphone and needs no camera, microphone, or screen-recording permission for them. The bot also mutes itself.

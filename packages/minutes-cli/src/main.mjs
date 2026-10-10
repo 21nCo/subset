@@ -1,5 +1,6 @@
 // The subset-minutes command. `cli.mjs` calls `main` with the real process; tests pass a fake driver.
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,6 +58,31 @@ const commandOptions = {
 
 const expandHome = (value, home) => (value === '~' ? home : value.startsWith('~/') ? path.join(home, value.slice(2)) : value);
 
+/** The absolute path with symlinks resolved in its longest existing prefix (the rest may not exist yet). */
+function canonical(value) {
+  const absolute = path.resolve(value);
+  let existing = absolute;
+  for (;;) {
+    try {
+      return path.join(realpathSync(existing), path.relative(existing, absolute));
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) return absolute;
+      existing = parent;
+    }
+  }
+}
+
+/**
+ * The `--profile` folder, or null when it is outside the home folder. Chrome runs with this profile and
+ * `sign-in` creates it, so a caller (possibly an agent) cannot point either at an arbitrary folder.
+ */
+function profileInsideHome(value, home) {
+  const resolved = canonical(path.resolve(expandHome(value, home)));
+  const base = canonical(home);
+  return resolved.startsWith(base + path.sep) ? resolved : null;
+}
+
 /**
  * @param {object} io
  * @param {string[]} io.argv  Arguments after the executable and script.
@@ -94,7 +120,11 @@ export async function main(io) {
   }
   const values = parsed.values;
   const environment = { platform: process.platform, home: io.home, env: io.env };
-  const profileDirectory = values.profile ? path.resolve(expandHome(values.profile, io.home)) : defaultProfileDirectory(environment);
+  let profileDirectory = defaultProfileDirectory(environment);
+  if (values.profile) {
+    profileDirectory = profileInsideHome(values.profile, io.home);
+    if (!profileDirectory) return usageError(io, json, '--profile must be a folder inside your home folder.');
+  }
   const outputDirectory = values.out ? path.resolve(expandHome(values.out, io.home)) : defaultOutputDirectory(environment);
 
   switch (command) {

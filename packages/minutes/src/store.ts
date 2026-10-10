@@ -37,7 +37,7 @@ export function isProcessAlive(pid: number): boolean {
 /** When a process started, from `ps -o lstart=` (macOS and Linux), or null when unknown. */
 export function processStartedAt(pid: number): Promise<Date | null> {
   return new Promise((resolve) => {
-    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
+    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000, env: { ...process.env, LC_ALL: 'C' } }, (error, stdout) => {
       const time = error ? Number.NaN : Date.parse(stdout.trim());
       resolve(Number.isNaN(time) ? null : new Date(time));
     });

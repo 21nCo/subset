@@ -166,7 +166,7 @@ class ChromeMeetingPage implements MeetingPage {
     const result = await new Promise<EndSignal>((resolve) => {
       let pending = watchers.length;
       for (const watcher of watchers) {
-        watcher.then((value) => {
+        void watcher.then((value) => {
           if (value) resolve(value);
           else if (--pending === 0) resolve('page_closed');
         });

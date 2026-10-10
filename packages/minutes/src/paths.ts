@@ -49,7 +49,7 @@ export function createSessionId(now: Date = new Date(), random: () => string = (
  * The meeting code is left out so a shared folder listing does not reveal which meeting it was.
  */
 export function recordingFileName(platform: Platform, startedAt: Date, attempt = 0): string {
-  const stamp = startedAt.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/:/g, '-');
+  const stamp = startedAt.toISOString().replace(/\.\d{3}Z$/, 'Z').replaceAll(':', '-');
   return `minutes-${platform}-${stamp}${attempt > 0 ? `-${attempt + 1}` : ''}.webm`;
 }
 

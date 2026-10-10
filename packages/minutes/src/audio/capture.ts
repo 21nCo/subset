@@ -4,6 +4,7 @@ import type { Page } from 'playwright-core';
 import { MinutesError } from '../driver.js';
 
 const CHUNK_BINDING = '__minutesAudioChunk__';
+const TRACK_BINDING = '__minutesAudioTrack__';
 
 /**
  * Injected before the meeting page's own scripts. It hooks `RTCPeerConnection` track events, mixes
@@ -12,7 +13,8 @@ const CHUNK_BINDING = '__minutesAudioChunk__';
  *
  * A silent source keeps the timeline continuous. Only the top-level document records, so a page with several frames still produces one WebM stream.
  * `window.__minutesCapture__.stop()` stops the recorder and resolves after the final slice reached Node:
- * true when every slice was delivered, false when one was lost.
+ * true when every slice was delivered, false when one was lost. Each connected remote track is reported to
+ * Node, so a recording that only ever held the silent source is detected even if the page has closed.
  */
 export const CAPTURE_INIT_SCRIPT = `
 (function () {
@@ -34,6 +36,7 @@ export const CAPTURE_INIT_SCRIPT = `
     try {
       ctx.createMediaStreamSource(new MediaStream([track])).connect(destination);
       if (ctx.state === 'suspended') ctx.resume().catch(function () {});
+      if (window.${TRACK_BINDING}) window.${TRACK_BINDING}().catch(function () {});
     } catch (error) {
       console.warn('[minutes] could not connect an audio stream', error);
     }
@@ -132,7 +135,8 @@ export interface AudioCapture {
   begin(): Promise<void>;
   /**
    * Stops recording, waits for the last slice, closes the file, and returns its size in bytes. Throws
-   * `capture_failed` (after closing the file) when a write failed or audio slices were not delivered.
+   * `capture_failed` (after closing the file) when a write failed, audio slices were not delivered, or no
+   * remote audio track ever reached the recorder (the file would hold only silence).
    */
   stop(): Promise<number>;
 }
@@ -156,6 +160,7 @@ export async function installAudioCapture(page: Page, outputPath: string): Promi
   stream.on('error', (error) => { writeError = error; });
 
   let lateSlices = 0;
+  let remoteTracks = 0;
   try {
     await page.exposeFunction(CHUNK_BINDING, (base64: unknown) => {
       if (typeof base64 !== 'string') return;
@@ -164,6 +169,7 @@ export async function installAudioCapture(page: Page, outputPath: string): Promi
       bytes += chunk.length;
       stream.write(chunk);
     });
+    await page.exposeFunction(TRACK_BINDING, () => { remoteTracks += 1; });
     await page.addInitScript(CAPTURE_INIT_SCRIPT);
   } catch (error) {
     // Leave no empty file and no open stream behind.
@@ -195,6 +201,9 @@ export async function installAudioCapture(page: Page, outputPath: string): Promi
         if (writeError) throw new MinutesError('capture_failed', `Writing the recording failed: ${(writeError as Error).message}`);
         if (!flushed || lateSlices > 0) {
           throw new MinutesError('capture_failed', 'The recorder did not hand over all of its audio, so the end of the recording may be missing.');
+        }
+        if (begun && remoteTracks === 0) {
+          throw new MinutesError('capture_failed', 'No participant audio reached the recorder, so the recording holds only silence.');
         }
         return bytes;
       })();
