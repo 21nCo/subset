@@ -1,6 +1,6 @@
 import Foundation
 
-struct ShortcutSearchService {
+struct ShortcutSearchService: Sendable {
     func loadShortcuts() -> [SearchResult] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
@@ -8,16 +8,17 @@ struct ShortcutSearchService {
 
         let outputPipe = Pipe()
         process.standardOutput = outputPipe
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return []
         }
 
+        // Drain stdout before waiting so a long shortcut list cannot fill the pipe and deadlock.
         let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         guard let output = String(data: data, encoding: .utf8), process.terminationStatus == 0 else {
             return []
         }

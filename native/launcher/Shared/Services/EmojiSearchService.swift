@@ -67,7 +67,8 @@ struct EmojiSearchService {
 
 private extension String {
     var normalizedEmojiSearchText: String {
-        folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        // Every searchable field is English, so fold with the same locale (e.g. Turkish "I").
+        folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en"))
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")

@@ -26,7 +26,7 @@ It is a Subset capability in the `building` state. The source builds and its uni
 | Window positions | The Accessibility API |
 | Quick notes | A local Core Data store at `~/Library/Application Support/dev.subset.launcher/QuickNotes.sqlite` |
 
-Nothing is sent over the network. The one exception is Swift Package Manager fetching EmojiKit at build time.
+Launcher has no network service of its own. Siri Shortcuts that it runs may send data over the network, as defined by each shortcut. Swift Package Manager fetches EmojiKit at build time.
 
 **Explicit operations**
 
@@ -47,7 +47,7 @@ The native target owns the global hotkeys, Accessibility window control, Spotlig
 
 | Surface | Status |
 | --- | --- |
-| macOS app (`Launcher`) | Proposed. Builds unsigned; 3 unit tests pass. |
+| macOS app (`Launcher`) | Proposed. Builds unsigned; 5 unit tests pass. A Developer ID-signed build (not notarized) was produced locally; see Release. |
 | App Intents / Shortcuts actions | Compiled into the app; not verified in the Shortcuts app. |
 | Web, iOS, embed, agent CLI/view | Not proposed. |
 
@@ -77,9 +77,15 @@ No `DEVELOPMENT_TEAM` is set. Choose your own team in Xcode to keep Accessibilit
 
 Unit tests run inside the app as their host. In that mode, global hotkeys are not registered and quick notes use an in-memory store.
 
+### Release
+
+`macos-release.json` opts the `Launcher` scheme into the Developer ID signing and notarization script; see [docs/macos-release.md](../../docs/macos-release.md). A signed build with `--skip-notarize` was produced and verified locally on 2026-10-10. It has not been notarized or published, so there is no download.
+
 ### Permissions
 
 - **Accessibility:** window commands only. macOS prompts the first time one runs.
+- **Automation of System Events:** used only as a fallback when a window rejects Accessibility moves. `NSAppleEventsUsageDescription` explains the prompt, and `MacApp/Launcher.entitlements` grants `com.apple.security.automation.apple-events`, which the hardened runtime requires.
+- **Global hotkeys:** if another app already owns ⌥Space or ⌃⌥N, the other hotkey still works and the menu shows the taken one as unavailable.
 - **Files and Folders / Full Disk Access:** may be requested by macOS depending on which folders Spotlight results come from.
 - **Automation of Shortcuts:** handled by the `shortcuts` command line tool.
 
@@ -117,7 +123,8 @@ Reviewed `/Users/ar/dev/superfunctions` (branch `next`, commit `9cf3812`) and np
 Third-party material:
 
 - **EmojiKit 2.5.0** (MIT). The POC already used it.
-- **`Shared/Services/EmojiAnnotationIndex.swift`**, generated from Unicode CLDR English emoji annotations (Unicode License v3). Any binary release needs the CLDR and EmojiKit license notices added to the app's acknowledgements. This has not been done yet.
+- **`Shared/Services/EmojiAnnotationIndex.swift`**, generated from Unicode CLDR English emoji annotations, used under the Unicode License v3 (SPDX `Unicode-3.0`). The full notice is in [`Shared/Services/EmojiAnnotationIndex-LICENSE.txt`](Shared/Services/EmojiAnnotationIndex-LICENSE.txt), next to the data.
+- Both notices ship inside the app bundle: `EmojiAnnotationIndex-LICENSE.txt` and [`MacApp/EmojiKit-LICENSE.txt`](MacApp/EmojiKit-LICENSE.txt) are copied to `Launcher.app/Contents/Resources`. There is no in-app acknowledgements screen yet.
 
 ## Provenance
 

@@ -71,7 +71,10 @@ final class LauncherPanelController: NSObject, NSWindowDelegate {
 
     private func frame(for mode: LauncherMode) -> NSRect {
         let size = mode == .quickNote ? NSSize(width: 740, height: 420) : NSSize(width: 720, height: 430)
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // Open on the display the user is working on (the one under the pointer).
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) } ?? NSScreen.main
+        let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         return NSRect(
             x: screenFrame.midX - size.width / 2,
             y: screenFrame.maxY - size.height - 96,

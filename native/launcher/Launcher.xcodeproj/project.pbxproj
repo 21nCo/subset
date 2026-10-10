@@ -7,239 +7,233 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		133C99E1E1A6C527609C1E6E /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A9263A571DE5E0CFB1401AAD /* AppIntents.framework */; };
-		2387DF034939AB2F829BC4B6 /* QuickNotesWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51E10A8DE1D9F9D224AD2B7F /* QuickNotesWindowController.swift */; };
-		281CA6BA01C8DA58567AFC09 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A583E935F0CF5BDCB394850 /* Cocoa.framework */; };
-		2F8901469EB742106F29E689 /* WindowManagementService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0722147856B63155E4CB271 /* WindowManagementService.swift */; };
-		3208128EE6185D8C249DA4C1 /* CoreData.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AECBC7EC7CB5FEA9C474B249 /* CoreData.framework */; };
-		34A8B5DCF32D4432C76A484F /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D7864BFBC0E16776C6343FF5 /* AppKit.framework */; };
-		34DA281BF4E3247B829A853B /* EmojiAnnotationIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2DD8797D951F92C832BB03C /* EmojiAnnotationIndex.swift */; };
-		3A124C24FC7F82685749F47A /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6CB1C9CCDFD94F31B0B15B00 /* SwiftUI.framework */; };
-		43A6B7937516D0FE00C74ACC /* PersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9594C5D1ADACFFD9CD91CB08 /* PersistenceController.swift */; };
-		4B8111F22B185BF856508339 /* LauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93C51BFEADEE65F0B45E9FE2 /* LauncherTests.swift */; };
-		4C98B6793738B7E49F8E1C9C /* LauncherModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD07B5FC550C27AA508745B3 /* LauncherModels.swift */; };
-		50791C467645CE9A3D487D09 /* GlobalShortcutMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65A846C2EEBEDAE64EE1FB33 /* GlobalShortcutMonitor.swift */; };
-		7D8CD7C9BCFB2A75ED021AE2 /* Collection+Uniqued.swift in Sources */ = {isa = PBXBuildFile; fileRef = 512C29D4B9F64B9095813166 /* Collection+Uniqued.swift */; };
-		83E76D7340D07E51229E0778 /* QuickNotesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33028D1BA4E3064B44B28E1C /* QuickNotesView.swift */; };
-		853E9DFCCC7CCC396E891B74 /* AppSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1F52D18BFD713ACA71AC5AC /* AppSearchService.swift */; };
-		8A8C3B2F2B7C6E98FA303D4F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7DC6CB8BF84B0249D9D59796 /* Assets.xcassets */; };
-		8B1DD11D5726C2A86B86D984 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1D6AF3E70C8512A465E807 /* StatusBarController.swift */; };
-		9176B53C5E2F0FD2906BE6D4 /* ShortcutSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE8B34E7D3E17FFE7B0157BB /* ShortcutSearchService.swift */; };
-		92BAB8F51A81C61923E67147 /* FileSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E41012BBF6E422ACC94EE80 /* FileSearchService.swift */; };
-		96A327FB3C58037CE82C0834 /* EmojiSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058E357FEB9267CAEC974649 /* EmojiSearchService.swift */; };
-		99BC6E6DA34A184B40183D8F /* LauncherPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2431B74BD66907865F8899F /* LauncherPanelController.swift */; };
-		9A17B5D506C07126A48C019F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE0EDB5DCE63058B7B15B16E /* AppDelegate.swift */; };
-		A74B3610BCBF5D78560104DD /* LauncherIntentBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9944B57A6D309DF48BD17AF2 /* LauncherIntentBridge.swift */; };
-		B84CE29DC07F91E725D6578E /* LauncherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F435C221A74CF87C25224AD /* LauncherView.swift */; };
-		B8680AB92F5B76388B91C59C /* AvatarWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495B103B2CAEEECACC1ADF2A /* AvatarWindowController.swift */; };
-		C9AA59079ECAC4712B309182 /* QuickNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B4A74ADBD37D29CD2F810F /* QuickNote.swift */; };
-		CDCF7BECC5E44145433046EA /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A583E935F0CF5BDCB394850 /* Cocoa.framework */; };
-		CF662B37CF32DB4B73BFE372 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F4BB1B6DF0862B4013D69C02 /* Carbon.framework */; };
-		D2D6468BB661E261D5BB736B /* EmojiKit in Frameworks */ = {isa = PBXBuildFile; productRef = 935D84EE53BC46AEE5610174 /* EmojiKit */; };
-		EA3E4F1C5D4FF6A62E986E8A /* LauncherAppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE2D736CC3A08A058E3AE56C /* LauncherAppState.swift */; };
-		F79CFA6FF823F71719F96202 /* LauncherApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22EAF7E9011B2B0A51481C97 /* LauncherApp.swift */; };
-		F7DBD6B7C261FC41CA09031A /* AvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5D3A88F265387239BCE4193 /* AvatarView.swift */; };
+		000E29B865F0EDB1EE328AB7 /* LauncherModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7D9455EB5B6CA9171A4FC55 /* LauncherModels.swift */; };
+		0264FD37CAB05A88A84A0071 /* AvatarWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43E81A740157A015BEF1FFD9 /* AvatarWindowController.swift */; };
+		068398CD535B74DBDC7AA97E /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5AE6ADABAB23CCFCCE82DA5 /* AppIntents.framework */; };
+		22CD7E72B7D701C13F913511 /* WindowManagementService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B839D6F6AF001311E61F926A /* WindowManagementService.swift */; };
+		27C6791DEDE2D9ED22A28CD8 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FAF0E7FFB1DD00B1C8157852 /* AppKit.framework */; };
+		2BA305496D52EB787CBB8313 /* CoreData.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0BF056674A02C3786ED05D3F /* CoreData.framework */; };
+		382B382EE7DE3862723601A4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7663B40596F1EDB1EBAEF311 /* Assets.xcassets */; };
+		397A9C7005EAD6A587E1F3DE /* GlobalShortcutMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9614F41C269BA10A304C5E9 /* GlobalShortcutMonitor.swift */; };
+		3E63B43767B7DF27F7BCB805 /* EmojiSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99014887B18FF2F9B2D50DCA /* EmojiSearchService.swift */; };
+		402D9DED19A647A5E0F03D57 /* AppSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 437FD9C2971648712C281EA4 /* AppSearchService.swift */; };
+		418CCEA260F59CC4E5788938 /* PersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D5A753F4335D988B07C724A /* PersistenceController.swift */; };
+		41E0C94FAEEAEDEF3ED84123 /* EmojiAnnotationIndex-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7AEBD383DD203ED143806EF3 /* EmojiAnnotationIndex-LICENSE.txt */; };
+		4B1FF250E92F26749FB47884 /* LauncherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80135DF73957C85839B2BFA7 /* LauncherView.swift */; };
+		4FB892015F128606EEE1F679 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B05CC661D7B2D223F2F6866D /* StatusBarController.swift */; };
+		6999F1EF2F366B7B31C0D2D4 /* QuickNotesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6EB192EF51A28B96C1C60C /* QuickNotesView.swift */; };
+		6E40AF776D6A8DBB6F8B0674 /* LauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A56417E42195D157EFCC0EC /* LauncherTests.swift */; };
+		6F8644EEB4B66B47B868A651 /* FileSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94A5EC2257AD27BAF83566CA /* FileSearchService.swift */; };
+		795CA4DB1307E9F548EEC43C /* EmojiKit-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 4B807EDE3B9F3908F21BAA9C /* EmojiKit-LICENSE.txt */; };
+		89B916FF1BD25F64974DFE4E /* LauncherAppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51663647BCBC8921DE1F5EA5 /* LauncherAppState.swift */; };
+		99249EE1590724152B1F1860 /* EmojiAnnotationIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2670B19985D2790D27FF1CFD /* EmojiAnnotationIndex.swift */; };
+		B564C115632D8740E1AEC161 /* QuickNotesWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B53BAD27D369145FB70B7D5 /* QuickNotesWindowController.swift */; };
+		BD40F447A6227A19B0D5AD55 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF4AF71117E69634556D72D0 /* SwiftUI.framework */; };
+		C624EE4B1489F3EB26CB2F5D /* EmojiKit in Frameworks */ = {isa = PBXBuildFile; productRef = B06F98AAF1C70E6EA2FF1532 /* EmojiKit */; };
+		D45F77DA9401B2CFD70377F6 /* Collection+Uniqued.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBCCD9179482C6597768EE55 /* Collection+Uniqued.swift */; };
+		E167C91D34668965E7E37151 /* LauncherIntentBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2550AF0A79500CF754A56792 /* LauncherIntentBridge.swift */; };
+		E277CB002D2F24ABD7500652 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C669D494B4154D6DE5B3CB3E /* Carbon.framework */; };
+		E85BC402B706C710E4F541D7 /* QuickNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8F8F5CA607B998AD81B43A3 /* QuickNote.swift */; };
+		ED8843B9F49A4BD0C7C66241 /* AvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1C2D37CE0D35E353AB29A9C /* AvatarView.swift */; };
+		F0F7EA34A2CFDA4FFE653158 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC986256CDF50B1BE951DF4B /* AppDelegate.swift */; };
+		F749250E8A645BE7E116E240 /* LauncherApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6067CAB8AF1726BB5EE78F5B /* LauncherApp.swift */; };
+		F9E1D4B7E30A90327A106238 /* ShortcutSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E8AE455B655682C403E169C /* ShortcutSearchService.swift */; };
+		FAC508A81B606630628769E8 /* LauncherPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 699B9EF9E4DD76F7EAD27543 /* LauncherPanelController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		FDCE9F7354D083FAE6EAE8C3 /* PBXContainerItemProxy */ = {
+		3C5766D62046E9009919FC0D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
-			containerPortal = FBB8CBE619BBA268BB04A835 /* Project object */;
+			containerPortal = 756426AC3BBFAB951F37D609 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = AB480C0E88759C7F4D362ABC;
+			remoteGlobalIDString = 83F16BBA2B93D750E060AA59;
 			remoteInfo = Launcher;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		058E357FEB9267CAEC974649 /* EmojiSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EmojiSearchService.swift; sourceTree = "<group>"; };
-		22EAF7E9011B2B0A51481C97 /* LauncherApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherApp.swift; sourceTree = "<group>"; };
-		24B4A74ADBD37D29CD2F810F /* QuickNote.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNote.swift; sourceTree = "<group>"; };
-		2A583E935F0CF5BDCB394850 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
-		2F435C221A74CF87C25224AD /* LauncherView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherView.swift; sourceTree = "<group>"; };
-		33028D1BA4E3064B44B28E1C /* QuickNotesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNotesView.swift; sourceTree = "<group>"; };
-		43B0506E5977715D5C3BD370 /* Launcher.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Launcher.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		495B103B2CAEEECACC1ADF2A /* AvatarWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AvatarWindowController.swift; sourceTree = "<group>"; };
-		512C29D4B9F64B9095813166 /* Collection+Uniqued.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "Collection+Uniqued.swift"; sourceTree = "<group>"; };
-		51E10A8DE1D9F9D224AD2B7F /* QuickNotesWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNotesWindowController.swift; sourceTree = "<group>"; };
-		65A846C2EEBEDAE64EE1FB33 /* GlobalShortcutMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GlobalShortcutMonitor.swift; sourceTree = "<group>"; };
-		6CB1C9CCDFD94F31B0B15B00 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = "<group>"; };
-		6E41012BBF6E422ACC94EE80 /* FileSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileSearchService.swift; sourceTree = "<group>"; };
-		7DC6CB8BF84B0249D9D59796 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		8CD2AE210C08FA29695945E8 /* macOS-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "macOS-Info.plist"; sourceTree = "<group>"; };
-		93C51BFEADEE65F0B45E9FE2 /* LauncherTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherTests.swift; sourceTree = "<group>"; };
-		9594C5D1ADACFFD9CD91CB08 /* PersistenceController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PersistenceController.swift; sourceTree = "<group>"; };
-		9944B57A6D309DF48BD17AF2 /* LauncherIntentBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherIntentBridge.swift; sourceTree = "<group>"; };
-		A0722147856B63155E4CB271 /* WindowManagementService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowManagementService.swift; sourceTree = "<group>"; };
-		A9263A571DE5E0CFB1401AAD /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = "<group>"; };
-		AB1D6AF3E70C8512A465E807 /* StatusBarController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
-		AE0EDB5DCE63058B7B15B16E /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		AECBC7EC7CB5FEA9C474B249 /* CoreData.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreData.framework; path = System/Library/Frameworks/CoreData.framework; sourceTree = "<group>"; };
-		AF90E7AB49F39D3DC9E4E94C /* LauncherTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LauncherTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		C5D3A88F265387239BCE4193 /* AvatarView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AvatarView.swift; sourceTree = "<group>"; };
-		CE2D736CC3A08A058E3AE56C /* LauncherAppState.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherAppState.swift; sourceTree = "<group>"; };
-		D1F52D18BFD713ACA71AC5AC /* AppSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppSearchService.swift; sourceTree = "<group>"; };
-		D2431B74BD66907865F8899F /* LauncherPanelController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherPanelController.swift; sourceTree = "<group>"; };
-		D2DD8797D951F92C832BB03C /* EmojiAnnotationIndex.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EmojiAnnotationIndex.swift; sourceTree = "<group>"; };
-		D7864BFBC0E16776C6343FF5 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = "<group>"; };
-		DD07B5FC550C27AA508745B3 /* LauncherModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherModels.swift; sourceTree = "<group>"; };
-		DE8B34E7D3E17FFE7B0157BB /* ShortcutSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShortcutSearchService.swift; sourceTree = "<group>"; };
-		F4BB1B6DF0862B4013D69C02 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = "<group>"; };
+		0BF056674A02C3786ED05D3F /* CoreData.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreData.framework; path = System/Library/Frameworks/CoreData.framework; sourceTree = SDKROOT; };
+		2550AF0A79500CF754A56792 /* LauncherIntentBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherIntentBridge.swift; sourceTree = "<group>"; };
+		2670B19985D2790D27FF1CFD /* EmojiAnnotationIndex.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EmojiAnnotationIndex.swift; sourceTree = "<group>"; };
+		3CB576745C6F745816F5937B /* LauncherTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LauncherTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3D5A753F4335D988B07C724A /* PersistenceController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PersistenceController.swift; sourceTree = "<group>"; };
+		437FD9C2971648712C281EA4 /* AppSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppSearchService.swift; sourceTree = "<group>"; };
+		43E81A740157A015BEF1FFD9 /* AvatarWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AvatarWindowController.swift; sourceTree = "<group>"; };
+		4B807EDE3B9F3908F21BAA9C /* EmojiKit-LICENSE.txt */ = {isa = PBXFileReference; includeInIndex = 1; path = "EmojiKit-LICENSE.txt"; sourceTree = "<group>"; };
+		51663647BCBC8921DE1F5EA5 /* LauncherAppState.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherAppState.swift; sourceTree = "<group>"; };
+		5B53BAD27D369145FB70B7D5 /* QuickNotesWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNotesWindowController.swift; sourceTree = "<group>"; };
+		6067CAB8AF1726BB5EE78F5B /* LauncherApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherApp.swift; sourceTree = "<group>"; };
+		699B9EF9E4DD76F7EAD27543 /* LauncherPanelController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherPanelController.swift; sourceTree = "<group>"; };
+		6E8AE455B655682C403E169C /* ShortcutSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShortcutSearchService.swift; sourceTree = "<group>"; };
+		7663B40596F1EDB1EBAEF311 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		76ACD2F6D892C2F23999D329 /* Launcher.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = Launcher.entitlements; sourceTree = "<group>"; };
+		7AEBD383DD203ED143806EF3 /* EmojiAnnotationIndex-LICENSE.txt */ = {isa = PBXFileReference; includeInIndex = 1; path = "EmojiAnnotationIndex-LICENSE.txt"; sourceTree = "<group>"; };
+		80135DF73957C85839B2BFA7 /* LauncherView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherView.swift; sourceTree = "<group>"; };
+		82668C83371B4B14550E9F85 /* Launcher.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Launcher.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8A56417E42195D157EFCC0EC /* LauncherTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherTests.swift; sourceTree = "<group>"; };
+		8E6EB192EF51A28B96C1C60C /* QuickNotesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNotesView.swift; sourceTree = "<group>"; };
+		94A5EC2257AD27BAF83566CA /* FileSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileSearchService.swift; sourceTree = "<group>"; };
+		99014887B18FF2F9B2D50DCA /* EmojiSearchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EmojiSearchService.swift; sourceTree = "<group>"; };
+		A5AE6ADABAB23CCFCCE82DA5 /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
+		B05CC661D7B2D223F2F6866D /* StatusBarController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
+		B839D6F6AF001311E61F926A /* WindowManagementService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowManagementService.swift; sourceTree = "<group>"; };
+		B9614F41C269BA10A304C5E9 /* GlobalShortcutMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GlobalShortcutMonitor.swift; sourceTree = "<group>"; };
+		C669D494B4154D6DE5B3CB3E /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
+		C7D9455EB5B6CA9171A4FC55 /* LauncherModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LauncherModels.swift; sourceTree = "<group>"; };
+		DBCCD9179482C6597768EE55 /* Collection+Uniqued.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "Collection+Uniqued.swift"; sourceTree = "<group>"; };
+		DC986256CDF50B1BE951DF4B /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		E869ABC4FFE1AB4A5CB319DB /* macOS-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "macOS-Info.plist"; sourceTree = "<group>"; };
+		E8F8F5CA607B998AD81B43A3 /* QuickNote.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QuickNote.swift; sourceTree = "<group>"; };
+		F1C2D37CE0D35E353AB29A9C /* AvatarView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AvatarView.swift; sourceTree = "<group>"; };
+		FAF0E7FFB1DD00B1C8157852 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
+		FF4AF71117E69634556D72D0 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		314D035A22426DCF23CD7459 /* Frameworks */ = {
+		348F0D7BEDBDE75DCFF524F2 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				281CA6BA01C8DA58567AFC09 /* Cocoa.framework in Frameworks */,
+				068398CD535B74DBDC7AA97E /* AppIntents.framework in Frameworks */,
+				27C6791DEDE2D9ED22A28CD8 /* AppKit.framework in Frameworks */,
+				E277CB002D2F24ABD7500652 /* Carbon.framework in Frameworks */,
+				2BA305496D52EB787CBB8313 /* CoreData.framework in Frameworks */,
+				BD40F447A6227A19B0D5AD55 /* SwiftUI.framework in Frameworks */,
+				C624EE4B1489F3EB26CB2F5D /* EmojiKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		DA6686BE88DB0F52F20434E2 /* Frameworks */ = {
+		B5E9CEEC4D2DF081EDCB51FA /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CDCF7BECC5E44145433046EA /* Cocoa.framework in Frameworks */,
-				133C99E1E1A6C527609C1E6E /* AppIntents.framework in Frameworks */,
-				34A8B5DCF32D4432C76A484F /* AppKit.framework in Frameworks */,
-				CF662B37CF32DB4B73BFE372 /* Carbon.framework in Frameworks */,
-				3208128EE6185D8C249DA4C1 /* CoreData.framework in Frameworks */,
-				3A124C24FC7F82685749F47A /* SwiftUI.framework in Frameworks */,
-				D2D6468BB661E261D5BB736B /* EmojiKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		072327D4EC05103934D5E6CD /* Services */ = {
+		3D71820979048548119449B4 = {
 			isa = PBXGroup;
 			children = (
-				D1F52D18BFD713ACA71AC5AC /* AppSearchService.swift */,
-				512C29D4B9F64B9095813166 /* Collection+Uniqued.swift */,
-				D2DD8797D951F92C832BB03C /* EmojiAnnotationIndex.swift */,
-				058E357FEB9267CAEC974649 /* EmojiSearchService.swift */,
-				6E41012BBF6E422ACC94EE80 /* FileSearchService.swift */,
-				65A846C2EEBEDAE64EE1FB33 /* GlobalShortcutMonitor.swift */,
-				CE2D736CC3A08A058E3AE56C /* LauncherAppState.swift */,
-				9594C5D1ADACFFD9CD91CB08 /* PersistenceController.swift */,
-				DE8B34E7D3E17FFE7B0157BB /* ShortcutSearchService.swift */,
-				A0722147856B63155E4CB271 /* WindowManagementService.swift */,
-			);
-			name = Services;
-			path = Services;
-			sourceTree = "<group>";
-		};
-		4AC73D43900BC9018F9FDABA /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				91CDDE74687CA2CB98F2D6BD /* Models */,
-				072327D4EC05103934D5E6CD /* Services */,
-				BC2F2DE2B3A6867536CF5B0A /* Views */,
-			);
-			name = Shared;
-			path = Shared;
-			sourceTree = "<group>";
-		};
-		4D44635F710458A6623D4950 /* OS X */ = {
-			isa = PBXGroup;
-			children = (
-				2A583E935F0CF5BDCB394850 /* Cocoa.framework */,
-			);
-			name = "OS X";
-			sourceTree = "<group>";
-		};
-		6E79E7958024FE1751037F7A = {
-			isa = PBXGroup;
-			children = (
-				B3CE1863B61FD1307C9D64CD /* Products */,
-				A21A20C97BD2048254FC55B1 /* Frameworks */,
-				BBD14DE78CB94D202192585D /* MacApp */,
-				4AC73D43900BC9018F9FDABA /* Shared */,
-				76C7A68991FBFB2EF0273B4F /* Tests */,
+				F716CE2B5A429C4CFC404519 /* Products */,
+				9FEAF403BDED16C3814E80D3 /* Frameworks */,
+				41C38BE49B1A091F459D780B /* MacApp */,
+				C49B1F8AC183DB1A9145979F /* Shared */,
+				AED4F253EAC0FA7AC014E2F2 /* Tests */,
 			);
 			sourceTree = "<group>";
 		};
-		76C7A68991FBFB2EF0273B4F /* Tests */ = {
+		41C38BE49B1A091F459D780B /* MacApp */ = {
 			isa = PBXGroup;
 			children = (
-				93C51BFEADEE65F0B45E9FE2 /* LauncherTests.swift */,
-			);
-			name = Tests;
-			path = Tests;
-			sourceTree = "<group>";
-		};
-		91CDDE74687CA2CB98F2D6BD /* Models */ = {
-			isa = PBXGroup;
-			children = (
-				DD07B5FC550C27AA508745B3 /* LauncherModels.swift */,
-				24B4A74ADBD37D29CD2F810F /* QuickNote.swift */,
-			);
-			name = Models;
-			path = Models;
-			sourceTree = "<group>";
-		};
-		A21A20C97BD2048254FC55B1 /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-				4D44635F710458A6623D4950 /* OS X */,
-				A9263A571DE5E0CFB1401AAD /* AppIntents.framework */,
-				D7864BFBC0E16776C6343FF5 /* AppKit.framework */,
-				F4BB1B6DF0862B4013D69C02 /* Carbon.framework */,
-				AECBC7EC7CB5FEA9C474B249 /* CoreData.framework */,
-				6CB1C9CCDFD94F31B0B15B00 /* SwiftUI.framework */,
-			);
-			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		B3CE1863B61FD1307C9D64CD /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				43B0506E5977715D5C3BD370 /* Launcher.app */,
-				AF90E7AB49F39D3DC9E4E94C /* LauncherTests.xctest */,
-			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		BBD14DE78CB94D202192585D /* MacApp */ = {
-			isa = PBXGroup;
-			children = (
-				AE0EDB5DCE63058B7B15B16E /* AppDelegate.swift */,
-				495B103B2CAEEECACC1ADF2A /* AvatarWindowController.swift */,
-				22EAF7E9011B2B0A51481C97 /* LauncherApp.swift */,
-				9944B57A6D309DF48BD17AF2 /* LauncherIntentBridge.swift */,
-				D2431B74BD66907865F8899F /* LauncherPanelController.swift */,
-				51E10A8DE1D9F9D224AD2B7F /* QuickNotesWindowController.swift */,
-				AB1D6AF3E70C8512A465E807 /* StatusBarController.swift */,
-				7DC6CB8BF84B0249D9D59796 /* Assets.xcassets */,
-				8CD2AE210C08FA29695945E8 /* macOS-Info.plist */,
+				DC986256CDF50B1BE951DF4B /* AppDelegate.swift */,
+				43E81A740157A015BEF1FFD9 /* AvatarWindowController.swift */,
+				6067CAB8AF1726BB5EE78F5B /* LauncherApp.swift */,
+				2550AF0A79500CF754A56792 /* LauncherIntentBridge.swift */,
+				699B9EF9E4DD76F7EAD27543 /* LauncherPanelController.swift */,
+				5B53BAD27D369145FB70B7D5 /* QuickNotesWindowController.swift */,
+				B05CC661D7B2D223F2F6866D /* StatusBarController.swift */,
+				7663B40596F1EDB1EBAEF311 /* Assets.xcassets */,
+				E869ABC4FFE1AB4A5CB319DB /* macOS-Info.plist */,
+				76ACD2F6D892C2F23999D329 /* Launcher.entitlements */,
+				4B807EDE3B9F3908F21BAA9C /* EmojiKit-LICENSE.txt */,
 			);
 			name = MacApp;
 			path = MacApp;
 			sourceTree = "<group>";
 		};
-		BC2F2DE2B3A6867536CF5B0A /* Views */ = {
+		9FEAF403BDED16C3814E80D3 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				C5D3A88F265387239BCE4193 /* AvatarView.swift */,
-				2F435C221A74CF87C25224AD /* LauncherView.swift */,
-				33028D1BA4E3064B44B28E1C /* QuickNotesView.swift */,
+				A5AE6ADABAB23CCFCCE82DA5 /* AppIntents.framework */,
+				FAF0E7FFB1DD00B1C8157852 /* AppKit.framework */,
+				C669D494B4154D6DE5B3CB3E /* Carbon.framework */,
+				0BF056674A02C3786ED05D3F /* CoreData.framework */,
+				FF4AF71117E69634556D72D0 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		AED4F253EAC0FA7AC014E2F2 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				8A56417E42195D157EFCC0EC /* LauncherTests.swift */,
+			);
+			name = Tests;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		B8B9CA9191A784B06FDBA7FC /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				C7D9455EB5B6CA9171A4FC55 /* LauncherModels.swift */,
+				E8F8F5CA607B998AD81B43A3 /* QuickNote.swift */,
+			);
+			name = Models;
+			path = Models;
+			sourceTree = "<group>";
+		};
+		C49B1F8AC183DB1A9145979F /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				B8B9CA9191A784B06FDBA7FC /* Models */,
+				E50C52443999999B18E65701 /* Services */,
+				C8CF44BD670E4684526C0069 /* Views */,
+			);
+			name = Shared;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		C8CF44BD670E4684526C0069 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				F1C2D37CE0D35E353AB29A9C /* AvatarView.swift */,
+				80135DF73957C85839B2BFA7 /* LauncherView.swift */,
+				8E6EB192EF51A28B96C1C60C /* QuickNotesView.swift */,
 			);
 			name = Views;
 			path = Views;
 			sourceTree = "<group>";
 		};
+		E50C52443999999B18E65701 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				437FD9C2971648712C281EA4 /* AppSearchService.swift */,
+				DBCCD9179482C6597768EE55 /* Collection+Uniqued.swift */,
+				2670B19985D2790D27FF1CFD /* EmojiAnnotationIndex.swift */,
+				99014887B18FF2F9B2D50DCA /* EmojiSearchService.swift */,
+				94A5EC2257AD27BAF83566CA /* FileSearchService.swift */,
+				B9614F41C269BA10A304C5E9 /* GlobalShortcutMonitor.swift */,
+				51663647BCBC8921DE1F5EA5 /* LauncherAppState.swift */,
+				3D5A753F4335D988B07C724A /* PersistenceController.swift */,
+				6E8AE455B655682C403E169C /* ShortcutSearchService.swift */,
+				B839D6F6AF001311E61F926A /* WindowManagementService.swift */,
+				7AEBD383DD203ED143806EF3 /* EmojiAnnotationIndex-LICENSE.txt */,
+			);
+			name = Services;
+			path = Services;
+			sourceTree = "<group>";
+		};
+		F716CE2B5A429C4CFC404519 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				82668C83371B4B14550E9F85 /* Launcher.app */,
+				3CB576745C6F745816F5937B /* LauncherTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		AB480C0E88759C7F4D362ABC /* Launcher */ = {
+		83F16BBA2B93D750E060AA59 /* Launcher */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 7DAB474552E40998AD58BCC3 /* Build configuration list for PBXNativeTarget "Launcher" */;
+			buildConfigurationList = 2F57AE52E91C297C3EBDF7D5 /* Build configuration list for PBXNativeTarget "Launcher" */;
 			buildPhases = (
-				4A03DF582AB1A9FE24CC3C0F /* Sources */,
-				DA6686BE88DB0F52F20434E2 /* Frameworks */,
-				C223486E887A2D5CBD7FD3F5 /* Resources */,
+				335EF221B7787F0FE46DE174 /* Sources */,
+				348F0D7BEDBDE75DCFF524F2 /* Frameworks */,
+				8B42EE0FD046262E6922150C /* Resources */,
 			);
 			buildRules = (
 			);
@@ -247,49 +241,49 @@
 			);
 			name = Launcher;
 			packageProductDependencies = (
-				935D84EE53BC46AEE5610174 /* EmojiKit */,
+				B06F98AAF1C70E6EA2FF1532 /* EmojiKit */,
 			);
 			productName = Launcher;
-			productReference = 43B0506E5977715D5C3BD370 /* Launcher.app */;
+			productReference = 82668C83371B4B14550E9F85 /* Launcher.app */;
 			productType = "com.apple.product-type.application";
 		};
-		E97EE806AA73219F1488883A /* LauncherTests */ = {
+		EDABDE96EF61D12BC0B3F15E /* LauncherTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = FDE652025CEDC1B7C2FCA017 /* Build configuration list for PBXNativeTarget "LauncherTests" */;
+			buildConfigurationList = DDCE6AC934C98EC69B96F2B0 /* Build configuration list for PBXNativeTarget "LauncherTests" */;
 			buildPhases = (
-				3F40550FF0F2D67F99C55D8F /* Sources */,
-				314D035A22426DCF23CD7459 /* Frameworks */,
-				8FC3410D8BC7F0D5E597FC7F /* Resources */,
+				BDF0983797C30EE3FDD7F4DE /* Sources */,
+				B5E9CEEC4D2DF081EDCB51FA /* Frameworks */,
+				B257FAA7273F659093E57275 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				12227101A949F7603B9C5E28 /* PBXTargetDependency */,
+				5DBAA8AF58C47ED8BB8B3C55 /* PBXTargetDependency */,
 			);
 			name = LauncherTests;
 			productName = LauncherTests;
-			productReference = AF90E7AB49F39D3DC9E4E94C /* LauncherTests.xctest */;
+			productReference = 3CB576745C6F745816F5937B /* LauncherTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		FBB8CBE619BBA268BB04A835 /* Project object */ = {
+		756426AC3BBFAB951F37D609 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
-					AB480C0E88759C7F4D362ABC = {
+					83F16BBA2B93D750E060AA59 = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					E97EE806AA73219F1488883A = {
+					EDABDE96EF61D12BC0B3F15E = {
 						CreatedOnToolsVersion = 26.4;
-						TestTargetID = AB480C0E88759C7F4D362ABC;
+						TestTargetID = 83F16BBA2B93D750E060AA59;
 					};
 				};
 			};
-			buildConfigurationList = E0830FA1D37F336526616158 /* Build configuration list for PBXProject "Launcher" */;
+			buildConfigurationList = 34D1F6A804D78E57CABD17AE /* Build configuration list for PBXProject "Launcher" */;
 			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -297,91 +291,163 @@
 				en,
 				Base,
 			);
-			mainGroup = 6E79E7958024FE1751037F7A;
+			mainGroup = 3D71820979048548119449B4;
 			minimizedProjectReferenceProxies = 0;
 			packageReferences = (
-				E08A7A0830E668283FB21D08 /* XCRemoteSwiftPackageReference "EmojiKit" */,
+				980E100A7685993BCFA9604C /* XCRemoteSwiftPackageReference "EmojiKit" */,
 			);
 			preferredProjectObjectVersion = 77;
-			productRefGroup = B3CE1863B61FD1307C9D64CD /* Products */;
+			productRefGroup = F716CE2B5A429C4CFC404519 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AB480C0E88759C7F4D362ABC /* Launcher */,
-				E97EE806AA73219F1488883A /* LauncherTests */,
+				83F16BBA2B93D750E060AA59 /* Launcher */,
+				EDABDE96EF61D12BC0B3F15E /* LauncherTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		8FC3410D8BC7F0D5E597FC7F /* Resources */ = {
+		8B42EE0FD046262E6922150C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				382B382EE7DE3862723601A4 /* Assets.xcassets in Resources */,
+				795CA4DB1307E9F548EEC43C /* EmojiKit-LICENSE.txt in Resources */,
+				41E0C94FAEEAEDEF3ED84123 /* EmojiAnnotationIndex-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C223486E887A2D5CBD7FD3F5 /* Resources */ = {
+		B257FAA7273F659093E57275 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				8A8C3B2F2B7C6E98FA303D4F /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		3F40550FF0F2D67F99C55D8F /* Sources */ = {
+		335EF221B7787F0FE46DE174 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4B8111F22B185BF856508339 /* LauncherTests.swift in Sources */,
+				F0F7EA34A2CFDA4FFE653158 /* AppDelegate.swift in Sources */,
+				0264FD37CAB05A88A84A0071 /* AvatarWindowController.swift in Sources */,
+				F749250E8A645BE7E116E240 /* LauncherApp.swift in Sources */,
+				E167C91D34668965E7E37151 /* LauncherIntentBridge.swift in Sources */,
+				FAC508A81B606630628769E8 /* LauncherPanelController.swift in Sources */,
+				B564C115632D8740E1AEC161 /* QuickNotesWindowController.swift in Sources */,
+				4FB892015F128606EEE1F679 /* StatusBarController.swift in Sources */,
+				000E29B865F0EDB1EE328AB7 /* LauncherModels.swift in Sources */,
+				E85BC402B706C710E4F541D7 /* QuickNote.swift in Sources */,
+				402D9DED19A647A5E0F03D57 /* AppSearchService.swift in Sources */,
+				D45F77DA9401B2CFD70377F6 /* Collection+Uniqued.swift in Sources */,
+				99249EE1590724152B1F1860 /* EmojiAnnotationIndex.swift in Sources */,
+				3E63B43767B7DF27F7BCB805 /* EmojiSearchService.swift in Sources */,
+				6F8644EEB4B66B47B868A651 /* FileSearchService.swift in Sources */,
+				397A9C7005EAD6A587E1F3DE /* GlobalShortcutMonitor.swift in Sources */,
+				89B916FF1BD25F64974DFE4E /* LauncherAppState.swift in Sources */,
+				418CCEA260F59CC4E5788938 /* PersistenceController.swift in Sources */,
+				F9E1D4B7E30A90327A106238 /* ShortcutSearchService.swift in Sources */,
+				22CD7E72B7D701C13F913511 /* WindowManagementService.swift in Sources */,
+				ED8843B9F49A4BD0C7C66241 /* AvatarView.swift in Sources */,
+				4B1FF250E92F26749FB47884 /* LauncherView.swift in Sources */,
+				6999F1EF2F366B7B31C0D2D4 /* QuickNotesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		4A03DF582AB1A9FE24CC3C0F /* Sources */ = {
+		BDF0983797C30EE3FDD7F4DE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				9A17B5D506C07126A48C019F /* AppDelegate.swift in Sources */,
-				B8680AB92F5B76388B91C59C /* AvatarWindowController.swift in Sources */,
-				F79CFA6FF823F71719F96202 /* LauncherApp.swift in Sources */,
-				A74B3610BCBF5D78560104DD /* LauncherIntentBridge.swift in Sources */,
-				99BC6E6DA34A184B40183D8F /* LauncherPanelController.swift in Sources */,
-				2387DF034939AB2F829BC4B6 /* QuickNotesWindowController.swift in Sources */,
-				8B1DD11D5726C2A86B86D984 /* StatusBarController.swift in Sources */,
-				4C98B6793738B7E49F8E1C9C /* LauncherModels.swift in Sources */,
-				C9AA59079ECAC4712B309182 /* QuickNote.swift in Sources */,
-				853E9DFCCC7CCC396E891B74 /* AppSearchService.swift in Sources */,
-				7D8CD7C9BCFB2A75ED021AE2 /* Collection+Uniqued.swift in Sources */,
-				34DA281BF4E3247B829A853B /* EmojiAnnotationIndex.swift in Sources */,
-				96A327FB3C58037CE82C0834 /* EmojiSearchService.swift in Sources */,
-				92BAB8F51A81C61923E67147 /* FileSearchService.swift in Sources */,
-				50791C467645CE9A3D487D09 /* GlobalShortcutMonitor.swift in Sources */,
-				EA3E4F1C5D4FF6A62E986E8A /* LauncherAppState.swift in Sources */,
-				43A6B7937516D0FE00C74ACC /* PersistenceController.swift in Sources */,
-				9176B53C5E2F0FD2906BE6D4 /* ShortcutSearchService.swift in Sources */,
-				2F8901469EB742106F29E689 /* WindowManagementService.swift in Sources */,
-				F7DBD6B7C261FC41CA09031A /* AvatarView.swift in Sources */,
-				B84CE29DC07F91E725D6578E /* LauncherView.swift in Sources */,
-				83E76D7340D07E51229E0778 /* QuickNotesView.swift in Sources */,
+				6E40AF776D6A8DBB6F8B0674 /* LauncherTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		12227101A949F7603B9C5E28 /* PBXTargetDependency */ = {
+		5DBAA8AF58C47ED8BB8B3C55 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = Launcher;
-			target = AB480C0E88759C7F4D362ABC /* Launcher */;
-			targetProxy = FDCE9F7354D083FAE6EAE8C3 /* PBXContainerItemProxy */;
+			target = 83F16BBA2B93D750E060AA59 /* Launcher */;
+			targetProxy = 3C5766D62046E9009919FC0D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		2C3182EE10D43B05D26F9A53 /* Debug */ = {
+		2D77F688E6067AB7EEB49512 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Launcher.app/Contents/MacOS/Launcher";
+			};
+			name = Release;
+		};
+		3C8C5469114F456E18320B7A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = MacApp/Launcher.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher;
+				PRODUCT_NAME = Launcher;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		66860BA9E9359CE0714CC156 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = MacApp/Launcher.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher;
+				PRODUCT_NAME = Launcher;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		7305B65A11F200A0AD6382DA /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -442,97 +508,7 @@
 			};
 			name = Debug;
 		};
-		3E29758D630BC3954508D5C5 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Launcher.app/Contents/MacOS/Launcher";
-			};
-			name = Release;
-		};
-		4A4CE04DC35FE61E4274E586 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher;
-				PRODUCT_NAME = Launcher;
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Release;
-		};
-		8581211D4923B7E90ECE228A /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher;
-				PRODUCT_NAME = Launcher;
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		A429E9CCEE61EC7BA4440520 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Launcher.app/Contents/MacOS/Launcher";
-			};
-			name = Debug;
-		};
-		D249A1941379FDDEB2682726 /* Release */ = {
+		CFCEB85278AA83D68A499765 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -586,32 +562,52 @@
 			};
 			name = Release;
 		};
+		D27833529AF021E41714183E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.launcher.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Launcher.app/Contents/MacOS/Launcher";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		7DAB474552E40998AD58BCC3 /* Build configuration list for PBXNativeTarget "Launcher" */ = {
+		2F57AE52E91C297C3EBDF7D5 /* Build configuration list for PBXNativeTarget "Launcher" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				4A4CE04DC35FE61E4274E586 /* Release */,
-				8581211D4923B7E90ECE228A /* Debug */,
+				66860BA9E9359CE0714CC156 /* Release */,
+				3C8C5469114F456E18320B7A /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E0830FA1D37F336526616158 /* Build configuration list for PBXProject "Launcher" */ = {
+		34D1F6A804D78E57CABD17AE /* Build configuration list for PBXProject "Launcher" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				2C3182EE10D43B05D26F9A53 /* Debug */,
-				D249A1941379FDDEB2682726 /* Release */,
+				7305B65A11F200A0AD6382DA /* Debug */,
+				CFCEB85278AA83D68A499765 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		FDE652025CEDC1B7C2FCA017 /* Build configuration list for PBXNativeTarget "LauncherTests" */ = {
+		DDCE6AC934C98EC69B96F2B0 /* Build configuration list for PBXNativeTarget "LauncherTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				3E29758D630BC3954508D5C5 /* Release */,
-				A429E9CCEE61EC7BA4440520 /* Debug */,
+				2D77F688E6067AB7EEB49512 /* Release */,
+				D27833529AF021E41714183E /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -619,7 +615,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		E08A7A0830E668283FB21D08 /* XCRemoteSwiftPackageReference "EmojiKit" */ = {
+		980E100A7685993BCFA9604C /* XCRemoteSwiftPackageReference "EmojiKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/danielsaidi/EmojiKit.git";
 			requirement = {
@@ -630,12 +626,12 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		935D84EE53BC46AEE5610174 /* EmojiKit */ = {
+		B06F98AAF1C70E6EA2FF1532 /* EmojiKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = E08A7A0830E668283FB21D08 /* XCRemoteSwiftPackageReference "EmojiKit" */;
+			package = 980E100A7685993BCFA9604C /* XCRemoteSwiftPackageReference "EmojiKit" */;
 			productName = EmojiKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
-	rootObject = FBB8CBE619BBA268BB04A835 /* Project object */;
+	rootObject = 756426AC3BBFAB951F37D609 /* Project object */;
 }

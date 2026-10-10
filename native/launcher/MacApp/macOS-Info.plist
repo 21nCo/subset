@@ -24,6 +24,8 @@
 	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Launcher uses System Events to move and resize a window when Accessibility alone cannot.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright 21N</string>
 </dict>

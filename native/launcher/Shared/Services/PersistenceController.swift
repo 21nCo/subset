@@ -10,6 +10,8 @@ final class PersistenceController {
     private static let model = makeModel()
 
     let container: NSPersistentContainer
+    /// Set if the store could not be opened; saves then fail and report it.
+    private(set) var loadError: Error?
 
     init(inMemory: Bool = false) {
         let model = Self.model
@@ -32,20 +34,32 @@ final class PersistenceController {
             container.persistentStoreDescriptions = [description]
         }
 
+        var storeLoadError: Error?
         container.loadPersistentStores { _, error in
             if let error {
-                assertionFailure("Core Data failed to load: \(error.localizedDescription)")
+                storeLoadError = error
+                NSLog("Launcher: Quick Notes store failed to load: %@", error.localizedDescription)
             }
         }
+        loadError = storeLoadError
 
         container.viewContext.mergePolicy = NSMergePolicy(merge: .mergeByPropertyObjectTrumpMergePolicyType)
         container.viewContext.automaticallyMergesChangesFromParent = true
     }
 
-    func saveQuickNote(title: String, body: String) {
+    nonisolated static func isBlankNote(title: String, body: String) -> Bool {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Saves a note. A blank note is ignored and reported as success; a store failure is
+    /// rolled back and returned so the caller can keep the user's draft.
+    @discardableResult
+    func saveQuickNote(title: String, body: String) -> Result<Void, Error> {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty || !trimmedBody.isEmpty else { return }
+        guard !Self.isBlankNote(title: trimmedTitle, body: trimmedBody) else { return .success(()) }
+        if let loadError { return .failure(loadError) }
 
         let note = QuickNote(context: container.viewContext)
         note.id = UUID()
@@ -53,12 +67,13 @@ final class PersistenceController {
         note.body = trimmedBody
         note.createdAt = Date()
 
-        save()
+        return save()
     }
 
-    func delete(_ note: QuickNote) {
+    @discardableResult
+    func delete(_ note: QuickNote) -> Result<Void, Error> {
         container.viewContext.delete(note)
-        save()
+        return save()
     }
 
     func fetchRecentNotes(limit: Int = 20) -> [QuickNote] {
@@ -66,9 +81,16 @@ final class PersistenceController {
         return (try? container.viewContext.fetch(request)) ?? []
     }
 
-    private func save() {
-        guard container.viewContext.hasChanges else { return }
-        try? container.viewContext.save()
+    private func save() -> Result<Void, Error> {
+        guard container.viewContext.hasChanges else { return .success(()) }
+        do {
+            try container.viewContext.save()
+            return .success(())
+        } catch {
+            container.viewContext.rollback()
+            NSLog("Launcher: Quick Notes save failed: %@", error.localizedDescription)
+            return .failure(error)
+        }
     }
 
     private static func makeModel() -> NSManagedObjectModel {

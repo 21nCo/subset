@@ -36,7 +36,9 @@ struct LauncherView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onAppear {
+            // Each show() builds a new view in the requested mode, so focus whichever field it has.
             focusSearchField()
+            focusNoteTitleField()
             selectedIndex = 0
             installKeyMonitor()
         }
@@ -457,15 +459,17 @@ struct LauncherView: View {
                     .scrollContentBackground(.hidden)
                     .padding(12)
                     .focused($isNoteDetailsFocused)
-                    .onSubmit {
-                        saveNote()
-                    }
             }
             .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
 
             HStack {
-                Text("Saved locally. Open them from the menu bar: Quick Notes…")
-                    .foregroundStyle(.secondary)
+                if let noteSaveError = appState.noteSaveError {
+                    Text(noteSaveError)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Saved locally. Open them from the menu bar: Quick Notes…")
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Text("⌘↵ save · esc cancel")
                     .font(.caption)
@@ -494,7 +498,8 @@ struct LauncherView: View {
     }
 
     private func saveNote() {
-        appState.saveQuickNote(title: noteTitle, body: noteBody)
+        // Keep the draft and the composer open if the store rejected the note.
+        guard appState.saveQuickNote(title: noteTitle, body: noteBody) else { return }
         noteTitle = ""
         noteBody = ""
         appState.closeLauncher()
@@ -640,9 +645,21 @@ private enum TimeConversionCalculator {
         resultFormatter.timeZone = destinationTimeZone
         resultFormatter.dateFormat = "h:mm a"
 
+        // Say when the destination time falls on another calendar day.
+        var destinationCalendar = Calendar(identifier: .gregorian)
+        destinationCalendar.timeZone = destinationTimeZone
+        var dayCalendar = Calendar(identifier: .gregorian)
+        dayCalendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+        let sourceDay = dayCalendar.date(from: calendar.dateComponents([.year, .month, .day], from: sourceDate))
+        let destinationDay = dayCalendar.date(from: destinationCalendar.dateComponents([.year, .month, .day], from: sourceDate))
+        let dayOffset = sourceDay.flatMap { source in
+            destinationDay.flatMap { dayCalendar.dateComponents([.day], from: source, to: $0).day }
+        } ?? 0
+        let daySuffix = dayOffset > 0 ? " (next day)" : dayOffset < 0 ? " (previous day)" : ""
+
         return Conversion(
             inputCaption: "\(inputFormatter.string(from: sourceDate)) \(friendlyName(for: sourceTimeZone))",
-            result: resultFormatter.string(from: sourceDate),
+            result: resultFormatter.string(from: sourceDate) + daySuffix,
             resultCaption: "\(destination.displayName), \(destinationTimeZone.abbreviation(for: sourceDate) ?? destination.identifier)"
         )
     }

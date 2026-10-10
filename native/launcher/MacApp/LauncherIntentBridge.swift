@@ -9,22 +9,27 @@ final class LauncherIntentBridge {
     var openQuickNotes: (() -> Void)?
     var openQuickNoteComposer: (() -> Void)?
     var setAvatarVisible: ((Bool) -> Void)?
+    var quickNotesChanged: (() -> Void)?
 
     private init() {}
 
     func showSearch(filter: SearchFilter = .all) {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         openSearch?(filter)
     }
 
     func showQuickNotes() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         openQuickNotes?()
     }
 
     func showQuickNoteComposer() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         openQuickNoteComposer?()
+    }
+
+    func notifyQuickNotesChanged() {
+        quickNotesChanged?()
     }
 
     func updateAvatarVisibility(isVisible: Bool) {
@@ -88,8 +93,26 @@ struct CreateQuickNoteIntent: AppIntent {
     var details: String
 
     func perform() async throws -> some IntentResult {
-        await PersistenceController.shared.saveQuickNote(title: titleText, body: details)
+        guard !PersistenceController.isBlankNote(title: titleText, body: details) else {
+            throw LauncherIntentError.emptyNote
+        }
+        if case .failure(let error) = await PersistenceController.shared.saveQuickNote(title: titleText, body: details) {
+            throw error
+        }
+        // Keep an open Quick Notes window in sync with the store.
+        await LauncherIntentBridge.shared.notifyQuickNotesChanged()
         return .result()
+    }
+}
+
+enum LauncherIntentError: Error, CustomLocalizedStringResourceConvertible {
+    case emptyNote
+
+    var localizedStringResource: LocalizedStringResource {
+        switch self {
+        case .emptyNote:
+            return "Enter a title or details before saving a note."
+        }
     }
 }
 

@@ -9,8 +9,7 @@ final class AvatarWindowController {
     init(appState: LauncherAppState) {
         self.appState = appState
 
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let frame = NSRect(x: screenFrame.maxX - 82, y: screenFrame.midY, width: 54, height: 54)
+        let frame = Self.defaultFrame()
 
         window = NSPanel(
             contentRect: frame,
@@ -28,7 +27,19 @@ final class AvatarWindowController {
     }
 
     func show() {
+        // A display that was unplugged, or a drag off-screen, must not strand the button.
+        let isOnScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(window.frame) }
+        if !isOnScreen {
+            window.setFrame(Self.defaultFrame(), display: false)
+        }
         window.orderFrontRegardless()
+    }
+
+    private static func defaultFrame() -> NSRect {
+        let screenFrame = NSScreen.main?.visibleFrame
+            ?? NSScreen.screens.first?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        return NSRect(x: screenFrame.maxX - 82, y: screenFrame.midY, width: 54, height: 54)
     }
 
     func hide() {

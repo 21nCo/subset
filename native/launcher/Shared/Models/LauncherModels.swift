@@ -119,12 +119,12 @@ struct SearchResult: Identifiable, Hashable {
 
 extension SearchResult {
     var isImageFile: Bool {
-        guard kind == .file, let url else { return false }
-        return ["png", "jpg", "jpeg", "heic", "gif", "tiff", "bmp", "webp"].contains(url.pathExtension.lowercased())
+        guard kind == .file, let url, !url.hasDirectoryPath else { return false }
+        return ["png", "jpg", "jpeg", "heic", "gif", "tiff", "bmp", "webp", "svg"].contains(url.pathExtension.lowercased())
     }
 
     var isTextFile: Bool {
-        guard kind == .file, let url else { return false }
+        guard kind == .file, let url, !url.hasDirectoryPath else { return false }
         return ["txt", "md", "rtf", "json", "csv", "xml", "html", "css", "js", "ts", "swift", "py", "rb", "yml", "yaml", "log"].contains(url.pathExtension.lowercased())
     }
 }

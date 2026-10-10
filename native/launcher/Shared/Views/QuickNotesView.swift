@@ -89,7 +89,8 @@ struct QuickNotesView: View {
     }
 
     private func delete(_ note: QuickNote) {
-        let next = notes.first { $0.id != note.id }?.id
+        // Keep the current selection unless the selected note is the one being deleted.
+        let next = note.id == selection ? notes.first { $0.id != note.id }?.id : selection
         appState.deleteQuickNote(note)
         selection = next
     }

@@ -17,9 +17,13 @@ final class GlobalShortcutMonitor {
     private var handlers: [UInt32: () -> Void] = [:]
     private let hotKeySignature: OSType = 0x53555052 // SUPR
 
-    func start(shortcuts: [GlobalShortcutRegistration]) -> Bool {
+    /// Registers each shortcut independently and returns the IDs that could not be registered
+    /// (for example because another app already owns the combination).
+    @discardableResult
+    func start(shortcuts: [GlobalShortcutRegistration]) -> Set<UInt32> {
         stop()
-        guard !shortcuts.isEmpty else { return false }
+        let allIDs = Set(shortcuts.map(\.id))
+        guard !shortcuts.isEmpty else { return allIDs }
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -40,7 +44,9 @@ final class GlobalShortcutMonitor {
             &eventHandlerRef
         )
 
-        guard handlerStatus == noErr else { return false }
+        guard handlerStatus == noErr else { return allIDs }
+
+        var failedIDs: Set<UInt32> = []
 
         for shortcut in shortcuts {
             var hotKeyRef: EventHotKeyRef?
@@ -54,16 +60,21 @@ final class GlobalShortcutMonitor {
                 &hotKeyRef
             )
 
+            // One conflict must not unregister the others (for example ⌥Space owned by another app).
             guard registrationStatus == noErr, let hotKeyRef else {
-                stop()
-                return false
+                NSLog("Launcher: global shortcut %u is unavailable (status %d)", shortcut.id, registrationStatus)
+                failedIDs.insert(shortcut.id)
+                continue
             }
 
             hotKeyRefs[shortcut.id] = hotKeyRef
             handlers[shortcut.id] = shortcut.onPress
         }
 
-        return true
+        if hotKeyRefs.isEmpty {
+            stop()
+        }
+        return failedIDs
     }
 
     func stop() {

@@ -2,6 +2,8 @@ import Foundation
 
 // Generated from Unicode CLDR English emoji annotations.
 // Source: https://github.com/unicode-org/cldr-json/tree/main/cldr-json/cldr-annotations-full/annotations/en
+// Copyright © 1991-2026 Unicode, Inc. Used under the Unicode License v3 (SPDX: Unicode-3.0);
+// see EmojiAnnotationIndex-LICENSE.txt next to this file, which also ships in the app bundle.
 enum EmojiAnnotationIndex {
     static let annotations: [String: [String]] = [
         "!": ["bang", "exclamation", "exclamation mark", "mark", "point"],

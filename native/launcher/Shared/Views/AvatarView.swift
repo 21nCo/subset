@@ -18,6 +18,13 @@ struct AvatarView: View {
         .frame(width: 48, height: 48)
         .contentShape(Circle())
         .help("Drag or click to open Launcher")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Launcher")
+        .accessibilityHint("Opens or closes the Launcher search panel")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            appState.toggleLauncher(mode: .search)
+        }
     }
 }
 
@@ -46,6 +53,12 @@ private final class AvatarDragView: NSView {
 
     required init?(coder: NSCoder) {
         return nil
+    }
+
+    // The floating panel never activates Launcher, so accept the first click instead of
+    // spending it on window activation.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
     }
 
     override func mouseDown(with event: NSEvent) {

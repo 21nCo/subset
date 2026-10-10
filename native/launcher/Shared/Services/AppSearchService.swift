@@ -1,6 +1,6 @@
 import Foundation
 
-struct AppSearchService {
+struct AppSearchService: Sendable {
     private let applicationDirectories: [URL] = [
         URL(fileURLWithPath: "/Applications", isDirectory: true),
         URL(fileURLWithPath: "/System/Applications", isDirectory: true),
@@ -21,9 +21,12 @@ struct AppSearchService {
             }
 
             return enumerator.compactMap { item in
-                guard let url = item as? URL, url.pathExtension == "app" else { return nil }
-                let values = try? url.resourceValues(forKeys: resourceKeys)
-                let name = values?.localizedName ?? url.deletingPathExtension().lastPathComponent
+                // Only real application bundles, not any folder or package named *.app.
+                guard let url = item as? URL,
+                      url.pathExtension == "app",
+                      let values = try? url.resourceValues(forKeys: resourceKeys),
+                      values.isApplication == true else { return nil }
+                let name = values.localizedName ?? url.deletingPathExtension().lastPathComponent
                 return SearchResult.app(name: name, url: url)
             }
         }

@@ -15,10 +15,25 @@ final class LauncherTests: XCTestCase {
 
     func testSearchOffersNoSampleProductResources() {
         let state = LauncherAppState()
-        let kinds = Set(state.filteredResults(for: "").map(\.kind))
+        state.refreshSearchData()
+        let results = state.filteredResults(for: "")
+        let kinds = Set(results.map(\.kind))
 
         XCTAssertTrue(kinds.isSubset(of: [.app, .file, .shortcut, .window, .emoji]))
+        XCTAssertFalse(results.contains { $0.title.localizedCaseInsensitiveContains("Nucleum") })
         XCTAssertFalse(SearchFilter.searchChips.map(\.rawValue).contains("Nucleum"))
+    }
+
+    func testWindowCommandQueryDoesNotHideFileFilters() {
+        let state = LauncherAppState()
+        state.selectedFilter = .files
+        // With the Files filter, window commands are not offered and file search is not suppressed.
+        XCTAssertTrue(state.filteredResults(for: "left").allSatisfy { $0.kind == .file })
+    }
+
+    func testBlankQuickNotesAreDetected() {
+        XCTAssertTrue(PersistenceController.isBlankNote(title: " ", body: "\n"))
+        XCTAssertFalse(PersistenceController.isBlankNote(title: "", body: "Call the venue"))
     }
 
     func testQuickNotesSaveFetchAndDelete() {

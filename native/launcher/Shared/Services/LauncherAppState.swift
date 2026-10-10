@@ -13,8 +13,12 @@ final class LauncherAppState: ObservableObject {
     @Published private(set) var files: [SearchResult] = []
     @Published private(set) var shortcuts: [SearchResult] = []
     @Published private(set) var quickNotes: [QuickNote] = []
+    /// Set when a note could not be written to the local store.
+    @Published var noteSaveError: String?
 
     static let avatarVisibleKey = "dev.subset.launcher.floatingButtonVisible"
+    /// The Quick Notes window and Launcher share one list, so every fetch uses the same limit.
+    static let quickNotesLimit = 500
     let persistenceController = PersistenceController.shared
 
     var onOpenLauncher: ((LauncherMode) -> Void)?
@@ -28,15 +32,36 @@ final class LauncherAppState: ObservableObject {
     private let emojiSearchService = EmojiSearchService()
     private let windowManagementService = WindowManagementService()
     private var fileSearchTask: Task<Void, Never>?
+    private var catalogTask: Task<Void, Never>?
 
     init() {
-        quickNotes = persistenceController.fetchRecentNotes()
+        quickNotes = persistenceController.fetchRecentNotes(limit: Self.quickNotesLimit)
     }
 
     func refreshSearchData() {
-        apps = appSearchService.loadApps()
-        shortcuts = shortcutSearchService.loadShortcuts()
         files = fileSearchService.initialFiles()
+        refreshCatalogs()
+    }
+
+    /// Reloads apps and Siri Shortcuts off the main actor; `shortcuts list` can take a while.
+    private func refreshCatalogs() {
+        guard catalogTask == nil else { return }
+        let appSearchService = appSearchService
+        let shortcutSearchService = shortcutSearchService
+        catalogTask = Task { [weak self] in
+            async let loadedApps = Task.detached(priority: .utility) { appSearchService.loadApps() }.value
+            async let loadedShortcuts = Task.detached(priority: .utility) { shortcutSearchService.loadShortcuts() }.value
+            let (apps, shortcuts) = await (loadedApps, loadedShortcuts)
+            guard let self else { return }
+            self.apps = apps
+            self.shortcuts = shortcuts
+            self.catalogTask = nil
+        }
+    }
+
+    /// Reloads notes after an external writer (an App Intent) changed the store.
+    func reloadQuickNotes() {
+        quickNotes = persistenceController.fetchRecentNotes(limit: Self.quickNotesLimit)
     }
 
     func rememberWindowTarget(_ app: NSRunningApplication) {
@@ -49,9 +74,12 @@ final class LauncherAppState: ObservableObject {
         selectedFilter = .all
         isLauncherOpen = true
         query = ""
+        noteSaveError = nil
+        // A search from the previous session must not replace the fresh suggestions.
+        fileSearchTask?.cancel()
         files = fileSearchService.initialFiles()
-        quickNotes = persistenceController.fetchRecentNotes()
-        shortcuts = shortcutSearchService.loadShortcuts()
+        reloadQuickNotes()
+        refreshCatalogs()
         onOpenLauncher?(mode)
     }
 
@@ -70,11 +98,12 @@ final class LauncherAppState: ObservableObject {
     }
 
     func markLauncherClosed() {
+        fileSearchTask?.cancel()
         isLauncherOpen = false
     }
 
     func openQuickNotes() {
-        quickNotes = persistenceController.fetchRecentNotes(limit: 500)
+        reloadQuickNotes()
         onOpenQuickNotes?()
     }
 
@@ -88,14 +117,22 @@ final class LauncherAppState: ObservableObject {
         onAvatarVisibilityChanged?(isVisible)
     }
 
-    func saveQuickNote(title: String, body: String) {
-        persistenceController.saveQuickNote(title: title, body: body)
-        quickNotes = persistenceController.fetchRecentNotes(limit: 500)
+    /// Returns false if the note could not be saved; `noteSaveError` then explains why.
+    @discardableResult
+    func saveQuickNote(title: String, body: String) -> Bool {
+        let result = persistenceController.saveQuickNote(title: title, body: body)
+        reloadQuickNotes()
+        if case .failure(let error) = result {
+            noteSaveError = "The note could not be saved. \(error.localizedDescription)"
+            return false
+        }
+        noteSaveError = nil
+        return true
     }
 
     func deleteQuickNote(_ note: QuickNote) {
         persistenceController.delete(note)
-        quickNotes = persistenceController.fetchRecentNotes(limit: 500)
+        reloadQuickNotes()
     }
 
     func filteredResults(for query: String) -> [SearchResult] {
@@ -116,11 +153,13 @@ final class LauncherAppState: ObservableObject {
                 + windowResults
                 + Array(files.prefix(12))
 
-            return filterResults(Array(initialResults.prefix(30)))
+            // Filter before capping so Images or Text still show matching suggestions.
+            return Array(filterResults(initialResults).prefix(30))
         }
 
+        // Window commands are listed ahead of files; a query such as "left" or "window" must
+        // not hide files with that name.
         let shouldShowFiles = [.all, .files, .images, .text].contains(selectedFilter)
-            && !hasMatchingWindowCommand(for: normalizedQuery)
         let matchingFiles: [SearchResult] = shouldShowFiles ? files : []
         let allResults = apps + shortcuts + windowResults + matchingFiles
 
@@ -144,10 +183,6 @@ final class LauncherAppState: ObservableObject {
             return
         }
 
-        guard !hasMatchingWindowCommand(for: normalizedQuery) else {
-            return
-        }
-
         guard normalizedQuery.count > 1 else {
             files = normalizedQuery.isEmpty ? fileSearchService.initialFiles() : []
             return
@@ -163,14 +198,6 @@ final class LauncherAppState: ObservableObject {
 
             guard !Task.isCancelled else { return }
             self?.files = results
-        }
-    }
-
-    private func hasMatchingWindowCommand(for query: String) -> Bool {
-        guard !query.isEmpty else { return false }
-        return WindowCommand.allCases.contains { command in
-            command.title.localizedCaseInsensitiveContains(query)
-                || command.searchTerms.localizedCaseInsensitiveContains(query)
         }
     }
 

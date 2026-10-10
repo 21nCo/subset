@@ -32,17 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             isVisible ? self?.avatarController?.show() : self?.avatarController?.hide()
         }
 
-        statusBarController?.configure(
-            onOpenLauncher: { [weak self] in self?.appState.openLauncher(mode: .search) },
-            onNewQuickNote: { [weak self] in self?.appState.openLauncher(mode: .quickNote) },
-            onOpenQuickNotes: { [weak self] in self?.appState.openQuickNotes() },
-            isAvatarVisible: { [weak self] in self?.appState.isAvatarVisible ?? false },
-            onToggleAvatar: { [weak self] in self?.appState.toggleAvatarVisibility() },
-            onQuit: { NSApp.terminate(nil) }
-        )
-
         // Unit tests use this app as their host; they must not claim system-wide hotkeys.
-        if !PersistenceController.isRunningUnitTests { _ = GlobalShortcutMonitor.shared.start(shortcuts: [
+        var unavailableHotkeys: Set<UInt32> = []
+        if !PersistenceController.isRunningUnitTests { unavailableHotkeys = GlobalShortcutMonitor.shared.start(shortcuts: [
             GlobalShortcutRegistration(
                 id: 1,
                 keyCode: UInt32(kVK_Space),
@@ -56,6 +48,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onPress: { [weak self] in self?.appState.openLauncher(mode: .quickNote) }
             )
         ]) }
+
+        // A hotkey another app already owns is shown as unavailable in the menu instead of
+        // being advertised; the menu items still work.
+        statusBarController?.configure(
+            onOpenLauncher: { [weak self] in self?.appState.openLauncher(mode: .search) },
+            onNewQuickNote: { [weak self] in self?.appState.openLauncher(mode: .quickNote) },
+            onOpenQuickNotes: { [weak self] in self?.appState.openQuickNotes() },
+            isAvatarVisible: { [weak self] in self?.appState.isAvatarVisible ?? false },
+            onToggleAvatar: { [weak self] in self?.appState.toggleAvatarVisibility() },
+            onQuit: { NSApp.terminate(nil) },
+            isLauncherHotkeyAvailable: !unavailableHotkeys.contains(1),
+            isQuickNoteHotkeyAvailable: !unavailableHotkeys.contains(2)
+        )
 
         if appState.isAvatarVisible {
             avatarController?.show()
@@ -102,6 +107,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         bridge.setAvatarVisible = { [weak self] isVisible in
             self?.appState.setAvatarVisibility(isVisible)
+        }
+
+        bridge.quickNotesChanged = { [weak self] in
+            self?.appState.reloadQuickNotes()
         }
     }
 }

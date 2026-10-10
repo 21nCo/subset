@@ -80,22 +80,24 @@ final class FileSearchService: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
         process.arguments = ["-0", predicates.joined(separator: " && ")]
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return []
         }
 
+        // Drain stdout before waiting: a broad query can fill the pipe buffer and block mdfind forever.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         guard !data.isEmpty else { return [] }
 
-        return data
+        // Filter while consuming, then cap, so rejected hits do not crowd out valid matches.
+        let urls = data
             .split(separator: 0)
-            .prefix(limit * 2)
-            .compactMap { Data($0) }
+            .lazy
+            .map { Data($0) }
             .compactMap { String(data: $0, encoding: .utf8) }
             .map { URL(fileURLWithPath: $0) }
             .filter(isSearchableFile)
@@ -109,7 +111,7 @@ final class FileSearchService: @unchecked Sendable {
                 return true
             }
             .prefix(limit)
-            .map(SearchResult.file(url:))
+        return Array(urls.map(SearchResult.file(url:)))
     }
 
     private func children(in directory: URL, limit: Int) -> [SearchResult] {

@@ -10,6 +10,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private weak var avatarItem: NSMenuItem?
     private var onToggleAvatar: (() -> Void)?
     private var onQuit: (() -> Void)?
+    private var isLauncherHotkeyAvailable = true
+    private var isQuickNoteHotkeyAvailable = true
 
     override init() {
         super.init()
@@ -18,6 +20,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             button.image = Self.makeMenuBarIcon()
             button.imagePosition = .imageOnly
             button.toolTip = "Launcher (⌥Space)"
+            button.setAccessibilityLabel("Launcher")
         }
     }
 
@@ -53,8 +56,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         onOpenQuickNotes: @escaping () -> Void,
         isAvatarVisible: @escaping () -> Bool,
         onToggleAvatar: @escaping () -> Void,
-        onQuit: @escaping () -> Void
+        onQuit: @escaping () -> Void,
+        isLauncherHotkeyAvailable: Bool = true,
+        isQuickNoteHotkeyAvailable: Bool = true
     ) {
+        self.isLauncherHotkeyAvailable = isLauncherHotkeyAvailable
+        self.isQuickNoteHotkeyAvailable = isQuickNoteHotkeyAvailable
+        if !isLauncherHotkeyAvailable, let button = statusItem.button {
+            button.toolTip = "Launcher (⌥Space is used by another app)"
+        }
         self.onOpenLauncher = onOpenLauncher
         self.onNewQuickNote = onNewQuickNote
         self.onOpenQuickNotes = onOpenQuickNotes
@@ -73,8 +83,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
 
         // Key equivalents mirror the global shortcuts so they are discoverable here.
-        menu.addItem(item("Open Launcher", #selector(handleOpenLauncher), key: " ", modifiers: [.option]))
-        menu.addItem(item("New Quick Note", #selector(handleNewQuickNote), key: "n", modifiers: [.control, .option]))
+        // A shortcut that could not be registered is not advertised.
+        menu.addItem(isLauncherHotkeyAvailable
+            ? item("Open Launcher", #selector(handleOpenLauncher), key: " ", modifiers: [.option])
+            : item("Open Launcher (⌥Space unavailable)", #selector(handleOpenLauncher)))
+        menu.addItem(isQuickNoteHotkeyAvailable
+            ? item("New Quick Note", #selector(handleNewQuickNote), key: "n", modifiers: [.control, .option])
+            : item("New Quick Note (⌃⌥N unavailable)", #selector(handleNewQuickNote)))
         menu.addItem(item("Quick Notes…", #selector(handleOpenQuickNotes)))
 
         menu.addItem(.separator())

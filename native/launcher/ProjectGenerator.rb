@@ -2,7 +2,9 @@ require "xcodeproj"
 require "fileutils"
 
 project_path = File.join(__dir__, "Launcher.xcodeproj")
-FileUtils.rm_rf(project_path) if File.exist?(project_path)
+# Keep the SwiftPM pin across regeneration; removing the project would otherwise drop it.
+resolved_path = File.join(project_path, "project.xcworkspace", "xcshareddata", "swiftpm", "Package.resolved")
+resolved = File.exist?(resolved_path) ? File.read(resolved_path) : nil
 project = Xcodeproj::Project.new(project_path)
 
 project.root_object.attributes["LastSwiftUpdateCheck"] = "2640"
@@ -20,6 +22,12 @@ tests_group = main_group.new_group("Tests", "Tests")
 mac_target = project.new_target(:application, "Launcher", :osx, "14.0")
 test_target = project.new_target(:unit_test_bundle, "LauncherTests", :osx, "14.0")
 test_target.add_dependency(mac_target)
+
+# new_target links Cocoa through a DEVELOPER_DIR path pinned to one macOS SDK version.
+# The frameworks the app needs are added below relative to SDKROOT instead.
+[mac_target, test_target].each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
+project.frameworks_group.recursive_children.select { |child| child.isa == "PBXFileReference" }.each(&:remove_from_project)
+project.frameworks_group.groups.each(&:remove_from_project)
 project.root_object.attributes["TargetAttributes"][mac_target.uuid] = {
   "CreatedOnToolsVersion" => "26.4"
 }
@@ -63,6 +71,10 @@ mac_target.build_configurations.each do |config|
   config.build_settings["CURRENT_PROJECT_VERSION"] = "1"
   config.build_settings["CODE_SIGN_STYLE"] = "Automatic"
   config.build_settings["ASSETCATALOG_COMPILER_APPICON_NAME"] = "AppIcon"
+  # The asset catalog has no AccentColor set.
+  config.build_settings.delete("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME")
+  # Hardened runtime (required for notarization) blocks Apple Events to System Events without this.
+  config.build_settings["CODE_SIGN_ENTITLEMENTS"] = "MacApp/Launcher.entitlements"
 end
 
 test_target.build_configurations.each do |config|
@@ -114,19 +126,30 @@ add_files(views_group, mac_target, %w[
 add_files(tests_group, test_target, %w[LauncherTests.swift])
 mac_target.resources_build_phase.add_file_reference(mac_group.new_file("Assets.xcassets"))
 mac_group.new_file("macOS-Info.plist")
+mac_group.new_file("Launcher.entitlements")
+# Third-party license notices ship inside the app bundle (Contents/Resources).
+mac_target.resources_build_phase.add_file_reference(mac_group.new_file("EmojiKit-LICENSE.txt"))
+mac_target.resources_build_phase.add_file_reference(services_group.new_file("EmojiAnnotationIndex-LICENSE.txt"))
 
 frameworks = mac_target.frameworks_build_phase
 %w[AppIntents.framework AppKit.framework Carbon.framework CoreData.framework SwiftUI.framework].each do |framework|
-  file_ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}")
+  file_ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}", :sdk_root)
   frameworks.add_file_reference(file_ref)
 end
 emoji_kit_build_file = project.new(Xcodeproj::Project::Object::PBXBuildFile)
 emoji_kit_build_file.product_ref = emoji_kit_product
 frameworks.files << emoji_kit_build_file
 
+# Remove the old project only after generation has succeeded, so a failure leaves it intact.
+FileUtils.rm_rf(project_path) if File.exist?(project_path)
 project.save
+if resolved
+  FileUtils.mkdir_p(File.dirname(resolved_path))
+  File.write(resolved_path, resolved)
+end
 
 scheme = Xcodeproj::XCScheme.new
+scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
 scheme.configure_with_targets(mac_target, test_target, launch_target: true)
 scheme.save_as(project_path, "Launcher", true)
 

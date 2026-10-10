@@ -47,8 +47,10 @@ final class WindowManagementService {
             return
         }
 
+        // Only the frontmost eligible window is a valid target. If it cannot be moved, report
+        // that instead of falling through to a background app the user did not choose.
         var attemptedAppNames: [String] = []
-        for target in targets {
+        for target in targets.prefix(1) {
             let app = target.app
             let appName = app.localizedName ?? "the selected app"
             attemptedAppNames.append(appName)
@@ -249,8 +251,8 @@ final class WindowManagementService {
     private func attribute(_ name: String, from element: AXUIElement) -> AXUIElement? {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-        guard error == .success else { return nil }
-        return value as! AXUIElement?
+        guard error == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
     }
 
     private func stringAttribute(_ name: String, from element: AXUIElement) -> String? {
@@ -298,18 +300,16 @@ final class WindowManagementService {
     private func accessibilityVisibleFrame(for screen: NSScreen?) -> CGRect? {
         guard let screen else { return nil }
 
-        let screenUnion = NSScreen.screens.reduce(CGRect.null) { partialResult, screen in
-            partialResult.union(screen.frame)
-        }
-
-        guard !screenUnion.isNull else {
+        // Accessibility coordinates start at the top-left of the primary (menu bar) display,
+        // which is NSScreen.screens.first, not at the top of the union of all displays.
+        guard let primaryScreen = NSScreen.screens.first else {
             return nil
         }
 
         let visibleFrame = screen.visibleFrame
         return CGRect(
             x: visibleFrame.minX,
-            y: screenUnion.maxY - visibleFrame.maxY,
+            y: primaryScreen.frame.maxY - visibleFrame.maxY,
             width: visibleFrame.width,
             height: visibleFrame.height
         )
