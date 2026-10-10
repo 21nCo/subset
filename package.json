@@ -8,9 +8,9 @@
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
     "dev": "npm run build --workspace=@subset/catalog && npm run dev --workspace=@subset/directory",
-    "check": "npm run check:workspaces && npm run test --workspace=@subset/mgraph-contracts && npm run test --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run check --workspace=@subset/usage && npm run check --workspace=@subset/directory && npm run check --workspace=@subset/usage-web && node --check packages/usage-cli/src/server.mjs && node --check packages/usage-cli/src/accounts.mjs",
-    "build": "npm run build --workspace=@subset/mgraph-contracts && npm run build --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run build --workspace=@subset/directory && npm run build --workspace=@subset/usage-web && npm run build --workspace=@subset.dev/usage",
+    "check": "npm run check:workspaces && node --test scripts/release-macos.test.mjs && npm run test --workspace=@subset/mgraph-contracts && npm run test --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run check --workspace=@subset/usage && npm run test --workspace=@subset/minutes && npm run check --workspace=@subset/directory && npm run check --workspace=@subset/usage-web && node --check packages/usage-cli/src/server.mjs && node --check packages/usage-cli/src/accounts.mjs && node --check packages/minutes-cli/src/main.mjs",
+    "build": "npm run build --workspace=@subset/mgraph-contracts && npm run build --workspace=@subset/mgraph-store && npm run build --workspace=@subset/catalog && npm run build --workspace=@subset/usage && npm run build --workspace=@subset/directory && npm run build --workspace=@subset/usage-web && npm run build --workspace=@subset.dev/usage && npm run build --workspace=@subset/minutes && npm run build --workspace=@subset.dev/minutes",
     "check:workspaces": "node scripts/check-workspaces.mjs",
-    "test": "npm test --workspace=@subset/usage --if-present && npm test --workspace=@subset.dev/usage"
+    "test": "npm test --workspace=@subset/usage --if-present && npm test --workspace=@subset.dev/usage && npm test --workspace=@subset/minutes && npm run build --workspace=@subset.dev/minutes && npm test --workspace=@subset.dev/minutes"
   }
 }
