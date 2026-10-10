@@ -45,10 +45,18 @@ export const capabilities = [
   },
   {
     id: 'pdf-review',
-    name: 'PDF annotation and review',
-    summary: 'Annotate a PDF and review marked passages in a focused workspace.',
-    state: 'planned',
+    name: 'Annotate',
+    summary: 'Mark up a PDF with ink, highlights, notes, shapes, and links, then export an annotated copy while the original stays untouched.',
+    state: 'building',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
+    availableSurfaces: []
+  },
+  {
+    id: 'dictate',
+    name: 'Dictate',
+    summary: 'Hold fn, speak, and insert locally transcribed text into the app where your cursor is.',
+    state: 'building',
+    proposedSurfaces: ['macos'],
     availableSurfaces: []
   },
   {
@@ -65,6 +73,14 @@ export const capabilities = [
     summary: 'Send a visible notetaker bot to a Google Meet or Zoom call and keep the meeting audio locally.',
     state: 'building',
     proposedSurfaces: ['macos', 'agent-cli'],
+    availableSurfaces: []
+  },
+  {
+    id: 'record',
+    name: 'Record',
+    summary: 'Record audio with a live waveform, keep clips on your device, and see the timer from anywhere.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'ios'],
     availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
