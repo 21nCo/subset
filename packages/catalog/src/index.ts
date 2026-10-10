@@ -15,7 +15,7 @@ export const capabilities = [
     id: 'usage',
     name: 'Usage dashboard',
     summary: 'See supported usage sources, limits, reset times, and freshness in one focused view.',
-    state: 'planned',
+    state: 'building',
     proposedSurfaces: ['web', 'embed', 'agent-cli', 'agent-view'],
     availableSurfaces: []
   },
