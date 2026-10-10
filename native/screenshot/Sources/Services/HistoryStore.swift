@@ -1,22 +1,14 @@
 import AppKit
 import Foundation
 
-enum HistoryStoreError: LocalizedError {
-    case indexWriteFailed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case let .indexWriteFailed(detail):
-            "The capture was saved, but the capture history could not be updated: \(detail)"
-        }
-    }
-}
-
 @MainActor
 final class HistoryStore: ObservableObject {
     static let shared = HistoryStore()
 
     @Published private(set) var records: [CaptureRecord] = []
+    /// Set when the last write of `history.json` failed, so callers can tell the user that
+    /// entries will not survive a relaunch; cleared by the next successful write.
+    private(set) var persistenceError: String?
 
     let rootDirectory: URL
     private let mediaDirectory: URL
@@ -82,9 +74,7 @@ final class HistoryStore: ObservableObject {
             isFavorite: false
         )
         records.insert(record, at: 0)
-        // The capture file is already written; report an index failure instead of losing the
-        // entry silently on the next launch.
-        try writeIndex()
+        persist()
         pruneExpired()
         return record
     }
@@ -113,9 +103,7 @@ final class HistoryStore: ObservableObject {
             isFavorite: false
         )
         records.insert(record, at: 0)
-        // The capture file is already written; report an index failure instead of losing the
-        // entry silently on the next launch.
-        try writeIndex()
+        persist()
         pruneExpired()
         return record
     }
@@ -174,14 +162,12 @@ final class HistoryStore: ObservableObject {
     }
 
     private func persist() {
-        do { try writeIndex() } catch { NSLog("Screenshot: saving the capture history failed: %@", error.localizedDescription) }
-    }
-
-    private func writeIndex() throws {
         do {
             try encoder.encode(records).write(to: indexURL, options: .atomic)
+            persistenceError = nil
         } catch {
-            throw HistoryStoreError.indexWriteFailed(error.localizedDescription)
+            NSLog("Screenshot: saving the capture history failed: %@", error.localizedDescription)
+            persistenceError = "The capture was saved, but the capture history could not be updated, so it will be missing after Screenshot restarts: \(error.localizedDescription)"
         }
     }
 

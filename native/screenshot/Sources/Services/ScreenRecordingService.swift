@@ -19,6 +19,7 @@ enum ScreenRecordingError: LocalizedError {
     case alreadyRecording
     case noFrames
     case writerFailure(String)
+    case stoppedDuringStart
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,7 @@ enum ScreenRecordingError: LocalizedError {
         case .alreadyRecording: "A recording is already in progress."
         case .noFrames: "The recording ended before the display produced a video frame."
         case let .writerFailure(detail): "The video writer failed: \(detail)"
+        case .stoppedDuringStart: "The recording stopped before it started."
         }
     }
 }
@@ -53,6 +55,8 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
     /// stream or finalize the same writer twice (both only touched on the main actor).
     @MainActor private var isStarting = false
     @MainActor private var isStopping = false
+    /// A stop that arrived while `start()` was awaiting ScreenCaptureKit; start cancels the session.
+    @MainActor private var stopRequestedDuringStart = false
     /// Called on the main actor when ScreenCaptureKit stops the stream on its own (display
     /// removed, permission revoked), so the owner can finish and report the recording.
     @MainActor var onUnexpectedStop: (() -> Void)?
@@ -66,6 +70,7 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
     ) async throws {
         guard !isStarting, !isStopping, !isCapturing, stream == nil else { throw ScreenRecordingError.alreadyRecording }
         isStarting = true
+        stopRequestedDuringStart = false
         defer { isStarting = false }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         // Quartz global coordinates start at the top-left of the primary display.
@@ -161,14 +166,29 @@ final class ScreenRecordingService: NSObject, @unchecked Sendable, SCStreamOutpu
             reset()
             throw error
         }
+        if stopRequestedDuringStart {
+            // The stream was stopped (by the user or by ScreenCaptureKit) before start finished:
+            // discard the session rather than leaving a dead stream installed.
+            stopRequestedDuringStart = false
+            isCapturing = false
+            try? await nextStream.stopCapture()
+            outputQueue.sync { nextWriter.cancelWriting() }
+            reset()
+            throw ScreenRecordingError.stoppedDuringStart
+        }
     }
 
-    /// Returns nil when no session is active or another stop is already finalizing it.
+    /// Returns nil when no session is active, another stop is already finalizing it, or start is
+    /// still in progress (start then cancels the session and throws `.stoppedDuringStart`).
     @MainActor
     func stop() async throws -> ScreenRecordingResult? {
         // `stream` (not `isCapturing`) marks an active session: a stream that ScreenCaptureKit
         // stopped on its own still has a writer to cancel and an error to report.
-        guard !isStarting, !isStopping, let stream, let destination else { return nil }
+        if isStarting {
+            stopRequestedDuringStart = true
+            return nil
+        }
+        guard !isStopping, let stream, let destination else { return nil }
         isStopping = true
         defer { isStopping = false }
         // ScreenCaptureKit may emit a terminal, non-display sample while stopping.

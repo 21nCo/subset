@@ -155,6 +155,7 @@ final class AppState: ObservableObject {
                 if preferences.openVideoEditor, result.format == .mp4 {
                     videoEditorController?.show(url: result.url)
                 }
+                reportHistoryPersistenceError()
             } catch {
                 tearDownRecordingUI()
                 showError(error.localizedDescription)
@@ -199,6 +200,7 @@ final class AppState: ObservableObject {
                     kind: result.format == .gif ? .gif : .recording,
                     pixelSize: result.pixelSize
                 )
+                reportHistoryPersistenceError()
             } catch {
                 isRecording = false
                 showError(error.localizedDescription)
@@ -342,12 +344,17 @@ final class AppState: ObservableObject {
             if actions.contains(.upload) { upload(record: record) }
             if actions.contains(.pin) { pinController?.pin(image: image, title: record.displayName) }
             if actions.contains(.quickAccess) { quickAccessController?.show(record: record, image: image) }
+            reportHistoryPersistenceError()
         } catch {
             showError(error.localizedDescription)
         }
     }
 
     private static let captureFailedMessage = "The capture failed. Check that Screenshot has Screen Recording permission in System Settings > Privacy & Security."
+
+    private func reportHistoryPersistenceError() {
+        if let message = history.persistenceError { showError(message) }
+    }
 
     func showError(_ message: String) {
         lastError = message

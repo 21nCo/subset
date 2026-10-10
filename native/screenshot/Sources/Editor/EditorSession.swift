@@ -114,9 +114,11 @@ final class EditorSession: ObservableObject {
               let index = annotations.firstIndex(where: { $0.id == original.id }) else { return }
         let requested = CGPoint(x: normalizedPoint.x - selectionStart.x, y: normalizedPoint.y - selectionStart.y)
         let rect = original.rect.cgRect
+        // Keep the item inside the image, but never move one that a crop left partly outside
+        // until the user drags it (zero movement is always allowed).
         let delta = CGPoint(
-            x: max(-rect.minX, min(requested.x, 1 - rect.maxX)),
-            y: max(-rect.minY, min(requested.y, 1 - rect.maxY))
+            x: max(min(-rect.minX, 0), min(requested.x, max(1 - rect.maxX, 0))),
+            y: max(min(-rect.minY, 0), min(requested.y, max(1 - rect.maxY, 0)))
         )
         var moved = original
         moved.points = original.points.map { point in

@@ -16,7 +16,15 @@ struct EditorCanvas: View {
                 drawBackground(context: &context, size: size)
                 let imageRect = fittedImageRect(canvasSize: size)
                 context.draw(Image(nsImage: session.image), in: imageRect)
-                for item in session.annotations { draw(item, context: &context, imageRect: imageRect) }
+                // Annotations belong to the image: a crop can leave parts of them outside it.
+                context.drawLayer { layer in
+                    layer.clip(to: Path(imageRect))
+                    for item in session.annotations { draw(item, context: &layer, imageRect: imageRect) }
+                }
+                if showsSelection, let selected = session.annotations.first(where: { $0.id == session.selectedAnnotationID }) {
+                    let rect = denormalize(selected.rect.cgRect, in: imageRect)
+                    context.stroke(Path(rect.insetBy(dx: -4, dy: -4)), with: .color(.white.opacity(0.8)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                }
             }
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
@@ -151,10 +159,6 @@ struct EditorCanvas: View {
             context.stroke(Path(rect), with: .color(.white), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
         case .select, .background:
             break
-        }
-
-        if showsSelection, session.selectedAnnotationID == item.id {
-            context.stroke(Path(rect.insetBy(dx: -4, dy: -4)), with: .color(.white.opacity(0.8)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
     }
 

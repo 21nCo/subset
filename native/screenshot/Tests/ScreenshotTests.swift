@@ -253,6 +253,28 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(blur.rect.height, 0.4, accuracy: 0.02)
     }
 
+    func testSelectingACroppedAnnotationDoesNotMoveIt() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 100, height: 100, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        let session = EditorSession(image: NSImage(cgImage: try XCTUnwrap(context.makeImage()), size: .zero), record: nil)
+        session.selectedTool = .rectangle
+        session.begin(at: CGPoint(x: 0.4, y: 0.4))
+        session.end(at: CGPoint(x: 0.6, y: 0.6))
+        session.selectedTool = .crop
+        session.begin(at: CGPoint(x: 0.5, y: 0))
+        session.end(at: CGPoint(x: 1, y: 1))
+        let before = try XCTUnwrap(session.annotations.first).rect
+
+        session.selectedTool = .select
+        session.beginSelection(at: CGPoint(x: 0.1, y: 0.5))
+        session.endSelection(at: CGPoint(x: 0.1, y: 0.5))
+
+        XCTAssertLessThan(before.x, 0)
+        XCTAssertEqual(session.annotations.first?.rect, before)
+    }
+
     func testCombineKeepsAnnotationsOnTheOriginalImage() throws {
         let session = EditorSession(image: NSImage(size: CGSize(width: 100, height: 100)), record: nil)
         session.selectedTool = .pixelate

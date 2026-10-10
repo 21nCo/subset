@@ -125,7 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     to: resultPath,
                     after: 1,
                     baselineRecordIDs: baselineRecordIDs,
-                    waitsForUpload: action == .upload
+                    // Without an explicit action, AppState applies the after-capture preferences.
+                    waitsForUpload: action.map { $0 == .upload } ?? appState.preferences.afterCaptureActions.contains(.upload)
                 )
             }
         }
@@ -199,7 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 to: path,
                 baselineRecordIDs: baselineRecordIDs,
                 waitsForUpload: waitsForUpload,
-                attemptsRemaining: 120
+                // 0.5 s per attempt: 60 s for a capture, 200 s to cover the 180 s upload timeout.
+                attemptsRemaining: waitsForUpload ? 400 : 120
             )
         }
     }
@@ -224,9 +226,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
+        var errorMessage = appState.lastError
+        if errorMessage == nil, !complete {
+            errorMessage = record == nil ? "Timed out waiting for the capture." : "Timed out waiting for the upload."
+        }
         let payload: [String: Any] = [
             "ok": complete && appState.lastError == nil,
-            "error": appState.lastError ?? NSNull(),
+            "error": errorMessage ?? NSNull(),
             "recording": appState.isRecording,
             "record": record.map { record in
                 [

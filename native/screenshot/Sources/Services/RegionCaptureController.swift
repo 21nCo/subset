@@ -50,7 +50,13 @@ final class RegionCaptureController {
             panel.hidesOnDeactivate = false
 
             let view = RegionSelectionView(mode: mode, instruction: mode.instruction)
-            view.resolveWindow = { [weak self] point in self?.screenCaptureService.windowRect(at: point) }
+            // A capture targets one display, so a window spanning displays is clipped to this one.
+            let screenFrame = screen.frame
+            view.resolveWindow = { [weak self] point in
+                guard let rect = self?.screenCaptureService.windowRect(at: point)?.intersection(screenFrame),
+                      !rect.isNull, !rect.isEmpty else { return nil }
+                return rect
+            }
             view.onComplete = { [weak self] rect in self?.finish(rect) }
             view.onCancel = { [weak self] in self?.finish(nil) }
             panel.contentView = view
