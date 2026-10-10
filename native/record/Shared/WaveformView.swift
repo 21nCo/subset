@@ -42,15 +42,37 @@ struct WaveformView: View {
             }
 
             if let onScrub {
+                let width = max(geometry.size.width, 1)
                 canvas
                     .contentShape(Rectangle())
-                    .gesture(
+                    // Simultaneous so a vertical swipe still scrolls the parent; only taps and
+                    // mostly-horizontal drags seek.
+                    .simultaneousGesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
-                                let progress = min(max(value.location.x / max(geometry.size.width, 1), 0), 1)
-                                onScrub(progress)
+                                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                                onScrub(min(max(value.location.x / width, 0), 1))
+                            }
+                            .onEnded { value in
+                                let isTap = abs(value.translation.width) < 4 && abs(value.translation.height) < 4
+                                guard isTap || abs(value.translation.width) > abs(value.translation.height) else { return }
+                                onScrub(min(max(value.location.x / width, 0), 1))
                             }
                     )
+                    .accessibilityElement()
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue("\(Int((min(max(playheadPosition, 0), 1) * 100).rounded())) percent")
+                    .accessibilityAdjustableAction { direction in
+                        let step: CGFloat = 0.05
+                        switch direction {
+                        case .increment:
+                            onScrub(min(playheadPosition + step, 1))
+                        case .decrement:
+                            onScrub(max(playheadPosition - step, 0))
+                        @unknown default:
+                            break
+                        }
+                    }
             } else {
                 canvas
             }

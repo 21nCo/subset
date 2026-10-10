@@ -40,10 +40,14 @@ final class RecordingManager: NSObject, ObservableObject {
     @Published private(set) var playbackTime: TimeInterval = 0
     @Published private(set) var playbackProgress: Double = 0
     @Published private(set) var playbackWaveformSamples: [CGFloat] = []
+    #if os(iOS)
+    @Published private(set) var isLiveActivityActive = false
+    #endif
 
     var surfaceStatusText: String {
         #if os(iOS)
-        return isRecording ? "Live Activity armed" : "Live Activity idle"
+        guard isRecording else { return "Live Activity idle" }
+        return isLiveActivityActive ? "Live Activity armed" : "Live Activity unavailable"
         #elseif os(macOS)
         return isRecording ? "Floating panel open" : "Floating panel idle"
         #else
@@ -59,6 +63,8 @@ final class RecordingManager: NSObject, ObservableObject {
     private var lastActivityUpdate = Date.distantPast
     private var waveformCache: [String: [CGFloat]] = [:]
     private var waveformGenerationInFlight: Set<String> = []
+    /// True while a start is waiting for permission or setup, so a second Start cannot overlap it.
+    private var isStartingRecording = false
 
     #if os(iOS)
     private let activityBridge = RecordingActivityBridge()
@@ -75,7 +81,54 @@ final class RecordingManager: NSObject, ObservableObject {
         Task {
             await activityBridge.cleanupOrphanedActivities()
         }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+        #elseif os(macOS)
+        // Finalize the file if the app quits mid-recording, so the folder holds a playable clip.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationWillTerminate(_:)),
+            name: NSApplication.willTerminateNotification,
+            object: nil
+        )
         #endif
+    }
+
+    #if os(iOS)
+    /// A call, alarm, or Siri can pause capture. Stop and save rather than keep claiming to record.
+    @objc nonisolated private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard
+            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+            AVAudioSession.InterruptionType(rawValue: rawType) == .began
+        else { return }
+
+        Task { @MainActor [weak self] in
+            self?.stopRecordingAfterSystemInterruption(
+                message: "Recording stopped because another app or a call interrupted audio. The clip up to that point is saved."
+            )
+        }
+    }
+    #elseif os(macOS)
+    @objc nonisolated private func handleApplicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            stopRecording()
+        }
+    }
+    #endif
+
+    /// Re-reads the recordings folder, which is the source of truth, e.g. when the app becomes active.
+    func reloadSavedRecordings() {
+        refreshSavedRecordings()
+    }
+
+    private func stopRecordingAfterSystemInterruption(message: String) {
+        guard isRecording else { return }
+        stopRecording()
+        statusMessage = message
     }
 
     func toggleRecording() {
@@ -162,6 +215,10 @@ final class RecordingManager: NSObject, ObservableObject {
     }
 
     private func startRecording() async {
+        guard !isRecording, !isStartingRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
+
         errorMessage = nil
         stopPlayback(deactivateSession: false, updateStatus: false)
 
@@ -191,7 +248,10 @@ final class RecordingManager: NSObject, ObservableObject {
 
             #if os(iOS)
             pendingVisibilityAlert = false
-            await activityBridge.start(startedAt: startedAt, samples: activitySamples(from: waveformSamples).map(Double.init))
+            isLiveActivityActive = false
+            let activityStarted = await activityBridge.start(startedAt: startedAt, samples: activitySamples(from: waveformSamples).map(Double.init))
+            // The recording may have stopped while the activity request was pending.
+            isLiveActivityActive = activityStarted && isRecording
             lastActivityUpdate = .now
             #endif
         } catch {
@@ -199,6 +259,7 @@ final class RecordingManager: NSObject, ObservableObject {
             statusMessage = "Failed to begin recording."
             stopStatusLoop()
             stopAudioRecorder()
+            deactivateAudioSessionIfNeeded()
             endBackgroundAssertionIfNeeded()
         }
     }
@@ -220,6 +281,7 @@ final class RecordingManager: NSObject, ObservableObject {
 
         #if os(iOS)
         pendingVisibilityAlert = false
+        isLiveActivityActive = false
         let samples = activitySamples(from: waveformSamples).map(Double.init)
         Task {
             await activityBridge.end(startedAt: startedAt, samples: samples)
@@ -231,6 +293,7 @@ final class RecordingManager: NSObject, ObservableObject {
         stopAudioRecorder()
 
         let recorder = try AVAudioRecorder(url: url, settings: Self.recordingSettings)
+        recorder.delegate = self
         recorder.isMeteringEnabled = true
         recorder.prepareToRecord()
 
@@ -246,8 +309,20 @@ final class RecordingManager: NSObject, ObservableObject {
     }
 
     private func stopAudioRecorder() {
-        audioRecorder?.stop()
+        // Clear the reference first so the delegate callback for this stop is recognized as ours.
+        let recorder = audioRecorder
         audioRecorder = nil
+        recorder?.stop()
+    }
+
+    /// The recorder finished or failed without our stopRecording() call (system stop or encode error).
+    private func handleRecorderEndedUnexpectedly(_ recorderID: ObjectIdentifier, errorDescription: String?) {
+        guard isRecording, let audioRecorder, ObjectIdentifier(audioRecorder) == recorderID else { return }
+        stopRecording()
+        if let errorDescription {
+            errorMessage = errorDescription
+        }
+        statusMessage = "Recording stopped unexpectedly. The clip up to that point is saved."
     }
 
     private func startStatusLoop() {
@@ -522,6 +597,8 @@ final class RecordingManager: NSObject, ObservableObject {
 
     private func storeGeneratedWaveformSamples(_ samples: [CGFloat], for recordingID: String, recordingURL: URL) {
         waveformGenerationInFlight.remove(recordingID)
+        // The cache is not @Published; notify so rows replace their placeholder bars.
+        objectWillChange.send()
         waveformCache[recordingID] = samples
 
         if playingRecordingURL == recordingURL {
@@ -531,10 +608,11 @@ final class RecordingManager: NSObject, ObservableObject {
 
     #if os(iOS)
     func handleScenePhaseChange(_ phase: ScenePhase) {
-        guard isRecording else { return }
-        if phase == .background {
-            pendingVisibilityAlert = true
+        if phase == .active, !isRecording {
+            refreshSavedRecordings()
         }
+        guard isRecording else { return }
+        pendingVisibilityAlert = phase == .background
     }
     #endif
 
@@ -728,6 +806,23 @@ final class RecordingManager: NSObject, ObservableObject {
             let previous = index > 0 ? samples[index - 1] : sample
             let next = index < samples.count - 1 ? samples[index + 1] : sample
             return min(max((previous * 0.2) + (sample * 0.6) + (next * 0.2), 0.03), 1.0)
+        }
+    }
+}
+
+extension RecordingManager: AVAudioRecorderDelegate {
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let recorderID = ObjectIdentifier(recorder)
+        Task { @MainActor [weak self] in
+            self?.handleRecorderEndedUnexpectedly(recorderID, errorDescription: nil)
+        }
+    }
+
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        let recorderID = ObjectIdentifier(recorder)
+        let errorDescription = error?.localizedDescription
+        Task { @MainActor [weak self] in
+            self?.handleRecorderEndedUnexpectedly(recorderID, errorDescription: errorDescription)
         }
     }
 }

@@ -18,10 +18,13 @@ This is a port of a proof of concept. It builds locally; it is not signed, relea
 | Operation | Trigger | Effect |
 | --- | --- | --- |
 | Start / stop recording | **Start Recording** (⌘R with a keyboard); the stop button in the macOS floating panel | Requests the microphone if needed, records to a new timestamped file, and saves it on stop. |
-| Play / stop playback | **Play** on a clip | Plays the clip; dragging the playback waveform seeks. |
+| Play / stop playback | **Play** on a clip | Plays the clip; tapping or dragging horizontally on the playback waveform seeks (VoiceOver: swipe up or down to adjust). |
 | Share (iOS) / Show in Finder (macOS) | Clip action buttons | Hands the file URL to the share sheet or Finder. |
 | Delete | Trash button, then confirm | Permanently removes that clip's file. |
 | Reset waveform | **Reset Waveform** | Clears the idle live waveform. |
+| Refresh list | App becomes active | Re-reads the recordings folder, so clips added or removed in Finder or Files appear. |
+
+If the system stops capture (an iOS call, alarm, or Siri interruption, an encoder error, or quitting the macOS app mid-recording), Record stops the session, saves the clip recorded so far, and says so instead of continuing to show a running timer. If iOS does not grant a Live Activity, the dashboard says it is unavailable.
 
 ### Consuming surfaces
 
@@ -37,7 +40,7 @@ No reusable `packages/` contract is extracted. A future consumer would most like
 
 - Microphone (`NSMicrophoneUsageDescription`) on both platforms. If access is denied, the dashboard shows an **Open Settings** action.
 - iOS: `UIBackgroundModes` `audio` to keep recording in the background, `NSSupportsLiveActivities` (with frequent updates), and `UIFileSharingEnabled` / `LSSupportsOpeningDocumentsInPlace` so recordings appear in Files.
-- macOS: no sandbox entitlement is set. Writing to `~/Documents` may trigger the system Documents folder prompt.
+- macOS: no sandbox entitlement is set. Writing to `~/Documents` may trigger the system Documents folder prompt. `MacApp/Record-macOS.entitlements` grants `com.apple.security.device.audio-input`, which the hardened runtime (required for notarization) needs for microphone access.
 
 ## Build and run
 
@@ -50,6 +53,10 @@ xcodebuild -project Record.xcodeproj -scheme Record-iOS -destination 'generic/pl
 ```
 
 Building the iOS asset catalog needs the iOS Simulator runtime that matches the installed iOS SDK.
+
+### Release (macOS)
+
+`macos-release.json` opts the `Record-macOS` scheme into the Developer ID signing and notarization script; see [docs/macos-release.md](../../docs/macos-release.md). A signed build with `--skip-notarize` was produced and verified locally on 2026-10-10 (`codesign --verify --deep --strict` passed, audio-input entitlement present). It has not been notarized or published, so there is no download.
 
 ## UI/UX changes from the POC
 
@@ -84,5 +91,6 @@ Package/version used: none. Gap: no Superfunctions package provides native audio
 
 - Recording, playback, seeking, and deletion were not exercised in this port (no microphone session was started).
 - The iOS app and Live Activity were not run on a simulator or device. On the verification host, the iOS 26.4 Simulator runtime was not installed (only iOS 18.3), so `actool` could not compile the iOS asset catalog. The iOS and widget Swift sources were compiled with a scratch copy of the project that omitted only that catalog.
-- Background recording duration limits, interruption handling (calls, Siri), and Live Activity updates on device.
+- Background recording duration limits, the interruption and system-stop handling (calls, Siri, encoder errors), and Live Activity updates on device.
+- The macOS floating panel's placement, focus behavior, and quit-while-recording finalization were compiled but not exercised interactively.
 - Signing, sandboxing, notarization, App Store/TestFlight distribution, and any download route.

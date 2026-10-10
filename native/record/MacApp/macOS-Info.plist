@@ -20,8 +20,6 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-	<key>NSMainStoryboardFile</key>
-	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record uses the microphone to capture audio clips that stay on this device.</string>
 	<key>NSPrincipalClass</key>

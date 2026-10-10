@@ -161,6 +161,7 @@ struct RecordingDashboardView: View {
                 samples: displayedWaveformSamples,
                 mode: .recording,
                 baselineColor: Color(red: 0.20, green: 0.44, blue: 0.95).opacity(0.22),
+                showPlayhead: recorder.isRecording,
                 playheadPosition: 0.94,
                 onScrub: nil
             )
@@ -188,26 +189,33 @@ struct RecordingDashboardView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 16) {
-            Button {
-                recorder.toggleRecording()
-            } label: {
-                Label(recorder.isRecording ? "Stop Recording" : "Start Recording", systemImage: recorder.isRecording ? "stop.fill" : "record.circle.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(recorder.isRecording ? .red : .accentColor)
-            .keyboardShortcut("r", modifiers: .command)
-            .help(recorder.isRecording ? "Stop and save the recording (⌘R)" : "Start a new recording (⌘R)")
-
-            Button("Reset Waveform") {
-                recorder.resetVisualization()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(recorder.isRecording)
+        // Stack the buttons on narrow phone widths instead of truncating their labels.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) { controlButtons }
+            VStack(spacing: 12) { controlButtons }
         }
+    }
+
+    @ViewBuilder
+    private var controlButtons: some View {
+        Button {
+            recorder.toggleRecording()
+        } label: {
+            Label(recorder.isRecording ? "Stop Recording" : "Start Recording", systemImage: recorder.isRecording ? "stop.fill" : "record.circle.fill")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(recorder.isRecording ? .red : .accentColor)
+        .keyboardShortcut("r", modifiers: .command)
+        .help(recorder.isRecording ? "Stop and save the recording (⌘R)" : "Start a new recording (⌘R)")
+
+        Button("Reset Waveform") {
+            recorder.resetVisualization()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(recorder.isRecording)
     }
 
     @ViewBuilder
@@ -284,23 +292,6 @@ struct RecordingDashboardView: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
-    }
-
-    @ViewBuilder
-    private func accessoryButton(for url: URL) -> some View {
-        #if os(iOS)
-        ShareLink(item: url) {
-            Label("Share", systemImage: "square.and.arrow.up")
-        }
-        .buttonStyle(.bordered)
-        #elseif os(macOS)
-        Button {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        } label: {
-            Label("Reveal", systemImage: "folder")
-        }
-        .buttonStyle(.bordered)
-        #endif
     }
 
     private func recordingActionRow(for recording: RecordingItem) -> some View {

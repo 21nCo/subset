@@ -4,6 +4,9 @@ import Foundation
 
 actor RecordingActivityBridge {
     private var activity: Activity<RecordingActivityAttributes>?
+    /// Incremented by every start and end. A start that resumes after an end ran during its
+    /// suspension sees a different value and does not request an orphaned activity.
+    private var generation = 0
 
     func cleanupOrphanedActivities() async {
         await endAllActivities(
@@ -14,8 +17,11 @@ actor RecordingActivityBridge {
         )
     }
 
-    func start(startedAt: Date, samples: [Double]) async {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+    /// Returns whether a Live Activity is now showing this recording.
+    func start(startedAt: Date, samples: [Double]) async -> Bool {
+        generation += 1
+        let startGeneration = generation
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return false }
 
         await endAllActivities(
             startedAt: startedAt,
@@ -31,14 +37,18 @@ actor RecordingActivityBridge {
             title: "Recording in progress"
         )
 
+        guard generation == startGeneration else { return false }
+
         do {
             activity = try Activity.request(
                 attributes: attributes,
                 content: ActivityContent(state: state, staleDate: nil),
                 pushType: nil
             )
+            return true
         } catch {
             print("Live Activity request failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -66,6 +76,7 @@ actor RecordingActivityBridge {
     }
 
     func end(startedAt: Date, samples: [Double]) async {
+        generation += 1
         await endAllActivities(
             startedAt: startedAt,
             samples: samples,

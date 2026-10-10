@@ -57,6 +57,8 @@ apply_settings(
   "PRODUCT_NAME" => "Record",
   "PRODUCT_BUNDLE_IDENTIFIER" => "dev.subset.record",
   "INFOPLIST_FILE" => "MacApp/macOS-Info.plist",
+  # Hardened runtime (required for notarization) blocks the microphone without this entitlement.
+  "CODE_SIGN_ENTITLEMENTS" => "MacApp/Record-macOS.entitlements",
   "ASSETCATALOG_COMPILER_APPICON_NAME" => "AppIcon",
   "MACOSX_DEPLOYMENT_TARGET" => "14.0",
   "LD_RUNPATH_SEARCH_PATHS" => ["$(inherited)", "@executable_path/../Frameworks"],
@@ -107,6 +109,7 @@ mac_refs = %w[
 ].map { |name| mac_group.new_file(name) }
 mac_target.add_file_references(mac_refs)
 mac_group.new_file("macOS-Info.plist")
+mac_group.new_file("Record-macOS.entitlements")
 mac_target.add_resources([mac_group.new_file("Assets.xcassets")])
 
 widget_refs = %w[RecordWidgetBundle.swift RecordingLiveActivityWidget.swift].map { |name| widget_group.new_file(name) }
@@ -117,7 +120,7 @@ ios_target.add_dependency(widget_target)
 embed_phase = ios_target.new_copy_files_build_phase("Embed App Extensions")
 embed_phase.symbol_dst_subfolder_spec = :plug_ins
 embed_file = embed_phase.add_file_reference(widget_target.product_reference)
-embed_file.settings = { "ATTRIBUTES" => ["RemoveHeadersOnCopy"] }
+embed_file.settings = { "ATTRIBUTES" => ["CodeSignOnCopy", "RemoveHeadersOnCopy"] }
 
 project.save
 

@@ -14,7 +14,7 @@
 		3DB6A27414D4D663F33852F1 /* RecordingActivityBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECDBBDCD0CAE911EFA8A9099 /* RecordingActivityBridge.swift */; };
 		41700B1666CA36CD9A789F05 /* RecordingLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A75468FC55961C8E68F3378 /* RecordingLiveActivityWidget.swift */; };
 		48A7AE66C371832662F364A2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 15A573E3C5A0D2ADE1D9576F /* Assets.xcassets */; };
-		4D36A9A3F3F3270BB9578714 /* RecordWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 28086EB5A86CDDA41F98742E /* RecordWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		4D36A9A3F3F3270BB9578714 /* RecordWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 28086EB5A86CDDA41F98742E /* RecordWidgetExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		4FF3EC5254FE5DA02294FB88 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E73D1C36B4DB70043A7EA5B2 /* Assets.xcassets */; };
 		56A6495F4D444AE968AA445C /* silent.caf in Resources */ = {isa = PBXBuildFile; fileRef = E0EBF15135917DBB9643FFF4 /* silent.caf */; };
 		721BD4DDABABDF3AA14A75DB /* RecordingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB4799F2B1213FA8401D0D8 /* RecordingManager.swift */; };
@@ -87,6 +87,7 @@
 		ECDBBDCD0CAE911EFA8A9099 /* RecordingActivityBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingActivityBridge.swift; sourceTree = "<group>"; };
 		FB7EB587AF6F0976D0CF1FD1 /* RecordiOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RecordiOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FD955E4E84BF8F9E01297BC1 /* macOS-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "macOS-Info.plist"; sourceTree = "<group>"; };
+		5EC0DE0A11D1E0E47A1C0001 /* Record-macOS.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = "Record-macOS.entitlements"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -199,6 +200,7 @@
 				607FD3B6DFC56F5620934FEB /* FloatingRecorderView.swift */,
 				D27F28C84669DAEB443D5696 /* FloatingRecorderPanelController.swift */,
 				FD955E4E84BF8F9E01297BC1 /* macOS-Info.plist */,
+				5EC0DE0A11D1E0E47A1C0001 /* Record-macOS.entitlements */,
 				E73D1C36B4DB70043A7EA5B2 /* Assets.xcassets */,
 			);
 			name = MacApp;
@@ -459,6 +461,7 @@
 				DEFINES_MODULE = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				CODE_SIGN_ENTITLEMENTS = "MacApp/Record-macOS.entitlements";
 				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -650,6 +653,7 @@
 				DEFINES_MODULE = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				CODE_SIGN_ENTITLEMENTS = "MacApp/Record-macOS.entitlements";
 				INFOPLIST_FILE = "MacApp/macOS-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
