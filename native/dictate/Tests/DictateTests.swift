@@ -94,4 +94,14 @@ final class DictateTests: XCTestCase {
         }
         wait(for: [checked], timeout: 2)
     }
+
+    func testSystemEventsScriptCompilesWithEveryHandler() throws {
+        XCTAssertNoThrow(try ActiveAppTextInjector.systemEventsScript())
+        for handler in ActiveAppTextInjector.SystemEventsHandler.allCases {
+            XCTAssertTrue(
+                ActiveAppTextInjector.systemEventsScriptSource.contains("on \(handler.rawValue)(bundleID, appName, theText)"),
+                "missing handler \(handler.rawValue)"
+            )
+        }
+    }
 }

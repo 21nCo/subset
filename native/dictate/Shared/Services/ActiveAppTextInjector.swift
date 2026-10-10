@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import ApplicationServices
+import Carbon
 import Foundation
 
 enum ActiveAppTextInjectorError: LocalizedError {
@@ -784,66 +785,73 @@ enum ActiveAppTextInjector {
     }
 
     private static func pasteViaSystemEvents(on application: NSRunningApplication?) throws {
-        let activationTarget = applicationScriptTarget(for: application)
-        let processActivation = systemEventsProcessActivation(for: application)
-        let scriptSource = """
-        tell application \(activationTarget) to activate
-        delay 0.12
-        \(processActivation)
-        tell application "System Events"
-            keystroke "v" using command down
-        end tell
-        """
-
-        var error: NSDictionary?
-        let script = NSAppleScript(source: scriptSource)
-        script?.executeAndReturnError(&error)
-
-        guard error == nil else {
-            if let error,
-               let errorNumber = error[NSAppleScript.errorNumber] as? Int,
-               errorNumber == -1743 {
-                throw ActiveAppTextInjectorError.automationPermissionMissing
-            }
-            throw ActiveAppTextInjectorError.failedToGenerateKeyboardEvents
-        }
+        try runSystemEventsHandler(.pasteKeystroke, on: application)
     }
 
     private static func typeViaSystemEvents(text: String, on application: NSRunningApplication?) throws {
-        let activationTarget = applicationScriptTarget(for: application)
-        let processActivation = systemEventsProcessActivation(for: application)
-        let scriptSource = """
-        tell application \(activationTarget) to activate
-        delay 0.12
-        \(processActivation)
-        tell application "System Events"
-            keystroke \(quotedAppleScript(text))
-        end tell
-        """
-
-        var error: NSDictionary?
-        let script = NSAppleScript(source: scriptSource)
-        script?.executeAndReturnError(&error)
-
-        guard error == nil else {
-            if let error,
-               let errorNumber = error[NSAppleScript.errorNumber] as? Int,
-               errorNumber == -1743 {
-                throw ActiveAppTextInjectorError.automationPermissionMissing
-            }
-            throw ActiveAppTextInjectorError.failedToGenerateKeyboardEvents
-        }
+        try runSystemEventsHandler(.typeText, on: application, text: text)
     }
 
     private static func pasteViaSystemEventsMenu(on application: NSRunningApplication?) throws {
-        let activationTarget = applicationScriptTarget(for: application)
-        let processName = application?.localizedName ?? ""
-        let scriptSource = """
-        tell application \(activationTarget) to activate
+        try runSystemEventsHandler(.pasteMenu, on: application)
+    }
+
+    enum SystemEventsHandler: String, CaseIterable {
+        case pasteKeystroke = "dictate_paste_keystroke"
+        case typeText = "dictate_type_text"
+        case pasteMenu = "dictate_paste_menu"
+    }
+
+    /// Fixed AppleScript for the System Events fallbacks. The target app and transcript are
+    /// passed as Apple event parameters, never spliced into the source, so neither a process
+    /// name nor dictated text can change what the script does.
+    static let systemEventsScriptSource = """
+    on dictate_activate(bundleID, appName)
+        if bundleID is not "" then
+            tell application id bundleID to activate
+        else if appName is not "" then
+            tell application appName to activate
+        else
+            activate
+        end if
+    end dictate_activate
+
+    on dictate_front_process(appName)
+        if appName is "" then return
+        tell application "System Events"
+            if exists process appName then
+                tell process appName
+                    set frontmost to true
+                end tell
+            end if
+        end tell
+        delay 0.08
+    end dictate_front_process
+
+    on dictate_paste_keystroke(bundleID, appName, theText)
+        dictate_activate(bundleID, appName)
+        delay 0.12
+        dictate_front_process(appName)
+        tell application "System Events"
+            keystroke "v" using command down
+        end tell
+    end dictate_paste_keystroke
+
+    on dictate_type_text(bundleID, appName, theText)
+        dictate_activate(bundleID, appName)
+        delay 0.12
+        dictate_front_process(appName)
+        tell application "System Events"
+            keystroke theText
+        end tell
+    end dictate_type_text
+
+    on dictate_paste_menu(bundleID, appName, theText)
+        dictate_activate(bundleID, appName)
         delay 0.16
         tell application "System Events"
-            if exists process \(quotedAppleScript(processName)) then
-                tell process \(quotedAppleScript(processName))
+            if appName is not "" and (exists process appName) then
+                tell process appName
                     set frontmost to true
                     if exists menu bar 1 then
                         if exists menu bar item "Edit" of menu bar 1 then
@@ -859,11 +867,47 @@ enum ActiveAppTextInjector {
                 keystroke "v" using command down
             end if
         end tell
-        """
+    end dictate_paste_menu
+    """
+
+    private static var compiledSystemEventsScript: NSAppleScript?
+
+    static func systemEventsScript() throws -> NSAppleScript {
+        if let compiledSystemEventsScript {
+            return compiledSystemEventsScript
+        }
+        var error: NSDictionary?
+        guard let script = NSAppleScript(source: systemEventsScriptSource),
+              script.compileAndReturnError(&error) else {
+            throw ActiveAppTextInjectorError.failedToGenerateKeyboardEvents
+        }
+        compiledSystemEventsScript = script
+        return script
+    }
+
+    private static func runSystemEventsHandler(
+        _ handler: SystemEventsHandler,
+        on application: NSRunningApplication?,
+        text: String = ""
+    ) throws {
+        let script = try systemEventsScript()
+        let parameters = NSAppleEventDescriptor.list()
+        parameters.insert(NSAppleEventDescriptor(string: application?.bundleIdentifier ?? ""), at: 1)
+        parameters.insert(NSAppleEventDescriptor(string: application?.localizedName ?? ""), at: 2)
+        parameters.insert(NSAppleEventDescriptor(string: text), at: 3)
+
+        let event = NSAppleEventDescriptor(
+            eventClass: AEEventClass(kASAppleScriptSuite),
+            eventID: AEEventID(kASSubroutineEvent),
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        event.setDescriptor(NSAppleEventDescriptor(string: handler.rawValue), forKeyword: AEKeyword(keyASSubroutineName))
+        event.setDescriptor(parameters, forKeyword: AEKeyword(keyDirectObject))
 
         var error: NSDictionary?
-        let script = NSAppleScript(source: scriptSource)
-        script?.executeAndReturnError(&error)
+        script.executeAppleEvent(event, error: &error)
 
         guard error == nil else {
             if let error,
@@ -873,41 +917,6 @@ enum ActiveAppTextInjector {
             }
             throw ActiveAppTextInjectorError.failedToGenerateKeyboardEvents
         }
-    }
-
-    private static func applicationScriptTarget(for application: NSRunningApplication?) -> String {
-        if let bundleIdentifier = application?.bundleIdentifier, !bundleIdentifier.isEmpty {
-            return "id \(quotedAppleScript(bundleIdentifier))"
-        }
-
-        if let localizedName = application?.localizedName, !localizedName.isEmpty {
-            return quotedAppleScript(localizedName)
-        }
-
-        return "current application"
-    }
-
-    private static func systemEventsProcessActivation(for application: NSRunningApplication?) -> String {
-        guard let processName = application?.localizedName, !processName.isEmpty else {
-            return ""
-        }
-
-        let quotedProcessName = quotedAppleScript(processName)
-        return """
-        tell application "System Events"
-            if exists process \(quotedProcessName) then
-                tell process \(quotedProcessName)
-                    set frontmost to true
-                end tell
-            end if
-        end tell
-        delay 0.08
-        """
-    }
-
-    private static func quotedAppleScript(_ value: String) -> String {
-        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 }
 /// Saves every item and type on a pasteboard before Dictate writes a transcript to it, and

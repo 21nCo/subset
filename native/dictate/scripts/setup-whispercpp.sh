@@ -35,7 +35,7 @@ if [[ "${FORCE_DOWNLOAD}" == "1" || ! -d "${WHISPER_FRAMEWORK}" || "${cached_mar
     trap 'rm -rf "${archive_path}" "${staging}"' EXIT
 
     echo "Downloading whisper.xcframework ${WHISPER_TAG}"
-    curl -fL --progress-bar "${WHISPER_XCFRAMEWORK_URL}" -o "${archive_path}"
+    curl --proto "=https" --proto-redir "=https" --tlsv1.2 -fL --progress-bar "${WHISPER_XCFRAMEWORK_URL}" -o "${archive_path}"
 
     actual_sha="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
     if [[ "${actual_sha}" != "${WHISPER_ZIP_SHA256}" ]]; then
