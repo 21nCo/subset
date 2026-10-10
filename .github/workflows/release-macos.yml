@@ -127,9 +127,12 @@ jobs:
           APPLE_API_KEY_PATH: ${{ runner.temp }}/notary-key.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # Tag-derived values reach the shell through env vars, never through expression interpolation.
+          APP_ID: ${{ steps.tag.outputs.app_id }}
+          APP_VERSION: ${{ steps.tag.outputs.version }}
         run: >-
-          node scripts/release-macos.mjs "${{ steps.tag.outputs.app_id }}"
-          --version "${{ steps.tag.outputs.version }}"
+          node scripts/release-macos.mjs "$APP_ID"
+          --version "$APP_VERSION"
           --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
