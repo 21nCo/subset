@@ -405,7 +405,11 @@ final class WindowManagementService {
             return true
         }
 
-        if runSystemEventsFallback(frame: frame, appName: appName),
+        if runSystemEventsFallback(
+            frame: frame,
+            appName: appName,
+            windowTitle: stringAttribute(kAXTitleAttribute, from: window) ?? ""
+        ),
            didApply(frame: frame, to: window) {
             return true
         }
@@ -456,30 +460,36 @@ final class WindowManagementService {
     /// Constant AppleScript source. Values are passed as Apple event parameters to the
     /// `moveFrontWindow` handler, so the app name is never interpolated into script text.
     private static let systemEventsFallbackSource = """
-    on moveFrontWindow(appName, x, y, w, h)
+    on moveFrontWindow(appName, windowTitle, x, y, w, h)
         tell application "System Events"
             tell process appName
                 set frontmost to true
-                if exists window 1 then
-                    set position of window 1 to {x, y}
-                    set size of window 1 to {w, h}
+                if windowTitle is not "" then
+                    set targetWindow to window windowTitle
+                else
+                    set targetWindow to window 1
                 end if
+                set position of targetWindow to {x, y}
+                set size of targetWindow to {w, h}
             end tell
         end tell
     end moveFrontWindow
     """
 
-    private func runSystemEventsFallback(frame: CGRect, appName: String) -> Bool {
+    /// Targets the selected window by its title (the front window only when it has none). A
+    /// missing window raises an AppleScript error, which is reported as a failure.
+    private func runSystemEventsFallback(frame: CGRect, appName: String, windowTitle: String) -> Bool {
         guard let script = NSAppleScript(source: Self.systemEventsFallbackSource) else {
             return false
         }
 
         let parameters = NSAppleEventDescriptor.list()
         parameters.insert(NSAppleEventDescriptor(string: appName), at: 1)
-        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minX.rounded())), at: 2)
-        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minY.rounded())), at: 3)
-        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.width.rounded())), at: 4)
-        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.height.rounded())), at: 5)
+        parameters.insert(NSAppleEventDescriptor(string: windowTitle), at: 2)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minX.rounded())), at: 3)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.minY.rounded())), at: 4)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.width.rounded())), at: 5)
+        parameters.insert(NSAppleEventDescriptor(int32: Int32(frame.height.rounded())), at: 6)
 
         let event = NSAppleEventDescriptor(
             eventClass: AEEventClass(kASAppleScriptSuite),
