@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import UserNotifications
 
 struct StartMindfulBreakIntent: AppIntent {
     static let title: LocalizedStringResource = "Start a Mindful Break"
@@ -36,19 +37,19 @@ struct BreakFocusFilterIntent: SetFocusFilterIntent {
     static let title: LocalizedStringResource = "Breaks Focus Filter"
     static let description = IntentDescription("Pause break reminders while this Focus is active.")
 
+    /// Nil is the default value. When a Focus ends, the system calls `perform()` with default values, so
+    /// nil must mean "this Focus no longer pauses reminders".
     @Parameter(title: "Pause reminders")
     var isEnabled: Bool?
 
-    init() {
-        isEnabled = true
-    }
+    init() {}
 
     init(isEnabled: Bool) {
         self.isEnabled = isEnabled
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: (isEnabled ?? true) ? "Pause reminders" : "Keep reminders active")
+        DisplayRepresentation(title: isEnabled == true ? "Pause reminders" : "Keep reminders active")
     }
 
     static func suggestedFocusFilters(for context: FocusFilterSuggestionContext) async -> [BreakFocusFilterIntent] {
@@ -56,7 +57,12 @@ struct BreakFocusFilterIntent: SetFocusFilterIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        BreakRepository().setCommand((isEnabled ?? true) ? "focus:on" : "focus:off")
+        let pauses = isEnabled == true
+        BreakRepository().setCommand(pauses ? "focus:on" : "focus:off")
+        if pauses, BreakRepository().loadSettings().smartPause.focusMode {
+            // The app may not run again until it is opened; stop the pending break alerts now.
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: NotificationCoordinator.breakAlertIDs)
+        }
         return .result()
     }
 }

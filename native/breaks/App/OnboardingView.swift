@@ -69,45 +69,47 @@ struct OnboardingView: View {
     }
 
     private var permissions: some View {
-        VStack(spacing: 26) {
-            Spacer()
-            HStack(spacing: 18) {
-                PermissionGlyph(icon: "bell.badge.fill", color: BreakPalette.coral)
-                PermissionGlyph(icon: "hourglass.badge.plus", color: BreakPalette.magenta)
-                PermissionGlyph(icon: "lock.shield.fill", color: BreakPalette.violet)
-            }
-            VStack(spacing: 12) {
-                Text("Make breaks work everywhere")
-                    .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                    .multilineTextAlignment(.center)
-                Text("Notifications give you a gentle heads-up. Screen Time can shield distracting apps and sites while a break is active.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 520)
-            }
-            Button {
-                isRequestingPermissions = true
-                Task {
-                    await engine.requestSetupPermissions()
-                    isRequestingPermissions = false
+        ScrollingPage {
+            VStack(spacing: 26) {
+                Spacer()
+                HStack(spacing: 18) {
+                    PermissionGlyph(icon: "bell.badge.fill", color: BreakPalette.coral)
+                    PermissionGlyph(icon: "hourglass.badge.plus", color: BreakPalette.magenta)
+                    PermissionGlyph(icon: "lock.shield.fill", color: BreakPalette.violet)
                 }
-            } label: {
-                HStack {
-                    if isRequestingPermissions { ProgressView() }
-                    Text(isRequestingPermissions ? "Requesting…" : "Enable notifications & Screen Time")
+                VStack(spacing: 12) {
+                    Text("Make breaks work everywhere")
+                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                        .multilineTextAlignment(.center)
+                    Text("Notifications give you a gentle heads-up. Screen Time can shield distracting apps and sites while a break is active.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 520)
                 }
-                .frame(maxWidth: 420)
+                Button {
+                    isRequestingPermissions = true
+                    Task {
+                        await engine.requestSetupPermissions()
+                        isRequestingPermissions = false
+                    }
+                } label: {
+                    HStack {
+                        if isRequestingPermissions { ProgressView() }
+                        Text(isRequestingPermissions ? "Requesting…" : "Enable notifications & Screen Time")
+                    }
+                    .frame(maxWidth: 420)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(BreakPalette.magenta)
+                .controlSize(.large)
+                .disabled(isRequestingPermissions)
+                Text("You can change either permission later in Settings.")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                Spacer()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(BreakPalette.magenta)
-            .controlSize(.large)
-            .disabled(isRequestingPermissions)
-            Text("You can change either permission later in Settings.")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
-            Spacer()
+            .padding(32)
         }
-        .padding(32)
     }
 
     private var ready: some View {
@@ -132,27 +134,43 @@ private struct OnboardingPage: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
-            visual
-            VStack(spacing: 14) {
-                Text(eyebrow.uppercased())
-                    .font(.caption.weight(.bold))
-                    .tracking(1.8)
-                    .foregroundStyle(BreakPalette.amber)
-                Text(title)
-                    .font(.system(size: 42, weight: .bold, design: .rounded))
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.76)
-                Text(message)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 580)
+        ScrollingPage {
+            VStack(spacing: 28) {
+                Spacer()
+                visual
+                VStack(spacing: 14) {
+                    Text(eyebrow.uppercased())
+                        .font(.caption.weight(.bold))
+                        .tracking(1.8)
+                        .foregroundStyle(BreakPalette.amber)
+                    Text(title)
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .multilineTextAlignment(.center)
+                        .minimumScaleFactor(0.76)
+                    Text(message)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 580)
+                }
+                Spacer()
             }
-            Spacer()
+            .padding(30)
         }
-        .padding(30)
+    }
+}
+
+/// Fills the page when there is room and scrolls when there is not (landscape, large text).
+private struct ScrollingPage<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                content.frame(maxWidth: .infinity, minHeight: proxy.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
     }
 }
 
@@ -166,5 +184,6 @@ private struct PermissionGlyph: View {
             .frame(width: 72, height: 72)
             .background(color.gradient, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .shadow(color: color.opacity(0.3), radius: 18, y: 8)
+            .accessibilityHidden(true)
     }
 }

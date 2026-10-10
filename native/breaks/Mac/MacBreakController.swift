@@ -22,6 +22,7 @@ final class MacBreakController: ObservableObject {
     private var timer: Timer?
     private var lastSignalReadAt = Date.distantPast
     private var observers: [NSObjectProtocol] = []
+    private var sleptAt: Date?
 
     init(repository: BreakRepository = BreakRepository()) {
         self.repository = repository
@@ -42,6 +43,7 @@ final class MacBreakController: ObservableObject {
             core.settings = newValue
             core.normalizeSettings()
             lastSignalReadAt = .distantPast
+            if !core.settings.reminder.headsUpEnabled { notice.hide() }
             save()
         }
     }
@@ -120,8 +122,11 @@ final class MacBreakController: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
 
         let center = NSWorkspace.shared.notificationCenter
+        observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.sleptAt = .now }
+        })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.tick() }
+            Task { @MainActor [weak self] in self?.didWake() }
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -182,7 +187,15 @@ final class MacBreakController: ObservableObject {
 
     // MARK: - Tick and effects
 
-    private func tick() {
+    /// Time asleep is time away. The input that wakes the Mac resets the idle reading, so pass the sleep
+    /// gap through the idle path: a long sleep then starts a fresh interval instead of a break.
+    private func didWake() {
+        let gap = sleptAt.map { Date.now.timeIntervalSince($0) } ?? 0
+        sleptAt = nil
+        tick(awayAtLeast: gap)
+    }
+
+    private func tick(awayAtLeast away: TimeInterval = 0) {
         now = .now
         // Idle time is cheap and read every tick; device and power-assertion signals every few seconds.
         var reading = lastReading
@@ -193,8 +206,9 @@ final class MacBreakController: ObservableObject {
             reading.idleSeconds = core.settings.desktop.idle.isEnabled ? ActivitySignals.idleSeconds() : 0
         }
         if reading != lastReading { lastReading = reading }
+        let idle = core.settings.desktop.idle.isEnabled ? max(reading.idleSeconds, away) : reading.idleSeconds
         let before = core.snapshot
-        let events = core.tick(now: now, inputs: .init(idleSeconds: reading.idleSeconds, signals: reading.signals))
+        let events = core.tick(now: now, inputs: .init(idleSeconds: idle, signals: reading.signals))
         handle(events)
         if core.snapshot != before { save() }
     }
@@ -212,6 +226,8 @@ final class MacBreakController: ObservableObject {
             switch event {
             case .headsUp:
                 if settings.reminder.headsUpEnabled { notice.show() }
+            case .headsUpCancelled:
+                notice.hide()
             case .breakStarted:
                 notice.hide()
                 activeMessage = settings.customization.messages.randomElement() ?? "Let your eyes rest."

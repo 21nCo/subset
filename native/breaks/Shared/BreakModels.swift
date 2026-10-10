@@ -112,15 +112,17 @@ struct OfficeHours: Codable, Equatable, Sendable {
 
     func contains(_ date: Date, calendar: Calendar = .current) -> Bool {
         guard isEnabled else { return true }
-        guard weekdays.contains(calendar.component(.weekday, from: date)) else { return false }
-
+        let weekday = calendar.component(.weekday, from: date)
         let minute = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
         let start = startHour * 60 + startMinute
         let end = endHour * 60 + endMinute
         if start <= end {
-            return minute >= start && minute < end
+            return weekdays.contains(weekday) && minute >= start && minute < end
         }
-        return minute >= start || minute < end
+        // An overnight window belongs to the day it starts on: after midnight, check the previous weekday.
+        if minute >= start { return weekdays.contains(weekday) }
+        let previousWeekday = weekday == 1 ? 7 : weekday - 1
+        return minute < end && weekdays.contains(previousWeekday)
     }
 }
 
@@ -139,7 +141,7 @@ struct PlannedBreak: Codable, Equatable, Identifiable, Sendable {
         symbol: "figure.walk",
         hour: 16,
         minute: 0,
-        duration: 10 * 60,
+        duration: 15 * 60,
         weekdays: [2, 3, 4, 5, 6],
         isEnabled: true
     )
@@ -301,6 +303,8 @@ struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
     var kind: BreakKind
     var completed: Bool
     var skipped: Bool
+    /// Focus time counted before this break (the stretch it ended). Nil for records saved by older builds.
+    var focusDuration: TimeInterval?
 
     /// The most records kept on the device.
     static let historyLimit = 400
@@ -356,11 +360,16 @@ enum BreakMath {
         let today = records.filter { $0.startedAt >= startOfDay && $0.startedAt <= now }
         let completed = today.filter { $0.completed && !$0.skipped }
         let skipped = today.filter(\.skipped)
-        let focusedDuration = max(0, now.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
-        let stretches = today.map { max(0, $0.startedAt.timeIntervalSince(startOfDay)) }
-        let longest = max(focusedDuration, stretches.max() ?? 0)
+        // A stretch is the focus time counted before a break, not the time since midnight.
+        let currentEnd = snapshot.phase == .breaking ? (snapshot.breakStartedAt ?? now) : now
+        let currentStretch = max(0, currentEnd.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
+        let stretches = today.compactMap { record in
+            record.focusDuration.map { min(max(0, $0), max(0, record.startedAt.timeIntervalSince(startOfDay))) }
+        }
+        let focusedDuration = stretches.reduce(currentStretch, +)
+        let longest = max(currentStretch, stretches.max() ?? 0)
         let sorted = stretches.sorted()
-        let median = sorted.isEmpty ? focusedDuration : sorted[sorted.count / 2]
+        let median = sorted.isEmpty ? currentStretch : sorted[sorted.count / 2]
         let scorePenalty = skipped.count * 12 + snapshot.snoozesUsedToday * 3 + Int(max(0, longest - 45 * 60) / (15 * 60)) * 4
 
         return DashboardStats(
@@ -404,7 +413,10 @@ extension TimeInterval {
 
     var clockDuration: String {
         let total = max(0, Int(self.rounded(.up)))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        let hours = total / 3600
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, (total % 3600) / 60, total % 60)
+            : String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     /// A VoiceOver-friendly duration such as "4 minutes, 30 seconds".

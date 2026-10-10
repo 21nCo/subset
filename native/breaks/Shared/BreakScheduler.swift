@@ -9,6 +9,8 @@ import Foundation
 struct BreakScheduler: Sendable {
     enum Event: Equatable, Sendable {
         case headsUp(breakAt: Date)
+        /// A shown heads-up no longer applies (for example, office hours ended); hosts hide it.
+        case headsUpCancelled
         case breakStarted(BreakKind, duration: TimeInterval)
         case breakEnded(completed: Bool)
         case breakSnoozed(minutes: Int, duringBreak: Bool)
@@ -45,6 +47,8 @@ struct BreakScheduler: Sendable {
     private(set) var lastSignalAt: Date?
     private(set) var lastBlinkAt: Date?
     private(set) var lastPostureAt: Date?
+    /// When the focus timer last started or resumed counting. Idle time before this was never counted.
+    private var countingSince: Date?
 
     init(settings: BreakSettings, snapshot: EngineSnapshot, records: [BreakRecord], calendar: Calendar = .current) {
         self.settings = settings
@@ -108,8 +112,9 @@ struct BreakScheduler: Sendable {
     var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore }
 
     /// A break may be snoozed while it runs only when it could also be skipped, and a snooze is left.
+    /// A planned break is not snoozed: the snooze would replace it with an ordinary interval break.
     func canSnoozeActiveBreak(now: Date) -> Bool {
-        snapshot.phase == .breaking && canSkipBreak(now: now) && snoozesRemaining > 0
+        snapshot.phase == .breaking && snapshot.activeKind != .planned && canSkipBreak(now: now) && snoozesRemaining > 0
     }
 
     var upcomingBreakKind: BreakKind {
@@ -159,19 +164,23 @@ struct BreakScheduler: Sendable {
             return events
         }
 
+        // Planned breaks run at their chosen time, inside or outside office hours.
+        if let (planned, occurrence) = duePlannedBreak(at: now) {
+            events += startPlannedBreak(planned, occurrence: occurrence, now: now)
+            return events
+        }
+
         guard settings.officeHours.contains(now, calendar: calendar) else {
             if snapshot.nextBreakAt <= now {
                 snapshot.focusStartedAt = now
                 snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
+                countingSince = now
             }
-            if snapshot.phase == .headsUp { snapshot.phase = .focusing }
+            if snapshot.phase == .headsUp {
+                snapshot.phase = .focusing
+                events.append(.headsUpCancelled)
+            }
             clearWellnessCadence()
-            return events
-        }
-
-        if let (planned, occurrence) = duePlannedBreak(at: now) {
-            snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
-            events += startBreak(kind: .planned, duration: planned.duration, plannedName: planned.name, now: now)
             return events
         }
 
@@ -211,6 +220,19 @@ struct BreakScheduler: Sendable {
         return [.breakStarted(kind, duration: resolved)]
     }
 
+    /// Starts today's occurrence of a planned break if it is still running, for the time that is left.
+    /// Used when a background monitor reports that a planned break began (the iOS Device Activity extension).
+    mutating func startPlannedBreak(id: UUID, now: Date) -> [Event] {
+        guard
+            let planned = settings.plannedBreaks.first(where: { $0.id == id }),
+            let occurrence = planned.occurrence(on: now, calendar: calendar),
+            isUndelivered(planned, occurrence: occurrence),
+            now >= occurrence,
+            now < occurrence.addingTimeInterval(planned.duration)
+        else { return [] }
+        return startPlannedBreak(planned, occurrence: occurrence, now: now)
+    }
+
     mutating func endBreak(completed: Bool, now: Date) -> [Event] {
         guard snapshot.phase == .breaking else { return [] }
         let startedAt = snapshot.breakStartedAt ?? now
@@ -222,7 +244,8 @@ struct BreakScheduler: Sendable {
             plannedDuration: plannedDuration,
             kind: kind,
             completed: completed,
-            skipped: !completed
+            skipped: !completed,
+            focusDuration: max(0, startedAt.timeIntervalSince(snapshot.focusStartedAt))
         ))
         if completed {
             switch kind {
@@ -249,7 +272,7 @@ struct BreakScheduler: Sendable {
         let duringBreak = snapshot.phase == .breaking
         switch snapshot.phase {
         case .breaking:
-            guard canSkipBreak(now: now) else { return [] }
+            guard snapshot.activeKind != .planned, canSkipBreak(now: now) else { return [] }
             clearActiveBreak()
         case .paused:
             return []
@@ -260,6 +283,7 @@ struct BreakScheduler: Sendable {
         snapshot.phase = .focusing
         snapshot.nextBreakAt = now.addingTimeInterval(TimeInterval(minutes * 60))
         snapshot.deliveredHeadsUpFor = nil
+        countingSince = now
         return [.breakSnoozed(minutes: minutes, duringBreak: duringBreak)]
     }
 
@@ -273,7 +297,8 @@ struct BreakScheduler: Sendable {
             plannedDuration: duration(for: kind),
             kind: kind,
             completed: false,
-            skipped: true
+            skipped: true,
+            focusDuration: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
         ))
         startFocusInterval(at: now)
         return [.upcomingBreakSkipped]
@@ -309,6 +334,7 @@ struct BreakScheduler: Sendable {
         snapshot.pausedRemaining = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
+        countingSince = now
         return [.resumed(reason)]
     }
 
@@ -325,16 +351,21 @@ struct BreakScheduler: Sendable {
     @discardableResult
     mutating func reconcileRestoredState(now: Date) -> Bool {
         if snapshot.phase == .breaking {
-            if let end = snapshot.breakEndsAt, end > now { return true }
-            clearActiveBreak()
+            let end = snapshot.breakEndsAt ?? now
+            if end > now { return true }
+            // The break ran its full length while the app was not running: record it as completed.
+            _ = endBreak(completed: true, now: end)
             startFocusInterval(at: now)
             return false
         }
-        if snapshot.phase == .paused, snapshot.pauseReason?.isAutomatic == true {
-            // Automatic pauses are re-derived from live signals after launch.
+        if snapshot.phase == .paused, snapshot.pauseReason?.isAutomatic == true, snapshot.pauseReason != .focus {
+            // Idle and smart pauses are re-derived from live signals after launch. A Focus pause is not:
+            // it ends only when the Focus Filter reports that the Focus is off.
             _ = resume(now: now)
         } else if snapshot.phase == .headsUp {
+            // Show the heads-up again on the next tick if it still applies.
             snapshot.phase = .focusing
+            snapshot.deliveredHeadsUpFor = nil
         }
         if snapshot.phase != .paused, snapshot.nextBreakAt < now.addingTimeInterval(-settings.workInterval) {
             startFocusInterval(at: now)
@@ -402,8 +433,10 @@ struct BreakScheduler: Sendable {
         switch snapshot.phase {
         case .focusing, .headsUp:
             guard idle >= idleSettings.pauseAfter else { return [] }
-            // The timer kept counting while the user was already away; give that time back.
-            var events = pause(reason: .idle, now: now, creditingIdle: idle)
+            // The timer kept counting while the user was already away; give that time back, but only the
+            // part the timer actually counted (not time spent in an earlier pause).
+            let counted = min(idle, max(0, now.timeIntervalSince(countingSince ?? snapshot.focusStartedAt)))
+            var events = pause(reason: .idle, now: now, creditingIdle: counted)
             if idle >= idleSettings.resetAfter {
                 snapshot.pausedRemaining = settings.workInterval
                 events.append(.focusReset)
@@ -476,6 +509,18 @@ struct BreakScheduler: Sendable {
         snapshot.pausedRemaining = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
+        countingSince = now
+    }
+
+    private mutating func startPlannedBreak(_ planned: PlannedBreak, occurrence: Date, now: Date) -> [Event] {
+        snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
+        // A late start (the host was asleep or suspended at the start time) gets only the time that is left.
+        let remaining = occurrence.addingTimeInterval(planned.duration).timeIntervalSince(now)
+        return startBreak(kind: .planned, duration: max(1, min(planned.duration, remaining)), plannedName: planned.name, now: now)
+    }
+
+    private func isUndelivered(_ planned: PlannedBreak, occurrence: Date) -> Bool {
+        snapshot.deliveredPlannedOccurrences[planned.id.uuidString].map { !calendar.isDate($0, inSameDayAs: occurrence) } ?? true
     }
 
     private mutating func clearActiveBreak() {
@@ -492,13 +537,14 @@ struct BreakScheduler: Sendable {
         }
     }
 
+    /// A planned break is due from its start time until its scheduled end, so one missed by a host that was
+    /// asleep or suspended still starts (for the time left) instead of being dropped for the day.
     private func duePlannedBreak(at date: Date) -> (PlannedBreak, Date)? {
         for planned in settings.plannedBreaks where planned.isEnabled {
             guard let occurrence = planned.occurrence(on: date, calendar: calendar) else { continue }
-            let alreadyDelivered = snapshot.deliveredPlannedOccurrences[planned.id.uuidString]
             if date >= occurrence,
-               date < occurrence.addingTimeInterval(60),
-               alreadyDelivered.map({ !calendar.isDate($0, inSameDayAs: occurrence) }) ?? true {
+               date < occurrence.addingTimeInterval(max(60, planned.duration)),
+               isUndelivered(planned, occurrence: occurrence) {
                 return (planned, occurrence)
             }
         }

@@ -113,6 +113,7 @@ apply_settings(
     "GENERATE_INFOPLIST_FILE" => "NO",
     "INFOPLIST_FILE" => "Mac/Info.plist",
     "ASSETCATALOG_COMPILER_APPICON_NAME" => "AppIcon",
+    "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME" => "AccentColor",
     "ENABLE_HARDENED_RUNTIME" => "YES",
     "COMBINE_HIDPI_IMAGES" => "YES",
     "LD_RUNPATH_SEARCH_PATHS" => ["$(inherited)", "@executable_path/../Frameworks"]
@@ -205,6 +206,13 @@ embed_phase.symbol_dst_subfolder_spec = :plug_ins
   embed_phase.add_file_reference(target.product_reference)
 end
 tests_target.add_dependency(app_target)
+
+# The gem points Foundation at one fixed iOS SDK version under DEVELOPER_DIR; make it relative to each
+# target's SDK so the path exists on any Xcode.
+project.files.select { |ref| ref.path.to_s.end_with?("Foundation.framework") }.each do |ref|
+  ref.path = "System/Library/Frameworks/Foundation.framework"
+  ref.source_tree = "SDKROOT"
+end
 
 project.save
 

@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// A borderless window that can take keyboard focus (for Return and Esc on the break screen).
+/// A borderless window. Only the primary display's window, which holds the controls, takes keyboard focus
+/// (for Return and Esc), so clicking another display does not move focus away from them.
 private final class OverlayWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    var isPrimary = false
+    override var canBecomeKey: Bool { isPrimary }
+    override var canBecomeMain: Bool { isPrimary }
 }
 
 /// Covers every display with a blurred or dimmed break screen while a break runs.
@@ -77,6 +79,7 @@ final class BreakOverlayController {
         let ordered = screens.filter { $0 == primary } + screens.filter { $0 != primary }
         for screen in ordered {
             let window = OverlayWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isPrimary = screen == primary
             window.setFrame(screen.frame, display: false)
             window.level = .screenSaver
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]

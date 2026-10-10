@@ -4,6 +4,7 @@ import SwiftUI
 struct BreaksApp: App {
     @StateObject private var engine = BreakEngine()
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("onboarding.completed", store: SharedStore.defaults) private var onboardingCompleted = false
 
     var body: some Scene {
         WindowGroup {
@@ -11,13 +12,18 @@ struct BreaksApp: App {
                 .environmentObject(engine)
                 .preferredColorScheme(.dark)
                 .tint(BreakPalette.magenta)
-                .onAppear { engine.start() }
+                .onAppear(perform: startIfReady)
+                .onChange(of: onboardingCompleted) { _, _ in startIfReady() }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active {
-                        engine.start()
-                        engine.processPendingCommand()
-                    }
+                    if phase == .active { startIfReady() }
                 }
         }
+    }
+
+    /// Breaks start only after onboarding, so a break or heads-up cannot interrupt it.
+    private func startIfReady() {
+        guard onboardingCompleted else { return }
+        engine.start()
+        engine.processPendingCommand()
     }
 }

@@ -20,15 +20,16 @@ enum BreakPalette {
 struct AmbientBackground: View {
     var style: BreakBackground = .ambient
     var showArtwork = false
+    /// The custom background's file, when the caller already has the settings.
+    var customFilename: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             BreakPalette.ink
             if style == .custom,
-               let filename = BreakRepository().loadSettings().customization.customBackgroundFilename,
-               let url = AppGroupAssets.url(for: filename),
-               let image = UIImage(contentsOfFile: url.path) {
+               let filename = customFilename ?? BreakRepository().loadSettings().customization.customBackgroundFilename,
+               let image = CustomBackgroundCache.image(filename: filename) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -71,6 +72,22 @@ struct AmbientBackground: View {
         case .classic: [.gray.opacity(0.3), .black, .gray.opacity(0.15), .black]
         case .custom: [BreakPalette.coral, BreakPalette.magenta, BreakPalette.violet, BreakPalette.teal]
         }
+    }
+}
+
+/// Keeps the decoded custom background, so a view that redraws every second does not reload the photo.
+/// The file's modification date is part of the key because a new import reuses the same filename.
+@MainActor
+enum CustomBackgroundCache {
+    private static var cached: (path: String, modified: Date?, image: UIImage)?
+
+    static func image(filename: String) -> UIImage? {
+        guard let url = AppGroupAssets.url(for: filename) else { return nil }
+        let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        if let cached, cached.path == url.path, cached.modified == modified { return cached.image }
+        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+        cached = (url.path, modified, image)
+        return image
     }
 }
 

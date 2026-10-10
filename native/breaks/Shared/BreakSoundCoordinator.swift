@@ -7,6 +7,8 @@ final class BreakSoundCoordinator {
     private let player = AVAudioPlayerNode()
     private var isConnected = false
     private var filePlayer: AVAudioPlayer?
+    /// Identifies the latest tone, so an older tone's completion does not stop a newer one.
+    private var generation = 0
 
     func play(name: String, volume: Double, customFilename: String?, isCompletion: Bool) {
         guard name != "None", volume > 0 else { return }
@@ -14,6 +16,8 @@ final class BreakSoundCoordinator {
            let customFilename,
            let url = AppGroupAssets.url(for: customFilename),
            let player = try? AVAudioPlayer(contentsOf: url) {
+            // Same session as the generated tones: mix with, rather than interrupt, other audio.
+            guard activateSession() else { return }
             filePlayer = player
             player.volume = Float(min(1, max(0, volume)))
             player.prepareToPlay()
@@ -45,12 +49,8 @@ final class BreakSoundCoordinator {
             }
         }
 
+        guard activateSession() else { return }
         do {
-            #if os(iOS)
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            #endif
             if !isConnected {
                 engine.attach(player)
                 engine.connect(player, to: engine.mainMixerNode, format: format)
@@ -58,11 +58,41 @@ final class BreakSoundCoordinator {
             }
             if !engine.isRunning { try engine.start() }
             player.stop()
-            player.scheduleBuffer(buffer, at: nil, options: .interrupts)
+            generation += 1
+            let current = generation
+            player.scheduleBuffer(buffer, at: nil, options: .interrupts, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.finishTone(generation: current) }
+            }
             player.play()
         } catch {
             player.stop()
         }
+    }
+
+    /// Stops the engine and releases the audio session once the latest tone has played, so an idle
+    /// coordinator does not keep the audio route active.
+    private func finishTone(generation finished: Int) {
+        guard finished == generation else { return }
+        player.stop()
+        engine.stop()
+        #if os(iOS)
+        if filePlayer?.isPlaying != true {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+        #endif
+    }
+
+    private func activateSession() -> Bool {
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true)
+        } catch {
+            return false
+        }
+        #endif
+        return true
     }
 
     private func tones(for name: String, completion: Bool) -> (Double, Double) {

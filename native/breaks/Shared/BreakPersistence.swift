@@ -86,7 +86,9 @@ struct BreakRepository {
         return command
     }
 
-    func clearCommand() {
+    /// Removes the pending command only if it is still `command`, so a newer command is kept.
+    func clearCommand(ifEqualTo command: String) {
+        guard defaults.string(forKey: SharedStore.commandKey) == command else { return }
         defaults.removeObject(forKey: SharedStore.commandKey)
     }
 

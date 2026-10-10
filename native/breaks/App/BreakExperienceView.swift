@@ -6,7 +6,11 @@ struct BreakExperienceView: View {
 
     var body: some View {
         ZStack {
-            AmbientBackground(style: engine.settings.customization.background, showArtwork: true)
+            AmbientBackground(
+                style: engine.settings.customization.background,
+                showArtwork: true,
+                customFilename: engine.settings.customization.customBackgroundFilename
+            )
             VStack(spacing: 0) {
                 topBar
                 Spacer()
@@ -47,7 +51,7 @@ struct BreakExperienceView: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.72))
             Spacer()
-            if engine.settings.screenTimeEnforcement && engine.screenTime.isAuthorized {
+            if engine.screenTime.shieldsSomething(settings: engine.settings) {
                 Label("Distractions shielded", systemImage: "lock.shield.fill")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 12)

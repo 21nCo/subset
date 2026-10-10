@@ -207,6 +207,7 @@ private struct DisciplinePicker: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(level == selection ? .isSelected : [])
             }
         }
         .padding(.vertical, 8)
@@ -279,7 +280,8 @@ struct PlannedBreakEditor: View {
             }
             Section("Timing") {
                 DatePicker("Starts at", selection: timeBinding, displayedComponents: .hourAndMinute)
-                Stepper(value: $draft.duration, in: 60...7200, step: 60) {
+                // Screen Time can only monitor intervals of 15 minutes or more.
+                Stepper(value: $draft.duration, in: ScreenTimeCoordinator.minimumMonitoredInterval...7200, step: 60) {
                     LabeledContent("Duration", value: draft.duration.compactDuration)
                 }
                 WeekdayPicker(selection: $draft.weekdays)
@@ -327,7 +329,12 @@ struct WeekdayPicker: View {
             HStack(spacing: 6) {
                 ForEach(weekdays, id: \.self) { day in
                     Button {
-                        if selection.contains(day) { selection.remove(day) } else { selection.insert(day) }
+                        // At least one day stays selected; an empty schedule would never run.
+                        if !selection.contains(day) {
+                            selection.insert(day)
+                        } else if selection.count > 1 {
+                            selection.remove(day)
+                        }
                     } label: {
                         Text(Calendar.current.veryShortWeekdaySymbols[day - 1])
                             .font(.caption.weight(.semibold))

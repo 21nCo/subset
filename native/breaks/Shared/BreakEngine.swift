@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class BreakEngine: ObservableObject {
@@ -29,7 +30,8 @@ final class BreakEngine: ObservableObject {
         self.notifications = notifications ?? NotificationCoordinator()
         self.screenTime = screenTime ?? ScreenTimeCoordinator()
 
-        let loadedSettings = repository.loadSettings()
+        var loadedSettings = repository.loadSettings()
+        Self.normalizeForScreenTime(&loadedSettings)
         core = BreakScheduler(
             settings: loadedSettings,
             snapshot: repository.loadSnapshot(settings: loadedSettings),
@@ -47,11 +49,28 @@ final class BreakEngine: ObservableObject {
     var settings: BreakSettings {
         get { core.settings }
         set {
-            core.settings = newValue
+            let old = core.settings
+            var value = newValue
+            Self.normalizeForScreenTime(&value)
+            core.settings = value
             core.normalizeSettings()
             save()
-            notifications.schedule(settings: core.settings, snapshot: snapshot, now: now)
-            screenTime.refreshSchedules(settings: core.settings)
+            // Bindings write on every slider step or keystroke; only redo the system work a change affects.
+            let new = core.settings
+            if old.officeHours != new.officeHours || old.plannedBreaks != new.plannedBreaks || old.workInterval != new.workInterval {
+                screenTime.refreshSchedules(settings: new)
+            }
+            if old.reminder != new.reminder || old.wellness != new.wellness || old.officeHours != new.officeHours {
+                notifications.schedule(settings: new, snapshot: snapshot, now: now)
+            }
+        }
+    }
+
+    /// Device Activity cannot monitor intervals shorter than 15 minutes, so a planned break that Screen Time
+    /// enforces in the background must last at least that long.
+    private static func normalizeForScreenTime(_ settings: inout BreakSettings) {
+        for index in settings.plannedBreaks.indices {
+            settings.plannedBreaks[index].duration = max(ScreenTimeCoordinator.minimumMonitoredInterval, settings.plannedBreaks[index].duration)
         }
     }
 
@@ -92,6 +111,11 @@ final class BreakEngine: ObservableObject {
         timer = nil
     }
 
+    func authorizeScreenTime() async {
+        await screenTime.requestAuthorization()
+        screenTime.refreshSchedules(settings: settings)
+    }
+
     func requestSetupPermissions() async {
         await notifications.requestAuthorization()
         await screenTime.requestAuthorization()
@@ -103,7 +127,7 @@ final class BreakEngine: ObservableObject {
 
     func processPendingCommand() {
         guard let command = repository.takeCommand() else { return }
-        if command == "start" || command == "open" {
+        if command == "start" {
             startBreak(kind: core.upcomingBreakKind)
         } else if command.hasPrefix("snooze:"), let minutes = Int(command.split(separator: ":").last ?? "") {
             snooze(minutes: minutes)
@@ -113,13 +137,11 @@ final class BreakEngine: ObservableObject {
             resume()
         } else if command == "focus:on", settings.smartPause.focusMode {
             perform { $0.pause(reason: .focus, now: $1) }
-        } else if command == "focus:off", snapshot.phase == .paused, snapshot.pauseReason != .manual {
+        } else if command == "focus:off", snapshot.phase == .paused, snapshot.pauseReason == .focus {
             resume()
-        } else if command.hasPrefix("planned:"),
-                  let id = UUID(uuidString: String(command.dropFirst("planned:".count))),
-                  let planned = settings.plannedBreaks.first(where: { $0.id == id }),
-                  planned.occurs(on: .now) {
-            startBreak(kind: .planned, duration: planned.duration, plannedName: planned.name)
+        } else if command.hasPrefix("planned:"), let id = UUID(uuidString: String(command.dropFirst("planned:".count))) {
+            // The monitor started this break at its scheduled time; join it for the time that is left.
+            perform { $0.startPlannedBreak(id: id, now: $1) }
         }
     }
 
@@ -138,6 +160,9 @@ final class BreakEngine: ObservableObject {
     }
 
     func snooze(minutes: Int) {
+        // iOS offers no snooze for a running break. A queued notification snooze that arrives after a break
+        // started must not end that break.
+        guard snapshot.phase != .breaking else { return }
         perform { $0.snooze(minutes: minutes, now: $1) }
     }
 
@@ -174,15 +199,19 @@ final class BreakEngine: ObservableObject {
         let events = core.tick(now: now)
         handle(events)
         if core.snapshot != before { save() }
+        if events.isEmpty, core.snapshot.nextBreakAt != before.nextBreakAt {
+            // The break time moved without an event (for example, at the end of office hours).
+            notifications.schedule(settings: settings, snapshot: snapshot, now: now)
+        }
     }
 
     @discardableResult
     private func perform(_ operation: (inout BreakScheduler, Date) -> [BreakScheduler.Event]) -> [BreakScheduler.Event] {
         now = .now
+        let before = core.snapshot
         let events = operation(&core, now)
-        guard !events.isEmpty else { return events }
         handle(events)
-        save()
+        if !events.isEmpty || core.snapshot != before { save() }
         return events
     }
 
@@ -202,6 +231,9 @@ final class BreakEngine: ObservableObject {
                 notifications.schedule(settings: settings, snapshot: snapshot, now: now)
             case .headsUp:
                 isHeadsUpPresented = true
+            case .headsUpCancelled:
+                isHeadsUpPresented = false
+                notifications.schedule(settings: settings, snapshot: snapshot, now: now)
             case .paused, .resumed:
                 isHeadsUpPresented = false
                 notifications.schedule(settings: settings, snapshot: snapshot, now: now)
@@ -225,8 +257,11 @@ final class BreakEngine: ObservableObject {
             customFilename: settings.customization.customSoundFilename,
             isCompletion: false
         )
+        playHaptic(.warning)
         notifications.notifyBreakStarted(duration: duration)
         SharedStore.defaults.set(endsAt, forKey: SharedStore.activeBreakEndKey)
+        // Lifts the shields at the end even if the app is suspended by then.
+        screenTime.scheduleBreakEnd(at: endsAt)
 
         if settings.automation.runStartShortcut {
             shortcuts.run(named: settings.automation.startShortcutName)
@@ -246,6 +281,7 @@ final class BreakEngine: ObservableObject {
             customFilename: settings.customization.customSoundFilename,
             isCompletion: true
         )
+        if completed { playHaptic(.success) }
         notifications.schedule(settings: settings, snapshot: snapshot, now: now)
 
         if settings.automation.runEndShortcut {
@@ -253,9 +289,15 @@ final class BreakEngine: ObservableObject {
         }
     }
 
+    private func playHaptic(_ type: UINotificationFeedbackGenerator.FeedbackType) {
+        guard settings.customization.hapticsEnabled else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(type)
+    }
+
     private func didLeaveBreak() {
         isBreakPresented = false
         screenTime.clearShield()
+        screenTime.cancelBreakEnd()
         SharedStore.defaults.removeObject(forKey: SharedStore.activeBreakEndKey)
         Task { await liveActivity.end() }
     }
@@ -268,6 +310,9 @@ final class BreakEngine: ObservableObject {
         } else {
             isBreakPresented = false
             screenTime.clearShield()
+            screenTime.cancelBreakEnd()
+            SharedStore.defaults.removeObject(forKey: SharedStore.activeBreakEndKey)
+            Task { await liveActivity.end() }
         }
         save()
     }

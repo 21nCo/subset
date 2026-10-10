@@ -54,7 +54,7 @@ struct ActivitySignals {
     // MARK: - Microphone
 
     /// True when any other process is capturing audio input. On macOS 14.2+ this uses the per-process
-    /// Core Audio objects; earlier systems fall back to "an input device is running".
+    /// Core Audio objects; earlier systems fall back to "an input-only device is running".
     static func isMicrophoneInUse() -> Bool {
         if #available(macOS 14.2, *) {
             if let inUse = anyProcessCapturingInput() { return inUse }
@@ -101,7 +101,10 @@ struct ActivitySignals {
             mElement: kAudioObjectPropertyElementMain
         )
         guard let devices: [AudioDeviceID] = audioObjectList(AudioObjectID(kAudioObjectSystemObject), &address) else { return false }
-        for device in devices where hasInputStreams(device) {
+        // "Running somewhere" also covers output, so a duplex device (a headset, or a USB interface) that is
+        // only playing audio would look like a call. Only input-only devices, such as the built-in
+        // microphone, are counted; a call on a duplex headset is missed on these older systems.
+        for device in devices where hasStreams(device, scope: kAudioObjectPropertyScopeInput) && !hasStreams(device, scope: kAudioObjectPropertyScopeOutput) {
             var runningAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -116,10 +119,10 @@ struct ActivitySignals {
         return false
     }
 
-    private static func hasInputStreams(_ device: AudioDeviceID) -> Bool {
+    private static func hasStreams(_ device: AudioDeviceID, scope: AudioObjectPropertyScope) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
-            mScope: kAudioObjectPropertyScopeInput,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0

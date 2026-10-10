@@ -18,16 +18,23 @@ final class NotificationActionRouter: NSObject, UNUserNotificationCenterDelegate
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // Only the explicit actions change state. A plain tap just opens the app.
         let command: String?
+        var snoozeMinutes: Int?
         switch response.actionIdentifier {
         case NotificationCoordinator.startAction: command = "start"
-        case NotificationCoordinator.snoozeOneAction: command = "snooze:1"
-        case NotificationCoordinator.snoozeFiveAction: command = "snooze:5"
-        case NotificationCoordinator.snoozeFifteenAction: command = "snooze:15"
-        default: command = response.notification.request.content.categoryIdentifier == SharedStore.notificationCategory ? "open" : nil
+        case NotificationCoordinator.snoozeOneAction: command = "snooze:1"; snoozeMinutes = 1
+        case NotificationCoordinator.snoozeFiveAction: command = "snooze:5"; snoozeMinutes = 5
+        case NotificationCoordinator.snoozeFifteenAction: command = "snooze:15"; snoozeMinutes = 15
+        default: command = nil
         }
         if let command {
             BreakRepository().setCommand(command)
+        }
+        if let snoozeMinutes {
+            // Snooze actions run in the background, where the engine's timer does not tick until the app is
+            // opened. Move the pending alert now so it does not fire at the original break time.
+            NotificationCoordinator.rescheduleBreakDue(after: TimeInterval(snoozeMinutes * 60), center: center)
         }
         completionHandler()
     }
@@ -65,9 +72,16 @@ final class NotificationCoordinator: ObservableObject {
         }
     }
 
+    private var scheduledWellness: WellnessSettings?
+
+    /// Schedules the heads-up and break-due alerts for the current interval, and the repeating wellness
+    /// reminders when their settings changed.
     func schedule(settings: BreakSettings, snapshot: EngineSnapshot, now: Date = .now) {
-        center.removePendingNotificationRequests(withIdentifiers: ["heads-up", "break-due", "posture", "blink"])
+        scheduleWellness(settings.wellness)
+        center.removePendingNotificationRequests(withIdentifiers: Self.breakAlertIDs)
         guard snapshot.phase == .focusing || snapshot.phase == .headsUp else { return }
+        // Outside office hours the engine does not start breaks, and it moves the break time when it gets there.
+        guard settings.officeHours.contains(snapshot.nextBreakAt) else { return }
 
         if settings.reminder.headsUpEnabled {
             add(
@@ -87,26 +101,48 @@ final class NotificationCoordinator: ObservableObject {
             category: Self.breakCategory,
             now: now
         )
+    }
 
-        if settings.wellness.postureEnabled {
+    /// Repeating reminders are replaced only when their settings change, so rescheduling the break alerts
+    /// does not restart (and keep postponing) their cadence.
+    private func scheduleWellness(_ wellness: WellnessSettings) {
+        guard wellness != scheduledWellness else { return }
+        scheduledWellness = wellness
+        center.removePendingNotificationRequests(withIdentifiers: ["posture", "blink"])
+        if wellness.postureEnabled {
             addRepeating(
                 id: "posture",
                 title: "Posture check",
                 body: "Relax your shoulders and let your spine lengthen.",
-                interval: settings.wellness.postureInterval
+                interval: wellness.postureInterval
             )
         }
-        if settings.wellness.blinkEnabled {
+        if wellness.blinkEnabled {
             addRepeating(
                 id: "blink",
                 title: "Blink slowly",
                 body: "A few full blinks help your eyes feel refreshed.",
-                interval: settings.wellness.blinkInterval
+                interval: wellness.blinkInterval
             )
         }
     }
 
+    nonisolated static let breakAlertIDs = ["heads-up", "break-due"]
+
+    nonisolated static func rescheduleBreakDue(after interval: TimeInterval, center: UNUserNotificationCenter) {
+        center.removePendingNotificationRequests(withIdentifiers: breakAlertIDs)
+        let content = UNMutableNotificationContent()
+        content.title = "Time to look into the distance"
+        content.body = "Take a short, screen-free pause."
+        content.categoryIdentifier = SharedStore.notificationCategory
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, interval), repeats: false)
+        center.add(UNNotificationRequest(identifier: "break-due", content: content, trigger: trigger))
+    }
+
     func notifyBreakStarted(duration: TimeInterval) {
+        // A break is running now; alerts for the interval it replaced must not fire during it.
+        center.removePendingNotificationRequests(withIdentifiers: Self.breakAlertIDs)
         let content = UNMutableNotificationContent()
         content.title = "Break started"
         content.body = "Step away for \(duration.compactDuration)."

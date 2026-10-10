@@ -14,7 +14,7 @@ struct SettingsView: View {
                     SettingsRow(icon: "eyes", color: BreakPalette.magenta, title: "Screen Breaks", subtitle: "Intervals, duration, enforcement")
                 }
                 NavigationLink { SmartPauseSettingsView() } label: {
-                    SettingsRow(icon: "pause.fill", color: BreakPalette.violet, title: "Smart Pause", subtitle: "Focus modes and high engagement")
+                    SettingsRow(icon: "pause.fill", color: BreakPalette.violet, title: "Smart Pause", subtitle: "Focus modes")
                 }
                 NavigationLink { WellnessSettingsView() } label: {
                     SettingsRow(icon: "heart.fill", color: BreakPalette.coral, title: "Wellness Reminders", subtitle: "Posture and blink nudges")
@@ -22,7 +22,7 @@ struct SettingsView: View {
             }
             Section("Behavior & Feedback") {
                 NavigationLink { AlertsSettingsView() } label: {
-                    SettingsRow(icon: "rectangle.topthird.inset.filled", color: BreakPalette.magenta, title: "Alerts / Nudges", subtitle: "Heads-up, countdown, overtime")
+                    SettingsRow(icon: "rectangle.topthird.inset.filled", color: BreakPalette.magenta, title: "Alerts / Nudges", subtitle: "Heads-up and countdown")
                 }
                 NavigationLink { AppearanceSettingsView() } label: {
                     SettingsRow(icon: "speaker.wave.2.fill", color: BreakPalette.coral, title: "Sounds & Appearance", subtitle: "Ambience, sound, messages")
@@ -74,20 +74,8 @@ struct SmartPauseSettingsView: View {
         Form {
             Section {
                 Toggle("Focus Mode", isOn: $engine.settings.smartPause.focusMode)
-                Toggle("Meetings or calls", isOn: $engine.settings.smartPause.meetingsAndCalls)
-                Toggle("Video or audio playback", isOn: $engine.settings.smartPause.mediaPlayback)
-                Toggle("Calendar events", isOn: $engine.settings.smartPause.calendarEvents)
-                Toggle("Deep focus apps", isOn: $engine.settings.smartPause.deepFocusApps)
-                Toggle("Fullscreen games", isOn: $engine.settings.smartPause.games)
-            } header: {
-                Text("High engagement activities")
             } footer: {
-                Text("iOS does not expose arbitrary app state to third-party apps. Focus Filters pause automatically; the other choices shape notifications and Screen Time behavior where the system provides a signal.")
-            }
-            Section("After an activity") {
-                Stepper(value: $engine.settings.smartPause.gracePeriod, in: 0...600, step: 30) {
-                    LabeledContent("Grace period", value: engine.settings.smartPause.gracePeriod.compactDuration)
-                }
+                Text("Add the Breaks Focus Filter to a Focus in the Settings app to pause reminders while that Focus is on. iOS does not let apps observe meetings, media playback, or other apps, so those pauses are available only in Breaks for Mac.")
             }
         }
         .navigationTitle("Smart Pause")
@@ -115,10 +103,6 @@ struct WellnessSettingsView: View {
                         LabeledContent("Remind every", value: engine.settings.wellness.blinkInterval.compactDuration)
                     }
                 }
-            }
-            Section("Presentation") {
-                Toggle("Dim the background", isOn: $engine.settings.wellness.dimsBackground)
-                Toggle("Use large reminders", isOn: $engine.settings.wellness.largePresentation)
             }
         }
         .navigationTitle("Wellness Reminders")
@@ -148,9 +132,6 @@ struct AlertsSettingsView: View {
                     Stepper(value: $engine.settings.reminder.headsUpLeadTime, in: 10...600, step: 10) {
                         LabeledContent("Show reminder", value: "\(engine.settings.reminder.headsUpLeadTime.compactDuration) before")
                     }
-                    Stepper(value: $engine.settings.reminder.visibleDuration, in: 5...60, step: 5) {
-                        LabeledContent("Keep visible for", value: engine.settings.reminder.visibleDuration.compactDuration)
-                    }
                 }
             }
             Section("Countdown before break") {
@@ -158,10 +139,6 @@ struct AlertsSettingsView: View {
                 Stepper(value: $engine.settings.reminder.countdownDuration, in: 3...15, step: 1) {
                     LabeledContent("Countdown duration", value: engine.settings.reminder.countdownDuration.compactDuration)
                 }
-            }
-            Section("Overtime nudge") {
-                Toggle("Enabled", isOn: $engine.settings.reminder.overtimeNudgeEnabled)
-                Toggle("Show even when paused", isOn: $engine.settings.reminder.overtimeShowsWhenPaused)
             }
         }
         .navigationTitle("Alerts / Nudges")
@@ -341,7 +318,7 @@ struct ScreenTimeSettingsView: View {
                     }
                 }
                 if !engine.screenTime.isAuthorized {
-                    Button("Authorize Screen Time") { Task { await engine.screenTime.requestAuthorization() } }
+                    Button("Authorize Screen Time") { Task { await engine.authorizeScreenTime() } }
                 }
             }
             Section("Enforcement") {

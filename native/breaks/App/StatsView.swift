@@ -30,17 +30,13 @@ struct StatsView: View {
     }
 
     private var daySelector: some View {
-        HStack {
-            Button(action: {}) { Image(systemName: "chevron.left") }.disabled(true)
-            Spacer()
-            VStack(spacing: 2) {
-                Text("Today's Screen Score").font(.headline)
-                Text(Date.now, format: .dateTime.weekday(.wide).month(.abbreviated).day())
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button(action: {}) { Image(systemName: "chevron.right") }.disabled(true)
+        // Only today is shown; there is no history browser yet, so there are no day arrows.
+        VStack(spacing: 2) {
+            Text("Today's Screen Score").font(.headline)
+            Text(Date.now, format: .dateTime.weekday(.wide).month(.abbreviated).day())
+                .font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity)
         .glassCard(padding: 12)
     }
 
@@ -72,8 +68,8 @@ struct StatsView: View {
                 Label("Break Stats", systemImage: "leaf.fill")
                     .font(.headline).foregroundStyle(BreakPalette.teal)
                 MetricValueRow(label: "Total break time", value: engine.dashboardStats.breakTime.compactDuration)
-                MetricValueRow(label: "Short breaks", value: "\(engine.records.filter { $0.kind == .short && $0.completed }.count)")
-                MetricValueRow(label: "Long & planned", value: "\(engine.records.filter { ($0.kind == .long || $0.kind == .planned) && $0.completed }.count)")
+                MetricValueRow(label: "Short breaks", value: "\(todayRecords.filter { $0.kind == .short && $0.completed }.count)")
+                MetricValueRow(label: "Long & planned", value: "\(todayRecords.filter { ($0.kind == .long || $0.kind == .planned) && $0.completed }.count)")
             }
             .glassCard()
         }

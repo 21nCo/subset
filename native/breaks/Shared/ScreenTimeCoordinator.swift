@@ -7,7 +7,11 @@ import ManagedSettings
 final class ScreenTimeCoordinator: ObservableObject {
     @Published private(set) var authorizationStatus: AuthorizationStatus
     @Published var selection: FamilyActivitySelection {
-        didSet { saveSelection() }
+        didSet {
+            saveSelection()
+            // The focus-window event captures the selected tokens, so register it again with the new ones.
+            if let lastSettings { refreshSchedules(settings: lastSettings) }
+        }
     }
     @Published var isPickerPresented = false
     @Published private(set) var lastError: String?
@@ -15,6 +19,10 @@ final class ScreenTimeCoordinator: ObservableObject {
     private let authorizationCenter = AuthorizationCenter.shared
     private let store = ManagedSettingsStore(named: .breakReminder)
     private let activityCenter = DeviceActivityCenter()
+    private var lastSettings: BreakSettings?
+
+    /// Device Activity rejects monitored intervals shorter than this.
+    static let minimumMonitoredInterval: TimeInterval = 15 * 60
 
     init() {
         authorizationStatus = AuthorizationCenter.shared.authorizationStatus
@@ -42,6 +50,15 @@ final class ScreenTimeCoordinator: ObservableObject {
         }
     }
 
+    /// Whether a shield applied with these settings would restrict anything.
+    func shieldsSomething(settings: BreakSettings) -> Bool {
+        guard settings.screenTimeEnforcement, isAuthorized else { return false }
+        return settings.shieldEveryAppAndWebsite
+            || !selection.applicationTokens.isEmpty
+            || !selection.categoryTokens.isEmpty
+            || !selection.webDomainTokens.isEmpty
+    }
+
     func applyShield(settings: BreakSettings) {
         guard settings.screenTimeEnforcement, isAuthorized else { return }
 
@@ -59,7 +76,32 @@ final class ScreenTimeCoordinator: ObservableObject {
         store.clearAllSettings()
     }
 
+    /// Registers a one-off interval that ends at `endsAt`, so the Device Activity monitor lifts the shields when
+    /// the break ends even if the app is suspended. The interval starts in the past because Device Activity
+    /// needs at least 15 minutes; only its end matters.
+    func scheduleBreakEnd(at endsAt: Date) {
+        activityCenter.stopMonitoring([.activeBreak])
+        guard isAuthorized else { return }
+        let components: Set<Calendar.Component> = [.year, .month, .day, .hour, .minute, .second]
+        let calendar = Calendar.current
+        let schedule = DeviceActivitySchedule(
+            intervalStart: calendar.dateComponents(components, from: endsAt.addingTimeInterval(-Self.minimumMonitoredInterval)),
+            intervalEnd: calendar.dateComponents(components, from: endsAt),
+            repeats: false
+        )
+        do {
+            try activityCenter.startMonitoring(.activeBreak, during: schedule)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func cancelBreakEnd() {
+        activityCenter.stopMonitoring([.activeBreak])
+    }
+
     func refreshSchedules(settings: BreakSettings) {
+        lastSettings = settings
         let owned = activityCenter.activities.filter { $0.rawValue.hasPrefix("break.") }
         activityCenter.stopMonitoring(owned)
         guard isAuthorized else { return }
@@ -71,8 +113,10 @@ final class ScreenTimeCoordinator: ObservableObject {
     }
 
     private func scheduleFocusWindow(settings: BreakSettings) {
-        let start = DateComponents(hour: settings.officeHours.startHour, minute: settings.officeHours.startMinute)
-        let end = DateComponents(hour: settings.officeHours.endHour, minute: settings.officeHours.endMinute)
+        // Without office hours, reminders run all day. The monitor checks the office-hours weekdays itself.
+        let hours = settings.officeHours
+        let start = hours.isEnabled ? DateComponents(hour: hours.startHour, minute: hours.startMinute) : DateComponents(hour: 0, minute: 0)
+        let end = hours.isEnabled ? DateComponents(hour: hours.endHour, minute: hours.endMinute) : DateComponents(hour: 23, minute: 59)
         let schedule = DeviceActivitySchedule(intervalStart: start, intervalEnd: end, repeats: true, warningTime: DateComponents(minute: 1))
         let event = DeviceActivityEvent(
             applications: selection.applicationTokens,
@@ -91,7 +135,7 @@ final class ScreenTimeCoordinator: ObservableObject {
         let start = DateComponents(hour: planned.hour, minute: planned.minute)
         let endDate = Calendar.current.date(
             byAdding: .second,
-            value: Int(planned.duration),
+            value: Int(max(Self.minimumMonitoredInterval, planned.duration)),
             to: Calendar.current.date(from: start) ?? .now
         )
         let end = DateComponents(

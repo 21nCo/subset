@@ -20,11 +20,8 @@ final class BreakShieldConfigurationDataSource: ShieldConfigurationDataSource {
     }
 
     private func configuration(for itemName: String) -> ShieldConfiguration {
-        let end = SharedStore.defaults.object(forKey: SharedStore.activeBreakEndKey) as? Date
-        let remaining = max(0, end?.timeIntervalSinceNow ?? 0)
-        let subtitle = remaining > 0
-            ? "Let your eyes rest. \(remaining.compactDuration) remaining before \(itemName) is available."
-            : "Your break is active. Take one slow breath before returning."
+        // The system may keep showing this configuration for a while, so it states no countdown that would go stale.
+        let subtitle = "Let your eyes rest. \(itemName) is available again when your break ends."
 
         return ShieldConfiguration(
             backgroundBlurStyle: .systemUltraThinMaterialDark,

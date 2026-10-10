@@ -306,7 +306,14 @@ private struct WeekdayPicker: View {
             ForEach(1...7, id: \.self) { day in
                 Toggle(symbols[day - 1], isOn: Binding(
                     get: { selection.contains(day) },
-                    set: { isOn in if isOn { selection.insert(day) } else { selection.remove(day) } }
+                    // At least one day stays selected; an empty schedule would never run.
+                    set: { isOn in
+                        if isOn {
+                            selection.insert(day)
+                        } else if selection.count > 1 {
+                            selection.remove(day)
+                        }
+                    }
                 ))
                 .toggleStyle(.button)
                 .accessibilityLabel(names[day - 1])

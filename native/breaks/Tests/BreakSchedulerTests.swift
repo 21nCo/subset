@@ -66,9 +66,10 @@ final class BreakSchedulerTests: XCTestCase {
     }
 
     func testHeadsUpRespectsLeadTimeAndToggle() {
-        var scheduler = makeScheduler { $0.reminder.headsUpLeadTime = 60 }
-        XCTAssertTrue(run(&scheduler, from: t0, seconds: 20 * 60 - 61).isEmpty)
-        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(20 * 60 - 60)), [.headsUp(breakAt: t0.addingTimeInterval(20 * 60))])
+        // A non-default lead time, so a hard-coded 60 seconds would fail.
+        var scheduler = makeScheduler { $0.reminder.headsUpLeadTime = 120 }
+        XCTAssertTrue(run(&scheduler, from: t0, seconds: 20 * 60 - 121).isEmpty)
+        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(20 * 60 - 120)), [.headsUp(breakAt: t0.addingTimeInterval(20 * 60))])
         XCTAssertEqual(scheduler.phase, .headsUp)
 
         var silent = makeScheduler { $0.reminder.headsUpEnabled = false }
@@ -111,6 +112,43 @@ final class BreakSchedulerTests: XCTestCase {
         let events = run(&scheduler, from: start, seconds: 5 * 60 + 30)
         XCTAssertEqual(events.filter { $0 == .breakStarted(.planned, duration: 300) }.count, 1)
         XCTAssertEqual(scheduler.snapshot.activePlannedBreakName, "Walk")
+    }
+
+    func testPlannedBreakRunsOutsideOfficeHours() {
+        var scheduler = makeScheduler {
+            $0.officeHours = OfficeHours(isEnabled: true, startHour: 12, startMinute: 0, endHour: 18, endMinute: 0, weekdays: [2, 3, 4, 5, 6])
+            $0.plannedBreaks = [PlannedBreak(name: "Walk", symbol: "figure.walk", hour: 10, minute: 5, duration: 300, weekdays: [2], isEnabled: true)]
+        }
+        let events = run(&scheduler, from: t0, seconds: 5 * 60 + 1)
+        XCTAssertTrue(events.contains(.breakStarted(.planned, duration: 300)))
+    }
+
+    func testLatePlannedBreakGetsOnlyTheTimeLeft() {
+        let planned = PlannedBreak(name: "Walk", symbol: "figure.walk", hour: 10, minute: 0, duration: 900, weekdays: [2], isEnabled: true)
+        // A host that was asleep at 10:00 ticks again at 10:10.
+        var scheduler = makeScheduler { $0.workInterval = 120 * 60; $0.plannedBreaks = [planned] }
+        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(600)), [.breakStarted(.planned, duration: 300)])
+
+        // A monitor-reported start joins the same occurrence once, for the time left.
+        var joined = makeScheduler { $0.workInterval = 120 * 60; $0.plannedBreaks = [planned] }
+        XCTAssertEqual(joined.startPlannedBreak(id: planned.id, now: t0.addingTimeInterval(840)), [.breakStarted(.planned, duration: 60)])
+        _ = joined.endBreak(completed: true, now: t0.addingTimeInterval(900))
+        XCTAssertTrue(joined.startPlannedBreak(id: planned.id, now: t0.addingTimeInterval(899)).isEmpty)
+        // After its scheduled end it does not start at all.
+        var expired = makeScheduler { $0.plannedBreaks = [planned] }
+        XCTAssertTrue(expired.startPlannedBreak(id: planned.id, now: t0.addingTimeInterval(901)).isEmpty)
+    }
+
+    func testHeadsUpIsCancelledWhenOfficeHoursEnd() {
+        var scheduler = makeScheduler {
+            $0.officeHours = OfficeHours(isEnabled: true, startHour: 8, startMinute: 0, endHour: 10, endMinute: 20, weekdays: [2])
+        }
+        // The heads-up for the 10:20 break shows at 10:19; office hours end at 10:20.
+        let events = run(&scheduler, from: t0, seconds: 20 * 60)
+        XCTAssertTrue(events.contains(.headsUp(breakAt: t0.addingTimeInterval(20 * 60))))
+        XCTAssertEqual(events.last, .headsUpCancelled)
+        XCTAssertEqual(scheduler.phase, .focusing)
+        XCTAssertFalse(events.contains { if case .breakStarted = $0 { true } else { false } })
     }
 
     // MARK: - Discipline, skip, and snooze
@@ -165,6 +203,14 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.snapshot.snoozesUsedToday, 1)
     }
 
+    func testRunningPlannedBreakCannotBeSnoozed() {
+        var scheduler = makeScheduler { $0.discipline = .casual }
+        _ = scheduler.startBreak(kind: .planned, duration: 900, plannedName: "Walk", now: t0)
+        XCTAssertFalse(scheduler.canSnoozeActiveBreak(now: t0.addingTimeInterval(10)))
+        XCTAssertTrue(scheduler.snooze(minutes: 1, now: t0.addingTimeInterval(10)).isEmpty)
+        XCTAssertEqual(scheduler.phase, .breaking)
+    }
+
     func testSkipUpcomingBreakRecordsSkipAndRestartsInterval() {
         var scheduler = makeScheduler { $0.discipline = .balanced }
         let now = t0.addingTimeInterval(600)
@@ -212,6 +258,18 @@ final class BreakSchedulerTests: XCTestCase {
         let back = leftAt.addingTimeInterval(6 * 60 + 1)
         _ = scheduler.tick(now: back, inputs: .init(idleSeconds: 1))
         XCTAssertEqual(scheduler.snapshot.nextBreakAt, back.addingTimeInterval(20 * 60))
+    }
+
+    func testIdleAfterSmartPauseCreditsOnlyCountedTime() {
+        var scheduler = makeScheduler { $0.smartPause.gracePeriod = 0 }
+        // 5 minutes of focus, then a 10-minute call; there was no input for its last 4 minutes.
+        let callAt = t0.addingTimeInterval(5 * 60)
+        XCTAssertEqual(scheduler.tick(now: callAt, inputs: .init(signals: [.meeting])), [.paused(.meeting)])
+        let ended = callAt.addingTimeInterval(10 * 60)
+        let events = scheduler.tick(now: ended, inputs: .init(idleSeconds: 4 * 60))
+        XCTAssertEqual(events, [.resumed(.meeting), .paused(.idle)])
+        // The timer was frozen during the call, so none of those 4 idle minutes is given back.
+        XCTAssertEqual(scheduler.snapshot.pausedRemaining, 15 * 60)
     }
 
     func testIdleIgnoredWhenDisabled() {
@@ -308,6 +366,27 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertFalse(scheduler.reconcileRestoredState(now: t0.addingTimeInterval(60)))
         XCTAssertEqual(scheduler.phase, .focusing)
         XCTAssertNil(scheduler.snapshot.breakEndsAt)
+        // The break ran its full length while the app was not running, so it counts as completed.
+        XCTAssertEqual(scheduler.records.count, 1)
+        XCTAssertEqual(scheduler.records.first?.completed, true)
+        XCTAssertEqual(scheduler.records.first?.endedAt, t0.addingTimeInterval(20))
+        XCTAssertEqual(scheduler.snapshot.nextBreakAt, t0.addingTimeInterval(60 + 20 * 60))
+    }
+
+    func testRestoredFocusPauseIsKept() {
+        var scheduler = makeScheduler()
+        _ = scheduler.pause(reason: .focus, now: t0.addingTimeInterval(1))
+        scheduler.reconcileRestoredState(now: t0.addingTimeInterval(2))
+        XCTAssertEqual(scheduler.phase, .paused)
+        XCTAssertEqual(scheduler.pauseReasonForTest, .focus)
+    }
+
+    func testRestoredHeadsUpIsShownAgain() {
+        var scheduler = makeScheduler()
+        let headsUpAt = t0.addingTimeInterval(20 * 60 - 60)
+        XCTAssertEqual(scheduler.tick(now: headsUpAt), [.headsUp(breakAt: t0.addingTimeInterval(20 * 60))])
+        scheduler.reconcileRestoredState(now: headsUpAt.addingTimeInterval(5))
+        XCTAssertEqual(scheduler.tick(now: headsUpAt.addingTimeInterval(6)), [.headsUp(breakAt: t0.addingTimeInterval(20 * 60))])
     }
 
     func testRestoredAutomaticPauseIsCleared() {

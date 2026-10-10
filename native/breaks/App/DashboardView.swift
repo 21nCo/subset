@@ -73,13 +73,16 @@ struct DashboardView: View {
                 .tint(BreakPalette.amber)
                 .accessibilityLabel("Focus interval progress")
 
-            HStack(spacing: 8) {
-                Button("Start break") { engine.startBreak(kind: .manual) }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.white)
-                    .foregroundStyle(.black)
-                    .keyboardShortcut("b", modifiers: .command)
-                SnoozeButtons(engine: engine)
+            // On narrow phones the snooze buttons move to their own row instead of being cut off.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    startBreakButton
+                    SnoozeButtons(engine: engine)
+                }
+                VStack(spacing: 8) {
+                    startBreakButton
+                    HStack(spacing: 8) { SnoozeButtons(engine: engine) }
+                }
             }
             .controlSize(.regular)
 
@@ -87,6 +90,14 @@ struct DashboardView: View {
         }
         .frame(maxWidth: .infinity)
         .glassCard(padding: 22)
+    }
+
+    private var startBreakButton: some View {
+        Button("Start break") { engine.startBreak(kind: .manual) }
+            .buttonStyle(.borderedProminent)
+            .tint(.white)
+            .foregroundStyle(.black)
+            .keyboardShortcut("b", modifiers: .command)
     }
 
     private var scoreCard: some View {
@@ -185,20 +196,30 @@ struct HeadsUpView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            HStack(spacing: 8) {
-                Button("Start now") {
-                    dismiss()
-                    engine.startBreak(kind: engine.upcomingBreakKind)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    startNowButton
+                    SnoozeButtons(engine: engine) { dismiss() }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.white)
-                .foregroundStyle(.black)
-                .keyboardShortcut(.defaultAction)
-                SnoozeButtons(engine: engine) { dismiss() }
+                VStack(spacing: 8) {
+                    startNowButton
+                    HStack(spacing: 8) { SnoozeButtons(engine: engine) { dismiss() } }
+                }
             }
             SnoozeAllowanceNote(remaining: engine.snoozesRemaining, allowed: engine.settings.snoozesAllowedPerDay)
         }
         .padding(24)
+    }
+
+    private var startNowButton: some View {
+        Button("Start now") {
+            dismiss()
+            engine.startBreak(kind: engine.upcomingBreakKind)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.white)
+        .foregroundStyle(.black)
+        .keyboardShortcut(.defaultAction)
     }
 }
 
