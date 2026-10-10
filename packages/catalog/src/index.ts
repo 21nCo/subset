@@ -37,9 +37,9 @@ export const capabilities = [
   },
   {
     id: 'pdf-review',
-    name: 'PDF annotation and review',
-    summary: 'Annotate a PDF and review marked passages in a focused workspace.',
-    state: 'planned',
+    name: 'Annotate',
+    summary: 'Mark up a PDF with ink, highlights, notes, shapes, and links, then export an annotated copy while the original stays untouched.',
+    state: 'building',
     proposedSurfaces: ['web', 'macos', 'ios', 'embed', 'agent-view'],
     availableSurfaces: []
   },
