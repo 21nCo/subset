@@ -32,6 +32,18 @@ final class DictationManager: ObservableObject {
     private var lastInsertedAt = Date.distantPast
     private var currentInsertSessionID: UUID?
     private var completedInsertSessions: [UUID: Date] = [:]
+    /// Set synchronously when a session is requested, before the permission prompt or model
+    /// preparation, so a release or Esc during that wait cancels the pending start.
+    private var isSessionRequested = false
+    /// Incremented whenever a pending or active session is abandoned.
+    private var sessionGeneration = 0
+
+    /// True from a start request until the session's audio capture has ended.
+    var isSessionActive: Bool { isSessionRequested || transcriptState.isRecording }
+
+    /// True while a session is pending, recording, finalizing, or being cancelled; a new
+    /// session must not start until this is false.
+    var isBusy: Bool { isSessionActive || isStoppingAndInserting || isFinalizing || isCancelling }
 
     init(store: SharedTranscriptStore = .shared) {
         self.store = store
@@ -41,8 +53,13 @@ final class DictationManager: ObservableObject {
         loadedSettings.useCoreML = true
         loadedSettings.localModelName = loadedSettings.whisperModelPreset.ggmlFilename
         self.settings = loadedSettings
-        self.transcriptState = store.loadState()
-        self.transcriptState.backendKind = .whisperCppLocal
+        var loadedState = store.loadState()
+        // A quit or crash mid-session leaves the persisted state marked as recording; no
+        // backend survives a relaunch, so reset the transient session fields.
+        loadedState.isRecording = false
+        loadedState.partialText = ""
+        loadedState.backendKind = .whisperCppLocal
+        self.transcriptState = loadedState
         observeActiveApplications()
         refreshPermissionStatus()
         refreshLocalModelStatus()
@@ -60,9 +77,13 @@ final class DictationManager: ObservableObject {
     }
 
     func startDictation() {
+        guard !isBusy else { return }
+        isSessionRequested = true
+        sessionGeneration += 1
+        let generation = sessionGeneration
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard !transcriptState.isRecording else { return }
+            guard generation == sessionGeneration, isSessionRequested else { return }
             persistState(status: "Starting local dictation...")
             currentInsertSessionID = UUID()
             if insertionTarget == nil {
@@ -70,9 +91,12 @@ final class DictationManager: ObservableObject {
                     ?? lastExternalInsertionTarget.map { ActiveAppInsertionTarget(application: $0, focusedElement: nil) }
             }
             guard await requestPermissionIfNeeded() else {
+                if generation == sessionGeneration { isSessionRequested = false }
                 persistState(status: "Microphone permission is required in the host app before dictation can start.")
                 return
             }
+            // The key was released or Esc pressed while the permission prompt was up.
+            guard generation == sessionGeneration, isSessionRequested else { return }
 
             let backend = DictationBackendFactory.makeBackend(for: settings)
             self.backend = backend
@@ -111,9 +135,9 @@ final class DictationManager: ObservableObject {
     /// Starts or stops dictation from a window or menu control (no hotkey held).
     /// Stopping from the UI keeps the transcript in Dictate instead of inserting it elsewhere.
     func toggleDictationFromUI() {
-        if transcriptState.isRecording {
+        if isSessionActive {
             stopDictation()
-        } else {
+        } else if !isBusy {
             rememberInsertionTarget()
             startDictation()
         }
@@ -131,6 +155,8 @@ final class DictationManager: ObservableObject {
     }
 
     func stopDictation() {
+        if abandonPendingStart(status: "Dictation stopped.") { return }
+        isSessionRequested = false
         Task { @MainActor [weak self] in
             guard let self else { return }
             isFinalizing = true
@@ -153,10 +179,12 @@ final class DictationManager: ObservableObject {
     }
 
     func stopDictationAndInsert() {
+        if abandonPendingStart(status: "Dictation stopped.") { return }
+        guard transcriptState.isRecording, !isStoppingAndInserting, !isCancelling else { return }
+        isSessionRequested = false
+        isStoppingAndInserting = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard !isStoppingAndInserting, !isCancelling else { return }
-            isStoppingAndInserting = true
             isFinalizing = true
             defer {
                 isStoppingAndInserting = false
@@ -185,7 +213,9 @@ final class DictationManager: ObservableObject {
 
     /// Ends the current session without inserting anything and discards its transcript.
     func cancelDictation() {
+        if abandonPendingStart(status: "Dictation cancelled. Nothing was inserted.") { return }
         guard transcriptState.isRecording, !isCancelling else { return }
+        isSessionRequested = false
         isCancelling = true
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -205,12 +235,29 @@ final class DictationManager: ObservableObject {
         }
     }
 
+    /// Abandons a session that was requested but has not started capturing yet (for example,
+    /// the microphone prompt is still open). Returns true if there was one.
+    private func abandonPendingStart(status: String) -> Bool {
+        guard isSessionRequested, !transcriptState.isRecording else { return false }
+        isSessionRequested = false
+        sessionGeneration += 1
+        insertionTarget = nil
+        currentInsertSessionID = nil
+        persistState(status: status)
+        return true
+    }
+
+    /// The text `copyLastTranscript()` would copy.
+    var copyableTranscript: String {
+        lastTranscript.isEmpty
+            ? transcriptState.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            : lastTranscript
+    }
+
     /// Copies the most recent final transcript to the general pasteboard.
     @discardableResult
     func copyLastTranscript() -> Bool {
-        let text = lastTranscript.isEmpty
-            ? transcriptState.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            : lastTranscript
+        let text = copyableTranscript
         guard !text.isEmpty else {
             persistState(status: "Nothing to copy yet.")
             return false
@@ -361,9 +408,16 @@ final class DictationManager: ObservableObject {
     }
 
     private func handleStreamError(_ error: Error) {
+        // Make sure capture is really stopped; the backend may still hold the microphone.
+        let failedBackend = backend
+        backend = nil
+        streamingTask = nil
+        isSessionRequested = false
+        Task { await failedBackend?.stopStreaming() }
         transcriptState.isRecording = false
         microphoneLevel = 0
         insertionTarget = nil
+        currentInsertSessionID = nil
         persistState(status: "Stream failed: \(error.localizedDescription)")
     }
 

@@ -14,9 +14,23 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "69E9CCDCC2196B476AC7628E"
+               BlueprintIdentifier = "3F7B2F894C01B5FAFED32996"
                BuildableName = "Dictate.app"
                BlueprintName = "Dictate"
+               ReferencedContainer = "container:Dictate.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "211C833780E971BCDF7E6AE9"
+               BuildableName = "DictateTests.xctest"
+               BlueprintName = "DictateTests"
                ReferencedContainer = "container:Dictate.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -30,13 +44,23 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "69E9CCDCC2196B476AC7628E"
+            BlueprintIdentifier = "3F7B2F894C01B5FAFED32996"
             BuildableName = "Dictate.app"
             BlueprintName = "Dictate"
             ReferencedContainer = "container:Dictate.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "211C833780E971BCDF7E6AE9"
+               BuildableName = "DictateTests.xctest"
+               BlueprintName = "DictateTests"
+               ReferencedContainer = "container:Dictate.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
@@ -53,7 +77,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "69E9CCDCC2196B476AC7628E"
+            BlueprintIdentifier = "3F7B2F894C01B5FAFED32996"
             BuildableName = "Dictate.app"
             BlueprintName = "Dictate"
             ReferencedContainer = "container:Dictate.xcodeproj">
@@ -70,7 +94,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "69E9CCDCC2196B476AC7628E"
+            BlueprintIdentifier = "3F7B2F894C01B5FAFED32996"
             BuildableName = "Dictate.app"
             BlueprintName = "Dictate"
             ReferencedContainer = "container:Dictate.xcodeproj">

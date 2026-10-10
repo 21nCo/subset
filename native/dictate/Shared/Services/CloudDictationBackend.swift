@@ -13,6 +13,11 @@ final class CloudDictationBackend: DictationBackend {
                 continuation.yield(.status("Cloud adapter scaffold active. Replace this with your deployed-model streaming client."))
                 continuation.yield(.partial("connecting to \(context.settings.deployedModelName)"))
                 try? await Task.sleep(for: .milliseconds(450))
+                // A stopped session must not deliver a final transcript.
+                guard !Task.isCancelled else {
+                    continuation.finish()
+                    return
+                }
                 continuation.yield(.final("cloud backend ready for endpoint integration"))
                 continuation.finish()
             }

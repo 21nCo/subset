@@ -79,7 +79,11 @@ enum ActiveAppTextInjector {
     }
 
     static func captureTarget(excludingSelf: Bool = true) -> ActiveAppInsertionTarget? {
-        let focusedElement = copyFocusedElement(from: AXUIElementCreateSystemWide())
+        var focusedElement = copyFocusedElement(from: AXUIElementCreateSystemWide())
+        // A field inside Dictate itself is never an insertion target.
+        if excludingSelf, let element = focusedElement, processIdentifier(of: element) == ProcessInfo.processInfo.processIdentifier {
+            focusedElement = nil
+        }
         let focusedApplication = focusedElement.flatMap(applicationTarget(for:))
         let application = focusedApplication ?? currentApplicationTarget(excludingSelf: excludingSelf)
 
@@ -113,14 +117,17 @@ enum ActiveAppTextInjector {
             throw ActiveAppTextInjectorError.failedToInsertText
         }
 
-        if !shouldBypassAccessibility, replaceSelectedTextOnCurrentFocusedElement(trimmed) {
-            return .accessibilityCurrent
-        }
-
+        // The element captured when dictation started comes first; live focus is used only
+        // when it belongs to the same app, so switching apps mid-dictation cannot redirect text.
         if !shouldBypassAccessibility,
            let focusedElement = target?.focusedElement,
            replaceSelectedText(trimmed, on: focusedElement) {
             return .accessibilityFocused
+        }
+
+        if !shouldBypassAccessibility,
+           replaceSelectedTextOnCurrentFocusedElement(trimmed, requiredPID: targetApplication?.processIdentifier) {
+            return .accessibilityCurrent
         }
 
         if shouldRetargetCurrentFrontmostApp(to: targetApplication) {
@@ -137,138 +144,87 @@ enum ActiveAppTextInjector {
             throw ActiveAppTextInjectorError.postEventPermissionMissing
         }
 
-        let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string)
+        let pasteboard = PasteboardGuard(.general)
 
         if shouldBypassAccessibility {
-            pasteboard.clearContents()
-            pasteboard.setString(trimmed, forType: .string)
+            pasteboard.write(trimmed)
             do {
                 switch richEditorInsertionStrategy(for: targetApplication, target: target) {
                 case .targetedPaste:
-                    if let targetPID = targetApplication?.processIdentifier {
-                        try postCommandV(targetPID: targetPID)
-                    } else {
-                        try postCommandV(targetPID: nil)
-                    }
+                    try postCommandV(targetPID: targetApplication?.processIdentifier)
                     try await Task.sleep(for: richEditorSettleDelay(for: targetApplication))
-                    restorePasteboard(previous)
+                    pasteboard.restore()
                     markInsertion(text: trimmed, application: targetApplication)
                     return .targetedPasteFallback
                 case .systemEventsMenuPaste:
                     try pasteViaSystemEventsMenu(on: targetApplication)
                     try await Task.sleep(for: richEditorSettleDelay(for: targetApplication))
-                    restorePasteboard(previous)
+                    pasteboard.restore()
                     markInsertion(text: trimmed, application: targetApplication)
                     return .systemEventsMenuPasteFallback
                 case .systemEventsTyping:
-                    restorePasteboard(previous)
+                    pasteboard.restore()
                     try typeViaSystemEvents(text: trimmed, on: targetApplication)
                     try await Task.sleep(for: richEditorSettleDelay(for: targetApplication))
                     markInsertion(text: trimmed, application: targetApplication)
                     return .systemEventsTypingFallback
                 }
             } catch {
-                restorePasteboard(previous)
+                pasteboard.restore()
                 throw error
             }
         }
 
-        if let targetPID = targetApplication?.processIdentifier {
+        // Each remaining method sends text that cannot be withdrawn. Move on to the next one
+        // only when the target exposes its text and the transcript is verifiably absent;
+        // otherwise a target without readable AX text would receive one copy per method.
+        let targetPID = targetApplication?.processIdentifier
+        func finished(_ method: ActiveAppInsertionMethod) -> ActiveAppInsertionMethod? {
+            guard insertionCheck(text: trimmed, targetPID: targetPID) != .absent else { return nil }
+            pasteboard.restore()
+            markInsertion(text: trimmed, application: targetApplication)
+            return method
+        }
+
+        if let targetPID {
             try typeUnicodeText(trimmed, targetPID: targetPID)
             try await Task.sleep(for: .milliseconds(220))
-
-            if didInsert(text: trimmed, targetPID: targetPID) {
-                markInsertion(text: trimmed, application: targetApplication)
-                return .targetedSyntheticTyping
-            }
-
-            if shouldBypassAccessibility {
-                markInsertion(text: trimmed, application: targetApplication)
-                return .targetedSyntheticTyping
-            }
+            if let method = finished(.targetedSyntheticTyping) { return method }
         }
 
         try typeUnicodeText(trimmed, targetPID: nil)
         try await Task.sleep(for: .milliseconds(80))
+        if let method = finished(.syntheticTyping) { return method }
 
-        if didInsert(text: trimmed, targetPID: targetApplication?.processIdentifier) {
-            markInsertion(text: trimmed, application: targetApplication)
-            return .syntheticTyping
-        }
-
-        pasteboard.clearContents()
-        pasteboard.setString(trimmed, forType: .string)
-
-        if let targetPID = targetApplication?.processIdentifier {
-            try postCommandV(targetPID: targetPID)
-            try await Task.sleep(for: .milliseconds(260))
-
-            if didInsert(text: trimmed, targetPID: targetPID) {
-                restorePasteboard(previous)
-                markInsertion(text: trimmed, application: targetApplication)
-                return .targetedPasteFallback
-            }
-
-            if shouldBypassAccessibility {
-                restorePasteboard(previous)
-                markInsertion(text: trimmed, application: targetApplication)
-                return .targetedPasteFallback
-            }
-        }
-
-        try postCommandV(targetPID: nil)
-        try await Task.sleep(for: .milliseconds(120))
-
-        if didInsert(text: trimmed, targetPID: targetApplication?.processIdentifier) {
-            restorePasteboard(previous)
-            markInsertion(text: trimmed, application: targetApplication)
-            return .pasteFallback
-        }
-
+        pasteboard.write(trimmed)
         do {
+            if let targetPID {
+                try postCommandV(targetPID: targetPID)
+                try await Task.sleep(for: .milliseconds(260))
+                if let method = finished(.targetedPasteFallback) { return method }
+            }
+
+            try postCommandV(targetPID: nil)
+            try await Task.sleep(for: .milliseconds(120))
+            if let method = finished(.pasteFallback) { return method }
+
             try pasteViaSystemEvents(on: targetApplication)
             try await Task.sleep(for: .milliseconds(180))
+            if let method = finished(.systemEventsPasteFallback) { return method }
 
-            if didInsert(text: trimmed, targetPID: targetApplication?.processIdentifier) {
-                restorePasteboard(previous)
-                markInsertion(text: trimmed, application: targetApplication)
-                return .systemEventsPasteFallback
-            }
-        } catch {
-            restorePasteboard(previous)
-            throw error
-        }
-
-        do {
             try pasteViaSystemEventsMenu(on: targetApplication)
             try await Task.sleep(for: .milliseconds(220))
+            if let method = finished(.systemEventsMenuPasteFallback) { return method }
 
-            if didInsert(text: trimmed, targetPID: targetApplication?.processIdentifier) {
-                restorePasteboard(previous)
-                markInsertion(text: trimmed, application: targetApplication)
-                return .systemEventsMenuPasteFallback
-            }
-        } catch {
-            restorePasteboard(previous)
-            throw error
-        }
-
-        do {
             try typeViaSystemEvents(text: trimmed, on: targetApplication)
             try await Task.sleep(for: .milliseconds(220))
-
-            if didInsert(text: trimmed, targetPID: targetApplication?.processIdentifier) {
-                restorePasteboard(previous)
-                markInsertion(text: trimmed, application: targetApplication)
-                return .systemEventsTypingFallback
-            }
+            if let method = finished(.systemEventsTypingFallback) { return method }
         } catch {
-            restorePasteboard(previous)
+            pasteboard.restore()
             throw error
         }
 
-        restorePasteboard(previous)
+        pasteboard.restore()
         throw ActiveAppTextInjectorError.failedToInsertText
     }
 
@@ -580,21 +536,33 @@ enum ActiveAppTextInjector {
         return (value as! AXUIElement)
     }
 
-    private static func replaceSelectedTextOnCurrentFocusedElement(_ text: String) -> Bool {
+    private static func replaceSelectedTextOnCurrentFocusedElement(_ text: String, requiredPID: pid_t?) -> Bool {
         let systemWide = AXUIElementCreateSystemWide()
+        let accepts: (AXUIElement) -> Bool = { element in
+            guard let requiredPID else { return true }
+            return processIdentifier(of: element) == requiredPID
+        }
 
         if let focusedApplication = copyFocusedApplication(from: systemWide),
            let focusedElement = copyFocusedElement(from: focusedApplication),
+           accepts(focusedElement),
            replaceSelectedText(text, on: focusedElement) {
             return true
         }
 
         if let focusedElement = copyFocusedElement(from: systemWide),
+           accepts(focusedElement),
            replaceSelectedText(text, on: focusedElement) {
             return true
         }
 
         return false
+    }
+
+    private static func processIdentifier(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return nil }
+        return pid
     }
 
     private static func copyFocusedApplication(from element: AXUIElement) -> AXUIElement? {
@@ -719,35 +687,26 @@ enum ActiveAppTextInjector {
         return range
     }
 
-    private static func didInsert(text: String, targetPID: pid_t?) -> Bool {
-        let candidates = focusedElementCandidates(targetPID: targetPID)
-        for element in candidates {
-            if let selectedText = copyStringAttribute(kAXSelectedTextAttribute as CFString, from: element),
-               selectedText == text {
-                return true
-            }
-
-            if let value = copyStringAttribute(kAXValueAttribute as CFString, from: element),
-               value.contains(text) {
-                return true
-            }
-        }
-
-        return false
+    enum InsertionCheck: Equatable {
+        case confirmed
+        /// The focused element exposes its text and the transcript is not in it.
+        case absent
+        /// No focused element exposes readable text, so the result cannot be checked.
+        case unverifiable
     }
 
-    private static func restorePasteboard(_ previous: String?) {
-        let pasteboard = NSPasteboard.general
-        if let previous {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                pasteboard.clearContents()
-                pasteboard.setString(previous, forType: .string)
+    private static func insertionCheck(text: String, targetPID: pid_t?) -> InsertionCheck {
+        var sawReadableText = false
+        for element in focusedElementCandidates(targetPID: targetPID) {
+            if let selectedText = copyStringAttribute(kAXSelectedTextAttribute as CFString, from: element) {
+                if selectedText == text { return .confirmed }
             }
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                pasteboard.clearContents()
+            if let value = copyStringAttribute(kAXValueAttribute as CFString, from: element) {
+                sawReadableText = true
+                if value.contains(text) { return .confirmed }
             }
         }
+        return sawReadableText ? .absent : .unverifiable
     }
 
     private static func ensurePostEventAccess() -> Bool {
@@ -769,7 +728,11 @@ enum ActiveAppTextInjector {
         var startIndex = 0
 
         while startIndex < utf16Scalars.count {
-            let endIndex = min(startIndex + chunkSize, utf16Scalars.count)
+            var endIndex = min(startIndex + chunkSize, utf16Scalars.count)
+            // Never split a surrogate pair across two events.
+            if endIndex < utf16Scalars.count, UTF16.isLeadSurrogate(utf16Scalars[endIndex - 1]) {
+                endIndex -= 1
+            }
             let chunk = Array(utf16Scalars[startIndex..<endIndex])
 
             guard
@@ -945,6 +908,44 @@ enum ActiveAppTextInjector {
     private static func quotedAppleScript(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+}
+/// Saves every item and type on a pasteboard before Dictate writes a transcript to it, and
+/// restores them afterwards unless the user has copied something new in the meantime.
+@MainActor
+final class PasteboardGuard {
+    private let pasteboard: NSPasteboard
+    private let savedItems: [[(NSPasteboard.PasteboardType, Data)]]
+    private var ownChangeCount: Int?
+
+    init(_ pasteboard: NSPasteboard) {
+        self.pasteboard = pasteboard
+        savedItems = (pasteboard.pasteboardItems ?? []).map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        }
+    }
+
+    func write(_ text: String) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        ownChangeCount = pasteboard.changeCount
+    }
+
+    func restore(after delay: TimeInterval = 0.2) {
+        guard let expected = ownChangeCount else { return }
+        ownChangeCount = nil
+        let pasteboard = pasteboard
+        let items = savedItems
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard pasteboard.changeCount == expected else { return }
+            pasteboard.clearContents()
+            let restored = items.map { entries -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in entries { item.setData(data, forType: type) }
+                return item
+            }
+            if !restored.isEmpty { pasteboard.writeObjects(restored) }
+        }
     }
 }
 #endif

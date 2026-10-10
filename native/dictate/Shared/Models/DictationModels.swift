@@ -121,15 +121,16 @@ struct DictationSettings: Codable, Hashable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        backendKind = try container.decodeIfPresent(DictationBackendKind.self, forKey: .backendKind) ?? .mock
+        let defaults = DictationSettings.default
+        backendKind = try container.decodeIfPresent(DictationBackendKind.self, forKey: .backendKind) ?? defaults.backendKind
         let decodedPreset = try container.decodeIfPresent(WhisperModelPreset.self, forKey: .whisperModelPreset)
         let decodedLocalModelName = try container.decodeIfPresent(String.self, forKey: .localModelName)
         whisperModelPreset = decodedPreset ?? WhisperModelPreset.infer(from: decodedLocalModelName) ?? .baseEn
         localModelName = decodedLocalModelName ?? whisperModelPreset.ggmlFilename
-        useCoreML = try container.decodeIfPresent(Bool.self, forKey: .useCoreML) ?? true
-        deployedModelName = try container.decodeIfPresent(String.self, forKey: .deployedModelName) ?? "managed-dictation-v1"
-        deployedEndpointURL = try container.decodeIfPresent(String.self, forKey: .deployedEndpointURL) ?? "https://example.com/transcribe"
-        appGroupID = try container.decodeIfPresent(String.self, forKey: .appGroupID) ?? DictationSettings.defaultAppGroupID
+        useCoreML = try container.decodeIfPresent(Bool.self, forKey: .useCoreML) ?? defaults.useCoreML
+        deployedModelName = try container.decodeIfPresent(String.self, forKey: .deployedModelName) ?? defaults.deployedModelName
+        deployedEndpointURL = try container.decodeIfPresent(String.self, forKey: .deployedEndpointURL) ?? defaults.deployedEndpointURL
+        appGroupID = try container.decodeIfPresent(String.self, forKey: .appGroupID) ?? defaults.appGroupID
     }
 }
 

@@ -8,6 +8,9 @@ final class DictationAppController: ObservableObject {
     private let panelController = FloatingActivationPanelController.shared
     private let hotkeyMonitor = GlobalHotkeyMonitor.shared
     private var cancellables = Set<AnyCancellable>()
+    /// Whether the current fn press started a session. Only that press's release inserts,
+    /// so a press during finalization or during a window-started session does nothing.
+    private var pressStartedSession = false
 
     init(manager: DictationManager = DictationManager()) {
         self.manager = manager
@@ -26,20 +29,25 @@ final class DictationAppController: ObservableObject {
         hotkeyMonitor.start(
             onPress: { [weak self] in
                 guard let self else { return }
-                manager.rememberInsertionTarget()
-                if !manager.transcriptState.isRecording {
-                    manager.clearTranscript()
-                    manager.startDictation()
+                // Capture the insertion target only for a new session; a press while the
+                // previous one finalizes must not redirect its pending insertion.
+                guard !manager.isBusy else {
+                    pressStartedSession = false
+                    return
                 }
+                pressStartedSession = true
+                manager.rememberInsertionTarget()
+                manager.clearTranscript()
+                manager.startDictation()
             },
             onRelease: { [weak self] in
-                guard let self else { return }
-                if manager.transcriptState.isRecording {
-                    manager.stopDictationAndInsert()
-                }
+                guard let self, pressStartedSession else { return }
+                pressStartedSession = false
+                manager.stopDictationAndInsert()
             },
             onCancel: { [weak self] in
-                self?.manager.cancelDictation()
+                guard let self, pressStartedSession else { return }
+                manager.cancelDictation()
             }
         )
     }

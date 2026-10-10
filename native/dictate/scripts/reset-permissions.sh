@@ -45,12 +45,13 @@ run_cmd() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --bundle-id)
-            BUNDLE_ID="$2"
-            shift 2
-            ;;
-        --process-name)
-            APP_PROCESS_NAME="$2"
+        --bundle-id|--process-name)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "$1 needs a non-empty value" >&2
+                usage >&2
+                exit 1
+            fi
+            if [[ "$1" == "--bundle-id" ]]; then BUNDLE_ID="$2"; else APP_PROCESS_NAME="$2"; fi
             shift 2
             ;;
         --no-kill)
@@ -87,9 +88,10 @@ require_tool() {
 require_tool tccutil
 
 if [[ "${KILL_APP}" == "1" ]]; then
-    if pgrep -f "${APP_PROCESS_NAME}" >/dev/null 2>&1; then
+    # Match the exact process name, not any command line that mentions it.
+    if pgrep -x "${APP_PROCESS_NAME}" >/dev/null 2>&1; then
         echo "Stopping running ${APP_PROCESS_NAME} instances"
-        run_cmd pkill -f "${APP_PROCESS_NAME}"
+        run_cmd pkill -x "${APP_PROCESS_NAME}"
     else
         echo "No running ${APP_PROCESS_NAME} instances found"
     fi

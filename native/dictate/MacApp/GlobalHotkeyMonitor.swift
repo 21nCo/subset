@@ -80,9 +80,11 @@ final class GlobalHotkeyMonitor {
         guard event.keyCode == 63 else { return }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let isPressed = flags.contains(.function)
-        let now = Date()
+        handleFunctionKey(isPressed: flags.contains(.function))
+    }
 
+    /// The fn press/release state machine, separated from NSEvent for tests.
+    func handleFunctionKey(isPressed: Bool, at now: Date = Date()) {
         if isPressed && !isFunctionKeyDown {
             guard now.timeIntervalSince(lastTransitionAt) >= minimumTransitionInterval else { return }
             isFunctionKeyDown = true
@@ -90,7 +92,8 @@ final class GlobalHotkeyMonitor {
             lastTransitionAt = now
             onPress?()
         } else if !isPressed && isFunctionKeyDown {
-            guard now.timeIntervalSince(lastTransitionAt) >= minimumTransitionInterval else { return }
+            // Only presses are debounced: the release of an accepted press must always be
+            // delivered, or a quick tap would leave dictation recording with fn released.
             isFunctionKeyDown = false
             lastTransitionAt = now
             if cancelledWhileHeld {

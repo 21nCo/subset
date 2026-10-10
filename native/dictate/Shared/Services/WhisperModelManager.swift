@@ -47,9 +47,21 @@ struct WhisperModelManager {
         return try snapshot(for: descriptor)
     }
 
+    /// Setup (Download button) and a first dictation can both prepare the same model; they
+    /// share one preparation so downloads never race on the same destination files.
     func ensureLocalModel(
         for settings: DictationSettings,
         statusHandler: (@Sendable (String) -> Void)? = nil
+    ) async throws -> WhisperResolvedModel {
+        let key = "\(settings.whisperModelPreset.ggmlFilename)|coreml=\(settings.useCoreML)"
+        return try await WhisperModelPreparationGate.shared.run(key: key) {
+            try await WhisperModelManager().prepareLocalModel(for: settings, statusHandler: statusHandler)
+        }
+    }
+
+    private func prepareLocalModel(
+        for settings: DictationSettings,
+        statusHandler: (@Sendable (String) -> Void)?
     ) async throws -> WhisperResolvedModel {
         let descriptor = WhisperModelCatalog.descriptor(for: settings.whisperModelPreset)
         var currentSnapshot = try snapshot(for: descriptor)
@@ -70,13 +82,21 @@ struct WhisperModelManager {
         var coreMLModelURL: URL?
         if settings.useCoreML {
             if currentSnapshot.coreMLModelURL == nil {
-                statusHandler?("Downloading Core ML encoder for \(descriptor.title)...")
-                let archiveURL = try store.localFileURL(named: descriptor.coreMLArchiveFilename)
-                _ = try await downloader.download(from: descriptor.coreMLArchiveDownloadURL, to: archiveURL)
-                statusHandler?("Extracting Core ML encoder...")
-                try downloader.extractArchive(at: archiveURL, into: try store.modelsDirectory())
-                try? store.fileManager.removeItem(at: archiveURL)
-                currentSnapshot = try snapshot(for: descriptor)
+                // The encoder is optional: a failed download or extraction falls back to the
+                // standard whisper.cpp encoder instead of failing dictation.
+                do {
+                    statusHandler?("Downloading Core ML encoder for \(descriptor.title)...")
+                    let archiveURL = try store.localFileURL(named: descriptor.coreMLArchiveFilename)
+                    _ = try await downloader.download(from: descriptor.coreMLArchiveDownloadURL, to: archiveURL)
+                    statusHandler?("Extracting Core ML encoder...")
+                    try downloader.extractArchive(at: archiveURL, into: try store.modelsDirectory())
+                    try? store.fileManager.removeItem(at: archiveURL)
+                    currentSnapshot = try snapshot(for: descriptor)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    statusHandler?("Core ML encoder download failed: \(error.localizedDescription)")
+                }
             }
 
             if let resolvedCoreMLModelURL = currentSnapshot.coreMLModelURL {
@@ -99,5 +119,19 @@ struct WhisperModelManager {
             modelURL: try store.resolveLocalOrBundledURL(named: descriptor.ggmlFilename),
             coreMLModelURL: try store.resolveLocalOrBundledURL(named: descriptor.coreMLDirectoryName, isDirectory: true)
         )
+    }
+}
+
+/// Coalesces concurrent preparations of the same model into one task.
+actor WhisperModelPreparationGate {
+    static let shared = WhisperModelPreparationGate()
+    private var inFlight: [String: Task<WhisperResolvedModel, Error>] = [:]
+
+    func run(key: String, operation: @escaping @Sendable () async throws -> WhisperResolvedModel) async throws -> WhisperResolvedModel {
+        if let existing = inFlight[key] { return try await existing.value }
+        let task = Task { try await operation() }
+        inFlight[key] = task
+        defer { inFlight[key] = nil }
+        return try await task.value
     }
 }

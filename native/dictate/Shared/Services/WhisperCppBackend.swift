@@ -28,6 +28,9 @@ final class WhisperCppBackend: DictationBackend {
     private var continuation: AsyncThrowingStream<TranscriptionEvent, Error>.Continuation?
     private var streamingSession: WhisperStreamingSession?
     private var isRecording = false
+    /// True while a live-partial pass is running; newer chunks are skipped instead of queued
+    /// behind it, so the final pass after release never waits on stale partials.
+    private var isTranscribingPartial = false
 
     func startStreaming(context: DictationContext) -> AsyncThrowingStream<TranscriptionEvent, Error> {
         AsyncThrowingStream { continuation in
@@ -39,8 +42,10 @@ final class WhisperCppBackend: DictationBackend {
                 guard let self else { return }
                 do {
                     try await prepareAndStart(context: context)
+                } catch is CancellationError {
+                    // stopStreaming() already finished the stream.
                 } catch {
-                    continuation.finish(throwing: error)
+                    failStream(error)
                 }
             }
         }
@@ -70,17 +75,25 @@ final class WhisperCppBackend: DictationBackend {
             throw WhisperCppBackendError.microphonePermissionDenied
         }
 
+        try Task.checkCancellation()
+
         let modelManager = WhisperModelManager()
         let resolvedModel = try await modelManager.ensureLocalModel(for: context.settings) { [weak self] status in
             Task { @MainActor [weak self] in
                 self?.continuation?.yield(.status(status))
             }
         }
+        try Task.checkCancellation()
 
-        guard let session = WhisperStreamingSession(
-            modelPath: resolvedModel.modelURL.path,
-            coreMLModelPath: resolvedModel.coreMLModelURL?.path
-        ) else {
+        // Loading the model can take seconds; keep it off the main actor.
+        let modelPath = resolvedModel.modelURL.path
+        let coreMLModelPath = resolvedModel.coreMLModelURL?.path
+        let loadedSession = await Task.detached(priority: .userInitiated) {
+            WhisperStreamingSession(modelPath: modelPath, coreMLModelPath: coreMLModelPath)
+        }.value
+        // If the key was released while preparing, never turn the microphone on.
+        try Task.checkCancellation()
+        guard let session = loadedSession else {
             throw WhisperCppBackendError.wrapperUnavailable(
                 "Whisper wrapper could not initialize. Add whisper.xcframework and the whisper headers to the Xcode target."
             )
@@ -103,25 +116,36 @@ final class WhisperCppBackend: DictationBackend {
 
     @MainActor
     private func transcribeChunk(samples: [Float], sampleRate: Int) {
-        guard isRecording else { return }
+        guard isRecording, !isTranscribingPartial else { return }
         guard let continuation, let streamingSession else { return }
+        isTranscribingPartial = true
 
-        transcriptionQueue.async { [streamingSession] in
+        transcriptionQueue.async { [weak self, streamingSession] in
             do {
-                guard let output = try streamingSession.process(samples: samples, sampleRate: sampleRate, finalize: false),
-                      let partial = output.partial else {
-                    return
-                }
-
-                Task { @MainActor in
-                    continuation.yield(.partial(partial))
+                let output = try streamingSession.process(samples: samples, sampleRate: sampleRate, finalize: false)
+                Task { @MainActor [weak self] in
+                    self?.isTranscribingPartial = false
+                    if let partial = output?.partial { continuation.yield(.partial(partial)) }
                 }
             } catch {
-                Task { @MainActor in
-                    continuation.finish(throwing: error)
+                Task { @MainActor [weak self] in
+                    self?.isTranscribingPartial = false
+                    self?.failStream(error)
                 }
             }
         }
+    }
+
+    /// Ends the session after an error: stops the microphone before reporting the failure.
+    @MainActor
+    private func failStream(_ error: Error) {
+        streamTask?.cancel()
+        streamTask = nil
+        audioProcessor.stop()
+        isRecording = false
+        continuation?.finish(throwing: error)
+        continuation = nil
+        streamingSession = nil
     }
 
     @MainActor

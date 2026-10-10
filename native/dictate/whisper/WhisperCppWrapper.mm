@@ -163,16 +163,36 @@ struct whisper_full_params {
         return nil;
     }
 
+    const NSUInteger length = audioData.length;
+    // A PCM fmt chunk is at least 16 bytes; never read past the buffer for a malformed header.
+    if (fmtSize < 16 || (NSUInteger)fmtPos + 16 > length) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"WhisperCppWrapper"
+                                         code:5
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Invalid WAV file: malformed fmt chunk"}];
+        }
+        return nil;
+    }
+
     const int numChannels = bytes[fmtPos + 2] | (bytes[fmtPos + 3] << 8);
     const int sampleRate = bytes[fmtPos + 4] | (bytes[fmtPos + 5] << 8) | (bytes[fmtPos + 6] << 16) | (bytes[fmtPos + 7] << 24);
     const int bitsPerSample = bytes[fmtPos + 14] | (bytes[fmtPos + 15] << 8);
 
+    if (bitsPerSample != 16 || numChannels <= 0 || sampleRate <= 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"WhisperCppWrapper"
+                                         code:7
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Only 16-bit PCM WAV with at least one channel is supported in this file path"}];
+        }
+        return nil;
+    }
+
     int dataPos = -1;
     int dataSize = 0;
-    for (int i = fmtPos + fmtSize; i < audioData.length - 8; i++) {
+    for (NSUInteger i = (NSUInteger)fmtPos + (NSUInteger)fmtSize; i + 8 <= length; i++) {
         if (bytes[i] == 'd' && bytes[i+1] == 'a' && bytes[i+2] == 't' && bytes[i+3] == 'a') {
             dataSize = bytes[i+4] | (bytes[i+5] << 8) | (bytes[i+6] << 16) | (bytes[i+7] << 24);
-            dataPos = i + 8;
+            dataPos = (int)(i + 8);
             break;
         }
     }
@@ -186,11 +206,14 @@ struct whisper_full_params {
         return nil;
     }
 
-    const int nSamples = dataSize / (bitsPerSample / 8) / numChannels;
+    // Trust the declared data size only as far as the bytes actually present.
+    const NSUInteger available = length - (NSUInteger)dataPos;
+    const NSUInteger usableBytes = (dataSize < 0 || (NSUInteger)dataSize > available) ? available : (NSUInteger)dataSize;
+    const int nSamples = (int)(usableBytes / 2 / (NSUInteger)numChannels);
     std::vector<float> pcmf32;
     pcmf32.resize(nSamples);
 
-    if (bitsPerSample == 16) {
+    {
         const int16_t *samples = (const int16_t *)(bytes + dataPos);
         for (int i = 0; i < nSamples; i++) {
             float sum = 0.0f;
@@ -199,13 +222,6 @@ struct whisper_full_params {
             }
             pcmf32[i] = sum / numChannels;
         }
-    } else {
-        if (error) {
-            *error = [NSError errorWithDomain:@"WhisperCppWrapper"
-                                         code:7
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Only 16-bit WAV is supported in this file path"}];
-        }
-        return nil;
     }
 
     return [self transcribeAudioFromPCMData:pcmf32.data()

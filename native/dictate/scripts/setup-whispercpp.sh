@@ -17,6 +17,9 @@ WHISPER_FRAMEWORK="${BUILD_DIR}/whisper.xcframework"
 WHISPER_XCFRAMEWORK_URL="https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_TAG}/whisper-${WHISPER_TAG}-xcframework.zip"
 VENDOR_DIR="${DICTATE_ROOT}/whisper/vendor"
 MACOS_HEADERS="${WHISPER_FRAMEWORK}/macos-arm64_x86_64/whisper.framework/Versions/A/Headers"
+# Records which archive the cached framework came from, so a changed tag or checksum refetches.
+WHISPER_MARKER="${BUILD_DIR}/whisper.xcframework.source"
+expected_marker="${WHISPER_TAG} ${WHISPER_ZIP_SHA256}"
 
 for tool in curl ditto shasum; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -25,9 +28,11 @@ for tool in curl ditto shasum; do
     fi
 done
 
-if [[ "${FORCE_DOWNLOAD}" == "1" || ! -d "${WHISPER_FRAMEWORK}" ]]; then
+cached_marker="$(cat "${WHISPER_MARKER}" 2>/dev/null || true)"
+if [[ "${FORCE_DOWNLOAD}" == "1" || ! -d "${WHISPER_FRAMEWORK}" || "${cached_marker}" != "${expected_marker}" ]]; then
     archive_path="$(mktemp -t whisper-xcframework.XXXXXX)"
-    trap 'rm -f "${archive_path}"' EXIT
+    staging="$(mktemp -d -t whisper-xcframework)"
+    trap 'rm -rf "${archive_path}" "${staging}"' EXIT
 
     echo "Downloading whisper.xcframework ${WHISPER_TAG}"
     curl -fL --progress-bar "${WHISPER_XCFRAMEWORK_URL}" -o "${archive_path}"
@@ -40,12 +45,16 @@ if [[ "${FORCE_DOWNLOAD}" == "1" || ! -d "${WHISPER_FRAMEWORK}" ]]; then
         exit 1
     fi
 
-    staging="$(mktemp -d -t whisper-xcframework)"
     ditto -xk "${archive_path}" "${staging}"
-    rm -rf "${WHISPER_FRAMEWORK}"
+    if [[ ! -d "${staging}/build-apple/whisper.xcframework" ]]; then
+        echo "The archive does not contain build-apple/whisper.xcframework; keeping the existing cache." >&2
+        exit 1
+    fi
+    # Replace the cache only after the new framework was extracted successfully.
     mkdir -p "${BUILD_DIR}"
+    rm -rf "${WHISPER_FRAMEWORK}" "${WHISPER_MARKER}"
     mv "${staging}/build-apple/whisper.xcframework" "${WHISPER_FRAMEWORK}"
-    rm -rf "${staging}"
+    printf '%s\n' "${expected_marker}" > "${WHISPER_MARKER}"
 else
     echo "Reusing existing XCFramework at ${WHISPER_FRAMEWORK}"
 fi

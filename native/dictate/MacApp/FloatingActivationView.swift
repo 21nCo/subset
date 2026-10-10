@@ -47,7 +47,8 @@ struct FloatingActivationView: View {
         if manager.isFinalizing {
             return "Dictate is transcribing"
         }
-        return manager.transcriptState.isRecording ? "Dictate is listening. Release fn to insert, or press Escape to cancel." : "Dictate is idle"
+        // Escape cancels only while fn is held; a window-started session is stopped from the window.
+        return manager.transcriptState.isRecording ? "Dictate is listening. Release fn to insert, or press Escape while holding fn to cancel." : "Dictate is idle"
     }
 
     private func barHeight(for index: Int) -> CGFloat {

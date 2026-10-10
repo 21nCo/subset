@@ -58,7 +58,8 @@ final class FloatingActivationPanelController {
     }
 
     private func position(panel: NSPanel) {
-        let targetScreen = NSScreen.screens.first(where: { $0.visibleFrame.contains(NSEvent.mouseLocation) })
+        // Match the full frame: the pointer may be over the Dock or menu bar, outside visibleFrame.
+        let targetScreen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.main
             ?? NSScreen.screens.first
         guard let screen = targetScreen else { return }

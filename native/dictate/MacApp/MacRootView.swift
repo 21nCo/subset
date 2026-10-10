@@ -14,7 +14,7 @@ struct MacRootView: View {
                 text: transcriptText,
                 emptyMessage: "Hold fn in any text field and speak. Release fn to insert the text where your cursor is.",
                 tint: .green,
-                onCopy: transcriptText.isEmpty ? nil : { manager.copyLastTranscript() }
+                onCopy: manager.copyableTranscript.isEmpty ? nil : { manager.copyLastTranscript() }
             )
             shortcutLegend
         }
@@ -121,7 +121,7 @@ struct MacRootView: View {
             }
             .buttonStyle(.bordered)
             .keyboardShortcut("c", modifiers: [.command, .shift])
-            .disabled(transcriptText.isEmpty)
+            .disabled(manager.copyableTranscript.isEmpty)
             .help("Copy the last transcript (⇧⌘C)")
 
             Button("Clear") {
@@ -149,12 +149,17 @@ struct MacRootView: View {
     }
 
     private var transcriptText: String {
+        // While recording, show the live partial even if an earlier committed transcript exists.
+        let liveText = manager.transcriptState.partialText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if manager.transcriptState.isRecording, !liveText.isEmpty {
+            return liveText
+        }
+
         let finalText = manager.transcriptState.committedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !finalText.isEmpty {
             return finalText
         }
 
-        let liveText = manager.transcriptState.partialText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !liveText.isEmpty {
             return liveText
         }
