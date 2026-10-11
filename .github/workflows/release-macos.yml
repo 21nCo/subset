@@ -10,8 +10,9 @@ name: Release macOS app
 #
 # Two jobs keep project code away from the signing credentials. `build` has no environment, secrets, or write
 # token: it prepares inputs (npm workspaces, fetched frameworks, Swift packages) and archives the app with an
-# ad-hoc signature. `release` runs nothing from the project: it re-signs that archive with Developer ID
-# (xcodebuild -exportArchive), notarizes, and publishes.
+# ad-hoc signature. `release` runs only the repository's release script and Apple's tools, no app, Swift
+# package, or npm build code: it re-signs that archive with Developer ID (xcodebuild -exportArchive), notarizes,
+# and publishes.
 #
 # Needs these secrets in the `macos-release` environment:
 #   MACOS_CERTIFICATE_P12       base64 of the "Developer ID Application" certificate and private key (.p12)
@@ -95,7 +96,8 @@ jobs:
           name: app-archive
           path: ${{ runner.temp }}/app.xcarchive.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          # Long enough for a release that waits on environment approval.
+          retention-days: 7
 
   release:
     needs: build
@@ -217,8 +219,9 @@ jobs:
         run: |
           dev_args=()
           if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
-          # --from-archive: re-sign the build job's archive with Developer ID and notarize it. Nothing from the
-          # project, its packages, or npm runs in this job; the archive's entries are checked before unpacking.
+          # --from-archive: re-sign the build job's archive with Developer ID and notarize it. Only this script and
+          # Apple's tools run here, no app, package, or npm build code; the archive's entries are checked before
+          # unpacking.
           node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --from-archive "$RUNNER_TEMP/archive/app.xcarchive.tar.gz" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or

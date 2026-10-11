@@ -291,12 +291,23 @@ export function unexpectedArchiveMembers(members, roots) {
   });
 }
 
+// Builds of an app that uses Swift packages must use exactly the versions in its committed Package.resolved.
+function swiftPackageArgs(manifest, appId) {
+  const pbxproj = path.join(repoRoot, 'native', appId, manifest.project, 'project.pbxproj');
+  const usesPackages = existsSync(pbxproj) && /XC(Remote|Local)SwiftPackageReference/.test(readFileSync(pbxproj, 'utf8'));
+  return usesPackages ? ['-onlyUsePackageVersionsFromResolvedFile'] : [];
+}
+
 // Reads the version from the project. Only used where the project is built anyway: it can evaluate Swift package
 // manifests.
 function projectVersion(options, manifest) {
   const project = path.join(repoRoot, 'native', options.appId, manifest.project);
   const settings = JSON.parse(
-    run('xcodebuild', ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS'], { capture: true })
+    run(
+      'xcodebuild',
+      ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS', ...swiftPackageArgs(manifest, options.appId)],
+      { capture: true }
+    )
   );
   const appSettings = selectAppSettings(settings, manifest.app);
   if (!appSettings) throw new Error(`Scheme ${manifest.scheme} does not build ${manifest.app}.app`);
@@ -323,6 +334,7 @@ function archiveApp({ appId, manifest, team, version }, dev, workDir) {
     '-destination', 'generic/platform=macOS',
     '-archivePath', archivePath,
     '-derivedDataPath', path.join(workDir, 'DerivedData'),
+    ...swiftPackageArgs(manifest, appId),
     `DEVELOPMENT_TEAM=${team}`,
     'CODE_SIGN_STYLE=Manual',
     'CODE_SIGN_IDENTITY=-',
