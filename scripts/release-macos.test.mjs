@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   hasHardenedRuntime,
@@ -54,11 +55,14 @@ test('macOS release tags never match the npm publish trigger', () => {
 });
 
 test('dev tags match the workflow trigger and the environment tag policy', () => {
-  // GitHub's * does not cross a slash. release-macos.yml triggers on macos/*/v*.*.*; the macos-release
-  // environment allows macos/*/v*.
+  // GitHub's * does not cross a slash. The trigger is read from release-macos.yml; the macos-release environment's
+  // tag rule (macos/*/v*) lives in the repository settings, not in a file.
+  const workflow = readFileSync(new URL('../.github/workflows/release-macos.yml', import.meta.url), 'utf8');
+  const trigger = /^\s+tags:\n\s+- '([^']+)'$/m.exec(workflow)?.[1];
+  assert.equal(trigger, 'macos/*/v*.*.*');
   const glob = (pattern) => new RegExp(`^${pattern.replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*')}$`);
   for (const tag of ['macos/breaks/v0.1.0', 'macos/breaks/v0.1.1-dev.1', 'macos/pdf-review/v12.3.4-dev.27']) {
-    assert.equal(glob('macos/*/v*.*.*').test(tag), true, tag);
+    assert.equal(glob(trigger).test(tag), true, tag);
     assert.equal(glob('macos/*/v*').test(tag), true, tag);
   }
 });
@@ -85,8 +89,17 @@ test('flags pre-release catalog surfaces', () => {
   assert.deepEqual(prereleaseProblems({ ...live, releaseUrl: 'https://github.com/21nCo/subset/releases/tag/macos%2Fbreaks%2Fv0.1.1%2Ddev.2' }), [
     'releaseUrl links a pre-release',
   ]);
-  assert.deepEqual(prereleaseProblems({ ...live, url: 'https://example.com/Breaks-dev.dmg' }), ['url links a pre-release']);
   assert.deepEqual(prereleaseProblems({ ...live, url: 'https://example.com/Breaks-0.1.0-dev.dmg' }), ['url links a pre-release']);
+  assert.deepEqual(prereleaseProblems({ ...live, url: 'https://example.com/v1.0.0-rc1/App.dmg' }), ['url links a pre-release']);
+  // Only pre-release versions count: build counts, dates, and other words in a link are fine.
+  for (const url of ['https://example.com/App-1.0.0-2.dmg', 'https://example.com/2025.01.15-assets/App.dmg', 'https://example.com/my-dev.tools/App.dmg']) {
+    assert.deepEqual(prereleaseProblems({ ...live, url }), [], url);
+  }
+  assert.match(prereleaseProblems({ ...live, version: '01.2.3' }).join(), /plain x\.y\.z/);
+  // A long digit run is checked in linear time.
+  const started = performance.now();
+  prereleaseProblems({ ...live, url: `https://example.com/1.1.${'1'.repeat(200000)}` });
+  assert.ok(performance.now() - started < 1000);
 });
 
 test('validates release manifests', () => {

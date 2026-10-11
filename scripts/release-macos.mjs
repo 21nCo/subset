@@ -42,12 +42,14 @@ export function releaseVersion(version, dev) {
   return dev === undefined ? version : `${version}-dev.${dev}`;
 }
 
-// Catalog surfaces list only live releases (AGENTS.md rule 4). A SemVer pre-release such as 0.1.1-dev.2, in the
-// version or anywhere in a link (a dev tag or file name), marks a build that is never listed as available.
-const prereleasePattern = /\d+\.\d+\.\d+-[0-9A-Za-z]|-dev\./i;
+// Catalog surfaces list only live releases (AGENTS.md rule 4). The version must be a plain x.y.z, and no link may
+// name a pre-release version such as 0.1.1-dev.2 (a dev tag like /v0.1.1-dev.2 or a file like App-0.1.1-dev.2.dmg).
+// The lookbehind starts a version only at the beginning of a digit run, so long digit runs scan in linear time.
+const liveVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const prereleaseLinkPattern = /(?<!\d)\d+\.\d+\.\d+-(?:dev|alpha|beta|rc|pre|preview|canary|nightly)(?![a-z])/i;
 export function prereleaseProblems({ version, url, releaseUrl }) {
   const problems = [];
-  if (typeof version !== 'string' || !versionPattern.test(version)) problems.push(`version ${JSON.stringify(version)} is not a plain x.y.z release`);
+  if (typeof version !== 'string' || !liveVersionPattern.test(version)) problems.push(`version ${JSON.stringify(version)} is not a plain x.y.z release`);
   for (const [name, value] of [['url', url], ['releaseUrl', releaseUrl]]) {
     // Check the decoded form too, so an escaped tag (v0.1.1%2Ddev.1) cannot slip through.
     let decoded = '';
@@ -56,7 +58,7 @@ export function prereleaseProblems({ version, url, releaseUrl }) {
     } catch {
       // A malformed escape leaves only the raw text to check.
     }
-    if (prereleasePattern.test(String(value)) || prereleasePattern.test(decoded)) problems.push(`${name} links a pre-release`);
+    if (prereleaseLinkPattern.test(String(value)) || prereleaseLinkPattern.test(decoded)) problems.push(`${name} links a pre-release`);
   }
   return problems;
 }
@@ -97,31 +99,33 @@ export function unsafeOutDirReason(outDir, repoRoot, home) {
   return null;
 }
 
+// Options that take a value, mapped to their key in the parsed options.
+const valueOptions = { '--version': 'version', '--dev': 'dev', '--out': 'out', '--team': 'team', '--notary-profile': 'notaryProfile' };
+const optionChecks = [
+  ['version', versionPattern, (value) => `--version must be x.y.z, got ${value}`],
+  ['dev', devBuildPattern, (value) => `--dev must be a positive integer, got ${value}`],
+  ['team', teamPattern, () => '--team must be a 10-character Apple team ID'],
+];
+
 export function parseArgs(argv) {
   const options = { skipNotarize: false };
   const rest = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    const value = () => {
+    if (Object.hasOwn(valueOptions, arg)) {
       const next = argv[index + 1];
       if (next === undefined || next.startsWith('--')) throw new Error(`${arg} needs a value`);
+      options[valueOptions[arg]] = next;
       index += 1;
-      return next;
-    };
-    if (arg === '--version') options.version = value();
-    else if (arg === '--dev') options.dev = value();
-    else if (arg === '--out') options.out = value();
-    else if (arg === '--team') options.team = value();
-    else if (arg === '--notary-profile') options.notaryProfile = value();
-    else if (arg === '--skip-notarize') options.skipNotarize = true;
+    } else if (arg === '--skip-notarize') options.skipNotarize = true;
     else if (arg.startsWith('--')) throw new Error(`Unknown option ${arg}`);
     else rest.push(arg);
   }
   if (rest.length !== 1) throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize]');
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
-  if (options.version !== undefined && !versionPattern.test(options.version)) throw new Error(`--version must be x.y.z, got ${options.version}`);
-  if (options.dev !== undefined && !devBuildPattern.test(options.dev)) throw new Error(`--dev must be a positive integer, got ${options.dev}`);
-  if (options.team !== undefined && !teamPattern.test(options.team)) throw new Error('--team must be a 10-character Apple team ID');
+  for (const [key, pattern, message] of optionChecks) {
+    if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
+  }
   return { appId: rest[0], ...options };
 }
 
