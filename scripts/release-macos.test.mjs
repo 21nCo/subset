@@ -111,20 +111,14 @@ test('validates release manifests', () => {
   assert.deepEqual(validateManifest({ project: 'Breaks.xcodeproj', scheme: 'BreaksMac', app: 'Breaks', team: 'SAZVPX4CAA' }, 'breaks'), []);
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A' }, 'a'), []);
   const base = { project: 'A.xcodeproj', scheme: 'A', app: 'A' };
-  assert.deepEqual(validateManifest({ ...base, workspaces: ['@subset/minutes', '@subset.dev/minutes'], prepared: ['packages/minutes-cli/app-runtime'] }, 'a'), []);
-  assert.deepEqual(validateManifest({ ...base, prepare: 'scripts/setup.sh', prepared: ['native/a/.build/x.xcframework'] }, 'a'), []);
+  assert.deepEqual(validateManifest({ ...base, workspaces: ['@subset/minutes', '@subset.dev/minutes'] }, 'a'), []);
+  assert.deepEqual(validateManifest({ ...base, prepare: 'scripts/setup.sh' }, 'a'), []);
   for (const workspaces of [[], 'x', ['Bad Name'], [7]]) {
-    assert.match(validateManifest({ ...base, workspaces, prepared: ['x'] }, 'a').join(), /"workspaces"/, String(workspaces));
+    assert.match(validateManifest({ ...base, workspaces }, 'a').join(), /"workspaces"/, String(workspaces));
   }
-  for (const prepare of ['../x.sh', '/tmp/x.sh', 'scripts/setup', 'a b.sh', 'scripts/../../x.sh', 7]) {
-    assert.match(validateManifest({ ...base, prepare, prepared: ['x'] }, 'a').join(), /"prepare"/, String(prepare));
+  for (const prepare of ['../x.sh', '/tmp/x.sh', 'scripts/setup', 'a b.sh', 'scripts/../../x.sh', './x.sh', 7]) {
+    assert.match(validateManifest({ ...base, prepare }, 'a').join(), /"prepare"/, String(prepare));
   }
-  for (const prepared of [['../x'], ['/abs'], 'x', [7]]) {
-    assert.match(validateManifest({ ...base, prepare: 'p.sh', prepared }, 'a').join(), /"prepared"/, JSON.stringify(prepared));
-  }
-  // Anything built or fetched must be declared, or the signing job couldn't receive it.
-  assert.match(validateManifest({ ...base, prepare: 'p.sh' }, 'a').join(), /"prepared" must list/);
-  assert.match(validateManifest({ ...base, workspaces: ['@subset/minutes'] }, 'a').join(), /"prepared" must list/);
   assert.match(validateManifest({ scheme: 'A', app: 'A' }, 'a').join(), /"project"/);
   assert.match(validateManifest({ project: '../other/A.xcodeproj', scheme: 'A', app: 'A' }, 'a').join(), /inside the app directory/);
   assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A/../B' }, 'a').join(), /plain app name/);
@@ -151,13 +145,18 @@ test('parses arguments', () => {
   assert.throws(() => parseArgs(['breaks', '--version']), /needs a value/);
   assert.throws(() => parseArgs(['breaks', '--team', 'abc']), /team ID/);
   assert.throws(() => parseArgs(['breaks', '--sign']), /Unknown option/);
-  assert.equal(parseArgs(['minutes', '--prepare-only']).prepareOnly, true);
-  assert.equal(parseArgs(['minutes', '--prepare-only', '--prepared-archive', 'x.tgz']).preparedArchive, 'x.tgz');
-  assert.equal(parseArgs(['minutes', '--no-prepare']).noPrepare, true);
-  assert.throws(() => parseArgs(['minutes', '--prepare-only', '--no-prepare']), /cannot be combined/);
-  assert.throws(() => parseArgs(['minutes', '--prepared-archive', 'x.tgz']), /needs --prepare-only/);
-  assert.equal(parseArgs(['minutes', '--no-prepare', '--prepared-from', 'd']).preparedFrom, 'd');
-  assert.throws(() => parseArgs(['minutes', '--prepared-from', 'd']), /needs --no-prepare/);
+  assert.deepEqual(parseArgs(['minutes', '--archive-only', '--archive-out', 'a.tgz', '--dev', '2']), {
+    appId: 'minutes',
+    skipNotarize: false,
+    archiveOnly: true,
+    archiveOut: 'a.tgz',
+    dev: '2',
+  });
+  assert.equal(parseArgs(['minutes', '--from-archive', 'a.tgz', '--version', '0.1.0']).fromArchive, 'a.tgz');
+  assert.throws(() => parseArgs(['minutes', '--archive-only']), /needs --archive-out/);
+  assert.throws(() => parseArgs(['minutes', '--archive-out', 'a.tgz']), /needs --archive-only/);
+  assert.throws(() => parseArgs(['minutes', '--from-archive', 'a.tgz']), /needs --version/);
+  assert.throws(() => parseArgs(['minutes', '--archive-only', '--archive-out', 'a', '--from-archive', 'b', '--version', '0.1.0']), /cannot be combined/);
 });
 
 test('detects the hardened runtime among other CodeDirectory flags', () => {
@@ -188,7 +187,7 @@ test('refuses output folders whose release files would be risky to clear', () =>
   assert.equal(unsafeOutDirReason('/Users/me/Downloads', repo, '/Users/me'), null);
 });
 
-test('detects symlinks that escape a prepared input', () => {
+test('detects symlinks that escape an archive', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'prepared-'));
   try {
     writeFileSync(path.join(root, 'secret'), 'outside');
@@ -216,25 +215,25 @@ test('accepts only plain repository-relative paths', () => {
   for (const bad of ['.', './.', '', 'a/./b', 'a//b', 'a/', '../a', 'a/../b', '/abs', 'a b', 7]) assert.equal(isRepoRelativePath(bad), false, String(bad));
 });
 
-test('flags archive members outside the declared outputs', () => {
-  const prepared = ['packages/minutes-cli/app-runtime'];
+test('flags archive members outside the allowed roots', () => {
+  const roots = ['Minutes.xcarchive'];
   const ok = [
-    'packages/',
-    'packages/minutes-cli/',
-    'packages/minutes-cli/app-runtime/',
-    'packages/minutes-cli/app-runtime/dist/cli.mjs',
-    'packages/minutes-cli/app-runtime/node_modules/@scope/pkg+1~x/a file.js',
+    'Minutes.xcarchive/',
+    'Minutes.xcarchive/Info.plist',
+    'Minutes.xcarchive/Products/Applications/Minutes.app/Contents/Resources/minutes-cli/node_modules/@scope/pkg+1~x/a file.js',
   ];
-  assert.deepEqual(unexpectedArchiveMembers(ok, prepared), []);
+  assert.deepEqual(unexpectedArchiveMembers(ok, roots), []);
   const bad = [
     'scripts/release-macos.mjs',
     '../evil',
     '/etc/passwd',
-    'packages/minutes-cli/app-runtime/../../../x',
-    'packages/minutes-cli/app-runtime-other/x',
+    'Minutes.xcarchive/../../../x',
+    'Minutes.xcarchive-other/x',
+    'Other.xcarchive/x',
     './x',
-    'packages/minutes-cli/app-runtime/a\\..\\b',
-    'packages/minutes-cli/app-runtime/line\nbreak',
+    'Minutes.xcarchive/a\\..\\b',
+    'Minutes.xcarchive/line\nbreak',
+    'Minutes.xcarchive/c1\u009bx',
   ];
-  assert.deepEqual(unexpectedArchiveMembers(bad, prepared), bad);
+  assert.deepEqual(unexpectedArchiveMembers(bad, roots), bad);
 });

@@ -3,6 +3,5 @@
   "scheme": "Dictate",
   "app": "Dictate",
   "team": "SAZVPX4CAA",
-  "prepare": "scripts/setup-whispercpp.sh",
-  "prepared": ["native/dictate/.build/whisper.xcframework"]
+  "prepare": "scripts/setup-whispercpp.sh"
 }

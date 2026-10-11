@@ -14,9 +14,15 @@
 //
 // Output: <out>/<App>-<version>.dmg, <App>-<version>.zip, and SHA256SUMS, where <version> is x.y.z or
 // x.y.z-dev.<n>. Nothing is uploaded or published.
+//
+// Building and signing can run separately, so no project, package, or npm code ever runs while signing
+// credentials are present:
+//   --archive-only --archive-out <file>   prepare inputs and archive the app with an ad-hoc signature (no credentials)
+//   --from-archive <file> --version <v>   re-sign that archive with Developer ID, notarize, and package; runs nothing
+//                                         from the project
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -77,11 +83,6 @@ const manifestRules = [
       ? ['"workspaces" must be a non-empty list of npm workspace names']
       : [],
   (m) => (m.prepare !== undefined && !(typeof m.prepare === 'string' && m.prepare.endsWith('.sh') && isRepoRelativePath(m.prepare)) ? ['"prepare" must be a .sh path inside the app directory'] : []),
-  (m) => (m.prepared !== undefined && !(Array.isArray(m.prepared) && m.prepared.every(isRepoRelativePath)) ? ['"prepared" must be a list of paths inside the repository'] : []),
-  (m) =>
-    (m.workspaces || m.prepare) && !m.prepared?.length
-      ? ['"prepared" must list the outputs of "workspaces" or "prepare", so a release can build them in a separate step']
-      : [],
 ];
 
 export function validateManifest(manifest, appId) {
@@ -129,8 +130,8 @@ const valueOptions = {
   '--out': 'out',
   '--team': 'team',
   '--notary-profile': 'notaryProfile',
-  '--prepared-archive': 'preparedArchive',
-  '--prepared-from': 'preparedFrom',
+  '--archive-out': 'archiveOut',
+  '--from-archive': 'fromArchive',
 };
 const optionChecks = [
   ['version', versionPattern, (value) => `--version must be x.y.z, got ${value}`],
@@ -139,9 +140,11 @@ const optionChecks = [
 ];
 
 function checkOptions(options) {
-  if (options.prepareOnly && options.noPrepare) throw new Error('--prepare-only and --no-prepare cannot be combined');
-  if (options.preparedArchive !== undefined && !options.prepareOnly) throw new Error('--prepared-archive needs --prepare-only');
-  if (options.preparedFrom !== undefined && !options.noPrepare) throw new Error('--prepared-from needs --no-prepare');
+  if (options.archiveOnly && options.archiveOut === undefined) throw new Error('--archive-only needs --archive-out');
+  if (options.archiveOut !== undefined && !options.archiveOnly) throw new Error('--archive-out needs --archive-only');
+  if (options.fromArchive !== undefined && options.archiveOnly) throw new Error('--from-archive and --archive-only cannot be combined');
+  // Signing an archive must not run xcodebuild on the project to learn its version, so the version is given.
+  if (options.fromArchive !== undefined && options.version === undefined) throw new Error('--from-archive needs --version');
   for (const [key, pattern, message] of optionChecks) {
     if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
   }
@@ -158,13 +161,12 @@ export function parseArgs(argv) {
       options[valueOptions[arg]] = next;
       index += 1;
     } else if (arg === '--skip-notarize') options.skipNotarize = true;
-    else if (arg === '--prepare-only') options.prepareOnly = true;
-    else if (arg === '--no-prepare') options.noPrepare = true;
+    else if (arg === '--archive-only') options.archiveOnly = true;
     else if (arg.startsWith('--')) throw new Error(`Unknown option ${arg}`);
     else rest.push(arg);
   }
   if (rest.length !== 1) {
-    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--prepare-only [--prepared-archive file] | --no-prepare]');
+    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--archive-only --archive-out file | --from-archive file]');
   }
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
   checkOptions(options);
@@ -212,7 +214,6 @@ function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
-// Reads and checks the app's manifest and Xcode settings; returns what the build needs.
 function readManifest(appId) {
   const manifestPath = path.join(repoRoot, 'native', appId, 'macos-release.json');
   if (!existsSync(manifestPath)) throw new Error(`Missing ${path.relative(repoRoot, manifestPath)}`);
@@ -222,28 +223,15 @@ function readManifest(appId) {
   return manifest;
 }
 
-// Builds or fetches the inputs an app's Xcode build needs but the repository doesn't hold: the npm workspaces it
-// bundles (Minutes embeds the built CLI) and anything its prepare script fetches (Dictate's checksum-pinned
-// whisper.cpp XCFramework). This runs dependency code, so CI runs it in a job that has no signing credentials
-// (--prepare-only) and hands the "prepared" outputs to the signing job (--no-prepare).
-// Swift packages are resolved (fetched, and their manifests evaluated) while preparing, into a folder that is handed
-// to the signing job like any other prepared output; the signing job then builds with resolution turned off.
-function usesSwiftPackages(manifest, appId) {
-  const pbxproj = path.join(repoRoot, 'native', appId, manifest.project, 'project.pbxproj');
-  return existsSync(pbxproj) && /XC(Remote|Local)SwiftPackageReference/.test(readFileSync(pbxproj, 'utf8'));
+function resolveTeam(options, manifest) {
+  const team = options.team ?? process.env.APPLE_TEAM_ID ?? manifest.team;
+  if (!team || !teamPattern.test(team)) throw new Error('Set the Apple team ID with "team" in the manifest, --team, or APPLE_TEAM_ID');
+  return team;
 }
 
-const swiftPackagesFolder = (appId) => `native/${appId}/.release-packages`;
-
-function preparedPaths(manifest, appId) {
-  return [...(manifest.prepared ?? []), ...(usesSwiftPackages(manifest, appId) ? [swiftPackagesFolder(appId)] : [])];
-}
-
-function swiftPackageArgs(manifest, appId) {
-  if (!usesSwiftPackages(manifest, appId)) return [];
-  return ['-clonedSourcePackagesDirPath', path.join(repoRoot, swiftPackagesFolder(appId)), '-disableAutomaticPackageResolution', '-onlyUsePackageVersionsFromResolvedFile'];
-}
-
+// Builds or fetches what the Xcode build needs but the repository doesn't hold: the npm workspaces the app bundles
+// (Minutes embeds the built CLI) and anything its prepare script fetches (Dictate's checksum-pinned whisper.cpp
+// XCFramework).
 function prepareInputs(manifest, appId) {
   if (manifest.workspaces) {
     run('npm', ['ci', '--no-audit', '--no-fund']);
@@ -255,27 +243,11 @@ function prepareInputs(manifest, appId) {
     if (!existsSync(prepareScript)) throw new Error(`Missing prepare script native/${appId}/${manifest.prepare}`);
     run('/bin/bash', [prepareScript], { cwd: appDir });
   }
-  if (usesSwiftPackages(manifest, appId)) {
-    run('xcodebuild', [
-      '-resolvePackageDependencies',
-      '-project', path.join(repoRoot, 'native', appId, manifest.project),
-      '-scheme', manifest.scheme,
-      '-clonedSourcePackagesDirPath', path.join(repoRoot, swiftPackagesFolder(appId)),
-      '-onlyUsePackageVersionsFromResolvedFile',
-    ]);
-  }
-  requirePrepared(manifest, appId);
 }
 
-function requirePrepared(manifest, appId) {
-  const missing = preparedPaths(manifest, appId).filter((relative) => !existsSync(path.join(repoRoot, relative)));
-  if (missing.length > 0) throw new Error(`Prepared build inputs are missing: ${missing.join(', ')}`);
-}
-
-// Every symlink under root must resolve inside root (framework bundles use internal Versions/Current links).
 // Every symlink under root must be relative and, followed through the filesystem (so chained links can't hide a
-// "..", and dangling links fail), land inside root. Framework bundles legitimately use internal links such as
-// Versions/Current -> A.
+// "..", and dangling links fail), land inside root. App and framework bundles legitimately use internal links such
+// as Versions/Current -> A.
 export function escapingSymlinks(root) {
   const realRoot = realpathSync(root);
   const inside = (target) => target === realRoot || target.startsWith(`${realRoot}${path.sep}`);
@@ -298,8 +270,8 @@ export function escapingSymlinks(root) {
   return escaping;
 }
 
-// Archive member names are file names from built output (for example node_modules/@scope/pkg), so unlike manifest
-// paths they may use any printable characters; only the structure is restricted.
+// Archive member names are file names from built output, so they may use any printable characters; only the
+// structure is restricted.
 function isSafeMemberPath(name) {
   return (
     name !== '' &&
@@ -309,71 +281,22 @@ function isSafeMemberPath(name) {
   );
 }
 
-// Archive members must be relative, free of "..", and inside one of the declared outputs.
-export function unexpectedArchiveMembers(members, prepared) {
+// Archive members must be relative, free of "..", and inside one of the allowed roots (or a parent folder of one).
+export function unexpectedArchiveMembers(members, roots) {
   return members.filter((member) => {
     let name = member;
     while (name.endsWith('/')) name = name.slice(0, -1);
     if (!isSafeMemberPath(name)) return true;
-    return !prepared.some((root) => name === root || name.startsWith(`${root}/`) || root.startsWith(`${name}/`));
+    return !roots.some((root) => name === root || name.startsWith(`${root}/`) || root.startsWith(`${name}/`));
   });
 }
 
-// Copies only the manifest's declared outputs from an unpacked prepare-job archive into the checkout. The
-// archive comes from a job that ran dependency code, so nothing else in it may land in the repository.
-// Installs only the manifest's declared outputs from the prepare job's archive. That archive comes from a job that
-// ran dependency code, so it is listed and checked before anything is unpacked, unpacked into a fresh folder, and
-// each output must really (not just textually) live inside that folder before it is copied into the checkout.
-function installPrepared(manifest, appId, archive) {
-  const prepared = preparedPaths(manifest, appId);
-  const members = run('tar', ['-tzf', archive], { capture: true }).split('\n').filter(Boolean);
-  const unexpected = unexpectedArchiveMembers(members, prepared);
-  if (unexpected.length > 0) throw new Error(`Prepared archive has unexpected entries: ${unexpected.slice(0, 5).join(', ')}`);
-
-  const staging = mkdtempSync(path.join(tmpdir(), 'release-macos-prepared-'));
-  try {
-    // bsdtar refuses absolute paths, ".." and writes through symlinks unless -P is given.
-    run('tar', ['-xzf', archive, '-C', staging]);
-    const realStaging = realpathSync(staging);
-    for (const relative of prepared) {
-      const from = path.join(realStaging, relative);
-      if (!existsSync(from) || lstatSync(from).isSymbolicLink() || realpathSync(from) !== from) {
-        throw new Error(`Prepared input ${relative} is missing or not a real path in the archive`);
-      }
-      const escaping = escapingSymlinks(from);
-      if (escaping.length > 0) throw new Error(`Prepared input ${relative} has symlinks pointing outside it: ${escaping.join(', ')}`);
-      const to = path.join(repoRoot, relative);
-      rmSync(to, { recursive: true, force: true });
-      mkdirSync(path.dirname(to), { recursive: true });
-      cpSync(from, to, { recursive: true, verbatimSymlinks: true });
-    }
-  } finally {
-    rmSync(staging, { recursive: true, force: true });
-  }
-}
-
-function archivePrepared(manifest, appId, archive) {
-  const target = path.resolve(archive);
-  const prepared = preparedPaths(manifest, appId);
-  // An app with nothing to prepare still gets an (empty) archive, so the workflow handles every app the same way.
-  if (prepared.length > 0) run('tar', ['-czf', target, '-C', repoRoot, ...prepared]);
-  else run('tar', ['-czf', target, '-T', '/dev/null']);
-}
-
-function loadRelease(options) {
-  const appDir = path.join(repoRoot, 'native', options.appId);
-  const manifest = readManifest(options.appId);
-
-  const team = options.team ?? process.env.APPLE_TEAM_ID ?? manifest.team;
-  if (!team || !teamPattern.test(team)) throw new Error('Set the Apple team ID with "team" in the manifest, --team, or APPLE_TEAM_ID');
-
-  const project = path.join(appDir, manifest.project);
+// Reads the version from the project. Only used where the project is built anyway: it can evaluate Swift package
+// manifests.
+function projectVersion(options, manifest) {
+  const project = path.join(repoRoot, 'native', options.appId, manifest.project);
   const settings = JSON.parse(
-    run(
-      'xcodebuild',
-      ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS', ...swiftPackageArgs(manifest, options.appId)],
-      { capture: true }
-    )
+    run('xcodebuild', ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS'], { capture: true })
   );
   const appSettings = selectAppSettings(settings, manifest.app);
   if (!appSettings) throw new Error(`Scheme ${manifest.scheme} does not build ${manifest.app}.app`);
@@ -385,32 +308,56 @@ function loadRelease(options) {
   if (options.version && options.version !== version) {
     throw new Error(`Requested version ${options.version} but ${manifest.scheme} has MARKETING_VERSION ${version}`);
   }
-  return { manifest, team, project, version, appId: options.appId };
+  return version;
 }
 
-// Archives and exports the app with the Developer ID identity, then refuses anything not signed by this team's
-// Developer ID with the hardened runtime. Returns the exported app and its signature details.
-function buildSignedApp({ manifest, team, project, version, appId }, dev, workDir) {
+// Archives the app with an ad-hoc signature: entitlements and the hardened runtime are applied, but no signing
+// identity is used, so this step needs no credentials. Export re-signs it with Developer ID.
+function archiveApp({ appId, manifest, team, version }, dev, workDir) {
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
   run('xcodebuild', [
     'archive',
-    '-project', project,
+    '-project', path.join(repoRoot, 'native', appId, manifest.project),
     '-scheme', manifest.scheme,
     '-configuration', 'Release',
     '-destination', 'generic/platform=macOS',
     '-archivePath', archivePath,
     '-derivedDataPath', path.join(workDir, 'DerivedData'),
-    ...swiftPackageArgs(manifest, appId),
     `DEVELOPMENT_TEAM=${team}`,
     'CODE_SIGN_STYLE=Manual',
-    'CODE_SIGN_IDENTITY=Developer ID Application',
+    'CODE_SIGN_IDENTITY=-',
     'PROVISIONING_PROFILE_SPECIFIER=',
     'ENABLE_HARDENED_RUNTIME=YES',
-    'OTHER_CODE_SIGN_FLAGS=--timestamp',
     // A dev build stamps its number into CFBundleVersion for every target, so embedded extensions still match.
     ...(dev === undefined ? [] : [`CURRENT_PROJECT_VERSION=${dev}`]),
   ]);
+  checkBundleVersions(archivedApp(archivePath, manifest), version, dev);
+  return archivePath;
+}
 
+const archivedApp = (archivePath, manifest) => path.join(archivePath, 'Products', 'Applications', `${manifest.app}.app`);
+
+// Unpacks an archive made by --archive-only. It comes from a job that ran project, package, and npm code, so its
+// entries are checked before anything is written, it is unpacked into the work folder, and every symlink in it must
+// resolve inside it. Nothing in it is executed: export only re-signs it.
+function unpackArchive(file, manifest, workDir) {
+  const root = `${manifest.app}.xcarchive`;
+  const members = run('tar', ['-tzf', file], { capture: true }).split('\n').filter(Boolean);
+  const unexpected = unexpectedArchiveMembers(members, [root]);
+  if (unexpected.length > 0) throw new Error(`Archive has unexpected entries: ${unexpected.slice(0, 5).join(', ')}`);
+  // bsdtar refuses absolute paths, ".." and writes through symlinks unless -P is given.
+  run('tar', ['-xzf', file, '-C', workDir]);
+  const archivePath = path.join(realpathSync(workDir), root);
+  if (!existsSync(archivePath) || lstatSync(archivePath).isSymbolicLink()) throw new Error(`Archive does not contain ${root}`);
+  const escaping = escapingSymlinks(archivePath);
+  if (escaping.length > 0) throw new Error(`Archive has symlinks pointing outside it: ${escaping.slice(0, 5).join(', ')}`);
+  if (!existsSync(archivedApp(archivePath, manifest))) throw new Error(`Archive does not contain ${manifest.app}.app`);
+  return archivePath;
+}
+
+// Re-signs the archive with the Developer ID identity, then refuses anything not signed by this team's Developer
+// ID with the hardened runtime. Returns the exported app and its signature details.
+function exportSigned(archivePath, { manifest, team, version }, dev, workDir) {
   const exportOptions = path.join(workDir, 'ExportOptions.plist');
   writeFileSync(
     exportOptions,
@@ -448,7 +395,7 @@ function plistValue(plist, key) {
   return execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' }).trim();
 }
 
-// The exported app must carry the release's version, and a dev build its build number.
+// The app must carry the release's version, and a dev build its build number.
 function checkBundleVersions(appPath, version, dev) {
   const plist = path.join(appPath, 'Contents', 'Info.plist');
   const shortVersion = plistValue(plist, 'CFBundleShortVersionString');
@@ -466,22 +413,31 @@ function notarizeAndStaple(submission, target, authArgs, workDir) {
   run('xcrun', ['stapler', 'validate', target]);
 }
 
+// --archive-only: prepare and archive, then write the archive for the signing step. Needs no credentials.
+function writeArchiveOnly(options) {
+  const manifest = readManifest(options.appId);
+  const team = resolveTeam(options, manifest);
+  prepareInputs(manifest, options.appId);
+  const version = projectVersion(options, manifest);
+  const workDir = mkdtempSync(path.join(tmpdir(), 'release-macos-archive-'));
+  try {
+    const archivePath = archiveApp({ appId: options.appId, manifest, team, version }, options.dev, workDir);
+    run('tar', ['-czf', path.resolve(options.archiveOut), '-C', workDir, path.basename(archivePath)]);
+    console.log(`\nArchived ${manifest.app} ${releaseVersion(version, options.dev)} (ad-hoc signed) to ${options.archiveOut}`);
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.prepareOnly) {
-    const manifest = readManifest(options.appId);
-    prepareInputs(manifest, options.appId);
-    if (options.preparedArchive) archivePrepared(manifest, options.appId, options.preparedArchive);
-    return;
-  }
-  // Inputs go in place before the first xcodebuild call, which already needs resolved Swift packages.
-  const appManifest = readManifest(options.appId);
-  if (options.preparedFrom) installPrepared(appManifest, options.appId, options.preparedFrom);
-  if (options.noPrepare) requirePrepared(appManifest, options.appId);
-  else prepareInputs(appManifest, options.appId);
+  if (options.archiveOnly) return writeArchiveOnly(options);
 
-  const release = loadRelease(options);
-  const { manifest, version } = release;
+  const manifest = readManifest(options.appId);
+  const team = resolveTeam(options, manifest);
+  if (!options.fromArchive) prepareInputs(manifest, options.appId);
+  const version = options.fromArchive ? options.version : projectVersion(options, manifest);
+  const release = { appId: options.appId, manifest, team, version };
   const fullVersion = releaseVersion(version, options.dev);
   // Resolve credentials before the slow build so a missing setup fails fast.
   const authArgs = options.skipNotarize ? null : notaryAuthArgs(options);
@@ -497,7 +453,14 @@ function main() {
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
 
-  const { appPath, signature } = buildSignedApp(release, options.dev, workDir);
+  let archivePath;
+  if (options.fromArchive) {
+    archivePath = unpackArchive(options.fromArchive, manifest, workDir);
+    checkBundleVersions(archivedApp(archivePath, manifest), version, options.dev);
+  } else {
+    archivePath = archiveApp(release, options.dev, workDir);
+  }
+  const { appPath, signature } = exportSigned(archivePath, release, options.dev, workDir);
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);

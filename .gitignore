@@ -7,4 +7,3 @@ dist/
 packages/usage-cli/web/
 packages/minutes-cli/app-runtime/
 packages/minutes-cli/.app-runtime-*/
-native/*/.release-packages/
