@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hasHardenedRuntime, parseArgs, parseReleaseTag, selectAppSettings, unsafeOutDirReason, validateManifest } from './release-macos.mjs';
+import {
+  hasHardenedRuntime,
+  parseArgs,
+  parseReleaseTag,
+  prereleaseProblems,
+  releaseVersion,
+  selectAppSettings,
+  unsafeOutDirReason,
+  validateManifest,
+} from './release-macos.mjs';
 
 test('parses macOS release tags', () => {
   assert.deepEqual(parseReleaseTag('macos/breaks/v0.1.0'), { appId: 'breaks', version: '0.1.0' });
@@ -10,12 +20,86 @@ test('parses macOS release tags', () => {
   }
 });
 
+test('parses macOS dev build tags', () => {
+  assert.deepEqual(parseReleaseTag('macos/breaks/v0.1.1-dev.1'), { appId: 'breaks', version: '0.1.1', dev: '1' });
+  assert.deepEqual(parseReleaseTag('macos/pdf-review/v2.0.0-dev.42'), { appId: 'pdf-review', version: '2.0.0', dev: '42' });
+  for (const tag of [
+    'macos/breaks/v0.1.1-dev.0',
+    'macos/breaks/v0.1.1-dev.01',
+    'macos/breaks/v0.1.1-dev.',
+    'macos/breaks/v0.1.1-dev.-1',
+    'macos/breaks/v0.1.1-dev.1.2',
+    'macos/breaks/v0.1.1-dev1',
+    'macos/breaks/v0.1.1-beta.1',
+    'macos/breaks/v0.1.1-dev.1x',
+    'macos/breaks/v0.1-dev.1',
+  ]) {
+    assert.throws(() => parseReleaseTag(tag), /-dev\.<n>/, tag);
+  }
+});
+
+test('names dev builds after the dev tag', () => {
+  assert.equal(releaseVersion('0.1.1'), '0.1.1');
+  assert.equal(releaseVersion('0.1.1', '3'), '0.1.1-dev.3');
+  const { version, dev } = parseReleaseTag('macos/breaks/v0.1.1-dev.3');
+  assert.equal(`macos/breaks/v${releaseVersion(version, dev)}`, 'macos/breaks/v0.1.1-dev.3');
+});
+
 test('macOS release tags never match the npm publish trigger', () => {
   // publish-tag.yml listens for *-v*.*.*, and GitHub's * does not cross a slash.
   const npmTrigger = /^[^/]*-v[^/]*\.[^/]*\.[^/]*$/;
   assert.equal(npmTrigger.test('macos/breaks/v0.1.0'), false);
   assert.equal(npmTrigger.test('macos/pdf-review/v0.1.0'), false);
+  assert.equal(npmTrigger.test('macos/breaks/v0.1.1-dev.1'), false);
   assert.equal(npmTrigger.test('usage-v0.1.0'), true);
+});
+
+test('dev tags match the workflow trigger and the environment tag policy', () => {
+  // GitHub's * does not cross a slash. The trigger is read from release-macos.yml; the macos-release environment's
+  // tag rule (macos/*/v*) lives in the repository settings, not in a file.
+  const workflow = readFileSync(new URL('../.github/workflows/release-macos.yml', import.meta.url), 'utf8');
+  const trigger = /^\s+tags:\n\s+- '([^']+)'$/m.exec(workflow)?.[1];
+  assert.equal(trigger, 'macos/*/v*.*.*');
+  const glob = (pattern) => new RegExp(`^${pattern.replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*')}$`);
+  for (const tag of ['macos/breaks/v0.1.0', 'macos/breaks/v0.1.1-dev.1', 'macos/pdf-review/v12.3.4-dev.27']) {
+    assert.equal(glob(trigger).test(tag), true, tag);
+    assert.equal(glob('macos/*/v*').test(tag), true, tag);
+  }
+});
+
+test('flags pre-release catalog surfaces', () => {
+  const live = {
+    version: '0.1.0',
+    url: 'https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg',
+    releaseUrl: 'https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0',
+  };
+  assert.deepEqual(prereleaseProblems(live), []);
+  assert.deepEqual(prereleaseProblems({ ...live, version: '0.1.1-dev.2' }), ['version "0.1.1-dev.2" is not a plain x.y.z release']);
+  assert.match(prereleaseProblems({ ...live, version: '1.0.0-beta' }).join(), /plain x\.y\.z/);
+  assert.deepEqual(
+    prereleaseProblems({
+      ...live,
+      url: 'https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.2/Breaks-0.1.1-dev.2.dmg',
+    }),
+    ['url links a pre-release']
+  );
+  assert.deepEqual(prereleaseProblems({ ...live, releaseUrl: 'https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-dev.2' }), [
+    'releaseUrl links a pre-release',
+  ]);
+  assert.deepEqual(prereleaseProblems({ ...live, releaseUrl: 'https://github.com/21nCo/subset/releases/tag/macos%2Fbreaks%2Fv0.1.1%2Ddev.2' }), [
+    'releaseUrl links a pre-release',
+  ]);
+  assert.deepEqual(prereleaseProblems({ ...live, url: 'https://example.com/Breaks-0.1.0-dev.dmg' }), ['url links a pre-release']);
+  assert.deepEqual(prereleaseProblems({ ...live, url: 'https://example.com/v1.0.0-rc1/App.dmg' }), ['url links a pre-release']);
+  // Only pre-release versions count: build counts, dates, and other words in a link are fine.
+  for (const url of ['https://example.com/App-1.0.0-2.dmg', 'https://example.com/2025.01.15-assets/App.dmg', 'https://example.com/my-dev.tools/App.dmg']) {
+    assert.deepEqual(prereleaseProblems({ ...live, url }), [], url);
+  }
+  assert.match(prereleaseProblems({ ...live, version: '01.2.3' }).join(), /plain x\.y\.z/);
+  // A long digit run is checked in linear time.
+  const started = performance.now();
+  prereleaseProblems({ ...live, url: `https://example.com/1.1.${'1'.repeat(200000)}` });
+  assert.ok(performance.now() - started < 1000);
 });
 
 test('validates release manifests', () => {
@@ -38,6 +122,8 @@ test('parses arguments', () => {
     out: 'x',
   });
   assert.equal(parseArgs(['breaks', '--skip-notarize']).skipNotarize, true);
+  assert.equal(parseArgs(['breaks', '--dev', '7']).dev, '7');
+  for (const dev of ['0', '01', '-1', '1.2', 'x', '1234567890']) assert.throws(() => parseArgs(['breaks', '--dev', dev]), /positive integer/, dev);
   assert.throws(() => parseArgs([]), /Usage/);
   assert.throws(() => parseArgs(['breaks', 'extra']), /Usage/);
   assert.throws(() => parseArgs(['../x']), /Invalid app id/);
