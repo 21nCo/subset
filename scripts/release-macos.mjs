@@ -226,6 +226,24 @@ function readManifest(appId) {
 // bundles (Minutes embeds the built CLI) and anything its prepare script fetches (Dictate's checksum-pinned
 // whisper.cpp XCFramework). This runs dependency code, so CI runs it in a job that has no signing credentials
 // (--prepare-only) and hands the "prepared" outputs to the signing job (--no-prepare).
+// Swift packages are resolved (fetched, and their manifests evaluated) while preparing, into a folder that is handed
+// to the signing job like any other prepared output; the signing job then builds with resolution turned off.
+function usesSwiftPackages(manifest, appId) {
+  const pbxproj = path.join(repoRoot, 'native', appId, manifest.project, 'project.pbxproj');
+  return existsSync(pbxproj) && /XC(Remote|Local)SwiftPackageReference/.test(readFileSync(pbxproj, 'utf8'));
+}
+
+const swiftPackagesFolder = (appId) => `native/${appId}/.release-packages`;
+
+function preparedPaths(manifest, appId) {
+  return [...(manifest.prepared ?? []), ...(usesSwiftPackages(manifest, appId) ? [swiftPackagesFolder(appId)] : [])];
+}
+
+function swiftPackageArgs(manifest, appId) {
+  if (!usesSwiftPackages(manifest, appId)) return [];
+  return ['-clonedSourcePackagesDirPath', path.join(repoRoot, swiftPackagesFolder(appId)), '-disableAutomaticPackageResolution', '-onlyUsePackageVersionsFromResolvedFile'];
+}
+
 function prepareInputs(manifest, appId) {
   if (manifest.workspaces) {
     run('npm', ['ci', '--no-audit', '--no-fund']);
@@ -237,11 +255,20 @@ function prepareInputs(manifest, appId) {
     if (!existsSync(prepareScript)) throw new Error(`Missing prepare script native/${appId}/${manifest.prepare}`);
     run('/bin/bash', [prepareScript], { cwd: appDir });
   }
-  requirePrepared(manifest);
+  if (usesSwiftPackages(manifest, appId)) {
+    run('xcodebuild', [
+      '-resolvePackageDependencies',
+      '-project', path.join(repoRoot, 'native', appId, manifest.project),
+      '-scheme', manifest.scheme,
+      '-clonedSourcePackagesDirPath', path.join(repoRoot, swiftPackagesFolder(appId)),
+      '-onlyUsePackageVersionsFromResolvedFile',
+    ]);
+  }
+  requirePrepared(manifest, appId);
 }
 
-function requirePrepared(manifest) {
-  const missing = (manifest.prepared ?? []).filter((relative) => !existsSync(path.join(repoRoot, relative)));
+function requirePrepared(manifest, appId) {
+  const missing = preparedPaths(manifest, appId).filter((relative) => !existsSync(path.join(repoRoot, relative)));
   if (missing.length > 0) throw new Error(`Prepared build inputs are missing: ${missing.join(', ')}`);
 }
 
@@ -277,7 +304,7 @@ function isSafeMemberPath(name) {
   return (
     name !== '' &&
     !name.startsWith('/') &&
-    !/[\u0000-\u001f\u007f\\]/.test(name) &&
+    !/[\u0000-\u001f\u007f-\u009f\\]/.test(name) &&
     name.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
   );
 }
@@ -297,8 +324,8 @@ export function unexpectedArchiveMembers(members, prepared) {
 // Installs only the manifest's declared outputs from the prepare job's archive. That archive comes from a job that
 // ran dependency code, so it is listed and checked before anything is unpacked, unpacked into a fresh folder, and
 // each output must really (not just textually) live inside that folder before it is copied into the checkout.
-function installPrepared(manifest, archive) {
-  const prepared = manifest.prepared ?? [];
+function installPrepared(manifest, appId, archive) {
+  const prepared = preparedPaths(manifest, appId);
   const members = run('tar', ['-tzf', archive], { capture: true }).split('\n').filter(Boolean);
   const unexpected = unexpectedArchiveMembers(members, prepared);
   if (unexpected.length > 0) throw new Error(`Prepared archive has unexpected entries: ${unexpected.slice(0, 5).join(', ')}`);
@@ -325,9 +352,9 @@ function installPrepared(manifest, archive) {
   }
 }
 
-function archivePrepared(manifest, archive) {
+function archivePrepared(manifest, appId, archive) {
   const target = path.resolve(archive);
-  const prepared = manifest.prepared ?? [];
+  const prepared = preparedPaths(manifest, appId);
   // An app with nothing to prepare still gets an (empty) archive, so the workflow handles every app the same way.
   if (prepared.length > 0) run('tar', ['-czf', target, '-C', repoRoot, ...prepared]);
   else run('tar', ['-czf', target, '-T', '/dev/null']);
@@ -342,7 +369,11 @@ function loadRelease(options) {
 
   const project = path.join(appDir, manifest.project);
   const settings = JSON.parse(
-    run('xcodebuild', ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS'], { capture: true })
+    run(
+      'xcodebuild',
+      ['-showBuildSettings', '-json', '-project', project, '-scheme', manifest.scheme, '-configuration', 'Release', '-destination', 'generic/platform=macOS', ...swiftPackageArgs(manifest, options.appId)],
+      { capture: true }
+    )
   );
   const appSettings = selectAppSettings(settings, manifest.app);
   if (!appSettings) throw new Error(`Scheme ${manifest.scheme} does not build ${manifest.app}.app`);
@@ -354,12 +385,12 @@ function loadRelease(options) {
   if (options.version && options.version !== version) {
     throw new Error(`Requested version ${options.version} but ${manifest.scheme} has MARKETING_VERSION ${version}`);
   }
-  return { manifest, team, project, version };
+  return { manifest, team, project, version, appId: options.appId };
 }
 
 // Archives and exports the app with the Developer ID identity, then refuses anything not signed by this team's
 // Developer ID with the hardened runtime. Returns the exported app and its signature details.
-function buildSignedApp({ manifest, team, project, version }, dev, workDir) {
+function buildSignedApp({ manifest, team, project, version, appId }, dev, workDir) {
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
   run('xcodebuild', [
     'archive',
@@ -369,6 +400,7 @@ function buildSignedApp({ manifest, team, project, version }, dev, workDir) {
     '-destination', 'generic/platform=macOS',
     '-archivePath', archivePath,
     '-derivedDataPath', path.join(workDir, 'DerivedData'),
+    ...swiftPackageArgs(manifest, appId),
     `DEVELOPMENT_TEAM=${team}`,
     'CODE_SIGN_STYLE=Manual',
     'CODE_SIGN_IDENTITY=Developer ID Application',
@@ -439,9 +471,15 @@ function main() {
   if (options.prepareOnly) {
     const manifest = readManifest(options.appId);
     prepareInputs(manifest, options.appId);
-    if (options.preparedArchive) archivePrepared(manifest, options.preparedArchive);
+    if (options.preparedArchive) archivePrepared(manifest, options.appId, options.preparedArchive);
     return;
   }
+  // Inputs go in place before the first xcodebuild call, which already needs resolved Swift packages.
+  const appManifest = readManifest(options.appId);
+  if (options.preparedFrom) installPrepared(appManifest, options.appId, options.preparedFrom);
+  if (options.noPrepare) requirePrepared(appManifest, options.appId);
+  else prepareInputs(appManifest, options.appId);
+
   const release = loadRelease(options);
   const { manifest, version } = release;
   const fullVersion = releaseVersion(version, options.dev);
@@ -458,10 +496,6 @@ function main() {
   const dmgPath = path.join(outDir, `${base}.dmg`);
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
-
-  if (options.preparedFrom) installPrepared(manifest, options.preparedFrom);
-  if (options.noPrepare) requirePrepared(manifest);
-  else prepareInputs(manifest, options.appId);
 
   const { appPath, signature } = buildSignedApp(release, options.dev, workDir);
 
