@@ -218,8 +218,23 @@ test('accepts only plain repository-relative paths', () => {
 
 test('flags archive members outside the declared outputs', () => {
   const prepared = ['packages/minutes-cli/app-runtime'];
-  const ok = ['packages/', 'packages/minutes-cli/', 'packages/minutes-cli/app-runtime/', 'packages/minutes-cli/app-runtime/dist/cli.mjs'];
+  const ok = [
+    'packages/',
+    'packages/minutes-cli/',
+    'packages/minutes-cli/app-runtime/',
+    'packages/minutes-cli/app-runtime/dist/cli.mjs',
+    'packages/minutes-cli/app-runtime/node_modules/@scope/pkg+1~x/a file.js',
+  ];
   assert.deepEqual(unexpectedArchiveMembers(ok, prepared), []);
-  const bad = ['scripts/release-macos.mjs', '../evil', '/etc/passwd', 'packages/minutes-cli/app-runtime/../../../x', 'packages/minutes-cli/app-runtime-other/x', './x'];
+  const bad = [
+    'scripts/release-macos.mjs',
+    '../evil',
+    '/etc/passwd',
+    'packages/minutes-cli/app-runtime/../../../x',
+    'packages/minutes-cli/app-runtime-other/x',
+    './x',
+    'packages/minutes-cli/app-runtime/a\\..\\b',
+    'packages/minutes-cli/app-runtime/line\nbreak',
+  ];
   assert.deepEqual(unexpectedArchiveMembers(bad, prepared), bad);
 });

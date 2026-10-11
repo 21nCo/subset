@@ -271,12 +271,23 @@ export function escapingSymlinks(root) {
   return escaping;
 }
 
+// Archive member names are file names from built output (for example node_modules/@scope/pkg), so unlike manifest
+// paths they may use any printable characters; only the structure is restricted.
+function isSafeMemberPath(name) {
+  return (
+    name !== '' &&
+    !name.startsWith('/') &&
+    !/[\u0000-\u001f\u007f\\]/.test(name) &&
+    name.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+  );
+}
+
 // Archive members must be relative, free of "..", and inside one of the declared outputs.
 export function unexpectedArchiveMembers(members, prepared) {
   return members.filter((member) => {
     let name = member;
     while (name.endsWith('/')) name = name.slice(0, -1);
-    if (name === '' || !isRepoRelativePath(name)) return true;
+    if (!isSafeMemberPath(name)) return true;
     return !prepared.some((root) => name === root || name.startsWith(`${root}/`) || root.startsWith(`${name}/`));
   });
 }
