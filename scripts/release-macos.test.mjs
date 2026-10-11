@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
   escapingSymlinks,
+  isRepoRelativePath,
+  unexpectedArchiveMembers,
   hasHardenedRuntime,
   parseArgs,
   parseReleaseTag,
@@ -189,14 +191,34 @@ test('refuses output folders whose release files would be risky to clear', () =>
 test('detects symlinks that escape a prepared input', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'prepared-'));
   try {
+    writeFileSync(path.join(root, 'secret'), 'outside');
     const framework = path.join(root, 'x.xcframework');
-    mkdirSync(path.join(framework, 'Versions', 'A'), { recursive: true });
+    mkdirSync(path.join(framework, 'Versions', 'A', 'b'), { recursive: true });
     symlinkSync('A', path.join(framework, 'Versions', 'Current'));
     assert.deepEqual(escapingSymlinks(framework), []);
+    // Lexically these resolve inside; followed through the filesystem they leave the output.
+    symlinkSync('.', path.join(framework, 's'));
+    symlinkSync('s/../../secret', path.join(framework, 'chained'));
+    symlinkSync('../..', path.join(framework, 'Versions', 'A', 'b', 'up'));
+    symlinkSync('Versions/A/b/up/../secret', path.join(framework, 'chained2'));
     symlinkSync('../../../etc', path.join(framework, 'Versions', 'evil'));
-    symlinkSync('/etc/passwd', path.join(framework, 'abs'));
-    assert.deepEqual(escapingSymlinks(framework).sort(), ['Versions/evil', 'abs']);
+    symlinkSync(path.join(framework, 'Versions', 'A'), path.join(framework, 'absolute-inside'));
+    symlinkSync('missing', path.join(framework, 'dangling'));
+    assert.deepEqual(escapingSymlinks(framework).sort(), ['Versions/evil', 'absolute-inside', 'chained', 'chained2', 'dangling'].sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('accepts only plain repository-relative paths', () => {
+  for (const ok of ['packages/minutes-cli/app-runtime', 'native/dictate/.build/whisper.xcframework', 'a']) assert.equal(isRepoRelativePath(ok), true, ok);
+  for (const bad of ['.', './.', '', 'a/./b', 'a//b', 'a/', '../a', 'a/../b', '/abs', 'a b', 7]) assert.equal(isRepoRelativePath(bad), false, String(bad));
+});
+
+test('flags archive members outside the declared outputs', () => {
+  const prepared = ['packages/minutes-cli/app-runtime'];
+  const ok = ['packages/', 'packages/minutes-cli/', 'packages/minutes-cli/app-runtime/', 'packages/minutes-cli/app-runtime/dist/cli.mjs'];
+  assert.deepEqual(unexpectedArchiveMembers(ok, prepared), []);
+  const bad = ['scripts/release-macos.mjs', '../evil', '/etc/passwd', 'packages/minutes-cli/app-runtime/../../../x', 'packages/minutes-cli/app-runtime-other/x', './x'];
+  assert.deepEqual(unexpectedArchiveMembers(bad, prepared), bad);
 });

@@ -16,7 +16,8 @@
 // x.y.z-dev.<n>. Nothing is uploaded or published.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -63,33 +64,29 @@ export function prereleaseProblems({ version, url, releaseUrl }) {
   return problems;
 }
 
+const manifestRules = [
+  (m) => ['project', 'scheme', 'app'].filter((key) => typeof m[key] !== 'string' || m[key].length === 0).map((key) => `"${key}" must be a non-empty string`),
+  (m) =>
+    typeof m.project === 'string' && (!m.project.endsWith('.xcodeproj') || m.project.includes('..') || path.isAbsolute(m.project))
+      ? ['"project" must be a .xcodeproj path inside the app directory']
+      : [],
+  (m) => (typeof m.app === 'string' && !/^[A-Za-z0-9 ._-]+$/.test(m.app) ? ['"app" must be a plain app name'] : []),
+  (m) => (m.team !== undefined && !teamPattern.test(m.team) ? ['"team" must be a 10-character Apple team ID'] : []),
+  (m) =>
+    m.workspaces !== undefined && !(Array.isArray(m.workspaces) && m.workspaces.length > 0 && m.workspaces.every((name) => typeof name === 'string' && workspaceNamePattern.test(name)))
+      ? ['"workspaces" must be a non-empty list of npm workspace names']
+      : [],
+  (m) => (m.prepare !== undefined && !(typeof m.prepare === 'string' && m.prepare.endsWith('.sh') && isRepoRelativePath(m.prepare)) ? ['"prepare" must be a .sh path inside the app directory'] : []),
+  (m) => (m.prepared !== undefined && !(Array.isArray(m.prepared) && m.prepared.every(isRepoRelativePath)) ? ['"prepared" must be a list of paths inside the repository'] : []),
+  (m) =>
+    (m.workspaces || m.prepare) && !m.prepared?.length
+      ? ['"prepared" must list the outputs of "workspaces" or "prepare", so a release can build them in a separate step']
+      : [],
+];
+
 export function validateManifest(manifest, appId) {
-  const problems = [];
   if (!manifest || typeof manifest !== 'object') return [`native/${appId}/macos-release.json must be an object`];
-  for (const key of ['project', 'scheme', 'app']) {
-    if (typeof manifest[key] !== 'string' || manifest[key].length === 0) problems.push(`"${key}" must be a non-empty string`);
-  }
-  if (typeof manifest.project === 'string' && (!manifest.project.endsWith('.xcodeproj') || manifest.project.includes('..') || path.isAbsolute(manifest.project))) {
-    problems.push('"project" must be a .xcodeproj path inside the app directory');
-  }
-  if (typeof manifest.app === 'string' && !/^[A-Za-z0-9 ._-]+$/.test(manifest.app)) problems.push('"app" must be a plain app name');
-  if (manifest.team !== undefined && !teamPattern.test(manifest.team)) problems.push('"team" must be a 10-character Apple team ID');
-  if (manifest.workspaces !== undefined && !(Array.isArray(manifest.workspaces) && manifest.workspaces.length > 0 && manifest.workspaces.every((name) => typeof name === 'string' && workspaceNamePattern.test(name)))) {
-    problems.push('"workspaces" must be a non-empty list of npm workspace names');
-  }
-  if (manifest.prepared !== undefined && !(Array.isArray(manifest.prepared) && manifest.prepared.every(isRepoRelativePath))) {
-    problems.push('"prepared" must be a list of paths inside the repository');
-  }
-  if ((manifest.workspaces || manifest.prepare) && !manifest.prepared?.length) {
-    problems.push('"prepared" must list the outputs of "workspaces" or "prepare", so a release can build them in a separate step');
-  }
-  if (
-    manifest.prepare !== undefined &&
-    (typeof manifest.prepare !== 'string' || !/^[A-Za-z0-9._/-]+\.sh$/.test(manifest.prepare) || manifest.prepare.split('/').includes('..') || path.isAbsolute(manifest.prepare))
-  ) {
-    problems.push('"prepare" must be a .sh path inside the app directory');
-  }
-  return problems;
+  return manifestRules.flatMap((rule) => rule(manifest));
 }
 
 // codesign lists every CodeDirectory flag, e.g. flags=0x12000(library-validation,runtime).
@@ -117,8 +114,13 @@ export function unsafeOutDirReason(outDir, repoRoot, home) {
 // Options that take a value, mapped to their key in the parsed options.
 const workspaceNamePattern = /^(@[a-z0-9.-]+\/)?[a-z0-9.-]+$/;
 
-function isRepoRelativePath(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9._/-]+$/.test(value) && !path.isAbsolute(value) && !value.split('/').includes('..');
+// A plain relative path with no ".", "..", or empty segments, so it can never name the repository root or leave it.
+export function isRepoRelativePath(value) {
+  return (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9._/-]+$/.test(value) &&
+    value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+  );
 }
 
 const valueOptions = {
@@ -135,6 +137,15 @@ const optionChecks = [
   ['dev', devBuildPattern, (value) => `--dev must be a positive integer, got ${value}`],
   ['team', teamPattern, () => '--team must be a 10-character Apple team ID'],
 ];
+
+function checkOptions(options) {
+  if (options.prepareOnly && options.noPrepare) throw new Error('--prepare-only and --no-prepare cannot be combined');
+  if (options.preparedArchive !== undefined && !options.prepareOnly) throw new Error('--prepared-archive needs --prepare-only');
+  if (options.preparedFrom !== undefined && !options.noPrepare) throw new Error('--prepared-from needs --no-prepare');
+  for (const [key, pattern, message] of optionChecks) {
+    if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
+  }
+}
 
 export function parseArgs(argv) {
   const options = { skipNotarize: false };
@@ -155,13 +166,8 @@ export function parseArgs(argv) {
   if (rest.length !== 1) {
     throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--prepare-only [--prepared-archive file] | --no-prepare]');
   }
-  if (options.prepareOnly && options.noPrepare) throw new Error('--prepare-only and --no-prepare cannot be combined');
-  if (options.preparedArchive !== undefined && !options.prepareOnly) throw new Error('--prepared-archive needs --prepare-only');
-  if (options.preparedFrom !== undefined && !options.noPrepare) throw new Error('--prepared-from needs --no-prepare');
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
-  for (const [key, pattern, message] of optionChecks) {
-    if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
-  }
+  checkOptions(options);
   return { appId: rest[0], ...options };
 }
 
@@ -240,14 +246,24 @@ function requirePrepared(manifest) {
 }
 
 // Every symlink under root must resolve inside root (framework bundles use internal Versions/Current links).
+// Every symlink under root must be relative and, followed through the filesystem (so chained links can't hide a
+// "..", and dangling links fail), land inside root. Framework bundles legitimately use internal links such as
+// Versions/Current -> A.
 export function escapingSymlinks(root) {
+  const realRoot = realpathSync(root);
+  const inside = (target) => target === realRoot || target.startsWith(`${realRoot}${path.sep}`);
   const escaping = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const entryPath = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) {
-        const target = path.resolve(path.dirname(entryPath), readlinkSync(entryPath));
-        if (target !== root && !target.startsWith(`${root}${path.sep}`)) escaping.push(path.relative(root, entryPath));
+        let resolved = null;
+        try {
+          resolved = realpathSync(entryPath);
+        } catch {
+          // Dangling or looping link.
+        }
+        if (path.isAbsolute(readlinkSync(entryPath)) || !resolved || !inside(resolved)) escaping.push(path.relative(root, entryPath));
       } else if (entry.isDirectory()) walk(entryPath);
     }
   };
@@ -255,19 +271,45 @@ export function escapingSymlinks(root) {
   return escaping;
 }
 
+// Archive members must be relative, free of "..", and inside one of the declared outputs.
+export function unexpectedArchiveMembers(members, prepared) {
+  return members.filter((member) => {
+    const name = member.replace(/\/+$/, '');
+    if (name === '' || !isRepoRelativePath(name)) return true;
+    return !prepared.some((root) => name === root || name.startsWith(`${root}/`) || root.startsWith(`${name}/`));
+  });
+}
+
 // Copies only the manifest's declared outputs from an unpacked prepare-job archive into the checkout. The
 // archive comes from a job that ran dependency code, so nothing else in it may land in the repository.
-function installPrepared(manifest, fromDir) {
-  const source = path.resolve(fromDir);
-  for (const relative of manifest.prepared ?? []) {
-    const from = path.join(source, relative);
-    if (!existsSync(from) || lstatSync(from).isSymbolicLink()) throw new Error(`Prepared input ${relative} is missing from ${fromDir}`);
-    const escaping = escapingSymlinks(from);
-    if (escaping.length > 0) throw new Error(`Prepared input ${relative} has symlinks pointing outside it: ${escaping.join(', ')}`);
-    const to = path.join(repoRoot, relative);
-    rmSync(to, { recursive: true, force: true });
-    mkdirSync(path.dirname(to), { recursive: true });
-    cpSync(from, to, { recursive: true, verbatimSymlinks: true });
+// Installs only the manifest's declared outputs from the prepare job's archive. That archive comes from a job that
+// ran dependency code, so it is listed and checked before anything is unpacked, unpacked into a fresh folder, and
+// each output must really (not just textually) live inside that folder before it is copied into the checkout.
+function installPrepared(manifest, archive) {
+  const prepared = manifest.prepared ?? [];
+  const members = run('tar', ['-tzf', archive], { capture: true }).split('\n').filter(Boolean);
+  const unexpected = unexpectedArchiveMembers(members, prepared);
+  if (unexpected.length > 0) throw new Error(`Prepared archive has unexpected entries: ${unexpected.slice(0, 5).join(', ')}`);
+
+  const staging = mkdtempSync(path.join(tmpdir(), 'release-macos-prepared-'));
+  try {
+    // bsdtar refuses absolute paths, ".." and writes through symlinks unless -P is given.
+    run('tar', ['-xzf', archive, '-C', staging]);
+    const realStaging = realpathSync(staging);
+    for (const relative of prepared) {
+      const from = path.join(realStaging, relative);
+      if (!existsSync(from) || lstatSync(from).isSymbolicLink() || realpathSync(from) !== from) {
+        throw new Error(`Prepared input ${relative} is missing or not a real path in the archive`);
+      }
+      const escaping = escapingSymlinks(from);
+      if (escaping.length > 0) throw new Error(`Prepared input ${relative} has symlinks pointing outside it: ${escaping.join(', ')}`);
+      const to = path.join(repoRoot, relative);
+      rmSync(to, { recursive: true, force: true });
+      mkdirSync(path.dirname(to), { recursive: true });
+      cpSync(from, to, { recursive: true, verbatimSymlinks: true });
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 

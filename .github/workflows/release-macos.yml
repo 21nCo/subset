@@ -122,13 +122,6 @@ jobs:
           name: prepared-inputs
           path: ${{ runner.temp }}/prepared
 
-      # Unpacked into a staging folder, not the checkout: the build step copies in only the manifest's declared
-      # outputs (--prepared-from), so the archive can't replace repository scripts that run with the secrets.
-      - name: Unpack prepared inputs
-        run: |
-          mkdir -p "$RUNNER_TEMP/prepared/inputs"
-          tar -xzf "$RUNNER_TEMP/prepared/prepared.tar.gz" -C "$RUNNER_TEMP/prepared/inputs"
-
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -196,7 +189,9 @@ jobs:
           dev_args=()
           if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
           # --no-prepare: inputs were built without credentials in the prepare job; nothing here runs npm or fetches.
-          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --no-prepare --prepared-from "$RUNNER_TEMP/prepared/inputs" --out "$RUNNER_TEMP/release"
+          # --prepared-from checks the archive's entries before unpacking it outside the checkout, then copies in
+          # only the manifest's declared outputs.
+          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --no-prepare --prepared-from "$RUNNER_TEMP/prepared/prepared.tar.gz" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.

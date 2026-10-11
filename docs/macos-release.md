@@ -16,7 +16,9 @@ Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 - `"prepare"`: a `.sh` path inside the app directory that fetches inputs (Dictate's checksum-pinned whisper.cpp XCFramework: `"scripts/setup-whispercpp.sh"`). Runs from the app directory.
 - `"prepared"`: the repository-relative outputs of those steps (`["packages/minutes-cli/app-runtime"]`, `["native/dictate/.build/whisper.xcframework"]`). Required whenever `workspaces` or `prepare` is set.
 
-Locally the script runs these steps before archiving. In CI they run dependency code, so the workflow's `prepare` job runs them with no environment, secrets, or write token (`--prepare-only --prepared-archive`), and the signing job unpacks the archive into a staging folder and copies in only the `prepared` paths, refusing symlinks that point outside them (`--no-prepare --prepared-from`). Nothing in the signing job runs npm or fetches. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
+Locally the script runs these steps before archiving. In CI they run dependency code, so the workflow's `prepare` job runs them with no environment, secrets, or write token (`--prepare-only --prepared-archive`), and the signing job passes the archive to `--no-prepare --prepared-from`, which rejects entries outside the declared outputs, unpacks it into a temporary folder, checks that every output and every symlink in it really resolves inside that output (absolute and dangling links are refused), and copies in only the `prepared` paths. Nothing in the signing job runs npm or fetches.
+
+The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
 
 ## One-time setup
 
