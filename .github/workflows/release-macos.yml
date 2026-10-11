@@ -41,6 +41,8 @@ jobs:
     runs-on: macos-26
     permissions:
       contents: read
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
@@ -62,6 +64,10 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+
+      - name: Record the prepared commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare build inputs
         run: |
@@ -108,11 +114,19 @@ jobs:
           # Later steps run code from the tag; they need no authenticated git, so keep the token out of git config.
           persist-credentials: false
 
-      - name: Verify checkout matches the tag
+      # The prepared inputs must come from the same commit that is signed, even if the tag moved between jobs or only
+      # this job is re-run.
+      - name: Verify checkout matches the tag and the prepared commit
+        env:
+          PREPARED_COMMIT: ${{ needs.prepare.outputs.commit }}
         run: |
           tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
           if [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
             echo "HEAD is not tag ${RELEASE_TAG} (${tag_commit})." >&2
+            exit 1
+          fi
+          if [ "$tag_commit" != "$PREPARED_COMMIT" ]; then
+            echo "Tag ${RELEASE_TAG} is now ${tag_commit}, but the inputs were prepared from ${PREPARED_COMMIT}. Re-run the whole workflow." >&2
             exit 1
           fi
 

@@ -196,11 +196,12 @@ test('detects symlinks that escape a prepared input', () => {
     mkdirSync(path.join(framework, 'Versions', 'A', 'b'), { recursive: true });
     symlinkSync('A', path.join(framework, 'Versions', 'Current'));
     assert.deepEqual(escapingSymlinks(framework), []);
-    // Lexically these resolve inside; followed through the filesystem they leave the output.
+    // Both resolve to the existing root/secret only when the links are followed: as text, 's/../secret' looks like
+    // x.xcframework/secret. A lexical check would accept them.
     symlinkSync('.', path.join(framework, 's'));
-    symlinkSync('s/../../secret', path.join(framework, 'chained'));
+    symlinkSync('s/../secret', path.join(framework, 'chained'));
     symlinkSync('../..', path.join(framework, 'Versions', 'A', 'b', 'up'));
-    symlinkSync('Versions/A/b/up/../secret', path.join(framework, 'chained2'));
+    symlinkSync('Versions/A/b/up/../../secret', path.join(framework, 'chained2'));
     symlinkSync('../../../etc', path.join(framework, 'Versions', 'evil'));
     symlinkSync(path.join(framework, 'Versions', 'A'), path.join(framework, 'absolute-inside'));
     symlinkSync('missing', path.join(framework, 'dangling'));

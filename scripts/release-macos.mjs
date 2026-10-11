@@ -274,7 +274,8 @@ export function escapingSymlinks(root) {
 // Archive members must be relative, free of "..", and inside one of the declared outputs.
 export function unexpectedArchiveMembers(members, prepared) {
   return members.filter((member) => {
-    const name = member.replace(/\/+$/, '');
+    let name = member;
+    while (name.endsWith('/')) name = name.slice(0, -1);
     if (name === '' || !isRepoRelativePath(name)) return true;
     return !prepared.some((root) => name === root || name.startsWith(`${root}/`) || root.startsWith(`${name}/`));
   });
