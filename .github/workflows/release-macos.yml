@@ -4,6 +4,10 @@ name: Release macOS app
 # app's MARKETING_VERSION) to build a Developer ID-signed, notarized, stapled DMG and zip. The result goes to
 # a DRAFT GitHub Release: nothing is public until someone verifies the download and publishes the draft.
 #
+# A dev build tag like macos/breaks/v0.1.1-dev.3 builds the same way, with files named <App>-0.1.1-dev.3 and
+# CFBundleVersion 3, and publishes them as a GitHub PRE-RELEASE (not a draft, never "latest") so testers can
+# download it. A dev build is for testing and is never listed as available in the catalog.
+#
 # Needs these secrets in the `macos-release` environment:
 #   MACOS_CERTIFICATE_P12       base64 of the "Developer ID Application" certificate and private key (.p12)
 #   MACOS_CERTIFICATE_PASSWORD  password of that .p12
@@ -18,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag in the form macos/<app-id>/v<version>'
+        description: 'Release tag in the form macos/<app-id>/v<version> or macos/<app-id>/v<version>-dev.<n>'
         required: true
         type: string
 
@@ -45,7 +49,7 @@ jobs:
         run: |
           case "$RELEASE_TAG" in
             macos/*/v*.*.*) ;;
-            *) echo "Release tag must look like macos/<app-id>/v<x.y.z>." >&2; exit 1 ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>." >&2; exit 1 ;;
           esac
           if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
             echo "Run this workflow from tag $RELEASE_TAG (Use workflow from), not $GITHUB_REF." >&2
@@ -79,9 +83,10 @@ jobs:
         run: |
           node --input-type=module -e '
             import { appendFileSync } from "node:fs";
-            import { parseReleaseTag } from "./scripts/release-macos.mjs";
-            const { appId, version } = parseReleaseTag(process.env.RELEASE_TAG);
-            appendFileSync(process.env.GITHUB_OUTPUT, `app_id=${appId}\nversion=${version}\n`);
+            import { parseReleaseTag, releaseVersion } from "./scripts/release-macos.mjs";
+            const { appId, version, dev } = parseReleaseTag(process.env.RELEASE_TAG);
+            // dev is empty for a live release tag.
+            appendFileSync(process.env.GITHUB_OUTPUT, `app_id=${appId}\nversion=${version}\ndev=${dev ?? ""}\nrelease_version=${releaseVersion(version, dev)}\n`);
           '
 
       - name: Select Xcode
@@ -130,14 +135,16 @@ jobs:
           # Tag-derived values reach the shell through env vars, never through expression interpolation.
           APP_ID: ${{ steps.tag.outputs.app_id }}
           APP_VERSION: ${{ steps.tag.outputs.version }}
-        run: >-
-          node scripts/release-macos.mjs "$APP_ID"
-          --version "$APP_VERSION"
-          --out "$RUNNER_TEMP/release"
+          DEV_BUILD: ${{ steps.tag.outputs.dev }}
+        run: |
+          dev_args=()
+          if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
+          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.
       - name: Create draft GitHub Release
+        if: steps.tag.outputs.dev == ''
         env:
           GH_TOKEN: ${{ github.token }}
           OUT_DIR: ${{ steps.build.outputs.out_dir }}
@@ -150,6 +157,25 @@ jobs:
             --verify-tag \
             --title "$APP_NAME $VERSION for macOS" \
             --notes "Developer ID-signed and notarized build of $APP_NAME $VERSION. SHA-256 checksums are in SHA256SUMS." \
+            "$OUT_DIR"/*.dmg "$OUT_DIR"/*.zip "$OUT_DIR"/SHA256SUMS
+
+      # Dev builds are published as pre-releases so testers can download them without a GitHub account. A
+      # pre-release is never marked latest, and the catalog check rejects any dev build listed as available.
+      - name: Create dev build pre-release
+        if: steps.tag.outputs.dev != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT_DIR: ${{ steps.build.outputs.out_dir }}
+          APP_NAME: ${{ steps.build.outputs.app }}
+          VERSION: ${{ steps.tag.outputs.release_version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --latest=false \
+            --verify-tag \
+            --title "$APP_NAME $VERSION (dev build)" \
+            --notes "Development build of $APP_NAME $VERSION for testing. This is not a release: it is not listed in the Subset catalog and may change or be removed. It is Developer ID-signed and notarized; SHA-256 checksums are in SHA256SUMS." \
             "$OUT_DIR"/*.dmg "$OUT_DIR"/*.zip "$OUT_DIR"/SHA256SUMS
 
       - name: Remove signing material

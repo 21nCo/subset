@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Builds a Developer ID-signed, notarized, stapled macOS release of one native app:
-//   node scripts/release-macos.mjs <app-id> [--version <x.y.z>] [--out <dir>] [--skip-notarize]
+//   node scripts/release-macos.mjs <app-id> [--version <x.y.z>] [--dev <n>] [--out <dir>] [--skip-notarize]
+//
+// --dev <n> makes development build n of the app's MARKETING_VERSION: the files are named <App>-<x.y.z>-dev.<n>
+// and the app's CFBundleVersion (CURRENT_PROJECT_VERSION) is set to n, so each dev build is distinguishable while
+// CFBundleShortVersionString stays x.y.z. A dev build is signed and notarized like a live one.
 //
 // The app is described by native/<app-id>/macos-release.json ({ project, scheme, app }). Signing uses the
 // "Developer ID Application" identity for the team in that file (or --team / APPLE_TEAM_ID) from the
@@ -8,7 +12,8 @@
 // NOTARY_PROFILE, set up once with `xcrun notarytool store-credentials`) or, in CI, from an App Store Connect
 // API key (APPLE_API_KEY_PATH, APPLE_API_KEY_ID, APPLE_API_ISSUER). Credentials are never printed.
 //
-// Output: <out>/<App>-<version>.dmg, <App>-<version>.zip, and SHA256SUMS. Nothing is uploaded or published.
+// Output: <out>/<App>-<version>.dmg, <App>-<version>.zip, and SHA256SUMS, where <version> is x.y.z or
+// x.y.z-dev.<n>. Nothing is uploaded or published.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -20,12 +25,40 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const appIdPattern = /^[a-z0-9][a-z0-9-]*$/;
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const teamPattern = /^[A-Z0-9]{10}$/;
+// A dev build number is a positive integer without leading zeros; it becomes CFBundleVersion.
+const devBuildPattern = /^[1-9]\d{0,8}$/;
 
-// A release tag is macos/<app-id>/v<version>. The slashes keep it from matching publish-tag.yml's *-v*.*.*.
+// A live release tag is macos/<app-id>/v<x.y.z>; a dev build tag is macos/<app-id>/v<x.y.z>-dev.<n>. The slashes
+// keep both from matching publish-tag.yml's *-v*.*.*. Dev tags also return `dev` (n, as a string).
 export function parseReleaseTag(tag) {
-  const match = /^macos\/(?<appId>[a-z0-9][a-z0-9-]*)\/v(?<version>\d+\.\d+\.\d+)$/.exec(tag ?? '');
-  if (!match) throw new Error(`Release tag must look like macos/<app-id>/v<x.y.z>, got ${JSON.stringify(tag)}`);
-  return { appId: match.groups.appId, version: match.groups.version };
+  const match = /^macos\/(?<appId>[a-z0-9][a-z0-9-]*)\/v(?<version>\d+\.\d+\.\d+)(?:-dev\.(?<dev>[1-9]\d{0,8}))?$/.exec(tag ?? '');
+  if (!match) throw new Error(`Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>, got ${JSON.stringify(tag)}`);
+  const { appId, version, dev } = match.groups;
+  return dev === undefined ? { appId, version } : { appId, version, dev };
+}
+
+// The version a build's files and release are named for: x.y.z for a live release, x.y.z-dev.<n> for a dev build.
+export function releaseVersion(version, dev) {
+  return dev === undefined ? version : `${version}-dev.${dev}`;
+}
+
+// Catalog surfaces list only live releases (AGENTS.md rule 4). A SemVer pre-release such as 0.1.1-dev.2, in the
+// version or anywhere in a link (a dev tag or file name), marks a build that is never listed as available.
+const prereleasePattern = /\d+\.\d+\.\d+-[0-9A-Za-z]|-dev\./i;
+export function prereleaseProblems({ version, url, releaseUrl }) {
+  const problems = [];
+  if (typeof version !== 'string' || !versionPattern.test(version)) problems.push(`version ${JSON.stringify(version)} is not a plain x.y.z release`);
+  for (const [name, value] of [['url', url], ['releaseUrl', releaseUrl]]) {
+    // Check the decoded form too, so an escaped tag (v0.1.1%2Ddev.1) cannot slip through.
+    let decoded = '';
+    try {
+      decoded = decodeURIComponent(String(value));
+    } catch {
+      // A malformed escape leaves only the raw text to check.
+    }
+    if (prereleasePattern.test(String(value)) || prereleasePattern.test(decoded)) problems.push(`${name} links a pre-release`);
+  }
+  return problems;
 }
 
 export function validateManifest(manifest, appId) {
@@ -76,6 +109,7 @@ export function parseArgs(argv) {
       return next;
     };
     if (arg === '--version') options.version = value();
+    else if (arg === '--dev') options.dev = value();
     else if (arg === '--out') options.out = value();
     else if (arg === '--team') options.team = value();
     else if (arg === '--notary-profile') options.notaryProfile = value();
@@ -83,9 +117,10 @@ export function parseArgs(argv) {
     else if (arg.startsWith('--')) throw new Error(`Unknown option ${arg}`);
     else rest.push(arg);
   }
-  if (rest.length !== 1) throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize]');
+  if (rest.length !== 1) throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize]');
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
   if (options.version !== undefined && !versionPattern.test(options.version)) throw new Error(`--version must be x.y.z, got ${options.version}`);
+  if (options.dev !== undefined && !devBuildPattern.test(options.dev)) throw new Error(`--dev must be a positive integer, got ${options.dev}`);
   if (options.team !== undefined && !teamPattern.test(options.team)) throw new Error('--team must be a 10-character Apple team ID');
   return { appId: rest[0], ...options };
 }
@@ -162,7 +197,7 @@ function loadRelease(options) {
 
 // Archives and exports the app with the Developer ID identity, then refuses anything not signed by this team's
 // Developer ID with the hardened runtime. Returns the exported app and its signature details.
-function buildSignedApp({ manifest, team, project }, workDir) {
+function buildSignedApp({ manifest, team, project, version }, dev, workDir) {
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
   run('xcodebuild', [
     'archive',
@@ -178,6 +213,8 @@ function buildSignedApp({ manifest, team, project }, workDir) {
     'PROVISIONING_PROFILE_SPECIFIER=',
     'ENABLE_HARDENED_RUNTIME=YES',
     'OTHER_CODE_SIGN_FLAGS=--timestamp',
+    // A dev build stamps its number into CFBundleVersion for every target, so embedded extensions still match.
+    ...(dev === undefined ? [] : [`CURRENT_PROJECT_VERSION=${dev}`]),
   ]);
 
   const exportOptions = path.join(workDir, 'ExportOptions.plist');
@@ -199,6 +236,7 @@ function buildSignedApp({ manifest, team, project }, workDir) {
   run('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportDir, '-exportOptionsPlist', exportOptions]);
   const appPath = path.join(exportDir, `${manifest.app}.app`);
   if (!existsSync(appPath)) throw new Error(`Export did not produce ${manifest.app}.app`);
+  checkBundleVersions(appPath, version, dev);
 
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   // codesign prints signature details on stderr.
@@ -210,6 +248,20 @@ function buildSignedApp({ manifest, team, project }, workDir) {
   }
   if (!hasHardenedRuntime(signature)) throw new Error('App is not signed with the hardened runtime');
   return { appPath, signature };
+}
+
+function plistValue(plist, key) {
+  return execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' }).trim();
+}
+
+// The exported app must carry the release's version, and a dev build its build number.
+function checkBundleVersions(appPath, version, dev) {
+  const plist = path.join(appPath, 'Contents', 'Info.plist');
+  const shortVersion = plistValue(plist, 'CFBundleShortVersionString');
+  const bundleVersion = plistValue(plist, 'CFBundleVersion');
+  if (shortVersion !== version) throw new Error(`App has CFBundleShortVersionString ${shortVersion}, expected ${version}`);
+  if (dev !== undefined && bundleVersion !== dev) throw new Error(`Dev build ${dev} has CFBundleVersion ${bundleVersion}, expected ${dev}`);
+  console.log(`CFBundleShortVersionString ${shortVersion}, CFBundleVersion ${bundleVersion}`);
 }
 
 // Submits `submission` for notarization, then staples the ticket to `target` (an app is submitted as a zip but
@@ -224,21 +276,22 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
   const release = loadRelease(options);
   const { manifest, version } = release;
+  const fullVersion = releaseVersion(version, options.dev);
   // Resolve credentials before the slow build so a missing setup fails fast.
   const authArgs = options.skipNotarize ? null : notaryAuthArgs(options);
 
-  const outDir = path.resolve(options.out ?? path.join(repoRoot, 'dist', 'macos', options.appId, version));
+  const outDir = path.resolve(options.out ?? path.join(repoRoot, 'dist', 'macos', options.appId, fullVersion));
   const outDirProblem = unsafeOutDirReason(outDir, repoRoot, process.env.HOME);
   if (outDirProblem) throw new Error(`Refusing to use ${outDir} as --out: ${outDirProblem}`);
   // Only remove what this script writes; --out may be a folder with other files in it.
   const workDir = path.join(outDir, '.release-macos-work');
-  const base = `${manifest.app.replace(/\s+/g, '-')}-${version}`;
+  const base = `${manifest.app.replace(/\s+/g, '-')}-${fullVersion}`;
   const zipPath = path.join(outDir, `${base}.zip`);
   const dmgPath = path.join(outDir, `${base}.dmg`);
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
 
-  const { appPath, signature } = buildSignedApp(release, workDir);
+  const { appPath, signature } = buildSignedApp(release, options.dev, workDir);
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);
@@ -267,11 +320,11 @@ function main() {
   writeFileSync(path.join(outDir, 'SHA256SUMS'), sums);
   rmSync(workDir, { recursive: true, force: true });
 
-  console.log(`\n${authArgs ? 'Signed, notarized, and stapled' : 'Signed (NOT notarized)'} ${manifest.app} ${version}:`);
+  console.log(`\n${authArgs ? 'Signed, notarized, and stapled' : 'Signed (NOT notarized)'} ${manifest.app} ${fullVersion}:`);
   console.log(sums.trimEnd().replace(/^/gm, '  '));
   console.log(`  in ${outDir}`);
   if (process.env.GITHUB_OUTPUT) {
-    writeFileSync(process.env.GITHUB_OUTPUT, `out_dir=${outDir}\nversion=${version}\napp=${manifest.app}\n`, { flag: 'a' });
+    writeFileSync(process.env.GITHUB_OUTPUT, `out_dir=${outDir}\nversion=${fullVersion}\napp=${manifest.app}\n`, { flag: 'a' });
   }
 }
 

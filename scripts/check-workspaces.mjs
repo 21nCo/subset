@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { prereleaseProblems } from './release-macos.mjs';
 
 const root = new URL('../', import.meta.url);
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, root), 'utf8'));
@@ -118,6 +119,9 @@ for (const capability of capabilities) {
     assert.equal(seen.has(release.surface), false, `${label} is listed as available more than once`);
     seen.add(release.surface);
     assert.match(release.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `${label} needs a release version`);
+    // Dev builds (x.y.z-dev.<n>, published as GitHub pre-releases for testing) are never listed as available.
+    const prerelease = prereleaseProblems(release);
+    assert.deepEqual(prerelease, [], `${label} is a pre-release and cannot be available: ${prerelease.join('; ')}`);
     assert.ok(isHttpsUrl(release.url), `${label} needs an https artifact URL`);
     assert.ok(isHttpsUrl(release.releaseUrl), `${label} needs an https release page URL`);
     if (release.sha256 !== undefined) assert.match(release.sha256, /^[0-9a-f]{64}$/, `${label} has a malformed sha256`);

@@ -198,6 +198,8 @@ Package/version used: none. Gap: there is no Superfunctions package for Screen T
 
 `macos-release.json` opts the `BreaksMac` scheme into the signed macOS release flow; see [docs/macos-release.md](../../docs/macos-release.md).
 
+The project's `MARKETING_VERSION` is 0.1.1, the next version after the released 0.1.0. Its dev builds are tagged `macos/breaks/v0.1.1-dev.<n>` and published as GitHub pre-releases for testing ([Dev builds](../../docs/macos-release.md#dev-builds)); they are not releases and are not listed as available. Breaks 0.1.1 has not been built or released.
+
 ### Breaks 0.1.0 for macOS
 
 - Release: [macos/breaks/v0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), built by the **Release macOS app** workflow (run 38075115184) from the tag at commit `313b064`.
