@@ -74,6 +74,7 @@ export function validateManifest(manifest, appId) {
   }
   if (typeof manifest.app === 'string' && !/^[A-Za-z0-9 ._-]+$/.test(manifest.app)) problems.push('"app" must be a plain app name');
   if (manifest.team !== undefined && !teamPattern.test(manifest.team)) problems.push('"team" must be a 10-character Apple team ID');
+  if (manifest.workspaceBuild !== undefined && typeof manifest.workspaceBuild !== 'boolean') problems.push('"workspaceBuild" must be true or false');
   return problems;
 }
 
@@ -294,6 +295,13 @@ function main() {
   const dmgPath = path.join(outDir, `${base}.dmg`);
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
+
+  // Apps that bundle workspace output (for example Minutes embeds the built CLI) need the npm workspaces built
+  // first; their Release build fails without it.
+  if (manifest.workspaceBuild) {
+    run('npm', ['ci', '--no-audit', '--no-fund']);
+    run('npm', ['run', 'build']);
+  }
 
   const { appPath, signature } = buildSignedApp(release, options.dev, workDir);
 

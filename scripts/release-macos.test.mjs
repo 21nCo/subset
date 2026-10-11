@@ -105,6 +105,8 @@ test('flags pre-release catalog surfaces', () => {
 test('validates release manifests', () => {
   assert.deepEqual(validateManifest({ project: 'Breaks.xcodeproj', scheme: 'BreaksMac', app: 'Breaks', team: 'SAZVPX4CAA' }, 'breaks'), []);
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A' }, 'a'), []);
+  assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', workspaceBuild: true }, 'a'), []);
+  assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', workspaceBuild: 'yes' }, 'a').join(), /workspaceBuild/);
   assert.match(validateManifest({ scheme: 'A', app: 'A' }, 'a').join(), /"project"/);
   assert.match(validateManifest({ project: '../other/A.xcodeproj', scheme: 'A', app: 'A' }, 'a').join(), /inside the app directory/);
   assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A/../B' }, 'a').join(), /plain app name/);
