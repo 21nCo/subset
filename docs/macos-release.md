@@ -1,6 +1,6 @@
 # Signed macOS releases
 
-`scripts/release-macos.mjs` turns one native app into a download that passes Gatekeeper's signature and notarization checks on another Mac, with no untrusted-developer warning: it archives the app with the team's **Developer ID Application** certificate and the hardened runtime, exports it, checks the signature, notarizes and staples the app, then builds, signs, notarizes, and staples a DMG. It writes `<App>-<version>.dmg`, `<App>-<version>.zip` (the stapled app), and `SHA256SUMS`; a dev build (`--dev <n>`, see [Dev builds](#dev-builds)) names them `<App>-<version>-dev.<n>`. It never uploads or publishes anything. `--out` may be an existing folder: the script replaces only its own files there (the DMG, the zip, `SHA256SUMS`, and a temporary `.release-macos-work` folder) and refuses the filesystem root, the home folder, and any folder containing the repository.
+`scripts/release-macos.mjs` turns one native app into a download that passes Gatekeeper's signature and notarization checks on another Mac, with no untrusted-developer warning: it archives the app with an ad-hoc signature (entitlements and the hardened runtime applied, no signing identity), re-signs the archive with the team's **Developer ID Application** certificate during export, checks the signature, notarizes and staples the app, then builds, signs, notarizes, and staples a DMG. It writes `<App>-<version>.dmg`, `<App>-<version>.zip` (the stapled app), and `SHA256SUMS`; a dev build (`--dev <n>`, see [Dev builds](#dev-builds)) names them `<App>-<version>-dev.<n>`. It never uploads or publishes anything. `--out` may be an existing folder: the script replaces only its own files there (the DMG, the zip, `SHA256SUMS`, and a temporary `.release-macos-work` folder) and refuses the filesystem root, the home folder, and any folder containing the repository.
 
 ## Opting an app in
 
@@ -10,7 +10,14 @@ Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 { "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA" }
 ```
 
-`scheme` must build a macOS `.app`; `app` is its product name. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
+`scheme` must build a macOS `.app`; `app` is its product name. Some apps need build inputs the repository doesn't hold:
+
+- `"workspaces"`: npm workspaces to build first, in order (Minutes embeds the built `@subset.dev/minutes` CLI: `["@subset/minutes", "@subset.dev/minutes"]`). Runs `npm ci` and `npm run build --workspace=<name>` for each.
+- `"prepare"`: a `.sh` path inside the app directory that fetches inputs (Dictate's checksum-pinned whisper.cpp XCFramework: `"scripts/setup-whispercpp.sh"`). Runs from the app directory.
+
+The script runs these steps, resolves any Swift packages, and archives the app with an ad-hoc signature (entitlements and hardened runtime applied, no signing identity), then re-signs the archive with Developer ID through `xcodebuild -exportArchive` and notarizes it. Locally that is one command. In CI, building and signing are separate jobs so no project, package, or npm code runs while credentials are present: the `build` job has no environment, secrets, or write token and runs `--archive-only --archive-out <file>`; the signing job runs `--from-archive <file> --version <x.y.z>`, which lists the archive's entries (only `<App>.xcarchive/...` is accepted), unpacks it, refuses symlinks that resolve outside it, checks the app's version and build number, and only re-signs, notarizes, and packages it. The signing job runs the repository's release script and Apple's tools, but no app, Swift package, or npm build code. The signing job also refuses an archive built from a different commit than the tag it signs.
+
+The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
 
 ## One-time setup
 
@@ -41,7 +48,7 @@ node scripts/release-macos.mjs breaks --skip-notarize                  # signed-
 node scripts/release-macos.mjs breaks --dev 3 --skip-notarize          # signed-only dev build 3 (Breaks-<version>-dev.3)
 ```
 
-From CI, push a tag `macos/<app-id>/v<version>` (the version must equal `MARKETING_VERSION`), or run **Release macOS app** manually from that tag (choose the tag under *Use workflow from* and enter the same tag; the run fails if they differ, so the environment's tag policy always covers the code that runs). The slashes keep these tags out of the npm `publish-tag.yml` trigger. The workflow attaches the files to a **draft** GitHub Release only; it uploads no public workflow artifact.
+From CI, push a tag `macos/<app-id>/v<version>` (the version must equal `MARKETING_VERSION`), or run **Release macOS app** manually from that tag (choose the tag under *Use workflow from* and enter the same tag; the run fails if they differ, so the environment's tag policy always covers the code that runs). The slashes keep these tags out of the npm `publish-tag.yml` trigger. The workflow attaches the signed files to a **draft** GitHub Release only; they are never uploaded as workflow artifacts. The build job does upload the ad-hoc-signed `.xcarchive` (artifact `app-archive`, kept 7 days) for the signing job, so anyone who can read the repository can download that unsigned build of the tagged source before the release is published.
 
 A draft is not a release. Before publishing it and before any catalog `availableSurfaces` entry or landing page links it (see [AGENTS.md](../AGENTS.md)): download the DMG on a Mac that has never run the app, confirm it opens without a Gatekeeper prompt beyond the standard "downloaded from the internet" notice, check the checksum, and run the app's first-launch and permission flows.
 

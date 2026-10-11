@@ -1,1 +1,7 @@
-{ "project": "Minutes.xcodeproj", "scheme": "Minutes", "app": "Minutes", "team": "SAZVPX4CAA" }
+{
+  "project": "Minutes.xcodeproj",
+  "scheme": "Minutes",
+  "app": "Minutes",
+  "team": "SAZVPX4CAA",
+  "workspaces": ["@subset/minutes", "@subset.dev/minutes"]
+}

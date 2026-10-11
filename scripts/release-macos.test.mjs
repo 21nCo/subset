@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import {
+  escapingSymlinks,
+  isRepoRelativePath,
+  unexpectedArchiveMembers,
   hasHardenedRuntime,
   parseArgs,
   parseReleaseTag,
@@ -105,6 +110,15 @@ test('flags pre-release catalog surfaces', () => {
 test('validates release manifests', () => {
   assert.deepEqual(validateManifest({ project: 'Breaks.xcodeproj', scheme: 'BreaksMac', app: 'Breaks', team: 'SAZVPX4CAA' }, 'breaks'), []);
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A' }, 'a'), []);
+  const base = { project: 'A.xcodeproj', scheme: 'A', app: 'A' };
+  assert.deepEqual(validateManifest({ ...base, workspaces: ['@subset/minutes', '@subset.dev/minutes'] }, 'a'), []);
+  assert.deepEqual(validateManifest({ ...base, prepare: 'scripts/setup.sh' }, 'a'), []);
+  for (const workspaces of [[], 'x', ['Bad Name'], [7]]) {
+    assert.match(validateManifest({ ...base, workspaces }, 'a').join(), /"workspaces"/, String(workspaces));
+  }
+  for (const prepare of ['../x.sh', '/tmp/x.sh', 'scripts/setup', 'a b.sh', 'scripts/../../x.sh', './x.sh', 7]) {
+    assert.match(validateManifest({ ...base, prepare }, 'a').join(), /"prepare"/, String(prepare));
+  }
   assert.match(validateManifest({ scheme: 'A', app: 'A' }, 'a').join(), /"project"/);
   assert.match(validateManifest({ project: '../other/A.xcodeproj', scheme: 'A', app: 'A' }, 'a').join(), /inside the app directory/);
   assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A/../B' }, 'a').join(), /plain app name/);
@@ -131,6 +145,18 @@ test('parses arguments', () => {
   assert.throws(() => parseArgs(['breaks', '--version']), /needs a value/);
   assert.throws(() => parseArgs(['breaks', '--team', 'abc']), /team ID/);
   assert.throws(() => parseArgs(['breaks', '--sign']), /Unknown option/);
+  assert.deepEqual(parseArgs(['minutes', '--archive-only', '--archive-out', 'a.tgz', '--dev', '2']), {
+    appId: 'minutes',
+    skipNotarize: false,
+    archiveOnly: true,
+    archiveOut: 'a.tgz',
+    dev: '2',
+  });
+  assert.equal(parseArgs(['minutes', '--from-archive', 'a.tgz', '--version', '0.1.0']).fromArchive, 'a.tgz');
+  assert.throws(() => parseArgs(['minutes', '--archive-only']), /needs --archive-out/);
+  assert.throws(() => parseArgs(['minutes', '--archive-out', 'a.tgz']), /needs --archive-only/);
+  assert.throws(() => parseArgs(['minutes', '--from-archive', 'a.tgz']), /needs --version/);
+  assert.throws(() => parseArgs(['minutes', '--archive-only', '--archive-out', 'a', '--from-archive', 'b', '--version', '0.1.0']), /cannot be combined/);
 });
 
 test('detects the hardened runtime among other CodeDirectory flags', () => {
@@ -159,4 +185,55 @@ test('refuses output folders whose release files would be risky to clear', () =>
   assert.match(unsafeOutDirReason('/work', repo, '/Users/me'), /repository/);
   assert.equal(unsafeOutDirReason('/work/subset/dist/macos/record/0.1.0', repo, '/Users/me'), null);
   assert.equal(unsafeOutDirReason('/Users/me/Downloads', repo, '/Users/me'), null);
+});
+
+test('detects symlinks that escape an archive', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'prepared-'));
+  try {
+    writeFileSync(path.join(root, 'secret'), 'outside');
+    const framework = path.join(root, 'x.xcframework');
+    mkdirSync(path.join(framework, 'Versions', 'A', 'b'), { recursive: true });
+    symlinkSync('A', path.join(framework, 'Versions', 'Current'));
+    assert.deepEqual(escapingSymlinks(framework), []);
+    // Both resolve to the existing root/secret only when the links are followed: as text, 's/../secret' looks like
+    // x.xcframework/secret. A lexical check would accept them.
+    symlinkSync('.', path.join(framework, 's'));
+    symlinkSync('s/../secret', path.join(framework, 'chained'));
+    symlinkSync('../..', path.join(framework, 'Versions', 'A', 'b', 'up'));
+    symlinkSync('Versions/A/b/up/../../secret', path.join(framework, 'chained2'));
+    symlinkSync('../../../etc', path.join(framework, 'Versions', 'evil'));
+    symlinkSync(path.join(framework, 'Versions', 'A'), path.join(framework, 'absolute-inside'));
+    symlinkSync('missing', path.join(framework, 'dangling'));
+    assert.deepEqual(escapingSymlinks(framework).sort(), ['Versions/evil', 'absolute-inside', 'chained', 'chained2', 'dangling'].sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('accepts only plain repository-relative paths', () => {
+  for (const ok of ['packages/minutes-cli/app-runtime', 'native/dictate/.build/whisper.xcframework', 'a']) assert.equal(isRepoRelativePath(ok), true, ok);
+  for (const bad of ['.', './.', '', 'a/./b', 'a//b', 'a/', '../a', 'a/../b', '/abs', 'a b', 7]) assert.equal(isRepoRelativePath(bad), false, String(bad));
+});
+
+test('flags archive members outside the allowed roots', () => {
+  const roots = ['Minutes.xcarchive'];
+  const ok = [
+    'Minutes.xcarchive/',
+    'Minutes.xcarchive/Info.plist',
+    'Minutes.xcarchive/Products/Applications/Minutes.app/Contents/Resources/minutes-cli/node_modules/@scope/pkg+1~x/a file.js',
+  ];
+  assert.deepEqual(unexpectedArchiveMembers(ok, roots), []);
+  const bad = [
+    'scripts/release-macos.mjs',
+    '../evil',
+    '/etc/passwd',
+    'Minutes.xcarchive/../../../x',
+    'Minutes.xcarchive-other/x',
+    'Other.xcarchive/x',
+    './x',
+    'Minutes.xcarchive/a\\..\\b',
+    'Minutes.xcarchive/line\nbreak',
+    'Minutes.xcarchive/c1\u009bx',
+  ];
+  assert.deepEqual(unexpectedArchiveMembers(bad, roots), bad);
 });

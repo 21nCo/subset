@@ -1,1 +1,7 @@
-{ "project": "Dictate.xcodeproj", "scheme": "Dictate", "app": "Dictate", "team": "SAZVPX4CAA" }
+{
+  "project": "Dictate.xcodeproj",
+  "scheme": "Dictate",
+  "app": "Dictate",
+  "team": "SAZVPX4CAA",
+  "prepare": "scripts/setup-whispercpp.sh"
+}

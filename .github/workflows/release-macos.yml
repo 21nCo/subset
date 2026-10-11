@@ -8,6 +8,12 @@ name: Release macOS app
 # CFBundleVersion 3, and publishes them as a GitHub PRE-RELEASE (not a draft, never "latest") so testers can
 # download it. A dev build is for testing and is never listed as available in the catalog.
 #
+# Two jobs keep project code away from the signing credentials. `build` has no environment, secrets, or write
+# token: it prepares inputs (npm workspaces, fetched frameworks, Swift packages) and archives the app with an
+# ad-hoc signature. `release` runs only the repository's release script and Apple's tools, no app, Swift
+# package, or npm build code: it re-signs that archive with Developer ID (xcodebuild -exportArchive), notarizes,
+# and publishes.
+#
 # Needs these secrets in the `macos-release` environment:
 #   MACOS_CERTIFICATE_P12       base64 of the "Developer ID Application" certificate and private key (.p12)
 #   MACOS_CERTIFICATE_PASSWORD  password of that .p12
@@ -34,7 +40,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      - name: Check the release tag
+        run: |
+          case "$RELEASE_TAG" in
+            macos/*/v*.*.*) ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>." >&2; exit 1 ;;
+          esac
+
+      - name: Checkout release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Record the built commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "No Xcode 26 on this runner." >&2; exit 1; fi
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      - name: Prepare and archive (ad-hoc signed, no credentials)
+        run: |
+          eval "$(node --input-type=module -e '
+            import { parseReleaseTag } from "./scripts/release-macos.mjs";
+            const { appId, version, dev } = parseReleaseTag(process.env.RELEASE_TAG);
+            console.log(`app_id=${appId}; version=${version}; dev=${dev ?? ""}`);
+          ')"
+          dev_args=()
+          if [ -n "$dev" ]; then dev_args=(--dev "$dev"); fi
+          node scripts/release-macos.mjs "$app_id" --version "$version" "${dev_args[@]}" --archive-only --archive-out "$RUNNER_TEMP/app.xcarchive.tar.gz"
+
+      - name: Hand the archive to the signing job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-archive
+          path: ${{ runner.temp }}/app.xcarchive.tar.gz
+          if-no-files-found: error
+          # Long enough for a release that waits on environment approval.
+          retention-days: 7
+
   release:
+    needs: build
     runs-on: macos-26
     environment: macos-release
     permissions:
@@ -65,13 +131,27 @@ jobs:
           # Later steps run code from the tag; they need no authenticated git, so keep the token out of git config.
           persist-credentials: false
 
-      - name: Verify checkout matches the tag
+      # The archive must come from the same commit that this job's scripts come from, even if the tag moved between
+      # jobs or only this job is re-run.
+      - name: Verify checkout matches the tag and the built commit
+        env:
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
         run: |
           tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
           if [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
             echo "HEAD is not tag ${RELEASE_TAG} (${tag_commit})." >&2
             exit 1
           fi
+          if [ "$tag_commit" != "$BUILT_COMMIT" ]; then
+            echo "Tag ${RELEASE_TAG} is now ${tag_commit}, but the archive was built from ${BUILT_COMMIT}. Re-run the whole workflow." >&2
+            exit 1
+          fi
+
+      - name: Download the archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: app-archive
+          path: ${{ runner.temp }}/archive
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -125,7 +205,7 @@ jobs:
           umask 077
           printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
 
-      - name: Build, sign, notarize, and staple
+      - name: Sign, notarize, and staple
         id: build
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -139,7 +219,10 @@ jobs:
         run: |
           dev_args=()
           if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
-          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --out "$RUNNER_TEMP/release"
+          # --from-archive: re-sign the build job's archive with Developer ID and notarize it. Only this script and
+          # Apple's tools run here, no app, package, or npm build code; the archive's entries are checked before
+          # unpacking.
+          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --from-archive "$RUNNER_TEMP/archive/app.xcarchive.tar.gz" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.
