@@ -107,6 +107,10 @@ test('validates release manifests', () => {
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A' }, 'a'), []);
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', workspaceBuild: true }, 'a'), []);
   assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', workspaceBuild: 'yes' }, 'a').join(), /workspaceBuild/);
+  assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', prepare: 'scripts/setup.sh' }, 'a'), []);
+  for (const prepare of ['../x.sh', '/tmp/x.sh', 'scripts/setup', 'a b.sh', 'scripts/../../x.sh', 7]) {
+    assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A', prepare }, 'a').join(), /"prepare"/, String(prepare));
+  }
   assert.match(validateManifest({ scheme: 'A', app: 'A' }, 'a').join(), /"project"/);
   assert.match(validateManifest({ project: '../other/A.xcodeproj', scheme: 'A', app: 'A' }, 'a').join(), /inside the app directory/);
   assert.match(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A/../B' }, 'a').join(), /plain app name/);

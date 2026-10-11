@@ -75,6 +75,12 @@ export function validateManifest(manifest, appId) {
   if (typeof manifest.app === 'string' && !/^[A-Za-z0-9 ._-]+$/.test(manifest.app)) problems.push('"app" must be a plain app name');
   if (manifest.team !== undefined && !teamPattern.test(manifest.team)) problems.push('"team" must be a 10-character Apple team ID');
   if (manifest.workspaceBuild !== undefined && typeof manifest.workspaceBuild !== 'boolean') problems.push('"workspaceBuild" must be true or false');
+  if (
+    manifest.prepare !== undefined &&
+    (typeof manifest.prepare !== 'string' || !/^[A-Za-z0-9._/-]+\.sh$/.test(manifest.prepare) || manifest.prepare.split('/').includes('..') || path.isAbsolute(manifest.prepare))
+  ) {
+    problems.push('"prepare" must be a .sh path inside the app directory');
+  }
   return problems;
 }
 
@@ -301,6 +307,14 @@ function main() {
   if (manifest.workspaceBuild) {
     run('npm', ['ci', '--no-audit', '--no-fund']);
     run('npm', ['run', 'build']);
+  }
+  // Apps with build inputs that are fetched rather than checked in (for example Dictate's checksum-pinned
+  // whisper.cpp XCFramework) name a script in their own directory that prepares them.
+  if (manifest.prepare) {
+    const appDir = path.join(repoRoot, 'native', options.appId);
+    const prepareScript = path.join(appDir, manifest.prepare);
+    if (!existsSync(prepareScript)) throw new Error(`Missing prepare script native/${options.appId}/${manifest.prepare}`);
+    run('/bin/bash', [prepareScript], { cwd: appDir });
   }
 
   const { appPath, signature } = buildSignedApp(release, options.dev, workDir);

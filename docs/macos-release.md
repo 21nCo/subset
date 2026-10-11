@@ -10,7 +10,7 @@ Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 { "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA" }
 ```
 
-`scheme` must build a macOS `.app`; `app` is its product name. Set `"workspaceBuild": true` when the app bundles output from the npm workspaces (Minutes embeds the built `@subset.dev/minutes` CLI); the script then runs `npm ci` and `npm run build` at the repository root before archiving. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
+`scheme` must build a macOS `.app`; `app` is its product name. Set `"workspaceBuild": true` when the app bundles output from the npm workspaces (Minutes embeds the built `@subset.dev/minutes` CLI); the script then runs `npm ci` and `npm run build` at the repository root before archiving. Set `"prepare"` to a `.sh` path inside the app directory when the build needs inputs that are fetched rather than checked in (Dictate's checksum-pinned whisper.cpp XCFramework); it runs from the app directory before archiving. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
 
 ## One-time setup
 
