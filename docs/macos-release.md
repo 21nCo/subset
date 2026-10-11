@@ -10,7 +10,13 @@ Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 { "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA" }
 ```
 
-`scheme` must build a macOS `.app`; `app` is its product name. Set `"workspaceBuild": true` when the app bundles output from the npm workspaces (Minutes embeds the built `@subset.dev/minutes` CLI); the script then runs `npm ci` and `npm run build` at the repository root before archiving. Set `"prepare"` to a `.sh` path inside the app directory when the build needs inputs that are fetched rather than checked in (Dictate's checksum-pinned whisper.cpp XCFramework); it runs from the app directory before archiving. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
+`scheme` must build a macOS `.app`; `app` is its product name. Some apps need build inputs the repository doesn't hold:
+
+- `"workspaces"`: npm workspaces to build first, in order (Minutes embeds the built `@subset.dev/minutes` CLI: `["@subset/minutes", "@subset.dev/minutes"]`). Runs `npm ci` and `npm run build --workspace=<name>` for each.
+- `"prepare"`: a `.sh` path inside the app directory that fetches inputs (Dictate's checksum-pinned whisper.cpp XCFramework: `"scripts/setup-whispercpp.sh"`). Runs from the app directory.
+- `"prepared"`: the repository-relative outputs of those steps (`["packages/minutes-cli/app-runtime"]`, `["native/dictate/.build/whisper.xcframework"]`). Required whenever `workspaces` or `prepare` is set.
+
+Locally the script runs these steps before archiving. In CI they run dependency code, so the workflow's `prepare` job runs them with no environment, secrets, or write token (`--prepare-only --prepared-archive`), and the signing job unpacks the archive into a staging folder and copies in only the `prepared` paths, refusing symlinks that point outside them (`--no-prepare --prepared-from`). Nothing in the signing job runs npm or fetches. The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
 
 ## One-time setup
 

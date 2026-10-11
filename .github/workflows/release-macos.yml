@@ -34,7 +34,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Builds or fetches what an app's Xcode build needs but the repository doesn't hold (npm workspaces it bundles,
+  # files its prepare script downloads). That runs dependency code, so this job has no environment, no secrets,
+  # and a read-only token; the signing job only receives the declared outputs.
+  prepare:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+    steps:
+      - name: Check the release tag
+        run: |
+          case "$RELEASE_TAG" in
+            macos/*/v*.*.*) ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>." >&2; exit 1 ;;
+          esac
+
+      - name: Checkout release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Prepare build inputs
+        run: |
+          app_id="$(node --input-type=module -e 'import { parseReleaseTag } from "./scripts/release-macos.mjs"; console.log(parseReleaseTag(process.env.RELEASE_TAG).appId);')"
+          node scripts/release-macos.mjs "$app_id" --prepare-only --prepared-archive "$RUNNER_TEMP/prepared.tar.gz"
+
+      - name: Hand prepared inputs to the signing job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prepared-inputs
+          path: ${{ runner.temp }}/prepared.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   release:
+    needs: prepare
     runs-on: macos-26
     environment: macos-release
     permissions:
@@ -72,6 +115,19 @@ jobs:
             echo "HEAD is not tag ${RELEASE_TAG} (${tag_commit})." >&2
             exit 1
           fi
+
+      - name: Download prepared inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: prepared-inputs
+          path: ${{ runner.temp }}/prepared
+
+      # Unpacked into a staging folder, not the checkout: the build step copies in only the manifest's declared
+      # outputs (--prepared-from), so the archive can't replace repository scripts that run with the secrets.
+      - name: Unpack prepared inputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/prepared/inputs"
+          tar -xzf "$RUNNER_TEMP/prepared/prepared.tar.gz" -C "$RUNNER_TEMP/prepared/inputs"
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -139,7 +195,8 @@ jobs:
         run: |
           dev_args=()
           if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
-          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --out "$RUNNER_TEMP/release"
+          # --no-prepare: inputs were built without credentials in the prepare job; nothing here runs npm or fetches.
+          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --no-prepare --prepared-from "$RUNNER_TEMP/prepared/inputs" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.

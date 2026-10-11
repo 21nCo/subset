@@ -16,7 +16,7 @@
 // x.y.z-dev.<n>. Nothing is uploaded or published.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -74,7 +74,15 @@ export function validateManifest(manifest, appId) {
   }
   if (typeof manifest.app === 'string' && !/^[A-Za-z0-9 ._-]+$/.test(manifest.app)) problems.push('"app" must be a plain app name');
   if (manifest.team !== undefined && !teamPattern.test(manifest.team)) problems.push('"team" must be a 10-character Apple team ID');
-  if (manifest.workspaceBuild !== undefined && typeof manifest.workspaceBuild !== 'boolean') problems.push('"workspaceBuild" must be true or false');
+  if (manifest.workspaces !== undefined && !(Array.isArray(manifest.workspaces) && manifest.workspaces.length > 0 && manifest.workspaces.every((name) => typeof name === 'string' && workspaceNamePattern.test(name)))) {
+    problems.push('"workspaces" must be a non-empty list of npm workspace names');
+  }
+  if (manifest.prepared !== undefined && !(Array.isArray(manifest.prepared) && manifest.prepared.every(isRepoRelativePath))) {
+    problems.push('"prepared" must be a list of paths inside the repository');
+  }
+  if ((manifest.workspaces || manifest.prepare) && !manifest.prepared?.length) {
+    problems.push('"prepared" must list the outputs of "workspaces" or "prepare", so a release can build them in a separate step');
+  }
   if (
     manifest.prepare !== undefined &&
     (typeof manifest.prepare !== 'string' || !/^[A-Za-z0-9._/-]+\.sh$/.test(manifest.prepare) || manifest.prepare.split('/').includes('..') || path.isAbsolute(manifest.prepare))
@@ -107,7 +115,21 @@ export function unsafeOutDirReason(outDir, repoRoot, home) {
 }
 
 // Options that take a value, mapped to their key in the parsed options.
-const valueOptions = { '--version': 'version', '--dev': 'dev', '--out': 'out', '--team': 'team', '--notary-profile': 'notaryProfile' };
+const workspaceNamePattern = /^(@[a-z0-9.-]+\/)?[a-z0-9.-]+$/;
+
+function isRepoRelativePath(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._/-]+$/.test(value) && !path.isAbsolute(value) && !value.split('/').includes('..');
+}
+
+const valueOptions = {
+  '--version': 'version',
+  '--dev': 'dev',
+  '--out': 'out',
+  '--team': 'team',
+  '--notary-profile': 'notaryProfile',
+  '--prepared-archive': 'preparedArchive',
+  '--prepared-from': 'preparedFrom',
+};
 const optionChecks = [
   ['version', versionPattern, (value) => `--version must be x.y.z, got ${value}`],
   ['dev', devBuildPattern, (value) => `--dev must be a positive integer, got ${value}`],
@@ -125,10 +147,17 @@ export function parseArgs(argv) {
       options[valueOptions[arg]] = next;
       index += 1;
     } else if (arg === '--skip-notarize') options.skipNotarize = true;
+    else if (arg === '--prepare-only') options.prepareOnly = true;
+    else if (arg === '--no-prepare') options.noPrepare = true;
     else if (arg.startsWith('--')) throw new Error(`Unknown option ${arg}`);
     else rest.push(arg);
   }
-  if (rest.length !== 1) throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize]');
+  if (rest.length !== 1) {
+    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--prepare-only [--prepared-archive file] | --no-prepare]');
+  }
+  if (options.prepareOnly && options.noPrepare) throw new Error('--prepare-only and --no-prepare cannot be combined');
+  if (options.preparedArchive !== undefined && !options.prepareOnly) throw new Error('--prepared-archive needs --prepare-only');
+  if (options.preparedFrom !== undefined && !options.noPrepare) throw new Error('--prepared-from needs --no-prepare');
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
   for (const [key, pattern, message] of optionChecks) {
     if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
@@ -178,13 +207,81 @@ function sha256(file) {
 }
 
 // Reads and checks the app's manifest and Xcode settings; returns what the build needs.
-function loadRelease(options) {
-  const appDir = path.join(repoRoot, 'native', options.appId);
-  const manifestPath = path.join(appDir, 'macos-release.json');
+function readManifest(appId) {
+  const manifestPath = path.join(repoRoot, 'native', appId, 'macos-release.json');
   if (!existsSync(manifestPath)) throw new Error(`Missing ${path.relative(repoRoot, manifestPath)}`);
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const problems = validateManifest(manifest, options.appId);
+  const problems = validateManifest(manifest, appId);
   if (problems.length > 0) throw new Error(`${path.relative(repoRoot, manifestPath)}: ${problems.join('; ')}`);
+  return manifest;
+}
+
+// Builds or fetches the inputs an app's Xcode build needs but the repository doesn't hold: the npm workspaces it
+// bundles (Minutes embeds the built CLI) and anything its prepare script fetches (Dictate's checksum-pinned
+// whisper.cpp XCFramework). This runs dependency code, so CI runs it in a job that has no signing credentials
+// (--prepare-only) and hands the "prepared" outputs to the signing job (--no-prepare).
+function prepareInputs(manifest, appId) {
+  if (manifest.workspaces) {
+    run('npm', ['ci', '--no-audit', '--no-fund']);
+    for (const name of manifest.workspaces) run('npm', ['run', 'build', `--workspace=${name}`]);
+  }
+  if (manifest.prepare) {
+    const appDir = path.join(repoRoot, 'native', appId);
+    const prepareScript = path.join(appDir, manifest.prepare);
+    if (!existsSync(prepareScript)) throw new Error(`Missing prepare script native/${appId}/${manifest.prepare}`);
+    run('/bin/bash', [prepareScript], { cwd: appDir });
+  }
+  requirePrepared(manifest);
+}
+
+function requirePrepared(manifest) {
+  const missing = (manifest.prepared ?? []).filter((relative) => !existsSync(path.join(repoRoot, relative)));
+  if (missing.length > 0) throw new Error(`Prepared build inputs are missing: ${missing.join(', ')}`);
+}
+
+// Every symlink under root must resolve inside root (framework bundles use internal Versions/Current links).
+export function escapingSymlinks(root) {
+  const escaping = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = path.resolve(path.dirname(entryPath), readlinkSync(entryPath));
+        if (target !== root && !target.startsWith(`${root}${path.sep}`)) escaping.push(path.relative(root, entryPath));
+      } else if (entry.isDirectory()) walk(entryPath);
+    }
+  };
+  if (lstatSync(root).isDirectory()) walk(root);
+  return escaping;
+}
+
+// Copies only the manifest's declared outputs from an unpacked prepare-job archive into the checkout. The
+// archive comes from a job that ran dependency code, so nothing else in it may land in the repository.
+function installPrepared(manifest, fromDir) {
+  const source = path.resolve(fromDir);
+  for (const relative of manifest.prepared ?? []) {
+    const from = path.join(source, relative);
+    if (!existsSync(from) || lstatSync(from).isSymbolicLink()) throw new Error(`Prepared input ${relative} is missing from ${fromDir}`);
+    const escaping = escapingSymlinks(from);
+    if (escaping.length > 0) throw new Error(`Prepared input ${relative} has symlinks pointing outside it: ${escaping.join(', ')}`);
+    const to = path.join(repoRoot, relative);
+    rmSync(to, { recursive: true, force: true });
+    mkdirSync(path.dirname(to), { recursive: true });
+    cpSync(from, to, { recursive: true, verbatimSymlinks: true });
+  }
+}
+
+function archivePrepared(manifest, archive) {
+  const target = path.resolve(archive);
+  const prepared = manifest.prepared ?? [];
+  // An app with nothing to prepare still gets an (empty) archive, so the workflow handles every app the same way.
+  if (prepared.length > 0) run('tar', ['-czf', target, '-C', repoRoot, ...prepared]);
+  else run('tar', ['-czf', target, '-T', '/dev/null']);
+}
+
+function loadRelease(options) {
+  const appDir = path.join(repoRoot, 'native', options.appId);
+  const manifest = readManifest(options.appId);
 
   const team = options.team ?? process.env.APPLE_TEAM_ID ?? manifest.team;
   if (!team || !teamPattern.test(team)) throw new Error('Set the Apple team ID with "team" in the manifest, --team, or APPLE_TEAM_ID');
@@ -285,6 +382,12 @@ function notarizeAndStaple(submission, target, authArgs, workDir) {
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.prepareOnly) {
+    const manifest = readManifest(options.appId);
+    prepareInputs(manifest, options.appId);
+    if (options.preparedArchive) archivePrepared(manifest, options.preparedArchive);
+    return;
+  }
   const release = loadRelease(options);
   const { manifest, version } = release;
   const fullVersion = releaseVersion(version, options.dev);
@@ -302,20 +405,9 @@ function main() {
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
 
-  // Apps that bundle workspace output (for example Minutes embeds the built CLI) need the npm workspaces built
-  // first; their Release build fails without it.
-  if (manifest.workspaceBuild) {
-    run('npm', ['ci', '--no-audit', '--no-fund']);
-    run('npm', ['run', 'build']);
-  }
-  // Apps with build inputs that are fetched rather than checked in (for example Dictate's checksum-pinned
-  // whisper.cpp XCFramework) name a script in their own directory that prepares them.
-  if (manifest.prepare) {
-    const appDir = path.join(repoRoot, 'native', options.appId);
-    const prepareScript = path.join(appDir, manifest.prepare);
-    if (!existsSync(prepareScript)) throw new Error(`Missing prepare script native/${options.appId}/${manifest.prepare}`);
-    run('/bin/bash', [prepareScript], { cwd: appDir });
-  }
+  if (options.preparedFrom) installPrepared(manifest, options.preparedFrom);
+  if (options.noPrepare) requirePrepared(manifest);
+  else prepareInputs(manifest, options.appId);
 
   const { appPath, signature } = buildSignedApp(release, options.dev, workDir);
 
