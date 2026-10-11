@@ -67,7 +67,7 @@ mac_target.build_configurations.each do |config|
   config.build_settings["GENERATE_INFOPLIST_FILE"] = "NO"
   config.build_settings["INFOPLIST_FILE"] = "MacApp/macOS-Info.plist"
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/../Frameworks"]
-  config.build_settings["MARKETING_VERSION"] = "1.0"
+  config.build_settings["MARKETING_VERSION"] = "1.0.0"
   config.build_settings["CURRENT_PROJECT_VERSION"] = "1"
   config.build_settings["CODE_SIGN_STYLE"] = "Automatic"
   config.build_settings["ASSETCATALOG_COMPILER_APPICON_NAME"] = "AppIcon"
