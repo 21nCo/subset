@@ -122,6 +122,88 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 }
 
+@Suite struct SequencerTests {
+    private func sequencer() -> CaptureSequencer { CaptureSequencer(recorder: SegmentRecorder(maxSampleInterval: 30)) }
+
+    private func read(_ sequencer: inout CaptureSequencer, _ pid: Int32, _ date: Date) -> CaptureSequencer.Ticket? {
+        sequencer.beginRead(of: pid, at: date)
+    }
+
+    /// Reads one sample of `bundleID` (pid `pid`) at `second` and finishes it immediately.
+    private func readNow(_ sequencer: inout CaptureSequencer, _ bundleID: String, pid: Int32, at second: TimeInterval) -> [Segment] {
+        guard let ticket = sequencer.beginRead(of: pid, at: t0 + second) else { return [] }
+        return sequencer.complete(ticket, with: content(bundleID))
+    }
+
+    @Test func lateReadCannotBridgeAnotherAppInBetween() throws {
+        // A -> B -> A within one read's latency: A's first read finishes last of all.
+        var sequencer = sequencer()
+        let lateA = try #require(read(&sequencer, 1, t0))
+        _ = sequencer.foregroundChanged(at: t0 + 2)
+        let b = try #require(read(&sequencer, 2, t0 + 2))
+        _ = sequencer.foregroundChanged(at: t0 + 4)
+        let a = try #require(read(&sequencer, 1, t0 + 4))
+        let lateClosed = sequencer.complete(lateA, with: content("a")), bClosed = sequencer.complete(b, with: content("b"))
+        #expect(lateClosed.isEmpty && bClosed.isEmpty && sequencer.open == nil)
+        _ = sequencer.complete(a, with: content("a"))
+        _ = readNow(&sequencer, "a", pid: 1, at: 9)
+        #expect(sequencer.open?.bundleID == "a" && sequencer.open?.start == t0 + 4)
+    }
+
+    @Test func foregroundChangeEndsTheOpenSegmentSoTheSameAppCannotResumeIt() throws {
+        var sequencer = sequencer()
+        _ = readNow(&sequencer, "a", pid: 1, at: 0)
+        _ = readNow(&sequencer, "a", pid: 1, at: 5)
+        let closed = sequencer.foregroundChanged(at: t0 + 7) // B came to the front; its read never lands
+        #expect(closed.first?.end == t0 + 7)
+        _ = sequencer.foregroundChanged(at: t0 + 12) // A again
+        _ = readNow(&sequencer, "a", pid: 1, at: 12)
+        #expect(sequencer.open?.start == t0 + 12)
+    }
+
+    @Test(arguments: [nil, CapturePolicy(excludedBundleIDs: ["x"], exclusionMode: .nothing)])
+    func lateReadCannotBridgeTimeThatRecordsNothing(_ policy: CapturePolicy?) throws {
+        // A -> pointInTime (nil) or A -> an app excluded with "record nothing" -> A, seen only by the sample timer.
+        var sequencer = sequencer()
+        let lateA = try #require(read(&sequencer, 1, t0))
+        let nothing = policy.flatMap { content("x", policy: $0) }
+        #expect(nothing == nil)
+        _ = sequencer.sample(nothing, at: t0 + 5)
+        _ = sequencer.sample(nothing, at: t0 + 10)
+        let a = try #require(read(&sequencer, 1, t0 + 15))
+        let lateClosed = sequencer.complete(lateA, with: content("a"))
+        #expect(lateClosed.isEmpty && sequencer.open == nil)
+        _ = sequencer.complete(a, with: content("a"))
+        #expect(sequencer.open?.start == t0 + 15)
+    }
+
+    @Test func aNothingSampleStopsEarlierSamplesFromOpeningAfterIt() {
+        var recorder = SegmentRecorder()
+        _ = recorder.record(nil, at: t0 + 10)
+        let closed = recorder.record(content("a"), at: t0)
+        #expect(closed.isEmpty && recorder.open == nil)
+    }
+
+    @Test func gapVoidsReadsInFlight() throws {
+        var sequencer = sequencer()
+        let ticket = try #require(read(&sequencer, 1, t0))
+        _ = sequencer.gap(at: t0 + 1)
+        let closed = sequencer.complete(ticket, with: content("a"))
+        #expect(closed.isEmpty && sequencer.open == nil)
+    }
+
+    @Test func oneReadInFlightPerForeground() throws {
+        var sequencer = sequencer()
+        let first = try #require(read(&sequencer, 1, t0))
+        #expect(read(&sequencer, 1, t0 + 5) == nil) // a slow app does not build a backlog
+        sequencer.discard(first)
+        let second = try #require(read(&sequencer, 1, t0 + 10)) // a dropped read frees the next sample
+        _ = sequencer.complete(second, with: content("a"))
+        #expect(read(&sequencer, 1, t0 + 15) != nil)
+        #expect(read(&sequencer, 2, t0 + 16) != nil) // another app is read at once, behind nothing
+    }
+}
+
 @Suite struct WindowPrivacyTests {
     private let query = "https://example.com/pit/page?secret=abc#frag"
 

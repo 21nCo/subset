@@ -21,12 +21,15 @@ final class CaptureController {
     private let settings: CaptureSettings
     private let store: ActivityStore?
     private let reader = ActivityReader()
-    private var recorder = SegmentRecorder(maxSampleInterval: CaptureController.sampleInterval * 6)
+    private var sequencer = CaptureSequencer(recorder: SegmentRecorder(maxSampleInterval: CaptureController.sampleInterval * 6))
     private var timer: Timer?
     private var lastFlush = Date.distantPast
     private var asleep = false, locked = false, sessionInactive = false
-    /// Increments on every gap so a read that started before it cannot record afterwards.
-    private var generation = 0
+    /// When recording last resumed after sleep, lock, pause, or tracking off. Idle retraction never reaches before it,
+    /// so input-free time spent asleep or paused cannot delete what was recorded earlier.
+    private var recordingSince = Date.distantPast
+    /// Keeps App Nap from stretching the sample timer while recording; a throttled timer would end segments early.
+    private var samplingActivity: NSObjectProtocol?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     var onStateChange: (() -> Void)?
 
@@ -45,7 +48,7 @@ final class CaptureController {
         observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.asleep = false; $0.tick() }
         observe(workspace, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true; $0.endSegment() }
         observe(workspace, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false; $0.tick() }
-        observe(workspace, NSWorkspace.didActivateApplicationNotification) { $0.tick() }
+        observe(workspace, NSWorkspace.didActivateApplicationNotification) { $0.foregroundChanged() }
         observe(distributed, Notification.Name("com.apple.screenIsLocked")) { $0.locked = true; $0.endSegment() }
         observe(distributed, Notification.Name("com.apple.screenIsUnlocked")) { $0.locked = false; $0.tick() }
         let timer = Timer(timeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
@@ -59,32 +62,37 @@ final class CaptureController {
 
     /// Ends and saves the open segment, for example before quitting or when a control changes.
     func endSegment(at date: Date = Date()) {
-        generation += 1
-        if let segment = recorder.gap(at: date) { persist(segment) }
+        if let segment = sequencer.gap(at: date) { persist(segment) }
         refreshState()
+    }
+
+    /// Another app came to the front: what was in front ends now, and reads started before now are void.
+    private func foregroundChanged() {
+        apply(sequencer.foregroundChanged(at: Date()), at: Date())
+        tick()
     }
 
     func tick() {
         let now = Date()
         refreshState(now: now)
         guard state == .recording || state == .idle else {
-            if recorder.open != nil { endSegment(at: now) }
+            if sequencer.open != nil { endSegment(at: now) }
             return
         }
         let idle = secondsSinceLastInput()
         if idle >= Self.idleThreshold {
-            if state != .idle { retractIdleTime(since: now.addingTimeInterval(-idle), until: now) }
+            if state != .idle { retractIdleTime(since: max(now.addingTimeInterval(-idle), recordingSince), until: now) }
             setState(.idle)
             return
         }
         setState(.recording)
         guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else {
-            apply(nil, at: now)
+            apply(sequencer.sample(nil, at: now), at: now)
             return
         }
         if bundleID == Bundle.main.bundleIdentifier || bundleID == "com.apple.loginwindow" {
             // pointInTime's own windows are not activity, and loginwindow in front means the lock screen or no app.
-            apply(nil, at: now)
+            apply(sequencer.sample(nil, at: now), at: now)
             return
         }
         let name = app.localizedName ?? bundleID
@@ -92,17 +100,20 @@ final class CaptureController {
         let policy = settings.policy
         if policy.excludedBundleIDs.contains(bundleID) {
             // Excluded apps are never read: no title or URL request is made.
-            apply(policy.content(for: Activity(bundleID: bundleID, appName: name), at: now), at: now)
+            apply(sequencer.sample(policy.content(for: Activity(bundleID: bundleID, appName: name), at: now), at: now), at: now)
             return
         }
         let pid = app.processIdentifier
-        let expectedGeneration = generation
+        guard let ticket = sequencer.beginRead(of: pid, at: now) else { return }
         reader.read(pid: pid, bundleID: bundleID, readTitle: AccessibilityAccess.isGranted) { result in
             Task { @MainActor [weak self] in
-                guard let self, self.generation == expectedGeneration, self.state == .recording,
-                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                guard let self else { return }
+                guard self.state == .recording, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                    self.sequencer.discard(ticket)
+                    return
+                }
                 let activity = Activity(bundleID: bundleID, appName: name, windowTitle: result.title, url: result.url)
-                self.apply(self.settings.policy.content(for: activity, at: now), at: now)
+                self.apply(self.sequencer.complete(ticket, with: self.settings.policy.content(for: activity, at: now)), at: now)
             }
         }
     }
@@ -120,9 +131,10 @@ final class CaptureController {
         }
     }
 
-    private func apply(_ content: Segment?, at date: Date) {
-        for segment in recorder.record(content, at: date) { persist(segment) }
-        if let open = recorder.open, date.timeIntervalSince(lastFlush) >= Self.flushInterval {
+    /// Saves segments that closed and, at most once a minute, the open one.
+    private func apply(_ closed: [Segment], at date: Date) {
+        for segment in closed { persist(segment) }
+        if let open = sequencer.open, date.timeIntervalSince(lastFlush) >= Self.flushInterval {
             persist(open)
             lastFlush = date
         }
@@ -149,12 +161,22 @@ final class CaptureController {
         else if sessionInactive { next = .inactiveSession }
         else if state == .idle || state == .recording { next = state }
         else { next = .recording }
-        setState(next)
+        setState(next, now: now)
     }
 
-    private func setState(_ next: State) {
+    private func setState(_ next: State, now: Date = Date()) {
         guard next != state else { return }
+        if next == .recording, state != .idle { recordingSince = now }
         state = next
+        if state == .recording || state == .idle {
+            if samplingActivity == nil {
+                samplingActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                         reason: "Sampling the frontmost app")
+            }
+        } else if let activity = samplingActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            samplingActivity = nil
+        }
         onStateChange?()
     }
 
