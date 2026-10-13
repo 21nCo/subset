@@ -139,7 +139,7 @@ final class BreaksTests: XCTestCase {
 
     func testHardStopSettingsRoundTripEveryCase() throws {
         let stops = [
-            HardStop(name: "A", hour: 9, minute: 15, end: .at(hour: 9, minute: 45), repeats: .once(Date(timeIntervalSince1970: 1_800_000_000)), warningMinutes: [], escapeHatch: .none, duringCalls: .startAnyway),
+            HardStop(name: "A", hour: 9, minute: 15, end: .at(hour: 9, minute: 45), repeats: .once(DateComponents(year: 2027, month: 1, day: 15)), warningMinutes: [], escapeHatch: .none, duringCalls: .startAnyway),
             HardStop(name: "B", hour: 22, minute: 0, end: .untilDismissed, escapeHatch: .dismissEarly),
             HardStop(name: "C", hour: 17, minute: 30)
         ]
@@ -153,7 +153,7 @@ final class BreaksTests: XCTestCase {
         let now = try XCTUnwrap(utc.date(from: DateComponents(year: 2026, month: 8, day: 10, hour: 12)))
         var settings = BreakSettings()
         let valid = HardStop(name: "Evening", hour: 18, minute: 0)
-        settings.hardStops = [valid, HardStop(name: "Tomorrow", hour: 9, minute: 0, repeats: .once(now.addingTimeInterval(24 * 3600)))]
+        settings.hardStops = [valid, HardStop(name: "Tomorrow", hour: 9, minute: 0, repeats: .once(on: now.addingTimeInterval(24 * 3600), calendar: utc))]
         XCTAssertEqual(settings.hardStopErrors(now: now, calendar: utc), [])
 
         func errors(_ change: (inout HardStop) -> Void) -> [HardStopFieldError.Field] {
@@ -175,8 +175,9 @@ final class BreaksTests: XCTestCase {
         XCTAssertEqual(errors { $0.repeats = .weekdays([]) }, [.repeats])
         XCTAssertEqual(errors { $0.repeats = .weekdays([0, 2]) }, [.repeats])
         // A one-off stop earlier today has passed; one later today has not.
-        XCTAssertEqual(errors { $0.hour = 9; $0.repeats = .once(now) }, [.repeats])
-        XCTAssertEqual(errors { $0.repeats = .once(now) }, [])
+        XCTAssertEqual(errors { $0.hour = 9; $0.repeats = .once(on: now, calendar: utc) }, [.repeats])
+        XCTAssertEqual(errors { $0.repeats = .once(on: now, calendar: utc) }, [])
+        XCTAssertEqual(errors { $0.repeats = .once(DateComponents(year: 2026, month: 8)) }, [.repeats])
         XCTAssertEqual(errors { $0.warningMinutes = [1, 2, 3, 4, 5, 6] }, [.warningMinutes])
         XCTAssertEqual(errors { $0.warningMinutes = [0] }, [.warningMinutes])
         XCTAssertEqual(errors { $0.warningMinutes = [121] }, [.warningMinutes])

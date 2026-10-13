@@ -442,11 +442,11 @@ struct BreakScheduler: Sendable {
             settings.hardStops.removeLast(settings.hardStops.count - HardStop.maximumCount)
         }
         for index in settings.hardStops.indices {
-            Self.normalize(&settings.hardStops[index], calendar: calendar)
+            Self.normalize(&settings.hardStops[index])
         }
     }
 
-    private static func normalize(_ stop: inout HardStop, calendar: Calendar) {
+    private static func normalize(_ stop: inout HardStop) {
         func clamp<T: Comparable>(_ value: T, _ range: ClosedRange<T>) -> T { min(range.upperBound, max(range.lowerBound, value)) }
         stop.hour = clamp(stop.hour, 0...23)
         stop.minute = clamp(stop.minute, 0...59)
@@ -459,7 +459,7 @@ struct BreakScheduler: Sendable {
         case .weekdays(let weekdays):
             stop.repeats = .weekdays(weekdays.filter((1...7).contains))
         case .once(let date):
-            if let noon = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: date) { stop.repeats = .once(noon) }
+            stop.repeats = .once(DateComponents(year: date.year, month: date.month, day: date.day))
         }
         let warnings = Set(stop.warningMinutes.filter(HardStop.warningRange.contains)).sorted(by: >)
         stop.warningMinutes = Array(warnings.prefix(HardStop.maximumWarnings))
@@ -473,6 +473,7 @@ struct BreakScheduler: Sendable {
     /// Hides the shown hard stop for the escape hatch's minutes without moving its end. Returns no events when
     /// the escape hatch has no extension left.
     mutating func extendHardStop(now: Date) -> [Event] {
+        reconcileMerges(now: now)
         guard canExtendHardStop(now: now), var active = snapshot.activeHardStop,
               case .extend(let minutes, _) = active.escapeHatch else { return [] }
         let until = now.addingTimeInterval(TimeInterval(minutes * 60))
@@ -491,8 +492,22 @@ struct BreakScheduler: Sendable {
     /// Ends the running hard stop early. Returns no events unless it lasts until dismissed or its escape hatch
     /// allows dismissing it.
     mutating func dismissHardStop(now: Date) -> [Event] {
+        reconcileMerges(now: now)
         guard canDismissHardStop(now: now) else { return [] }
         return finishHardStop(.dismissed, endedAt: now, now: now)
+    }
+
+    /// A stop that starts inside the running one by `now` may change its end and escape hatch, so an operation
+    /// merges it first, even when no tick has run since it started.
+    private mutating func reconcileMerges(now: Date) {
+        guard let before = snapshot.activeHardStop else { return }
+        mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now)
+        guard let active = snapshot.activeHardStop, active.endsAt != before.endsAt else { return }
+        if let until = active.extendedUntil {
+            snapshot.nextBreakAt = min(until, active.endsAt ?? until)
+        } else {
+            showHardStop()
+        }
     }
 
     /// Moves hard stops forward for one tick: merges, misses, ends, resumes, starts, and warns.
@@ -762,7 +777,9 @@ struct BreakScheduler: Sendable {
     /// old occurrence ran keeps its new occurrence.
     private mutating func removeOnceStops(_ occurrences: [(id: UUID, key: Int)]) {
         settings.hardStops.removeAll { stop in
-            guard case .once(let date) = stop.repeats, let key = stop.occurrence(onDayOf: date, calendar: calendar)?.key else { return false }
+            // The key comes from the configured date and time only, so a time zone change does not keep the stop.
+            guard case .once(let date) = stop.repeats, let year = date.year, let month = date.month, let day = date.day else { return false }
+            let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)
             return occurrences.contains { $0.id == stop.id && $0.key == key }
         }
     }

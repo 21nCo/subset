@@ -171,9 +171,14 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     enum Repeat: Codable, Equatable, Sendable {
         /// Calendar weekday values, where Sunday is 1 and Saturday is 7. An occurrence belongs to the weekday it starts on.
         case weekdays(Set<Int>)
-        /// One occurrence, on the calendar day that contains this date. The scheduler keeps the date at noon, so a
-        /// time zone change of up to 12 hours does not move it to another day.
-        case once(Date)
+        /// One occurrence, on this calendar date (year, month, and day). A date rather than an instant, so a time
+        /// zone change never moves it to another day.
+        case once(DateComponents)
+
+        /// A one-off stop on the calendar day that contains `date`.
+        static func once(on date: Date, calendar: Calendar) -> Repeat {
+            .once(calendar.dateComponents([.year, .month, .day], from: date))
+        }
     }
 
     enum EscapeHatch: Codable, Equatable, Sendable {
@@ -214,24 +219,30 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
         case .weekdays(let weekdays):
             guard weekdays.contains(calendar.component(.weekday, from: day)) else { return nil }
         case .once(let date):
-            guard calendar.isDate(date, inSameDayAs: day) else { return nil }
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            guard parts.year == date.year, parts.month == date.month, parts.day == date.day else { return nil }
         }
         return Self.time(hour: hour, minute: minute, onDayOf: day, calendar: calendar)
     }
 
-    /// The scheduled end of the occurrence that starts at `start`, or nil for a stop that lasts until dismissed.
+    /// The scheduled end of an occurrence that starts at `start` on its own day, or nil for a stop that lasts until dismissed.
     func end(forStart start: Date, calendar: Calendar) -> Date? {
+        end(start: start, onDayOf: start, startHour: hour, startMinute: minute, calendar: calendar)
+    }
+
+    /// Whether an `.at` end falls on the next day is decided from the configured clock times, not from the
+    /// worked-out start, so a start moved by daylight-saving time does not turn the stop into an overnight one.
+    private func end(start: Date, onDayOf day: Date, startHour: Int, startMinute: Int, calendar: Calendar) -> Date? {
         switch end {
         case .untilDismissed:
             return nil
         case .after(let duration):
             return start.addingTimeInterval(duration)
         case .at(let endHour, let endMinute):
-            if let sameDay = Self.time(hour: endHour, minute: endMinute, onDayOf: start, calendar: calendar), sameDay > start {
-                return sameDay
-            }
-            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: start)) else { return nil }
-            return Self.time(hour: endHour, minute: endMinute, onDayOf: nextDay, calendar: calendar)
+            let nextDay = endHour * 60 + endMinute <= startHour * 60 + startMinute
+            guard let endDay = calendar.date(byAdding: .day, value: nextDay ? 1 : 0, to: calendar.startOfDay(for: day)),
+                  let end = Self.time(hour: endHour, minute: endMinute, onDayOf: endDay, calendar: calendar) else { return nil }
+            return max(start, end)
         }
     }
 
@@ -244,12 +255,15 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
-    /// The occurrence that begins on the calendar day of `day`, or nil when none does.
+    /// The occurrence that begins on the calendar day of `day`, or nil when none does. There is none when
+    /// daylight-saving time skips its whole window.
     func occurrence(onDayOf day: Date, calendar: Calendar) -> Occurrence? {
         guard let start = start(onDayOf: day, calendar: calendar) else { return nil }
         let date = calendar.dateComponents([.year, .month, .day], from: day)
         let key = Occurrence.key(year: date.year ?? 0, month: date.month ?? 0, day: date.day ?? 0, hour: hour, minute: minute)
-        return Occurrence(start: start, end: end(forStart: start, calendar: calendar), key: key)
+        let end = end(start: start, onDayOf: day, startHour: hour, startMinute: minute, calendar: calendar)
+        if let end, end <= start { return nil }
+        return Occurrence(start: start, end: end, key: key)
     }
 
     /// The occurrence identified by `key`, worked out with `calendar` from the day and start time in the key.
@@ -257,7 +271,7 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
         let parts = Occurrence.parts(of: key)
         guard let day = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: parts.day)),
               let start = Self.time(hour: parts.hour, minute: parts.minute, onDayOf: day, calendar: calendar) else { return nil }
-        return Occurrence(start: start, end: end(forStart: start, calendar: calendar), key: key)
+        return Occurrence(start: start, end: end(start: start, onDayOf: day, startHour: parts.hour, startMinute: parts.minute, calendar: calendar), key: key)
     }
 
     /// True when the occurrence may start at `now`: from its start until its scheduled end. A stop without an end
@@ -273,8 +287,9 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     /// True for a one-off stop whose occurrence can no longer start.
     func isExpiredOnce(now: Date, calendar: Calendar) -> Bool {
         guard case .once(let date) = repeats else { return false }
-        guard let occurrence = occurrence(onDayOf: date, calendar: calendar) else {
-            return calendar.startOfDay(for: date) < calendar.startOfDay(for: now)
+        guard let day = calendar.date(from: DateComponents(year: date.year, month: date.month, day: date.day)) else { return true }
+        guard let occurrence = occurrence(onDayOf: day, calendar: calendar) else {
+            return calendar.startOfDay(for: day) < calendar.startOfDay(for: now)
         }
         return occurrence.start <= now && !isDue(occurrence, now: now, calendar: calendar)
     }
@@ -535,6 +550,8 @@ extension BreakSettings {
             switch stop.repeats {
             case .weekdays(let weekdays):
                 if weekdays.isEmpty || !weekdays.allSatisfy((1...7).contains) { fail(.repeats, "Choose at least one day.") }
+            case .once(let date) where date.year == nil || date.month == nil || date.day == nil:
+                fail(.repeats, "Choose a date.")
             case .once:
                 if stop.isExpiredOnce(now: now, calendar: calendar) { fail(.repeats, "This date and time have passed.") }
             }

@@ -544,7 +544,7 @@ final class BreakSchedulerTests: XCTestCase {
     }
 
     func testOneOffHardStopRunsOnceAndIsRemoved() {
-        let once = hardStop(hour: 10, minute: 5, end: .after(5 * 60), repeats: .once(t0))
+        let once = hardStop(hour: 10, minute: 5, end: .after(5 * 60), repeats: .once(on: t0, calendar: calendar))
         let weekly = hardStop(hour: 18, minute: 0)
         var scheduler = makeScheduler(stops: [once, weekly])
         let events = runTimed(&scheduler, from: t0, through: at(10, 11)).map(\.1).filter(isHardStopEvent)
@@ -552,8 +552,8 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [weekly.id])
 
         // At launch, a one-off stop whose date has passed is removed; a future one is kept.
-        let yesterday = hardStop(repeats: .once(t0.addingTimeInterval(-24 * 3600)))
-        let tomorrow = hardStop(repeats: .once(t0.addingTimeInterval(24 * 3600)))
+        let yesterday = hardStop(repeats: .once(on: t0.addingTimeInterval(-24 * 3600), calendar: calendar))
+        let tomorrow = hardStop(repeats: .once(on: t0.addingTimeInterval(24 * 3600), calendar: calendar))
         var launched = makeScheduler(stops: [yesterday, tomorrow])
         launched.reconcileRestoredState(now: t0)
         XCTAssertEqual(launched.settings.hardStops.map(\.id), [tomorrow.id])
@@ -714,7 +714,7 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertTrue(runTimed(&missed, from: at(11, 0), through: at(11, 5)).filter { isHardStopEvent($0.1) }.isEmpty)
 
         // A one-off stop is removed after it is missed.
-        var missedOnce = makeScheduler(stops: [hardStop(repeats: .once(t0))])
+        var missedOnce = makeScheduler(stops: [hardStop(repeats: .once(on: t0, calendar: calendar))])
         _ = runTimed(&missedOnce, from: at(10, 29), through: at(11, 0), step: 30, inputs: call)
         XCTAssertEqual(missedOnce.records.last?.hardStopEndReason, .missed)
         XCTAssertTrue(missedOnce.settings.hardStops.isEmpty)
@@ -729,7 +729,7 @@ final class BreakSchedulerTests: XCTestCase {
     func testWaitingOccurrencesSurviveDaysAndAreMissedBeforeTheNextOne() {
         let call: (Date) -> BreakScheduler.Inputs = { _ in .init(signals: [.meeting]) }
         // A Monday stop without an end waits through a call that lasts until Wednesday, and is kept meanwhile.
-        let open = hardStop(end: .untilDismissed, repeats: .once(t0))
+        let open = hardStop(end: .untilDismissed, repeats: .once(on: t0, calendar: calendar))
         var waits = makeScheduler(stops: [open])
         let during = runTimed(&waits, from: at(10, 29), through: at(9, 0, dayOffset: 2), step: 600, inputs: call)
         XCTAssertTrue(during.filter { isHardStopEvent($0.1) }.isEmpty)
@@ -771,10 +771,10 @@ final class BreakSchedulerTests: XCTestCase {
     }
 
     func testOneOffStopRescheduledWhileRunningKeepsItsNewDate() {
-        let once = hardStop(repeats: .once(t0))
+        let once = hardStop(repeats: .once(on: t0, calendar: calendar))
         var scheduler = makeScheduler(stops: [once])
         _ = scheduler.tick(now: at(10, 30))
-        scheduler.settings.hardStops[0].repeats = .once(t0.addingTimeInterval(24 * 3600))
+        scheduler.settings.hardStops[0].repeats = .once(on: t0.addingTimeInterval(24 * 3600), calendar: calendar)
         XCTAssertEqual(scheduler.tick(now: at(11, 0)), [.hardStopEnded(id: once.id, reason: .ended)])
         XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [once.id])
         XCTAssertEqual(scheduler.tick(now: at(10, 30, dayOffset: 1)), [.hardStopStarted(id: once.id, endsAt: at(11, 0, dayOffset: 1))])
@@ -783,7 +783,7 @@ final class BreakSchedulerTests: XCTestCase {
     func testStopWaitingForCallMergesIntoRunningStop() {
         // A is running when a call starts; B starts inside A and would wait for the call, but joins A instead.
         let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))
-        let b = hardStop(hour: 10, minute: 30, end: .at(hour: 12, minute: 0), repeats: .once(t0), escapeHatch: .dismissEarly)
+        let b = hardStop(hour: 10, minute: 30, end: .at(hour: 12, minute: 0), repeats: .once(on: t0, calendar: calendar), escapeHatch: .dismissEarly)
         var scheduler = makeScheduler(stops: [a, b])
         _ = scheduler.tick(now: at(10, 0))
         let events = runTimed(&scheduler, from: at(10, 20), through: at(11, 30), step: 10) { _ in .init(signals: [.meeting]) }
@@ -1029,7 +1029,7 @@ final class BreakSchedulerTests: XCTestCase {
 
     func testStopWithoutEndThatStartedInsideRunningStopSurvivesMultiDayGap() throws {
         let a = hardStop()
-        let b = hardStop(hour: 10, minute: 45, end: .untilDismissed, repeats: .once(t0))
+        let b = hardStop(hour: 10, minute: 45, end: .untilDismissed, repeats: .once(on: t0, calendar: calendar))
         var scheduler = makeScheduler(stops: [a, b])
         _ = scheduler.tick(now: at(10, 30))
 
@@ -1050,7 +1050,7 @@ final class BreakSchedulerTests: XCTestCase {
 
     func testTimeZoneChangeDuringStopDoesNotRunItsOccurrenceAgain() throws {
         // Both stops run 10:30–11:00 UTC. At 10:45 the time zone moves an hour west, so 10:30 local is now 11:30 UTC.
-        let once = hardStop(repeats: .once(t0), warnings: [2])
+        let once = hardStop(repeats: .once(on: t0, calendar: calendar), warnings: [2])
         let weekly = hardStop(repeats: .weekdays([2]), warnings: [2])
         for stop in [once, weekly] {
             var scheduler = makeScheduler(stops: [stop])
@@ -1060,11 +1060,28 @@ final class BreakSchedulerTests: XCTestCase {
             XCTAssertTrue(runTimed(&scheduler, from: at(11, 0), through: at(11, 40), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
             XCTAssertEqual(scheduler.records.count, 1)
         }
-        var removed = makeScheduler(stops: [once])
-        _ = removed.tick(now: at(10, 30))
-        removed.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -3600))
-        _ = removed.tick(now: at(11, 0))
-        XCTAssertTrue(removed.settings.hardStops.isEmpty, "The one-off stop ran, so it is removed")
+        // Whichever way the time zone moves, even across the date line, the one-off stop that ran is removed.
+        for offset in [-3600, 12 * 3600] {
+            var removed = makeScheduler(stops: [once])
+            _ = removed.tick(now: at(10, 30))
+            removed.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: offset))
+            _ = removed.tick(now: at(11, 0))
+            XCTAssertTrue(removed.settings.hardStops.isEmpty, "The one-off stop ran, so it is removed")
+            XCTAssertTrue(runTimed(&removed, from: at(11, 0), through: at(23, 30), step: 300).filter { isHardStopEvent($0.1) }.isEmpty)
+        }
+    }
+
+    func testOperationsSeeAStopThatStartedInsideBeforeTheNextTick() {
+        // B starts at 10:45 inside A and ends later with no escape hatch. Extending at 10:45, before that tick,
+        // follows B's rule.
+        let a = hardStop(escapeHatch: .extend(minutes: 15, times: 1))
+        let b = hardStop(hour: 10, minute: 45, end: .at(hour: 12, minute: 0), escapeHatch: .none)
+        var scheduler = makeScheduler(stops: [a, b])
+        _ = runTimed(&scheduler, from: t0, through: at(10, 44, 59))
+        XCTAssertTrue(scheduler.extendHardStop(now: at(10, 45)).isEmpty)
+        XCTAssertTrue(scheduler.dismissHardStop(now: at(10, 45)).isEmpty)
+        XCTAssertEqual(scheduler.phase, .breaking)
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(12, 0))
     }
 
     func testRestoringDeletedStopWhileItRunsDoesNotRecordItTwice() {
@@ -1098,6 +1115,24 @@ final class BreakSchedulerTests: XCTestCase {
         let events = runTimed(&scheduler, from: night, through: threeAM.addingTimeInterval(60)).filter { isHardStopEvent($0.1) }
         XCTAssertEqual(events.map(\.0), [threeAM])
         XCTAssertEqual(events.map(\.1), [.hardStopStarted(id: stop.id, endsAt: threeAM.addingTimeInterval(30 * 60))])
+    }
+
+    func testDaylightSavingStartThatReachesItsEndIsNotAnOvernightStop() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let night = try XCTUnwrap(newYork.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 1, minute: 0)))
+        // 02:30 to 03:00: 02:30 does not exist that night, so the start moves to 03:00, which is also the end.
+        let stop = HardStop(name: "Night", hour: 2, minute: 30, end: .at(hour: 3, minute: 0), repeats: .weekdays([1]))
+        // The whole window is skipped, so there is no occurrence that night, and not one from 03:00 until 03:00 the next day.
+        XCTAssertNil(stop.occurrence(onDayOf: night, calendar: newYork))
+
+        var settings = BreakSettings()
+        settings.officeHours.isEnabled = false
+        settings.plannedBreaks = []
+        settings.hardStops = [stop]
+        let snapshot = EngineSnapshot(focusStartedAt: night, nextBreakAt: night.addingTimeInterval(4 * 3600), snoozeDay: newYork.startOfDay(for: night))
+        var scheduler = BreakScheduler(settings: settings, snapshot: snapshot, records: [], calendar: newYork)
+        XCTAssertTrue(runTimed(&scheduler, from: night, through: night.addingTimeInterval(3 * 3600), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
     }
 
     func testHardStopWorkedOutWithCurrentTimeZoneEachTick() throws {
