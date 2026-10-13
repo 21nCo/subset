@@ -2,6 +2,7 @@
   import { onMount, tick, type Snippet } from 'svelte';
   import ArrowClockwiseIcon from 'phosphor-svelte/lib/ArrowClockwiseIcon';
   import ArrowRightIcon from 'phosphor-svelte/lib/ArrowRightIcon';
+  import ArrowsOutSimpleIcon from 'phosphor-svelte/lib/ArrowsOutSimpleIcon';
   import ClockIcon from 'phosphor-svelte/lib/ClockIcon';
   import ClockCountdownIcon from 'phosphor-svelte/lib/ClockCountdownIcon';
   import DotsThreeIcon from 'phosphor-svelte/lib/DotsThreeIcon';
@@ -21,6 +22,7 @@
   import {
     accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, planName, providerMeta, resetDetails, spanLabel, summarize,
     paceText, sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
+    clipSeries, DEFAULT_TREND_RANGE, TREND_RANGES, trendRange, trendSpanText, type TrendRange, type TrendRangeId,
   } from './present.js';
 
   type Hint = { message?: string; action?: { label: string; run: () => void; busy?: boolean } } | null;
@@ -185,18 +187,44 @@
   let trendModule: Promise<typeof import('./UsageTrend.svelte')> | undefined;
   const loadTrend = () => (trendModule ??= import('./UsageTrend.svelte'));
 
-  // A trend needs at least three observations across 30 minutes to say anything.
-  function trendSeries(account: UsageAccount) {
+  // A trend needs at least three observations across 30 minutes of the shown range to say anything.
+  function trendSeries(account: UsageAccount, range: TrendRange) {
     const windows = showTrends ? history?.series[account.id] : undefined;
     if (!windows) return [];
     return shownWindows(account)
       .map((window) => ({
         name: windowTitle(account, window),
-        points: (windows[historyWindowKey(window)] ?? []).map(([time, used]): [number, number] => [time, percentMode === 'used' ? used : Math.round((100 - used) * 100) / 100]),
+        points: clipSeries(windows[historyWindowKey(window)] ?? [], now, range.ms)
+          .map(([time, used]): [number, number] => [time, percentMode === 'used' ? used : Math.round((100 - used) * 100) / 100]),
       }))
       .filter((item) => item.points.length >= 3 && item.points.at(-1)![0] - item.points[0][0] >= 30 * 60_000)
       .slice(0, 4);
   }
+  const trendLabel = (trend: ReturnType<typeof trendSeries>, range: TrendRange) =>
+    `Trend · last ${trendSpanText(Math.min(...trend.map((item) => item.points[0][0])), now, range)} · ${percentMode}`;
+
+  // Expanded trend dialog; the range is not saved and resets to 48 hours on each open.
+  let trendDialog: HTMLDialogElement | undefined = $state();
+  let trendAccountId = $state<string | null>(null);
+  let trendRangeId = $state<TrendRangeId>(DEFAULT_TREND_RANGE);
+  let trendOpener: HTMLElement | null = null;
+  const trendAccount = $derived(trendAccountId ? status.accounts.find((account) => account.id === trendAccountId) ?? null : null);
+  async function showTrend(account: UsageAccount, opener: HTMLElement) {
+    trendOpener = opener;
+    trendRangeId = DEFAULT_TREND_RANGE;
+    trendAccountId = account.id;
+    await tick();
+    if (!trendDialog?.open) trendDialog?.showModal();
+  }
+  function closedTrend() {
+    trendAccountId = null;
+    if (trendOpener?.isConnected) trendOpener.focus();
+    trendOpener = null;
+  }
+  // Turning trend charts off or losing the account closes the dialog.
+  $effect(() => {
+    if (trendDialog?.open && (!showTrends || !trendAccount)) trendDialog.close();
+  });
 
   function permissionLine(account: UsageAccount) {
     if (account.provider !== 'codex-chatgpt' || account.ordinaryUsageAllowed === true || account.ordinaryUsageAllowed === undefined) return null;
@@ -457,10 +485,14 @@
                 </ul>
               {/if}
 
-              {#if trendSeries(account).length}
-                {@const trend = trendSeries(account)}
+              {#if trendSeries(account, trendRange(DEFAULT_TREND_RANGE)).length}
+                {@const trend = trendSeries(account, trendRange(DEFAULT_TREND_RANGE))}
                 <div class="trend-block">
-                  <span class="trend-label">Trend · last {compactDuration(now - Math.min(...trend.map((item) => item.points[0][0])))} · {percentMode}</span>
+                  <div class="trend-head">
+                    <span class="trend-label">{trendLabel(trend, trendRange(DEFAULT_TREND_RANGE))}</span>
+                    <button type="button" class="icon trend-expand" aria-label="Expand trend chart" title="Expand trend chart" aria-haspopup="dialog"
+                      onclick={(event) => showTrend(account, event.currentTarget)}><ArrowsOutSimpleIcon size={14} weight="bold" /></button>
+                  </div>
                   {#await loadTrend() then { default: UsageTrend }}
                     <UsageTrend series={trend} label={`${name} ${percentMode} trend`} remainingMode={percentMode === 'remaining'} />
                   {:catch}
@@ -604,6 +636,39 @@
     {/if}
   </dialog>
 
+  <dialog bind:this={trendDialog} class="resets trend-dialog" aria-labelledby="trend-title" onclose={closedTrend}
+    onclick={(event) => { if (event.target === trendDialog) trendDialog?.close(); }}>
+    {#if trendAccount}
+      {@const range = trendRange(trendRangeId)}
+      {@const trend = trendSeries(trendAccount, range)}
+      <div class="sheet">
+        <header>
+          <ProviderIcon provider={trendAccount.provider} size={34} />
+          <div class="sheet-title">
+            <h2 id="trend-title">{accountName(trendAccount)} trend</h2>
+            <p>{trend.length ? trendLabel(trend, range) : providerMeta[trendAccount.provider].name}</p>
+          </div>
+          <button type="button" class="icon" onclick={() => trendDialog?.close()} aria-label="Close"><XIcon size={18} weight="bold" /></button>
+        </header>
+        <label class="range">
+          <span>Range</span>
+          <select bind:value={trendRangeId}>
+            {#each TREND_RANGES as option (option.id)}<option value={option.id}>{option.label}</option>{/each}
+          </select>
+        </label>
+        {#if trend.length}
+          {#await loadTrend() then { default: UsageTrend }}
+            <UsageTrend series={trend} label={`${accountName(trendAccount)} ${percentMode} trend`} remainingMode={percentMode === 'remaining'} height={280} />
+          {:catch}
+            <p class="muted-text">Trend chart unavailable.</p>
+          {/await}
+        {:else}
+          <p class="muted-text">A trend needs three observations across at least 30 minutes of the selected range.</p>
+        {/if}
+      </div>
+    {/if}
+  </dialog>
+
   <dialog bind:this={alertDialog} class="resets" aria-labelledby="alerts-title" onclick={(event) => { if (event.target === alertDialog) alertDialog?.close(); }}>
     <div class="sheet">
       <header>
@@ -733,6 +798,11 @@
   .reset { border: 0; background: none; padding: 0; color: var(--text-3); font-size: .78rem; text-decoration: underline dotted; text-underline-offset: 3px; }
   .reset:hover { color: var(--text); }
   .trend-block { display: grid; gap: 2px; }
+  .trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  /* The expand button shows on hover or keyboard focus, and always on devices without hover. */
+  .trend-expand { width: 24px; height: 24px; margin: -5px 0; border-radius: 6px; opacity: 0; }
+  .trend-block:hover .trend-expand, .trend-block:focus-within .trend-expand { opacity: 1; }
+  @media (hover: none) { .trend-expand { opacity: 1; } }
   .filter-bar { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
   /* Chips scroll sideways instead of wrapping; the sort button stays in view. */
   .filters { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; min-width: 0; flex: 1; scrollbar-width: none; }
@@ -777,6 +847,10 @@
   .footnote { margin-top: 24px; font-size: .78rem; color: var(--text-3); line-height: 1.5; }
 
   .resets { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgb(0 0 0 / .22); }
+  .trend-dialog { width: min(880px, calc(100vw - 24px)); }
+  .range { justify-self: start; display: inline-flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--text-3); }
+  .range select { height: 32px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); font: inherit; font-size: .86rem; }
+  .range select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .resets::backdrop { background: rgb(10 10 12 / .45); backdrop-filter: blur(2px); }
   .sheet { display: grid; gap: 16px; padding: 22px; }
   .sheet > header { display: flex; align-items: center; gap: 12px; }

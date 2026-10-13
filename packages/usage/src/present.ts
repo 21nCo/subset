@@ -270,6 +270,37 @@ export function historyResets(points: Array<[number, number]>, minimumDrop = 3):
   return resets;
 }
 
+/** Time ranges a trend chart can show. `ms: null` is all recorded history (up to the eight-day retention). */
+export const TREND_RANGES = [
+  { id: '24h', label: '24 hours', short: '24h', ms: 24 * 3_600_000 },
+  { id: '48h', label: '48 hours', short: '48h', ms: 48 * 3_600_000 },
+  { id: '7d', label: '7 days', short: '7d', ms: 7 * 86_400_000 },
+  { id: 'all', label: 'All history', short: 'all', ms: null },
+] as const;
+export type TrendRange = (typeof TREND_RANGES)[number];
+export type TrendRangeId = TrendRange['id'];
+/** Cards and a newly opened trend dialog show the last 48 hours. */
+export const DEFAULT_TREND_RANGE: TrendRangeId = '48h';
+export const trendRange = (id: TrendRangeId): TrendRange => TREND_RANGES.find((range) => range.id === id) ?? TREND_RANGES[1];
+
+/**
+ * Points from `now - rangeMs` to now, in ascending time. The last point before the cutoff is kept and moved to the
+ * cutoff, so the line starts at the chart's left edge. A null range keeps every point. Values are never changed.
+ */
+export function clipSeries(points: Array<[number, number]>, now: number, rangeMs: number | null): Array<[number, number]> {
+  if (rangeMs === null) return points.slice();
+  const cutoff = now - rangeMs;
+  const start = points.findIndex(([time]) => time >= cutoff);
+  if (start === -1) return [];
+  if (start === 0 || points[start][0] === cutoff) return points.slice(start);
+  return [[cutoff, points[start - 1][1]], ...points.slice(start)];
+}
+
+/** The span a trend shows, such as "48h" for a full range or "1d 5h" when less history exists. */
+export function trendSpanText(firstTime: number, now: number, range: TrendRange): string {
+  return range.ms !== null && now - firstTime >= range.ms ? range.short : compactDuration(now - firstTime);
+}
+
 /** Parts of the day the activity heatmap groups usage into, in local time. */
 export const DAY_PARTS = [
   { label: 'Night', from: 0, to: 6 }, { label: 'Morning', from: 6, to: 12 },

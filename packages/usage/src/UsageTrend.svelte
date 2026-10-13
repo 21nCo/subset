@@ -13,8 +13,10 @@
     label: string;
     /** True when points are remaining percentages, so a reset is a rise. */
     remainingMode?: boolean;
+    /** Chart height in pixels; cards use the compact default. */
+    height?: number;
   }
-  let { series, label, remainingMode = false }: Props = $props();
+  let { series, label, remainingMode = false, height = 104 }: Props = $props();
 
   let element: HTMLDivElement | undefined = $state();
   let chart: echarts.ECharts | undefined;
@@ -100,7 +102,7 @@
 </script>
 
 <figure class="trend">
-  <div bind:this={element} class="canvas" role="img" aria-label={`${label}. Latest: ${summary}.`}></div>
+  <div bind:this={element} class="canvas" style:height={`${height}px`} role="img" aria-label={`${label}. Latest: ${summary}.`}></div>
   {#if series.length > 1}
     <figcaption>
       {#each series as item, index (item.name)}<span><i class={`line-${index}`}></i>{item.name}</span>{/each}
@@ -110,7 +112,7 @@
 
 <style>
   .trend { margin: 0; }
-  .canvas { width: 100%; height: 104px; }
+  .canvas { width: 100%; }
   figcaption { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .74rem; color: var(--text-3); margin-top: 4px; }
   figcaption span { display: inline-flex; align-items: center; gap: 5px; }
   figcaption i { width: 10px; height: 2px; border-radius: 1px; background: var(--accent); }

@@ -153,3 +153,29 @@ test('orders Gemini before third-party groups and lists the next three resets', 
   const status = createUsageStatus([google, account({ id: 'c', windows: [w('codex', 5), w('other', 600)] })]);
   assert.deepEqual(summarize(status, now).nextResets.map((reset) => [reset.accountId, reset.window]), [['c', '5-hour usage'], ['g', 'Third-party · 5-hour usage'], ['g', 'Gemini · 5-hour usage']]);
 });
+
+test('clips trend series to a range, anchoring the last earlier point at the cutoff', async () => {
+  const { clipSeries, trendRange, trendSpanText } = await import('../dist/present.js');
+  const hour = 3_600_000;
+  const day = trendRange('48h').ms;
+  // Entirely inside the range: unchanged.
+  const inside = [[now - 10 * hour, 20], [now - 5 * hour, 30], [now - hour, 35]];
+  assert.deepEqual(clipSeries(inside, now, day), inside);
+  // Straddling the cutoff: older points drop and the last of them moves to the cutoff.
+  const straddle = [[now - 72 * hour, 5], [now - 60 * hour, 80], [now - 40 * hour, 2], [now - hour, 10]];
+  assert.deepEqual(clipSeries(straddle, now, day), [[now - 48 * hour, 80], [now - 40 * hour, 2], [now - hour, 10]]);
+  // A point exactly at the cutoff needs no anchor.
+  assert.deepEqual(clipSeries([[now - 50 * hour, 1], [now - 48 * hour, 3], [now, 4]], now, day), [[now - 48 * hour, 3], [now, 4]]);
+  // Everything older than the range: nothing to show.
+  assert.deepEqual(clipSeries([[now - 80 * hour, 10], [now - 49 * hour, 12]], now, day), []);
+  assert.deepEqual(clipSeries([], now, day), []);
+  // All history keeps every point.
+  assert.deepEqual(clipSeries(straddle, now, trendRange('all').ms), straddle);
+  // Remaining-mode values (and fractions) pass through as given, including the moved anchor.
+  const remaining = [[now - 30 * hour, 62.5], [now - 26 * hour, 37.25], [now - 2 * hour, 99.99]];
+  assert.deepEqual(clipSeries(remaining, now, trendRange('24h').ms), [[now - 24 * hour, 37.25], [now - 2 * hour, 99.99]]);
+  // The label names the full range once covered, otherwise the shorter span shown.
+  assert.equal(trendSpanText(now - 48 * hour, now, trendRange('48h')), '48h');
+  assert.equal(trendSpanText(now - 29 * hour, now, trendRange('48h')), '1d 5h');
+  assert.equal(trendSpanText(now - (5 * 24 + 3) * hour, now, trendRange('all')), '5d 3h');
+});
