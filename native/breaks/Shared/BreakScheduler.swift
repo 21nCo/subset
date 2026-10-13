@@ -113,7 +113,7 @@ struct BreakScheduler: Sendable {
 
     /// Seconds until a Balanced break can be skipped, or nil when no wait applies.
     func skipAvailableIn(now: Date) -> TimeInterval? {
-        guard settings.discipline == .balanced, snapshot.phase == .breaking, !canSkipBreak(now: now) else { return nil }
+        guard settings.discipline == .balanced, snapshot.phase == .breaking, snapshot.activeHardStop == nil, !canSkipBreak(now: now) else { return nil }
         return Self.balancedSkipDelay - now.timeIntervalSince(snapshot.breakStartedAt ?? now)
     }
 
@@ -131,10 +131,12 @@ struct BreakScheduler: Sendable {
         return active.extensionsUsed < times
     }
 
-    /// A stop without an end can always be dismissed; one with an end only when its escape hatch allows it.
-    var canDismissHardStop: Bool {
+    /// A stop without an end can always be dismissed; one with an end only when its escape hatch allows it, and
+    /// not once its end has passed (the next tick ends it).
+    func canDismissHardStop(now: Date) -> Bool {
         guard let active = snapshot.activeHardStop else { return false }
-        return active.endsAt == nil || active.escapeHatch == .dismissEarly
+        guard let end = active.endsAt else { return true }
+        return now < end && active.escapeHatch == .dismissEarly
     }
 
     /// A break may be snoozed while it runs only when it could also be skipped, and a snooze is left.
@@ -175,10 +177,7 @@ struct BreakScheduler: Sendable {
         events += advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
         if snapshot.activeHardStop != nil {
             // A running hard stop overrides pauses, idle, office hours, and regular and planned breaks, and
-            // keeps the heads-up and nudges off. A planned break due meanwhile is dropped, not started afterwards.
-            while let (planned, occurrence) = duePlannedBreak(at: now) {
-                snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
-            }
+            // keeps the heads-up and nudges off.
             clearWellnessCadence()
             return events
         }
@@ -487,22 +486,36 @@ struct BreakScheduler: Sendable {
     /// Ends the running hard stop early. Returns no events unless it lasts until dismissed or its escape hatch
     /// allows dismissing it.
     mutating func dismissHardStop(now: Date) -> [Event] {
-        guard canDismissHardStop else { return [] }
+        guard canDismissHardStop(now: now) else { return [] }
         return finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
-    /// Moves hard stops forward for one tick: merges, ends, resumes, starts, misses, and warns.
+    /// Moves hard stops forward for one tick: merges, misses, ends, resumes, starts, and warns.
     private mutating func advanceHardStops(now: Date, inCall: Bool) -> [Event] {
         var events: [Event] = []
         let stops = settings.hardStops.filter(\.isEnabled)
+
+        // Merging comes first, so a stop that started inside the running one joins it even if it waits for
+        // calls or its own window passed while the host was asleep.
+        if snapshot.activeHardStop != nil {
+            mergeOverlappingStops(stops: stops, now: now)
+        }
+        // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
+        events += missWaitingStops(now: now)
 
         // The latest due occurrence of each stop that has not been handled. One that waits for a call is held back.
         var due: [(stop: HardStop, occurrence: HardStop.Occurrence)] = []
         for stop in stops {
             let key = stop.id.uuidString
-            guard let occurrence = stop.occurrences(around: now, calendar: calendar).last(where: {
+            var candidates = stop.occurrences(around: now, calendar: calendar).filter {
                 stop.isDue($0, now: now, calendar: calendar) && !isHandled(stop, start: $0.start)
-            }) else { continue }
+            }
+            // A stop without an end keeps waiting for the call however long it lasts.
+            if let waiting = snapshot.hardStopsWaitingForCall[key], stop.end(forStart: waiting, calendar: calendar) == nil,
+               waiting <= now, !isHandled(stop, start: waiting) {
+                candidates.append(HardStop.Occurrence(start: waiting, end: nil))
+            }
+            guard let occurrence = candidates.max(by: { $0.start < $1.start }) else { continue }
             if inCall, stop.duringCalls == .waitForCallToEnd {
                 snapshot.hardStopsWaitingForCall[key] = occurrence.start
             } else {
@@ -511,14 +524,7 @@ struct BreakScheduler: Sendable {
         }
         due.sort { $0.occurrence.start < $1.occurrence.start }
 
-        if var active = snapshot.activeHardStop {
-            // A stop that starts inside the running one joins it.
-            due.removeAll { item in
-                guard item.occurrence.start < active.endsAt ?? .distantFuture else { return false }
-                merge(item.stop, item.occurrence, into: &active)
-                return true
-            }
-            snapshot.activeHardStop = active
+        if let active = snapshot.activeHardStop {
             if let end = active.endsAt, now >= end {
                 events += finishHardStop(.ended, endedAt: end, now: now)
             } else if let until = active.extendedUntil, now >= until {
@@ -530,36 +536,52 @@ struct BreakScheduler: Sendable {
             }
         }
 
-        events += missWaitingStops(now: now)
-
-        if snapshot.activeHardStop == nil, let first = due.first {
-            var active = ActiveHardStop(
+        // Every due stop left starts at or after the end of a stop that just ended, so none is already handled.
+        if snapshot.activeHardStop == nil, let first = due.first(where: { !isHandled($0.stop, start: $0.occurrence.start) }) {
+            markHandled(first.stop, start: first.occurrence.start)
+            snapshot.activeHardStop = ActiveHardStop(
                 id: first.stop.id,
                 name: first.stop.name,
                 occurrence: first.occurrence.start,
                 startedAt: now,
                 endsAt: first.occurrence.end,
-                escapeHatch: first.stop.escapeHatch
+                escapeHatch: first.stop.escapeHatch,
+                focusDuration: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
             )
-            markHandled(first.stop, start: first.occurrence.start)
-            for item in due.dropFirst() {
-                merge(item.stop, item.occurrence, into: &active)
-            }
+            // Other due stops, and ones waiting for a call, join it at once.
+            mergeOverlappingStops(stops: stops, now: now)
             // A running regular or planned break ends and counts as completed; a heads-up is withdrawn.
             if snapshot.phase == .breaking {
                 events += finishBreak(completed: true, now: now)
             } else if snapshot.phase == .headsUp {
                 events.append(.headsUpCancelled)
             }
-            snapshot.activeHardStop = active
             showHardStop()
-            events.append(.hardStopStarted(id: active.id, endsAt: active.endsAt))
+            if let active = snapshot.activeHardStop {
+                events.append(.hardStopStarted(id: active.id, endsAt: active.endsAt))
+            }
         }
 
         removeExpiredOnceStops(now: now)
         events += hardStopWarnings(stops: stops, now: now, inCall: inCall)
         pruneHardStopProgress()
         return events
+    }
+
+    /// Merges into the running stop every unhandled occurrence that started by `now` and overlaps it, in start
+    /// order, so that a chain of overlapping stops gives the same result whether or not every tick ran.
+    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) {
+        guard var active = snapshot.activeHardStop else { return }
+        let candidates = stops
+            .flatMap { stop in stop.occurrences(around: now, calendar: calendar).map { (stop: stop, occurrence: $0) } }
+            .filter { $0.occurrence.start <= now }
+            .sorted { $0.occurrence.start < $1.occurrence.start }
+        for item in candidates where !isHandled(item.stop, start: item.occurrence.start) {
+            guard item.occurrence.start < active.endsAt ?? .distantFuture,
+                  item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
+            merge(item.stop, item.occurrence, into: &active)
+        }
+        snapshot.activeHardStop = active
     }
 
     /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
@@ -571,10 +593,10 @@ struct BreakScheduler: Sendable {
                 snapshot.hardStopsWaitingForCall[key] = nil
                 continue
             }
-            let occurrence = HardStop.Occurrence(start: start, end: stop.end(forStart: start, calendar: calendar))
-            guard !stop.isDue(occurrence, now: now, calendar: calendar) else { continue }
+            // A stop without an end always waits, so it is never missed.
+            guard let end = stop.end(forStart: start, calendar: calendar) else { continue }
+            guard now >= end else { continue }
             markHandled(stop, start: start)
-            let end = occurrence.end ?? now
             appendRecord(BreakRecord(
                 startedAt: start,
                 endedAt: end,
@@ -634,10 +656,12 @@ struct BreakScheduler: Sendable {
             kind: .hardStop,
             completed: reason == .ended,
             skipped: false,
+            focusDuration: active.focusDuration,
             hardStopEndReason: reason,
             extensionsUsed: active.extensionsUsed
         ))
         removeOnceStops([active.id] + active.mergedIDs)
+        dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
         snapshot.activeHardStop = nil
         clearActiveBreak()
         // A fresh focus interval starts after a hard stop; a pause from before it does not come back.
@@ -657,6 +681,15 @@ struct BreakScheduler: Sendable {
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         snapshot.deliveredHeadsUpFor = nil
+    }
+
+    /// A planned break that overlaps a hard stop is dropped instead of starting, for the time left, after it.
+    private mutating func dropPlannedBreaks(overlappingFrom start: Date, to end: Date, now: Date) {
+        for planned in settings.plannedBreaks where planned.isEnabled {
+            guard let occurrence = planned.occurrence(on: now, calendar: calendar),
+                  occurrence < end, occurrence.addingTimeInterval(max(60, planned.duration)) > start else { continue }
+            snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
+        }
     }
 
     private func isHandled(_ stop: HardStop, start: Date) -> Bool {

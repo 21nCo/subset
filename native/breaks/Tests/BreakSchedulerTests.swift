@@ -609,15 +609,17 @@ final class BreakSchedulerTests: XCTestCase {
             var inputs = BreakScheduler.Inputs()
             /// A manual pause does not come back after the stop; an automatic one follows its live signal again.
             var freshFocusAfter = true
+            /// The reason reminders are paused just before the stop, or nil when they are held by office hours.
+            var pausedBy: PauseReason?
         }
         let cases = [
-            Case(name: "manual pause", prepare: { s, now in _ = s.pause(now: now) }),
-            Case(name: "timed manual pause", prepare: { s, now in _ = s.pause(until: now.addingTimeInterval(4 * 3600), now: now) }),
-            Case(name: "media", inputs: .init(signals: [.media]), freshFocusAfter: false),
-            Case(name: "chosen app", configure: { $0.smartPause.deepFocusApps = true }, inputs: .init(signals: [.app]), freshFocusAfter: false),
-            Case(name: "game", configure: { $0.smartPause.games = true }, inputs: .init(signals: [.game]), freshFocusAfter: false),
-            Case(name: "idle pause", inputs: .init(idleSeconds: 120), freshFocusAfter: false),
-            Case(name: "idle reset", inputs: .init(idleSeconds: 10 * 60), freshFocusAfter: false),
+            Case(name: "manual pause", prepare: { s, now in _ = s.pause(now: now) }, pausedBy: .manual),
+            Case(name: "timed manual pause", prepare: { s, now in _ = s.pause(until: now.addingTimeInterval(4 * 3600), now: now) }, pausedBy: .manual),
+            Case(name: "media", inputs: .init(signals: [.media]), freshFocusAfter: false, pausedBy: .media),
+            Case(name: "chosen app", configure: { $0.smartPause.deepFocusApps = true }, inputs: .init(signals: [.app]), freshFocusAfter: false, pausedBy: .app),
+            Case(name: "game", configure: { $0.smartPause.games = true }, inputs: .init(signals: [.game]), freshFocusAfter: false, pausedBy: .game),
+            Case(name: "idle pause", inputs: .init(idleSeconds: 120), freshFocusAfter: false, pausedBy: .idle),
+            Case(name: "idle reset", inputs: .init(idleSeconds: 10 * 60), freshFocusAfter: false, pausedBy: .idle),
             Case(name: "office hours", configure: {
                 $0.officeHours = OfficeHours(isEnabled: true, startHour: 12, startMinute: 0, endHour: 18, endMinute: 0, weekdays: [2])
             })
@@ -627,6 +629,11 @@ final class BreakSchedulerTests: XCTestCase {
             var scheduler = makeScheduler(stops: [stop], testCase.configure)
             testCase.prepare(&scheduler, at(10, 29))
             _ = scheduler.tick(now: at(10, 29), inputs: testCase.inputs)
+            if let reason = testCase.pausedBy {
+                XCTAssertEqual(scheduler.pauseReasonForTest, reason, testCase.name)
+            } else {
+                XCTAssertFalse(scheduler.settings.officeHours.contains(at(10, 29), calendar: calendar), testCase.name)
+            }
             XCTAssertEqual(scheduler.tick(now: at(10, 30), inputs: testCase.inputs), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))], testCase.name)
             XCTAssertEqual(scheduler.snapshot.activeKind, .hardStop, testCase.name)
             XCTAssertNil(scheduler.pauseReasonForTest, testCase.name)
@@ -706,11 +713,78 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(missed.records.last?.endedAt, at(11, 0))
         XCTAssertTrue(runTimed(&missed, from: at(11, 0), through: at(11, 5)).filter { isHardStopEvent($0.1) }.isEmpty)
 
+        // A one-off stop is removed after it is missed.
+        var missedOnce = makeScheduler(stops: [hardStop(repeats: .once(t0))])
+        _ = runTimed(&missedOnce, from: at(10, 29), through: at(11, 0), step: 30, inputs: call)
+        XCTAssertEqual(missedOnce.records.last?.hardStopEndReason, .missed)
+        XCTAssertTrue(missedOnce.settings.hardStops.isEmpty)
+
         // A stop without an end always waits.
         let open = hardStop(end: .untilDismissed)
         var always = makeScheduler(stops: [open])
         XCTAssertTrue(runTimed(&always, from: at(10, 29), through: at(18, 0), step: 60, inputs: call).filter { isHardStopEvent($0.1) }.isEmpty)
         XCTAssertEqual(always.tick(now: at(18, 0, 1)), [.hardStopStarted(id: open.id, endsAt: nil)])
+    }
+
+    func testWaitingOccurrencesSurviveDaysAndAreMissedBeforeTheNextOne() {
+        let call: (Date) -> BreakScheduler.Inputs = { _ in .init(signals: [.meeting]) }
+        // A Monday stop without an end waits through a call that lasts until Wednesday, and is kept meanwhile.
+        let open = hardStop(end: .untilDismissed, repeats: .once(t0))
+        var waits = makeScheduler(stops: [open])
+        let during = runTimed(&waits, from: at(10, 29), through: at(9, 0, dayOffset: 2), step: 600, inputs: call)
+        XCTAssertTrue(during.filter { isHardStopEvent($0.1) }.isEmpty)
+        XCTAssertEqual(waits.settings.hardStops.map(\.id), [open.id])
+        XCTAssertEqual(waits.tick(now: at(9, 0, 1, dayOffset: 2)), [.hardStopStarted(id: open.id, endsAt: nil)])
+
+        // A daily stop that waited on Monday is recorded as missed before Tuesday's occurrence starts waiting.
+        let daily = hardStop(repeats: .weekdays([2, 3]))
+        var missed = makeScheduler(stops: [daily])
+        XCTAssertTrue(missed.tick(now: at(10, 30), inputs: .init(signals: [.meeting])).filter(isHardStopEvent).isEmpty)
+        XCTAssertEqual(missed.tick(now: at(10, 30, dayOffset: 1), inputs: .init(signals: [.meeting])).filter(isHardStopEvent),
+                       [.hardStopEnded(id: daily.id, reason: .missed)])
+        XCTAssertEqual(missed.records.map(\.startedAt), [at(10, 30)])
+        XCTAssertEqual(missed.tick(now: at(10, 31, dayOffset: 1)), [.hardStopStarted(id: daily.id, endsAt: at(11, 0, dayOffset: 1))])
+    }
+
+    func testStopWaitingForCallMergesIntoRunningStop() {
+        // A is running when a call starts; B starts inside A and would wait for the call, but joins A instead.
+        let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))
+        let b = hardStop(hour: 10, minute: 30, end: .at(hour: 12, minute: 0), repeats: .once(t0), escapeHatch: .dismissEarly)
+        var scheduler = makeScheduler(stops: [a, b])
+        _ = scheduler.tick(now: at(10, 0))
+        let events = runTimed(&scheduler, from: at(10, 20), through: at(11, 30), step: 10) { _ in .init(signals: [.meeting]) }
+        XCTAssertTrue(events.filter { isHardStopEvent($0.1) }.isEmpty)
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(12, 0))
+        XCTAssertTrue(scheduler.canDismissHardStop(now: at(11, 30)))
+        XCTAssertEqual(scheduler.settings.hardStops.count, 2, "A merged one-off stop is removed when the running stop ends")
+        XCTAssertEqual(scheduler.tick(now: at(12, 0), inputs: .init(signals: [.meeting])).first, .hardStopEnded(id: a.id, reason: .ended))
+        XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [a.id])
+        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), [.ended])
+    }
+
+    func testMissedTicksGiveTheSameOverlapAndPlannedBreakOutcome() {
+        // A 10:30–11:00, B 10:45–11:10, C 11:05–11:30: B extends A, so C starts inside it too.
+        let a = hardStop()
+        let b = hardStop(hour: 10, minute: 45, end: .at(hour: 11, minute: 10))
+        let c = hardStop(hour: 11, minute: 5, end: .at(hour: 11, minute: 30))
+        var asleep = makeScheduler(stops: [a, b, c])
+        _ = asleep.tick(now: at(10, 30))
+        XCTAssertTrue(asleep.tick(now: at(11, 20)).isEmpty)
+        XCTAssertEqual(asleep.snapshot.activeHardStop?.id, a.id)
+        XCTAssertEqual(asleep.snapshot.breakEndsAt, at(11, 30))
+        XCTAssertEqual(asleep.tick(now: at(11, 30)), [.hardStopEnded(id: a.id, reason: .ended)])
+
+        // A planned break inside the stop is dropped even when no tick ran while it was due.
+        let walk = PlannedBreak(name: "Walk", symbol: "figure.walk", hour: 10, minute: 50, duration: 20 * 60, weekdays: [2], isEnabled: true)
+        var planned = makeScheduler(stops: [a]) { $0.plannedBreaks = [walk] }
+        _ = planned.tick(now: at(10, 30))
+        XCTAssertEqual(planned.tick(now: at(11, 5)), [.hardStopEnded(id: a.id, reason: .ended)])
+        XCTAssertEqual(planned.phase, .focusing)
+        // One that starts after a dismissed stop still runs.
+        var dismissed = makeScheduler(stops: [hardStop(escapeHatch: .dismissEarly)]) { $0.plannedBreaks = [walk] }
+        _ = dismissed.tick(now: at(10, 30))
+        _ = dismissed.dismissHardStop(now: at(10, 40))
+        XCTAssertEqual(dismissed.tick(now: at(10, 50)), [.breakStarted(.planned, duration: 20 * 60)])
     }
 
     func testOverlappingHardStopsMerge() {
@@ -722,7 +796,7 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(events, [.hardStopStarted(id: a.id, endsAt: at(11, 0))])
         XCTAssertTrue(scheduler.tick(now: at(10, 45)).isEmpty)
         XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(11, 30))
-        XCTAssertTrue(scheduler.canDismissHardStop)
+        XCTAssertTrue(scheduler.canDismissHardStop(now: at(10, 46)))
         XCTAssertFalse(scheduler.canExtendHardStop(now: at(10, 46)))
         XCTAssertEqual(runTimed(&scheduler, from: at(10, 45), through: at(11, 31)).map(\.1), [.hardStopEnded(id: a.id, reason: .ended)])
         XCTAssertEqual(scheduler.records.count, 1)
@@ -734,7 +808,7 @@ final class BreakSchedulerTests: XCTestCase {
         _ = kept.tick(now: at(10, 30))
         _ = kept.tick(now: at(10, 45))
         XCTAssertEqual(kept.snapshot.breakEndsAt, at(11, 0))
-        XCTAssertFalse(kept.canDismissHardStop)
+        XCTAssertFalse(kept.canDismissHardStop(now: at(10, 46)))
         XCTAssertTrue(kept.canExtendHardStop(now: at(10, 46)))
     }
 
@@ -774,6 +848,13 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertTrue(dismissed(.none, end: .untilDismissed))
         XCTAssertTrue(dismissed(.extend(minutes: 15, times: 1), end: .untilDismissed))
 
+        // Once the end has passed, the next tick ends the stop; dismissing it is not recorded instead.
+        var overdue = makeScheduler(stops: [hardStop(escapeHatch: .dismissEarly)])
+        _ = overdue.tick(now: at(10, 30))
+        XCTAssertTrue(overdue.dismissHardStop(now: at(11, 0)).isEmpty)
+        XCTAssertEqual(overdue.tick(now: at(11, 0)).first.map(isHardStopEvent), true)
+        XCTAssertEqual(overdue.records.last?.hardStopEndReason, .ended)
+
         // A dismissed occurrence does not start again, and a fresh focus interval starts.
         let stop = hardStop(escapeHatch: .dismissEarly)
         var scheduler = makeScheduler(stops: [stop])
@@ -786,12 +867,13 @@ final class BreakSchedulerTests: XCTestCase {
 
     func testSnoozeSkipAndBreakOperationsHaveNoEffectDuringHardStop() {
         let stop = hardStop(escapeHatch: .extend(minutes: 5, times: 1))
-        var scheduler = makeScheduler(stops: [stop]) { $0.discipline = .casual }
+        var scheduler = makeScheduler(stops: [stop]) { $0.discipline = .balanced }
         _ = scheduler.tick(now: at(10, 30))
-        let now = at(10, 31)
+        let now = at(10, 30, 2)
         XCTAssertFalse(scheduler.canSkipBreak(now: now))
         XCTAssertFalse(scheduler.canEndEarly(now: now))
         XCTAssertFalse(scheduler.canSnoozeActiveBreak(now: now))
+        XCTAssertNil(scheduler.skipAvailableIn(now: now))
         XCTAssertTrue(scheduler.snooze(minutes: 5, now: now).isEmpty)
         XCTAssertTrue(scheduler.skipActiveBreak(now: now).isEmpty)
         XCTAssertTrue(scheduler.endBreak(completed: true, now: now).isEmpty)
@@ -824,6 +906,9 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(record?.hardStopEndReason, .ended)
 
         let stats = scheduler.stats(now: at(11, 5))
+        // The 30 minutes of focus before the stop still count, plus 5 minutes after it.
+        XCTAssertEqual(stats.focusTime, 35 * 60)
+        XCTAssertEqual(stats.longestStretch, 30 * 60)
         XCTAssertEqual(stats.breaksTaken, 0)
         XCTAssertEqual(stats.breakTime, 0)
         XCTAssertEqual(stats.skippedBreaks, 0)

@@ -320,6 +320,8 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
     var extendedUntil: Date?
     /// Stops that started inside this one and were merged into it.
     var mergedIDs: [UUID] = []
+    /// Focus time counted before the stop started, kept for the stretch statistics.
+    var focusDuration: TimeInterval?
 }
 
 /// The warnings already delivered for one occurrence: every lead time of `minutes` or more.
@@ -613,14 +615,16 @@ struct DashboardStats: Equatable, Sendable {
 enum BreakMath {
     static func stats(records: [BreakRecord], snapshot: EngineSnapshot, now: Date, calendar: Calendar = .current) -> DashboardStats {
         let startOfDay = calendar.startOfDay(for: now)
-        // Hard stops are not breaks: they count toward neither the Screen Score nor the break statistics.
-        let today = records.filter { $0.kind != .hardStop && $0.startedAt >= startOfDay && $0.startedAt <= now }
+        let todayRecords = records.filter { $0.startedAt >= startOfDay && $0.startedAt <= now }
+        // Hard stops are not breaks: they count toward neither the break statistics nor the skip penalty.
+        // The focus stretch that ended at a hard stop still counts as focus time.
+        let today = todayRecords.filter { $0.kind != .hardStop }
         let completed = today.filter { $0.completed && !$0.skipped }
         let skipped = today.filter(\.skipped)
         // A stretch is the focus time counted before a break, not the time since midnight.
         let currentEnd = snapshot.phase == .breaking ? (snapshot.breakStartedAt ?? now) : now
         let currentStretch = max(0, currentEnd.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
-        let stretches = today.compactMap { record in
+        let stretches = todayRecords.compactMap { record in
             record.focusDuration.map { min(max(0, $0), max(0, record.startedAt.timeIntervalSince(startOfDay))) }
         }
         let focusedDuration = stretches.reduce(currentStretch, +)
