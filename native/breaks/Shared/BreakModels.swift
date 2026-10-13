@@ -318,12 +318,21 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
     var extensionsUsed = 0
     /// While set, the stop is hidden by an extension until this time.
     var extendedUntil: Date?
-    /// Stops that started inside this one and were merged into it.
-    var mergedIDs: [UUID] = []
+    /// Occurrences that joined this one; each is recorded in history when the stop ends.
+    var merged: [MergedHardStop] = []
     /// Focus time counted before the stop started, kept for the stretch statistics.
     var focusDuration: TimeInterval?
     /// The start of the last day whose occurrences were checked for merging.
     var mergedThrough: Date?
+}
+
+/// An occurrence that joined a running hard stop.
+struct MergedHardStop: Codable, Equatable, Sendable {
+    var id: UUID
+    /// When it joined: its own start, or when a call it waited for ended.
+    var joinedAt: Date
+    /// Its own scheduled end; nil when it lasts until dismissed.
+    var endsAt: Date?
 }
 
 /// The warnings already delivered for one occurrence: every lead time of `minutes` or more.

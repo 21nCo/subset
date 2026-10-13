@@ -533,9 +533,20 @@ struct BreakScheduler: Sendable {
                 snapshot.activeHardStop?.extendedUntil = nil
                 showHardStop()
                 events.append(.hardStopResumed(id: active.id))
-            } else if active.extendedUntil == nil {
+            } else if let until = active.extendedUntil {
+                // A merge may have moved the end of a hidden stop.
+                snapshot.nextBreakAt = min(until, active.endsAt ?? until)
+            } else {
                 showHardStop()
             }
+        }
+        // A due stop that could not start earlier (it waited for a call that has now ended) joins a running one.
+        if var active = snapshot.activeHardStop {
+            for item in due where !isHandled(item.stop, start: item.occurrence.start) {
+                merge(item.stop, item.occurrence, joinedAt: now, into: &active)
+            }
+            snapshot.activeHardStop = active
+            if active.extendedUntil == nil { showHardStop() }
         }
 
         // Every due stop left starts at or after the end of a stop that just ended, so none is already handled.
@@ -557,6 +568,7 @@ struct BreakScheduler: Sendable {
                 escapeHatch: first.stop.escapeHatch,
                 focusDuration: countedFocus(now: now)
             )
+            if snapshot.activeHardStop?.focusDuration == 0 { snapshot.activeHardStop?.focusDuration = nil }
             // Other due stops that start inside it, including ones waiting for a call, join it at once.
             mergeOverlappingStops(stops: stops, now: now)
             showHardStop()
@@ -588,7 +600,7 @@ struct BreakScheduler: Sendable {
                 guard item.occurrence.start >= active.occurrence, item.occurrence.start <= now,
                       item.occurrence.start < active.endsAt ?? .distantFuture,
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
-                merge(item.stop, item.occurrence, into: &active)
+                merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
             day = next
@@ -653,11 +665,9 @@ struct BreakScheduler: Sendable {
     }
 
     /// The stop that ends later sets the escape hatch. A stop without an end ends latest.
-    private mutating func merge(_ stop: HardStop, _ occurrence: HardStop.Occurrence, into active: inout ActiveHardStop) {
+    private mutating func merge(_ stop: HardStop, _ occurrence: HardStop.Occurrence, joinedAt: Date, into active: inout ActiveHardStop) {
         markHandled(stop, start: occurrence.start)
-        if stop.id != active.id, !active.mergedIDs.contains(stop.id) {
-            active.mergedIDs.append(stop.id)
-        }
+        active.merged.append(MergedHardStop(id: stop.id, joinedAt: joinedAt, endsAt: occurrence.end))
         let endsLater = switch (occurrence.end, active.endsAt) {
         case (nil, nil): false
         case (nil, _?): true
@@ -683,7 +693,23 @@ struct BreakScheduler: Sendable {
             hardStopEndReason: reason,
             extensionsUsed: active.extensionsUsed
         ))
-        removeOnceStops([active.id] + active.mergedIDs)
+        // Each merged occurrence is recorded too, from when it joined. One whose own end came first ended normally.
+        // Extensions are counted on the running stop's record, and the focus stretch only there.
+        for joined in active.merged {
+            let ownEnd = joined.endsAt.map { min($0, endedAt) } ?? endedAt
+            let endedOnTime = joined.endsAt.map { $0 <= endedAt } ?? false
+            appendRecord(BreakRecord(
+                startedAt: joined.joinedAt,
+                endedAt: max(joined.joinedAt, ownEnd),
+                plannedDuration: joined.endsAt.map { max(0, $0.timeIntervalSince(joined.joinedAt)) } ?? 0,
+                kind: .hardStop,
+                completed: endedOnTime || reason == .ended,
+                skipped: false,
+                hardStopEndReason: endedOnTime ? .ended : reason,
+                extensionsUsed: 0
+            ))
+        }
+        removeOnceStops([active.id] + active.merged.map(\.id))
         dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
         snapshot.activeHardStop = nil
         clearActiveBreak()
@@ -731,7 +757,7 @@ struct BreakScheduler: Sendable {
 
     /// Removes one-off stops that can no longer start, except one that is running or waiting for a call.
     private mutating func removeExpiredOnceStops(now: Date) {
-        let keep = Set((snapshot.activeHardStop.map { [$0.id] + $0.mergedIDs } ?? []).map(\.uuidString))
+        let keep = Set((snapshot.activeHardStop.map { [$0.id] + $0.merged.map(\.id) } ?? []).map(\.uuidString))
             .union(snapshot.hardStopsWaitingForCall.keys)
         settings.hardStops.removeAll { stop in
             !keep.contains(stop.id.uuidString) && stop.isExpiredOnce(now: now, calendar: calendar)

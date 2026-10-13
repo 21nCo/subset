@@ -759,7 +759,38 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.settings.hardStops.count, 2, "A merged one-off stop is removed when the running stop ends")
         XCTAssertEqual(scheduler.tick(now: at(12, 0), inputs: .init(signals: [.meeting])).first, .hardStopEnded(id: a.id, reason: .ended))
         XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [a.id])
-        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), [.ended])
+        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), [.ended, .ended])
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 0), at(10, 30)])
+    }
+
+    func testStopWhoseCallEndsWhileAnotherRunsJoinsIt() {
+        // A waits for the call; B starts anyway at 10:30. The call ends at 10:40 while B runs: A joins B then and
+        // is recorded, instead of being missed at 11:00.
+        let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))
+        let b = hardStop(hour: 10, minute: 30, end: .at(hour: 12, minute: 0), duringCalls: .startAnyway)
+        var scheduler = makeScheduler(stops: [a, b])
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        _ = scheduler.tick(now: at(10, 0), inputs: call)
+        XCTAssertEqual(scheduler.tick(now: at(10, 30), inputs: call), [.hardStopStarted(id: b.id, endsAt: at(12, 0))])
+        XCTAssertTrue(scheduler.tick(now: at(10, 40)).isEmpty)
+        XCTAssertEqual(runTimed(&scheduler, from: at(10, 40), through: at(12, 0), step: 30).map(\.1), [.hardStopEnded(id: b.id, reason: .ended)])
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30), at(10, 40)])
+        XCTAssertEqual(scheduler.records.map(\.endedAt), [at(12, 0), at(11, 0)])
+        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), [.ended, .ended])
+    }
+
+    func testMergeWhileHiddenMovesTheHiddenCountdown() {
+        let a = hardStop(escapeHatch: .extend(minutes: 30, times: 1))
+        let b = hardStop(hour: 10, minute: 55, end: .at(hour: 12, minute: 0))
+        var scheduler = makeScheduler(stops: [a, b])
+        _ = scheduler.tick(now: at(10, 30))
+        _ = scheduler.extendHardStop(now: at(10, 50))
+        XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(11, 0))
+        XCTAssertTrue(scheduler.tick(now: at(10, 55)).isEmpty)
+        XCTAssertEqual(scheduler.nextBreakRemaining(now: at(11, 5)), 15 * 60)
+        XCTAssertTrue(runTimed(&scheduler, from: at(10, 55), through: at(11, 19, 59), step: 30).isEmpty)
+        XCTAssertEqual(scheduler.tick(now: at(11, 20)), [.hardStopResumed(id: a.id)])
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(12, 0))
     }
 
     func testMissedTicksGiveTheSameOverlapAndPlannedBreakOutcome() {
@@ -799,8 +830,10 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertTrue(scheduler.canDismissHardStop(now: at(10, 46)))
         XCTAssertFalse(scheduler.canExtendHardStop(now: at(10, 46)))
         XCTAssertEqual(runTimed(&scheduler, from: at(10, 45), through: at(11, 31)).map(\.1), [.hardStopEnded(id: a.id, reason: .ended)])
-        XCTAssertEqual(scheduler.records.count, 1)
-        XCTAssertEqual(scheduler.records.first?.endedAt, at(11, 30))
+        // Each occurrence is recorded: A for the whole stop, and B from its own start to its own end.
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30), at(10, 45)])
+        XCTAssertEqual(scheduler.records.map(\.endedAt), [at(11, 30), at(11, 30)])
+        XCTAssertEqual(scheduler.records.map(\.extensionsUsed), [0, 0])
 
         // A stop that ends earlier keeps the running stop's end and escape hatch.
         let short = hardStop(hour: 10, minute: 45, end: .after(5 * 60), escapeHatch: .dismissEarly)
@@ -935,6 +968,7 @@ final class BreakSchedulerTests: XCTestCase {
         _ = interrupted.tick(now: at(11, 0))
         XCTAssertEqual(interrupted.stats(now: at(11, 5)).focusTime, 34 * 60)
         XCTAssertEqual(interrupted.stats(now: at(11, 5)).longestStretch, 29 * 60)
+        XCTAssertNil(interrupted.records.last?.focusDuration, "No zero-length stretch is added")
 
         // A stop that starts during an idle pause counts only the focus before the pause (4 minutes here).
         var idle = makeScheduler(stops: [stop])
