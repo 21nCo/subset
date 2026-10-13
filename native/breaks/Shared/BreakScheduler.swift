@@ -459,7 +459,9 @@ struct BreakScheduler: Sendable {
         case .weekdays(let weekdays):
             stop.repeats = .weekdays(weekdays.filter((1...7).contains))
         case .once(let date):
-            stop.repeats = .once(DateComponents(year: date.year, month: date.month, day: date.day))
+            // Bounded so an occurrence key cannot overflow; an impossible day never occurs and then expires.
+            stop.repeats = .once(DateComponents(year: date.year.map { clamp($0, 1...9999) }, month: date.month.map { clamp($0, 1...12) },
+                                                day: date.day.map { clamp($0, 1...31) }))
         }
         let warnings = Set(stop.warningMinutes.filter(HardStop.warningRange.contains)).sorted(by: >)
         stop.warningMinutes = Array(warnings.prefix(HardStop.maximumWarnings))
@@ -501,7 +503,7 @@ struct BreakScheduler: Sendable {
     /// merges it first, even when no tick has run since it started.
     private mutating func reconcileMerges(now: Date) {
         guard let before = snapshot.activeHardStop else { return }
-        mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now)
+        _ = mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now, resolvingWaits: false)
         guard let active = snapshot.activeHardStop, active.endsAt != before.endsAt else { return }
         if let until = active.extendedUntil {
             snapshot.nextBreakAt = min(until, active.endsAt ?? until)
@@ -518,7 +520,7 @@ struct BreakScheduler: Sendable {
         // Merging comes first, so a stop that started inside the running one joins it even if it waits for
         // calls or its own window passed while the host was asleep.
         if snapshot.activeHardStop != nil {
-            mergeOverlappingStops(stops: stops, now: now)
+            events += mergeOverlappingStops(stops: stops, now: now, resolvingWaits: true)
         }
         // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
         events += missWaitingStops(now: now)
@@ -591,7 +593,7 @@ struct BreakScheduler: Sendable {
             )
             if snapshot.activeHardStop?.focusDuration == 0 { snapshot.activeHardStop?.focusDuration = nil }
             // Other due stops that start inside it, including ones waiting for a call, join it at once.
-            mergeOverlappingStops(stops: stops, now: now)
+            events += mergeOverlappingStops(stops: stops, now: now, resolvingWaits: true)
             showHardStop()
             if let active = snapshot.activeHardStop {
                 events.append(.hardStopStarted(id: active.id, endsAt: active.endsAt))
@@ -608,8 +610,13 @@ struct BreakScheduler: Sendable {
     /// start and before its end) by `now`, in start order. Occurrences are worked out day by day from the running
     /// stop's start, so a chain of overlapping stops gives the same result whether or not every tick ran, even
     /// after a gap of several days. `mergedThrough` remembers the last day already worked out.
-    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) {
-        guard var active = snapshot.activeHardStop else { return }
+    ///
+    /// A later occurrence never merges past an earlier occurrence of the same stop that is waiting for a call. When
+    /// `resolvingWaits` is true and that earlier one's end has passed, it is first recorded as missed; one that is
+    /// still open stays waiting, and the later occurrence joins later. Operations pass false and only skip.
+    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date, resolvingWaits: Bool) -> [Event] {
+        var events: [Event] = []
+        guard var active = snapshot.activeHardStop else { return events }
         var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
         while day <= now, day < active.endsAt ?? .distantFuture {
             let candidates = stops
@@ -619,6 +626,11 @@ struct BreakScheduler: Sendable {
                 guard item.occurrence.start >= active.occurrence, item.occurrence.start <= now,
                       item.occurrence.start < active.endsAt ?? .distantFuture,
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
+                if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
+                    guard resolvingWaits, let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
+                          let end = waiting.end, end <= now else { continue }
+                    events.append(recordMissed(item.stop, waiting, end: end))
+                }
                 merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
@@ -627,6 +639,7 @@ struct BreakScheduler: Sendable {
         // Day granularity, so the saved snapshot changes at most once a day while a stop runs.
         active.mergedThrough = calendar.startOfDay(for: now)
         snapshot.activeHardStop = active
+        return events
     }
 
     /// Focus time the timer counted before a hard stop starts: none after a break (its record holds the stretch),
@@ -651,21 +664,25 @@ struct BreakScheduler: Sendable {
             // A stop without an end always waits, so it is never missed.
             guard let end = occurrence.end else { continue }
             guard now >= end else { continue }
-            markHandled(stop, occurrence)
-            appendRecord(BreakRecord(
-                startedAt: occurrence.start,
-                endedAt: end,
-                plannedDuration: max(0, end.timeIntervalSince(occurrence.start)),
-                kind: .hardStop,
-                completed: false,
-                skipped: false,
-                hardStopEndReason: .missed,
-                extensionsUsed: 0
-            ))
-            removeOnceStops([(stop.id, occurrence.key)])
-            events.append(.hardStopEnded(id: stop.id, reason: .missed))
+            events.append(recordMissed(stop, occurrence, end: end))
         }
         return events
+    }
+
+    private mutating func recordMissed(_ stop: HardStop, _ occurrence: HardStop.Occurrence, end: Date) -> Event {
+        markHandled(stop, occurrence)
+        appendRecord(BreakRecord(
+            startedAt: occurrence.start,
+            endedAt: end,
+            plannedDuration: max(0, end.timeIntervalSince(occurrence.start)),
+            kind: .hardStop,
+            completed: false,
+            skipped: false,
+            hardStopEndReason: .missed,
+            extensionsUsed: 0
+        ))
+        removeOnceStops([(stop.id, occurrence.key)])
+        return .hardStopEnded(id: stop.id, reason: .missed)
     }
 
     /// Warnings are not replayed: only the latest one whose time has passed is shown, once, while the start is

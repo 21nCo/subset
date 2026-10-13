@@ -178,6 +178,10 @@ final class BreaksTests: XCTestCase {
         XCTAssertEqual(errors { $0.hour = 9; $0.repeats = .once(on: now, calendar: utc) }, [.repeats])
         XCTAssertEqual(errors { $0.repeats = .once(on: now, calendar: utc) }, [])
         XCTAssertEqual(errors { $0.repeats = .once(DateComponents(year: 2026, month: 8)) }, [.repeats])
+        XCTAssertEqual(errors { $0.repeats = .once(DateComponents(year: 2027, month: 2, day: 30)) }, [.repeats])
+        // A malformed time is reported, not evaluated.
+        XCTAssertEqual(errors { $0.end = .at(hour: Int.max, minute: 0); $0.repeats = .once(on: now.addingTimeInterval(86400), calendar: utc) }, [.end])
+        XCTAssertEqual(errors { $0.hour = Int.min; $0.repeats = .once(on: now.addingTimeInterval(86400), calendar: utc) }, [.start])
         XCTAssertEqual(errors { $0.warningMinutes = [1, 2, 3, 4, 5, 6] }, [.warningMinutes])
         XCTAssertEqual(errors { $0.warningMinutes = [0] }, [.warningMinutes])
         XCTAssertEqual(errors { $0.warningMinutes = [121] }, [.warningMinutes])

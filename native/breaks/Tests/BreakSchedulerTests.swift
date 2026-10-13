@@ -780,6 +780,34 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.tick(now: at(10, 30, dayOffset: 1)), [.hardStopStarted(id: once.id, endsAt: at(11, 0, dayOffset: 1))])
     }
 
+    func testLaterOccurrenceDoesNotConsumeAnEarlierOneWaitingForCall() {
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        let b = hardStop(hour: 10, minute: 0, end: .after(2 * 3600), repeats: .weekdays([3]), escapeHatch: .dismissEarly, duringCalls: .startAnyway)
+
+        // S runs 24 hours from 10:30. Monday's occurrence waits through a call that lasts past Tuesday 10:30, when
+        // Tuesday's occurrence starts inside B: Monday's is recorded as missed first.
+        let s = hardStop(end: .at(hour: 10, minute: 30), repeats: .weekdays([2, 3]))
+        var bounded = makeScheduler(stops: [s, b])
+        _ = bounded.tick(now: at(10, 30), inputs: call)
+        XCTAssertEqual(bounded.tick(now: at(10, 0, dayOffset: 1), inputs: call), [.hardStopStarted(id: b.id, endsAt: at(12, 0, dayOffset: 1))])
+        XCTAssertEqual(bounded.tick(now: at(10, 30, dayOffset: 1), inputs: call), [.hardStopEnded(id: s.id, reason: .missed)])
+        XCTAssertEqual(bounded.records.map(\.startedAt), [at(10, 30)])
+        XCTAssertEqual(bounded.snapshot.activeHardStop?.merged.map(\.id), [s.id])
+
+        // Without an end, Monday's occurrence keeps waiting; when the call ends it joins B, and Tuesday's follows.
+        let open = hardStop(end: .untilDismissed, repeats: .weekdays([2, 3]))
+        var waiting = makeScheduler(stops: [open, b])
+        _ = waiting.tick(now: at(10, 30), inputs: call)
+        _ = waiting.tick(now: at(10, 0, dayOffset: 1), inputs: call)
+        XCTAssertTrue(waiting.tick(now: at(10, 30, dayOffset: 1), inputs: call).isEmpty)
+        XCTAssertEqual(waiting.snapshot.activeHardStop?.merged, [])
+        XCTAssertTrue(waiting.tick(now: at(10, 40, dayOffset: 1)).isEmpty)
+        XCTAssertTrue(waiting.tick(now: at(10, 40, 1, dayOffset: 1)).isEmpty)
+        XCTAssertNil(waiting.snapshot.breakEndsAt)
+        XCTAssertEqual(waiting.dismissHardStop(now: at(10, 41, dayOffset: 1)), [.hardStopEnded(id: b.id, reason: .dismissed)])
+        XCTAssertEqual(waiting.records.count, 3, "B, and Monday's and Tuesday's occurrences of the open stop")
+    }
+
     func testStopWaitingForCallMergesIntoRunningStop() {
         // A is running when a call starts; B starts inside A and would wait for the call, but joins A instead.
         let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))

@@ -536,24 +536,35 @@ extension BreakSettings {
             if stop.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 fail(.name, "Enter a name.")
             }
+            // Occurrences are worked out only from valid times, so a malformed value is reported, not evaluated.
+            var timesAreValid = true
             if !(0...23).contains(stop.hour) || !(0...59).contains(stop.minute) {
                 fail(.start, "Choose a valid start time.")
+                timesAreValid = false
             }
             switch stop.end {
             case .at(let hour, let minute):
-                if !(0...23).contains(hour) || !(0...59).contains(minute) { fail(.end, "Choose a valid end time.") }
+                if !(0...23).contains(hour) || !(0...59).contains(minute) {
+                    fail(.end, "Choose a valid end time.")
+                    timesAreValid = false
+                }
             case .after(let duration):
-                if !HardStop.durationRange.contains(duration) { fail(.end, "A hard stop lasts from 1 minute to 16 hours.") }
+                if !HardStop.durationRange.contains(duration) {
+                    fail(.end, "A hard stop lasts from 1 minute to 16 hours.")
+                    timesAreValid = false
+                }
             case .untilDismissed:
                 break
             }
             switch stop.repeats {
             case .weekdays(let weekdays):
                 if weekdays.isEmpty || !weekdays.allSatisfy((1...7).contains) { fail(.repeats, "Choose at least one day.") }
-            case .once(let date) where date.year == nil || date.month == nil || date.day == nil:
-                fail(.repeats, "Choose a date.")
-            case .once:
-                if stop.isExpiredOnce(now: now, calendar: calendar) { fail(.repeats, "This date and time have passed.") }
+            case .once(let date):
+                if !Self.isCalendarDate(date, calendar: calendar) {
+                    fail(.repeats, "Choose a date.")
+                } else if timesAreValid, stop.isExpiredOnce(now: now, calendar: calendar) {
+                    fail(.repeats, "This date and time have passed.")
+                }
             }
             if stop.warningMinutes.count > HardStop.maximumWarnings {
                 fail(.warningMinutes, "Add at most \(HardStop.maximumWarnings) warnings.")
@@ -566,6 +577,14 @@ extension BreakSettings {
             }
         }
         return errors
+    }
+
+    /// True when `date` names a day that exists, such as 28 February but not 30 February.
+    private static func isCalendarDate(_ date: DateComponents, calendar: Calendar) -> Bool {
+        guard let year = date.year, let month = date.month, let day = date.day, (1...9999).contains(year),
+              let resolved = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { return false }
+        let parts = calendar.dateComponents([.year, .month, .day], from: resolved)
+        return parts.year == year && parts.month == month && parts.day == day
     }
 }
 
