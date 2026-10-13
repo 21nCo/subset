@@ -175,6 +175,14 @@ export function displayPercent(window: UsageWindow, mode: PercentMode): { value:
   return { value, calculated, tone: usedTone(usedOf(window)) };
 }
 
+/** The on-pace projection at reset in the chosen mode, as the card's pace line and the resets dialog's sentence. */
+export function paceText(pace: Pace, mode: PercentMode): { line: string; sentence: string } {
+  const used = Math.min(pace.projectedPercent, 100);
+  if (mode === 'used') return { line: `On pace · ${used}% by reset`, sentence: `${used}% used by the reset.` };
+  const left = Math.max(100 - used, 0);
+  return { line: `On pace · ${left}% left by reset`, sentence: `${left}% left at the reset.` };
+}
+
 export interface ResetDetails {
   resetsAt: string | null;
   remainingMs: number | null;
