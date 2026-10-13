@@ -1048,6 +1048,37 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [a.id])
     }
 
+    func testTimeZoneChangeDuringStopDoesNotRunItsOccurrenceAgain() throws {
+        // Both stops run 10:30–11:00 UTC. At 10:45 the time zone moves an hour west, so 10:30 local is now 11:30 UTC.
+        let once = hardStop(repeats: .once(t0), warnings: [2])
+        let weekly = hardStop(repeats: .weekdays([2]), warnings: [2])
+        for stop in [once, weekly] {
+            var scheduler = makeScheduler(stops: [stop])
+            _ = scheduler.tick(now: at(10, 30))
+            scheduler.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -3600))
+            XCTAssertEqual(scheduler.tick(now: at(11, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
+            XCTAssertTrue(runTimed(&scheduler, from: at(11, 0), through: at(11, 40), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
+            XCTAssertEqual(scheduler.records.count, 1)
+        }
+        var removed = makeScheduler(stops: [once])
+        _ = removed.tick(now: at(10, 30))
+        removed.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -3600))
+        _ = removed.tick(now: at(11, 0))
+        XCTAssertTrue(removed.settings.hardStops.isEmpty, "The one-off stop ran, so it is removed")
+    }
+
+    func testRestoringDeletedStopWhileItRunsDoesNotRecordItTwice() {
+        let stop = hardStop()
+        var scheduler = makeScheduler(stops: [stop])
+        _ = scheduler.tick(now: at(10, 30))
+        scheduler.settings.hardStops = []
+        XCTAssertTrue(scheduler.tick(now: at(10, 31)).isEmpty)
+        scheduler.settings.hardStops = [stop]
+        XCTAssertTrue(scheduler.tick(now: at(10, 32)).isEmpty)
+        XCTAssertEqual(scheduler.tick(now: at(11, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertEqual(scheduler.records.count, 1)
+    }
+
     func testHardStopOnDaylightSavingDayStartsAtNextValidMinute() throws {
         var newYork = Calendar(identifier: .gregorian)
         newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))

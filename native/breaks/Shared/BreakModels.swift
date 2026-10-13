@@ -171,7 +171,8 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     enum Repeat: Codable, Equatable, Sendable {
         /// Calendar weekday values, where Sunday is 1 and Saturday is 7. An occurrence belongs to the weekday it starts on.
         case weekdays(Set<Int>)
-        /// One occurrence, on the calendar day that contains this date.
+        /// One occurrence, on the calendar day that contains this date. The scheduler keeps the date at noon, so a
+        /// time zone change of up to 12 hours does not move it to another day.
         case once(Date)
     }
 
@@ -239,10 +240,24 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     func occurrences(around now: Date, calendar: Calendar) -> [Occurrence] {
         let today = calendar.startOfDay(for: now)
         return (-1...1).compactMap { offset in
-            guard let day = calendar.date(byAdding: .day, value: offset, to: today),
-                  let start = start(onDayOf: day, calendar: calendar) else { return nil }
-            return Occurrence(start: start, end: end(forStart: start, calendar: calendar))
+            calendar.date(byAdding: .day, value: offset, to: today).flatMap { occurrence(onDayOf: $0, calendar: calendar) }
         }
+    }
+
+    /// The occurrence that begins on the calendar day of `day`, or nil when none does.
+    func occurrence(onDayOf day: Date, calendar: Calendar) -> Occurrence? {
+        guard let start = start(onDayOf: day, calendar: calendar) else { return nil }
+        let date = calendar.dateComponents([.year, .month, .day], from: day)
+        let key = Occurrence.key(year: date.year ?? 0, month: date.month ?? 0, day: date.day ?? 0, hour: hour, minute: minute)
+        return Occurrence(start: start, end: end(forStart: start, calendar: calendar), key: key)
+    }
+
+    /// The occurrence identified by `key`, worked out with `calendar` from the day and start time in the key.
+    func occurrence(forKey key: Int, calendar: Calendar) -> Occurrence? {
+        let parts = Occurrence.parts(of: key)
+        guard let day = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: parts.day)),
+              let start = Self.time(hour: parts.hour, minute: parts.minute, onDayOf: day, calendar: calendar) else { return nil }
+        return Occurrence(start: start, end: end(forStart: start, calendar: calendar), key: key)
     }
 
     /// True when the occurrence may start at `now`: from its start until its scheduled end. A stop without an end
@@ -258,16 +273,26 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     /// True for a one-off stop whose occurrence can no longer start.
     func isExpiredOnce(now: Date, calendar: Calendar) -> Bool {
         guard case .once(let date) = repeats else { return false }
-        guard let start = start(onDayOf: date, calendar: calendar) else {
+        guard let occurrence = occurrence(onDayOf: date, calendar: calendar) else {
             return calendar.startOfDay(for: date) < calendar.startOfDay(for: now)
         }
-        let occurrence = Occurrence(start: start, end: end(forStart: start, calendar: calendar))
-        return start <= now && !isDue(occurrence, now: now, calendar: calendar)
+        return occurrence.start <= now && !isDue(occurrence, now: now, calendar: calendar)
     }
 
     struct Occurrence: Equatable, Sendable {
         var start: Date
         var end: Date?
+        /// The occurrence's identity: its local day and configured start time as `yyyyMMddHHmm`. Unlike `start`,
+        /// it does not change when the time zone changes, and it orders occurrences of one stop.
+        var key: Int
+
+        static func key(year: Int, month: Int, day: Int, hour: Int, minute: Int) -> Int {
+            (((year * 100 + month) * 100 + day) * 100 + hour) * 100 + minute
+        }
+
+        static func parts(of key: Int) -> (year: Int, month: Int, day: Int, hour: Int, minute: Int) {
+            (key / 100_000_000, key / 1_000_000 % 100, key / 10_000 % 100, key / 100 % 100, key % 100)
+        }
     }
 
     private static func time(hour: Int, minute: Int, onDayOf day: Date, calendar: Calendar) -> Date? {
@@ -306,6 +331,8 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
     var name: String
     /// The scheduled start of the occurrence.
     var occurrence: Date
+    /// The occurrence's identity (`HardStop.Occurrence.key`).
+    var occurrenceKey: Int
     /// When it actually started; later than `occurrence` after waiting for a call or a late wake.
     var startedAt: Date
     /// Nil until dismissed.
@@ -325,8 +352,8 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
 /// An occurrence that joined a running hard stop.
 struct MergedHardStop: Codable, Equatable, Sendable {
     var id: UUID
-    /// Its scheduled start.
-    var occurrence: Date
+    /// The occurrence's identity (`HardStop.Occurrence.key`).
+    var occurrenceKey: Int
     /// When it joined: its own start, or when a call it waited for ended.
     var joinedAt: Date
     /// Its own scheduled end; nil when it lasts until dismissed.
@@ -335,7 +362,8 @@ struct MergedHardStop: Codable, Equatable, Sendable {
 
 /// The warnings already delivered for one occurrence: every lead time of `minutes` or more.
 struct HardStopWarningMark: Codable, Equatable, Sendable {
-    var occurrence: Date
+    /// The occurrence's identity (`HardStop.Occurrence.key`).
+    var occurrence: Int
     var minutes: Int
 }
 
@@ -566,11 +594,11 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var activeHardStop: ActiveHardStop?
     /// Per hard stop ID: the warnings already delivered for its next occurrence.
     var hardStopWarnings: [String: HardStopWarningMark] = [:]
-    /// Per hard stop ID: the latest occurrence that started, merged, ended, or was missed. It and every earlier
-    /// occurrence never start again.
-    var handledHardStops: [String: Date] = [:]
-    /// Per hard stop ID: the due occurrence that is waiting for a call to end.
-    var hardStopsWaitingForCall: [String: Date] = [:]
+    /// Per hard stop ID: the key of the latest occurrence that started, merged, ended, or was missed. It and every
+    /// earlier occurrence never start again.
+    var handledHardStops: [String: Int] = [:]
+    /// Per hard stop ID: the key of the due occurrence that is waiting for a call to end.
+    var hardStopsWaitingForCall: [String: Int] = [:]
 }
 
 extension EngineSnapshot {
@@ -594,8 +622,8 @@ extension EngineSnapshot {
         pausedUntil = try container.decodeIfPresent(Date.self, forKey: .pausedUntil)
         activeHardStop = try container.decodeIfPresent(ActiveHardStop.self, forKey: .activeHardStop)
         hardStopWarnings = try container.decodeIfPresent([String: HardStopWarningMark].self, forKey: .hardStopWarnings) ?? [:]
-        handledHardStops = try container.decodeIfPresent([String: Date].self, forKey: .handledHardStops) ?? [:]
-        hardStopsWaitingForCall = try container.decodeIfPresent([String: Date].self, forKey: .hardStopsWaitingForCall) ?? [:]
+        handledHardStops = try container.decodeIfPresent([String: Int].self, forKey: .handledHardStops) ?? [:]
+        hardStopsWaitingForCall = try container.decodeIfPresent([String: Int].self, forKey: .hardStopsWaitingForCall) ?? [:]
     }
 }
 
