@@ -10,39 +10,40 @@
 		0F40B620181A54F73F78B507D8A22A90 /* CaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCA6C28E51C54CAD75A1E44CA284993F /* CaptureTests.swift */; };
 		1D4D5E6CE16A50E15264BA847AEC2087 /* CaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F519A8EADC2AE8A7F2D08E74BA63721 /* CaptureController.swift */; };
 		29E0D0B8684554CBABC36568D549869D /* WelcomeWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BC61C28D0FEB357B471C5296D72E893 /* WelcomeWindow.swift */; };
+		30D820E47F798FCA80A97C8D81E2E9F8 /* ActivityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A322F5AAEF3B61FD776545DFCA45B /* ActivityStore.swift */; };
 		36852B2FD82E8E2CFED58EA6B7D3D4C2 /* StatusMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1EE9913B97023CD187517F9779FF489 /* StatusMenuController.swift */; };
 		46F58B163277220731BAD767E1CB11DB /* CaptureSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1974F27A771E48500E54D2723E2E1535 /* CaptureSettings.swift */; };
+		5F991D5F4C1D37474D0D70467893CD0A /* Block.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1749E85A7DC2BF2527F00BBCBF01495C /* Block.swift */; };
 		6891F97ED6E513E9890625670C080E03 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4368FDE12A7AD434E2CBEF94D8CA29ED /* SwiftUI.framework */; };
 		6E066DB75FC3B38E09911142A2FAF924 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 344FFBE79275D9555F14B73FB35E3415 /* AppKit.framework */; };
 		70808190660009C52DEBB83D23370405 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFBF7BF54CCA122F24355C5B6624ABC8 /* AppDelegate.swift */; };
-		7654C828730210FD7191CF6795C03DBC /* Activity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6536EC6F1F45BB1A45AB6CC2095E3DA /* Activity.swift */; };
 		7AE72BCF72980E90E16686582BA034F8 /* PointInTimeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 008A27318AB20DEB487B5DB76FABBDF3 /* PointInTimeApp.swift */; };
 		8BBA5DC41C46888D37EB3B73BFB00D35 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9FC02EF7C8D7296AFED55B7A121BCED3 /* Assets.xcassets */; };
-		A6533BF1E8E058A97F03DCFDF01730E4 /* ActivityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8C0AAE07B59AEB1C853668BB368DB2 /* ActivityStore.swift */; };
+		A81EDBC502EAF11DA05B52D01250C9E8 /* BrowserPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AEB82889F43A0FC1A481C466D143F61 /* BrowserPrivacy.swift */; };
 		AE231BB4E19D4DEEC68461858C9E16BE /* libPointInTimeCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA9FAEC9D311F2EE7BB2107EA64DDFF3 /* libPointInTimeCore.a */; };
-		B17E053FAACE3FC578098DB3667A5AE8 /* SegmentRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAFC0AF856844E0E85ACF1454F2BC85D /* SegmentRecorder.swift */; };
 		C37FCEB11E301BF59E3FD9C48C506ECA /* SystemReaders.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBAE11187A5C489D8389F89908603F2A /* SystemReaders.swift */; };
+		C785E421B530C0D38D55E697CD8A1B71 /* SQLite.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA807217F0049CF9A45F51392D8DF310 /* SQLite.swift */; };
 		CA22AC7DF1F1387A290A4C3DD0FB5483 /* StoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE37EFD0EF2CAAAE4A9D3C3429E2C71B /* StoreTests.swift */; };
+		CD204D5ED47A488E9F9C4E40BEB3FBF3 /* SegmentRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F901E8E60E459209CA3F38AD5BF91023 /* SegmentRecorder.swift */; };
 		E6CCB5FB4530C225DEA6D1143D3F16A5 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4FB6B59024191516E357D4D3DBDE9E07 /* ApplicationServices.framework */; };
 		E72A95690F8DCEABB1017B699A14314E /* libPointInTimeCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA9FAEC9D311F2EE7BB2107EA64DDFF3 /* libPointInTimeCore.a */; };
-		F660106DBF6FC7F4DA7D4DCC96ED193B /* Block.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D1D3F29287CA447895847958A0E007 /* Block.swift */; };
-		F79CD3590228778B00191942FAEFD58A /* SQLite.swift in Sources */ = {isa = PBXBuildFile; fileRef = 766132480A71D9281850BD3F10580E0E /* SQLite.swift */; };
+		F9AE626CF1F229973053A4F4CDA4180D /* Activity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C17A6B0B7647038F18E9CAA5A24F508F /* Activity.swift */; };
 		FB0089C8632699B40B9F1ACED8EB393A /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 793C91745173D2C71E51C17EACC4F3FC /* Carbon.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		7F73D111D8FBAD638BD62D75714934CE /* PBXContainerItemProxy */ = {
+		87ACB110EE1FBBCD694F30F732114E49 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 1B81B0EBFF2CF682B782C923D4FC7B93 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = 4CAF417C43C8A8917B668D63D60EAFE8;
+			remoteGlobalIDString = 1FCE8B95E94D4D772706F95B7B93CB80;
 			remoteInfo = PointInTimeCore;
 		};
-		CB136892D0A29749E5D2E93647E2D7F6 /* PBXContainerItemProxy */ = {
+		FE3F0EF74C770052499DE7C40DC10C92 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 1B81B0EBFF2CF682B782C923D4FC7B93 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = 4CAF417C43C8A8917B668D63D60EAFE8;
+			remoteGlobalIDString = 1FCE8B95E94D4D772706F95B7B93CB80;
 			remoteInfo = PointInTimeCore;
 		};
 /* End PBXContainerItemProxy section */
@@ -50,26 +51,27 @@
 /* Begin PBXFileReference section */
 		008A27318AB20DEB487B5DB76FABBDF3 /* PointInTimeApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PointInTimeApp.swift; sourceTree = "<group>"; };
 		02582BB78B6EF1B4D40170AC7DAE9238 /* PointInTimeCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PointInTimeCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1749E85A7DC2BF2527F00BBCBF01495C /* Block.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Block.swift; sourceTree = "<group>"; };
 		1974F27A771E48500E54D2723E2E1535 /* CaptureSettings.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CaptureSettings.swift; sourceTree = "<group>"; };
 		344FFBE79275D9555F14B73FB35E3415 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
 		3F519A8EADC2AE8A7F2D08E74BA63721 /* CaptureController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CaptureController.swift; sourceTree = "<group>"; };
 		425A0671AAB58F337107342D105CAC9F /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		4368FDE12A7AD434E2CBEF94D8CA29ED /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		4AEB82889F43A0FC1A481C466D143F61 /* BrowserPrivacy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BrowserPrivacy.swift; sourceTree = "<group>"; };
 		4FB6B59024191516E357D4D3DBDE9E07 /* ApplicationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ApplicationServices.framework; path = System/Library/Frameworks/ApplicationServices.framework; sourceTree = SDKROOT; };
-		63D1D3F29287CA447895847958A0E007 /* Block.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Block.swift; sourceTree = "<group>"; };
-		6A8C0AAE07B59AEB1C853668BB368DB2 /* ActivityStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ActivityStore.swift; sourceTree = "<group>"; };
-		766132480A71D9281850BD3F10580E0E /* SQLite.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SQLite.swift; sourceTree = "<group>"; };
 		793C91745173D2C71E51C17EACC4F3FC /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		7E9951283906A5C281B5D9563931A478 /* PointInTime.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PointInTime.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9BC61C28D0FEB357B471C5296D72E893 /* WelcomeWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WelcomeWindow.swift; sourceTree = "<group>"; };
 		9FC02EF7C8D7296AFED55B7A121BCED3 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA9FAEC9D311F2EE7BB2107EA64DDFF3 /* libPointInTimeCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libPointInTimeCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		C6536EC6F1F45BB1A45AB6CC2095E3DA /* Activity.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Activity.swift; sourceTree = "<group>"; };
-		CAFC0AF856844E0E85ACF1454F2BC85D /* SegmentRecorder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SegmentRecorder.swift; sourceTree = "<group>"; };
+		C17A6B0B7647038F18E9CAA5A24F508F /* Activity.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Activity.swift; sourceTree = "<group>"; };
 		CCA6C28E51C54CAD75A1E44CA284993F /* CaptureTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CaptureTests.swift; sourceTree = "<group>"; };
 		CE37EFD0EF2CAAAE4A9D3C3429E2C71B /* StoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StoreTests.swift; sourceTree = "<group>"; };
 		CFBF7BF54CCA122F24355C5B6624ABC8 /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		D62A322F5AAEF3B61FD776545DFCA45B /* ActivityStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ActivityStore.swift; sourceTree = "<group>"; };
+		DA807217F0049CF9A45F51392D8DF310 /* SQLite.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SQLite.swift; sourceTree = "<group>"; };
 		F1EE9913B97023CD187517F9779FF489 /* StatusMenuController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusMenuController.swift; sourceTree = "<group>"; };
+		F901E8E60E459209CA3F38AD5BF91023 /* SegmentRecorder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SegmentRecorder.swift; sourceTree = "<group>"; };
 		FBAE11187A5C489D8389F89908603F2A /* SystemReaders.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemReaders.swift; sourceTree = "<group>"; };
 		FF4194AEE85AD538C3D9D1C6118F0A17 /* PointInTime.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = PointInTime.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -83,13 +85,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		53716B001E61EDF550BA3309E47797DC /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		775C30A84E122607F54350ECB1375E65 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -99,6 +94,13 @@
 				E6CCB5FB4530C225DEA6D1143D3F16A5 /* ApplicationServices.framework in Frameworks */,
 				FB0089C8632699B40B9F1ACED8EB393A /* Carbon.framework in Frameworks */,
 				6891F97ED6E513E9890625670C080E03 /* SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E7BB554E83C8BA623AEC80A7AA98D879 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -116,19 +118,6 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		10C1816F219D671C7989D0B1EAFFDC2E /* Core */ = {
-			isa = PBXGroup;
-			children = (
-				C6536EC6F1F45BB1A45AB6CC2095E3DA /* Activity.swift */,
-				6A8C0AAE07B59AEB1C853668BB368DB2 /* ActivityStore.swift */,
-				63D1D3F29287CA447895847958A0E007 /* Block.swift */,
-				766132480A71D9281850BD3F10580E0E /* SQLite.swift */,
-				CAFC0AF856844E0E85ACF1454F2BC85D /* SegmentRecorder.swift */,
-			);
-			name = Core;
-			path = Core;
-			sourceTree = "<group>";
-		};
 		67B83C4DD7850350128E198D13D524BD /* Tests */ = {
 			isa = PBXGroup;
 			children = (
@@ -137,6 +126,20 @@
 			);
 			name = Tests;
 			path = Tests/CoreTests;
+			sourceTree = "<group>";
+		};
+		6C635B32C865E98AAF4CE95A88899A12 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				C17A6B0B7647038F18E9CAA5A24F508F /* Activity.swift */,
+				D62A322F5AAEF3B61FD776545DFCA45B /* ActivityStore.swift */,
+				1749E85A7DC2BF2527F00BBCBF01495C /* Block.swift */,
+				4AEB82889F43A0FC1A481C466D143F61 /* BrowserPrivacy.swift */,
+				DA807217F0049CF9A45F51392D8DF310 /* SQLite.swift */,
+				F901E8E60E459209CA3F38AD5BF91023 /* SegmentRecorder.swift */,
+			);
+			name = Core;
+			path = Core;
 			sourceTree = "<group>";
 		};
 		9856E61A50D7F1AAE1634AD98FA27393 /* Products */ = {
@@ -172,7 +175,7 @@
 			children = (
 				9856E61A50D7F1AAE1634AD98FA27393 /* Products */,
 				087BA4A2A1D7E91CE9DA3E67FB93E384 /* Frameworks */,
-				10C1816F219D671C7989D0B1EAFFDC2E /* Core */,
+				6C635B32C865E98AAF4CE95A88899A12 /* Core */,
 				B42FD48CF1CC5C4EBC6E5C7C20633D28 /* MacApp */,
 				67B83C4DD7850350128E198D13D524BD /* Tests */,
 			);
@@ -181,7 +184,7 @@
 /* End PBXGroup section */
 
 /* Begin PBXHeadersBuildPhase section */
-		EC0FC10D4D6A65E361FCA8B75802B6C7 /* Headers */ = {
+		3539F40265A74309C577BCC38D863C7F /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -191,6 +194,23 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
+		1FCE8B95E94D4D772706F95B7B93CB80 /* PointInTimeCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5D7BD623A869E5E559588C23437EE55F /* Build configuration list for PBXNativeTarget "PointInTimeCore" */;
+			buildPhases = (
+				3539F40265A74309C577BCC38D863C7F /* Headers */,
+				A56B97C8A7752EAC9AC2AC93C12623ED /* Sources */,
+				E7BB554E83C8BA623AEC80A7AA98D879 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PointInTimeCore;
+			productName = PointInTimeCore;
+			productReference = AA9FAEC9D311F2EE7BB2107EA64DDFF3 /* libPointInTimeCore.a */;
+			productType = "com.apple.product-type.library.static";
+		};
 		3E22D776A3349727A93E0FE414067636 /* PointInTime */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = D988FA500998E39C27226B43FE31F484 /* Build configuration list for PBXNativeTarget "PointInTime" */;
@@ -202,29 +222,12 @@
 			buildRules = (
 			);
 			dependencies = (
-				C2797252D2889B30A6ED45957D085B0B /* PBXTargetDependency */,
+				97AEC4103D887526F05CB7D43EF4A0B1 /* PBXTargetDependency */,
 			);
 			name = PointInTime;
 			productName = PointInTime;
 			productReference = 7E9951283906A5C281B5D9563931A478 /* PointInTime.app */;
 			productType = "com.apple.product-type.application";
-		};
-		4CAF417C43C8A8917B668D63D60EAFE8 /* PointInTimeCore */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 1993999D219155AE464B1853F2EDC642 /* Build configuration list for PBXNativeTarget "PointInTimeCore" */;
-			buildPhases = (
-				EC0FC10D4D6A65E361FCA8B75802B6C7 /* Headers */,
-				02942A6989B0D48C05B23ECED7F1B915 /* Sources */,
-				53716B001E61EDF550BA3309E47797DC /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = PointInTimeCore;
-			productName = PointInTimeCore;
-			productReference = AA9FAEC9D311F2EE7BB2107EA64DDFF3 /* libPointInTimeCore.a */;
-			productType = "com.apple.product-type.library.static";
 		};
 		7F0DF0B20DF8C53257331D7B80B319BB /* PointInTimeCoreTests */ = {
 			isa = PBXNativeTarget;
@@ -237,7 +240,7 @@
 			buildRules = (
 			);
 			dependencies = (
-				7832E08BEEFACFF74F493322F4345159 /* PBXTargetDependency */,
+				A099CD7B843B2C4185214C7E3440309B /* PBXTargetDependency */,
 			);
 			name = PointInTimeCoreTests;
 			productName = PointInTimeCoreTests;
@@ -276,7 +279,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				4CAF417C43C8A8917B668D63D60EAFE8 /* PointInTimeCore */,
+				1FCE8B95E94D4D772706F95B7B93CB80 /* PointInTimeCore */,
 				3E22D776A3349727A93E0FE414067636 /* PointInTime */,
 				7F0DF0B20DF8C53257331D7B80B319BB /* PointInTimeCoreTests */,
 			);
@@ -302,18 +305,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		02942A6989B0D48C05B23ECED7F1B915 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				7654C828730210FD7191CF6795C03DBC /* Activity.swift in Sources */,
-				A6533BF1E8E058A97F03DCFDF01730E4 /* ActivityStore.swift in Sources */,
-				F660106DBF6FC7F4DA7D4DCC96ED193B /* Block.swift in Sources */,
-				F79CD3590228778B00191942FAEFD58A /* SQLite.swift in Sources */,
-				B17E053FAACE3FC578098DB3667A5AE8 /* SegmentRecorder.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		36709F6F07E0E9CB1441DFD113F2A7B3 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -337,20 +328,33 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A56B97C8A7752EAC9AC2AC93C12623ED /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F9AE626CF1F229973053A4F4CDA4180D /* Activity.swift in Sources */,
+				30D820E47F798FCA80A97C8D81E2E9F8 /* ActivityStore.swift in Sources */,
+				5F991D5F4C1D37474D0D70467893CD0A /* Block.swift in Sources */,
+				A81EDBC502EAF11DA05B52D01250C9E8 /* BrowserPrivacy.swift in Sources */,
+				C785E421B530C0D38D55E697CD8A1B71 /* SQLite.swift in Sources */,
+				CD204D5ED47A488E9F9C4E40BEB3FBF3 /* SegmentRecorder.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		7832E08BEEFACFF74F493322F4345159 /* PBXTargetDependency */ = {
+		97AEC4103D887526F05CB7D43EF4A0B1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = PointInTimeCore;
-			target = 4CAF417C43C8A8917B668D63D60EAFE8 /* PointInTimeCore */;
-			targetProxy = 7F73D111D8FBAD638BD62D75714934CE /* PBXContainerItemProxy */;
+			target = 1FCE8B95E94D4D772706F95B7B93CB80 /* PointInTimeCore */;
+			targetProxy = 87ACB110EE1FBBCD694F30F732114E49 /* PBXContainerItemProxy */;
 		};
-		C2797252D2889B30A6ED45957D085B0B /* PBXTargetDependency */ = {
+		A099CD7B843B2C4185214C7E3440309B /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = PointInTimeCore;
-			target = 4CAF417C43C8A8917B668D63D60EAFE8 /* PointInTimeCore */;
-			targetProxy = CB136892D0A29749E5D2E93647E2D7F6 /* PBXContainerItemProxy */;
+			target = 1FCE8B95E94D4D772706F95B7B93CB80 /* PointInTimeCore */;
+			targetProxy = FE3F0EF74C770052499DE7C40DC10C92 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -386,7 +390,30 @@
 			};
 			name = Release;
 		};
-		3771D323DCB2F2CA51B1B5E05C0A97F4 /* Release */ = {
+		4A6E166A0BFCDCC2E6930F0C77F63535 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_PREFIX = lib;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lsqlite3",
+				);
+				PRODUCT_MODULE_NAME = PointInTimeCore;
+				PRODUCT_NAME = PointInTimeCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		546884FA94628BD774386B0DCE379F98 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -543,29 +570,6 @@
 			};
 			name = Debug;
 		};
-		CD4DDDC57147151036B22A674D439F3A /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_PREFIX = lib;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lsqlite3",
-				);
-				PRODUCT_MODULE_NAME = PointInTimeCore;
-				PRODUCT_NAME = PointInTimeCore;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
 		F6458E953D076E5FCB1050D71DEDCAEA /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -623,20 +627,20 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		1993999D219155AE464B1853F2EDC642 /* Build configuration list for PBXNativeTarget "PointInTimeCore" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				3771D323DCB2F2CA51B1B5E05C0A97F4 /* Release */,
-				CD4DDDC57147151036B22A674D439F3A /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		2F8857DDB670F442C590E7177DD56C20 /* Build configuration list for PBXProject "PointInTime" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AF5BC89CA947A9D710915881BECEE102 /* Debug */,
 				F6458E953D076E5FCB1050D71DEDCAEA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5D7BD623A869E5E559588C23437EE55F /* Build configuration list for PBXNativeTarget "PointInTimeCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				546884FA94628BD774386B0DCE379F98 /* Release */,
+				4A6E166A0BFCDCC2E6930F0C77F63535 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

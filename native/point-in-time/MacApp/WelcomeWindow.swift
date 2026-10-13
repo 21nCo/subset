@@ -5,6 +5,8 @@ import SwiftUI
 @MainActor
 final class WelcomeWindowController {
     private var window: NSWindow?
+    private var model: WelcomeModel?
+    private var closeObserver: NSObjectProtocol?
     private let settings: CaptureSettings
     private let onStart: () -> Void
 
@@ -15,7 +17,8 @@ final class WelcomeWindowController {
 
     func show() {
         if window == nil {
-            let view = WelcomeView(model: WelcomeModel(settings: settings), onStart: { [weak self] in
+            let model = WelcomeModel(settings: settings)
+            let view = WelcomeView(model: model, onStart: { [weak self] in
                 self?.onStart()
                 self?.window?.close()
             })
@@ -23,8 +26,13 @@ final class WelcomeWindowController {
             window.title = "Welcome to pointInTime"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
+            closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                MainActor.assumeIsolated { model.stopPolling() }
+            }
+            self.model = model
             self.window = window
         }
+        model?.startPolling()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)
@@ -41,11 +49,20 @@ final class WelcomeModel: ObservableObject {
 
     init(settings: CaptureSettings) {
         self.settings = settings
+    }
+
+    /// Accessibility is granted in System Settings, so poll while the window is open.
+    func startPolling() {
         refresh()
-        // Accessibility is granted in System Settings, so poll briefly while the window is open.
+        guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.accessibilityGranted = AccessibilityAccess.isGranted }
         }
+    }
+
+    func stopPolling() {
+        timer?.invalidate()
+        timer = nil
     }
 
     func refresh() {
@@ -79,7 +96,7 @@ struct WelcomeView: View {
             Text("pointInTime records which app, window, and website is in front while you work, in three-minute blocks, so you can see where your day went.")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
-                Label("Recorded: the app’s name, its focused window title, and for supported browsers the site and page path. Query strings, private windows, idle time, and excluded apps are not recorded.", systemImage: "list.bullet.rectangle")
+                Label("Recorded: the app’s name, its focused window title, and for supported browsers the site and page path. Query strings, idle time, and excluded apps are not recorded.", systemImage: "list.bullet.rectangle")
                 Label("Stored only on this Mac in ~/Library/Application Support/pointInTime. Nothing is sent anywhere.", systemImage: "lock.laptopcomputer")
                 Label("Pause, exclude an app, or delete data any time from the menu bar.", systemImage: "menubar.rectangle")
             }
@@ -107,7 +124,7 @@ struct WelcomeView: View {
                             }
                         }
                     }
-                    Text("Safari and Firefox are recorded by app and window title only: Safari cannot report whether a window is private, and Firefox offers no scripting access to its tabs.")
+                    Text("In Safari and Chromium browsers, a window’s title and site are kept only when the browser confirms it is not a private window: Chromium browsers need Automation, and Safari needs both Automation and Accessibility. Otherwise only the browser’s name is recorded. Firefox and other apps are recorded by app and window title; titles marked as private browsing are dropped.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

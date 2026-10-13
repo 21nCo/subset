@@ -13,6 +13,10 @@ private func segment(_ bundleID: String?, _ from: TimeInterval, _ to: TimeInterv
     Segment(start: t0 + from, end: t0 + to, excluded: excluded, bundleID: bundleID, appName: bundleID, windowTitle: title, url: url.flatMap(RedactedURL.init))
 }
 
+private func content(_ bundleID: String, _ title: String) -> Segment? {
+    CapturePolicy().content(for: Activity(bundleID: bundleID, appName: bundleID, windowTitle: title), at: t0)
+}
+
 @Suite struct StoreTests {
     @Test func createsPrivateFolderAndDatabaseAtCurrentSchema() throws {
         let directory = temporaryDirectory().appendingPathComponent("nested")
@@ -61,6 +65,54 @@ private func segment(_ bundleID: String?, _ from: TimeInterval, _ to: TimeInterv
         #expect(blocks[0].dominantURL?.string == "https://docs.example/d/1")
     }
 
+    @Test func shrinkingAFlushedSegmentClearsTheBucketsPastItsNewEnd() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("a", 0, 300, title: "Doc"))
+        try store.save(segment("a", 0, 130, title: "Doc")) // idle began at t0 + 130
+        #expect(try store.segments(from: .distantPast, to: .distantFuture).map(\.end) == [t0 + 130])
+        let blocks = try store.blocks(from: t0, to: t0 + 1_000)
+        #expect(blocks.map(\.start) == [t0])
+        #expect(blocks.map(\.activeSeconds) == [130])
+    }
+
+    @Test func savingAnEmptySegmentRetractsTheFlushedOne() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("a", 0, 100))
+        try store.save(segment("b", 150, 250, title: "Flushed"))
+        try store.save(segment("b", 150, 150, title: "Flushed")) // the recorder's empty close
+        #expect(try store.segments(from: .distantPast, to: .distantFuture).map { $0.bundleID ?? "" } == ["a"])
+        let blocks = try store.blocks(from: t0, to: t0 + 1_000)
+        #expect(blocks.map(\.start) == [t0] && blocks.first?.activeSeconds == 100)
+        #expect(blocks.first?.apps.map(\.bundleID) == ["a"])
+        try store.save(segment("never", 500, 500)) // nothing stored for it: a no-op
+        #expect(try store.segmentCount() == 1)
+    }
+
+    @Test func idleRetractionLeavesNothingAfterIdleBegan() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        var recorder = SegmentRecorder()
+        // Input stops at t0 + 100. A title change without input at t0 + 150 closes "one"; "two" is flushed at t0 + 210.
+        for second in stride(from: 0.0, through: 145, by: 5) { _ = recorder.record(content("app", "one"), at: t0 + second) }
+        for closed in recorder.record(content("app", "two"), at: t0 + 150) { try store.save(closed) }
+        for second in stride(from: 155.0, through: 210, by: 5) { _ = recorder.record(content("app", "two"), at: t0 + second) }
+        try store.save(try #require(recorder.open))
+        // The idle threshold is reached at t0 + 220: the host ends the segment at idle start and retracts the rest.
+        let idleStart = t0 + 100, now = t0 + 220
+        let closed = recorder.gap(at: idleStart)
+        try store.save(try #require(closed))
+        try store.deleteData(from: idleStart, to: now)
+        let remaining = try store.segments(from: .distantPast, to: .distantFuture)
+        #expect(remaining.map(\.windowTitle) == ["one"] && remaining.map(\.end) == [idleStart])
+        let blocks = try store.blocks(from: t0, to: t0 + 1_000)
+        #expect(blocks.map(\.start) == [t0] && blocks.map(\.activeSeconds) == [100])
+    }
+
     @Test func excludedSegmentsStoreNoIdentity() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -93,6 +145,29 @@ private func segment(_ bundleID: String?, _ from: TimeInterval, _ to: TimeInterv
         #expect(remaining[2].start == dayEnd && remaining[2].end == dayEnd + 100)
         #expect(try store.blocks(from: dayStart, to: dayEnd).isEmpty)
         #expect(!(try store.blocks(from: t0, to: dayStart).isEmpty))
+    }
+
+    @Test func deletingTodayThroughDistantFutureIsBoundedByStoredData() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        let midnight = t0 + 86_400
+        try store.save(segment("yesterday", 0, 600, title: "Y"))
+        try store.save(segment("crossesMidnight", 86_400 - 100, 86_400 + 200, title: "C"))
+        try store.save(segment("today", 86_400 + 1_000, 86_400 + 1_400, title: "T"))
+        let clock = ContinuousClock()
+        let elapsed = try clock.measure { try store.deleteData(from: midnight, to: .distantFuture) } // exactly as the menu calls it
+        #expect(elapsed < .seconds(2))
+        let remaining = try store.segments(from: .distantPast, to: .distantFuture)
+        #expect(remaining.map { $0.bundleID ?? "" } == ["yesterday", "crossesMidnight"])
+        #expect(remaining[1].end == midnight)
+        #expect(try store.blocks(from: midnight, to: .distantFuture).isEmpty)
+        let before = try store.blocks(from: t0, to: midnight)
+        #expect(before.reduce(0) { $0 + $1.activeSeconds } == 700)
+        #expect(before.last?.start == midnight - 180 && before.last?.activeSeconds == 100)
+        try store.checkpoint()
+        let wal = (try? Data(contentsOf: URL(fileURLWithPath: store.databaseURL.path + "-wal"))) ?? Data()
+        #expect(wal.isEmpty)
     }
 
     @Test func deletingARangeInsideOneSegmentKeepsBothEnds() throws {

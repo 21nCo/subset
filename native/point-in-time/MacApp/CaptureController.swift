@@ -73,7 +73,7 @@ final class CaptureController {
         }
         let idle = secondsSinceLastInput()
         if idle >= Self.idleThreshold {
-            if recorder.open != nil { endSegment(at: now.addingTimeInterval(-idle)) }
+            if state != .idle { retractIdleTime(since: now.addingTimeInterval(-idle), until: now) }
             setState(.idle)
             return
         }
@@ -104,6 +104,19 @@ final class CaptureController {
                 let activity = Activity(bundleID: bundleID, appName: name, windowTitle: result.title, url: result.url)
                 self.apply(self.settings.policy.content(for: activity, at: now), at: now)
             }
+        }
+    }
+
+    /// Ends recording when idle began and removes anything stored after that: the flushed part of the open segment,
+    /// and segments that closed while the user was away because a title or app changed without input.
+    private func retractIdleTime(since idleStart: Date, until now: Date) {
+        endSegment(at: idleStart)
+        guard let store, now > idleStart else { return }
+        do {
+            try store.deleteData(from: idleStart, to: now)
+        } catch {
+            lastError = String(describing: error)
+            onStateChange?()
         }
     }
 

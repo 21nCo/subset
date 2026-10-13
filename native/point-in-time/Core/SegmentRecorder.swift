@@ -21,11 +21,11 @@ public struct SegmentRecorder: Sendable {
     public mutating func record(_ content: Segment?, at date: Date) -> [Segment] {
         var closed: [Segment] = []
         if let current = open, date < current.end || date.timeIntervalSince(current.end) > maxSampleInterval {
-            if let segment = close(at: current.end) { closed.append(segment) }
+            if let segment = close(at: current.end), segment.duration > 0 { closed.append(segment) }
         }
         guard date >= floor else { return closed }
         guard var content else {
-            if let segment = close(at: date) { closed.append(segment) }
+            if let segment = close(at: date), segment.duration > 0 { closed.append(segment) }
             return closed
         }
         if var current = open, current.sameContent(as: content) {
@@ -33,7 +33,7 @@ public struct SegmentRecorder: Sendable {
             open = current
             return closed
         }
-        if let segment = close(at: date) { closed.append(segment) }
+        if let segment = close(at: date), segment.duration > 0 { closed.append(segment) }
         content.start = date
         content.end = date
         open = content
@@ -41,7 +41,9 @@ public struct SegmentRecorder: Sendable {
     }
 
     /// Ends recording at `date`, for example when idle began or the Mac went to sleep. The end never precedes the
-    /// segment's start and never extends more than one sample interval past its last confirmation.
+    /// segment's start and never extends more than one sample interval past its last confirmation. Unlike `record`,
+    /// this returns the segment even when it is empty (idle began at or before its start): the host may have flushed
+    /// part of it already, and saving the empty segment removes that.
     public mutating func gap(at date: Date) -> Segment? {
         close(at: date)
     }
@@ -51,6 +53,6 @@ public struct SegmentRecorder: Sendable {
         open = nil
         segment.end = max(segment.start, min(date, segment.end.addingTimeInterval(maxSampleInterval)))
         floor = max(floor, segment.end)
-        return segment.duration > 0 ? segment : nil
+        return segment
     }
 }

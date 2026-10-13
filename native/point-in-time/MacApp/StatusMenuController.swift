@@ -156,7 +156,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         capture.endSegment()
         do {
             if all { try store.deleteAll() }
-            else { try store.deleteData(from: Calendar.current.startOfDay(for: Date()), to: .distantFuture) }
+            else {
+                try store.deleteData(from: Calendar.current.startOfDay(for: Date()), to: .distantFuture)
+                try store.checkpoint()
+            }
         } catch {
             let failure = NSAlert()
             failure.messageText = "Could not delete activity"

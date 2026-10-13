@@ -46,21 +46,31 @@ public final class ActivityStore: @unchecked Sendable {
 
     // MARK: Writing
 
-    /// Inserts a segment, or extends the stored one with the same start, and rebuilds the blocks it touches.
+    /// Inserts a segment, or moves the end of the stored one with the same start, and rebuilds the blocks between its
+    /// old and new end. An empty segment removes the stored one: the recorder returns it when a gap (idle) began at or
+    /// before the segment's start, so time that was flushed earlier is retracted.
     public func save(_ segment: Segment) throws {
-        guard segment.duration > 0 else { return }
+        let start = segment.start.timeIntervalSince1970, end = segment.end.timeIntervalSince1970
         try locked {
             try connection.transaction {
-                let previousEnd = try connection.query("SELECT end FROM segments WHERE start = ?", [.real(segment.start.timeIntervalSince1970)]).first?.first?.double
+                let previousEnd = try connection.query("SELECT end FROM segments WHERE start = ?", [.real(start)]).first?.first?.double
+                guard segment.duration > 0 else {
+                    guard let previousEnd else { return }
+                    try connection.query("DELETE FROM segments WHERE start = ?", [.real(start)])
+                    try rebuildBlocks(from: segment.start, to: Date(timeIntervalSince1970: previousEnd))
+                    return
+                }
                 try connection.query("""
                     INSERT INTO segments (start, end, excluded, bundle_id, app_name, window_title, url_scheme, url_host, url_path)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(start) DO UPDATE SET end = excluded.end
-                    """, [.real(segment.start.timeIntervalSince1970), .real(segment.end.timeIntervalSince1970), .integer(segment.excluded ? 1 : 0),
+                    """, [.real(start), .real(end), .integer(segment.excluded ? 1 : 0),
                           SQLValue(segment.bundleID), SQLValue(segment.appName), SQLValue(segment.windowTitle),
                           SQLValue(segment.url?.scheme), SQLValue(segment.url?.host), SQLValue(segment.url?.path)])
-                let from = previousEnd.map { Date(timeIntervalSince1970: min($0, segment.end.timeIntervalSince1970)) } ?? segment.start
-                try rebuildBlocks(from: from, to: segment.end)
+                // A shorter end (idle retracting flushed time) must clear the buckets past it as well.
+                let from = previousEnd.map { Date(timeIntervalSince1970: min($0, end)) } ?? segment.start
+                let to = Date(timeIntervalSince1970: max(previousEnd ?? end, end))
+                try rebuildBlocks(from: from, to: to)
             }
         }
     }
@@ -101,6 +111,12 @@ public final class ActivityStore: @unchecked Sendable {
             }
             try connection.execute("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
         }
+    }
+
+    /// Copies the WAL into the database and truncates it. With `secure_delete` on, deleted rows are then gone from both
+    /// files; the menu calls this after a user-requested deletion.
+    public func checkpoint() throws {
+        try locked { try connection.execute("PRAGMA wal_checkpoint(TRUNCATE);") }
     }
 
     // MARK: Reading
@@ -152,13 +168,28 @@ public final class ActivityStore: @unchecked Sendable {
                   SQLValue(segment.url?.scheme), SQLValue(segment.url?.host), SQLValue(segment.url?.path)])
     }
 
-    /// Recomputes every bucket touched by `[from, to]` from the stored segments. Capture columns are replaced; the
-    /// reserved classification columns are left as they are.
+    /// Recomputes every bucket touched by `[from, to)` from the stored segments. Only buckets that a stored segment or
+    /// block row actually occupies are visited, so an unbounded range (Delete Today passes `.distantFuture`) costs no
+    /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted; the others have their
+    /// capture columns replaced and keep the reserved classification columns.
     private func rebuildBlocks(from: Date, to: Date) throws {
-        for bucket in Block.bucketStarts(from: from, to: to) {
-            let end = bucket.addingTimeInterval(Block.length)
-            let segments = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ?",
-                                                [.real(end.timeIntervalSince1970), .real(bucket.timeIntervalSince1970)]).map(Self.segment(from:))
+        let lower = Block.bucketStart(containing: from)
+        let lastBucket = Block.bucketStart(containing: to)
+        let upper = lastBucket < to ? lastBucket.addingTimeInterval(Block.length) : max(lastBucket, lower.addingTimeInterval(Block.length))
+        let overlapping = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ?",
+                                               [.real(upper.timeIntervalSince1970), .real(lower.timeIntervalSince1970)]).map(Self.segment(from:))
+        var buckets = Set<Date>()
+        for segment in overlapping {
+            let start = max(segment.start, lower), end = min(segment.end, upper)
+            if end > start { buckets.formUnion(Block.bucketStarts(from: start, to: end)) }
+        }
+        let stored = try connection.query("SELECT start FROM blocks WHERE start >= ? AND start < ?",
+                                          [.real(lower.timeIntervalSince1970), .real(upper.timeIntervalSince1970)])
+        for row in stored where !buckets.contains(Date(timeIntervalSince1970: row[0].double ?? 0)) {
+            try connection.query("DELETE FROM blocks WHERE start = ?", [row[0]])
+        }
+        for bucket in buckets.sorted() {
+            let segments = overlapping.filter { $0.start < bucket.addingTimeInterval(Block.length) && $0.end > bucket }
             guard let block = Block.rollUp(start: bucket, segments: segments) else {
                 try connection.query("DELETE FROM blocks WHERE start = ?", [.real(bucket.timeIntervalSince1970)])
                 continue

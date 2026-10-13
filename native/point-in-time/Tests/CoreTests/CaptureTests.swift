@@ -96,11 +96,109 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(recorder.open?.start == t0 + 21)
     }
 
+    @Test func idleBeginningBeforeTheSegmentReturnsItEmptyForRetraction() throws {
+        var recorder = SegmentRecorder()
+        for second in stride(from: 0.0, through: 60, by: 5) { _ = recorder.record(content("a"), at: t0 + second) }
+        // The host flushed [t0, t0 + 60]; idle turns out to have begun before the segment opened.
+        let gap = recorder.gap(at: t0 - 10)
+        let closed = try #require(gap)
+        #expect(closed.start == t0 && closed.duration == 0)
+        #expect(recorder.open == nil)
+        #expect(recorder.record(content("a"), at: t0 + 200).isEmpty)
+        #expect(recorder.open?.start == t0 + 200)
+    }
+
+    @Test func recordNeverReturnsEmptySegments() {
+        var recorder = SegmentRecorder()
+        _ = recorder.record(content("a"), at: t0)
+        #expect(recorder.record(content("b"), at: t0).isEmpty)
+    }
+
     @Test func nilContentClosesWithoutOpening() {
         var recorder = SegmentRecorder()
         _ = recorder.record(content("a"), at: t0)
         #expect(recorder.record(nil, at: t0 + 5).first?.end == t0 + 5)
         #expect(recorder.open == nil)
+    }
+}
+
+@Suite struct WindowPrivacyTests {
+    private let query = "https://example.com/pit/page?secret=abc#frag"
+
+    private func scriptable(_ report: BrowserWindowReport, focusedTitle: String? = "Focused", readsTitles: Bool = true) -> (title: String?, url: RedactedURL?) {
+        WindowPrivacy.reduce(focusedTitle: focusedTitle, readsTitles: readsTitles, support: .scriptable, report: report)
+    }
+
+    @Test func chromiumIncognitoKeepsNoTitleOrURL() {
+        let kept = scriptable(.chromium(scriptOutput: "PRIVATE"), focusedTitle: "Bank statement - Google Chrome (Incognito)")
+        #expect(kept.title == nil && kept.url == nil)
+    }
+
+    @Test func chromiumNormalWindowKeepsItsOwnTitleAndRedactedURL() {
+        let kept = scriptable(.chromium(scriptOutput: "NORMAL\nExample Domain\n" + query))
+        #expect(kept.title == "Example Domain")
+        #expect(kept.url?.string == "https://example.com/pit/page")
+    }
+
+    @Test func chromiumTitleNeverComesFromAnotherFocusedWindow() {
+        // Observed on this Mac: right after a normal window opened, Accessibility still reported the incognito window
+        // while the script's front window was the normal one. The stored title must be the scripted window's.
+        let kept = scriptable(.chromium(scriptOutput: "NORMAL\nExample Domain\n" + query),
+                              focusedTitle: "Example Domain - Google Chrome (Incognito)")
+        #expect(kept.title == "Example Domain")
+    }
+
+    @Test func chromiumTitlesNeedAccessibility() {
+        let kept = scriptable(.chromium(scriptOutput: "NORMAL\nExample Domain\n" + query), focusedTitle: nil, readsTitles: false)
+        #expect(kept.title == nil && kept.url?.string == "https://example.com/pit/page")
+    }
+
+    @Test(arguments: [nil, "", "normal", "https://example.com/", "NORMAL", "NORMAL\nhttps://example.com/"] as [String?])
+    func chromiumWithoutConfirmationKeepsNothing(_ output: String?) {
+        // A failed script (no Automation, an error, a dictionary without `mode`) or an unexpected answer.
+        let kept = scriptable(.chromium(scriptOutput: output))
+        #expect(kept.title == nil && kept.url == nil)
+    }
+
+    @Test func chromiumBlankTabIsNormalWithoutTitleOrURL() {
+        #expect(BrowserWindowReport.chromium(scriptOutput: "NORMAL\n\n") == .normal(title: nil, url: nil))
+    }
+
+    @Test func safariPrivateWindowTitleDoesNotMatchItsScriptedName() {
+        // Observed on macOS 26 / Safari 26: the Accessibility title of a private window carries ", Private Browsing".
+        let focused = "Example Domain, Private Browsing"
+        let report = BrowserWindowReport.safari(focusedTitleBefore: focused, focusedTitleAfter: focused, scriptOutput: "Example Domain\n" + query)
+        #expect(report == .unconfirmed)
+        let kept = scriptable(report, focusedTitle: focused)
+        #expect(kept.title == nil && kept.url == nil)
+    }
+
+    @Test func safariNormalWindowKeepsTitleAndRedactedURL() {
+        let focused = "Personal — Example Domain"
+        let report = BrowserWindowReport.safari(focusedTitleBefore: focused, focusedTitleAfter: focused, scriptOutput: focused + "\n" + query)
+        let kept = scriptable(report, focusedTitle: focused)
+        #expect(kept.title == "Personal — Example Domain")
+        #expect(kept.url?.string == "https://example.com/pit/page")
+    }
+
+    @Test func safariWindowSwitchDuringTheReadIsUnconfirmed() {
+        let report = BrowserWindowReport.safari(focusedTitleBefore: "Example Domain", focusedTitleAfter: "Example Domain, Private Browsing",
+                                                scriptOutput: "Example Domain\n" + query)
+        #expect(report == .unconfirmed)
+    }
+
+    @Test func safariWithoutAccessibilityOrScriptKeepsNothing() {
+        #expect(BrowserWindowReport.safari(focusedTitleBefore: nil, focusedTitleAfter: nil, scriptOutput: "Example Domain\n" + query) == .unconfirmed)
+        #expect(BrowserWindowReport.safari(focusedTitleBefore: "Example Domain", focusedTitleAfter: "Example Domain", scriptOutput: nil) == .unconfirmed)
+        #expect(BrowserWindowReport.safari(focusedTitleBefore: "", focusedTitleAfter: "", scriptOutput: "\n" + query) == .unconfirmed)
+    }
+
+    @Test func titleOnlyAppsDropMarkedPrivateTitlesAndNeverKeepAURL() {
+        let report = BrowserWindowReport.normal(title: "Ignored", url: query)
+        let firefoxPrivate = WindowPrivacy.reduce(focusedTitle: "Example Domain — Private Browsing", readsTitles: true, support: .titleOnly, report: report)
+        #expect(firefoxPrivate.title == nil && firefoxPrivate.url == nil)
+        let normal = WindowPrivacy.reduce(focusedTitle: "Example Domain — Mozilla Firefox", readsTitles: true, support: .titleOnly, report: report)
+        #expect(normal.title == "Example Domain — Mozilla Firefox" && normal.url == nil)
     }
 }
 
