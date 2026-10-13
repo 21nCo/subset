@@ -123,6 +123,11 @@ struct BreakScheduler: Sendable {
 
     var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore && snapshot.activeHardStop == nil }
 
+    /// True while a hard stop runs, or is due and waits for a call. Either holds the regular schedule.
+    var hardStopHoldsSchedule: Bool {
+        snapshot.activeHardStop != nil || !snapshot.hardStopsWaitingForCall.isEmpty
+    }
+
     /// True when the shown hard stop's escape hatch has an extension left.
     func canExtendHardStop(now: Date) -> Bool {
         guard let active = snapshot.activeHardStop, active.extendedUntil == nil,
@@ -174,12 +179,30 @@ struct BreakScheduler: Sendable {
         var events: [Event] = []
         resetDailyCountersIfNeeded(now: now)
 
-        events += advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
+        let hardStopEvents = advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
+        events += hardStopEvents
         if snapshot.activeHardStop != nil {
             // A running hard stop overrides pauses, idle, office hours, and regular and planned breaks, and
             // keeps the heads-up and nudges off.
             clearWellnessCadence()
             return events
+        }
+        if !snapshot.hardStopsWaitingForCall.isEmpty {
+            // A due stop that waits for a call holds the regular schedule too. A break that is already running
+            // still ends on time; a heads-up is withdrawn.
+            if snapshot.phase == .breaking, now >= snapshot.breakEndsAt ?? .distantFuture {
+                events += endBreak(completed: true, now: now)
+            } else if snapshot.phase == .headsUp {
+                snapshot.phase = .focusing
+                events.append(.headsUpCancelled)
+            }
+            clearWellnessCadence()
+            return events
+        }
+        if hardStopEvents.contains(where: { if case .hardStopEnded(_, .missed) = $0 { true } else { false } }),
+           snapshot.phase == .focusing || snapshot.phase == .headsUp {
+            // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop.
+            startFocusInterval(at: now)
         }
 
         if snapshot.phase == .breaking {
@@ -244,7 +267,7 @@ struct BreakScheduler: Sendable {
     // MARK: - Operations
 
     mutating func startBreak(kind: BreakKind = .manual, duration: TimeInterval? = nil, plannedName: String? = nil, now: Date) -> [Event] {
-        guard snapshot.phase != .breaking, snapshot.activeHardStop == nil, kind != .hardStop else { return [] }
+        guard snapshot.phase != .breaking, !hardStopHoldsSchedule, kind != .hardStop else { return [] }
         let resolved = duration ?? self.duration(for: kind)
         snapshot.phase = .breaking
         snapshot.breakStartedAt = now
@@ -262,7 +285,7 @@ struct BreakScheduler: Sendable {
     /// Used when a background monitor reports that a planned break began (the iOS Device Activity extension).
     mutating func startPlannedBreak(id: UUID, now: Date) -> [Event] {
         guard
-            snapshot.activeHardStop == nil,
+            !hardStopHoldsSchedule,
             let planned = settings.plannedBreaks.first(where: { $0.id == id }),
             let occurrence = planned.occurrence(on: now, calendar: calendar),
             isUndelivered(planned, occurrence: occurrence),
@@ -352,7 +375,7 @@ struct BreakScheduler: Sendable {
     }
 
     mutating func pause(reason: PauseReason = .manual, until: Date? = nil, now: Date, creditingIdle idle: TimeInterval = 0) -> [Event] {
-        guard snapshot.activeHardStop == nil else { return [] }
+        guard !hardStopHoldsSchedule else { return [] }
         switch snapshot.phase {
         case .breaking:
             return []

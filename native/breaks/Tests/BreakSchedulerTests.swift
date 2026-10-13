@@ -880,6 +880,34 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(dismissed.tick(now: at(10, 50)), [.breakStarted(.planned, duration: 20 * 60)])
     }
 
+    func testStopWaitingForCallHoldsTheRegularSchedule() {
+        // The meeting does not pause reminders here, so only the waiting stop holds the break due at 10:30.
+        let stop = hardStop()
+        let walk = PlannedBreak(name: "Walk", symbol: "figure.walk", hour: 10, minute: 35, duration: 10 * 60, weekdays: [2], isEnabled: true)
+        var scheduler = makeScheduler(stops: [stop]) {
+            $0.workInterval = 30 * 60
+            $0.smartPause.meetingsAndCalls = false
+            $0.plannedBreaks = [walk]
+        }
+        let call = BreakScheduler.Inputs(idleSeconds: 10 * 60, signals: [.meeting])
+        XCTAssertEqual(scheduler.tick(now: at(10, 29, 30)), [.headsUp(breakAt: at(10, 30))])
+        XCTAssertEqual(scheduler.tick(now: at(10, 30), inputs: call), [.headsUpCancelled])
+        XCTAssertTrue(runTimed(&scheduler, from: at(10, 30), through: at(10, 39, 59), inputs: { _ in call }).isEmpty)
+        XCTAssertTrue(scheduler.pause(now: at(10, 39)).isEmpty)
+        XCTAssertTrue(scheduler.startBreak(now: at(10, 39)).isEmpty)
+        XCTAssertEqual(scheduler.phase, .focusing)
+        XCTAssertEqual(scheduler.tick(now: at(10, 40)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+
+        // When the call outlasts the stop, the held schedule restarts with a fresh focus interval.
+        var missed = makeScheduler(stops: [stop]) {
+            $0.workInterval = 30 * 60
+            $0.smartPause.meetingsAndCalls = false
+        }
+        _ = runTimed(&missed, from: at(10, 29), through: at(10, 59, 59), step: 30, inputs: { _ in .init(signals: [.meeting]) })
+        XCTAssertEqual(missed.tick(now: at(11, 0), inputs: .init(signals: [.meeting])), [.hardStopEnded(id: stop.id, reason: .missed)])
+        XCTAssertEqual(missed.snapshot.nextBreakAt, at(11, 30))
+    }
+
     func testOverlappingHardStopsMerge() {
         // B starts inside A and ends later: A runs until B's end with B's escape hatch, and B shows no warnings.
         let a = hardStop(escapeHatch: .extend(minutes: 15, times: 1))
@@ -1050,8 +1078,8 @@ final class BreakSchedulerTests: XCTestCase {
         let call = BreakScheduler.Inputs(signals: [.meeting])
         XCTAssertEqual(scheduler.tick(now: at(10, 30), inputs: call), [.hardStopStarted(id: b.id, endsAt: at(10, 40))])
         XCTAssertTrue(scheduler.canDismissHardStop(now: at(10, 31)))
-        // After B, the call pauses reminders again until it ends.
-        XCTAssertEqual(scheduler.tick(now: at(10, 40), inputs: call), [.hardStopEnded(id: b.id, reason: .ended), .paused(.meeting)])
+        // After B, A still waits for the call and holds the regular schedule, so the meeting does not pause it.
+        XCTAssertEqual(scheduler.tick(now: at(10, 40), inputs: call), [.hardStopEnded(id: b.id, reason: .ended)])
         XCTAssertEqual(scheduler.tick(now: at(10, 45)), [.hardStopStarted(id: a.id, endsAt: at(11, 0))])
     }
 
