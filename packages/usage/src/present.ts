@@ -53,7 +53,8 @@ export function windowTitle(account: UsageAccount, window: UsageWindow): string 
   const bucket = account.limitAccess?.find((item) => item.limitId === window.limitId)?.label ?? window.limitId;
   const prefix = buckets > 1 && window.limitId !== 'codex' ? `${bucket} · ` : '';
   const slot = window.label.split(' · ').pop() ?? window.label;
-  return `${prefix}${span ?? `${slot.charAt(0).toUpperCase()}${slot.slice(1)} usage`}`;
+  const title = span ?? slot.charAt(0).toUpperCase() + slot.slice(1) + ' usage';
+  return prefix + title;
 }
 
 /** Compact duration such as "5d 18h", "2h 14m", or "42m". */
@@ -82,7 +83,8 @@ export function agoText(observedAt: string | null, now: number): string {
 
 export function usedTone(used: number | null): Tone {
   if (used === null) return 'muted';
-  return used < 60 ? 'good' : used < 85 ? 'warn' : 'bad';
+  if (used < 60) return 'good';
+  return used < 85 ? 'warn' : 'bad';
 }
 
 export interface Pace {
@@ -143,7 +145,7 @@ export function summarize(status: UsageStatus, now: number): UsageSummary {
   let highest: UsageSummary['highest'] = null;
   for (const account of status.accounts) {
     for (const window of account.windows) {
-      const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
+      const reset = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
       if (Number.isFinite(reset) && reset > now && (!nextReset || reset < Date.parse(nextReset.at))) {
         nextReset = { account: accountName(account), provider: providerMeta[account.provider].name, window: windowTitle(account, window), at: window.resetsAt! };
       }
@@ -192,7 +194,7 @@ export interface ResetDetails {
 
 /** Window timing derived from the reported reset time and window length. */
 export function resetDetails(window: UsageWindow, now: number): ResetDetails {
-  const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
+  const reset = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
   if (!Number.isFinite(reset)) return { resetsAt: null, remainingMs: null, windowStart: null, elapsedPercent: null };
   const remainingMs = Math.max(0, reset - now);
   if (!window.durationMinutes) return { resetsAt: window.resetsAt, remainingMs, windowStart: null, elapsedPercent: null };
@@ -242,7 +244,7 @@ export function lastUsedAt(account: UsageAccount, history: UsageHistory | undefi
 
 /** Soonest upcoming reset across an account's windows. */
 export function soonestReset(account: UsageAccount, now: number): number | null {
-  const times = account.windows.map((window) => window.resetsAt ? Date.parse(window.resetsAt) : NaN).filter((time) => Number.isFinite(time) && time > now);
+  const times = account.windows.map((window) => window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN).filter((time) => Number.isFinite(time) && time > now);
   return times.length ? Math.min(...times) : null;
 }
 
@@ -250,8 +252,12 @@ export function soonestReset(account: UsageAccount, now: number): number | null 
 export function sortAccounts(accounts: UsageAccount[], mode: SortMode, history: UsageHistory | undefined, now: number): UsageAccount[] {
   if (mode === 'default') return accounts;
   const key = (account: UsageAccount) => mode === 'recent' ? -(lastUsedAt(account, history) ?? -Infinity) : soonestReset(account, now) ?? Infinity;
+  const compare = (a: number, b: number) => {
+    if (a === b) return 0;
+    return a < b ? -1 : 1;
+  };
   return accounts.map((account, index) => ({ account, index, value: key(account) }))
-    .sort((a, b) => (a.value === b.value ? 0 : a.value < b.value ? -1 : 1) || a.index - b.index)
+    .sort((a, b) => compare(a.value, b.value) || a.index - b.index)
     .map((item) => item.account);
 }
 
@@ -330,8 +336,8 @@ export function windowGroups(account: UsageAccount): WindowGroup[] | null {
   }
   if (groups.size < 2) return null;
   // Primary groups lead: Gemini before third-party models, standard before Core.
-  const order = ['gemini', 'standard'];
-  return [...groups].sort((a, b) => (order.includes(b[0]) ? 1 : 0) - (order.includes(a[0]) ? 1 : 0)).map(([id, windows]) => ({ id, label: GROUP_LABELS[id] ?? `${id.charAt(0).toUpperCase()}${id.slice(1)}`, windows }));
+  const order = new Set(['gemini', 'standard']);
+  return [...groups].sort((a, b) => (order.has(b[0]) ? 1 : 0) - (order.has(a[0]) ? 1 : 0)).map(([id, windows]) => ({ id, label: GROUP_LABELS[id] ?? `${id.charAt(0).toUpperCase()}${id.slice(1)}`, windows }));
 }
 
 export interface LimitItem { accountId: string; key: string; account: string; provider: string; window: string; used: number; resetsAt: string | null; providerId: UsageProvider }
@@ -343,7 +349,7 @@ export function limitAlerts(accounts: UsageAccount[]): { exhausted: LimitItem[];
   for (const account of accounts) {
     const groups = windowGroups(account);
     for (const window of account.windows) {
-      const used = window.usedPercent ?? (window.remainingPercent === null ? null : 100 - window.remainingPercent);
+      const used = usedOf(window);
       if (used === null) continue;
       const group = groups?.find((item) => item.windows.includes(window));
       const item = { accountId: account.id, key: historyWindowKey(window), providerId: account.provider, account: accountName(account), provider: providerMeta[account.provider].name,
@@ -352,5 +358,7 @@ export function limitAlerts(accounts: UsageAccount[]): { exhausted: LimitItem[];
     }
   }
   const byReset = (a: LimitItem, b: LimitItem) => (a.resetsAt ? Date.parse(a.resetsAt) : Infinity) - (b.resetsAt ? Date.parse(b.resetsAt) : Infinity);
-  return { exhausted: exhausted.sort(byReset), low: low.sort((a, b) => b.used - a.used) };
+  exhausted.sort(byReset);
+  low.sort((a, b) => b.used - a.used);
+  return { exhausted, low };
 }
