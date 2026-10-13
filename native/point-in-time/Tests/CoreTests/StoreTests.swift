@@ -179,7 +179,8 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         let remaining = try store.segments(from: .distantPast, to: .distantFuture)
         #expect(remaining.map { [$0.start, $0.end] } == [[t0, t0 + 200], [t0 + 500, t0 + 1_000]])
         #expect(remaining.allSatisfy { $0.windowTitle == "T" })
-        #expect(try store.blocks(from: t0 + 360, to: t0 + 360).isEmpty)
+        let blocks = try store.blocks(from: .distantPast, to: .distantFuture)
+        #expect(blocks.map { [$0.start.timeIntervalSince(t0), $0.activeSeconds] } == [[0, 180], [180, 20], [360, 40], [540, 180], [720, 180], [900, 100]])
     }
 
     @Test func deleteAllLeavesAnEmptyCompactedDatabase() throws {

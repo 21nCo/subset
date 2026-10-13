@@ -124,7 +124,7 @@ struct WelcomeView: View {
                             }
                         }
                     }
-                    Text("In Safari and Chromium browsers, a window’s title and site are kept only when the browser confirms it is not a private window: Chromium browsers need Automation, and Safari needs both Automation and Accessibility. Otherwise only the browser’s name is recorded. Firefox and other apps are recorded by app and window title; titles marked as private browsing are dropped.")
+                    Text("In Safari and Chromium browsers, a window’s title and site are kept only when it is confirmed not to be a private window: Chromium browsers need Automation, and Safari needs both Automation and Accessibility. Otherwise only the browser’s name is recorded. Firefox and other apps are recorded by app and window title; titles marked as private browsing are dropped.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
