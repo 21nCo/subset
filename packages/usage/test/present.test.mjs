@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accountBadge, compactDuration, needsAttention, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
+import { accountBadge, compactDuration, needsAttention, paceText, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
 import { createUsageStatus } from '../dist/index.js';
 
 const now = Date.parse('2026-10-08T12:00:00Z');
@@ -40,6 +40,22 @@ test('estimates pace from the average rate and stays quiet early in a window', (
   assert.equal(windowPace(window({ resetsAt: new Date(now + 299 * 60_000).toISOString() }), now), null);
   assert.equal(windowPace(window({ durationMinutes: null }), now), null);
   assert.equal(windowPace(window({ usedPercent: 100 }), now).exhaustsInMs, 0);
+});
+
+test('words the pace projection in the chosen used or remaining mode', () => {
+  // 30% used halfway through the window: on pace for 60% used, so 40% left, at the reset.
+  const onPace = windowPace(window({ usedPercent: 30, remainingPercent: 70 }), now);
+  assert.equal(onPace.beforeReset, false);
+  assert.deepEqual(paceText(onPace, 'used'), { line: 'On pace · 60% by reset', sentence: '60% used by the reset.' });
+  assert.deepEqual(paceText(onPace, 'remaining'), { line: 'On pace · 40% left by reset', sentence: '40% left at the reset.' });
+  // A projection above 100% caps at 100% used and floors at 0% left.
+  const over = { projectedPercent: 140, exhaustsInMs: 60_000, beforeReset: false };
+  assert.deepEqual(paceText(over, 'used'), { line: 'On pace · 100% by reset', sentence: '100% used by the reset.' });
+  assert.deepEqual(paceText(over, 'remaining'), { line: 'On pace · 0% left by reset', sentence: '0% left at the reset.' });
+  const idle = windowPace(window({ usedPercent: 0, remainingPercent: 100 }), now);
+  assert.equal(idle.projectedPercent, 0);
+  assert.deepEqual(paceText(idle, 'used'), { line: 'On pace · 0% by reset', sentence: '0% used by the reset.' });
+  assert.deepEqual(paceText(idle, 'remaining'), { line: 'On pace · 100% left by reset', sentence: '100% left at the reset.' });
 });
 
 test('maps states to badges and summarizes attention, next reset, and highest usage', () => {

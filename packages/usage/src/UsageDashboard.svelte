@@ -20,7 +20,7 @@
   import { createUsageStatus, usageFreshness, type UsageAccount, type UsageProvider, type UsageStatus, type UsageWindow } from './index.js';
   import {
     accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, planName, providerMeta, resetDetails, spanLabel, summarize,
-    sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
+    paceText, sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
   } from './present.js';
 
   type Hint = { message?: string; action?: { label: string; run: () => void; busy?: boolean } } | null;
@@ -448,7 +448,7 @@
                         {:else if pace && pace.exhaustsInMs === 0}
                           <span class="pace tone-bad">Limit reached</span>
                         {:else if pace}
-                          <span class="pace" title="Estimate from the average rate since this window started">On pace · {Math.min(pace.projectedPercent, 100)}% by reset</span>
+                          <span class="pace" title="Estimate from the average rate since this window started">{paceText(pace, percentMode).line}</span>
                         {/if}
                         <button type="button" class="reset" onclick={() => showResets(account, window)} title={exactTime(window.resetsAt)}>{windowResetText(window, now, account.provider)}</button>
                       </span>
@@ -561,7 +561,7 @@
               <div><dt>Resets</dt><dd>{exactTime(details.resetsAt)}{details.remainingMs !== null ? ` · ${details.remainingMs > 0 ? `in ${compactDuration(details.remainingMs)}` : 'due'}` : ''}</dd></div>
               <div><dt>Window started</dt><dd>{details.windowStart ? exactTime(details.windowStart) : 'Unavailable'}</dd></div>
               <div class="wide"><dt>Usage</dt><dd>{window.usedPercent === null ? 'Unknown' : `${percent(window.usedPercent)} used · ${percent(window.remainingPercent ?? 100 - window.usedPercent)} left`}</dd></div>
-              <div class="wide"><dt>At this pace</dt><dd>{!pace ? 'Not enough of the window has passed to estimate.' : pace.exhaustsInMs === 0 ? 'Limit reached.' : pace.beforeReset ? `Runs out in ${compactDuration(pace.exhaustsInMs)}, before the reset.` : `${Math.min(pace.projectedPercent, 100)}% used by the reset.`}</dd></div>
+              <div class="wide"><dt>At this pace</dt><dd>{!pace ? 'Not enough of the window has passed to estimate.' : pace.exhaustsInMs === 0 ? 'Limit reached.' : pace.beforeReset ? `Runs out in ${compactDuration(pace.exhaustsInMs)}, before the reset.` : paceText(pace, percentMode).sentence}</dd></div>
             </dl>
           </section>
         {:else}
