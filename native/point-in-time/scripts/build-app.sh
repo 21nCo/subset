@@ -5,8 +5,13 @@
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 out="${1:-$root/build}"
-version="$(sed -n 's/.*"MARKETING_VERSION" => "\(.*\)".*/\1/p' "$root/ProjectGenerator.rb" | head -1)"
-build_number="$(sed -n 's/.*"CURRENT_PROJECT_VERSION" => "\(.*\)".*/\1/p' "$root/ProjectGenerator.rb" | head -1)"
+# ProjectGenerator.rb sets them as config.build_settings["MARKETING_VERSION"] = "0.1.0".
+version="$(sed -n 's/.*\["MARKETING_VERSION"\] = "\([^"]*\)".*/\1/p' "$root/ProjectGenerator.rb" | head -1)"
+build_number="$(sed -n 's/.*\["CURRENT_PROJECT_VERSION"\] = "\([^"]*\)".*/\1/p' "$root/ProjectGenerator.rb" | head -1)"
+if [ -z "$version" ] || [ -z "$build_number" ]; then
+  echo "Could not read MARKETING_VERSION and CURRENT_PROJECT_VERSION from ProjectGenerator.rb" >&2
+  exit 1
+fi
 swift build --package-path "$root" -c release --product PointInTime
 bin="$(swift build --package-path "$root" -c release --show-bin-path)"
 app="$out/pointInTime.app"

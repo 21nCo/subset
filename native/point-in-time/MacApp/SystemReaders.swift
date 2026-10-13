@@ -73,12 +73,17 @@ struct AppleEventReader {
         specifier(want: DescType(cWindow), form: DescType(formUniqueID), data: id, of: .null())
     }
 
+    /// An element by its id inside `container`; `elementClass` is the class code from the app's dictionary.
+    static func element(_ elementClass: String, id: NSAppleEventDescriptor, of container: NSAppleEventDescriptor) -> NSAppleEventDescriptor {
+        specifier(want: code(elementClass), form: DescType(formUniqueID), data: id, of: container)
+    }
+
     /// A property by its four-character code from the app's scripting dictionary, such as "pnam" for name.
     static func property(_ code: String, of container: NSAppleEventDescriptor) -> NSAppleEventDescriptor {
         specifier(want: DescType(cProperty), form: DescType(formPropertyID), data: NSAppleEventDescriptor(typeCode: Self.code(code)), of: container)
     }
 
-    private static func code(_ text: String) -> DescType { text.utf8.reduce(0) { $0 << 8 | DescType($1) } }
+    static func code(_ text: String) -> DescType { text.utf8.reduce(0) { $0 << 8 | DescType($1) } }
 
     private static func specifier(want: DescType, form: DescType, data: NSAppleEventDescriptor,
                                   of container: NSAppleEventDescriptor) -> NSAppleEventDescriptor {
@@ -88,6 +93,40 @@ struct AppleEventReader {
         record.setDescriptor(data, forKeyword: AEKeyword(keyAEKeyData))
         record.setDescriptor(container, forKeyword: AEKeyword(keyAEContainer))
         return record.coerce(toDescriptorType: DescType(typeObjectSpecifier)) ?? record
+    }
+}
+
+/// `ChromiumScripting` over Apple Events to one running Chromium browser, every event addressed by scripting id.
+struct ChromiumEvents: ChromiumScripting {
+    struct EventFailed: Error {}
+    private typealias AE = AppleEventReader
+
+    let events: AppleEventReader
+
+    func frontWindowID() throws -> NSAppleEventDescriptor { try get(AE.property("ID  ", of: AE.window(index: 1))) }
+
+    func mode(ofWindow window: NSAppleEventDescriptor) throws -> String? { AE.text(try get(AE.property("mode", of: AE.window(id: window)))) }
+
+    func activeTabID(ofWindow window: NSAppleEventDescriptor) throws -> NSAppleEventDescriptor {
+        try get(AE.property("ID  ", of: AE.property("acTa", of: AE.window(id: window))))
+    }
+
+    func title(ofTab tab: NSAppleEventDescriptor, inWindow window: NSAppleEventDescriptor) throws -> String? {
+        AE.text(try get(AE.property("pnam", of: Self.tab(tab, window))))
+    }
+
+    func url(ofTab tab: NSAppleEventDescriptor, inWindow window: NSAppleEventDescriptor) throws -> String? {
+        AE.text(try get(AE.property("URL ", of: Self.tab(tab, window))))
+    }
+
+    /// `tab id <tab> of window id <window>`; "CrTb" is the tab class in the Chromium dictionary.
+    private static func tab(_ tab: NSAppleEventDescriptor, _ window: NSAppleEventDescriptor) -> NSAppleEventDescriptor {
+        AE.element("CrTb", id: tab, of: AE.window(id: window))
+    }
+
+    private func get(_ specifier: NSAppleEventDescriptor) throws -> NSAppleEventDescriptor {
+        guard let answer = events.get(specifier) else { throw EventFailed() }
+        return answer
     }
 }
 
@@ -110,33 +149,18 @@ final class ActivityReader: @unchecked Sendable {
 
     func read(pid: pid_t, bundleID: String, readTitle: Bool, completion: @escaping @Sendable (Result) -> Void) {
         queue.async { [self] in
-            let title = readTitle ? focusedWindowTitle(pid: pid) : nil
-            guard let browser = SupportedBrowser.matching(bundleID) else {
-                let reduced = WindowPrivacy.reduce(focusedTitle: title, readsTitles: readTitle, support: .titleOnly,
-                                                   report: .unconfirmed, privateTitles: privateTitles)
-                completion(Result(title: reduced.title, url: reduced.url))
-                return
-            }
+            let browser = SupportedBrowser.matching(bundleID)
+            let support = BrowserSupport.forApp(bundleID, scriptable: browser != nil)
+            // Firefox-family browsers keep the app name only, and a scriptable browser's title comes from its report.
+            let title = readTitle && support == .titleOnly ? focusedWindowTitle(pid: pid) : nil
             var report = BrowserWindowReport.unconfirmed
-            if Self.permission(for: browser.bundleID, ask: false) == .granted {
-                report = .chromium(frontWindow(AppleEventReader(pid: pid)))
+            if let browser, Self.permission(for: browser.bundleID, ask: false) == .granted {
+                report = .chromium(reading: ChromiumEvents(events: AppleEventReader(pid: pid)))
             }
-            let reduced = WindowPrivacy.reduce(focusedTitle: title, readsTitles: readTitle, support: .scriptable,
+            let reduced = WindowPrivacy.reduce(focusedTitle: title, readsTitles: readTitle, support: support,
                                                report: report, privateTitles: privateTitles)
             completion(Result(title: reduced.title, url: reduced.url))
         }
-    }
-
-    /// The front window's id, `mode`, active tab title, and URL, every event addressed to that window by its id. A
-    /// failed event yields nil; a dictionary without `mode` yields a nil mode. Both keep nothing.
-    private func frontWindow(_ events: AppleEventReader) -> ScriptedWindow? {
-        typealias AE = AppleEventReader
-        guard let id = events.get(AE.property("ID  ", of: AE.window(index: 1))), let idText = id.stringValue else { return nil }
-        let window = AE.window(id: id)
-        guard let mode = events.get(AE.property("mode", of: window)) else { return ScriptedWindow(id: idText) }
-        let tab = AE.property("acTa", of: window)
-        guard let title = events.get(AE.property("pnam", of: tab)), let url = events.get(AE.property("URL ", of: tab)) else { return nil }
-        return ScriptedWindow(id: idText, mode: AE.text(mode), title: AE.text(title), url: AE.text(url))
     }
 
     /// Asks macOS whether this app may send Apple Events to `bundleID`. With `ask`, macOS shows its consent prompt

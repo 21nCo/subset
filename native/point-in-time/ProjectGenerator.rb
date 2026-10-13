@@ -1,12 +1,17 @@
+# Pin the gem CI installs: newer releases write a different preferredProjectObjectVersion, so a plain require would
+# make the committed project depend on whichever xcodeproj the host happens to have.
+gem "xcodeproj", "= 1.27.0"
 require "xcodeproj"
 require "fileutils"
+require "tmpdir"
 
 # Generates PointInTime.xcodeproj from the same sources as Package.swift: a static PointInTimeCore library, the
 # pointInTime menu-bar app that links it, and the core unit tests. Run `ruby ProjectGenerator.rb` from this folder
 # after adding or removing a source file; CI regenerates the project and fails if the committed copy differs.
 Dir.chdir(__dir__)
 project_path = File.join(__dir__, "PointInTime.xcodeproj")
-project = Xcodeproj::Project.new(project_path)
+project = Xcodeproj::Project.new(project_path, false, 46)
+project.root_object.preferred_project_object_version = "77"
 
 project.root_object.attributes["LastSwiftUpdateCheck"] = "2640"
 project.root_object.attributes["LastUpgradeCheck"] = "2640"
@@ -20,6 +25,8 @@ core_target = project.new_target(:static_library, "PointInTimeCore", :osx, "14.0
 app_target = project.new_target(:application, "PointInTime", :osx, "14.0")
 test_target = project.new_target(:unit_test_bundle, "PointInTimeCoreTests", :osx, "14.0")
 app_target.add_dependency(core_target)
+# The product reference is named after the target; the bundle is named after PRODUCT_NAME.
+app_target.product_reference.path = "pointInTime.app"
 test_target.add_dependency(core_target)
 
 # new_target links Cocoa through a DEVELOPER_DIR path pinned to one SDK version; frameworks are added relative to
@@ -97,17 +104,22 @@ test_target.frameworks_build_phase.add_file_reference(core_target.product_refere
   app_target.frameworks_build_phase.add_file_reference(file_ref)
 end
 
-# Remove the old project only after generation has succeeded, so a failure leaves it intact.
 # Derive object IDs from their paths so regeneration is byte-for-byte reproducible.
 project.predictabilize_uuids
 # Target dependency proxies hash the targets' IDs, so a second pass settles them on the derived IDs.
 project.predictabilize_uuids
-FileUtils.rm_rf(project_path) if File.exist?(project_path)
-project.save
 
-scheme = Xcodeproj::XCScheme.new
-scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
-scheme.configure_with_targets(app_target, test_target, launch_target: true)
-scheme.save_as(project_path, "PointInTime", true)
+# Write the project and its scheme to a temporary folder and replace the old project only after both saves succeed,
+# so a failure leaves it intact.
+Dir.mktmpdir("PointInTime-xcodeproj", __dir__) do |staging|
+  staged_path = File.join(staging, File.basename(project_path))
+  project.save(staged_path)
+  scheme = Xcodeproj::XCScheme.new
+  scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
+  scheme.configure_with_targets(app_target, test_target, launch_target: true)
+  scheme.save_as(staged_path, "PointInTime", true)
+  FileUtils.rm_rf(project_path)
+  FileUtils.mv(staged_path, project_path)
+end
 
 puts "Generated #{project_path}"

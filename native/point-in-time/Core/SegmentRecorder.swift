@@ -75,7 +75,8 @@ public struct CaptureSequencer: Sendable {
     private var epoch = 0
     /// The process the current epoch's reads describe; nil after a synchronous sample or a gap.
     private var foreground: Int32?
-    /// The epoch of the read in flight, so a slow app gets one read at a time instead of a growing backlog.
+    /// The epoch of the read in flight. Only one read is in flight at a time, across foregrounds, so a slow app cannot
+    /// build a backlog of reads on the host's serial reader; a read for a newer foreground waits until it finishes.
     private var outstanding: Int?
 
     public init(recorder: SegmentRecorder) {
@@ -103,14 +104,17 @@ public struct CaptureSequencer: Sendable {
         return recorder.gap(at: date)
     }
 
-    /// Starts a read of process `pid`, in front at `date`. Returns nil while a read of the same foreground is still in
-    /// flight; the next sample tries again.
+    /// Starts a read of process `pid`, in front at `date`. Returns nil while any read is still in flight; a read
+    /// begun for an earlier foreground is already void, and the host samples again once it finishes.
     public mutating func beginRead(of pid: Int32, at date: Date) -> Ticket? {
         if foreground != pid { newEpoch(foreground: pid) }
-        guard outstanding != epoch else { return nil }
+        guard outstanding == nil else { return nil }
         outstanding = epoch
         return Ticket(date: date, epoch: epoch)
     }
+
+    /// Whether `ticket` would still be applied: no foreground change, synchronous sample, or gap since it began.
+    public func isCurrent(_ ticket: Ticket) -> Bool { ticket.epoch == epoch }
 
     /// Applies a finished read, unless the foreground changed since it began. Returns segments that closed.
     public mutating func complete(_ ticket: Ticket, with content: Segment?) -> [Segment] {

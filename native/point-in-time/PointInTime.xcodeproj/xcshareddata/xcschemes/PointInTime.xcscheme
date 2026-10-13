@@ -14,8 +14,8 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "3E22D776A3349727A93E0FE414067636"
-               BuildableName = "PointInTime.app"
+               BlueprintIdentifier = "D5C928D339B9A0BCCC3EEAB7EBE4F84A"
+               BuildableName = "pointInTime.app"
                BlueprintName = "PointInTime"
                ReferencedContainer = "container:PointInTime.xcodeproj">
             </BuildableReference>
@@ -44,8 +44,8 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "3E22D776A3349727A93E0FE414067636"
-            BuildableName = "PointInTime.app"
+            BlueprintIdentifier = "D5C928D339B9A0BCCC3EEAB7EBE4F84A"
+            BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
          </BuildableReference>
@@ -77,8 +77,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "3E22D776A3349727A93E0FE414067636"
-            BuildableName = "PointInTime.app"
+            BlueprintIdentifier = "D5C928D339B9A0BCCC3EEAB7EBE4F84A"
+            BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
          </BuildableReference>
@@ -94,8 +94,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "3E22D776A3349727A93E0FE414067636"
-            BuildableName = "PointInTime.app"
+            BlueprintIdentifier = "D5C928D339B9A0BCCC3EEAB7EBE4F84A"
+            BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
          </BuildableReference>

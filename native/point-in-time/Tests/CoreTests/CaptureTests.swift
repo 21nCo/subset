@@ -37,6 +37,12 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(content("com.bank", policy: CapturePolicy(excludedBundleIDs: ["com.bank"], exclusionMode: .nothing)) == nil)
     }
 
+    @Test func excludedSegmentsDropAnyIdentityTheyAreGiven() {
+        let segment = Segment(start: t0, end: t0 + 5, excluded: true, bundleID: "a", appName: "A", windowTitle: "Secret",
+                              url: RedactedURL("https://example.com/x"))
+        #expect(segment.bundleID == nil && segment.appName == nil && segment.windowTitle == nil && segment.url == nil)
+    }
+
     @Test func titlesAreTrimmedAndCapped() {
         #expect(Activity(bundleID: "a", appName: "A", windowTitle: "   ").windowTitle == nil)
         #expect(Activity(bundleID: "a", appName: "A", windowTitle: String(repeating: "x", count: 1_000)).windowTitle?.count == Activity.maxTitleLength)
@@ -136,18 +142,19 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 
     @Test func lateReadCannotBridgeAnotherAppInBetween() throws {
-        // A -> B -> A within one read's latency: A's first read finishes last of all.
+        // A -> B -> A within one read's latency: A's first read finishes only after A is back in front.
         var sequencer = sequencer()
         let lateA = try #require(read(&sequencer, 1, t0))
         _ = sequencer.foregroundChanged(at: t0 + 2)
-        let b = try #require(read(&sequencer, 2, t0 + 2))
+        #expect(read(&sequencer, 2, t0 + 2) == nil) // B waits behind the slow read
         _ = sequencer.foregroundChanged(at: t0 + 4)
-        let a = try #require(read(&sequencer, 1, t0 + 4))
-        let lateClosed = sequencer.complete(lateA, with: content("a")), bClosed = sequencer.complete(b, with: content("b"))
-        #expect(lateClosed.isEmpty && bClosed.isEmpty && sequencer.open == nil)
+        #expect(read(&sequencer, 1, t0 + 4) == nil)
+        let lateClosed = sequencer.complete(lateA, with: content("a"))
+        #expect(lateClosed.isEmpty && sequencer.open == nil)
+        let a = try #require(read(&sequencer, 1, t0 + 6))
         _ = sequencer.complete(a, with: content("a"))
         _ = readNow(&sequencer, "a", pid: 1, at: 9)
-        #expect(sequencer.open?.bundleID == "a" && sequencer.open?.start == t0 + 4)
+        #expect(sequencer.open?.bundleID == "a" && sequencer.open?.start == t0 + 6)
     }
 
     @Test func foregroundChangeEndsTheOpenSegmentSoTheSameAppCannotResumeIt() throws {
@@ -170,11 +177,12 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(nothing == nil)
         _ = sequencer.sample(nothing, at: t0 + 5)
         _ = sequencer.sample(nothing, at: t0 + 10)
-        let a = try #require(read(&sequencer, 1, t0 + 15))
+        #expect(read(&sequencer, 1, t0 + 15) == nil) // A is back, behind its own slow read
         let lateClosed = sequencer.complete(lateA, with: content("a"))
         #expect(lateClosed.isEmpty && sequencer.open == nil)
+        let a = try #require(read(&sequencer, 1, t0 + 16))
         _ = sequencer.complete(a, with: content("a"))
-        #expect(sequencer.open?.start == t0 + 15)
+        #expect(sequencer.open?.start == t0 + 16)
     }
 
     @Test func aNothingSampleStopsEarlierSamplesFromOpeningAfterIt() {
@@ -192,15 +200,19 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(closed.isEmpty && sequencer.open == nil)
     }
 
-    @Test func oneReadInFlightPerForeground() throws {
+    @Test func oneReadInFlightAcrossForegrounds() throws {
         var sequencer = sequencer()
         let first = try #require(read(&sequencer, 1, t0))
         #expect(read(&sequencer, 1, t0 + 5) == nil) // a slow app does not build a backlog
-        sequencer.discard(first)
-        let second = try #require(read(&sequencer, 1, t0 + 10)) // a dropped read frees the next sample
-        _ = sequencer.complete(second, with: content("a"))
-        #expect(read(&sequencer, 1, t0 + 15) != nil)
-        #expect(read(&sequencer, 2, t0 + 16) != nil) // another app is read at once, behind nothing
+        // Nor do app switches: the read of app 2 waits, and app 1's read is already void.
+        #expect(read(&sequencer, 2, t0 + 6) == nil)
+        #expect(read(&sequencer, 3, t0 + 7) == nil)
+        #expect(!sequencer.isCurrent(first))
+        #expect(sequencer.complete(first, with: content("a")).isEmpty && sequencer.open == nil)
+        let third = try #require(read(&sequencer, 3, t0 + 8)) // the app in front now is read once the slow read ends
+        #expect(sequencer.isCurrent(third))
+        _ = sequencer.complete(third, with: content("c"))
+        #expect(sequencer.open?.bundleID == "c" && sequencer.open?.start == t0 + 8)
     }
 }
 
@@ -211,47 +223,98 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         WindowPrivacy.reduce(focusedTitle: focusedTitle, readsTitles: readsTitles, support: .scriptable, report: report, privateTitles: titles)
     }
 
-    private func chromium(mode: String? = "normal", title: String? = "Example Domain", url: String? = nil) -> ScriptedWindow {
-        ScriptedWindow(id: "7", mode: mode, title: title, url: url ?? query)
+    /// A Chromium browser answering get-data events from fixed windows and tabs. It logs every event, and its active
+    /// tab can switch after each event, as a user switching tabs mid-read would.
+    private final class FakeChromium: ChromiumScripting {
+        struct Failed: Error {}
+        var mode: String? = "normal"
+        var tabs: [Int: (title: String?, url: String?)] = [1: ("Example Domain", "https://example.com/pit/page?secret=abc#frag")]
+        /// The active tab before each successive event; the last entry stays.
+        var activeTabs = [1]
+        var failing: Set<String> = []
+        private(set) var events: [String] = []
+
+        private func send(_ event: String) throws {
+            events.append(event)
+            if failing.contains(event) { throw Failed() }
+        }
+        private var active: Int { activeTabs[min(events.count - 1, activeTabs.count - 1)] }
+
+        func frontWindowID() throws -> Int { try send("window"); return 7 }
+        func mode(ofWindow window: Int) throws -> String? { try send("mode"); return mode }
+        func activeTabID(ofWindow window: Int) throws -> Int { try send("activeTab"); return active }
+        func title(ofTab tab: Int, inWindow window: Int) throws -> String? { try send("title"); return tabs[tab]?.title }
+        func url(ofTab tab: Int, inWindow window: Int) throws -> String? { try send("url"); return tabs[tab]?.url }
+    }
+
+    private func chromium(_ configure: (FakeChromium) -> Void = { _ in }) -> (report: BrowserWindowReport, events: [String]) {
+        let browser = FakeChromium()
+        configure(browser)
+        return (.chromium(reading: browser), browser.events)
     }
 
     @Test func chromiumIncognitoKeepsNoTitleOrURL() {
-        let kept = scriptable(.chromium(chromium(mode: "incognito")), focusedTitle: "Bank statement - Google Chrome (Incognito)")
+        let read = chromium { $0.mode = "incognito" }
+        #expect(read.report == .privateWindow)
+        let kept = scriptable(read.report, focusedTitle: "Bank statement - Google Chrome (Incognito)")
         #expect(kept.title == nil && kept.url == nil)
     }
 
+    @Test func chromiumPrivateOrUnconfirmedWindowIsNeverAskedForATab() {
+        // The window's mode is read first; a private window's tabs are never asked for their title or URL.
+        for mode in ["incognito", nil] as [String?] {
+            let read = chromium { $0.mode = mode }
+            #expect(read.events == ["window", "mode"], "\(String(describing: mode))")
+        }
+    }
+
     @Test func chromiumNormalWindowKeepsItsOwnTitleAndRedactedURL() {
-        let kept = scriptable(.chromium(chromium()))
+        let read = chromium()
+        #expect(read.events == ["window", "mode", "activeTab", "title", "url"])
+        let kept = scriptable(read.report)
         #expect(kept.title == "Example Domain")
         #expect(kept.url?.string == "https://example.com/pit/page")
     }
 
+    @Test func chromiumTitleAndURLComeFromOneTabWhenTheUserSwitchesTabsMidRead() {
+        // Tab 1 is active when the read resolves the tab; tab 2 is active by the time the title and URL are read.
+        let read = chromium {
+            $0.tabs = [1: ("Work", "https://work.example/doc"), 2: ("Bank", "https://bank.example/account")]
+            $0.activeTabs = [1, 1, 1, 2]
+        }
+        #expect(read.report == .normal(title: "Work", url: "https://work.example/doc"))
+    }
+
     @Test func chromiumTitleNeverComesFromAnotherFocusedWindow() {
         // Accessibility focus can sit on an incognito window while the scripted window is a normal one.
-        let kept = scriptable(.chromium(chromium()), focusedTitle: "Secret - Google Chrome (Incognito)")
+        let kept = scriptable(chromium().report, focusedTitle: "Secret - Google Chrome (Incognito)")
         #expect(kept.title == "Example Domain")
     }
 
     @Test func chromiumTitlesNeedAccessibility() {
-        let kept = scriptable(.chromium(chromium()), focusedTitle: nil, readsTitles: false)
+        let kept = scriptable(chromium().report, focusedTitle: nil, readsTitles: false)
         #expect(kept.title == nil && kept.url?.string == "https://example.com/pit/page")
     }
 
     @Test func chromiumWithoutConfirmationKeepsNothing() {
-        // A failed read (no Automation, an error or timeout) or a dictionary without `mode`.
-        for report in [BrowserWindowReport.chromium(nil), .chromium(chromium(mode: nil))] {
+        // No Automation or a failed or timed-out event at any step, or a dictionary without `mode`.
+        var reports = ["window", "mode", "activeTab", "title", "url"].map { event in chromium { $0.failing = [event] }.report }
+        reports.append(chromium { $0.mode = nil }.report)
+        for report in reports {
             #expect(report == .unconfirmed)
             let kept = scriptable(report)
             #expect(kept.title == nil && kept.url == nil)
         }
     }
 
-    @Test func chromiumNormalModeWithAPrivateMarkerKeepsNothing() {
-        #expect(BrowserWindowReport.chromium(chromium(title: "New Incognito Tab")) == .privateWindow)
+    @Test func chromiumNormalModeWithAPrivateMarkerKeepsNothingAndSkipsTheURL() {
+        let read = chromium { $0.tabs = [1: ("New Incognito Tab", "https://example.com/?q=secret")] }
+        #expect(read.report == .privateWindow)
+        #expect(!read.events.contains("url"))
     }
 
     @Test func chromiumBlankTabIsNormalWithoutTitleOrURL() {
-        #expect(BrowserWindowReport.chromium(chromium(title: nil, url: "")) == .normal(title: nil, url: nil))
+        #expect(chromium { $0.tabs = [1: (nil, "")] }.report == .normal(title: nil, url: nil))
     }
 
     private let titles = PrivateWindowTitles(tables: [
@@ -297,11 +360,28 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 
     @Test func titleOnlyAppsDropMarkedPrivateTitlesAndNeverKeepAURL() {
-        let firefoxPrivate = titleOnly("Example Domain — Private Browsing")
-        #expect(firefoxPrivate.title == nil && firefoxPrivate.url == nil)
-        let normal = titleOnly("Example Domain — Mozilla Firefox")
-        #expect(normal.title == "Example Domain — Mozilla Firefox" && normal.url == nil)
-        #expect(titleOnly("Example Domain — Mozilla Firefox", readsTitles: false).title == nil)
+        let markedPrivate = titleOnly("Example Domain — Private Browsing")
+        #expect(markedPrivate.title == nil && markedPrivate.url == nil)
+        let normal = titleOnly("Notes — Project plan")
+        #expect(normal.title == "Notes — Project plan" && normal.url == nil)
+        #expect(titleOnly("Notes — Project plan", readsTitles: false).title == nil)
+    }
+
+    @Test func firefoxFamilyBrowsersKeepOnlyTheApp() {
+        // German and French private windows carry no English marker, so a title rule would have kept them.
+        let titles = ["Example Domain – Privater Modus", "Example Domain — Navigation privée", "Example Domain — Mozilla Firefox"]
+        for bundleID in ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "org.mozilla.firefoxbeta"] {
+            let support = BrowserSupport.forApp(bundleID, scriptable: false)
+            #expect(support == .appOnly, "\(bundleID)")
+            for title in titles {
+                let kept = WindowPrivacy.reduce(focusedTitle: title, readsTitles: true, support: support,
+                                                report: .normal(title: title, url: query), privateTitles: self.titles)
+                #expect(kept.title == nil && kept.url == nil, "\(title)")
+            }
+        }
+        #expect(!WindowPrivacy.looksPrivate(title: titles[0]) && !WindowPrivacy.looksPrivate(title: titles[1]))
+        #expect(BrowserSupport.forApp("com.apple.Safari", scriptable: false) == .titleOnly)
+        #expect(BrowserSupport.forApp("com.google.Chrome", scriptable: true) == .scriptable)
     }
 }
 
@@ -314,6 +394,7 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(Block.bucketStart(containing: t0 + 179.9) == t0)
         #expect(Block.bucketStart(containing: t0 + 180) == t0 + 180)
         #expect(Block.bucketStarts(from: t0 + 170, to: t0 + 370) == [t0, t0 + 180, t0 + 360])
+        #expect(Block.bucketStarts(from: t0 + 170, to: t0 + 170).isEmpty && Block.bucketStarts(from: t0 + 370, to: t0 + 170).isEmpty)
     }
 
     @Test func localMidnightIsABucketBoundaryInEveryWholeQuarterHourZone() throws {

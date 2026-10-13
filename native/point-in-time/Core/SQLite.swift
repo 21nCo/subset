@@ -57,7 +57,10 @@ final class SQLiteConnection {
             case .null: sqlite3_bind_null(statement, position)
             case .integer(let integer): sqlite3_bind_int64(statement, position, integer)
             case .real(let real): sqlite3_bind_double(statement, position, real)
-            case .text(let text): sqlite3_bind_text(statement, position, text, -1, SQLITE_TRANSIENT)
+            // An explicit byte count keeps text after an embedded NUL.
+            case .text(let text): text.utf8CString.withUnsafeBufferPointer { buffer in
+                sqlite3_bind_text(statement, position, buffer.baseAddress, Int32(buffer.count - 1), SQLITE_TRANSIENT)
+            }
             }
             guard status == SQLITE_OK else { throw error() }
         }
@@ -70,12 +73,18 @@ final class SQLiteConnection {
                 switch sqlite3_column_type(statement, column) {
                 case SQLITE_INTEGER: .integer(sqlite3_column_int64(statement, column))
                 case SQLITE_FLOAT: .real(sqlite3_column_double(statement, column))
-                case SQLITE_TEXT: .text(String(cString: sqlite3_column_text(statement, column)))
+                case SQLITE_TEXT: .text(Self.text(statement, column))
                 default: .null
                 }
             })
         }
         return rows
+    }
+
+    /// The column's text by its byte length, so an embedded NUL does not cut it short.
+    private static func text(_ statement: OpaquePointer?, _ column: Int32) -> String {
+        guard let bytes = sqlite3_column_text(statement, column) else { return "" }
+        return String(decoding: UnsafeBufferPointer(start: bytes, count: Int(sqlite3_column_bytes(statement, column))), as: UTF8.self)
     }
 
     func transaction<T>(_ body: () throws -> T) throws -> T {

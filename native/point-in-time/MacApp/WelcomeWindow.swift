@@ -96,7 +96,7 @@ struct WelcomeView: View {
             Text("pointInTime records which app, window, and website is in front while you work, in three-minute blocks, so you can see where your day went.")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
-                Label("Recorded: the app’s name, its focused window title, and for supported browsers the site and page path. Query strings, idle time, and excluded apps are not recorded.", systemImage: "list.bullet.rectangle")
+                Label("Recorded: the app’s name, its focused window title, and for supported browsers the site and page path. Query strings and idle time are not recorded. An excluded app’s name, title, and site are never recorded; its time is kept as anonymous excluded time unless you choose Record Nothing.", systemImage: "list.bullet.rectangle")
                 Label("Stored only on this Mac in ~/Library/Application Support/pointInTime. Nothing is sent anywhere.", systemImage: "lock.laptopcomputer")
                 Label("Pause, exclude an app, or delete data any time from the menu bar.", systemImage: "menubar.rectangle")
             }
@@ -124,7 +124,7 @@ struct WelcomeView: View {
                             }
                         }
                     }
-                    Text("In Chromium browsers, a window’s title and site are kept only when the browser confirms it is not a private or incognito window; otherwise only the browser’s name is recorded. Safari, Firefox, and other apps are recorded by app and window title only, never a site, and private-browsing window titles are dropped.")
+                    Text("In Chromium browsers, a window’s title and site are kept only when the browser confirms it is not a private or incognito window; otherwise only the browser’s name is recorded. Firefox is recorded by app name only. Safari and other apps are recorded by app and window title only, never a site, and private-browsing window titles are dropped.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

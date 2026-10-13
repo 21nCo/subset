@@ -38,9 +38,9 @@ public struct Block: Equatable, Sendable {
         return Date(timeIntervalSince1970: (seconds / length).rounded(.down) * length)
     }
 
-    /// Bucket starts touched by any part of the given span.
+    /// Bucket starts touched by any part of the given span; none for an empty or reversed span.
     public static func bucketStarts(from start: Date, to end: Date) -> [Date] {
-        guard end > start else { return [bucketStart(containing: start)] }
+        guard end > start else { return [] }
         var result: [Date] = []
         var bucket = bucketStart(containing: start)
         while bucket < end {

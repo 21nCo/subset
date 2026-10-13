@@ -46,7 +46,8 @@ public struct RedactedURL: Equatable, Sendable {
         self.path = path.isEmpty ? "/" : String(path.prefix(512))
     }
 
-    public init(scheme: String, host: String, path: String) {
+    /// Rebuilds a URL the store already reduced. Internal so no caller can bypass the reduction above.
+    init(scheme: String, host: String, path: String) {
         self.scheme = scheme
         self.host = host
         self.path = path
@@ -78,14 +79,15 @@ public struct Segment: Equatable, Sendable {
     public var windowTitle: String?
     public var url: RedactedURL?
 
+    /// An excluded segment drops any identity it is given, so no caller can store an excluded app's name, title, or URL.
     public init(start: Date, end: Date, excluded: Bool, bundleID: String?, appName: String?, windowTitle: String?, url: RedactedURL?) {
         self.start = start
         self.end = end
         self.excluded = excluded
-        self.bundleID = bundleID
-        self.appName = appName
-        self.windowTitle = windowTitle
-        self.url = url
+        self.bundleID = excluded ? nil : bundleID
+        self.appName = excluded ? nil : appName
+        self.windowTitle = excluded ? nil : windowTitle
+        self.url = excluded ? nil : url
     }
 
     public var duration: TimeInterval { max(0, end.timeIntervalSince(start)) }

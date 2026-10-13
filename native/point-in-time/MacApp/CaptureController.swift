@@ -15,7 +15,8 @@ final class CaptureController {
 
     private(set) var state: State = .off
     private(set) var lastError: String?
-    /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action.
+    /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action. Kept current while
+    /// paused or off as well, so the menu never names an app that is no longer in front.
     private(set) var lastForeignApp: (bundleID: String, name: String)?
 
     private let settings: CaptureSettings
@@ -74,6 +75,10 @@ final class CaptureController {
 
     func tick() {
         let now = Date()
+        let front = NSWorkspace.shared.frontmostApplication
+        if let front, let bundleID = front.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier, bundleID != "com.apple.loginwindow" {
+            lastForeignApp = (bundleID, front.localizedName ?? bundleID)
+        }
         refreshState(now: now)
         guard state == .recording || state == .idle else {
             if sequencer.open != nil { endSegment(at: now) }
@@ -86,7 +91,7 @@ final class CaptureController {
             return
         }
         setState(.recording)
-        guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else {
+        guard let app = front, let bundleID = app.bundleIdentifier else {
             apply(sequencer.sample(nil, at: now), at: now)
             return
         }
@@ -96,7 +101,6 @@ final class CaptureController {
             return
         }
         let name = app.localizedName ?? bundleID
-        lastForeignApp = (bundleID, name)
         let policy = settings.policy
         if policy.excludedBundleIDs.contains(bundleID) {
             // Excluded apps are never read: no title or URL request is made.
@@ -108,8 +112,11 @@ final class CaptureController {
         reader.read(pid: pid, bundleID: bundleID, readTitle: AccessibilityAccess.isGranted) { result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard self.state == .recording, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                guard self.state == .recording, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      self.sequencer.isCurrent(ticket) else {
+                    // The foreground moved on while this read ran; read what is in front now instead of waiting a tick.
                     self.sequencer.discard(ticket)
+                    if self.state == .recording { self.tick() }
                     return
                 }
                 let activity = Activity(bundleID: bundleID, appName: name, windowTitle: result.title, url: result.url)
@@ -119,12 +126,14 @@ final class CaptureController {
     }
 
     /// Ends recording when idle began and removes anything stored after that: the flushed part of the open segment,
-    /// and segments that closed while the user was away because a title or app changed without input.
+    /// and segments that closed while the user was away because a title or app changed without input. The WAL is then
+    /// checkpointed, so the retracted titles and URLs do not linger in it.
     private func retractIdleTime(since idleStart: Date, until now: Date) {
         endSegment(at: idleStart)
         guard let store, now > idleStart else { return }
         do {
             try store.deleteData(from: idleStart, to: now)
+            try store.checkpoint()
         } catch {
             lastError = String(describing: error)
             onStateChange?()

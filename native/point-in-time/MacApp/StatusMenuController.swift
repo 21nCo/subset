@@ -99,7 +99,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         guard let store else { return nil }
         let start = Calendar.current.startOfDay(for: Date())
         guard let blocks = try? store.blocks(from: start, to: Date().addingTimeInterval(Block.length)) else { return nil }
-        let seconds = blocks.reduce(0) { $0 + $1.activeSeconds }
+        // Anonymous excluded time is recorded time too.
+        let seconds = blocks.reduce(0) { $0 + $1.activeSeconds + $1.excludedSeconds }
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.hour, .minute]
         formatter.unitsStyle = .abbreviated

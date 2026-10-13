@@ -30,6 +30,46 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(try store.segmentCount() == 0)
     }
 
+    @Test func refusesToOpenADatabaseWhoseModeCannotBeRestricted() throws {
+        let directory = temporaryDirectory()
+        let database = directory.appendingPathComponent("activity.sqlite")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        #expect(FileManager.default.createFile(atPath: database.path, contents: nil, attributes: [.posixPermissions: 0o644]))
+        // An immutable file refuses chmod, even from its owner.
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: database.path)
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: database.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        do {
+            _ = try ActivityStore(directory: directory)
+            Issue.record("The store opened a database it could not restrict to mode 0600")
+        } catch StoreError.filesystem {
+        } catch {
+            Issue.record("Expected a filesystem error, got \(error)")
+        }
+    }
+
+    @Test func textWithAnEmbeddedNulRoundTrips() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("a", 0, 60, title: "before\u{0}after"))
+        #expect(try store.segments(from: t0, to: t0 + 60).first?.windowTitle == "before\u{0}after")
+    }
+
+    @Test func emptyOrReversedRangesReadNothing() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("a", 0, 300))
+        for (from, to) in [(t0 + 100, t0 + 100), (t0 + 200, t0 + 100)] {
+            #expect(try store.segments(from: from, to: to).isEmpty)
+            #expect(try store.blocks(from: from, to: to).isEmpty)
+        }
+        #expect(try store.segments(from: t0 + 100, to: t0 + 101).count == 1)
+    }
+
     @Test func reopeningKeepsDataAndDoesNotReapplyMigrations() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

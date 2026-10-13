@@ -34,7 +34,11 @@ public final class ActivityStore: @unchecked Sendable {
                 throw StoreError.filesystem("Could not create the database file")
             }
         }
-        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: databaseURL.path)
+        do {
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: databaseURL.path)
+        } catch {
+            throw StoreError.filesystem(error.localizedDescription)
+        }
         connection = try SQLiteConnection(path: databaseURL.path)
         try connection.execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;")
         try migrate()
@@ -122,14 +126,16 @@ public final class ActivityStore: @unchecked Sendable {
     // MARK: Reading
 
     public func segments(from: Date, to: Date) throws -> [Segment] {
-        try locked {
+        guard to > from else { return [] }
+        return try locked {
             try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ? ORDER BY start",
                                  [.real(to.timeIntervalSince1970), .real(from.timeIntervalSince1970)]).map(Self.segment(from:))
         }
     }
 
     public func blocks(from: Date, to: Date) throws -> [Block] {
-        try locked {
+        guard to > from else { return [] }
+        return try locked {
             try connection.query("""
                 SELECT start, active_seconds, excluded_seconds, apps_json, dominant_bundle_id, dominant_app_name, dominant_title,
                        dominant_url_scheme, dominant_url_host, dominant_url_path
