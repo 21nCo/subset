@@ -284,17 +284,22 @@ export const DEFAULT_TREND_RANGE: TrendRangeId = '48h';
 export const trendRange = (id: TrendRangeId): TrendRange => TREND_RANGES.find((range) => range.id === id) ?? TREND_RANGES[1];
 
 /**
- * Points from `now - rangeMs` to now, in ascending time. The last point before the cutoff is kept and moved to the
- * cutoff, so the line starts at the chart's left edge. A null range keeps every point. Values are never changed.
+ * A series clipped to `end - rangeMs` through `end` (a null range has no start). `observed` holds the recorded points
+ * in that range, ascending. `points` adds the last earlier value at the cutoff, so the line starts at the chart's left
+ * edge and a reset exactly at the cutoff keeps its drop. The anchor is drawn but is not an observation. Values are
+ * never changed.
  */
-export function clipSeries(points: Array<[number, number]>, now: number, rangeMs: number | null): Array<[number, number]> {
-  if (rangeMs === null) return points.slice();
-  const cutoff = now - rangeMs;
-  const start = points.findIndex(([time]) => time >= cutoff);
-  if (start === -1) return [];
-  if (start === 0 || points[start][0] === cutoff) return points.slice(start);
-  return [[cutoff, points[start - 1][1]], ...points.slice(start)];
+export function clipSeries(points: Array<[number, number]>, end: number, rangeMs: number | null) {
+  const cutoff = rangeMs === null ? -Infinity : end - rangeMs;
+  const observed = points.filter(([time]) => time >= cutoff && time <= end);
+  const before = points.filter(([time]) => time < cutoff).at(-1);
+  const first = observed[0];
+  const anchor: Array<[number, number]> = before && first && !(first[0] === cutoff && first[1] === before[1]) ? [[cutoff, before[1]]] : [];
+  return { points: [...anchor, ...observed], observed };
 }
+
+/** A trend needs at least three recorded observations across 30 minutes of its range to say anything. */
+export const trendReady = (observed: Array<[number, number]>) => observed.length >= 3 && observed.at(-1)![0] - observed[0][0] >= 30 * 60_000;
 
 /** The span a trend shows, such as "48h" for a full range or "1d 5h" when less history exists. */
 export function trendSpanText(firstTime: number, now: number, range: TrendRange): string {

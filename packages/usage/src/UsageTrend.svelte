@@ -15,8 +15,11 @@
     remainingMode?: boolean;
     /** Chart height in pixels; cards use the compact default. */
     height?: number;
+    /** Time-axis bounds; without them the axis fits the points. */
+    start?: number;
+    end?: number;
   }
-  let { series, label, remainingMode = false, height = 104 }: Props = $props();
+  let { series, label, remainingMode = false, height = 104, start, end }: Props = $props();
 
   let element: HTMLDivElement | undefined = $state();
   let chart: echarts.ECharts | undefined;
@@ -53,7 +56,7 @@
         axisPointer: { lineStyle: { color: colors.line } },
       },
       xAxis: {
-        type: 'time', axisLine: { lineStyle: { color: colors.line } }, axisTick: { show: false },
+        type: 'time', min: start, max: end, axisLine: { lineStyle: { color: colors.line } }, axisTick: { show: false },
         axisLabel: { color: colors.text, fontSize: 10, hideOverlap: true, formatter: { day: '{ee}', hour: '{HH}:{mm}' } },
         splitLine: { show: false },
       },
@@ -92,6 +95,8 @@
   $effect(() => {
     void theme;
     void series;
+    void start;
+    void end;
     render();
   });
 
