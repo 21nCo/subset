@@ -270,6 +270,42 @@ export function historyResets(points: Array<[number, number]>, minimumDrop = 3):
   return resets;
 }
 
+/** Time ranges a trend chart can show. `ms: null` is all recorded history (up to the eight-day retention). */
+export const TREND_RANGES = [
+  { id: '24h', label: '24 hours', short: '24h', ms: 24 * 3_600_000 },
+  { id: '48h', label: '48 hours', short: '48h', ms: 48 * 3_600_000 },
+  { id: '7d', label: '7 days', short: '7d', ms: 7 * 86_400_000 },
+  { id: 'all', label: 'All history', short: 'all', ms: null },
+] as const;
+export type TrendRange = (typeof TREND_RANGES)[number];
+export type TrendRangeId = TrendRange['id'];
+/** Cards and a newly opened trend dialog show the last 48 hours. */
+export const DEFAULT_TREND_RANGE: TrendRangeId = '48h';
+export const trendRange = (id: TrendRangeId): TrendRange => TREND_RANGES.find((range) => range.id === id) ?? TREND_RANGES[1];
+
+/**
+ * A series clipped to `end - rangeMs` through `end` (a null range has no start). `observed` holds the recorded points
+ * in that range, ascending. `points` adds the last earlier value at the cutoff, so the line starts at the chart's left
+ * edge and a reset exactly at the cutoff keeps its drop. The anchor is drawn but is not an observation. Values are
+ * never changed.
+ */
+export function clipSeries(points: Array<[number, number]>, end: number, rangeMs: number | null) {
+  const cutoff = rangeMs === null ? -Infinity : end - rangeMs;
+  const observed = points.filter(([time]) => time >= cutoff && time <= end);
+  const before = points.filter(([time]) => time < cutoff).at(-1);
+  const first = observed[0];
+  const anchor: Array<[number, number]> = before && first && !(first[0] === cutoff && first[1] === before[1]) ? [[cutoff, before[1]]] : [];
+  return { points: [...anchor, ...observed], observed };
+}
+
+/** A trend needs at least three recorded observations across 30 minutes of its range to say anything. */
+export const trendReady = (observed: Array<[number, number]>) => observed.length >= 3 && observed.at(-1)![0] - observed[0][0] >= 30 * 60_000;
+
+/** The span a trend shows, such as "48h" for a full range or "1d 5h" when less history exists. */
+export function trendSpanText(firstTime: number, now: number, range: TrendRange): string {
+  return range.ms !== null && now - firstTime >= range.ms ? range.short : compactDuration(now - firstTime);
+}
+
 /** Parts of the day the activity heatmap groups usage into, in local time. */
 export const DAY_PARTS = [
   { label: 'Night', from: 0, to: 6 }, { label: 'Morning', from: 6, to: 12 },
