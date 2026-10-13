@@ -222,8 +222,10 @@
     trendOpener = null;
   }
   // Turning trend charts off or losing the account closes the dialog.
+  // Read both dependencies before the non-reactive `open` check so they stay tracked.
   $effect(() => {
-    if (trendDialog?.open && (!showTrends || !trendAccount)) trendDialog.close();
+    const stale = !showTrends || !trendAccount;
+    if (stale && trendDialog?.open) trendDialog.close();
   });
 
   function permissionLine(account: UsageAccount) {
