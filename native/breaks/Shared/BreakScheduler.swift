@@ -505,7 +505,8 @@ struct BreakScheduler: Sendable {
         // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
         events += missWaitingStops(now: now)
 
-        // The latest due occurrence of each stop that has not been handled. One that waits for a call is held back.
+        // The earliest due occurrence of each stop that has not been handled; a later one of the same stop then
+        // joins it instead of replacing it. One that waits for a call is held back.
         var due: [(stop: HardStop, occurrence: HardStop.Occurrence)] = []
         for stop in stops {
             let key = stop.id.uuidString
@@ -517,7 +518,7 @@ struct BreakScheduler: Sendable {
                waiting <= now, !isHandled(stop, start: waiting) {
                 candidates.append(HardStop.Occurrence(start: waiting, end: nil))
             }
-            guard let occurrence = candidates.max(by: { $0.start < $1.start }) else { continue }
+            guard let occurrence = candidates.min(by: { $0.start < $1.start }) else { continue }
             if inCall, stop.duringCalls == .waitForCallToEnd {
                 snapshot.hardStopsWaitingForCall[key] = occurrence.start
             } else {
@@ -642,7 +643,7 @@ struct BreakScheduler: Sendable {
                 hardStopEndReason: .missed,
                 extensionsUsed: 0
             ))
-            removeOnceStops([stop.id])
+            removeOnceStops([(stop.id, start)])
             events.append(.hardStopEnded(id: stop.id, reason: .missed))
         }
         return events
@@ -667,7 +668,7 @@ struct BreakScheduler: Sendable {
     /// The stop that ends later sets the escape hatch. A stop without an end ends latest.
     private mutating func merge(_ stop: HardStop, _ occurrence: HardStop.Occurrence, joinedAt: Date, into active: inout ActiveHardStop) {
         markHandled(stop, start: occurrence.start)
-        active.merged.append(MergedHardStop(id: stop.id, joinedAt: joinedAt, endsAt: occurrence.end))
+        active.merged.append(MergedHardStop(id: stop.id, occurrence: occurrence.start, joinedAt: joinedAt, endsAt: occurrence.end))
         let endsLater = switch (occurrence.end, active.endsAt) {
         case (nil, nil): false
         case (nil, _?): true
@@ -709,7 +710,7 @@ struct BreakScheduler: Sendable {
                 extensionsUsed: 0
             ))
         }
-        removeOnceStops([active.id] + active.merged.map(\.id))
+        removeOnceStops([(active.id, active.occurrence)] + active.merged.map { ($0.id, $0.occurrence) })
         dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
         snapshot.activeHardStop = nil
         clearActiveBreak()
@@ -751,8 +752,13 @@ struct BreakScheduler: Sendable {
         snapshot.hardStopsWaitingForCall[key] = nil
     }
 
-    private mutating func removeOnceStops(_ ids: [UUID]) {
-        settings.hardStops.removeAll { $0.isOnce && ids.contains($0.id) }
+    /// Removes one-off stops whose occurrence is one of `occurrences`. One rescheduled to another time while its
+    /// old occurrence ran keeps its new occurrence.
+    private mutating func removeOnceStops(_ occurrences: [(id: UUID, start: Date)]) {
+        settings.hardStops.removeAll { stop in
+            guard case .once(let date) = stop.repeats, let start = stop.start(onDayOf: date, calendar: calendar) else { return false }
+            return occurrences.contains { $0.id == stop.id && $0.start == start }
+        }
     }
 
     /// Removes one-off stops that can no longer start, except one that is running or waiting for a call.

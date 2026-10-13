@@ -746,6 +746,40 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(missed.tick(now: at(10, 31, dayOffset: 1)), [.hardStopStarted(id: daily.id, endsAt: at(11, 0, dayOffset: 1))])
     }
 
+    func testEarlierOpenOccurrenceIsKeptWhenTheNextOneArrives() throws {
+        let stop = hardStop(end: .untilDismissed, repeats: .weekdays([2, 3]), escapeHatch: .none)
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+
+        // A call from Monday 10:30 past Tuesday 10:30, with a relaunch: Monday's occurrence starts when the call
+        // ends, and Tuesday's joins it. Both are recorded.
+        var waiting = makeScheduler(stops: [stop])
+        _ = waiting.tick(now: at(10, 30), inputs: call)
+        _ = waiting.tick(now: at(10, 30, dayOffset: 1), inputs: call)
+        var restored = try relaunch(waiting, at: at(10, 35, dayOffset: 1))
+        XCTAssertEqual(restored.tick(now: at(10, 40, dayOffset: 1)), [.hardStopStarted(id: stop.id, endsAt: nil)])
+        XCTAssertEqual(restored.snapshot.activeHardStop?.occurrence, at(10, 30))
+        XCTAssertEqual(restored.dismissHardStop(now: at(11, 0, dayOffset: 1)), [.hardStopEnded(id: stop.id, reason: .dismissed)])
+        XCTAssertEqual(restored.records.count, 2)
+        XCTAssertTrue(restored.tick(now: at(11, 0, 1, dayOffset: 1)).isEmpty)
+
+        // A host that was off from Monday morning until Tuesday 10:35 does the same.
+        var off = makeScheduler(stops: [stop])
+        XCTAssertEqual(off.tick(now: at(10, 35, dayOffset: 1)), [.hardStopStarted(id: stop.id, endsAt: nil)])
+        XCTAssertEqual(off.snapshot.activeHardStop?.occurrence, at(10, 30))
+        _ = off.dismissHardStop(now: at(11, 0, dayOffset: 1))
+        XCTAssertEqual(off.records.count, 2)
+    }
+
+    func testOneOffStopRescheduledWhileRunningKeepsItsNewDate() {
+        let once = hardStop(repeats: .once(t0))
+        var scheduler = makeScheduler(stops: [once])
+        _ = scheduler.tick(now: at(10, 30))
+        scheduler.settings.hardStops[0].repeats = .once(t0.addingTimeInterval(24 * 3600))
+        XCTAssertEqual(scheduler.tick(now: at(11, 0)), [.hardStopEnded(id: once.id, reason: .ended)])
+        XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [once.id])
+        XCTAssertEqual(scheduler.tick(now: at(10, 30, dayOffset: 1)), [.hardStopStarted(id: once.id, endsAt: at(11, 0, dayOffset: 1))])
+    }
+
     func testStopWaitingForCallMergesIntoRunningStop() {
         // A is running when a call starts; B starts inside A and would wait for the call, but joins A instead.
         let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))

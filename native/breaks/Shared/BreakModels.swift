@@ -206,10 +206,6 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
     var escapeHatch: EscapeHatch = .extend(minutes: 15, times: 1)
     var duringCalls: CallBehavior = .waitForCallToEnd
 
-    var isOnce: Bool {
-        if case .once = repeats { true } else { false }
-    }
-
     /// The start of the occurrence that begins on the calendar day of `day`, or nil when none does.
     /// When daylight-saving time skips the start minute, the occurrence starts at the next valid minute.
     func start(onDayOf day: Date, calendar: Calendar) -> Date? {
@@ -329,6 +325,8 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
 /// An occurrence that joined a running hard stop.
 struct MergedHardStop: Codable, Equatable, Sendable {
     var id: UUID
+    /// Its scheduled start.
+    var occurrence: Date
     /// When it joined: its own start, or when a call it waited for ended.
     var joinedAt: Date
     /// Its own scheduled end; nil when it lasts until dismissed.
