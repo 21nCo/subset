@@ -106,6 +106,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'point-in-time',
+    name: 'pointInTime',
+    summary: 'See where your day went: the apps, windows, and sites you worked in, recorded on your Mac in three-minute blocks.',
+    state: 'building',
+    proposedSurfaces: ['macos', 'agent-cli'],
+    availableSurfaces: []
+  },
+  {
     id: 'record',
     name: 'Record',
     summary: 'Record audio with a live waveform, keep clips on your device, and see the timer from anywhere.',
