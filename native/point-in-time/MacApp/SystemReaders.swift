@@ -19,23 +19,19 @@ enum AccessibilityAccess {
     }
 }
 
-/// Browsers whose active tab URL is read over Apple Events. Chromium browsers report a window's `mode`; Safari's
-/// private windows are recognized by their Accessibility titles (see `BrowserWindowReport.safari`).
+/// Chromium browsers, whose active tab URL is read over Apple Events once the window's `mode` reads `normal`. Safari
+/// is title-only: its dictionary has no private-window property, so its URLs are not read (see the README).
 struct SupportedBrowser: Hashable, Sendable {
-    enum Engine: Sendable { case safari, chromium }
-
     let bundleID: String
     let name: String
-    let engine: Engine
 
     static let all: [SupportedBrowser] = [
-        SupportedBrowser(bundleID: "com.apple.Safari", name: "Safari", engine: .safari),
-        SupportedBrowser(bundleID: "com.google.Chrome", name: "Google Chrome", engine: .chromium),
-        SupportedBrowser(bundleID: "com.brave.Browser", name: "Brave", engine: .chromium),
-        SupportedBrowser(bundleID: "com.microsoft.edgemac", name: "Microsoft Edge", engine: .chromium),
-        SupportedBrowser(bundleID: "company.thebrowser.Browser", name: "Arc", engine: .chromium),
-        SupportedBrowser(bundleID: "com.vivaldi.Vivaldi", name: "Vivaldi", engine: .chromium),
-        SupportedBrowser(bundleID: "at.studio.AsideBrowser", name: "Aside", engine: .chromium)
+        SupportedBrowser(bundleID: "com.google.Chrome", name: "Google Chrome"),
+        SupportedBrowser(bundleID: "com.brave.Browser", name: "Brave"),
+        SupportedBrowser(bundleID: "com.microsoft.edgemac", name: "Microsoft Edge"),
+        SupportedBrowser(bundleID: "company.thebrowser.Browser", name: "Arc"),
+        SupportedBrowser(bundleID: "com.vivaldi.Vivaldi", name: "Vivaldi"),
+        SupportedBrowser(bundleID: "at.studio.AsideBrowser", name: "Aside")
     ]
 
     static func matching(_ bundleID: String) -> SupportedBrowser? { all.first { $0.bundleID == bundleID } }
@@ -103,8 +99,8 @@ enum AutomationPermission: Sendable {
 /// background queue so a slow or hung app cannot stall the menu bar; each read is bounded by a timeout.
 final class ActivityReader: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.subset.point-in-time.reader", qos: .utility)
-    /// Loaded on first use, on `queue`.
-    private lazy var safariPrivateTitles = Self.loadSafariPrivateTitles()
+    /// Loaded on first use, on `queue`. Applied to every title-only app, so Safari's private windows keep no title.
+    private lazy var privateTitles = Self.loadSafariPrivateTitles()
 
     /// What may be recorded for the front window, after `WindowPrivacy.reduce`.
     struct Result: Sendable {
@@ -114,33 +110,26 @@ final class ActivityReader: @unchecked Sendable {
 
     func read(pid: pid_t, bundleID: String, readTitle: Bool, completion: @escaping @Sendable (Result) -> Void) {
         queue.async { [self] in
-            let focused = readTitle ? focusedWindow(pid: pid) : nil
+            let title = readTitle ? focusedWindowTitle(pid: pid) : nil
             guard let browser = SupportedBrowser.matching(bundleID) else {
-                let reduced = WindowPrivacy.reduce(focusedTitle: focused?.title, readsTitles: readTitle, support: .titleOnly, report: .unconfirmed)
+                let reduced = WindowPrivacy.reduce(focusedTitle: title, readsTitles: readTitle, support: .titleOnly,
+                                                   report: .unconfirmed, privateTitles: privateTitles)
                 completion(Result(title: reduced.title, url: reduced.url))
                 return
             }
             var report = BrowserWindowReport.unconfirmed
             if Self.permission(for: browser.bundleID, ask: false) == .granted {
-                let events = AppleEventReader(pid: pid)
-                switch browser.engine {
-                case .chromium:
-                    report = .chromium(chromiumFrontWindow(events))
-                case .safari:
-                    // Address the window Accessibility reported, so its title and the scripted name and URL describe
-                    // one window. Without Accessibility there is no window id, and nothing is confirmed.
-                    let scripted = focused?.id.flatMap { safariWindow(events, id: $0) }
-                    report = .safari(focused: focused, scripted: scripted, privateTitles: safariPrivateTitles)
-                }
+                report = .chromium(frontWindow(AppleEventReader(pid: pid)))
             }
-            let reduced = WindowPrivacy.reduce(focusedTitle: focused?.title, readsTitles: readTitle, support: .scriptable, report: report)
+            let reduced = WindowPrivacy.reduce(focusedTitle: title, readsTitles: readTitle, support: .scriptable,
+                                               report: report, privateTitles: privateTitles)
             completion(Result(title: reduced.title, url: reduced.url))
         }
     }
 
     /// The front window's id, `mode`, active tab title, and URL, every event addressed to that window by its id. A
     /// failed event yields nil; a dictionary without `mode` yields a nil mode. Both keep nothing.
-    private func chromiumFrontWindow(_ events: AppleEventReader) -> ScriptedWindow? {
+    private func frontWindow(_ events: AppleEventReader) -> ScriptedWindow? {
         typealias AE = AppleEventReader
         guard let id = events.get(AE.property("ID  ", of: AE.window(index: 1))), let idText = id.stringValue else { return nil }
         let window = AE.window(id: id)
@@ -148,16 +137,6 @@ final class ActivityReader: @unchecked Sendable {
         let tab = AE.property("acTa", of: window)
         guard let title = events.get(AE.property("pnam", of: tab)), let url = events.get(AE.property("URL ", of: tab)) else { return nil }
         return ScriptedWindow(id: idText, mode: AE.text(mode), title: AE.text(title), url: AE.text(url))
-    }
-
-    /// The name and current tab URL of Safari's window `id` (its window server number), or nil on any failure.
-    private func safariWindow(_ events: AppleEventReader, id: String) -> ScriptedWindow? {
-        typealias AE = AppleEventReader
-        guard let number = Int32(id) else { return nil }
-        let window = AE.window(id: NSAppleEventDescriptor(int32: number))
-        guard let name = events.get(AE.property("pnam", of: window)),
-              let url = events.get(AE.property("pURL", of: AE.property("cTab", of: window))) else { return nil }
-        return ScriptedWindow(id: id, title: AE.text(name), url: AE.text(url))
     }
 
     /// Asks macOS whether this app may send Apple Events to `bundleID`. With `ask`, macOS shows its consent prompt
@@ -175,8 +154,7 @@ final class ActivityReader: @unchecked Sendable {
         }
     }
 
-    /// The focused window's window server number and title, both read from one Accessibility element.
-    private func focusedWindow(pid: pid_t) -> FocusedWindow? {
+    private func focusedWindowTitle(pid: pid_t) -> String? {
         guard AXIsProcessTrusted() else { return nil }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
@@ -187,17 +165,8 @@ final class ActivityReader: @unchecked Sendable {
         AXUIElementSetMessagingTimeout(element, 0.25)
         var title: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title) == .success else { return nil }
-        var number = CGWindowID(0)
-        let id = Self.windowNumber.flatMap { $0(element, &number) == .success && number != 0 ? String(number) : nil }
-        return FocusedWindow(id: id, title: title as? String)
+        return title as? String
     }
-
-    /// `_AXUIElementGetWindow`, the long-standing HIServices call that maps an Accessibility window to its window server
-    /// number. It is looked up at run time, so if a future macOS drops it, Safari windows stay unconfirmed.
-    private static let windowNumber: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError)? = {
-        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }
-        return unsafeBitCast(symbol, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self)
-    }()
 
     /// Safari's private-window titles in every language its framework ships, plus English.
     private static func loadSafariPrivateTitles() -> PrivateWindowTitles {

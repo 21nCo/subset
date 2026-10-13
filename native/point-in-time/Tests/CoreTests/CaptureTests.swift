@@ -126,7 +126,7 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     private let query = "https://example.com/pit/page?secret=abc#frag"
 
     private func scriptable(_ report: BrowserWindowReport, focusedTitle: String? = "Focused", readsTitles: Bool = true) -> (title: String?, url: RedactedURL?) {
-        WindowPrivacy.reduce(focusedTitle: focusedTitle, readsTitles: readsTitles, support: .scriptable, report: report)
+        WindowPrivacy.reduce(focusedTitle: focusedTitle, readsTitles: readsTitles, support: .scriptable, report: report, privateTitles: titles)
     }
 
     private func chromium(mode: String? = "normal", title: String? = "Example Domain", url: String? = nil) -> ScriptedWindow {
@@ -177,53 +177,34 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         [PrivateWindowTitles.formatKey: "\u{200F}%@، التصفح الخاص", PrivateWindowTitles.titleKey: "تصفح خاص"]
     ])
 
-    private func safari(_ focused: FocusedWindow?, _ scripted: ScriptedWindow?) -> BrowserWindowReport {
-        .safari(focused: focused, scripted: scripted, privateTitles: titles)
+    private func titleOnly(_ title: String?, readsTitles: Bool = true) -> (title: String?, url: RedactedURL?) {
+        WindowPrivacy.reduce(focusedTitle: title, readsTitles: readsTitles, support: .titleOnly,
+                             report: .normal(title: "Ignored", url: query), privateTitles: titles)
     }
 
-    @Test func safariNormalWindowKeepsTitleAndRedactedURL() {
-        let title = "Personal — Example Domain"
-        let report = safari(FocusedWindow(id: "19297", title: title), ScriptedWindow(id: "19297", title: title, url: query))
-        let kept = scriptable(report, focusedTitle: title)
-        #expect(kept.title == "Personal — Example Domain")
-        #expect(kept.url?.string == "https://example.com/pit/page")
+    @Test func safariNormalWindowKeepsItsTitleButNeverAURL() {
+        let kept = titleOnly("Personal — Example Domain")
+        #expect(kept.title == "Personal — Example Domain" && kept.url == nil)
     }
 
     @Test func safariPrivateWindowWithAPageKeepsNothing() {
         // Observed on macOS 26 / Safari 26: a private window's Accessibility title is "%@, Private Browsing".
-        let report = safari(FocusedWindow(id: "8", title: "Example Domain, Private Browsing"),
-                            ScriptedWindow(id: "8", title: "Example Domain", url: query))
-        #expect(report == .privateWindow)
-        #expect(scriptable(report).title == nil && scriptable(report).url == nil)
+        let kept = titleOnly("Example Domain, Private Browsing")
+        #expect(kept.title == nil && kept.url == nil)
     }
 
     @Test func safariBlankOrLockedPrivateWindowKeepsNothing() {
-        // Both Accessibility and the script report the bare window title of a blank or locked private window.
         for title in ["Private Browsing", "Privates Surfen", "تصفح خاص"] {
-            #expect(safari(FocusedWindow(id: "8", title: title), ScriptedWindow(id: "8", title: title, url: "")) == .privateWindow, "\(title)")
+            #expect(titleOnly(title).title == nil, "\(title)")
         }
     }
 
     @Test func safariLocalizedPrivateTitlesKeepNothing() {
+        // No English marker, so only Safari's own string tables recognize these.
         for title in ["Inbox, „Privates Surfen“", "\u{200F}Inbox، التصفح الخاص"] {
-            #expect(safari(FocusedWindow(id: "8", title: title), ScriptedWindow(id: "8", title: "Inbox", url: query)) == .privateWindow)
+            #expect(!WindowPrivacy.looksPrivate(title: title))
+            #expect(titleOnly(title).title == nil, "\(title)")
         }
-    }
-
-    @Test func safariSwitchToAPrivateWindowWithTheSameNameIsUnconfirmed() {
-        // Accessibility read normal window 10 titled "Inbox"; the script answered for private window 11, also "Inbox".
-        let report = safari(FocusedWindow(id: "10", title: "Inbox"),
-                            ScriptedWindow(id: "11", title: "Inbox", url: "https://mail.example/private-thread?x=1"))
-        #expect(report == .unconfirmed)
-        #expect(scriptable(report).url == nil)
-    }
-
-    @Test func safariWithoutAWindowIDOrAnAnswerKeepsNothing() {
-        let scripted = ScriptedWindow(id: "8", title: "Example Domain", url: query)
-        #expect(safari(nil, scripted) == .unconfirmed)
-        #expect(safari(FocusedWindow(id: nil, title: "Example Domain"), scripted) == .unconfirmed)
-        #expect(safari(FocusedWindow(id: "8", title: "Example Domain"), nil) == .unconfirmed)
-        #expect(safari(FocusedWindow(id: "8", title: ""), ScriptedWindow(id: "8", title: "", url: query)) == .unconfirmed)
     }
 
     @Test func englishPrivateTitlesApplyWithoutSafarisStringTables() {
@@ -234,11 +215,11 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 
     @Test func titleOnlyAppsDropMarkedPrivateTitlesAndNeverKeepAURL() {
-        let report = BrowserWindowReport.normal(title: "Ignored", url: query)
-        let firefoxPrivate = WindowPrivacy.reduce(focusedTitle: "Example Domain — Private Browsing", readsTitles: true, support: .titleOnly, report: report)
+        let firefoxPrivate = titleOnly("Example Domain — Private Browsing")
         #expect(firefoxPrivate.title == nil && firefoxPrivate.url == nil)
-        let normal = WindowPrivacy.reduce(focusedTitle: "Example Domain — Mozilla Firefox", readsTitles: true, support: .titleOnly, report: report)
+        let normal = titleOnly("Example Domain — Mozilla Firefox")
         #expect(normal.title == "Example Domain — Mozilla Firefox" && normal.url == nil)
+        #expect(titleOnly("Example Domain — Mozilla Firefox", readsTitles: false).title == nil)
     }
 }
 
