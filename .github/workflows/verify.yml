@@ -18,3 +18,4 @@ jobs:
       - run: npm run build
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
+      - run: npm test --workspace=@subset/usage
