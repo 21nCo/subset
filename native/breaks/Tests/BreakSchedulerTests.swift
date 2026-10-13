@@ -915,6 +915,71 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(stats.screenScore, 100)
     }
 
+    func testFocusStretchBeforeHardStopIsCountedOnce() {
+        let stop = hardStop(escapeHatch: .extend(minutes: 15, times: 1))
+
+        // While hidden by an extension and after resuming, the stats keep the 30-minute stretch before the stop
+        // and leave out the hidden time.
+        var extended = makeScheduler(stops: [stop])
+        _ = extended.tick(now: at(10, 30))
+        _ = extended.extendHardStop(now: at(10, 40))
+        XCTAssertEqual(extended.stats(now: at(10, 50)).focusTime, 30 * 60)
+        _ = extended.tick(now: at(10, 55))
+        XCTAssertEqual(extended.stats(now: at(10, 57)).focusTime, 30 * 60)
+        XCTAssertEqual(extended.stats(now: at(10, 57)).longestStretch, 30 * 60)
+
+        // A stop that ends a running break adds no stretch: the break's record already holds the 29 minutes.
+        var interrupted = makeScheduler(stops: [stop]) { $0.shortBreakDuration = 120 }
+        _ = interrupted.startBreak(kind: .short, now: at(10, 29))
+        _ = interrupted.tick(now: at(10, 30))
+        _ = interrupted.tick(now: at(11, 0))
+        XCTAssertEqual(interrupted.stats(now: at(11, 5)).focusTime, 34 * 60)
+        XCTAssertEqual(interrupted.stats(now: at(11, 5)).longestStretch, 29 * 60)
+
+        // A stop that starts during an idle pause counts only the focus before the pause (4 minutes here).
+        var idle = makeScheduler(stops: [stop])
+        _ = idle.tick(now: at(10, 5), inputs: .init(idleSeconds: 60))
+        XCTAssertEqual(idle.pauseReasonForTest, .idle)
+        _ = idle.tick(now: at(10, 30), inputs: .init(idleSeconds: 25 * 60 + 60))
+        _ = idle.tick(now: at(11, 0))
+        XCTAssertEqual(idle.stats(now: at(11, 5)).focusTime, 9 * 60)
+        XCTAssertEqual(idle.stats(now: at(11, 5)).longestStretch, 5 * 60)
+    }
+
+    func testEarlierStopWaitingForCallIsNotMergedIntoLaterOne() {
+        // A waits for the call; B starts anyway inside A's window. A does not join B: it starts after the call.
+        let a = hardStop(hour: 10, minute: 0, end: .after(60 * 60))
+        let b = hardStop(hour: 10, minute: 30, end: .after(10 * 60), escapeHatch: .dismissEarly, duringCalls: .startAnyway)
+        var scheduler = makeScheduler(stops: [a, b])
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        XCTAssertEqual(scheduler.tick(now: at(10, 30), inputs: call), [.hardStopStarted(id: b.id, endsAt: at(10, 40))])
+        XCTAssertTrue(scheduler.canDismissHardStop(now: at(10, 31)))
+        // After B, the call pauses reminders again until it ends.
+        XCTAssertEqual(scheduler.tick(now: at(10, 40), inputs: call), [.hardStopEnded(id: b.id, reason: .ended), .paused(.meeting)])
+        XCTAssertEqual(scheduler.tick(now: at(10, 45)), [.hardStopStarted(id: a.id, endsAt: at(11, 0))])
+    }
+
+    func testStopWithoutEndThatStartedInsideRunningStopSurvivesMultiDayGap() throws {
+        let a = hardStop()
+        let b = hardStop(hour: 10, minute: 45, end: .untilDismissed, repeats: .once(t0))
+        var scheduler = makeScheduler(stops: [a, b])
+        _ = scheduler.tick(now: at(10, 30))
+
+        // Relaunched on Wednesday: B is not removed before it merges, and A keeps running until dismissed.
+        var restored = try relaunch(scheduler, at: at(12, 0, dayOffset: 2))
+        XCTAssertEqual(restored.settings.hardStops.count, 2)
+        XCTAssertTrue(restored.tick(now: at(12, 0, dayOffset: 2)).isEmpty)
+        XCTAssertEqual(restored.snapshot.activeHardStop?.id, a.id)
+        XCTAssertNil(restored.snapshot.breakEndsAt)
+        XCTAssertTrue(restored.canDismissHardStop(now: at(12, 1, dayOffset: 2)))
+
+        // The same without a relaunch, after the host slept until Wednesday.
+        XCTAssertTrue(scheduler.tick(now: at(12, 0, dayOffset: 2)).isEmpty)
+        XCTAssertNil(scheduler.snapshot.breakEndsAt)
+        XCTAssertEqual(scheduler.dismissHardStop(now: at(12, 1, dayOffset: 2)), [.hardStopEnded(id: a.id, reason: .dismissed)])
+        XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [a.id])
+    }
+
     func testHardStopOnDaylightSavingDayStartsAtNextValidMinute() throws {
         var newYork = Calendar(identifier: .gregorian)
         newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))

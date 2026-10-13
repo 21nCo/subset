@@ -322,6 +322,8 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
     var mergedIDs: [UUID] = []
     /// Focus time counted before the stop started, kept for the stretch statistics.
     var focusDuration: TimeInterval?
+    /// The start of the last day whose occurrences were checked for merging.
+    var mergedThrough: Date?
 }
 
 /// The warnings already delivered for one occurrence: every lead time of `minutes` or more.
@@ -621,9 +623,15 @@ enum BreakMath {
         let today = todayRecords.filter { $0.kind != .hardStop }
         let completed = today.filter { $0.completed && !$0.skipped }
         let skipped = today.filter(\.skipped)
-        // A stretch is the focus time counted before a break, not the time since midnight.
-        let currentEnd = snapshot.phase == .breaking ? (snapshot.breakStartedAt ?? now) : now
-        let currentStretch = max(0, currentEnd.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
+        // A stretch is the focus time counted before a break, not the time since midnight. While a hard stop runs
+        // (shown or hidden by an extension), the current stretch is the one that ended when it started.
+        let currentStretch: TimeInterval
+        if let active = snapshot.activeHardStop {
+            currentStretch = min(max(0, active.focusDuration ?? 0), max(0, active.startedAt.timeIntervalSince(startOfDay)))
+        } else {
+            let currentEnd = snapshot.phase == .breaking ? (snapshot.breakStartedAt ?? now) : now
+            currentStretch = max(0, currentEnd.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
+        }
         let stretches = todayRecords.compactMap { record in
             record.focusDuration.map { min(max(0, $0), max(0, record.startedAt.timeIntervalSince(startOfDay))) }
         }
