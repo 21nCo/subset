@@ -19,3 +19,29 @@ jobs:
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
       - run: npm test --workspace=@subset/usage
+
+  # Builds the Breaks menu bar app and runs its unit tests. Only the macOS scheme: the runner image has no
+  # matching iOS Simulator runtime, so the iOS targets are left out on purpose. No secrets and no signing.
+  # Runs for pull requests and pushes to main, not for every branch push, to save macOS runner minutes.
+  breaks-macos:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "No Xcode 26 on this runner." >&2; exit 1; fi
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      - name: Build and test BreaksMac
+        run: >-
+          xcodebuild -project native/breaks/Breaks.xcodeproj -scheme BreaksMac -destination 'platform=macOS'
+          CODE_SIGNING_ALLOWED=NO test
