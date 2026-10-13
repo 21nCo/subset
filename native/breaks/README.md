@@ -21,8 +21,8 @@ This is a port of a proof of concept plus a new Mac target. The macOS app is rel
 
 | Path | Platforms | Contents |
 | --- | --- | --- |
-| `Shared/BreakModels.swift` | iOS, macOS, DeviceActivityMonitor, ShieldConfiguration | Settings model (including `DesktopSettings` for Mac-only options), snapshot, history records, Screen Score and stats (`BreakMath`). |
-| `Shared/BreakScheduler.swift` | iOS, macOS | The schedule as a pure value type: intervals, heads-up, long-break cadence, planned breaks, office hours, snooze allowance, discipline rules, manual and timed pauses, smart pause with grace period, idle pause and reset, and blink and posture cadence. It returns events and does not touch UI or system APIs. |
+| `Shared/BreakModels.swift` | iOS, macOS, DeviceActivityMonitor, ShieldConfiguration | Settings model (including `DesktopSettings` for Mac-only options and `HardStop`), snapshot, history records, Screen Score and stats (`BreakMath`). |
+| `Shared/BreakScheduler.swift` | iOS, macOS | The schedule as a pure value type: intervals, heads-up, long-break cadence, planned breaks, office hours, snooze allowance, discipline rules, manual and timed pauses, smart pause with grace period, idle pause and reset, blink and posture cadence, and [hard stops](#hard-stops-shared-scheduler). It returns events and does not touch UI or system APIs. |
 | `Shared/BreakPersistence.swift` | iOS, macOS, DeviceActivityMonitor, ShieldConfiguration | `BreakRepository` and `SharedStore`. Uses the app group on iOS and standard defaults on macOS. |
 | `Shared/BreakSoundCoordinator.swift` | iOS, macOS | Synthesized chimes (the `AVAudioSession` setup is iOS-only). |
 | `Shared/BreakEngine.swift` and the other `Shared/*Coordinator.swift` files | iOS | Runs the scheduler and performs the iOS effects: Screen Time shields, notifications, the Live Activity, and Shortcuts. |
@@ -56,7 +56,7 @@ The two platforms share the operations and the data model. They do not share vie
 | `BreakLiveActivity` | `dev.subset.breaks.LiveActivity` | Compiles. Live Activity and Dynamic Island. |
 | `BreaksTests` | `dev.subset.breaks.Tests` | Compiles. Not run on this host. |
 | `BreaksMac` (macOS menu bar app, product `Breaks.app`, module `BreaksMac`) | `dev.subset.breaks` | Available: [0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), Developer ID signed and notarized, universal (Apple silicon and Intel), macOS 14 or later. See [Release (macOS)](#release-macos). |
-| `BreaksMacTests` | `dev.subset.breaks.MacTests` | 36 tests pass (scheduler and shared model). |
+| `BreaksMacTests` | `dev.subset.breaks.MacTests` | 58 tests pass (scheduler and shared model). |
 | Web, embed, agent surfaces | — | Not proposed. |
 
 The Mac and iOS apps share the bundle identifier `dev.subset.breaks`, as separate platform apps would for a universal purchase. Separate identifiers are not needed until a store route is chosen.
@@ -90,6 +90,38 @@ Modelled on LookAway's [site](https://lookaway.com) and [docs](https://lookaway.
 | Live Activity, sync with iPhone or iPad | Not implemented | Each device keeps its own schedule and history. |
 | Per-app exclusions for meeting detection | Not implemented | — |
 | Onboarding, Notification Center alerts | Not implemented on macOS | The Mac uses its own panels instead of notifications. |
+
+## Hard stops (shared scheduler)
+
+A hard stop is a user-defined time when the screen is blocked until the stop ends. The model and the scheduler rules are implemented in `Shared/` and covered by tests. **No platform presents them yet:** there is no overlay, warning, menu item, or settings editor on macOS or iOS, so a user cannot create one. The Mac presentation is planned separately. The hosts ignore the new events, and the Mac does not show the regular break overlay for a restored hard stop.
+
+**Model.** `BreakSettings.hardStops` holds up to 20 `HardStop` values. Each has a name, an on/off switch, a start time, and:
+
+| Field | Values | Default for a new stop |
+| --- | --- | --- |
+| `end` | `.at(hour:minute:)` (at or before the start means the next day), `.after(duration)` (1 minute to 16 hours), `.untilDismissed` | `.after(30 minutes)` |
+| `repeats` | `.weekdays(Set<Int>)` (Sunday is 1), `.once(date)` | Monday to Friday |
+| `warningMinutes` | 0 to 5 lead times, each 1 to 120 minutes | 10 and 2 |
+| `escapeHatch` | `.none`, `.extend(minutes: 5...60, times: 1...5)`, `.dismissEarly` | extend 15 minutes, once |
+| `duringCalls` | `.waitForCallToEnd`, `.startAnyway` | wait for the call to end |
+
+`BreakSettings.hardStopErrors(now:calendar:)` returns field errors for an editor. `BreakScheduler.normalizeSettings()` clamps out-of-range values so a hand-edited store cannot break the schedule.
+
+**Events and operations.** The scheduler emits `.hardStopWarning(id, startsAt, waitingForCall)`, `.hardStopStarted(id, endsAt?)`, `.hardStopExtended(id, until)`, `.hardStopResumed(id)`, and `.hardStopEnded(id, reason: .ended | .dismissed | .missed)`. `extendHardStop(now:)` and `dismissHardStop(now:)` return no events when the escape hatch does not allow them. `canExtendHardStop(now:)` and `canDismissHardStop` tell a host whether to offer the actions. A shown stop is a break of kind `.hardStop` (`phase == .breaking`, with `breakEndsAt` nil for a stop that lasts until dismissed). While an extension hides it, the phase is `.focusing` and `nextBreakAt` is when the stop returns or ends.
+
+**Rules.**
+
+- **Times.** Occurrences are worked out each tick with the scheduler's calendar, which by default follows the user's time zone. An occurrence belongs to the weekday it starts on, so a Monday 23:00–01:00 stop runs into Tuesday. When daylight-saving time skips the start minute, it starts at the next valid minute.
+- **Priority.** A due or running stop overrides manual and timed pauses, smart pauses, idle pause and reset, office hours, and regular and planned breaks. A regular or planned break that is running when a stop starts ends and is recorded as completed. A shown heads-up is withdrawn, and a planned break that falls inside a stop is dropped instead of starting afterwards. Heads-ups and blink and posture nudges stay off while a stop runs, including while it is hidden by an extension.
+- **Late start.** A stop missed while the host was asleep or not running still starts on return, for the time left. A stop without an end stays due through the day after it starts.
+- **Calls.** A call is the meeting signal (another process using the microphone, or any camera running); the scheduler honours it even when the meeting smart pause is off. With `.waitForCallToEnd`, the stop starts on the first tick after the call ends, and warnings report `waitingForCall`. If its scheduled end passes first, it ends as `.missed`, is recorded, and never starts. A stop without an end always waits. On the Mac, `ActivitySignals` currently reads the meeting signal only while the meeting smart pause is on; the Mac presentation work should read it whenever a stop waits for calls.
+- **Overlaps.** A stop that starts inside a running one is merged into it. The running stop ends at the later of the two ends, and the stop that ends later sets the escape hatch. It gets no warnings, and the merged occurrence is recorded as part of the running stop.
+- **Extend and dismiss.** Extending hides the stop for the chosen minutes without moving its end; it resumes when the time is up, or ends if its end comes first. Extensions are counted per occurrence and saved. Dismissing is allowed for a stop without an end and for `.dismissEarly`, and never otherwise. Snooze, skip, early end, manual breaks, and pauses return no events while a stop runs, and use no snooze. Discipline levels do not apply.
+- **Warnings.** Each lead time is shown once. After sleep or a relaunch, only the latest warning whose time has passed is shown, once, and only while the start is still ahead.
+- **After a stop.** A fresh focus interval starts, and a pause from before the stop does not come back. A running occurrence keeps the rules it started with, even if the stop is edited or deleted.
+- **One-off stops** are removed from settings when their occurrence ends or is missed, or when their date has passed (checked at launch and on each tick). An occurrence that began and ended while the host was not running is not recorded.
+- **History.** Each occurrence is recorded with kind `.hardStop`, its start and end, extensions used, and end reason. Hard-stop records are excluded from the Screen Score and break statistics.
+- **Persistence.** The snapshot saves the running stop (its occurrence, end, escape hatch, extensions used, and extended-until time), the warnings delivered, the handled occurrences, and any stop waiting for a call. Settings and snapshots saved by earlier builds load with no hard stops and no running stop.
 
 ## Permissions and entitlements
 
@@ -222,9 +254,9 @@ Release check for 0.1.0: the release is published (not a draft); the assets were
 On this host (Xcode 26.4, macOS 26):
 
 - `BreaksMac` builds with `xcodebuild` (`CODE_SIGNING_ALLOWED=NO`), including its asset catalog and app icon.
-- `BreaksMacTests` passes 36 tests: 31 scheduler tests and 5 model and repository tests. The scheduler tests cover the heads-up, break start and completion, long-break cadence, office hours, planned breaks, discipline levels, early end, snooze allowance and day rollover, snoozing a running break, skipping, timed pauses, idle pause and reset, smart pause with grace period, manual pause overriding signals, wellness cadence, restore after relaunch (including expired breaks, heads-up, and Focus pauses), late and off-hours planned breaks, idle credit after a smart pause, legacy settings decoding, and the history cap. The model tests cover overnight office hours, stretch statistics, and hour-long countdowns.
+- `BreaksMacTests` passes 58 tests: 48 scheduler tests and 10 model and repository tests. The scheduler tests cover the heads-up, break start and completion, long-break cadence, office hours, planned breaks, discipline levels, early end, snooze allowance and day rollover, snoozing a running break, skipping, timed pauses, idle pause and reset, smart pause with grace period, manual pause overriding signals, wellness cadence, restore after relaunch (including expired breaks, heads-up, and Focus pauses), late and off-hours planned breaks, idle credit after a smart pause, legacy settings decoding, and the history cap. The hard-stop scheduler tests use a fixed calendar and cover warnings at each lead time and after sleep or relaunch, start and end for each end type, a stop that crosses midnight, one-off stops and their removal, relaunch and wake during and after a stop, each priority rule, waiting for calls and the missed outcome, overlap merging, the extension limit and resume, dismiss rules, snooze and skip during a stop, the history record and its exclusion from statistics, a daylight-saving start, and a time zone change. The model tests cover overnight office hours, stretch statistics, hour-long countdowns, hard-stop defaults and end times, decoding of older settings and snapshots, and validation errors.
 - The built app launched from DerivedData and quit through `osascript` without a crash. A break restored from saved state completed and was recorded. An idle pause was then recorded correctly while the host had no input.
-- The iOS app, its four extensions, and `BreaksTests` compiled for the iOS Simulator SDK from a scratch copy without `App/Assets.xcassets` (see below).
+- The iOS app, its four extensions, and `BreaksTests` compiled for the iOS Simulator SDK from a scratch copy without `App/Assets.xcassets` (see below). With the hard-stop changes (SET-26), this was checked by removing the app's asset catalog from the copy's Resources phase and building the six iOS targets with `xcodebuild -target … -sdk iphonesimulator ARCHS=arm64`, because `-destination 'generic/platform=iOS Simulator'` found no eligible destination on this host.
 
 ## Unverified
 

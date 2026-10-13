@@ -45,6 +45,7 @@ enum BreakKind: String, Codable, CaseIterable, Sendable {
     case long
     case planned
     case manual
+    case hardStop
 
     var title: String {
         switch self {
@@ -52,6 +53,7 @@ enum BreakKind: String, Codable, CaseIterable, Sendable {
         case .long: "Long break"
         case .planned: "Planned break"
         case .manual: "Mindful break"
+        case .hardStop: "Hard stop"
         }
     }
 }
@@ -154,6 +156,176 @@ struct PlannedBreak: Codable, Equatable, Identifiable, Sendable {
         guard occurs(on: date, calendar: calendar) else { return nil }
         return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: date)
     }
+}
+
+/// A user-defined time when the screen is blocked until the stop ends, regardless of pauses, office hours,
+/// and the regular break schedule.
+struct HardStop: Codable, Equatable, Identifiable, Sendable {
+    enum End: Codable, Equatable, Sendable {
+        /// An end at or before the start time falls on the next day.
+        case at(hour: Int, minute: Int)
+        case after(TimeInterval)
+        case untilDismissed
+    }
+
+    enum Repeat: Codable, Equatable, Sendable {
+        /// Calendar weekday values, where Sunday is 1 and Saturday is 7. An occurrence belongs to the weekday it starts on.
+        case weekdays(Set<Int>)
+        /// One occurrence, on the calendar day that contains this date.
+        case once(Date)
+    }
+
+    enum EscapeHatch: Codable, Equatable, Sendable {
+        case none
+        /// Hide the stop for `minutes`, up to `times` per occurrence. Its end does not move.
+        case extend(minutes: Int, times: Int)
+        case dismissEarly
+    }
+
+    enum CallBehavior: String, Codable, CaseIterable, Sendable {
+        case waitForCallToEnd
+        case startAnyway
+    }
+
+    static let maximumCount = 20
+    static let durationRange: ClosedRange<TimeInterval> = 60...(16 * 3600)
+    static let maximumWarnings = 5
+    static let warningRange = 1...120
+    static let extendMinutesRange = 5...60
+    static let extendTimesRange = 1...5
+
+    var id = UUID()
+    var name: String
+    var isEnabled = true
+    var hour: Int
+    var minute: Int
+    var end: End = .after(30 * 60)
+    var repeats: Repeat = .weekdays([2, 3, 4, 5, 6])
+    /// Minutes before the start at which a warning is shown.
+    var warningMinutes = [10, 2]
+    var escapeHatch: EscapeHatch = .extend(minutes: 15, times: 1)
+    var duringCalls: CallBehavior = .waitForCallToEnd
+
+    var isOnce: Bool {
+        if case .once = repeats { true } else { false }
+    }
+
+    /// The start of the occurrence that begins on the calendar day of `day`, or nil when none does.
+    /// When daylight-saving time skips the start minute, the occurrence starts at the next valid minute.
+    func start(onDayOf day: Date, calendar: Calendar) -> Date? {
+        switch repeats {
+        case .weekdays(let weekdays):
+            guard weekdays.contains(calendar.component(.weekday, from: day)) else { return nil }
+        case .once(let date):
+            guard calendar.isDate(date, inSameDayAs: day) else { return nil }
+        }
+        return Self.time(hour: hour, minute: minute, onDayOf: day, calendar: calendar)
+    }
+
+    /// The scheduled end of the occurrence that starts at `start`, or nil for a stop that lasts until dismissed.
+    func end(forStart start: Date, calendar: Calendar) -> Date? {
+        switch end {
+        case .untilDismissed:
+            return nil
+        case .after(let duration):
+            return start.addingTimeInterval(duration)
+        case .at(let endHour, let endMinute):
+            if let sameDay = Self.time(hour: endHour, minute: endMinute, onDayOf: start, calendar: calendar), sameDay > start {
+                return sameDay
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: start)) else { return nil }
+            return Self.time(hour: endHour, minute: endMinute, onDayOf: nextDay, calendar: calendar)
+        }
+    }
+
+    /// Occurrences that start on the day before, the day of, and the day after `now`, in start order. This covers
+    /// every occurrence that can still be running (at most a day long) and every warning (at most 2 hours ahead).
+    func occurrences(around now: Date, calendar: Calendar) -> [Occurrence] {
+        let today = calendar.startOfDay(for: now)
+        return (-1...1).compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: today),
+                  let start = start(onDayOf: day, calendar: calendar) else { return nil }
+            return Occurrence(start: start, end: end(forStart: start, calendar: calendar))
+        }
+    }
+
+    /// True when the occurrence may start at `now`: from its start until its scheduled end. A stop without an end
+    /// stays due through the day after it starts, so one missed while the host was off still starts on return.
+    func isDue(_ occurrence: Occurrence, now: Date, calendar: Calendar) -> Bool {
+        guard occurrence.start <= now else { return false }
+        if let end = occurrence.end { return now < end }
+        let today = calendar.startOfDay(for: now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
+        return occurrence.start >= yesterday
+    }
+
+    /// True for a one-off stop whose occurrence can no longer start.
+    func isExpiredOnce(now: Date, calendar: Calendar) -> Bool {
+        guard case .once(let date) = repeats else { return false }
+        guard let start = start(onDayOf: date, calendar: calendar) else {
+            return calendar.startOfDay(for: date) < calendar.startOfDay(for: now)
+        }
+        let occurrence = Occurrence(start: start, end: end(forStart: start, calendar: calendar))
+        return start <= now && !isDue(occurrence, now: now, calendar: calendar)
+    }
+
+    struct Occurrence: Equatable, Sendable {
+        var start: Date
+        var end: Date?
+    }
+
+    private static func time(hour: Int, minute: Int, onDayOf day: Date, calendar: Calendar) -> Date? {
+        calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day, matchingPolicy: .nextTime, repeatedTimePolicy: .first, direction: .forward)
+    }
+}
+
+/// A field of a hard stop that the editor can mark as invalid. `stopID` is nil for an error about the whole list.
+struct HardStopFieldError: Equatable, Sendable {
+    enum Field: String, Sendable {
+        case list
+        case name
+        case start
+        case end
+        case repeats
+        case warningMinutes
+        case escapeHatch
+    }
+
+    var stopID: UUID?
+    var field: Field
+    var message: String
+}
+
+enum HardStopEndReason: String, Codable, Sendable {
+    case ended
+    case dismissed
+    /// The stop waited for a call, and its scheduled end passed before the call ended. It never started.
+    case missed
+}
+
+/// The hard stop that is running (shown, or hidden by an extension). It keeps the rules it started with,
+/// so editing or deleting the stop in settings does not change a running occurrence.
+struct ActiveHardStop: Codable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    /// The scheduled start of the occurrence.
+    var occurrence: Date
+    /// When it actually started; later than `occurrence` after waiting for a call or a late wake.
+    var startedAt: Date
+    /// Nil until dismissed.
+    var endsAt: Date?
+    var escapeHatch: HardStop.EscapeHatch
+    var extensionsUsed = 0
+    /// While set, the stop is hidden by an extension until this time.
+    var extendedUntil: Date?
+    /// Stops that started inside this one and were merged into it.
+    var mergedIDs: [UUID] = []
+}
+
+/// The warnings already delivered for one occurrence: every lead time of `minutes` or more.
+struct HardStopWarningMark: Codable, Equatable, Sendable {
+    var occurrence: Date
+    var minutes: Int
 }
 
 struct SmartPauseSettings: Codable, Equatable, Sendable {
@@ -262,6 +434,7 @@ struct BreakSettings: Codable, Equatable, Sendable {
     var customization = CustomizationSettings()
     var automation = AutomationSettings()
     var desktop = DesktopSettings()
+    var hardStops: [HardStop] = []
 }
 
 extension BreakSettings {
@@ -292,6 +465,51 @@ extension BreakSettings {
         customization = try value(.customization, defaults.customization)
         automation = try value(.automation, defaults.automation)
         desktop = try value(.desktop, defaults.desktop)
+        hardStops = try value(.hardStops, defaults.hardStops)
+    }
+
+    /// Field errors for the hard-stop editor. Empty when every stop can be saved. A one-off stop whose
+    /// occurrence can no longer start at `now` is an error, because the scheduler would remove it.
+    func hardStopErrors(now: Date, calendar: Calendar = .current) -> [HardStopFieldError] {
+        var errors: [HardStopFieldError] = []
+        if hardStops.count > HardStop.maximumCount {
+            errors.append(.init(field: .list, message: "Add at most \(HardStop.maximumCount) hard stops."))
+        }
+        for stop in hardStops {
+            func fail(_ field: HardStopFieldError.Field, _ message: String) {
+                errors.append(.init(stopID: stop.id, field: field, message: message))
+            }
+            if stop.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                fail(.name, "Enter a name.")
+            }
+            if !(0...23).contains(stop.hour) || !(0...59).contains(stop.minute) {
+                fail(.start, "Choose a valid start time.")
+            }
+            switch stop.end {
+            case .at(let hour, let minute):
+                if !(0...23).contains(hour) || !(0...59).contains(minute) { fail(.end, "Choose a valid end time.") }
+            case .after(let duration):
+                if !HardStop.durationRange.contains(duration) { fail(.end, "A hard stop lasts from 1 minute to 16 hours.") }
+            case .untilDismissed:
+                break
+            }
+            switch stop.repeats {
+            case .weekdays(let weekdays):
+                if weekdays.isEmpty || !weekdays.allSatisfy((1...7).contains) { fail(.repeats, "Choose at least one day.") }
+            case .once:
+                if stop.isExpiredOnce(now: now, calendar: calendar) { fail(.repeats, "This date and time have passed.") }
+            }
+            if stop.warningMinutes.count > HardStop.maximumWarnings {
+                fail(.warningMinutes, "Add at most \(HardStop.maximumWarnings) warnings.")
+            } else if !stop.warningMinutes.allSatisfy(HardStop.warningRange.contains) {
+                fail(.warningMinutes, "Warn from 1 to 120 minutes before.")
+            }
+            if case .extend(let minutes, let times) = stop.escapeHatch,
+               !HardStop.extendMinutesRange.contains(minutes) || !HardStop.extendTimesRange.contains(times) {
+                fail(.escapeHatch, "Extend by 5 to 60 minutes, 1 to 5 times.")
+            }
+        }
+        return errors
     }
 }
 
@@ -305,6 +523,9 @@ struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
     var skipped: Bool
     /// Focus time counted before this break (the stretch it ended). Nil for records saved by older builds.
     var focusDuration: TimeInterval?
+    /// Hard stops only: how the occurrence ended and how many extensions it used.
+    var hardStopEndReason: HardStopEndReason?
+    var extensionsUsed: Int?
 
     /// The most records kept on the device.
     static let historyLimit = 400
@@ -330,6 +551,41 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var pauseReason: PauseReason?
     /// A timed manual pause resumes at this instant.
     var pausedUntil: Date?
+    /// The running hard stop, including its extensions; nil when none is running.
+    var activeHardStop: ActiveHardStop?
+    /// Per hard stop ID: the warnings already delivered for its next occurrence.
+    var hardStopWarnings: [String: HardStopWarningMark] = [:]
+    /// Per hard stop ID: the latest occurrence that started, merged, ended, or was missed. It and every earlier
+    /// occurrence never start again.
+    var handledHardStops: [String: Date] = [:]
+    /// Per hard stop ID: the due occurrence that is waiting for a call to end.
+    var hardStopsWaitingForCall: [String: Date] = [:]
+}
+
+extension EngineSnapshot {
+    /// Snapshots saved before hard stops existed load with no active stop and no hard-stop progress.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        phase = try container.decode(BreakPhase.self, forKey: .phase)
+        focusStartedAt = try container.decode(Date.self, forKey: .focusStartedAt)
+        nextBreakAt = try container.decode(Date.self, forKey: .nextBreakAt)
+        pausedRemaining = try container.decodeIfPresent(TimeInterval.self, forKey: .pausedRemaining)
+        breakStartedAt = try container.decodeIfPresent(Date.self, forKey: .breakStartedAt)
+        breakEndsAt = try container.decodeIfPresent(Date.self, forKey: .breakEndsAt)
+        activeKind = try container.decodeIfPresent(BreakKind.self, forKey: .activeKind)
+        activePlannedBreakName = try container.decodeIfPresent(String.self, forKey: .activePlannedBreakName)
+        completedShortBreaks = try container.decode(Int.self, forKey: .completedShortBreaks)
+        snoozesUsedToday = try container.decode(Int.self, forKey: .snoozesUsedToday)
+        snoozeDay = try container.decode(Date.self, forKey: .snoozeDay)
+        deliveredHeadsUpFor = try container.decodeIfPresent(Date.self, forKey: .deliveredHeadsUpFor)
+        deliveredPlannedOccurrences = try container.decode([String: Date].self, forKey: .deliveredPlannedOccurrences)
+        pauseReason = try container.decodeIfPresent(PauseReason.self, forKey: .pauseReason)
+        pausedUntil = try container.decodeIfPresent(Date.self, forKey: .pausedUntil)
+        activeHardStop = try container.decodeIfPresent(ActiveHardStop.self, forKey: .activeHardStop)
+        hardStopWarnings = try container.decodeIfPresent([String: HardStopWarningMark].self, forKey: .hardStopWarnings) ?? [:]
+        handledHardStops = try container.decodeIfPresent([String: Date].self, forKey: .handledHardStops) ?? [:]
+        hardStopsWaitingForCall = try container.decodeIfPresent([String: Date].self, forKey: .hardStopsWaitingForCall) ?? [:]
+    }
 }
 
 struct DashboardStats: Equatable, Sendable {
@@ -357,7 +613,8 @@ struct DashboardStats: Equatable, Sendable {
 enum BreakMath {
     static func stats(records: [BreakRecord], snapshot: EngineSnapshot, now: Date, calendar: Calendar = .current) -> DashboardStats {
         let startOfDay = calendar.startOfDay(for: now)
-        let today = records.filter { $0.startedAt >= startOfDay && $0.startedAt <= now }
+        // Hard stops are not breaks: they count toward neither the Screen Score nor the break statistics.
+        let today = records.filter { $0.kind != .hardStop && $0.startedAt >= startOfDay && $0.startedAt <= now }
         let completed = today.filter { $0.completed && !$0.skipped }
         let skipped = today.filter(\.skipped)
         // A stretch is the focus time counted before a break, not the time since midnight.

@@ -112,7 +112,7 @@ final class MacBreakController: ObservableObject {
         now = .now
         core.reconcileRestoredState(now: now)
         save()
-        if phase == .breaking { overlay.show() }
+        if phase == .breaking, snapshot.activeKind != .hardStop { overlay.show() }
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
@@ -245,6 +245,9 @@ final class MacBreakController: ObservableObject {
                 break
             case .wellness(let reminder):
                 nudges.show(reminder, large: settings.wellness.largePresentation)
+            case .hardStopWarning, .hardStopStarted, .hardStopExtended, .hardStopResumed, .hardStopEnded:
+                // Hard stops have no Mac presentation yet.
+                break
             }
         }
     }

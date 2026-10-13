@@ -85,4 +85,109 @@ final class BreaksTests: XCTestCase {
         XCTAssertEqual(repository.loadSnapshot(settings: settings).snoozesUsedToday, 3)
         XCTAssertEqual(repository.loadRecords().count, 1)
     }
+
+    // MARK: - Hard stops
+
+    private var utc: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    func testNewHardStopUsesProductDefaults() {
+        let stop = HardStop(name: "Evening", hour: 18, minute: 0)
+        XCTAssertTrue(stop.isEnabled)
+        XCTAssertEqual(stop.escapeHatch, .extend(minutes: 15, times: 1))
+        XCTAssertEqual(stop.warningMinutes, [10, 2])
+        XCTAssertEqual(stop.duringCalls, .waitForCallToEnd)
+        XCTAssertEqual(stop.repeats, .weekdays([2, 3, 4, 5, 6]))
+        XCTAssertEqual(stop.end, .after(30 * 60))
+        XCTAssertEqual(BreakSettings().hardStops, [])
+    }
+
+    func testHardStopEndAtOrBeforeStartFallsOnNextDay() throws {
+        let start = try XCTUnwrap(utc.date(from: DateComponents(year: 2026, month: 8, day: 10, hour: 22)))
+        var stop = HardStop(name: "Night", hour: 22, minute: 0, end: .at(hour: 6, minute: 0))
+        XCTAssertEqual(stop.end(forStart: start, calendar: utc), start.addingTimeInterval(8 * 3600))
+        stop.end = .at(hour: 22, minute: 0)
+        XCTAssertEqual(stop.end(forStart: start, calendar: utc), start.addingTimeInterval(24 * 3600))
+        stop.end = .at(hour: 23, minute: 15)
+        XCTAssertEqual(stop.end(forStart: start, calendar: utc), start.addingTimeInterval(75 * 60))
+    }
+
+    func testSettingsAndSnapshotsSavedBeforeHardStopsStillDecode() throws {
+        var settings = BreakSettings()
+        settings.workInterval = 1500
+        var legacySettings = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(settings)) as? [String: Any])
+        legacySettings.removeValue(forKey: "hardStops")
+        let decodedSettings = try JSONDecoder().decode(BreakSettings.self, from: JSONSerialization.data(withJSONObject: legacySettings))
+        XCTAssertEqual(decodedSettings.workInterval, 1500)
+        XCTAssertEqual(decodedSettings.hardStops, [])
+
+        let snapshot = EngineSnapshot(phase: .paused, nextBreakAt: Date(timeIntervalSince1970: 1_000_000), snoozesUsedToday: 2, pauseReason: .manual)
+        var legacySnapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+        for key in ["hardStopWarnings", "handledHardStops", "hardStopsWaitingForCall"] {
+            XCTAssertNotNil(legacySnapshot.removeValue(forKey: key), key)
+        }
+        XCTAssertNil(legacySnapshot["activeHardStop"])
+        let decodedSnapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONSerialization.data(withJSONObject: legacySnapshot))
+        XCTAssertEqual(decodedSnapshot, snapshot)
+        XCTAssertNil(decodedSnapshot.activeHardStop)
+        XCTAssertTrue(decodedSnapshot.hardStopWarnings.isEmpty)
+        XCTAssertTrue(decodedSnapshot.handledHardStops.isEmpty)
+    }
+
+    func testHardStopSettingsRoundTripEveryCase() throws {
+        let stops = [
+            HardStop(name: "A", hour: 9, minute: 15, end: .at(hour: 9, minute: 45), repeats: .once(Date(timeIntervalSince1970: 1_800_000_000)), warningMinutes: [], escapeHatch: .none, duringCalls: .startAnyway),
+            HardStop(name: "B", hour: 22, minute: 0, end: .untilDismissed, escapeHatch: .dismissEarly),
+            HardStop(name: "C", hour: 17, minute: 30)
+        ]
+        var settings = BreakSettings()
+        settings.hardStops = stops
+        let decoded = try JSONDecoder().decode(BreakSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(decoded.hardStops, stops)
+    }
+
+    func testHardStopValidationReportsFieldErrors() throws {
+        let now = try XCTUnwrap(utc.date(from: DateComponents(year: 2026, month: 8, day: 10, hour: 12)))
+        var settings = BreakSettings()
+        let valid = HardStop(name: "Evening", hour: 18, minute: 0)
+        settings.hardStops = [valid, HardStop(name: "Tomorrow", hour: 9, minute: 0, repeats: .once(now.addingTimeInterval(24 * 3600)))]
+        XCTAssertEqual(settings.hardStopErrors(now: now, calendar: utc), [])
+
+        func errors(_ change: (inout HardStop) -> Void) -> [HardStopFieldError.Field] {
+            var stop = valid
+            change(&stop)
+            var edited = BreakSettings()
+            edited.hardStops = [stop]
+            let found = edited.hardStopErrors(now: now, calendar: utc)
+            XCTAssertTrue(found.allSatisfy { $0.stopID == stop.id && !$0.message.isEmpty })
+            return found.map(\.field)
+        }
+        XCTAssertEqual(errors { $0.name = "  " }, [.name])
+        XCTAssertEqual(errors { $0.hour = 24 }, [.start])
+        XCTAssertEqual(errors { $0.minute = -1 }, [.start])
+        XCTAssertEqual(errors { $0.end = .at(hour: 7, minute: 60) }, [.end])
+        XCTAssertEqual(errors { $0.end = .after(30) }, [.end])
+        XCTAssertEqual(errors { $0.end = .after(16 * 3600 + 60) }, [.end])
+        XCTAssertEqual(errors { $0.end = .after(16 * 3600) }, [])
+        XCTAssertEqual(errors { $0.repeats = .weekdays([]) }, [.repeats])
+        XCTAssertEqual(errors { $0.repeats = .weekdays([0, 2]) }, [.repeats])
+        // A one-off stop earlier today has passed; one later today has not.
+        XCTAssertEqual(errors { $0.hour = 9; $0.repeats = .once(now) }, [.repeats])
+        XCTAssertEqual(errors { $0.repeats = .once(now) }, [])
+        XCTAssertEqual(errors { $0.warningMinutes = [1, 2, 3, 4, 5, 6] }, [.warningMinutes])
+        XCTAssertEqual(errors { $0.warningMinutes = [0] }, [.warningMinutes])
+        XCTAssertEqual(errors { $0.warningMinutes = [121] }, [.warningMinutes])
+        XCTAssertEqual(errors { $0.warningMinutes = [] }, [])
+        XCTAssertEqual(errors { $0.escapeHatch = .extend(minutes: 4, times: 1) }, [.escapeHatch])
+        XCTAssertEqual(errors { $0.escapeHatch = .extend(minutes: 15, times: 6) }, [.escapeHatch])
+        XCTAssertEqual(errors { $0.escapeHatch = .extend(minutes: 60, times: 5) }, [])
+
+        settings.hardStops = (0...HardStop.maximumCount).map { HardStop(name: "Stop \($0)", hour: 18, minute: 0) }
+        let tooMany = settings.hardStopErrors(now: now, calendar: utc)
+        XCTAssertEqual(tooMany.map(\.field), [.list])
+        XCTAssertNil(tooMany.first?.stopID)
+    }
 }
