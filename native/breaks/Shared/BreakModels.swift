@@ -344,7 +344,7 @@ enum HardStopEndReason: String, Codable, Sendable {
 struct ActiveHardStop: Codable, Equatable, Sendable {
     var id: UUID
     var name: String
-    /// The scheduled start of the occurrence.
+    /// The scheduled start of the occurrence, or when it started if a time zone change moved that start later.
     var occurrence: Date
     /// The occurrence's identity (`HardStop.Occurrence.key`).
     var occurrenceKey: Int

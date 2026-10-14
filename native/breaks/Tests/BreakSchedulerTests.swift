@@ -929,6 +929,38 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(timed.snapshot.nextBreakAt, at(13, 0))
     }
 
+    func testMissedStopKeepsTheFocusStretchAndDropsAHeldPlannedBreak() {
+        // Focus since 10:00. The stop waits for the call from 10:30 and is missed at 11:00, holding the planned
+        // break due at 10:40. The planned break does not start afterwards, and the hour of focus still counts.
+        let stop = hardStop()
+        let walk = PlannedBreak(name: "Walk", symbol: "figure.walk", hour: 10, minute: 40, duration: 30 * 60, weekdays: [2], isEnabled: true)
+        var scheduler = makeScheduler(stops: [stop]) {
+            $0.plannedBreaks = [walk]
+            $0.smartPause.meetingsAndCalls = false
+        }
+        _ = runTimed(&scheduler, from: at(10, 29), through: at(10, 59, 30), step: 30, inputs: { _ in .init(signals: [.meeting]) })
+        XCTAssertEqual(scheduler.tick(now: at(11, 0)), [.hardStopEnded(id: stop.id, reason: .missed)])
+        XCTAssertTrue(runTimed(&scheduler, from: at(11, 0), through: at(11, 15), step: 30).isEmpty)
+        let stats = scheduler.stats(now: at(11, 0))
+        XCTAssertEqual(stats.focusTime, 60 * 60)
+        XCTAssertEqual(stats.longestStretch, 60 * 60)
+        XCTAssertEqual(stats.breaksTaken, 0)
+    }
+
+    func testStopThatStartedBeforeTheRunningOneDoesNotJoinIt() {
+        // A runs 10:30–11:30. B, added at 10:59, ran from 10:00 to 13:00 and would let A be dismissed. It does not
+        // change A; it starts when A ends.
+        let a = hardStop(end: .after(60 * 60))
+        let b = hardStop(hour: 10, minute: 0, end: .at(hour: 13, minute: 0), escapeHatch: .dismissEarly)
+        var scheduler = makeScheduler(stops: [a])
+        _ = scheduler.tick(now: at(10, 30))
+        scheduler.settings.hardStops.append(b)
+        XCTAssertTrue(scheduler.tick(now: at(11, 0)).isEmpty)
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(11, 30))
+        XCTAssertFalse(scheduler.canDismissHardStop(now: at(11, 1)))
+        XCTAssertEqual(scheduler.tick(now: at(11, 30)), [.hardStopEnded(id: a.id, reason: .ended), .hardStopStarted(id: b.id, endsAt: at(13, 0))])
+    }
+
     func testOperationBeforeTickMissesExpiredWaitLikeATick() {
         // S waits for Monday's call; B starts anyway inside it at 10:45 and lasts until dismissed. With no tick
         // until Tuesday 10:40, Monday's S is missed and Tuesday's S, which started inside B, joins B.
@@ -1199,6 +1231,28 @@ final class BreakSchedulerTests: XCTestCase {
             XCTAssertEqual(Set(host.records.map(\.hardStopEndReason)), [.dismissed])
             XCTAssertTrue(runTimed(&host, from: at(10, 41, dayOffset: 2), through: at(11, 0, dayOffset: 2), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
         }
+    }
+
+    func testStopWaitingForCallStartsWhenTheCallEndsAfterATimeZoneChange() throws {
+        // The stop waits for the call from 10:30 UTC. The time zone then moves an hour west, so 10:30 local is
+        // 11:30 UTC. When the call ends at 10:40 UTC, the waiting occurrence starts and ends at its local end.
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        let timed = hardStop()
+        var scheduler = makeScheduler(stops: [timed])
+        XCTAssertTrue(scheduler.tick(now: at(10, 30), inputs: call).isEmpty)
+        scheduler.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -3600))
+        XCTAssertEqual(scheduler.tick(now: at(10, 40)), [.hardStopStarted(id: timed.id, endsAt: at(12, 0))])
+        XCTAssertEqual(scheduler.tick(now: at(12, 0)), [.hardStopEnded(id: timed.id, reason: .ended)])
+        XCTAssertTrue(runTimed(&scheduler, from: at(12, 0), through: at(12, 30), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
+
+        // The same for a stop without an end.
+        let open = hardStop(end: .untilDismissed)
+        var untilDismissed = makeScheduler(stops: [open])
+        XCTAssertTrue(untilDismissed.tick(now: at(10, 30), inputs: call).isEmpty)
+        untilDismissed.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -3600))
+        XCTAssertEqual(untilDismissed.tick(now: at(10, 40)), [.hardStopStarted(id: open.id, endsAt: nil)])
+        XCTAssertEqual(untilDismissed.dismissHardStop(now: at(10, 41)), [.hardStopEnded(id: open.id, reason: .dismissed)])
+        XCTAssertTrue(runTimed(&untilDismissed, from: at(10, 41), through: at(11, 40), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
     }
 
     func testOperationsSeeAStopThatStartedInsideBeforeTheNextTick() {
