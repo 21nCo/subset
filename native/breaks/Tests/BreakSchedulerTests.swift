@@ -947,6 +947,55 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(stats.breaksTaken, 0)
     }
 
+    func testMissedStopFocusCountsOnTheDayItWasMissed() throws {
+        // A missed stop's stretch runs until it is missed, so it belongs to that day, not to the day of the stop's
+        // scheduled start, and counts only its part since midnight.
+        func scheduler(_ stop: HardStop, focusSince: Date) -> BreakScheduler {
+            let base = makeScheduler(stops: [stop])
+            let snapshot = EngineSnapshot(phase: .focusing, focusStartedAt: focusSince, nextBreakAt: focusSince.addingTimeInterval(120 * 60), snoozeDay: calendar.startOfDay(for: focusSince))
+            return BreakScheduler(settings: base.settings, snapshot: snapshot, records: [], calendar: calendar)
+        }
+        func savedAndLoaded(_ scheduler: BreakScheduler) throws -> [BreakRecord] {
+            let suiteName = "BreakSchedulerTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let repository = BreakRepository(defaults: defaults)
+            repository.save(settings: scheduler.settings, snapshot: scheduler.snapshot, records: scheduler.records)
+            return repository.loadRecords()
+        }
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+
+        // Monday 23:30 to Tuesday 00:30, focus since 23:00, missed at 00:30: 30 minutes of it count on Tuesday.
+        let acrossMidnight = hardStop(hour: 23, minute: 30, end: .after(60 * 60))
+        var late = scheduler(acrossMidnight, focusSince: at(23, 0))
+        XCTAssertTrue(late.tick(now: at(23, 30), inputs: call).isEmpty)
+        XCTAssertEqual(late.tick(now: at(0, 30, dayOffset: 1), inputs: call).first, .hardStopEnded(id: acrossMidnight.id, reason: .missed))
+        XCTAssertEqual(late.stats(now: at(0, 30, dayOffset: 1)).focusTime, 30 * 60)
+        XCTAssertEqual(late.stats(now: at(0, 30, dayOffset: 1)).longestStretch, 30 * 60)
+
+        // Tuesday 00:10 to 00:30, focus since Monday 23:50: the 30 minutes since midnight count, not 10.
+        let afterMidnight = hardStop(hour: 0, minute: 10, end: .after(20 * 60), repeats: .weekdays([3]))
+        var early = scheduler(afterMidnight, focusSince: at(23, 50))
+        XCTAssertTrue(early.tick(now: at(0, 10, dayOffset: 1), inputs: call).isEmpty)
+        XCTAssertEqual(early.tick(now: at(0, 30, dayOffset: 1), inputs: call).first, .hardStopEnded(id: afterMidnight.id, reason: .missed))
+        XCTAssertEqual(early.stats(now: at(0, 30, dayOffset: 1)).focusTime, 30 * 60)
+
+        // Relaunched at 00:45, after the stop's end: it is missed then, and its 45 minutes since midnight count on
+        // Tuesday after the history is saved and loaded again. It is neither a break nor a skip.
+        var relaunched = scheduler(acrossMidnight, focusSince: at(23, 0))
+        XCTAssertTrue(relaunched.tick(now: at(23, 30), inputs: call).isEmpty)
+        relaunched = try relaunch(relaunched, at: at(0, 45, dayOffset: 1))
+        XCTAssertEqual(relaunched.tick(now: at(0, 45, dayOffset: 1)), [.hardStopEnded(id: acrossMidnight.id, reason: .missed)])
+        let records = try savedAndLoaded(relaunched)
+        XCTAssertEqual(records.map(\.startedAt), [at(23, 30)])
+        let stats = BreakMath.stats(records: records, snapshot: relaunched.snapshot, now: at(0, 45, dayOffset: 1), calendar: calendar)
+        XCTAssertEqual(stats.focusTime, 45 * 60)
+        XCTAssertEqual(stats.longestStretch, 45 * 60)
+        XCTAssertEqual(stats.breaksTaken, 0)
+        XCTAssertEqual(stats.skippedBreaks, 0)
+        XCTAssertEqual(stats.screenScore, 100)
+    }
+
     func testStopThatStartedBeforeTheRunningOneDoesNotJoinIt() {
         // A runs 10:30–11:30. B, added at 10:59, ran from 10:00 to 13:00 and would let A be dismissed. It does not
         // change A; it starts when A ends.

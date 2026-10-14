@@ -601,6 +601,8 @@ struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
     /// Hard stops only: how the occurrence ended and how many extensions it used.
     var hardStopEndReason: HardStopEndReason?
     var extensionsUsed: Int?
+    /// When the focus stretch ended, if not at `startedAt`. A missed hard stop's stretch runs until it was missed.
+    var focusEndedAt: Date?
 
     /// The most records kept on the device.
     static let historyLimit = 400
@@ -703,8 +705,11 @@ enum BreakMath {
             let currentEnd = snapshot.phase == .breaking ? (snapshot.breakStartedAt ?? now) : now
             currentStretch = max(0, currentEnd.timeIntervalSince(max(startOfDay, snapshot.focusStartedAt)))
         }
-        let stretches = todayRecords.compactMap { record in
-            record.focusDuration.map { min(max(0, $0), max(0, record.startedAt.timeIntervalSince(startOfDay))) }
+        // A stretch belongs to the day it ended on and counts only its part since midnight.
+        let stretches = records.compactMap { record -> TimeInterval? in
+            let focusEnd = record.focusEndedAt ?? record.startedAt
+            guard let focus = record.focusDuration, focusEnd >= startOfDay, focusEnd <= now else { return nil }
+            return min(max(0, focus), focusEnd.timeIntervalSince(startOfDay))
         }
         let focusedDuration = stretches.reduce(currentStretch, +)
         let longest = max(currentStretch, stretches.max() ?? 0)

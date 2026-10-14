@@ -218,10 +218,12 @@ struct BreakScheduler: Sendable {
            snapshot.phase != .breaking {
             // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop. A
             // pause from before the stop does not come back; live signals may pause the new interval below. The
-            // stretch counted until now is kept on the missed record, as on the record of a stop that ran.
+            // stretch counted until now is kept on the missed record, as on the record of a stop that ran, and
+            // belongs to the day it ended on.
             let focus = countedFocus(now: now)
             if focus > 0, let last = records.indices.last, records[last].hardStopEndReason == .missed {
                 records[last].focusDuration = focus
+                records[last].focusEndedAt = now
             }
             startFocusInterval(at: now)
         }
