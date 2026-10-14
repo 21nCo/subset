@@ -31,6 +31,8 @@ final class MacBreakController: ObservableObject {
     private var sleptAt: Date?
     /// The meeting signal from the last signal read, including one read only for hard stops.
     private var callReading = false
+    /// A regular heads-up a hard-stop notice took the panel from.
+    private var displacedHeadsUp = DisplacedHeadsUp()
     /// The extension whose ending notice was already shown.
     private var warnedExtensionUntil: Date?
     /// True during the first tick after launch, which reports what happened to a restored hard stop while the app was off.
@@ -183,7 +185,10 @@ final class MacBreakController: ObservableObject {
         perform { s, now in s.pause(reason: .manual, until: duration.map { now.addingTimeInterval($0) }, now: now) }
     }
     func resume() { perform { $0.resume(now: $1) } }
-    func dismissHeadsUp() { notice.hide() }
+    func dismissHeadsUp() {
+        displacedHeadsUp.withdraw()
+        notice.hide()
+    }
 
     /// Runs a confirmed Extend or Dismiss, if the overlay still offers it for the same stop.
     func performHardStopAction(_ target: HardStopConfirmation.Target) {
@@ -293,7 +298,9 @@ final class MacBreakController: ObservableObject {
             switch event {
             case .headsUp:
                 // Held back while a hard-stop notice is open; it comes back when that notice closes.
-                if settings.reminder.headsUpEnabled, hardStopNoticeSubject == nil { notice.show(kind: .regular) }
+                if settings.reminder.headsUpEnabled, displacedHeadsUp.headsUpDue(hardStopNoticeOpen: hardStopNoticeSubject != nil) {
+                    notice.show(kind: .regular)
+                }
             case .headsUpCancelled:
                 hideRegularHeadsUp()
             case .breakStarted:
@@ -358,24 +365,28 @@ final class MacBreakController: ObservableObject {
     }
 
     /// Shows the first hard-stop notice that still applies, above the overlay while the overlay is up, or, once none
-    /// is left, closes the panel and brings back a regular heads-up that it held back.
+    /// is left, closes the panel and brings back a regular heads-up that it displaced.
     private func syncHardStopNotice(bringToFront: Bool = false) {
         hardStopNotices.prune(scheduler: core, inCall: inCall, now: now)
         if hardStopNotices.shown != nil {
             let layer = HardStopPresentation.noticeLayer(showsHardStopNotice: true, overlayVisible: overlay.isVisible)
             if bringToFront || notice.kind != .hardStop {
+                displacedHeadsUp.hardStopNoticeShown(regularHeadsUpVisible: notice.kind == .regular)
                 notice.show(kind: .hardStop, layer: layer)
             } else {
                 notice.set(layer)
             }
         } else if notice.kind == .hardStop {
             notice.hide()
-            if phase == .headsUp, settings.reminder.headsUpEnabled { notice.show(kind: .regular) }
+            if displacedHeadsUp.restore(stillDue: phase == .headsUp && settings.reminder.headsUpEnabled) {
+                notice.show(kind: .regular)
+            }
         }
     }
 
     /// Hides the notice unless it shows a hard-stop notice, which regular break events do not withdraw.
     private func hideRegularHeadsUp() {
+        displacedHeadsUp.withdraw()
         if notice.kind != .hardStop { notice.hide() }
     }
 

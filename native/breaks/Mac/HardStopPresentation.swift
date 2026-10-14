@@ -358,6 +358,35 @@ struct HardStopNoticeQueue: Equatable {
     }
 }
 
+/// A regular heads-up that a hard-stop notice displaced: one held back because a hard-stop notice was open when it came
+/// due, or one on screen when a hard-stop notice took the panel. It comes back once, when the last hard-stop notice
+/// closes, if its break is still coming. A heads-up the user dismissed, or one withdrawn by its break, stays hidden.
+struct DisplacedHeadsUp: Equatable {
+    private(set) var isHeld = false
+
+    /// A heads-up came due. Returns whether to show it now; while a hard-stop notice is open it is held back instead.
+    mutating func headsUpDue(hardStopNoticeOpen: Bool) -> Bool {
+        isHeld = hardStopNoticeOpen
+        return !hardStopNoticeOpen
+    }
+
+    /// A hard-stop notice takes the panel, from the regular heads-up when that is on screen.
+    mutating func hardStopNoticeShown(regularHeadsUpVisible: Bool) {
+        if regularHeadsUpVisible { isHeld = true }
+    }
+
+    /// The heads-up was dismissed, or cancelled, or its break started, was snoozed or skipped.
+    mutating func withdraw() {
+        isHeld = false
+    }
+
+    /// The last hard-stop notice closed. Returns whether to bring the heads-up back.
+    mutating func restore(stillDue: Bool) -> Bool {
+        defer { isHeld = false }
+        return isHeld && stillDue
+    }
+}
+
 private extension String {
     var lowercasedFirst: String { prefix(1).lowercased() + dropFirst() }
 }

@@ -521,6 +521,42 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertEqual(HardStopPresentation.noticeLayer(showsHardStopNotice: false, overlayVisible: true), .floating)
     }
 
+    func testOnlyAHeadsUpTheHardStopNoticeDisplacedComesBack() {
+        // Held back: due while a hard-stop notice is open, shown once that notice closes.
+        var heldBack = DisplacedHeadsUp()
+        XCTAssertFalse(heldBack.headsUpDue(hardStopNoticeOpen: true))
+        XCTAssertTrue(heldBack.restore(stillDue: true))
+        XCTAssertFalse(heldBack.restore(stillDue: true))
+
+        // On screen when the hard-stop notice took the panel: comes back.
+        var visible = DisplacedHeadsUp()
+        XCTAssertTrue(visible.headsUpDue(hardStopNoticeOpen: false))
+        visible.hardStopNoticeShown(regularHeadsUpVisible: true)
+        XCTAssertTrue(visible.restore(stillDue: true))
+
+        // Dismissed by the user before the hard-stop notice: stays hidden.
+        var dismissed = DisplacedHeadsUp()
+        XCTAssertTrue(dismissed.headsUpDue(hardStopNoticeOpen: false))
+        dismissed.withdraw()
+        dismissed.hardStopNoticeShown(regularHeadsUpVisible: false)
+        XCTAssertFalse(dismissed.restore(stillDue: true))
+
+        // Never shown: nothing comes back.
+        var never = DisplacedHeadsUp()
+        never.hardStopNoticeShown(regularHeadsUpVisible: false)
+        XCTAssertFalse(never.restore(stillDue: true))
+
+        // Held back, then its break started (or it was cancelled): stays hidden, also once the next one is due.
+        var withdrawn = DisplacedHeadsUp()
+        XCTAssertFalse(withdrawn.headsUpDue(hardStopNoticeOpen: true))
+        withdrawn.withdraw()
+        XCTAssertFalse(withdrawn.restore(stillDue: true))
+        // Held back, but its break is no longer coming when the notice closes.
+        var stale = DisplacedHeadsUp()
+        XCTAssertFalse(stale.headsUpDue(hardStopNoticeOpen: true))
+        XCTAssertFalse(stale.restore(stillDue: false))
+    }
+
     // MARK: - Menu bar
 
     func testMenuBarLabelInEachState() {
