@@ -274,6 +274,15 @@ struct HardStop: Codable, Equatable, Identifiable, Sendable {
         return Occurrence(start: start, end: end(start: start, onDayOf: day, startHour: parts.hour, startMinute: parts.minute, calendar: calendar), key: key)
     }
 
+    /// The occurrence identified by `key` when the stop as configured now still has it: on a day it repeats, at its
+    /// configured start time, and with a window that daylight-saving time does not skip. Nil once its time or days change.
+    func scheduledOccurrence(forKey key: Int, calendar: Calendar) -> Occurrence? {
+        let parts = Occurrence.parts(of: key)
+        guard let day = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: parts.day)),
+              let occurrence = occurrence(onDayOf: day, calendar: calendar), occurrence.key == key else { return nil }
+        return occurrence
+    }
+
     /// True when the occurrence may start at `now`: from its start until its scheduled end. A stop without an end
     /// stays due through the day after it starts, so one missed while the host was off still starts on return.
     func isDue(_ occurrence: Occurrence, now: Date, calendar: Calendar) -> Bool {

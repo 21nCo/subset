@@ -620,7 +620,7 @@ struct BreakScheduler: Sendable {
     /// still due or waiting for a call comes first, so a later one never starts past it.
     private func earlyStart(id: UUID, occurrenceKey key: Int, now: Date) -> (HardStop, HardStop.Occurrence)? {
         guard let stop = settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
-              let occurrence = stop.occurrence(forKey: key, calendar: calendar), !isHandled(stop, occurrence) else { return nil }
+              let occurrence = hardStopOccurrence(stop, key: key), !isHandled(stop, occurrence) else { return nil }
         if let waitingKey = snapshot.hardStopsWaitingForCall[stop.id.uuidString] {
             // Waits whose end has passed were recorded as missed first, so this one is still open.
             if waitingKey < key { return nil }
@@ -633,6 +633,14 @@ struct BreakScheduler: Sendable {
         guard !earlierDue, occurrence.start <= latest,
               occurrence.start > now || stop.isDue(occurrence, now: now, calendar: calendar) else { return nil }
         return (stop, occurrence)
+    }
+
+    /// Occurrence `key` of `stop` as a warning and Start now see it. One that waits for a call keeps its identity, as
+    /// it does for the tick; any other must still be an occurrence of the stop as configured now.
+    func hardStopOccurrence(_ stop: HardStop, key: Int) -> HardStop.Occurrence? {
+        snapshot.hardStopsWaitingForCall[stop.id.uuidString] == key
+            ? stop.occurrence(forKey: key, calendar: calendar)
+            : stop.scheduledOccurrence(forKey: key, calendar: calendar)
     }
 
     /// Shows the hidden stop again before its extension runs out, as **Start now** on the notice before an extension

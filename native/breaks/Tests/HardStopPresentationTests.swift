@@ -29,7 +29,7 @@ final class HardStopPresentationTests: XCTestCase {
                  escapeHatch: escapeHatch, duringCalls: duringCalls)
     }
 
-    private func makeScheduler(_ stops: [HardStop]) -> BreakScheduler {
+    private func makeScheduler(_ stops: [HardStop], start: Date? = nil) -> BreakScheduler {
         var settings = BreakSettings()
         settings.officeHours.isEnabled = false
         settings.plannedBreaks = []
@@ -37,7 +37,7 @@ final class HardStopPresentationTests: XCTestCase {
         settings.wellness.blinkEnabled = false
         settings.wellness.postureEnabled = false
         settings.hardStops = stops
-        let start = at(12, 0)
+        let start = start ?? at(12, 0)
         let snapshot = EngineSnapshot(
             phase: .focusing, focusStartedAt: start, nextBreakAt: start.addingTimeInterval(settings.workInterval),
             snoozeDay: calendar.startOfDay(for: start)
@@ -175,6 +175,51 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertEqual(notice?.canStartNow, true)
         XCTAssertEqual(scheduler.tick(now: at(12, 22)).filter { if case .hardStopWarning = $0 { true } else { false } }, [],
                        "The scheduler does not warn again, so the queued warning is the only one")
+    }
+
+    func testWarningForAnOccurrenceThatNoLongerExistsIsDropped() {
+        // Lunch's 12:30 warning is queued, then the stop moves to 13:00, or to Tuesdays.
+        let changes: [(String, (inout HardStop) -> Void)] = [
+            ("time", { $0.hour = 13 }),
+            ("days", { $0.repeats = .weekdays([3]) })
+        ]
+        for (change, apply) in changes {
+            var scheduler = makeScheduler([lunch()])
+            let id = scheduler.settings.hardStops[0].id
+            _ = scheduler.tick(now: at(12, 20))
+            var queue = HardStopNoticeQueue()
+            queue.add(.warning(id: id, occurrenceKey: key(12, 30)))
+            apply(&scheduler.settings.hardStops[0])
+            let before = scheduler.snapshot
+
+            queue.prune(scheduler: scheduler, inCall: false, now: at(12, 21))
+            XCTAssertNil(queue.shown, "After a \(change) change")
+            XCTAssertFalse(scheduler.canStartHardStopEarly(id: id, occurrenceKey: key(12, 30), now: at(12, 21)), "After a \(change) change")
+            XCTAssertEqual(scheduler.startHardStopEarly(id: id, occurrenceKey: key(12, 30), now: at(12, 21)), [], "After a \(change) change")
+            XCTAssertEqual(scheduler.snapshot, before, "After a \(change) change")
+        }
+    }
+
+    func testWarningForAWindowThatDaylightSavingTimeSkipsIsDropped() {
+        // Sunday 02:30–03:00, warned in UTC; in New York, clocks skip from 02:00 to 03:00 on Sunday 8 March 2026.
+        let stop = HardStop(name: "Night", hour: 2, minute: 30, end: .at(hour: 3, minute: 0), repeats: .weekdays([1]),
+                            warningMinutes: [120], escapeHatch: .none, duringCalls: .startAnyway)
+        let utc = { (hour: Int) in self.calendar.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: hour))! }
+        let night = HardStop.Occurrence.key(year: 2026, month: 3, day: 8, hour: 2, minute: 30)
+        var scheduler = makeScheduler([stop], start: utc(0))
+        XCTAssertEqual(scheduler.tick(now: utc(0) + 30 * 60),
+                       [.hardStopWarning(id: stop.id, occurrenceKey: night, startsAt: utc(2) + 30 * 60, waitingForCall: false)])
+        var queue = HardStopNoticeQueue()
+        queue.add(.warning(id: stop.id, occurrenceKey: night))
+
+        scheduler.calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        let before = scheduler.snapshot
+        // 05:00 UTC is midnight in New York, two hours before the skipped window would begin.
+        queue.prune(scheduler: scheduler, inCall: false, now: utc(5))
+        XCTAssertNil(queue.shown)
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: night, now: utc(5)))
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: night, now: utc(5)), [])
+        XCTAssertEqual(scheduler.snapshot, before)
     }
 
     func testWarningForALaterStopShowsWhileAStopRuns() {
