@@ -33,6 +33,8 @@ final class MacBreakController: ObservableObject {
     private var callReading = false
     /// The extension whose ending notice was already shown.
     private var warnedExtensionUntil: Date?
+    /// True during the first tick after launch, which reports what happened to a restored hard stop while the app was off.
+    private var isRestoring = false
 
     init(repository: BreakRepository = BreakRepository()) {
         self.repository = repository
@@ -156,7 +158,9 @@ final class MacBreakController: ObservableObject {
         })
         refreshLaunchAtLogin()
         // Tick once now, so a restored hard stop covers the screens without waiting for the timer.
+        isRestoring = true
         tick()
+        isRestoring = false
     }
 
     func stop() {
@@ -325,7 +329,7 @@ final class MacBreakController: ObservableObject {
                 // A missed stop never showed; another stop or a break may be on screen.
                 guard reason != .missed, !startsHardStop else { break }
                 overlay.hide()
-                if reason == .ended { playSound(completion: true) }
+                if HardStopPresentation.chimesOnEnd(reason, afterRelaunch: isRestoring) { playSound(completion: true) }
             }
         }
         reconcileHardStop()

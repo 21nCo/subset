@@ -160,6 +160,12 @@ struct HardStopPresentation: Equatable {
         return until
     }
 
+    /// Whether a stop's end plays the completion chime. An end that passed while the app was not running, reported by
+    /// the first tick after launch, ends silently, like a regular break that ran out then.
+    static func chimesOnEnd(_ reason: HardStopEndReason, afterRelaunch: Bool) -> Bool {
+        reason == .ended && !afterRelaunch
+    }
+
     /// Runs a confirmed Extend or Dismiss, only while the overlay at `now` still shows that action for that stop, so a
     /// confirmation never applies to another stop or another extension length. Returns the scheduler's events.
     static func perform(

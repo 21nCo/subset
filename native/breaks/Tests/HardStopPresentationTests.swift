@@ -321,6 +321,25 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(outlasts, at: at(12, 59, 30), notice: .extensionEnding).notice)
     }
 
+    func testStopThatEndedWhileTheAppWasOffEndsWithoutAChime() {
+        let stop = lunch()
+        var running = makeScheduler([stop])
+        _ = running.tick(now: at(12, 30))
+
+        // Relaunched after the end: the first tick ends the restored stop, and that end is silent.
+        var restored = BreakScheduler(settings: running.settings, snapshot: running.snapshot, records: running.records,
+                                      calendar: calendar)
+        restored.reconcileRestoredState(now: at(13, 20))
+        XCTAssertEqual(restored.tick(now: at(13, 20)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, afterRelaunch: true))
+
+        // An end reached while the app runs chimes; a dismissal or a missed stop never does.
+        XCTAssertEqual(running.tick(now: at(13, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, afterRelaunch: false))
+    }
+
     // MARK: - Menu bar
 
     func testMenuBarLabelInEachState() {
