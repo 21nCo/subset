@@ -86,7 +86,7 @@ final class MacBreakController: ObservableObject {
     var isWithinOfficeHours: Bool { settings.officeHours.contains(now) }
     var calendar: Calendar { core.calendar }
     var nextHardStop: (stop: HardStop, start: Date)? { core.nextHardStop(after: now) }
-    func isHardStopRunning(id: UUID) -> Bool { core.isHardStopRunning(id: id, now: now) }
+    func runningHardStop(containing id: UUID) -> ActiveHardStop? { core.runningHardStop(containing: id, now: now) }
 
     /// Why the hard-stop notice is open.
     var hardStopNoticeSubject: HardStopPresentation.NoticeSubject? { hardStopNotices.shown }

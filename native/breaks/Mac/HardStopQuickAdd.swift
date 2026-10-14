@@ -20,17 +20,31 @@ struct HardStopQuickAdd: Equatable {
         let later = now.addingTimeInterval(30 * 60)
         let parts = calendar.dateComponents([.minute, .second, .nanosecond], from: later)
         let past = TimeInterval((parts.minute ?? 0) % 5 * 60 + (parts.second ?? 0)) + TimeInterval(parts.nanosecond ?? 0) / 1e9
-        let start = past > 0 ? later.addingTimeInterval(5 * 60 - past) : later
-        let clock = calendar.dateComponents([.hour, .minute], from: start)
+        let first = past > 0 ? later.addingTimeInterval(5 * 60 - past) : later
+        let clock = calendar.dateComponents([.hour, .minute], from: first)
         hour = clock.hour ?? 0
         minute = clock.minute ?? 0
-        // When clocks go back, a stop's time in the repeated hour means its first pass, which may already be over.
-        // Move on to the first 5-minute time today whose start is still at least 30 minutes away.
-        guard calendar.isDate(start, inSameDayAs: now) else { return }
-        while hour * 60 + minute < 24 * 60 - 5,
-              let today = stop(onDayOf: now, calendar: calendar).start(onDayOf: now, calendar: calendar), today < later {
-            (hour, minute) = ((hour * 60 + minute + 5) / 60, (minute + 5) % 60)
+        // When clocks go back, a time in the repeated hour means its first pass, which may already be over, and the
+        // stop would wait a day. Step on 5 minutes at a time, past midnight if need be, to the first time whose stop
+        // starts at that very moment. A day of steps covers any change; if none matches, the first time stays.
+        for step in 0...24 * 12 {
+            let candidate = first.addingTimeInterval(TimeInterval(step * 5 * 60))
+            let clock = calendar.dateComponents([.hour, .minute], from: candidate)
+            var values = self
+            (values.hour, values.minute) = (clock.hour ?? 0, clock.minute ?? 0)
+            if let start = values.start(now: now, calendar: calendar), abs(start.timeIntervalSince(candidate)) < 1 {
+                self = values
+                break
+            }
         }
+    }
+
+    /// When the stop that `stop(now:calendar:)` creates starts.
+    func start(now: Date, calendar: Calendar) -> Date? {
+        let stop = stop(now: now, calendar: calendar)
+        guard case .once(let day) = stop.repeats,
+              let date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else { return nil }
+        return stop.start(onDayOf: date, calendar: calendar)
     }
 
     /// True when the chosen time is earlier than `now` today, so the stop is for tomorrow. A time in the current
@@ -233,13 +247,14 @@ extension BreakSettings {
 
 extension BreakScheduler {
     /// The enabled stop whose next occurrence starts first after `now`, and that start. Repeating stops are looked up
-    /// a week ahead; an occurrence that already ran, joined another, or was missed is skipped.
+    /// two weeks ahead, so a weekly one whose next day has no occurrence (the clocks skip its time) is still found.
+    /// An occurrence that already ran, joined another, or was missed is skipped.
     func nextHardStop(after now: Date) -> (stop: HardStop, start: Date)? {
         let today = calendar.startOfDay(for: now)
         var next: (stop: HardStop, start: Date)?
         for stop in settings.hardStops where stop.isEnabled {
             let days: [Date] = switch stop.repeats {
-            case .weekdays: (0...7).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
+            case .weekdays: (0...14).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
             case .once(let date): [calendar.date(from: DateComponents(year: date.year, month: date.month, day: date.day))].compactMap { $0 }
             }
             let handled = snapshot.handledHardStops[stop.id.uuidString] ?? .min

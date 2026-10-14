@@ -599,20 +599,31 @@ struct BreakScheduler: Sendable {
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
-    /// True when the stop with `id` is part of the running hard stop, shown or hidden by an extension, as its own
-    /// occurrence or one merged into it. Like `deleteHardStop`, this follows any stop that has started inside it.
-    func isHardStopRunning(id: UUID, now: Date) -> Bool {
-        guard let active = activeHardStop(now: now) else { return false }
-        return active.id == id || active.merged.contains { $0.id == id }
+    /// The running hard stop that the stop with `id` is part of, shown or hidden by an extension, as its own occurrence
+    /// or one merged into it, while its end is still ahead (once it has passed, the next tick ends it). Like
+    /// `deleteHardStop`, this follows any stop that has started inside it.
+    func runningHardStop(containing id: UUID, now: Date) -> ActiveHardStop? {
+        guard let active = activeHardStop(now: now), active.id == id || active.merged.contains(where: { $0.id == id }),
+              active.endsAt.map({ now < $0 }) ?? true else { return nil }
+        return active
     }
 
-    /// Removes the stop with `id` from the settings. When it is part of the running stop (`isHardStopRunning`), that
-    /// stop ends now and is recorded as dismissed, whatever its escape hatch allows.
+    func isHardStopRunning(id: UUID, now: Date) -> Bool {
+        runningHardStop(containing: id, now: now) != nil
+    }
+
+    /// Removes the stop with `id` from the settings. When it is part of the running stop (`runningHardStop`), that
+    /// stop ends now and is recorded as dismissed, whatever its escape hatch allows. One whose end has passed before
+    /// the next tick ended it is recorded as ended at that end, as the tick would.
     mutating func deleteHardStop(id: UUID, now: Date) -> [Event] {
         var events: [Event] = []
-        if isHardStopRunning(id: id, now: now) {
+        if let active = activeHardStop(now: now), active.id == id || active.merged.contains(where: { $0.id == id }) {
             events += reconcileMerges(now: now)
-            events += finishHardStop(.dismissed, endedAt: now, now: now)
+            if let end = active.endsAt, now >= end {
+                events += finishHardStop(.ended, endedAt: end, now: now)
+            } else {
+                events += finishHardStop(.dismissed, endedAt: now, now: now)
+            }
         }
         settings.hardStops.removeAll { $0.id == id }
         pruneHardStopProgress()

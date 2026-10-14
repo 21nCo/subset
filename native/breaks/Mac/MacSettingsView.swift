@@ -283,8 +283,12 @@ private struct ScheduleSettingsTab: View {
         ) { stop in
             Button("Delete", role: .destructive) { controller.deleteHardStop(id: stop.id) }
         } message: { stop in
-            if controller.isHardStopRunning(id: stop.id) {
-                Text("This hard stop is running. Deleting it ends it now and records it as dismissed.")
+            if let running = controller.runningHardStop(containing: stop.id) {
+                if running.id == stop.id {
+                    Text("This hard stop is running. Deleting it ends it now and records it as dismissed.")
+                } else {
+                    Text("This hard stop has joined “\(running.name)”, which is running. Deleting it ends “\(running.name)” now too and records both as dismissed.")
+                }
             } else {
                 Text("This hard stop will be removed.")
             }

@@ -164,6 +164,59 @@ final class HardStopSettingsTests: XCTestCase {
         }
     }
 
+    func testQuickAddWhereClocksGoBackAtMidnight() throws {
+        var beirut = Calendar(identifier: .gregorian)
+        beirut.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Beirut"))
+        func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
+
+        // Saturday 24 October 2026: at midnight clocks go back to 23:00, so 23:00 to 24:00 comes twice. Half an hour on
+        // from 23:40 (first pass), 23:58, or 23:10 (second pass) is in the second pass, which a stop's 23:xx cannot
+        // mean; the default is midnight, tomorrow by the calendar, not 23:xx a day later.
+        for now in try ["2026-10-24T20:40:00Z", "2026-10-24T20:58:00Z", "2026-10-24T21:10:00Z"].map(instant) {
+            let values = HardStopQuickAdd(now: now, calendar: beirut)
+            XCTAssertEqual([values.hour, values.minute], [0, 0])
+            XCTAssertTrue(values.startsTomorrow(now: now, calendar: beirut))
+            var settings = BreakSettings()
+            let quick = values.stop(now: now, calendar: beirut)
+            XCTAssertEqual(settings.saveHardStop(quick, isNew: true, now: now, calendar: beirut), [])
+            XCTAssertEqual(quick.repeats, .once(DateComponents(year: 2026, month: 10, day: 25)))
+            let day = try instant("2026-10-24T22:00:00Z")
+            XCTAssertEqual(settings.hardStops.first?.start(onDayOf: day, calendar: beirut), day)
+        }
+    }
+
+    func testQuickAddDefaultIsTheFirstTimeAtLeastHalfAnHourAheadAroundEachClockChange() throws {
+        func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
+        let changes = try [
+            ("America/New_York", instant("2026-03-08T07:00:00Z")),
+            ("America/New_York", instant("2026-11-01T06:00:00Z")),
+            ("Asia/Beirut", instant("2026-10-24T21:00:00Z")),
+            ("America/Santiago", instant("2026-04-05T03:00:00Z")),
+        ]
+        for (zone, change) in changes {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+            // Every 5 minutes for 3 hours either side, on the minute and between minutes.
+            for step in -36...36 {
+                for seconds in [0.0, 170.5] {
+                    let now = change.addingTimeInterval(TimeInterval(step * 5 * 60) + seconds)
+                    let values = HardStopQuickAdd(now: now, calendar: calendar)
+                    let quick = values.stop(now: now, calendar: calendar)
+                    guard case .once(let date) = quick.repeats else { return XCTFail("\(zone) \(now): not a one-off stop") }
+                    let day = try XCTUnwrap(calendar.date(from: DateComponents(year: date.year, month: date.month, day: date.day)))
+                    let start = try XCTUnwrap(quick.start(onDayOf: day, calendar: calendar))
+                    let context = "\(zone) \(now): \(values.hour):\(values.minute) starts \(start)"
+                    XCTAssertGreaterThanOrEqual(start, now.addingTimeInterval(30 * 60), context)
+                    // At most the 5-minute rounding plus the hour the clocks repeat.
+                    XCTAssertLessThan(start, now.addingTimeInterval(95 * 60), context)
+                    XCTAssertEqual(values.startsTomorrow(now: now, calendar: calendar), !calendar.isDate(start, inSameDayAs: now), context)
+                    let clock = calendar.dateComponents([.hour, .minute], from: start)
+                    XCTAssertEqual([clock.hour, clock.minute], [values.hour, values.minute], context)
+                }
+            }
+        }
+    }
+
     // MARK: - Quick add: the stop
 
     func testQuickAddCreatesAOneOffStopWithTheDefaultsThatStartsOnTheNextTick() {
@@ -376,6 +429,30 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(scheduler.tick(now: at(12, 51)).filter(isStart), [])
     }
 
+    func testDeletingAStopWhoseEndHasPassedBeforeTheTickRecordsItAsEnded() {
+        for extended in [false, true] {
+            // Lunch runs 12:30 to 13:00; no tick comes at or after its end.
+            for now in [at(13, 0), at(13, 0).addingTimeInterval(0.5)] {
+                let lunch = stop(escapeHatch: .extend(minutes: 15, times: 1))
+                var scheduler = makeScheduler([lunch])
+                _ = scheduler.tick(now: at(12, 30))
+                // Hidden until 13:05, after the stop's end.
+                if extended { XCTAssertFalse(scheduler.extendHardStop(now: at(12, 50)).isEmpty) }
+                XCTAssertFalse(scheduler.isHardStopRunning(id: lunch.id, now: now))
+                XCTAssertNil(scheduler.runningHardStop(containing: lunch.id, now: now))
+
+                XCTAssertEqual(scheduler.deleteHardStop(id: lunch.id, now: now), [.hardStopEnded(id: lunch.id, reason: .ended)])
+                XCTAssertNil(scheduler.snapshot.activeHardStop)
+                XCTAssertEqual(scheduler.settings.hardStops, [])
+                let record = scheduler.records.last
+                XCTAssertEqual(record?.hardStopEndReason, .ended, "extended: \(extended)")
+                XCTAssertEqual(record?.completed, true)
+                XCTAssertEqual(record?.endedAt, at(13, 0))
+                XCTAssertEqual(record?.extensionsUsed, extended ? 1 : 0)
+            }
+        }
+    }
+
     func testDeletingAStopThatIsNotRunningRecordsNothing() {
         let lunch = stop()
         let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
@@ -433,6 +510,17 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(HardStopText.next(lunch, start: at(12, 30, dayOffset: 7), now: at(13, 0), locale: locale, calendar: calendar),
                        "Next hard stop: Lunch at 12:30 on Mon 17 Aug")
         XCTAssertNil(makeScheduler([off]).nextHardStop(after: at(10, 0)))
+    }
+
+    func testNextHardStopLooksPastAWeekWhoseOccurrenceTheClocksSkip() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        // Sundays 2:00 to 2:45: on 8 March 2026 the clocks skip from 2:00 to 3:00, so that week has none.
+        let early = stop("Early", hour: 2, minute: 0, end: .at(hour: 2, minute: 45), repeats: .weekdays([1]))
+        let base = makeScheduler([early])
+        let scheduler = BreakScheduler(settings: base.settings, snapshot: base.snapshot, records: [], calendar: newYork)
+        let monday = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-02T15:00:00Z"))
+        XCTAssertEqual(scheduler.nextHardStop(after: monday)?.start, ISO8601DateFormatter().date(from: "2026-03-15T06:00:00Z"))
     }
 
     func testRowSummaries() {
