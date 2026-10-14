@@ -5,6 +5,8 @@ enum SharedStore {
     static let settingsKey = "break.settings"
     static let snapshotKey = "break.snapshot"
     static let recordsKey = "break.records"
+    /// Hard-stop history, kept apart so `recordsKey` holds only kinds that earlier builds can decode.
+    static let hardStopRecordsKey = "break.hard-stop-records"
     static let selectionKey = "break.family-selection"
     static let commandKey = "break.pending-command"
     static let activeBreakEndKey = "break.active-end"
@@ -66,14 +68,20 @@ struct BreakRepository {
             ?? EngineSnapshot(nextBreakAt: now.addingTimeInterval(settings.workInterval))
     }
 
+    /// Earlier builds decode the whole `recordsKey` array and fail on a kind they do not know, then save over it.
+    /// Hard-stop records are therefore saved under their own key, which those builds leave alone.
     func loadRecords() -> [BreakRecord] {
-        decode([BreakRecord].self, key: SharedStore.recordsKey) ?? []
+        let records = (decode([BreakRecord].self, key: SharedStore.recordsKey) ?? [])
+            + (decode([BreakRecord].self, key: SharedStore.hardStopRecordsKey) ?? [])
+        return Array(records.sorted { $0.endedAt < $1.endedAt }.suffix(BreakRecord.historyLimit))
     }
 
     func save(settings: BreakSettings, snapshot: EngineSnapshot, records: [BreakRecord]) {
         encode(settings, key: SharedStore.settingsKey)
         encode(snapshot, key: SharedStore.snapshotKey)
-        encode(Array(records.suffix(BreakRecord.historyLimit)), key: SharedStore.recordsKey)
+        let kept = records.suffix(BreakRecord.historyLimit)
+        encode(kept.filter { $0.kind != .hardStop }, key: SharedStore.recordsKey)
+        encode(kept.filter { $0.kind == .hardStop }, key: SharedStore.hardStopRecordsKey)
     }
 
     func setCommand(_ command: String) {

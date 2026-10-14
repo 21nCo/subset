@@ -101,9 +101,10 @@ struct BreakScheduler: Sendable {
         max(0, settings.snoozesAllowedPerDay - snapshot.snoozesUsedToday)
     }
 
-    /// Discipline levels do not apply to hard stops: a hard stop is never skipped, snoozed, or ended early.
+    /// Discipline levels do not apply to hard stops: a hard stop is never skipped, snoozed, or ended early. Nor is
+    /// a break that runs while a due stop waits for a call; it ends on time.
     func canSkipBreak(now: Date) -> Bool {
-        guard snapshot.activeHardStop == nil else { return false }
+        guard !hardStopHoldsSchedule else { return false }
         return switch settings.discipline {
         case .casual: true
         case .balanced: now.timeIntervalSince(snapshot.breakStartedAt ?? now) >= Self.balancedSkipDelay
@@ -113,32 +114,46 @@ struct BreakScheduler: Sendable {
 
     /// Seconds until a Balanced break can be skipped, or nil when no wait applies.
     func skipAvailableIn(now: Date) -> TimeInterval? {
-        guard settings.discipline == .balanced, snapshot.phase == .breaking, snapshot.activeHardStop == nil, !canSkipBreak(now: now) else { return nil }
+        guard settings.discipline == .balanced, snapshot.phase == .breaking, !hardStopHoldsSchedule, !canSkipBreak(now: now) else { return nil }
         return Self.balancedSkipDelay - now.timeIntervalSince(snapshot.breakStartedAt ?? now)
     }
 
     func canEndEarly(now: Date) -> Bool {
-        snapshot.activeHardStop == nil && settings.allowEarlyEnd && breakProgress(now: now) >= settings.earlyEndProgress
+        !hardStopHoldsSchedule && settings.allowEarlyEnd && breakProgress(now: now) >= settings.earlyEndProgress
     }
 
-    var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore && snapshot.activeHardStop == nil }
+    var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore && !hardStopHoldsSchedule }
 
     /// True while a hard stop runs, or is due and waits for a call. Either holds the regular schedule.
     var hardStopHoldsSchedule: Bool {
         snapshot.activeHardStop != nil || !snapshot.hardStopsWaitingForCall.isEmpty
     }
 
-    /// True when the shown hard stop's escape hatch has an extension left.
+    /// True when the shown hard stop's escape hatch has an extension left. Like `extendHardStop`, this follows
+    /// any stop that has started inside the running one, even before the next tick merges it.
     func canExtendHardStop(now: Date) -> Bool {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.extendAllowed(now: now)
+    }
+
+    /// A stop without an end can always be dismissed; one with an end only when its escape hatch allows it, and
+    /// not once its end has passed (the next tick ends it). Like `dismissHardStop`, this follows any stop that has
+    /// started inside the running one.
+    func canDismissHardStop(now: Date) -> Bool {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.dismissAllowed(now: now)
+    }
+
+    private func extendAllowed(now: Date) -> Bool {
         guard let active = snapshot.activeHardStop, active.extendedUntil == nil,
               active.endsAt.map({ now < $0 }) ?? true,
               case .extend(_, let times) = active.escapeHatch else { return false }
         return active.extensionsUsed < times
     }
 
-    /// A stop without an end can always be dismissed; one with an end only when its escape hatch allows it, and
-    /// not once its end has passed (the next tick ends it).
-    func canDismissHardStop(now: Date) -> Bool {
+    private func dismissAllowed(now: Date) -> Bool {
         guard let active = snapshot.activeHardStop else { return false }
         guard let end = active.endsAt else { return true }
         return now < end && active.escapeHatch == .dismissEarly
@@ -191,7 +206,7 @@ struct BreakScheduler: Sendable {
             // A due stop that waits for a call holds the regular schedule too. A break that is already running
             // still ends on time; a heads-up is withdrawn.
             if snapshot.phase == .breaking, now >= snapshot.breakEndsAt ?? .distantFuture {
-                events += endBreak(completed: true, now: now)
+                events += finishBreak(completed: true, now: now)
             } else if snapshot.phase == .headsUp {
                 snapshot.phase = .focusing
                 events.append(.headsUpCancelled)
@@ -213,7 +228,7 @@ struct BreakScheduler: Sendable {
 
         if snapshot.phase == .breaking {
             if now >= snapshot.breakEndsAt ?? .distantFuture {
-                events += endBreak(completed: true, now: now)
+                events += finishBreak(completed: true, now: now)
             }
             clearWellnessCadence()
             return events
@@ -301,9 +316,10 @@ struct BreakScheduler: Sendable {
         return startPlannedBreak(planned, occurrence: occurrence, now: now)
     }
 
-    /// Ends a regular or planned break. A hard stop ends only through its own rules and `dismissHardStop`.
+    /// Ends a regular or planned break. A hard stop ends only through its own rules and `dismissHardStop`, and a
+    /// break that runs while a due stop waits for a call ends only on time.
     mutating func endBreak(completed: Bool, now: Date) -> [Event] {
-        guard snapshot.activeHardStop == nil else { return [] }
+        guard !hardStopHoldsSchedule else { return [] }
         return finishBreak(completed: completed, now: now)
     }
 
@@ -340,9 +356,9 @@ struct BreakScheduler: Sendable {
 
     /// Postpones the upcoming break, or (when allowed) the break that is running. Uses one daily snooze.
     /// A snoozed active break is not recorded as skipped.
-    /// Has no effect while a hard stop is running, and then uses no snooze.
+    /// Has no effect while a hard stop runs or waits for a call, and then uses no snooze.
     mutating func snooze(minutes: Int, now: Date) -> [Event] {
-        guard snapshot.activeHardStop == nil else { return [] }
+        guard !hardStopHoldsSchedule else { return [] }
         resetDailyCountersIfNeeded(now: now)
         guard minutes > 0, snoozesRemaining > 0 else { return [] }
         let duringBreak = snapshot.phase == .breaking
@@ -437,7 +453,7 @@ struct BreakScheduler: Sendable {
             let end = snapshot.breakEndsAt ?? now
             if end > now { return true }
             // The break ran its full length while the app was not running: record it as completed.
-            _ = endBreak(completed: true, now: end)
+            _ = finishBreak(completed: true, now: end)
             startFocusInterval(at: now)
             return false
         }
@@ -506,7 +522,7 @@ struct BreakScheduler: Sendable {
     mutating func extendHardStop(now: Date) -> [Event] {
         var next = self
         let events = next.reconcileMerges(now: now)
-        guard next.canExtendHardStop(now: now), var active = next.snapshot.activeHardStop,
+        guard next.extendAllowed(now: now), var active = next.snapshot.activeHardStop,
               case .extend(let minutes, _) = active.escapeHatch else { return [] }
         self = next
         let until = now.addingTimeInterval(TimeInterval(minutes * 60))
@@ -527,7 +543,7 @@ struct BreakScheduler: Sendable {
     mutating func dismissHardStop(now: Date) -> [Event] {
         var next = self
         let events = next.reconcileMerges(now: now)
-        guard next.canDismissHardStop(now: now) else { return [] }
+        guard next.dismissAllowed(now: now) else { return [] }
         self = next
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }

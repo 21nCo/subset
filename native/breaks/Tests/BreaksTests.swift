@@ -86,6 +86,33 @@ final class BreaksTests: XCTestCase {
         XCTAssertEqual(repository.loadRecords().count, 1)
     }
 
+    func testHardStopHistorySurvivesAnEarlierBuildSavingItsHistory() throws {
+        let suiteName = "BreaksTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let repository = BreakRepository(defaults: defaults)
+        let start = Date(timeIntervalSince1970: 1_786_000_000)
+        func record(_ kind: BreakKind, _ minute: Double) -> BreakRecord {
+            BreakRecord(startedAt: start + minute * 60, endedAt: start + minute * 60 + 20, plannedDuration: 20, kind: kind, completed: true, skipped: false)
+        }
+        let records = [record(.short, 0), record(.hardStop, 10), record(.long, 20)]
+        repository.save(settings: BreakSettings(), snapshot: EngineSnapshot(), records: records)
+
+        // An earlier build knows only these kinds and decodes the whole history array at once.
+        struct EarlierRecord: Codable {
+            enum Kind: String, Codable { case short, long, planned, manual }
+            var id: UUID
+            var kind: Kind
+        }
+        let legacy = try JSONDecoder().decode([EarlierRecord].self, from: XCTUnwrap(defaults.data(forKey: SharedStore.recordsKey)))
+        XCTAssertEqual(legacy.map(\.id), [records[0].id, records[2].id])
+
+        // It saves its own history, with a new break, and does not know the hard-stop key.
+        let newer = record(.short, 30)
+        defaults.set(try JSONEncoder().encode([records[0], records[2], newer]), forKey: SharedStore.recordsKey)
+        XCTAssertEqual(repository.loadRecords().map(\.id), [records[0].id, records[1].id, records[2].id, newer.id])
+    }
+
     // MARK: - Hard stops
 
     private var utc: Calendar {

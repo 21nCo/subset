@@ -1098,6 +1098,61 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertTrue(scheduler.records.isEmpty)
     }
 
+    func testScheduleOperationsAreRefusedWhileAStopWaitsForACall() throws {
+        // The meeting does not pause reminders here, so only the stop that waits for the call holds the schedule.
+        // Snooze and skip change nothing and use no snooze, whether the stop then starts or is missed.
+        let stop = hardStop()
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        func assertRefused(_ scheduler: inout BreakScheduler, now: Date, file: StaticString = #filePath, line: UInt = #line) {
+            let before = scheduler
+            XCTAssertFalse(scheduler.canSkipBreak(now: now), file: file, line: line)
+            XCTAssertNil(scheduler.skipAvailableIn(now: now), file: file, line: line)
+            XCTAssertFalse(scheduler.canEndEarly(now: now), file: file, line: line)
+            XCTAssertFalse(scheduler.canSnoozeActiveBreak(now: now), file: file, line: line)
+            XCTAssertFalse(scheduler.canSkipUpcomingBreak, file: file, line: line)
+            XCTAssertTrue(scheduler.snooze(minutes: 5, now: now).isEmpty, file: file, line: line)
+            XCTAssertTrue(scheduler.skipUpcomingBreak(now: now).isEmpty, file: file, line: line)
+            XCTAssertTrue(scheduler.skipActiveBreak(now: now).isEmpty, file: file, line: line)
+            XCTAssertTrue(scheduler.endBreak(completed: true, now: now).isEmpty, file: file, line: line)
+            XCTAssertEqual(scheduler.snapshot, before.snapshot, file: file, line: line)
+            XCTAssertEqual(scheduler.records, before.records, file: file, line: line)
+        }
+
+        var starts = makeScheduler(stops: [stop]) { $0.discipline = .casual; $0.smartPause.meetingsAndCalls = false }
+        XCTAssertTrue(starts.tick(now: at(10, 30), inputs: call).isEmpty)
+        assertRefused(&starts, now: at(10, 31))
+        XCTAssertEqual(starts.tick(now: at(10, 40)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertEqual(starts.snoozesRemaining, 5)
+
+        var missed = makeScheduler(stops: [stop]) { $0.discipline = .casual; $0.smartPause.meetingsAndCalls = false }
+        XCTAssertTrue(missed.tick(now: at(10, 30), inputs: call).isEmpty)
+        assertRefused(&missed, now: at(10, 59))
+        XCTAssertEqual(missed.tick(now: at(11, 0), inputs: call), [.hardStopEnded(id: stop.id, reason: .missed)])
+        XCTAssertEqual(missed.records.map(\.kind), [.hardStop])
+        XCTAssertEqual(missed.snooze(minutes: 5, now: at(11, 1)), [.breakSnoozed(minutes: 5, duringBreak: false)])
+        XCTAssertEqual(missed.snoozesRemaining, 4)
+
+        // A break that was running when the stop became due cannot be skipped, snoozed, or ended early, but still
+        // ends on time and counts as completed, on a tick or after a relaunch.
+        var breaking = makeScheduler(stops: [stop]) {
+            $0.discipline = .casual
+            $0.shortBreakDuration = 120
+            $0.earlyEndProgress = 0
+            $0.smartPause.meetingsAndCalls = false
+        }
+        _ = breaking.startBreak(kind: .short, now: at(10, 29))
+        XCTAssertTrue(breaking.tick(now: at(10, 30), inputs: call).isEmpty)
+        assertRefused(&breaking, now: at(10, 30, 30))
+        let restored = try relaunch(breaking, at: at(10, 35))
+        XCTAssertEqual(breaking.tick(now: at(10, 31), inputs: call), [.breakEnded(completed: true)])
+        for scheduler in [breaking, restored] {
+            XCTAssertEqual(scheduler.phase, .focusing)
+            XCTAssertEqual(scheduler.records.map(\.kind), [.short])
+            XCTAssertEqual(scheduler.records.first?.completed, true)
+            XCTAssertEqual(scheduler.records.first?.endedAt, at(10, 31))
+        }
+    }
+
     func testHardStopHistoryRecordIsExcludedFromStatistics() {
         let stop = hardStop(escapeHatch: .extend(minutes: 5, times: 1))
         var scheduler = makeScheduler(stops: [stop])
@@ -1268,6 +1323,31 @@ final class BreakSchedulerTests: XCTestCase {
         // Refused operations change nothing; the next tick merges B.
         XCTAssertTrue(scheduler.tick(now: at(10, 45)).isEmpty)
         XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(12, 0))
+    }
+
+    func testCapabilityQueriesSeeAStopThatStartedInsideBeforeTheNextTick() {
+        // B starts at 10:45 inside A and ends later. Before that tick, the queries follow B's escape hatch, as
+        // the operations do, in both directions; asking changes nothing.
+        let cases: [(a: HardStop.EscapeHatch, b: HardStop.EscapeHatch, extend: Bool, dismiss: Bool)] = [
+            (.extend(minutes: 15, times: 1), .dismissEarly, false, true),
+            (.dismissEarly, .extend(minutes: 15, times: 1), true, false),
+        ]
+        for item in cases {
+            let a = hardStop(escapeHatch: item.a)
+            let b = hardStop(hour: 10, minute: 45, end: .at(hour: 12, minute: 0), escapeHatch: item.b)
+            var scheduler = makeScheduler(stops: [a, b])
+            _ = runTimed(&scheduler, from: t0, through: at(10, 44, 59), step: 15)
+            let before = scheduler
+            XCTAssertEqual(scheduler.canExtendHardStop(now: at(10, 45)), item.extend)
+            XCTAssertEqual(scheduler.canDismissHardStop(now: at(10, 45)), item.dismiss)
+            XCTAssertEqual(scheduler.snapshot, before.snapshot)
+            XCTAssertEqual(scheduler.records, before.records)
+
+            var extended = scheduler
+            XCTAssertEqual(!extended.extendHardStop(now: at(10, 45)).isEmpty, item.extend)
+            var dismissed = scheduler
+            XCTAssertEqual(!dismissed.dismissHardStop(now: at(10, 45)).isEmpty, item.dismiss)
+        }
     }
 
     func testRestoringDeletedStopWhileItRunsDoesNotRecordItTwice() {
