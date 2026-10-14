@@ -205,10 +205,17 @@ struct HardStopPresentation: Equatable {
         current ?? (isClosing ? last : nil)
     }
 
-    /// Whether a stop's end plays the completion chime. An end that passed while the app was not running, reported by
-    /// the first tick after launch, ends silently, like a regular break that ran out then.
-    static func chimesOnEnd(_ reason: HardStopEndReason, afterRelaunch: Bool) -> Bool {
+    /// How late a tick may report a stop's end and still chime: well past the timer's one-second ticks, far short of
+    /// a sleep worth noticing.
+    static let endChimeTolerance: TimeInterval = 60
+
+    /// Whether a stop's end plays the completion chime: only an end reached while the app ran, reported by a tick
+    /// soon after `scheduledEnd`. An end that passed while the Mac slept or the app was not running, reported by the
+    /// first tick after the wake or launch, in either order with the wake notice, ends silently, like a regular break
+    /// that ran out then.
+    static func chimesOnEnd(_ reason: HardStopEndReason, scheduledEnd: Date?, now: Date, afterRelaunch: Bool) -> Bool {
         reason == .ended && !afterRelaunch
+            && (scheduledEnd.map { now.timeIntervalSince($0) <= endChimeTolerance } ?? true)
     }
 
     /// Runs a confirmed Extend or Dismiss, only while the overlay at `now` still shows that action for that stop, so a
@@ -400,8 +407,12 @@ struct HardStopNoticeQueue: Equatable {
     typealias Subject = HardStopPresentation.NoticeSubject
 
     private(set) var subjects: [Subject] = []
-    /// The waits whose notice was queued, while they last.
-    private var queuedWaits: Set<Subject> = []
+    /// The current waits for a call, as of the last `addWaits`.
+    private var waits: Set<Subject> = []
+    /// The current waits whose notice the user closed.
+    private var closedWaits: Set<Subject> = []
+    /// The notice the panel showed after the last prune.
+    private var presented: Subject?
 
     /// The notice the panel shows.
     var shown: Subject? { subjects.first }
@@ -413,34 +424,38 @@ struct HardStopNoticeQueue: Equatable {
         subjects.sort { Self.order($0) < Self.order($1) }
     }
 
-    /// Queues the notice of each enabled stop that started waiting for a call since it last ran, once per wait. Its
+    /// Queues the notice of each enabled stop waiting for a call, unless the user closed it during this wait. Its
     /// start has passed, so no warning comes for it, and without the notice it could not be started now. Run after
-    /// every tick, it covers a wait restored after a relaunch, one the first tick creates, and one that begins while the
-    /// app runs. A notice closed during the wait is not queued again; one closed before quitting comes back once, like
-    /// a warning. Returns true when it queued one.
-    @discardableResult
-    mutating func addNewWaits(of scheduler: BreakScheduler) -> Bool {
-        let waits = Set(scheduler.settings.hardStops.compactMap { stop -> Subject? in
+    /// every tick, it covers a wait restored after a relaunch, one the first tick creates, one that begins while the
+    /// app runs, and one whose notice was pruned while another stop ran. One closed before quitting comes back once,
+    /// like a warning.
+    mutating func addWaits(of scheduler: BreakScheduler) {
+        waits = Set(scheduler.settings.hardStops.compactMap { stop -> Subject? in
             guard stop.isEnabled, let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString] else { return nil }
             return .warning(id: stop.id, occurrenceKey: key)
         })
-        let new = waits.subtracting(queuedWaits)
-        new.forEach { add($0) }
-        queuedWaits = waits
-        return !new.isEmpty
+        closedWaits.formIntersection(waits)
+        waits.subtracting(closedWaits).subtracting(subjects).forEach { add($0) }
     }
 
-    /// The shown notice was closed.
+    /// The shown notice was closed. A wait's notice stays closed until the wait ends.
     mutating func closeShown() {
-        if !subjects.isEmpty { subjects.removeFirst() }
+        guard let closed = subjects.first else { return }
+        subjects.removeFirst()
+        if waits.contains(closed) { closedWaits.insert(closed) }
     }
 
     /// Drops every notice that no longer applies: its stop started, was missed, removed or disabled, or will join
-    /// the running stop; or the extension it warns about ended.
-    mutating func prune(scheduler: BreakScheduler, inCall: Bool, now: Date) {
+    /// the running stop; or the extension it warns about ended. A wait's notice dropped while another stop runs is
+    /// queued again by `addWaits` and kept once it applies. Returns true when the panel now shows a notice it did not
+    /// show after the last prune, so the panel comes to the front once, not on every tick.
+    @discardableResult
+    mutating func prune(scheduler: BreakScheduler, inCall: Bool, now: Date) -> Bool {
         subjects.removeAll {
             HardStopPresentation(scheduler: scheduler, noticeSubject: $0, inCall: inCall, now: now).notice == nil
         }
+        defer { presented = shown }
+        return shown != nil && shown != presented
     }
 
     /// Occurrence keys are the local start day and time as `yyyyMMddHHmm`, so they order warnings by start.

@@ -280,7 +280,7 @@ final class MacBreakController: ObservableObject {
         let idle = core.settings.desktop.idle.isEnabled ? max(reading.idleSeconds, away) : reading.idleSeconds
         let before = core.snapshot
         let events = core.tick(now: now, inputs: .init(idleSeconds: idle, signals: signals))
-        handle(events)
+        handle(events, hardStopEnd: before.activeHardStop?.endsAt)
         if core.snapshot != before { save() }
     }
 
@@ -291,13 +291,15 @@ final class MacBreakController: ObservableObject {
 
     private func perform(_ operation: (inout BreakScheduler, Date) -> [BreakScheduler.Event]) {
         now = .now
+        let hardStopEnd = core.snapshot.activeHardStop?.endsAt
         let events = operation(&core, now)
         guard !events.isEmpty else { return }
-        handle(events)
+        handle(events, hardStopEnd: hardStopEnd)
         save()
     }
 
-    private func handle(_ events: [BreakScheduler.Event]) {
+    /// `hardStopEnd` is the scheduled end of the hard stop that ran before the events.
+    private func handle(_ events: [BreakScheduler.Event], hardStopEnd: Date?) {
         // When a hard stop starts in the same batch as a break or another stop ends, the overlay stays up and
         // changes content instead of fading out and back in, and only the start chime plays.
         let startsHardStop = events.contains { if case .hardStopStarted = $0 { true } else { false } }
@@ -343,7 +345,9 @@ final class MacBreakController: ObservableObject {
                 // A missed stop never showed; another stop or a break may be on screen.
                 guard reason != .missed, !startsHardStop else { break }
                 overlay.hide()
-                if HardStopPresentation.chimesOnEnd(reason, afterRelaunch: isRestoring) { playSound(completion: true) }
+                if HardStopPresentation.chimesOnEnd(reason, scheduledEnd: hardStopEnd, now: now, afterRelaunch: isRestoring) {
+                    playSound(completion: true)
+                }
             }
         }
         reconcileHardStop()
@@ -351,11 +355,12 @@ final class MacBreakController: ObservableObject {
 
     /// Keeps the screen in line with the running hard stop: the overlay comes back after a relaunch or wake, notices
     /// close once they no longer apply (their stop started, was missed, or was removed, or the extension ended), and
-    /// the notice before an extension runs out, and that of a stop that starts waiting for a call (also one restored
-    /// or made by the first tick after a relaunch), appear once.
+    /// the notice before an extension runs out appears once, and that of each stop waiting for a call (also one
+    /// restored or made by the first tick after a relaunch) whenever it applies, until the user closes it.
     private func reconcileHardStop() {
         if hardStop.overlay != nil, !overlay.isVisible { overlay.show() }
-        var bringToFront = hardStopNotices.addNewWaits(of: core)
+        hardStopNotices.addWaits(of: core)
+        var bringToFront = false
         if let until = HardStopPresentation.extensionWarningDue(core, now: now), warnedExtensionUntil != until {
             warnedExtensionUntil = until
             hardStopNotices.add(.extensionEnding)
@@ -375,10 +380,10 @@ final class MacBreakController: ObservableObject {
     /// Shows the first hard-stop notice that still applies, above the overlay while the overlay is up, or, once none
     /// is left, closes the panel and brings back a regular heads-up that it displaced.
     private func syncHardStopNotice(bringToFront: Bool = false) {
-        hardStopNotices.prune(scheduler: core, inCall: inCall, now: now)
+        let isNew = hardStopNotices.prune(scheduler: core, inCall: inCall, now: now)
         if hardStopNotices.shown != nil {
             let layer = HardStopPresentation.noticeLayer(showsHardStopNotice: true, overlayVisible: overlay.isVisible)
-            if bringToFront || notice.kind != .hardStop {
+            if bringToFront || isNew || notice.kind != .hardStop {
                 displacedHeadsUp.hardStopNoticeShown(regularHeadsUpVisible: notice.kind == .regular)
                 notice.show(kind: .hardStop, layer: layer)
             } else {

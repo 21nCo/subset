@@ -519,13 +519,31 @@ final class HardStopPresentationTests: XCTestCase {
                                       calendar: calendar)
         restored.reconcileRestoredState(now: at(13, 20))
         XCTAssertEqual(restored.tick(now: at(13, 20)), [.hardStopEnded(id: stop.id, reason: .ended)])
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, afterRelaunch: true))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 20), afterRelaunch: true))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 0, 1), afterRelaunch: true))
 
         // An end reached while the app runs chimes; a dismissal or a missed stop never does.
-        XCTAssertEqual(running.tick(now: at(13, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
-        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, afterRelaunch: false))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, afterRelaunch: false))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, afterRelaunch: false))
+        let end = running.snapshot.activeHardStop?.endsAt
+        XCTAssertEqual(end, at(13, 0))
+        XCTAssertEqual(running.tick(now: at(13, 0, 1)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 1), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, scheduledEnd: end, now: at(12, 40), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, scheduledEnd: end, now: at(13, 0, 1), afterRelaunch: false))
+    }
+
+    func testStopThatEndedWhileTheMacSleptEndsWithoutAChime() {
+        let stop = lunch()
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30))
+        let end = scheduler.snapshot.activeHardStop?.endsAt
+        // Asleep from 12:50 to 15:00: the first tick after the wake, whether the timer or the wake notice runs it,
+        // ends the stop, and that end is silent.
+        _ = scheduler.tick(now: at(12, 50))
+        XCTAssertEqual(scheduler.tick(now: at(15, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(15, 0), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1, 1), afterRelaunch: false))
+        // A tick a little late, as the timer may be while awake, still chimes.
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1), afterRelaunch: false))
     }
 
     func testFadingOverlayKeepsTheHardStopScreenAfterItsStopEnds() throws {
@@ -676,8 +694,8 @@ final class HardStopPresentationTests: XCTestCase {
         var queue = HardStopNoticeQueue()
         let events = relaunched.tick(now: at(12, 35), inputs: .init(signals: [.meeting]))
         XCTAssertFalse(events.contains { if case .hardStopWarning = $0 { true } else { false } })
-        XCTAssertTrue(queue.addNewWaits(of: relaunched))
-        queue.prune(scheduler: relaunched, inCall: true, now: at(12, 35))
+        queue.addWaits(of: relaunched)
+        XCTAssertTrue(queue.prune(scheduler: relaunched, inCall: true, now: at(12, 35)))
         let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
         XCTAssertEqual(queue.subjects, [subject])
         let notice = present(relaunched, at: at(12, 35), notice: subject, inCall: true).notice
@@ -694,15 +712,15 @@ final class HardStopPresentationTests: XCTestCase {
         var ended = relaunch()
         var endedQueue = HardStopNoticeQueue()
         XCTAssertTrue(ended.tick(now: at(12, 35)).contains(.hardStopStarted(id: stop.id, endsAt: at(13, 0))))
-        XCTAssertFalse(endedQueue.addNewWaits(of: ended))
-        endedQueue.prune(scheduler: ended, inCall: false, now: at(12, 35))
+        endedQueue.addWaits(of: ended)
+        XCTAssertFalse(endedQueue.prune(scheduler: ended, inCall: false, now: at(12, 35)))
         XCTAssertNil(endedQueue.shown)
 
         // A disabled stop's wait gets no notice.
         let disabled = relaunch { $0.hardStops[0].isEnabled = false }
         var disabledQueue = HardStopNoticeQueue()
-        XCTAssertFalse(disabledQueue.addNewWaits(of: disabled))
-        disabledQueue.prune(scheduler: disabled, inCall: true, now: at(12, 35))
+        disabledQueue.addWaits(of: disabled)
+        XCTAssertFalse(disabledQueue.prune(scheduler: disabled, inCall: true, now: at(12, 35)))
         XCTAssertNil(disabledQueue.shown)
     }
 
@@ -714,13 +732,14 @@ final class HardStopPresentationTests: XCTestCase {
         var relaunched = BreakScheduler(settings: scheduler.settings, snapshot: scheduler.snapshot, records: [], calendar: calendar)
         relaunched.reconcileRestoredState(now: at(12, 35))
         var queue = HardStopNoticeQueue()
-        XCTAssertFalse(queue.addNewWaits(of: relaunched))
+        queue.addWaits(of: relaunched)
+        XCTAssertTrue(queue.subjects.isEmpty)
         // Relaunched at 12:35 during a call: the first tick makes the stop wait, with no warning, and the notice comes.
         let events = relaunched.tick(now: at(12, 35), inputs: .init(signals: [.meeting]))
         XCTAssertFalse(events.contains { if case .hardStopWarning = $0 { true } else { false } })
         XCTAssertEqual(relaunched.snapshot.hardStopsWaitingForCall[stop.id.uuidString], key(12, 30))
-        XCTAssertTrue(queue.addNewWaits(of: relaunched))
-        queue.prune(scheduler: relaunched, inCall: true, now: at(12, 35))
+        queue.addWaits(of: relaunched)
+        XCTAssertTrue(queue.prune(scheduler: relaunched, inCall: true, now: at(12, 35)))
         let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
         XCTAssertEqual(queue.subjects, [subject])
         let notice = present(relaunched, at: at(12, 35), notice: subject, inCall: true).notice
@@ -737,21 +756,105 @@ final class HardStopPresentationTests: XCTestCase {
         var scheduler = makeScheduler([stop])
         var queue = HardStopNoticeQueue()
         _ = scheduler.tick(now: at(12, 29), inputs: .init(signals: [.meeting]))
-        XCTAssertFalse(queue.addNewWaits(of: scheduler))
+        queue.addWaits(of: scheduler)
+        XCTAssertFalse(queue.prune(scheduler: scheduler, inCall: true, now: at(12, 29)))
         _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
-        XCTAssertTrue(queue.addNewWaits(of: scheduler), "The wait begins while the app runs")
+        queue.addWaits(of: scheduler)
+        XCTAssertTrue(queue.prune(scheduler: scheduler, inCall: true, now: at(12, 30)), "The wait begins while the app runs")
         let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
         XCTAssertEqual(queue.subjects, [subject])
+        // Later ticks keep it without bringing it to the front again.
+        _ = scheduler.tick(now: at(12, 31), inputs: .init(signals: [.meeting]))
+        queue.addWaits(of: scheduler)
+        XCTAssertFalse(queue.prune(scheduler: scheduler, inCall: true, now: at(12, 31)))
+        XCTAssertEqual(queue.shown, subject)
         // Closed: later ticks of the same wait do not bring it back.
         queue.closeShown()
-        for minute in 31...33 {
+        for minute in 32...33 {
             _ = scheduler.tick(now: at(12, minute), inputs: .init(signals: [.meeting]))
-            XCTAssertFalse(queue.addNewWaits(of: scheduler))
+            queue.addWaits(of: scheduler)
+            XCTAssertFalse(queue.prune(scheduler: scheduler, inCall: true, now: at(12, minute)))
         }
         XCTAssertNil(queue.shown)
         // The call ends and the stop starts: nothing is queued.
         XCTAssertTrue(scheduler.tick(now: at(12, 34)).contains(.hardStopStarted(id: stop.id, endsAt: at(13, 0))))
-        XCTAssertFalse(queue.addNewWaits(of: scheduler))
+        queue.addWaits(of: scheduler)
+        XCTAssertFalse(queue.prune(scheduler: scheduler, inCall: false, now: at(12, 34)))
+        XCTAssertNil(queue.shown)
+        // The next occurrence waits for a call: its notice comes once, although the last wait's notice was closed.
+        _ = scheduler.tick(now: at(13, 0))
+        _ = scheduler.tick(now: at(12, 30, dayOffset: 7), inputs: .init(signals: [.meeting]))
+        queue.addWaits(of: scheduler)
+        XCTAssertTrue(queue.prune(scheduler: scheduler, inCall: true, now: at(12, 30, dayOffset: 7)))
+        XCTAssertEqual(queue.shown, .warning(id: stop.id, occurrenceKey: key(12, 30, dayOffset: 7)))
+    }
+
+    /// Lunch waits for the call; Walk, which ignores calls, starts at 12:45 and runs until 13:00 while the call goes on.
+    private func waitAndRunningStop() -> (waiting: HardStop, scheduler: BreakScheduler) {
+        let waiting = HardStop(name: "Lunch", hour: 12, minute: 30, end: .after(90 * 60), repeats: .weekdays([2]),
+                               warningMinutes: [], escapeHatch: .none, duringCalls: .waitForCallToEnd)
+        let other = HardStop(name: "Walk", hour: 12, minute: 45, end: .after(15 * 60), repeats: .weekdays([2]),
+                             warningMinutes: [], escapeHatch: .none, duringCalls: .startAnyway)
+        return (waiting, makeScheduler([waiting, other]))
+    }
+
+    /// One tick during the call and the controller's notice sync after it; returns whether the panel comes to the front.
+    private func step(_ scheduler: inout BreakScheduler, _ queue: inout HardStopNoticeQueue, _ now: Date) -> Bool {
+        _ = scheduler.tick(now: now, inputs: .init(signals: [.meeting]))
+        queue.addWaits(of: scheduler)
+        return queue.prune(scheduler: scheduler, inCall: true, now: now)
+    }
+
+    func testAWaitNoticeHiddenWhileAnotherStopRunsComesBackWhenItEnds() {
+        let (waiting, saved) = waitAndRunningStop()
+        var scheduler = saved
+        var queue = HardStopNoticeQueue()
+        let subject = HardStopPresentation.NoticeSubject.warning(id: waiting.id, occurrenceKey: key(12, 30))
+        XCTAssertTrue(step(&scheduler, &queue, at(12, 30)))
+        XCTAssertEqual(queue.shown, subject)
+        // Walk runs: Lunch starts before Walk ends, so its notice does not apply and is not brought up on any tick.
+        for minute in [45, 50, 55] {
+            XCTAssertFalse(step(&scheduler, &queue, at(12, minute)))
+            XCTAssertNotNil(scheduler.snapshot.activeHardStop)
+            XCTAssertNil(queue.shown)
+        }
+        // Walk ends while the call goes on, and Lunch still waits: its notice comes back once, with Start now.
+        XCTAssertTrue(step(&scheduler, &queue, at(13, 0)))
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall[waiting.id.uuidString], key(12, 30))
+        XCTAssertEqual(queue.shown, subject)
+        XCTAssertFalse(step(&scheduler, &queue, at(13, 1)))
+        XCTAssertEqual(queue.shown, subject)
+        let notice = present(scheduler, at: at(13, 1), notice: subject, inCall: true).notice
+        XCTAssertEqual(notice?.detail, "Starts when your call ends")
+        XCTAssertEqual(notice?.canStartNow, true)
+        XCTAssertTrue(scheduler.startHardStopEarly(id: waiting.id, occurrenceKey: key(12, 30), now: at(13, 2))
+            .contains(.hardStopStarted(id: waiting.id, endsAt: at(14, 0))))
+    }
+
+    func testAWaitRestoredDuringAnotherStopGetsItsNoticeWhenThatStopEnds() {
+        let (waiting, saved) = waitAndRunningStop()
+        var scheduler = saved
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        _ = scheduler.tick(now: at(12, 45), inputs: .init(signals: [.meeting]))
+        // Relaunched at 12:50 while Walk runs and Lunch waits.
+        var relaunched = BreakScheduler(settings: scheduler.settings, snapshot: scheduler.snapshot, records: [], calendar: calendar)
+        relaunched.reconcileRestoredState(now: at(12, 50))
+        var queue = HardStopNoticeQueue()
+        XCTAssertFalse(step(&relaunched, &queue, at(12, 50)))
+        XCTAssertNil(queue.shown)
+        XCTAssertTrue(step(&relaunched, &queue, at(13, 0)))
+        XCTAssertEqual(queue.shown, .warning(id: waiting.id, occurrenceKey: key(12, 30)))
+    }
+
+    func testAWaitNoticeTheUserClosedStaysClosedAfterAnotherStopRuns() {
+        var scheduler = waitAndRunningStop().scheduler
+        var queue = HardStopNoticeQueue()
+        XCTAssertTrue(step(&scheduler, &queue, at(12, 30)))
+        queue.closeShown()
+        for minute in [31, 45, 50] { XCTAssertFalse(step(&scheduler, &queue, at(12, minute))) }
+        for minute in [0, 1, 10] { XCTAssertFalse(step(&scheduler, &queue, at(13, minute))) }
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
         XCTAssertNil(queue.shown)
     }
 
