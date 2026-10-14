@@ -407,6 +407,27 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(switched.stop(calendar: calendar).escapeHatch, .dismissEarly)
     }
 
+    func testAStoredOneOffDayThatDoesNotExistShowsItsErrorUntilADateIsChosen() {
+        // Normalizing keeps a day from 1 to 31 in any month, so 31 April can be stored.
+        let impossible = stop("Impossible", repeats: .once(DateComponents(year: 2026, month: 4, day: 31)))
+        var settings = BreakSettings()
+        settings.hardStops = [impossible]
+        let before = settings
+
+        var draft = HardStopDraft(impossible, now: at(10, 0), calendar: calendar)
+        XCTAssertEqual(draft.repeatKind, .once)
+        XCTAssertEqual(draft.stop(calendar: calendar), impossible)
+        draft.name = "Renamed"
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: false, now: at(10, 0), calendar: calendar),
+                       [HardStopFieldError(stopID: impossible.id, field: .repeats, message: "Choose a date.")])
+        XCTAssertEqual(settings, before)
+
+        draft.date = at(9, 0, dayOffset: 2)
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: false, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops.first?.name, "Renamed")
+        XCTAssertEqual(settings.hardStops.first?.repeats, .once(DateComponents(year: 2026, month: 8, day: 12)))
+    }
+
     func testAnEditOfAStopThatIsGoneIsNotSaved() {
         // A one-off stop that ran (or one deleted elsewhere) while its editor was open.
         let ran = stop("Ran", repeats: .once(DateComponents(year: 2026, month: 8, day: 10)))

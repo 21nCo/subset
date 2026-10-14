@@ -135,8 +135,13 @@ struct HardStopDraft: Equatable, Identifiable {
     var lengthMinutes: Int
     var repeatKind: RepeatKind
     var weekdays: Set<Int>
-    /// The day of a one-off stop.
-    var date: Date
+    /// The day of a one-off stop. Choosing one replaces a stored day that does not exist.
+    var date: Date {
+        didSet { storedImpossibleDate = nil }
+    }
+    /// The stored day of a one-off stop that names no calendar day, such as 31 April. It is saved as it is, so the
+    /// editor shows its error and refuses to save, until the user chooses a date.
+    private(set) var storedImpossibleDate: DateComponents?
     var warningMinutes: [Int]
     var escapeKind: EscapeKind
     var extendMinutes: Int
@@ -179,7 +184,13 @@ struct HardStopDraft: Equatable, Identifiable {
             weekdays = days
         case .once(let day):
             repeatKind = .once
-            date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) ?? now
+            let parts = DateComponents(year: day.year, month: day.month, day: day.day)
+            if let resolved = calendar.date(from: parts),
+               calendar.dateComponents([.year, .month, .day], from: resolved) == parts {
+                date = resolved
+            } else {
+                storedImpossibleDate = day
+            }
         }
         warningMinutes = stop.warningMinutes
         // The model's default extension, shown when the user switches to Extend.
@@ -223,7 +234,7 @@ struct HardStopDraft: Equatable, Identifiable {
             hour: hour,
             minute: minute,
             end: end,
-            repeats: repeatKind == .weekdays ? .weekdays(weekdays) : .once(on: date, calendar: calendar),
+            repeats: repeatKind == .weekdays ? .weekdays(weekdays) : storedImpossibleDate.map { .once($0) } ?? .once(on: date, calendar: calendar),
             warningMinutes: warningMinutes,
             escapeHatch: escapeHatch,
             duringCalls: duringCalls

@@ -307,7 +307,7 @@ private struct ScheduleSettingsTab: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    Button("Edit…") { editing = HardStopDraft(stop, now: .now, calendar: controller.calendar) }
+                    Button("Edit…") { editing = HardStopDraft(stop, now: controller.now, calendar: controller.calendar) }
                     Button {
                         deleting = stop
                     } label: {
@@ -317,7 +317,7 @@ private struct ScheduleSettingsTab: View {
                     .accessibilityLabel("Delete \(stop.name)")
                 }
             }
-            Button("Add Hard Stop…") { editing = .new(now: .now) }
+            Button("Add Hard Stop…") { editing = .new(now: controller.now) }
                 .disabled(controller.settings.hardStops.count >= HardStop.maximumCount)
         } header: {
             Text("Hard stops")
@@ -467,10 +467,10 @@ private struct HardStopEditor: View {
         return settings.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew, now: controller.now, calendar: controller.calendar)
     }
 
+    /// Saves on the clock `errors` uses, so a save the button allows is not refused.
     private func save() {
-        let now = Date.now
         var settings = controller.settings
-        guard settings.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew, now: now, calendar: controller.calendar).isEmpty else { return }
+        guard settings.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew, now: controller.now, calendar: controller.calendar).isEmpty else { return }
         controller.settings = settings
         dismiss()
     }
