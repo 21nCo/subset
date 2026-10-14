@@ -295,6 +295,42 @@ final class HardStopPresentationTests: XCTestCase {
                        [.hardStopExtended(id: lunch.id, until: at(12, 56))])
     }
 
+    func testMalformedSavedExtensionCountsNeverCrash() {
+        // Lunch 12:30–13:30 with two extensions; Walk joins at 12:45, ends 14:00 and takes over with its own two.
+        let lunch = lunch(end: .after(60 * 60), escapeHatch: .extend(minutes: 5, times: 2))
+        let walk = walk(hour: 12, minute: 45, end: .at(hour: 14, minute: 0), escapeHatch: .extend(minutes: 10, times: 2))
+        var running = makeScheduler([lunch, walk])
+        _ = running.tick(now: at(12, 30))
+        _ = running.tick(now: at(12, 45))
+        XCTAssertEqual(running.snapshot.activeHardStop?.escapeHatchOwner, 0)
+
+        func restored(_ edit: (inout ActiveHardStop) -> Void) -> BreakScheduler {
+            var snapshot = running.snapshot
+            edit(&snapshot.activeHardStop!)
+            return BreakScheduler(settings: running.settings, snapshot: snapshot, records: [], calendar: calendar)
+        }
+        // The stop's own count, then the count of the stop that took over the escape hatch.
+        let direct = restored { $0.escapeHatchOwner = nil; $0.extensionsUsed = .min }
+        XCTAssertEqual(present(direct, at: at(12, 46)).overlay?.extensionsLeft, "2 extensions left")
+        let merged = restored { $0.merged[0].extensionsUsed = .min }
+        XCTAssertEqual(present(merged, at: at(12, 46)).overlay?.extensionsLeft, "2 extensions left")
+        let spent = restored { $0.merged[0].extensionsUsed = .max }
+        XCTAssertEqual(present(spent, at: at(12, 46)).overlay?.extensionsLeft, "No extensions left")
+        XCTAssertEqual(HardStopPresentation.extensionsLeft(times: .min, used: .max), 0)
+        XCTAssertEqual(HardStopPresentation.extensionsLeft(times: 3, used: .min), 3)
+
+        // A relaunch brings the saved counts and escape hatch back into range before anything uses them.
+        var relaunched = restored {
+            $0.merged[0].extensionsUsed = .min
+            $0.escapeHatch = .extend(minutes: .max, times: .max)
+        }
+        relaunched.reconcileRestoredState(now: at(12, 46))
+        XCTAssertEqual(relaunched.snapshot.activeHardStop?.ownerExtensionsUsed, 0)
+        XCTAssertEqual(relaunched.snapshot.activeHardStop?.escapeHatch, .extend(minutes: 60, times: 5))
+        XCTAssertEqual(relaunched.extendHardStop(now: at(12, 46)), [.hardStopExtended(id: lunch.id, until: at(13, 46))])
+        XCTAssertEqual(relaunched.snapshot.activeHardStop?.ownerExtensionsUsed, 1)
+    }
+
     // MARK: - Extension ending
 
     func testNoticeBeforeAnExtensionEnds() {
@@ -338,6 +374,24 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, afterRelaunch: false))
         XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, afterRelaunch: false))
         XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, afterRelaunch: false))
+    }
+
+    func testHardStopNoticeDueUnderTheOverlayGoesAboveIt() {
+        // Walk's 10-minute warning comes due at 12:55, while Lunch (12:30–13:00) covers the screen.
+        let lunch = lunch()
+        let walk = walk(hour: 13, minute: 5)
+        var scheduler = makeScheduler([lunch, walk])
+        _ = scheduler.tick(now: at(12, 30))
+        XCTAssertEqual(scheduler.tick(now: at(12, 55)), [.hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)])
+        let shown = present(scheduler, at: at(12, 55), notice: .warning(id: walk.id, startsAt: at(13, 5)))
+        XCTAssertNotNil(shown.overlay)
+        XCTAssertNotNil(shown.notice)
+        XCTAssertEqual(HardStopPresentation.noticeLayer(showsHardStopNotice: shown.notice != nil, overlayVisible: shown.overlay != nil),
+                       .aboveOverlay)
+
+        // Without the overlay, and always for the regular heads-up, the panel floats above other apps only.
+        XCTAssertEqual(HardStopPresentation.noticeLayer(showsHardStopNotice: true, overlayVisible: false), .floating)
+        XCTAssertEqual(HardStopPresentation.noticeLayer(showsHardStopNotice: false, overlayVisible: true), .floating)
     }
 
     // MARK: - Menu bar

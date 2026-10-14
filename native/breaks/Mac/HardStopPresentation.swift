@@ -96,7 +96,7 @@ struct HardStopPresentation: Equatable {
                 if scheduler.canDismissHardStop(now: now) { actions.append(.dismiss) }
                 var extensionsLeft: String?
                 if case .extend(_, let times) = active.escapeHatch {
-                    extensionsLeft = switch max(0, times - active.ownerExtensionsUsed) {
+                    extensionsLeft = switch Self.extensionsLeft(times: times, used: active.ownerExtensionsUsed) {
                     case 0: "No extensions left"
                     case 1: "1 extension left"
                     case let count: "\(count) extensions left"
@@ -158,6 +158,25 @@ struct HardStopPresentation: Equatable {
               active.endsAt.map({ until < $0 }) ?? true,
               now < until, until.timeIntervalSince(now) <= extensionWarningLead else { return nil }
         return until
+    }
+
+    /// Extensions left of `times`, from 0 to `times`. The counts come from the saved snapshot, so out-of-range values
+    /// are clamped instead of trusted.
+    static func extensionsLeft(times: Int, used: Int) -> Int {
+        let allowed = max(0, times)
+        return allowed - min(max(0, used), allowed)
+    }
+
+    /// Where the notice panel sits. A hard-stop notice that comes due while the full-screen overlay is up is placed
+    /// above it, so its warning is seen at its warning time; otherwise, and always for the regular heads-up, it floats
+    /// above other apps' windows only.
+    enum NoticeLayer: Equatable {
+        case floating
+        case aboveOverlay
+    }
+
+    static func noticeLayer(showsHardStopNotice: Bool, overlayVisible: Bool) -> NoticeLayer {
+        showsHardStopNotice && overlayVisible ? .aboveOverlay : .floating
     }
 
     /// Whether a stop's end plays the completion chime. An end that passed while the app was not running, reported by

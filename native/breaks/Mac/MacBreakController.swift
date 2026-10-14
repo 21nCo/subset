@@ -357,12 +357,17 @@ final class MacBreakController: ObservableObject {
         syncHardStopNotice(bringToFront: true)
     }
 
-    /// Shows the first hard-stop notice that still applies, or, once none is left, closes the panel and brings back
-    /// a regular heads-up that it held back.
+    /// Shows the first hard-stop notice that still applies, above the overlay while the overlay is up, or, once none
+    /// is left, closes the panel and brings back a regular heads-up that it held back.
     private func syncHardStopNotice(bringToFront: Bool = false) {
         hardStopNotices.prune(scheduler: core, inCall: inCall, now: now)
         if hardStopNotices.shown != nil {
-            if bringToFront || notice.kind != .hardStop { notice.show(kind: .hardStop) }
+            let layer = HardStopPresentation.noticeLayer(showsHardStopNotice: true, overlayVisible: overlay.isVisible)
+            if bringToFront || notice.kind != .hardStop {
+                notice.show(kind: .hardStop, layer: layer)
+            } else {
+                notice.set(layer)
+            }
         } else if notice.kind == .hardStop {
             notice.hide()
             if phase == .headsUp, settings.reminder.headsUpEnabled { notice.show(kind: .regular) }

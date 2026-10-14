@@ -22,6 +22,9 @@ final class BreakOverlayController {
 
     var isVisible: Bool { !windows.isEmpty }
 
+    /// The overlay windows' level, above full-screen apps. A hard-stop notice due while they are up goes above it.
+    static let windowLevel = NSWindow.Level.screenSaver
+
     func show() {
         guard windows.isEmpty else { return }
         previousApp = NSWorkspace.shared.frontmostApplication
@@ -81,7 +84,7 @@ final class BreakOverlayController {
             let window = OverlayWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isPrimary = screen == primary
             window.setFrame(screen.frame, display: false)
-            window.level = .screenSaver
+            window.level = Self.windowLevel
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             window.isOpaque = false
             window.backgroundColor = .clear

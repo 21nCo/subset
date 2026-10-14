@@ -462,7 +462,10 @@ struct BreakScheduler: Sendable {
     mutating func reconcileRestoredState(now: Date) -> Bool {
         // With a hard stop running, the next tick merges the stops that started inside it before one-off stops
         // are removed, so none that joined it while the host was off is lost.
-        if snapshot.activeHardStop != nil { return false }
+        if snapshot.activeHardStop != nil {
+            repairRestoredHardStop()
+            return false
+        }
         removeExpiredOnceStops(now: now)
         if snapshot.phase == .breaking {
             let end = snapshot.breakEndsAt ?? now
@@ -485,6 +488,21 @@ struct BreakScheduler: Sendable {
             startFocusInterval(at: now)
         }
         return false
+    }
+
+    /// Brings the running stop's saved escape hatch and extension counts back into range, so a malformed snapshot
+    /// cannot overflow the extension arithmetic.
+    private mutating func repairRestoredHardStop() {
+        guard var active = snapshot.activeHardStop else { return }
+        func clamp(_ value: Int, _ range: ClosedRange<Int>) -> Int { min(range.upperBound, max(range.lowerBound, value)) }
+        if case .extend(let minutes, let times) = active.escapeHatch {
+            active.escapeHatch = .extend(minutes: clamp(minutes, HardStop.extendMinutesRange), times: clamp(times, HardStop.extendTimesRange))
+        }
+        active.extensionsUsed = max(0, active.extensionsUsed)
+        for index in active.merged.indices {
+            active.merged[index].extensionsUsed = active.merged[index].extensionsUsed.map { max(0, $0) }
+        }
+        snapshot.activeHardStop = active
     }
 
     mutating func normalizeSettings() {

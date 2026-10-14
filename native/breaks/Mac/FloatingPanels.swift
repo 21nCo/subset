@@ -92,8 +92,9 @@ final class HeadsUpPanelController {
     }
 
     /// Shows the notice. The content follows the controller, so a shown panel is rebuilt only to change its size.
-    func show(kind: Kind) {
+    func show(kind: Kind, layer: HardStopPresentation.NoticeLayer = .floating) {
         if let panel, self.kind == kind {
+            set(layer)
             panel.orderFrontRegardless()
             return
         }
@@ -106,10 +107,21 @@ final class HeadsUpPanelController {
         panel.contentView = hosting
         place(panel, position: controller.settings.reminder.position)
         panel.alphaValue = wasShown ? 1 : 0
-        panel.orderFrontRegardless()
-        if !wasShown { fade(panel, in: true) }
         self.panel = panel
         self.kind = kind
+        set(layer)
+        panel.orderFrontRegardless()
+        if !wasShown { fade(panel, in: true) }
+    }
+
+    /// Moves the shown panel above the full-screen overlay or back to floating above other apps.
+    func set(_ layer: HardStopPresentation.NoticeLayer) {
+        guard let panel else { return }
+        let level: NSWindow.Level = switch layer {
+        case .floating: .floating
+        case .aboveOverlay: NSWindow.Level(rawValue: BreakOverlayController.windowLevel.rawValue + 1)
+        }
+        if panel.level != level { panel.level = level }
     }
 
     func hide() {
