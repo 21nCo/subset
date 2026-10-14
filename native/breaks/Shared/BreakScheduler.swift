@@ -599,6 +599,26 @@ struct BreakScheduler: Sendable {
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
+    /// True when the stop with `id` is part of the running hard stop, shown or hidden by an extension, as its own
+    /// occurrence or one merged into it. Like `deleteHardStop`, this follows any stop that has started inside it.
+    func isHardStopRunning(id: UUID, now: Date) -> Bool {
+        guard let active = activeHardStop(now: now) else { return false }
+        return active.id == id || active.merged.contains { $0.id == id }
+    }
+
+    /// Removes the stop with `id` from the settings. When it is part of the running stop (`isHardStopRunning`), that
+    /// stop ends now and is recorded as dismissed, whatever its escape hatch allows.
+    mutating func deleteHardStop(id: UUID, now: Date) -> [Event] {
+        var events: [Event] = []
+        if isHardStopRunning(id: id, now: now) {
+            events += reconcileMerges(now: now)
+            events += finishHardStop(.dismissed, endedAt: now, now: now)
+        }
+        settings.hardStops.removeAll { $0.id == id }
+        pruneHardStopProgress()
+        return events
+    }
+
     /// Starts occurrence `occurrenceKey` of the stop with `id` now, as **Start now** on its warning does: one that
     /// starts within the longest warning lead time, or is due, or waits for a call. Its end does not move, so starting
     /// early makes it longer. Returns no events, and changes nothing, while a stop runs or when that occurrence cannot

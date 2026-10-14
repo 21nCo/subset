@@ -75,6 +75,9 @@
 		5AC1B7A33CFE92CDFB044FD6 /* HardStopPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */; };
 		5CC61FAF7F1700F05D9AA674 /* HardStopPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */; };
 		FA16F8BDE3E2B986476456A1 /* HardStopPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */; };
+		7D3A1E5B9C2F4A6B8E0D1C2B /* HardStopQuickAdd.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D3A1E5B9C2F4A6B8E0D1C2A /* HardStopQuickAdd.swift */; };
+		7D3A1E5B9C2F4A6B8E0D1C2C /* HardStopQuickAdd.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D3A1E5B9C2F4A6B8E0D1C2A /* HardStopQuickAdd.swift */; };
+		7D3A1E5B9C2F4A6B8E0D1C2E /* HardStopSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D3A1E5B9C2F4A6B8E0D1C2D /* HardStopSettingsTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -182,6 +185,8 @@
 		F8455C5AEE97E7E95B4DF4FA /* AppTheme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
 		C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopPresentation.swift; sourceTree = "<group>"; };
 		C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopPresentationTests.swift; sourceTree = "<group>"; };
+		7D3A1E5B9C2F4A6B8E0D1C2A /* HardStopQuickAdd.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopQuickAdd.swift; sourceTree = "<group>"; };
+		7D3A1E5B9C2F4A6B8E0D1C2D /* HardStopSettingsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopSettingsTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -339,6 +344,7 @@
 				B6CF369583749DFDA69E03CA /* BreaksTests.swift */,
 				E96CA3DA367F98CF35CE6DEE /* BreakSchedulerTests.swift */,
 				C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */,
+				7D3A1E5B9C2F4A6B8E0D1C2D /* HardStopSettingsTests.swift */,
 			);
 			name = Tests;
 			path = Tests;
@@ -397,6 +403,7 @@
 				327CECA38854C2FBC9ED41F0 /* FloatingPanels.swift */,
 				6C5D20DAE7FB51D38EE86CA9 /* MacSettingsView.swift */,
 				C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */,
+				7D3A1E5B9C2F4A6B8E0D1C2A /* HardStopQuickAdd.swift */,
 				B963808371F77BE2BD14450A /* Assets.xcassets */,
 			);
 			name = Mac;
@@ -732,6 +739,7 @@
 				E69E6658C9847917FC99B0F8 /* FloatingPanels.swift in Sources */,
 				4127D5B153F497EF5A90F621 /* MacSettingsView.swift in Sources */,
 				5AC1B7A33CFE92CDFB044FD6 /* HardStopPresentation.swift in Sources */,
+				7D3A1E5B9C2F4A6B8E0D1C2B /* HardStopQuickAdd.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -756,6 +764,8 @@
 				8D4B54961734337B39AAB24E /* BreakSchedulerTests.swift in Sources */,
 				5CC61FAF7F1700F05D9AA674 /* HardStopPresentation.swift in Sources */,
 				FA16F8BDE3E2B986476456A1 /* HardStopPresentationTests.swift in Sources */,
+				7D3A1E5B9C2F4A6B8E0D1C2C /* HardStopQuickAdd.swift in Sources */,
+				7D3A1E5B9C2F4A6B8E0D1C2E /* HardStopSettingsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

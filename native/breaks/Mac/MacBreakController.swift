@@ -28,6 +28,7 @@ final class MacBreakController: ObservableObject {
     private lazy var overlay = BreakOverlayController(controller: self)
     private lazy var notice = HeadsUpPanelController(controller: self)
     private lazy var nudges = WellnessNudgeController()
+    private lazy var quickAdd = HardStopQuickAddPanelController(controller: self)
     private var timer: Timer?
     private var lastSignalReadAt = Date.distantPast
     private var observers: [NSObjectProtocol] = []
@@ -83,6 +84,9 @@ final class MacBreakController: ObservableObject {
     var stats: DashboardStats { core.stats(now: now) }
     var nextPlannedBreak: (PlannedBreak, Date)? { core.nextPlannedBreak(after: now) }
     var isWithinOfficeHours: Bool { settings.officeHours.contains(now) }
+    var calendar: Calendar { core.calendar }
+    var nextHardStop: (stop: HardStop, start: Date)? { core.nextHardStop(after: now) }
+    func isHardStopRunning(id: UUID) -> Bool { core.isHardStopRunning(id: id, now: now) }
 
     /// Why the hard-stop notice is open.
     var hardStopNoticeSubject: HardStopPresentation.NoticeSubject? { hardStopNotices.shown }
@@ -217,6 +221,20 @@ final class MacBreakController: ObservableObject {
         guard hardStopNoticeSubject != nil else { return }
         hardStopNotices.closeShown()
         syncHardStopNotice(bringToFront: true)
+    }
+
+    /// Deletes a hard stop. One that is running ends now and is recorded as dismissed.
+    func deleteHardStop(id: UUID) {
+        now = .now
+        let hardStopEnd = core.snapshot.activeHardStop?.endsAt
+        let events = core.deleteHardStop(id: id, now: now)
+        handle(events, hardStopEnd: hardStopEnd)
+        save()
+    }
+
+    /// Opens the **Hard stop at…** panel.
+    func showHardStopQuickAdd() {
+        quickAdd.show()
     }
 
     func resetToday() {

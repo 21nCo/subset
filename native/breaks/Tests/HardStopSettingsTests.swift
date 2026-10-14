@@ -1,0 +1,434 @@
+import XCTest
+// Mac only: the BreaksMacTests bundle compiles the shared sources and `Mac/HardStopQuickAdd.swift` directly.
+
+final class HardStopSettingsTests: XCTestCase {
+    private var calendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }()
+
+    private let locale = Locale(identifier: "en_GB")
+
+    /// Monday 10 August 2026 at `hour`:`minute` UTC, plus `seconds`, `dayOffset` days later.
+    private func at(_ hour: Int, _ minute: Int, _ seconds: Int = 0, dayOffset: Int = 0) -> Date {
+        calendar.date(from: DateComponents(year: 2026, month: 8, day: 10 + dayOffset, hour: hour, minute: minute, second: seconds))!
+    }
+
+    private func stop(
+        _ name: String = "Lunch",
+        hour: Int = 12,
+        minute: Int = 30,
+        end: HardStop.End = .after(30 * 60),
+        repeats: HardStop.Repeat = .weekdays([2]),
+        escapeHatch: HardStop.EscapeHatch = .none,
+        duringCalls: HardStop.CallBehavior = .startAnyway
+    ) -> HardStop {
+        HardStop(name: name, hour: hour, minute: minute, end: end, repeats: repeats, warningMinutes: [10],
+                 escapeHatch: escapeHatch, duringCalls: duringCalls)
+    }
+
+    private func makeScheduler(_ stops: [HardStop], start: Date? = nil) -> BreakScheduler {
+        var settings = BreakSettings()
+        settings.officeHours.isEnabled = false
+        settings.plannedBreaks = []
+        settings.workInterval = 8 * 3600
+        settings.wellness.blinkEnabled = false
+        settings.wellness.postureEnabled = false
+        settings.hardStops = stops
+        let start = start ?? at(12, 0)
+        let snapshot = EngineSnapshot(
+            phase: .focusing, focusStartedAt: start, nextBreakAt: start.addingTimeInterval(settings.workInterval),
+            snoozeDay: calendar.startOfDay(for: start)
+        )
+        return BreakScheduler(settings: settings, snapshot: snapshot, records: [], calendar: calendar)
+    }
+
+    private func isStart(_ event: BreakScheduler.Event) -> Bool {
+        if case .hardStopStarted = event { true } else { false }
+    }
+
+    // MARK: - Quick add: times
+
+    func testQuickAddOpensThirtyMinutesAheadRoundedUpToTheNextFiveMinutes() {
+        let cases: [(now: Date, hour: Int, minute: Int)] = [
+            (at(10, 0), 10, 30),
+            (at(10, 5), 10, 35),
+            (at(10, 0, 1), 10, 35),
+            (at(10, 2, 10), 10, 35),
+            (at(10, 4, 59), 10, 35),
+            (at(10, 29, 30), 11, 0),
+        ]
+        for item in cases {
+            let values = HardStopQuickAdd(now: item.now, calendar: calendar)
+            XCTAssertEqual([values.hour, values.minute], [item.hour, item.minute], "\(item.now)")
+            XCTAssertEqual(values.lengthMinutes, 30)
+            XCTAssertEqual(values.name, "Hard stop")
+            XCTAssertFalse(values.startsTomorrow(now: item.now, calendar: calendar))
+        }
+    }
+
+    func testQuickAddTimeEarlierThanNowIsTomorrow() {
+        let now = at(14, 0, 30)
+        var values = HardStopQuickAdd(now: now, calendar: calendar)
+
+        values.hour = 13
+        values.minute = 59
+        XCTAssertTrue(values.startsTomorrow(now: now, calendar: calendar))
+        let tomorrow = values.stop(now: now, calendar: calendar)
+        XCTAssertEqual(tomorrow.repeats, .once(DateComponents(year: 2026, month: 8, day: 11)))
+        XCTAssertEqual(tomorrow.start(onDayOf: at(0, 0, dayOffset: 1), calendar: calendar), at(13, 59, dayOffset: 1))
+
+        // The current minute is today, and starts at once.
+        values.minute = 0
+        values.hour = 14
+        XCTAssertFalse(values.startsTomorrow(now: now, calendar: calendar))
+        XCTAssertEqual(values.stop(now: now, calendar: calendar).repeats, .once(DateComponents(year: 2026, month: 8, day: 10)))
+
+        values.minute = 1
+        XCTAssertFalse(values.startsTomorrow(now: now, calendar: calendar))
+    }
+
+    func testQuickAddAroundMidnight() {
+        // 23:40 + 30 minutes is 00:10, which is earlier than now on the clock, so it is tomorrow.
+        let lateEvening = at(23, 40)
+        let values = HardStopQuickAdd(now: lateEvening, calendar: calendar)
+        XCTAssertEqual([values.hour, values.minute], [0, 10])
+        XCTAssertTrue(values.startsTomorrow(now: lateEvening, calendar: calendar))
+        let stop = values.stop(now: lateEvening, calendar: calendar)
+        XCTAssertEqual(stop.occurrence(onDayOf: at(0, 0, dayOffset: 1), calendar: calendar)?.start, at(0, 10, dayOffset: 1))
+
+        var settings = BreakSettings()
+        XCTAssertEqual(settings.saveHardStop(stop, isNew: true, now: lateEvening, calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops, [stop])
+
+        // Rounding crosses midnight too.
+        let rounded = HardStopQuickAdd(now: at(23, 50, 1), calendar: calendar)
+        XCTAssertEqual([rounded.hour, rounded.minute], [0, 25])
+
+        // Just after midnight, a late-evening time is later today, not tomorrow.
+        var late = HardStopQuickAdd(now: at(0, 5, dayOffset: 1), calendar: calendar)
+        late.hour = 23
+        late.minute = 30
+        XCTAssertFalse(late.startsTomorrow(now: at(0, 5, dayOffset: 1), calendar: calendar))
+    }
+
+    func testQuickAddOnDaylightSavingDays() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
+
+        // Sunday 8 March 2026: clocks go from 2:00 to 3:00. 1:50 EST plus 30 minutes is 3:20 EDT, not 2:20.
+        let spring = try instant("2026-03-08T06:50:00Z")
+        let values = HardStopQuickAdd(now: spring, calendar: newYork)
+        XCTAssertEqual([values.hour, values.minute], [3, 20])
+        XCTAssertFalse(values.startsTomorrow(now: spring, calendar: newYork))
+        let stop = values.stop(now: spring, calendar: newYork)
+        XCTAssertEqual(stop.start(onDayOf: spring, calendar: newYork), spring.addingTimeInterval(30 * 60))
+
+        // A time the clocks skip is still today, at the next time that exists.
+        var skipped = values
+        skipped.hour = 2
+        skipped.minute = 30
+        XCTAssertFalse(skipped.startsTomorrow(now: spring, calendar: newYork))
+        let start = try XCTUnwrap(skipped.stop(now: spring, calendar: newYork).start(onDayOf: spring, calendar: newYork))
+        XCTAssertGreaterThan(start, spring)
+        XCTAssertEqual(newYork.dateComponents([.year, .month, .day], from: start), DateComponents(year: 2026, month: 3, day: 8))
+
+        // Sunday 1 November 2026: clocks go back from 2:00 to 1:00. At the second 1:40, 1:50 already came (its first
+        // pass is what a stop uses), so it is tomorrow; 2:10 is still ahead today.
+        let fall = try instant("2026-11-01T06:40:00Z")
+        var repeated = HardStopQuickAdd(now: fall, calendar: newYork)
+        XCTAssertEqual([repeated.hour, repeated.minute], [2, 10])
+        XCTAssertFalse(repeated.startsTomorrow(now: fall, calendar: newYork))
+        repeated.hour = 1
+        repeated.minute = 50
+        XCTAssertTrue(repeated.startsTomorrow(now: fall, calendar: newYork))
+        var settings = BreakSettings()
+        XCTAssertEqual(settings.saveHardStop(repeated.stop(now: fall, calendar: newYork), isNew: true, now: fall, calendar: newYork), [])
+    }
+
+    // MARK: - Quick add: the stop
+
+    func testQuickAddCreatesAOneOffStopWithTheDefaultsThatStartsOnTheNextTick() {
+        let now = at(10, 2)
+        var values = HardStopQuickAdd(now: now, calendar: calendar)
+        values.lengthMinutes = 45
+        values.name = "  "
+        let quick = values.stop(now: now, calendar: calendar)
+        let defaults = HardStop(name: "", hour: 0, minute: 0)
+        XCTAssertEqual(quick.name, "Hard stop")
+        XCTAssertEqual(quick.end, .after(45 * 60))
+        XCTAssertEqual(quick.repeats, .once(DateComponents(year: 2026, month: 8, day: 10)))
+        XCTAssertEqual(quick.warningMinutes, defaults.warningMinutes)
+        XCTAssertEqual(quick.escapeHatch, defaults.escapeHatch)
+        XCTAssertEqual(quick.duringCalls, defaults.duringCalls)
+
+        // Added to the running scheduler's settings, as the controller does, it starts without a relaunch.
+        var scheduler = makeScheduler([], start: at(10, 0))
+        var settings = scheduler.settings
+        XCTAssertEqual(settings.saveHardStop(quick, isNew: true, now: now, calendar: calendar), [])
+        scheduler.settings = settings
+        XCTAssertEqual(scheduler.tick(now: at(10, 35)).filter(isStart), [.hardStopStarted(id: quick.id, endsAt: at(11, 20))])
+    }
+
+    func testQuickAddIsRejectedAtTheLimit() {
+        var settings = BreakSettings()
+        settings.hardStops = (0..<HardStop.maximumCount).map { stop("Stop \($0)") }
+        let before = settings
+        let quick = HardStopQuickAdd(now: at(10, 0), calendar: calendar).stop(now: at(10, 0), calendar: calendar)
+        XCTAssertEqual(settings.saveHardStop(quick, isNew: true, now: at(10, 0), calendar: calendar),
+                       [HardStopFieldError(field: .list, message: "Add at most 20 hard stops.")])
+        XCTAssertEqual(settings, before)
+    }
+
+    // MARK: - Editor
+
+    func testEditorValuesSaveToAValidHardStop() {
+        var draft = HardStopDraft.new(now: at(10, 0))
+        draft.name = "Lunch"
+        draft.hour = 13
+        draft.minute = 0
+        draft.endKind = .afterLength
+        draft.lengthMinutes = 45
+        draft.weekdays = [2, 4]
+        draft.warningMinutes = [10, 5]
+        draft.escapeKind = .extend
+        draft.extendMinutes = 10
+        draft.extendTimes = 2
+        draft.duringCalls = .startAnyway
+
+        var settings = BreakSettings()
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: draft.isNew, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops, [HardStop(
+            id: draft.id, name: "Lunch", hour: 13, minute: 0, end: .after(45 * 60), repeats: .weekdays([2, 4]),
+            warningMinutes: [10, 5], escapeHatch: .extend(minutes: 10, times: 2), duringCalls: .startAnyway
+        )])
+    }
+
+    func testEditorShowsEachStoredStopAsItIs() {
+        let stops = [
+            stop(end: .at(hour: 13, minute: 15), repeats: .weekdays([1, 7]), escapeHatch: .dismissEarly, duringCalls: .waitForCallToEnd),
+            stop(end: .after(90 * 60), repeats: .once(DateComponents(year: 2026, month: 8, day: 12)), escapeHatch: .extend(minutes: 20, times: 3)),
+            stop(end: .untilDismissed, repeats: .weekdays([2, 3]), escapeHatch: .dismissEarly),
+            stop(end: .after(30 * 60), escapeHatch: .none),
+        ]
+        for original in stops {
+            let draft = HardStopDraft(original, now: at(10, 0), calendar: calendar)
+            XCTAssertFalse(draft.isNew)
+            XCTAssertEqual(draft.stop(calendar: calendar), original)
+        }
+    }
+
+    func testEditingKeepsTheStopsPlaceAndOnOffState() {
+        let first = stop("First")
+        var second = stop("Second", hour: 15)
+        second.isEnabled = false
+        var settings = BreakSettings()
+        settings.hardStops = [first, second]
+
+        var draft = HardStopDraft(second, now: at(10, 0), calendar: calendar)
+        draft.name = "Renamed"
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: false, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops.map(\.name), ["First", "Renamed"])
+        XCTAssertEqual(settings.hardStops[1].id, second.id)
+        XCTAssertFalse(settings.hardStops[1].isEnabled)
+    }
+
+    func testEachInvalidFieldIsRejectedWithItsError() {
+        let cases: [(name: String, edit: (inout HardStopDraft) -> Void, field: HardStopFieldError.Field, message: String)] = [
+            ("blank name", { $0.name = "  " }, .name, "Enter a name."),
+            ("start hour", { $0.hour = 24 }, .start, "Choose a valid start time."),
+            ("end time", { $0.endKind = .atTime; $0.endMinute = 60 }, .end, "Choose a valid end time."),
+            ("no length", { $0.endKind = .afterLength; $0.lengthMinutes = 0 }, .end, "A hard stop lasts from 1 minute to 16 hours."),
+            ("too long", { $0.endKind = .afterLength; $0.lengthMinutes = 16 * 60 + 1 }, .end, "A hard stop lasts from 1 minute to 16 hours."),
+            ("no days", { $0.repeatKind = .weekdays; $0.weekdays = [] }, .repeats, "Choose at least one day."),
+            ("past date", { $0.repeatKind = .once; $0.date = self.at(9, 0, dayOffset: -1) }, .repeats, "This date and time have passed."),
+            ("passed today", { $0.repeatKind = .once; $0.date = self.at(10, 0); $0.hour = 9 }, .repeats, "This date and time have passed."),
+            ("six warnings", { $0.warningMinutes = [1, 2, 3, 4, 5, 6] }, .warningMinutes, "Add at most 5 warnings."),
+            ("zero warning", { $0.warningMinutes = [0] }, .warningMinutes, "Warn from 1 to 120 minutes before."),
+            ("late warning", { $0.warningMinutes = [121] }, .warningMinutes, "Warn from 1 to 120 minutes before."),
+            ("short extension", { $0.escapeKind = .extend; $0.extendMinutes = 4 }, .escapeHatch, "Extend by 5 to 60 minutes, 1 to 5 times."),
+            ("many extensions", { $0.escapeKind = .extend; $0.extendTimes = 6 }, .escapeHatch, "Extend by 5 to 60 minutes, 1 to 5 times."),
+        ]
+        let existing = stop("Existing")
+        for item in cases {
+            var settings = BreakSettings()
+            settings.hardStops = [existing]
+            let before = settings
+            var draft = HardStopDraft.new(now: at(10, 0))
+            item.edit(&draft)
+            let errors = settings.saveHardStop(draft.stop(calendar: calendar), isNew: true, now: at(10, 0), calendar: calendar)
+            XCTAssertEqual(errors, [HardStopFieldError(stopID: draft.id, field: item.field, message: item.message)], item.name)
+            XCTAssertEqual(settings, before, item.name)
+        }
+
+        // The 21st stop is rejected for the whole list.
+        var full = BreakSettings()
+        full.hardStops = (0..<HardStop.maximumCount).map { stop("Stop \($0)") }
+        let draft = HardStopDraft.new(now: at(10, 0))
+        XCTAssertEqual(full.saveHardStop(draft.stop(calendar: calendar), isNew: true, now: at(10, 0), calendar: calendar),
+                       [HardStopFieldError(field: .list, message: "Add at most 20 hard stops.")])
+        XCTAssertEqual(full.hardStops.count, HardStop.maximumCount)
+    }
+
+    func testOtherStopsErrorsDoNotBlockSaving() {
+        // A one-off stop that has passed stays in the settings until the next tick removes it.
+        let passed = stop("Passed", hour: 8, repeats: .once(DateComponents(year: 2026, month: 8, day: 10)))
+        var settings = BreakSettings()
+        settings.hardStops = [passed]
+        let draft = HardStopDraft.new(now: at(10, 0))
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: true, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops.count, 2)
+    }
+
+    func testUntilDismissedHidesTheEscapeHatchAndSavesDismissEarly() {
+        var draft = HardStopDraft.new(now: at(10, 0))
+        draft.escapeKind = .extend
+        draft.extendMinutes = 99
+        draft.endKind = .untilDismissed
+        XCTAssertFalse(draft.showsEscapeHatch)
+
+        var settings = BreakSettings()
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: true, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops.first?.end, .untilDismissed)
+        XCTAssertEqual(settings.hardStops.first?.escapeHatch, .dismissEarly)
+    }
+
+    func testAnEditOfAStopThatIsGoneIsNotSaved() {
+        // A one-off stop that ran (or one deleted elsewhere) while its editor was open.
+        let ran = stop("Ran", repeats: .once(DateComponents(year: 2026, month: 8, day: 10)))
+        var settings = BreakSettings()
+        let draft = HardStopDraft(ran, now: at(12, 40), calendar: calendar)
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: false, now: at(12, 40), calendar: calendar),
+                       [HardStopFieldError(stopID: ran.id, field: .list, message: "This hard stop was deleted or has already run.")])
+        XCTAssertEqual(settings.hardStops, [])
+    }
+
+    // MARK: - Delete
+
+    func testDeletingARunningStopEndsItAndRecordsItAsDismissed() {
+        // No escape hatch: the overlay offers no way out, but deleting the stop ends it.
+        let lunch = stop(escapeHatch: .none)
+        var scheduler = makeScheduler([lunch])
+        XCTAssertEqual(scheduler.tick(now: at(12, 30)).filter(isStart).count, 1)
+        XCTAssertEqual(scheduler.dismissHardStop(now: at(12, 35)), [])
+        XCTAssertTrue(scheduler.isHardStopRunning(id: lunch.id, now: at(12, 35)))
+
+        XCTAssertEqual(scheduler.deleteHardStop(id: lunch.id, now: at(12, 35)), [.hardStopEnded(id: lunch.id, reason: .dismissed)])
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+        XCTAssertEqual(scheduler.phase, .focusing)
+        XCTAssertEqual(scheduler.settings.hardStops, [])
+        let record = scheduler.records.last
+        XCTAssertEqual(record?.kind, .hardStop)
+        XCTAssertEqual(record?.hardStopEndReason, .dismissed)
+        XCTAssertEqual(record?.completed, false)
+        XCTAssertEqual(record?.endedAt, at(12, 35))
+        XCTAssertEqual(scheduler.tick(now: at(12, 36)).filter(isStart), [])
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+    }
+
+    func testDeletingAnExtendedStopEndsItAndRecordsItAsDismissed() {
+        let lunch = stop(escapeHatch: .extend(minutes: 15, times: 1))
+        var scheduler = makeScheduler([lunch])
+        _ = scheduler.tick(now: at(12, 30))
+        XCTAssertEqual(scheduler.extendHardStop(now: at(12, 32)), [.hardStopExtended(id: lunch.id, until: at(12, 47))])
+        XCTAssertTrue(scheduler.isHardStopRunning(id: lunch.id, now: at(12, 40)))
+
+        XCTAssertEqual(scheduler.deleteHardStop(id: lunch.id, now: at(12, 40)), [.hardStopEnded(id: lunch.id, reason: .dismissed)])
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+        XCTAssertEqual(scheduler.records.last?.hardStopEndReason, .dismissed)
+        XCTAssertEqual(scheduler.records.last?.extensionsUsed, 1)
+        // The extension never runs out into a resumed stop.
+        XCTAssertEqual(scheduler.tick(now: at(12, 47)).filter { if case .hardStopResumed = $0 { true } else { false } }, [])
+    }
+
+    func testDeletingAStopMergedIntoTheRunningOneEndsTheRunningStop() {
+        let long = stop("Long", end: .after(60 * 60))
+        let walk = stop("Walk", hour: 12, minute: 45)
+        var scheduler = makeScheduler([long, walk])
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.tick(now: at(12, 45))
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.id), [walk.id])
+        XCTAssertTrue(scheduler.isHardStopRunning(id: walk.id, now: at(12, 50)))
+
+        XCTAssertEqual(scheduler.deleteHardStop(id: walk.id, now: at(12, 50)), [.hardStopEnded(id: long.id, reason: .dismissed)])
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+        XCTAssertEqual(scheduler.records.suffix(2).map(\.hardStopEndReason), [.dismissed, .dismissed])
+        XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [long.id])
+        // The kept stop's occurrence stays handled and does not start again.
+        XCTAssertEqual(scheduler.tick(now: at(12, 51)).filter(isStart), [])
+    }
+
+    func testDeletingAStopThatIsNotRunningRecordsNothing() {
+        let lunch = stop()
+        let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([lunch, call], start: at(11, 0))
+        // Lunch has warned; Call waits for the call that is running.
+        _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+        XCTAssertNotNil(scheduler.snapshot.hardStopWarnings[lunch.id.uuidString])
+        XCTAssertNotNil(scheduler.snapshot.hardStopsWaitingForCall[call.id.uuidString])
+        XCTAssertFalse(scheduler.isHardStopRunning(id: call.id, now: at(12, 20)))
+
+        XCTAssertEqual(scheduler.deleteHardStop(id: call.id, now: at(12, 21)), [])
+        XCTAssertEqual(scheduler.deleteHardStop(id: lunch.id, now: at(12, 21)), [])
+        XCTAssertEqual(scheduler.records, [])
+        XCTAssertEqual(scheduler.settings.hardStops, [])
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:])
+        XCTAssertEqual(scheduler.snapshot.hardStopWarnings, [:])
+        XCTAssertEqual(scheduler.tick(now: at(12, 30)).filter(isStart), [])
+    }
+
+    func testDeletingAnotherStopLeavesTheRunningOneAlone() {
+        let lunch = stop()
+        let later = stop("Later", hour: 16)
+        var scheduler = makeScheduler([lunch, later])
+        _ = scheduler.tick(now: at(12, 30))
+        XCTAssertEqual(scheduler.deleteHardStop(id: later.id, now: at(12, 35)), [])
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.id, lunch.id)
+        XCTAssertEqual(scheduler.phase, .breaking)
+    }
+
+    // MARK: - Menu bar and summaries
+
+    func testNextHardStopIsTheEarliestUpcomingEnabledOccurrence() {
+        var off = stop("Off", hour: 11)
+        off.isEnabled = false
+        let lunch = stop("Lunch")
+        let tomorrow = stop("Early", hour: 9, minute: 0, repeats: .once(DateComponents(year: 2026, month: 8, day: 11)))
+        var scheduler = makeScheduler([off, lunch, tomorrow], start: at(10, 0))
+
+        var next = scheduler.nextHardStop(after: at(10, 0))
+        XCTAssertEqual(next?.stop.id, lunch.id)
+        XCTAssertEqual(next?.start, at(12, 30))
+        XCTAssertEqual(next.map { HardStopText.next($0.stop, start: $0.start, now: at(10, 0), locale: locale, calendar: calendar) },
+                       "Next hard stop: Lunch at 12:30")
+
+        // While lunch runs, the next is tomorrow's.
+        _ = scheduler.tick(now: at(12, 30))
+        next = scheduler.nextHardStop(after: at(12, 30))
+        XCTAssertEqual(next?.stop.id, tomorrow.id)
+        XCTAssertEqual(next.map { HardStopText.next($0.stop, start: $0.start, now: at(12, 30), locale: locale, calendar: calendar) },
+                       "Next hard stop: Early at 09:00 tomorrow")
+
+        // A weekly stop is found a week ahead; there is none once no stop is enabled.
+        let weekly = makeScheduler([lunch], start: at(13, 0))
+        XCTAssertEqual(weekly.nextHardStop(after: at(13, 0))?.start, at(12, 30, dayOffset: 7))
+        XCTAssertEqual(HardStopText.next(lunch, start: at(12, 30, dayOffset: 7), now: at(13, 0), locale: locale, calendar: calendar),
+                       "Next hard stop: Lunch at 12:30 on Mon 17 Aug")
+        XCTAssertNil(makeScheduler([off]).nextHardStop(after: at(10, 0)))
+    }
+
+    func testRowSummaries() {
+        XCTAssertEqual(HardStopText.summary(of: stop(hour: 13, minute: 0, end: .after(45 * 60), repeats: .weekdays([2, 3, 4, 5, 6])),
+                                            locale: locale, calendar: calendar), "Weekdays 13:00 · 45 min")
+        XCTAssertEqual(HardStopText.summary(of: stop(end: .at(hour: 14, minute: 0), repeats: .weekdays([1, 7])),
+                                            locale: locale, calendar: calendar), "Weekends 12:30 · until 14:00")
+        XCTAssertEqual(HardStopText.summary(of: stop(end: .untilDismissed, repeats: .weekdays(Set(1...7))),
+                                            locale: locale, calendar: calendar), "Every day 12:30 · until dismissed")
+        XCTAssertEqual(HardStopText.summary(of: stop(end: .after(90 * 60), repeats: .weekdays([4, 2])),
+                                            locale: locale, calendar: calendar), "Mon, Wed 12:30 · 1 hr 30 min")
+        XCTAssertEqual(HardStopText.summary(of: stop(end: .after(3600), repeats: .once(DateComponents(year: 2026, month: 8, day: 11))),
+                                            locale: locale, calendar: calendar), "Tue 11 Aug 12:30 · 1 hr")
+    }
+}
