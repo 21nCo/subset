@@ -353,15 +353,33 @@ struct ActiveHardStop: Codable, Equatable, Sendable {
     /// Nil until dismissed.
     var endsAt: Date?
     var escapeHatch: HardStop.EscapeHatch
+    /// Extensions used while this occurrence's own escape hatch controlled the stop.
     var extensionsUsed = 0
     /// While set, the stop is hidden by an extension until this time.
     var extendedUntil: Date?
-    /// Occurrences that joined this one; each is recorded in history when the stop ends.
+    /// Occurrences that joined this one; each is recorded in history when the stop ends. Only ever appended to.
     var merged: [MergedHardStop] = []
+    /// The index in `merged` of the occurrence that took over the escape hatch; nil while this one sets it.
+    var escapeHatchOwner: Int?
     /// Focus time counted before the stop started, kept for the stretch statistics.
     var focusDuration: TimeInterval?
     /// The start of the last day whose occurrences were checked for merging.
     var mergedThrough: Date?
+
+    /// Extensions used by the occurrence whose escape hatch controls the stop. A takeover brings its own allowance.
+    var ownerExtensionsUsed: Int {
+        get {
+            guard let index = escapeHatchOwner, merged.indices.contains(index) else { return extensionsUsed }
+            return merged[index].extensionsUsed ?? 0
+        }
+        set {
+            if let index = escapeHatchOwner, merged.indices.contains(index) {
+                merged[index].extensionsUsed = newValue
+            } else {
+                extensionsUsed = newValue
+            }
+        }
+    }
 }
 
 /// An occurrence that joined a running hard stop.
@@ -373,6 +391,8 @@ struct MergedHardStop: Codable, Equatable, Sendable {
     var joinedAt: Date
     /// Its own scheduled end; nil when it lasts until dismissed.
     var endsAt: Date?
+    /// Extensions used while its escape hatch controlled the stop. Nil when none were.
+    var extensionsUsed: Int?
 }
 
 /// The warnings already delivered for one occurrence: every lead time of `minutes` or more.

@@ -150,7 +150,7 @@ struct BreakScheduler: Sendable {
         guard let active = snapshot.activeHardStop, active.extendedUntil == nil,
               active.endsAt.map({ now < $0 }) ?? true,
               case .extend(_, let times) = active.escapeHatch else { return false }
-        return active.extensionsUsed < times
+        return active.ownerExtensionsUsed < times
     }
 
     private func dismissAllowed(now: Date) -> Bool {
@@ -533,7 +533,7 @@ struct BreakScheduler: Sendable {
               case .extend(let minutes, _) = active.escapeHatch else { return [] }
         self = next
         let until = now.addingTimeInterval(TimeInterval(minutes * 60))
-        active.extensionsUsed += 1
+        active.ownerExtensionsUsed += 1
         active.extendedUntil = until
         snapshot.activeHardStop = active
         clearActiveBreak()
@@ -770,7 +770,7 @@ struct BreakScheduler: Sendable {
         return events
     }
 
-    /// The stop that ends later sets the escape hatch. A stop without an end ends latest.
+    /// The stop that ends later sets the escape hatch, with its own extension allowance. A stop without an end ends latest.
     private mutating func merge(_ stop: HardStop, _ occurrence: HardStop.Occurrence, joinedAt: Date, into active: inout ActiveHardStop) {
         markHandled(stop, occurrence)
         active.merged.append(MergedHardStop(id: stop.id, occurrenceKey: occurrence.key, joinedAt: joinedAt, endsAt: occurrence.end))
@@ -783,6 +783,7 @@ struct BreakScheduler: Sendable {
         if endsLater {
             active.endsAt = occurrence.end
             active.escapeHatch = stop.escapeHatch
+            active.escapeHatchOwner = active.merged.count - 1
         }
     }
 
@@ -800,7 +801,8 @@ struct BreakScheduler: Sendable {
             extensionsUsed: active.extensionsUsed
         ))
         // Each merged occurrence is recorded too, from when it joined. One whose own end came first ended normally.
-        // Extensions are counted on the running stop's record, and the focus stretch only there.
+        // Each counts the extensions it used while its escape hatch controlled the stop; the focus stretch is
+        // counted on the running stop's record only.
         for joined in active.merged {
             let ownEnd = joined.endsAt.map { min($0, endedAt) } ?? endedAt
             let endedOnTime = joined.endsAt.map { $0 <= endedAt } ?? false
@@ -812,7 +814,7 @@ struct BreakScheduler: Sendable {
                 completed: endedOnTime || reason == .ended,
                 skipped: false,
                 hardStopEndReason: endedOnTime ? .ended : reason,
-                extensionsUsed: 0
+                extensionsUsed: joined.extensionsUsed ?? 0
             ))
         }
         removeOnceStops([(active.id, active.occurrenceKey)] + active.merged.map { ($0.id, $0.occurrenceKey) })

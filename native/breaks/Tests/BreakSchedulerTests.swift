@@ -1133,6 +1133,77 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(pastEnd.records.last?.extensionsUsed, 1)
     }
 
+    func testMergedStopThatTakesOverTheEscapeHatchBringsItsOwnExtensions() throws {
+        // A 10:30–11:00, then B to 11:10 and C to 11:30 each take over; D ends first, so it never does.
+        let a = hardStop(escapeHatch: .extend(minutes: 5, times: 1))
+        let b = hardStop(hour: 10, minute: 45, end: .at(hour: 11, minute: 10), escapeHatch: .extend(minutes: 5, times: 1))
+        let d = hardStop(hour: 10, minute: 50, end: .after(5 * 60), escapeHatch: .extend(minutes: 5, times: 3))
+        let c = hardStop(hour: 11, minute: 5, end: .at(hour: 11, minute: 30), escapeHatch: .extend(minutes: 5, times: 2))
+        var scheduler = makeScheduler(stops: [a, b, d, c])
+        _ = scheduler.tick(now: at(10, 30))
+        _ = scheduler.extendHardStop(now: at(10, 31))
+        _ = runTimed(&scheduler, from: at(10, 31), through: at(10, 40), step: 30)
+        XCTAssertFalse(scheduler.canExtendHardStop(now: at(10, 40)), "A's extension is used")
+
+        // B has started but no tick merged it yet: the queries offer B's own extension, and asking again changes nothing.
+        XCTAssertTrue(scheduler.canExtendHardStop(now: at(10, 45)))
+        XCTAssertTrue(scheduler.canExtendHardStop(now: at(10, 45)))
+        XCTAssertEqual(scheduler.extendHardStop(now: at(10, 45)), [.hardStopExtended(id: a.id, until: at(10, 50))])
+        XCTAssertTrue(scheduler.extendHardStop(now: at(10, 46)).isEmpty, "Already hidden")
+        XCTAssertEqual(runTimed(&scheduler, from: at(10, 45), through: at(10, 51), step: 30).map(\.1), [.hardStopResumed(id: a.id)])
+        // D merged at 10:50 but ends first, so B's used allowance still controls.
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.id), [b.id, d.id])
+        XCTAssertFalse(scheduler.canExtendHardStop(now: at(10, 51)))
+        XCTAssertTrue(scheduler.extendHardStop(now: at(10, 51)).isEmpty)
+        var relaunched = try relaunch(scheduler, at: at(10, 52))
+        XCTAssertFalse(relaunched.canExtendHardStop(now: at(10, 52)), "A relaunch does not give extensions back")
+        XCTAssertTrue(relaunched.extendHardStop(now: at(10, 52)).isEmpty)
+
+        // C takes over with both of its extensions, also after a relaunch.
+        _ = runTimed(&relaunched, from: at(10, 52), through: at(11, 5), step: 30)
+        var takenOver = try relaunch(relaunched, at: at(11, 5))
+        XCTAssertTrue(takenOver.canExtendHardStop(now: at(11, 5)))
+        XCTAssertEqual(takenOver.extendHardStop(now: at(11, 5)), [.hardStopExtended(id: a.id, until: at(11, 10))])
+        XCTAssertEqual(takenOver.tick(now: at(11, 10)), [.hardStopResumed(id: a.id)])
+        XCTAssertEqual(takenOver.extendHardStop(now: at(11, 11)), [.hardStopExtended(id: a.id, until: at(11, 16))])
+        XCTAssertEqual(takenOver.tick(now: at(11, 16)), [.hardStopResumed(id: a.id)])
+        XCTAssertFalse(takenOver.canExtendHardStop(now: at(11, 17)))
+        XCTAssertFalse(try relaunch(takenOver, at: at(11, 17)).canExtendHardStop(now: at(11, 17)))
+        XCTAssertEqual(runTimed(&takenOver, from: at(11, 16), through: at(11, 30), step: 30).map(\.1), [.hardStopEnded(id: a.id, reason: .ended)])
+        // Each occurrence's record shows the extensions it used, none counted twice.
+        XCTAssertEqual(takenOver.records.map(\.startedAt), [at(10, 30), at(10, 45), at(10, 50), at(11, 5)])
+        XCTAssertEqual(takenOver.records.map(\.extensionsUsed), [1, 1, 0, 2])
+
+        // A takeover while hidden does not end the hidden time or allow another extension during it.
+        let long = hardStop(escapeHatch: .extend(minutes: 30, times: 1))
+        let later = hardStop(hour: 10, minute: 45, end: .at(hour: 12, minute: 0), escapeHatch: .extend(minutes: 10, times: 1))
+        var hidden = makeScheduler(stops: [long, later])
+        _ = hidden.tick(now: at(10, 30))
+        _ = hidden.extendHardStop(now: at(10, 40))
+        XCTAssertTrue(hidden.tick(now: at(10, 45)).isEmpty)
+        XCTAssertFalse(hidden.canExtendHardStop(now: at(10, 50)))
+        XCTAssertTrue(hidden.extendHardStop(now: at(10, 50)).isEmpty)
+        XCTAssertEqual(hidden.snapshot.activeHardStop?.extendedUntil, at(11, 10))
+        XCTAssertEqual(runTimed(&hidden, from: at(10, 50), through: at(11, 10), step: 30).map(\.1), [.hardStopResumed(id: long.id)])
+        XCTAssertEqual(hidden.extendHardStop(now: at(11, 10)), [.hardStopExtended(id: long.id, until: at(11, 20))])
+        XCTAssertEqual(hidden.tick(now: at(11, 20)), [.hardStopResumed(id: long.id)])
+        XCTAssertFalse(hidden.canExtendHardStop(now: at(11, 21)))
+        _ = runTimed(&hidden, from: at(11, 20), through: at(12, 0), step: 30)
+        XCTAssertEqual(hidden.records.map(\.extensionsUsed), [1, 1])
+
+        // A snapshot saved before takeovers were tracked still loads, and counts the running occurrence's extensions.
+        let data = try JSONEncoder().encode(relaunched.snapshot)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var active = try XCTUnwrap(json["activeHardStop"] as? [String: Any])
+        active["escapeHatchOwner"] = nil
+        active["merged"] = (active["merged"] as? [[String: Any]])?.map { $0.filter { $0.key != "extensionsUsed" } }
+        json["activeHardStop"] = active
+        let legacy = try JSONDecoder().decode(EngineSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(legacy.activeHardStop?.escapeHatchOwner)
+        XCTAssertEqual(legacy.activeHardStop?.merged.map(\.id), [b.id, d.id, c.id])
+        XCTAssertEqual(legacy.activeHardStop?.ownerExtensionsUsed, 1)
+    }
+
     func testHardStopDismissRulesForEachEscapeHatch() {
         func dismissed(_ escapeHatch: HardStop.EscapeHatch, end: HardStop.End = .after(30 * 60)) -> Bool {
             var scheduler = makeScheduler(stops: [hardStop(end: end, escapeHatch: escapeHatch)])
