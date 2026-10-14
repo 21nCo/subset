@@ -200,8 +200,9 @@ struct BreakScheduler: Sendable {
             return events
         }
         if hardStopEvents.contains(where: { if case .hardStopEnded(_, .missed) = $0 { true } else { false } }),
-           snapshot.phase == .focusing || snapshot.phase == .headsUp {
-            // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop.
+           snapshot.phase != .breaking {
+            // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop. A
+            // pause from before the stop does not come back; live signals may pause the new interval below.
             startFocusInterval(at: now)
         }
 
@@ -495,12 +496,14 @@ struct BreakScheduler: Sendable {
 
     // MARK: - Hard stops
 
-    /// Hides the shown hard stop for the escape hatch's minutes without moving its end. Returns no events when
-    /// the escape hatch has no extension left.
+    /// Hides the shown hard stop for the escape hatch's minutes without moving its end. Returns no events, and
+    /// changes nothing, when the escape hatch has no extension left.
     mutating func extendHardStop(now: Date) -> [Event] {
-        reconcileMerges(now: now)
-        guard canExtendHardStop(now: now), var active = snapshot.activeHardStop,
+        var next = self
+        let events = next.reconcileMerges(now: now)
+        guard next.canExtendHardStop(now: now), var active = next.snapshot.activeHardStop,
               case .extend(let minutes, _) = active.escapeHatch else { return [] }
+        self = next
         let until = now.addingTimeInterval(TimeInterval(minutes * 60))
         active.extensionsUsed += 1
         active.extendedUntil = until
@@ -511,28 +514,32 @@ struct BreakScheduler: Sendable {
         snapshot.focusStartedAt = now
         snapshot.nextBreakAt = min(until, active.endsAt ?? until)
         countingSince = now
-        return [.hardStopExtended(id: active.id, until: until)]
+        return events + [.hardStopExtended(id: active.id, until: until)]
     }
 
-    /// Ends the running hard stop early. Returns no events unless it lasts until dismissed or its escape hatch
-    /// allows dismissing it.
+    /// Ends the running hard stop early. Returns no events, and changes nothing, unless it lasts until dismissed
+    /// or its escape hatch allows dismissing it.
     mutating func dismissHardStop(now: Date) -> [Event] {
-        reconcileMerges(now: now)
-        guard canDismissHardStop(now: now) else { return [] }
-        return finishHardStop(.dismissed, endedAt: now, now: now)
+        var next = self
+        let events = next.reconcileMerges(now: now)
+        guard next.canDismissHardStop(now: now) else { return [] }
+        self = next
+        return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
     /// A stop that starts inside the running one by `now` may change its end and escape hatch, so an operation
-    /// merges it first, even when no tick has run since it started.
-    private mutating func reconcileMerges(now: Date) {
-        guard let before = snapshot.activeHardStop else { return }
-        _ = mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now, resolvingWaits: false)
-        guard let active = snapshot.activeHardStop, active.endsAt != before.endsAt else { return }
+    /// merges it first, even when no tick has run since it started. Like a tick, it first records as missed an
+    /// earlier occurrence of the same stop that waited for a call and whose end has passed, so the later one joins.
+    private mutating func reconcileMerges(now: Date) -> [Event] {
+        guard let before = snapshot.activeHardStop else { return [] }
+        let events = mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now)
+        guard let active = snapshot.activeHardStop, active.endsAt != before.endsAt else { return events }
         if let until = active.extendedUntil {
             snapshot.nextBreakAt = min(until, active.endsAt ?? until)
         } else {
             showHardStop()
         }
+        return events
     }
 
     /// Moves hard stops forward for one tick: merges, misses, ends, resumes, starts, and warns.
@@ -543,7 +550,7 @@ struct BreakScheduler: Sendable {
         // Merging comes first, so a stop that started inside the running one joins it even if it waits for
         // calls or its own window passed while the host was asleep.
         if snapshot.activeHardStop != nil {
-            events += mergeOverlappingStops(stops: stops, now: now, resolvingWaits: true)
+            events += mergeOverlappingStops(stops: stops, now: now)
         }
         // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
         events += missWaitingStops(now: now)
@@ -616,7 +623,7 @@ struct BreakScheduler: Sendable {
             )
             if snapshot.activeHardStop?.focusDuration == 0 { snapshot.activeHardStop?.focusDuration = nil }
             // Other due stops that start inside it, including ones waiting for a call, join it at once.
-            events += mergeOverlappingStops(stops: stops, now: now, resolvingWaits: true)
+            events += mergeOverlappingStops(stops: stops, now: now)
             showHardStop()
             if let active = snapshot.activeHardStop {
                 events.append(.hardStopStarted(id: active.id, endsAt: active.endsAt))
@@ -635,9 +642,9 @@ struct BreakScheduler: Sendable {
     /// after a gap of several days. `mergedThrough` remembers the last day already worked out.
     ///
     /// A later occurrence never merges past an earlier occurrence of the same stop that is waiting for a call. When
-    /// `resolvingWaits` is true and that earlier one's end has passed, it is first recorded as missed; one that is
-    /// still open stays waiting, and the later occurrence joins later. Operations pass false and only skip.
-    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date, resolvingWaits: Bool) -> [Event] {
+    /// that earlier one's end has passed, it is first recorded as missed; one that is still open stays waiting, and
+    /// the later occurrence joins later.
+    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) -> [Event] {
         var events: [Event] = []
         guard var active = snapshot.activeHardStop else { return events }
         var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
@@ -650,7 +657,7 @@ struct BreakScheduler: Sendable {
                       item.occurrence.start < active.endsAt ?? .distantFuture,
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
                 if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
-                    guard resolvingWaits, let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
+                    guard let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
                           let end = waiting.end, end <= now else { continue }
                     events.append(recordMissed(item.stop, waiting, end: end))
                 }

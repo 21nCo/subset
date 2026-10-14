@@ -908,6 +908,58 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(missed.snapshot.nextBreakAt, at(11, 30))
     }
 
+    func testMissedStopDiscardsAPauseFromBeforeIt() {
+        // A manual pause from 10:29 is held while the stop waits for the call. When the stop is missed at 11:00, a
+        // fresh focus interval starts instead of the pause coming back; the live call may then pause that interval.
+        let stop = hardStop()
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        var indefinite = makeScheduler(stops: [stop])
+        XCTAssertEqual(indefinite.pause(now: at(10, 29)), [.paused(.manual)])
+        XCTAssertTrue(indefinite.tick(now: at(10, 30), inputs: call).isEmpty)
+        XCTAssertEqual(indefinite.tick(now: at(11, 0), inputs: call), [.hardStopEnded(id: stop.id, reason: .missed), .paused(.meeting)])
+        XCTAssertEqual(indefinite.snapshot.pauseReason, .meeting)
+        XCTAssertEqual(indefinite.snapshot.pausedRemaining, 120 * 60)
+
+        // A timed pause whose time ran out while the stop waited does not bring back its old remaining interval.
+        var timed = makeScheduler(stops: [stop])
+        XCTAssertEqual(timed.pause(until: at(10, 45), now: at(10, 29)), [.paused(.manual)])
+        XCTAssertTrue(timed.tick(now: at(10, 30), inputs: call).isEmpty)
+        XCTAssertEqual(timed.tick(now: at(11, 0)), [.hardStopEnded(id: stop.id, reason: .missed)])
+        XCTAssertEqual(timed.phase, .focusing)
+        XCTAssertEqual(timed.snapshot.nextBreakAt, at(13, 0))
+    }
+
+    func testOperationBeforeTickMissesExpiredWaitLikeATick() {
+        // S waits for Monday's call; B starts anyway inside it at 10:45 and lasts until dismissed. With no tick
+        // until Tuesday 10:40, Monday's S is missed and Tuesday's S, which started inside B, joins B.
+        let s = hardStop(repeats: .weekdays([2, 3]))
+        let b = hardStop(hour: 10, minute: 45, end: .untilDismissed, duringCalls: .startAnyway)
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        var scheduler = makeScheduler(stops: [s, b])
+        XCTAssertTrue(scheduler.tick(now: at(10, 30), inputs: call).isEmpty)
+        XCTAssertEqual(scheduler.tick(now: at(10, 45), inputs: call), [.hardStopStarted(id: b.id, endsAt: nil)])
+        let tuesday = at(10, 40, dayOffset: 1)
+
+        // A refused operation changes nothing; the next tick reports the miss.
+        var refused = scheduler
+        XCTAssertTrue(refused.extendHardStop(now: tuesday).isEmpty)
+        XCTAssertEqual(refused.snapshot, scheduler.snapshot)
+        XCTAssertEqual(refused.tick(now: tuesday), [.hardStopEnded(id: s.id, reason: .missed)])
+
+        var ticked = scheduler
+        let tickedEvents = ticked.tick(now: tuesday) + ticked.dismissHardStop(now: tuesday)
+        let events = scheduler.dismissHardStop(now: tuesday)
+        XCTAssertEqual(events, [.hardStopEnded(id: s.id, reason: .missed), .hardStopEnded(id: b.id, reason: .dismissed)])
+        XCTAssertEqual(events, tickedEvents)
+        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), [.missed, .dismissed, .dismissed])
+        XCTAssertEqual(scheduler.records.map(\.hardStopEndReason), ticked.records.map(\.hardStopEndReason))
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30), at(10, 45), at(10, 30, dayOffset: 1)])
+        XCTAssertEqual(scheduler.records.map(\.startedAt), ticked.records.map(\.startedAt))
+        XCTAssertEqual(scheduler.records.map(\.endedAt), ticked.records.map(\.endedAt))
+        // Tuesday's S was dismissed with B, so it does not start again.
+        XCTAssertTrue(runTimed(&scheduler, from: tuesday, through: at(11, 5, dayOffset: 1), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
+    }
+
     func testOverlappingHardStopsMerge() {
         // B starts inside A and ends later: A runs until B's end with B's escape hatch, and B shows no warnings.
         let a = hardStop(escapeHatch: .extend(minutes: 15, times: 1))
@@ -1137,6 +1189,8 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertTrue(scheduler.extendHardStop(now: at(10, 45)).isEmpty)
         XCTAssertTrue(scheduler.dismissHardStop(now: at(10, 45)).isEmpty)
         XCTAssertEqual(scheduler.phase, .breaking)
+        // Refused operations change nothing; the next tick merges B.
+        XCTAssertTrue(scheduler.tick(now: at(10, 45)).isEmpty)
         XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(12, 0))
     }
 
