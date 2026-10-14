@@ -475,6 +475,8 @@ struct BreakScheduler: Sendable {
     /// that through its events. One-off hard stops whose date has passed are removed.
     @discardableResult
     mutating func reconcileRestoredState(now: Date) -> Bool {
+        // A host shows warnings only while it runs, so the next tick shows the latest one that has passed again.
+        snapshot.hardStopWarnings = [:]
         // With a hard stop running, the next tick merges the stops that started inside it before one-off stops
         // are removed, so none that joined it while the host was off is lost.
         if snapshot.activeHardStop != nil {

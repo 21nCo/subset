@@ -1,10 +1,17 @@
 import AppKit
 import SwiftUI
 
+/// Set on a window once it starts fading out, so its view keeps a hard stop's screen until it is gone.
+@MainActor
+private final class OverlayFade: ObservableObject {
+    @Published var isClosing = false
+}
+
 /// A borderless window. Only the primary display's window, which holds the controls, takes keyboard focus
 /// (for Return and Esc, or a hard stop's controls), so clicking another display does not move focus away from them.
 private final class OverlayWindow: NSWindow {
     var isPrimary = false
+    let fade = OverlayFade()
     override var canBecomeKey: Bool { isPrimary }
     override var canBecomeMain: Bool { isPrimary }
 }
@@ -13,7 +20,7 @@ private final class OverlayWindow: NSWindow {
 @MainActor
 final class BreakOverlayController {
     private unowned let controller: MacBreakController
-    private var windows: [NSWindow] = []
+    private var windows: [OverlayWindow] = []
     private var previousApp: NSRunningApplication?
 
     init(controller: MacBreakController) {
@@ -48,6 +55,7 @@ final class BreakOverlayController {
         guard !windows.isEmpty else { return }
         let closing = windows
         windows.removeAll()
+        closing.forEach { $0.fade.isClosing = true }
         let finish = { [previousApp] in
             closing.forEach { $0.orderOut(nil) }
             if let previousApp, previousApp.processIdentifier != ProcessInfo.processInfo.processIdentifier {
@@ -92,7 +100,7 @@ final class BreakOverlayController {
             window.isReleasedWhenClosed = false
             window.animationBehavior = .none
 
-            let root = BreakOverlayView(isPrimary: screen == primary)
+            let root = BreakOverlayView(isPrimary: screen == primary, fade: window.fade)
                 .environmentObject(controller)
             let hosting = NSHostingView(rootView: root)
             hosting.frame = NSRect(origin: .zero, size: screen.frame.size)
@@ -114,23 +122,32 @@ final class BreakOverlayController {
     }
 }
 
-struct BreakOverlayView: View {
+private struct BreakOverlayView: View {
     @EnvironmentObject private var controller: MacBreakController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isPrimary: Bool
+    @ObservedObject var fade: OverlayFade
+    @State private var lastHardStop: HardStopPresentation.Overlay?
 
     var body: some View {
+        let current = controller.hardStop.overlay
         ZStack {
             Color.black.opacity(controller.settings.desktop.overlayStyle == .blur ? 0.35 : 0.82)
                 .ignoresSafeArea()
-            if let hardStop = controller.hardStop.overlay {
+            if let hardStop = HardStopPresentation.overlayScreen(current: current, last: lastHardStop, isClosing: fade.isClosing) {
+                // A stop's last screen stays, inactive, while the window fades out.
                 HardStopOverlayContent(overlay: hardStop, isPrimary: isPrimary)
                     .padding(40)
+                    .disabled(current == nil)
             } else {
                 breakContent
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear { lastHardStop = current }
+        .onChange(of: current) { _, overlay in
+            if let overlay { lastHardStop = overlay }
+        }
     }
 
     private var breakContent: some View {

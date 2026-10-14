@@ -185,6 +185,13 @@ struct HardStopPresentation: Equatable {
         showsHardStopNotice && overlayVisible ? .aboveOverlay : .floating
     }
 
+    /// The hard-stop screen a break-screen window shows: the running stop's, or, while the window fades out after the
+    /// stop ended or was dismissed, its last one, so the fading screen never shows regular-break content. Nil shows the
+    /// regular break.
+    static func overlayScreen(current: Overlay?, last: Overlay?, isClosing: Bool) -> Overlay? {
+        current ?? (isClosing ? last : nil)
+    }
+
     /// Whether a stop's end plays the completion chime. An end that passed while the app was not running, reported by
     /// the first tick after launch, ends silently, like a regular break that ran out then.
     static func chimesOnEnd(_ reason: HardStopEndReason, afterRelaunch: Bool) -> Bool {

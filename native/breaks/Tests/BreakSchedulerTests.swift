@@ -499,13 +499,40 @@ final class BreakSchedulerTests: XCTestCase {
         // Asleep from 10:21 to 10:29: the 5-minute warning is skipped, and only the latest (2 minutes) is shown.
         XCTAssertEqual(scheduler.tick(now: at(10, 29)), [warning])
         XCTAssertEqual(scheduler.snapshot.hardStopWarnings[stop.id.uuidString]?.minutes, 2)
-        // A relaunch does not show it again.
+        // A relaunch shows only that latest one again, once.
         var restored = try relaunch(scheduler, at: at(10, 29, 10))
-        XCTAssertTrue(restored.tick(now: at(10, 29, 20)).isEmpty)
+        XCTAssertEqual(restored.tick(now: at(10, 29, 20)), [warning])
+        XCTAssertTrue(restored.tick(now: at(10, 29, 30)).isEmpty)
 
         // Waking after the start shows no warning at all.
         var late = makeScheduler(stops: [stop])
         XCTAssertEqual(late.tick(now: at(10, 31)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+    }
+
+    /// The host keeps its notices only while it runs, so a relaunch inside a warned window shows the warning again.
+    func testWarningIsShownAgainAfterARelaunchBeforeTheStart() throws {
+        let stop = hardStop(warnings: [10])
+        var scheduler = makeScheduler(stops: [stop])
+        let warning = BreakScheduler.Event.hardStopWarning(id: stop.id, occurrenceKey: key(10, 30), startsAt: at(10, 30), waitingForCall: false)
+        XCTAssertEqual(scheduler.tick(now: at(10, 20)), [warning])
+        XCTAssertTrue(scheduler.tick(now: at(10, 21)).isEmpty)
+        var restored = try relaunch(scheduler, at: at(10, 22))
+        XCTAssertEqual(restored.tick(now: at(10, 22)), [warning])
+        XCTAssertTrue(runTimed(&restored, from: at(10, 22), through: at(10, 29, 59)).isEmpty)
+
+        // While a stop runs, the warning for a later one comes back too.
+        let later = hardStop(hour: 11, minute: 10, warnings: [30])
+        var running = makeScheduler(stops: [stop, later])
+        let laterWarning = BreakScheduler.Event.hardStopWarning(id: later.id, occurrenceKey: key(11, 10), startsAt: at(11, 10), waitingForCall: false)
+        XCTAssertEqual(running.tick(now: at(10, 30)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertEqual(running.tick(now: at(10, 40)), [laterWarning])
+        var relaunched = try relaunch(running, at: at(10, 45))
+        XCTAssertEqual(relaunched.tick(now: at(10, 45)), [laterWarning])
+        XCTAssertTrue(relaunched.tick(now: at(10, 46)).isEmpty)
+
+        // After the start, a relaunch shows no warning.
+        var started = try relaunch(scheduler, at: at(10, 31))
+        XCTAssertFalse(started.tick(now: at(10, 31)).contains { if case .hardStopWarning = $0 { true } else { false } })
     }
 
     func testHardStopStartsAndEndsForEachEndType() {

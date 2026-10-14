@@ -486,6 +486,23 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, afterRelaunch: false))
     }
 
+    func testFadingOverlayKeepsTheHardStopScreenAfterItsStopEnds() throws {
+        var scheduler = makeScheduler([lunch(escapeHatch: .dismissEarly)])
+        _ = scheduler.tick(now: at(12, 30))
+        let running = try XCTUnwrap(present(scheduler, at: at(12, 31)).overlay)
+        XCTAssertEqual(HardStopPresentation.overlayScreen(current: running, last: nil, isClosing: false), running)
+
+        // Dismissed: the windows fading out keep the stop's last screen instead of the regular break's.
+        _ = scheduler.dismissHardStop(now: at(12, 32))
+        let after = present(scheduler, at: at(12, 32)).overlay
+        XCTAssertNil(after)
+        XCTAssertEqual(HardStopPresentation.overlayScreen(current: after, last: running, isClosing: true), running)
+        // A window that is not closing shows the regular break once no stop runs.
+        XCTAssertNil(HardStopPresentation.overlayScreen(current: after, last: running, isClosing: false))
+        // A window that only ever showed a regular break fades out with it.
+        XCTAssertNil(HardStopPresentation.overlayScreen(current: nil, last: nil, isClosing: true))
+    }
+
     func testHardStopNoticeDueUnderTheOverlayGoesAboveIt() {
         // Walk's 10-minute warning comes due at 12:55, while Lunch (12:30–13:00) covers the screen.
         let lunch = lunch()
