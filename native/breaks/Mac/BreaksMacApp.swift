@@ -39,7 +39,8 @@ struct MenuBarLabel: View {
     @EnvironmentObject private var controller: MacBreakController
 
     var body: some View {
-        if controller.settings.desktop.showsMenuBarCountdown {
+        // A hard stop's status shows even with the countdown turned off.
+        if controller.settings.desktop.showsMenuBarCountdown || controller.hardStop.menuBar != nil {
             Label(controller.menuBarText, systemImage: controller.menuBarSymbol)
                 .labelStyle(.titleAndIcon)
                 .monospacedDigit()

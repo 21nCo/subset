@@ -3,7 +3,8 @@ import Combine
 import ServiceManagement
 
 /// Runs the shared `BreakScheduler` on macOS and performs its effects: the menu bar status, the heads-up
-/// notice, the full-screen overlay on every display, blink and posture nudges, and sounds.
+/// notice, the full-screen overlay on every display, blink and posture nudges, and sounds. Hard stops use the
+/// same notice and overlay, with content from `HardStopPresentation`.
 @MainActor
 final class MacBreakController: ObservableObject {
     @Published private var core: BreakScheduler
@@ -12,6 +13,10 @@ final class MacBreakController: ObservableObject {
     @Published private(set) var activeMessage: String
     @Published private(set) var launchAtLoginStatus: SMAppService.Status = SMAppService.mainApp.status
     @Published private(set) var launchAtLoginError: String?
+    /// Why the hard-stop notice is open; nil when it is closed or the notice shows the regular heads-up.
+    @Published private(set) var hardStopNoticeSubject: HardStopPresentation.NoticeSubject?
+    /// True while the meeting signal (microphone or camera in use) is on, read even when it does not pause reminders.
+    @Published private(set) var inCall = false
 
     private let repository: BreakRepository
     private let signals = ActivitySignals()
@@ -23,6 +28,10 @@ final class MacBreakController: ObservableObject {
     private var lastSignalReadAt = Date.distantPast
     private var observers: [NSObjectProtocol] = []
     private var sleptAt: Date?
+    /// The meeting signal from the last signal read, including one read only for hard stops.
+    private var callReading = false
+    /// The extension whose ending notice was already shown.
+    private var warnedExtensionUntil: Date?
 
     init(repository: BreakRepository = BreakRepository()) {
         self.repository = repository
@@ -43,7 +52,7 @@ final class MacBreakController: ObservableObject {
             core.settings = newValue
             core.normalizeSettings()
             lastSignalReadAt = .distantPast
-            if !core.settings.reminder.headsUpEnabled { notice.hide() }
+            if !core.settings.reminder.headsUpEnabled { hideRegularHeadsUp() }
             save()
         }
     }
@@ -66,13 +75,18 @@ final class MacBreakController: ObservableObject {
     var nextPlannedBreak: (PlannedBreak, Date)? { core.nextPlannedBreak(after: now) }
     var isWithinOfficeHours: Bool { settings.officeHours.contains(now) }
 
+    var hardStop: HardStopPresentation {
+        HardStopPresentation(scheduler: core, noticeSubject: hardStopNoticeSubject, inCall: inCall, now: now)
+    }
+
     var activeBreakTitle: String {
         snapshot.activePlannedBreakName ?? snapshot.activeKind?.title ?? BreakKind.manual.title
     }
 
     /// Short text for the menu bar.
     var menuBarText: String {
-        switch phase {
+        if let hardStop = hardStop.menuBar { return hardStop.text }
+        return switch phase {
         case .breaking: breakRemaining.clockDuration
         case .paused: "Paused"
         case .focusing, .headsUp:
@@ -81,7 +95,8 @@ final class MacBreakController: ObservableObject {
     }
 
     var menuBarSymbol: String {
-        switch phase {
+        if let hardStop = hardStop.menuBar { return hardStop.symbol }
+        return switch phase {
         case .breaking: "cup.and.saucer.fill"
         case .paused: "pause.circle"
         case .headsUp: "eye.fill"
@@ -90,7 +105,8 @@ final class MacBreakController: ObservableObject {
     }
 
     var statusLine: String {
-        switch phase {
+        if let hardStop = hardStop.menuBar { return hardStop.statusLine }
+        return switch phase {
         case .breaking: "\(activeBreakTitle), \(breakRemaining.spokenDuration) left"
         case .paused:
             if let until = snapshot.pausedUntil {
@@ -112,6 +128,7 @@ final class MacBreakController: ObservableObject {
         now = .now
         core.reconcileRestoredState(now: now)
         save()
+        // A restored hard stop is shown by the first tick, after the scheduler has ended, resumed, or kept it.
         if phase == .breaking, snapshot.activeKind != .hardStop { overlay.show() }
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -158,6 +175,24 @@ final class MacBreakController: ObservableObject {
     func resume() { perform { $0.resume(now: $1) } }
     func dismissHeadsUp() { notice.hide() }
 
+    func extendHardStop() { perform { $0.extendHardStop(now: $1) } }
+    func dismissHardStop() { perform { $0.dismissHardStop(now: $1) } }
+
+    /// **Start now** on the hard-stop notice: starts the warned stop, or ends the extension that is running out.
+    func startHardStopNow() {
+        switch hardStopNoticeSubject {
+        case .warning(let id, _): perform { $0.startHardStopEarly(id: id, now: $1) }
+        case .extensionEnding: perform { $0.endHardStopExtension(now: $1) }
+        case nil: break
+        }
+    }
+
+    func closeHardStopNotice() {
+        guard hardStopNoticeSubject != nil else { return }
+        hardStopNoticeSubject = nil
+        notice.hide()
+    }
+
     func resetToday() {
         core.resetToday(now: .now)
         save()
@@ -199,18 +234,34 @@ final class MacBreakController: ObservableObject {
         now = .now
         // Idle time is cheap and read every tick; device and power-assertion signals every few seconds.
         var reading = lastReading
-        if now.timeIntervalSince(lastSignalReadAt) >= 3 {
+        let readsSignals = now.timeIntervalSince(lastSignalReadAt) >= 3
+        if readsSignals {
             reading = signals.read(settings: core.settings)
             lastSignalReadAt = now
         } else {
             reading.idleSeconds = core.settings.desktop.idle.isEnabled ? ActivitySignals.idleSeconds() : 0
         }
         if reading != lastReading { lastReading = reading }
+        // Hard stops wait for calls even when the meeting smart pause is off; the scheduler ignores the signal
+        // for pausing then.
+        var signals = reading.signals
+        if readsSignals {
+            callReading = signals.contains(.meeting)
+                || (waitsForCalls && !core.settings.smartPause.meetingsAndCalls
+                    && (ActivitySignals.isMicrophoneInUse() || ActivitySignals.isCameraInUse()))
+        }
+        if callReading { signals.insert(.meeting) }
+        if inCall != callReading { inCall = callReading }
         let idle = core.settings.desktop.idle.isEnabled ? max(reading.idleSeconds, away) : reading.idleSeconds
         let before = core.snapshot
-        let events = core.tick(now: now, inputs: .init(idleSeconds: idle, signals: reading.signals))
+        let events = core.tick(now: now, inputs: .init(idleSeconds: idle, signals: signals))
         handle(events)
         if core.snapshot != before { save() }
+    }
+
+    private var waitsForCalls: Bool {
+        core.settings.hardStops.contains { $0.isEnabled && $0.duringCalls == .waitForCallToEnd }
+            || !core.snapshot.hardStopsWaitingForCall.isEmpty
     }
 
     private func perform(_ operation: (inout BreakScheduler, Date) -> [BreakScheduler.Event]) {
@@ -222,34 +273,89 @@ final class MacBreakController: ObservableObject {
     }
 
     private func handle(_ events: [BreakScheduler.Event]) {
+        // When a hard stop starts in the same batch as a break or another stop ends, the overlay stays up and
+        // changes content instead of fading out and back in, and only the start chime plays.
+        let startsHardStop = events.contains { if case .hardStopStarted = $0 { true } else { false } }
         for event in events {
             switch event {
             case .headsUp:
-                if settings.reminder.headsUpEnabled { notice.show() }
+                if settings.reminder.headsUpEnabled, hardStopNoticeSubject == nil { notice.show(kind: .regular) }
             case .headsUpCancelled:
-                notice.hide()
+                hideRegularHeadsUp()
             case .breakStarted:
-                notice.hide()
+                hideRegularHeadsUp()
                 activeMessage = settings.customization.messages.randomElement() ?? "Let your eyes rest."
                 overlay.show()
                 playSound(completion: false)
             case .breakEnded(let completed):
+                guard !startsHardStop else { break }
                 overlay.hide()
                 if completed { playSound(completion: true) }
             case .breakSnoozed(_, let duringBreak):
-                notice.hide()
+                hideRegularHeadsUp()
                 if duringBreak { overlay.hide() }
             case .upcomingBreakSkipped, .paused:
-                notice.hide()
+                hideRegularHeadsUp()
             case .resumed, .focusReset:
                 break
             case .wellness(let reminder):
                 nudges.show(reminder, large: settings.wellness.largePresentation)
-            case .hardStopWarning, .hardStopStarted, .hardStopExtended, .hardStopResumed, .hardStopEnded:
-                // Hard stops have no Mac presentation yet.
-                break
+            case .hardStopWarning(let id, let startsAt, _):
+                showHardStopWarning(id: id, startsAt: startsAt)
+            case .hardStopStarted:
+                hardStopNoticeSubject = nil
+                notice.hide()
+                overlay.show()
+                playSound(completion: false)
+            case .hardStopExtended:
+                overlay.hide()
+                warnedExtensionUntil = nil
+            case .hardStopResumed:
+                if hardStopNoticeSubject == .extensionEnding { closeHardStopNotice() }
+                overlay.show()
+            case .hardStopEnded(_, let reason):
+                // A missed stop never showed; another stop or a break may be on screen.
+                guard reason != .missed, !startsHardStop else { break }
+                if hardStopNoticeSubject == .extensionEnding { closeHardStopNotice() }
+                overlay.hide()
+                if reason == .ended { playSound(completion: true) }
             }
         }
+        reconcileHardStop()
+    }
+
+    /// Keeps the screen in line with the running hard stop: the overlay comes back after a relaunch or wake, the
+    /// notice closes once its stop started, was missed, or was removed, and the notice before an extension runs
+    /// out appears once.
+    private func reconcileHardStop() {
+        let presentation = hardStop
+        if presentation.overlay != nil, !overlay.isVisible { overlay.show() }
+        if hardStopNoticeSubject != nil, presentation.notice == nil { closeHardStopNotice() }
+        if let until = HardStopPresentation.extensionWarningDue(core.snapshot, now: now), warnedExtensionUntil != until {
+            warnedExtensionUntil = until
+            hardStopNoticeSubject = .extensionEnding
+            notice.show(kind: .hardStop)
+        }
+    }
+
+    /// Shows a hard-stop warning. Hard-stop warnings ignore the heads-up switch, since each stop sets its own; the
+    /// notice keeps the warning for the stop that starts first.
+    private func showHardStopWarning(id: UUID, startsAt: Date) {
+        if case .warning(let shownID, let shownStart) = hardStopNoticeSubject, shownID != id, shownStart < startsAt,
+           hardStop.notice != nil {
+            return
+        }
+        hardStopNoticeSubject = .warning(id: id, startsAt: startsAt)
+        if hardStop.notice == nil {
+            closeHardStopNotice()
+        } else {
+            notice.show(kind: .hardStop)
+        }
+    }
+
+    /// Hides the notice unless it shows a hard-stop warning, which regular break events do not withdraw.
+    private func hideRegularHeadsUp() {
+        if hardStopNoticeSubject == nil { notice.hide() }
     }
 
     private func playSound(completion: Bool) {

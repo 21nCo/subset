@@ -1133,6 +1133,63 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(pastEnd.records.last?.extensionsUsed, 1)
     }
 
+    func testStartHardStopEarlyFromItsWarning() {
+        let stop = hardStop(warnings: [10], escapeHatch: .dismissEarly)
+        var scheduler = makeScheduler(stops: [stop])
+        _ = scheduler.tick(now: at(10, 20))
+        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 22)))
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, now: at(10, 22)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertEqual(scheduler.phase, .breaking)
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(11, 0), "Starting early does not move the end")
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 23)), "Already running")
+        XCTAssertTrue(scheduler.startHardStopEarly(id: stop.id, now: at(10, 23)).isEmpty)
+        // The occurrence does not start again at its scheduled time, even after it was dismissed.
+        _ = scheduler.dismissHardStop(now: at(10, 25))
+        XCTAssertTrue(runTimed(&scheduler, from: at(10, 25), through: at(10, 31)).map(\.1).filter(isHardStopEvent).isEmpty)
+        XCTAssertEqual(scheduler.records.last?.startedAt, at(10, 22))
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 31)))
+
+        // A running break ends and counts as completed.
+        var breaking = makeScheduler(stops: [stop])
+        _ = breaking.startBreak(now: at(10, 21))
+        XCTAssertEqual(breaking.startHardStopEarly(id: stop.id, now: at(10, 21, 5)), [
+            .breakEnded(completed: true), .hardStopStarted(id: stop.id, endsAt: at(11, 0))
+        ])
+
+        // Not more than the longest warning lead time ahead, and not for a disabled stop.
+        var early = makeScheduler(stops: [hardStop(hour: 13, minute: 0)])
+        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(10, 59)))
+        XCTAssertTrue(early.startHardStopEarly(id: early.settings.hardStops[0].id, now: at(10, 59)).isEmpty)
+        XCTAssertTrue(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(11, 0)))
+        early.settings.hardStops[0].isEnabled = false
+        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(11, 0)))
+
+        // A stop that waits for a call starts despite the call.
+        var waiting = makeScheduler(stops: [stop])
+        _ = waiting.tick(now: at(10, 30), inputs: .init(signals: [.meeting]))
+        XCTAssertNil(waiting.snapshot.activeHardStop)
+        XCTAssertEqual(waiting.startHardStopEarly(id: stop.id, now: at(10, 32)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertTrue(waiting.snapshot.hardStopsWaitingForCall.isEmpty)
+        XCTAssertEqual(waiting.tick(now: at(10, 33), inputs: .init(signals: [.meeting])), [])
+        XCTAssertEqual(waiting.phase, .breaking)
+    }
+
+    func testEndHardStopExtensionShowsTheStopAgain() {
+        let stop = hardStop(escapeHatch: .extend(minutes: 15, times: 2))
+        var scheduler = makeScheduler(stops: [stop])
+        XCTAssertTrue(scheduler.endHardStopExtension(now: at(10, 25)).isEmpty, "No stop is running")
+        _ = scheduler.tick(now: at(10, 30))
+        XCTAssertTrue(scheduler.endHardStopExtension(now: at(10, 31)).isEmpty, "Not hidden")
+        _ = scheduler.extendHardStop(now: at(10, 31))
+        XCTAssertEqual(scheduler.endHardStopExtension(now: at(10, 40)), [.hardStopResumed(id: stop.id)])
+        XCTAssertEqual(scheduler.phase, .breaking)
+        XCTAssertNil(scheduler.snapshot.activeHardStop?.extendedUntil)
+        XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(11, 0))
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.extensionsUsed, 1, "The extension stays counted")
+        XCTAssertTrue(scheduler.tick(now: at(10, 46)).isEmpty, "No second resume when the extension would have run out")
+        XCTAssertTrue(scheduler.canExtendHardStop(now: at(10, 46)))
+    }
+
     func testMergedStopThatTakesOverTheEscapeHatchBringsItsOwnExtensions() throws {
         // A 10:30–11:00, then B to 11:10 and C to 11:30 each take over; D ends first, so it never does.
         let a = hardStop(escapeHatch: .extend(minutes: 5, times: 1))

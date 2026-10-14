@@ -66,34 +66,109 @@ private func fade(_ panel: NSPanel, in fadeIn: Bool, completion: (() -> Void)? =
 
 // MARK: - Heads-up notice
 
-/// The gentle pre-break notice: a countdown with Start now, Snooze, and Skip.
+/// The gentle pre-break notice: a countdown with Start now, Snooze, and Skip. The same panel, at the same
+/// position, shows hard-stop warnings, with only Start now and close.
 @MainActor
 final class HeadsUpPanelController {
+    enum Kind {
+        case regular
+        case hardStop
+
+        var size: NSSize {
+            switch self {
+            case .regular: NSSize(width: 380, height: 132)
+            case .hardStop: NSSize(width: 380, height: 150)
+            }
+        }
+    }
+
     private unowned let controller: MacBreakController
     private var panel: NSPanel?
+    private var kind: Kind?
 
     init(controller: MacBreakController) {
         self.controller = controller
     }
 
-    func show() {
-        guard panel == nil else { return }
-        let panel = FloatingPanel(size: NSSize(width: 380, height: 132), allowsKey: true)
-        let hosting = FirstMouseHostingView(rootView: HeadsUpNoticeView().environmentObject(controller))
+    /// Shows the notice. The content follows the controller, so a shown panel is rebuilt only to change its size.
+    func show(kind: Kind) {
+        if let panel, self.kind == kind {
+            panel.orderFrontRegardless()
+            return
+        }
+        let wasShown = panel != nil
+        panel?.orderOut(nil)
+        let panel = FloatingPanel(size: kind.size, allowsKey: true)
+        let hosting = FirstMouseHostingView(rootView: NoticeView().environmentObject(controller))
         hosting.frame = NSRect(origin: .zero, size: panel.frame.size)
         hosting.autoresizingMask = [.width, .height]
         panel.contentView = hosting
         place(panel, position: controller.settings.reminder.position)
-        panel.alphaValue = 0
+        panel.alphaValue = wasShown ? 1 : 0
         panel.orderFrontRegardless()
-        fade(panel, in: true)
+        if !wasShown { fade(panel, in: true) }
         self.panel = panel
+        self.kind = kind
     }
 
     func hide() {
         guard let panel else { return }
         self.panel = nil
+        kind = nil
         fade(panel, in: false) { panel.orderOut(nil) }
+    }
+}
+
+/// A hard-stop notice when one is open, otherwise the regular heads-up.
+private struct NoticeView: View {
+    @EnvironmentObject private var controller: MacBreakController
+
+    var body: some View {
+        if let notice = controller.hardStop.notice {
+            HardStopNoticeView(notice: notice)
+        } else {
+            HeadsUpNoticeView()
+        }
+    }
+}
+
+struct HardStopNoticeView: View {
+    @EnvironmentObject private var controller: MacBreakController
+    let notice: HardStopPresentation.Notice
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                Image(systemName: "hand.raised")
+                    .accessibilityHidden(true)
+                Text(notice.title)
+                    .font(.headline)
+                    .monospacedDigit()
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(notice.spokenTitle)
+                Spacer()
+                Button {
+                    controller.closeHardStopNotice()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Close notice")
+            }
+            if let detail = notice.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if notice.canStartNow {
+                Button("Start now") { controller.startHardStopNow() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
