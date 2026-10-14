@@ -20,8 +20,9 @@ struct BreakScheduler: Sendable {
         /// The user was away long enough that the absence counts as rest; the next interval starts fresh.
         case focusReset
         case wellness(WellnessReminder)
-        /// A hard stop starts soon. `waitingForCall` is true when a call is running and the stop will wait for it.
-        case hardStopWarning(id: UUID, startsAt: Date, waitingForCall: Bool)
+        /// A hard stop's occurrence `occurrenceKey` starts soon. `waitingForCall` is true when a call is running and
+        /// the stop will wait for it.
+        case hardStopWarning(id: UUID, occurrenceKey: Int, startsAt: Date, waitingForCall: Bool)
         /// A hard stop blocks the screen until `endsAt`, or until dismissed when nil.
         case hardStopStarted(id: UUID, endsAt: Date?)
         /// The stop is hidden until `until`; its end does not move.
@@ -595,38 +596,43 @@ struct BreakScheduler: Sendable {
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
-    /// Starts the stop with `id` now, as **Start now** on its warning does: its next occurrence that starts within the
-    /// longest warning lead time, or the due one that waits for a call. Its end does not move, so starting early
-    /// makes it longer. Returns no events, and changes nothing, while a stop runs or when no such occurrence exists.
-    /// Like a tick, it first records as missed an occurrence that waited for a call and whose end has passed.
-    mutating func startHardStopEarly(id: UUID, now: Date) -> [Event] {
+    /// Starts occurrence `occurrenceKey` of the stop with `id` now, as **Start now** on its warning does: one that
+    /// starts within the longest warning lead time, or is due, or waits for a call. Its end does not move, so starting
+    /// early makes it longer. Returns no events, and changes nothing, while a stop runs or when that occurrence cannot
+    /// start now. Like a tick, it first records as missed an occurrence that waited for a call and whose end has passed.
+    mutating func startHardStopEarly(id: UUID, occurrenceKey: Int, now: Date) -> [Event] {
         guard snapshot.activeHardStop == nil else { return [] }
         var next = self
         let events = next.missWaitingStops(now: now)
-        guard let stop = next.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
-              let occurrence = next.earlyStartOccurrence(of: stop, now: now) else { return [] }
+        guard let (stop, occurrence) = next.earlyStart(id: id, occurrenceKey: occurrenceKey, now: now) else { return [] }
         self = next
         return events + beginHardStop(stop, occurrence, stops: settings.hardStops.filter(\.isEnabled), now: now)
     }
 
-    func canStartHardStopEarly(id: UUID, now: Date) -> Bool {
+    func canStartHardStopEarly(id: UUID, occurrenceKey: Int, now: Date) -> Bool {
         guard snapshot.activeHardStop == nil else { return false }
         var next = self
         _ = next.missWaitingStops(now: now)
-        guard let stop = next.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }) else { return false }
-        return next.earlyStartOccurrence(of: stop, now: now) != nil
+        return next.earlyStart(id: id, occurrenceKey: occurrenceKey, now: now) != nil
     }
 
-    private func earlyStartOccurrence(of stop: HardStop, now: Date) -> HardStop.Occurrence? {
-        if let key = snapshot.hardStopsWaitingForCall[stop.id.uuidString],
-           let waiting = stop.occurrence(forKey: key, calendar: calendar),
-           !isHandled(stop, waiting), waiting.end.map({ now < $0 }) ?? true {
-            return waiting
+    /// The occurrence Start now may start, as a tick would order it: an earlier occurrence of the same stop that is
+    /// still due or waiting for a call comes first, so a later one never starts past it.
+    private func earlyStart(id: UUID, occurrenceKey key: Int, now: Date) -> (HardStop, HardStop.Occurrence)? {
+        guard let stop = settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
+              let occurrence = stop.occurrence(forKey: key, calendar: calendar), !isHandled(stop, occurrence) else { return nil }
+        if let waitingKey = snapshot.hardStopsWaitingForCall[stop.id.uuidString] {
+            // Waits whose end has passed were recorded as missed first, so this one is still open.
+            if waitingKey < key { return nil }
+            if waitingKey == key { return occurrence.end.map { now < $0 } ?? true ? (stop, occurrence) : nil }
+        }
+        let earlierDue = stop.occurrences(around: now, calendar: calendar).contains {
+            $0.key < key && !isHandled(stop, $0) && stop.isDue($0, now: now, calendar: calendar)
         }
         let latest = now.addingTimeInterval(TimeInterval(HardStop.warningRange.upperBound * 60))
-        return stop.occurrences(around: now, calendar: calendar).first {
-            !isHandled(stop, $0) && $0.start <= latest && ($0.start > now || stop.isDue($0, now: now, calendar: calendar))
-        }
+        guard !earlierDue, occurrence.start <= latest,
+              occurrence.start > now || stop.isDue(occurrence, now: now, calendar: calendar) else { return nil }
+        return (stop, occurrence)
     }
 
     /// Shows the hidden stop again before its extension runs out, as **Start now** on the notice before an extension
@@ -857,7 +863,7 @@ struct BreakScheduler: Sendable {
             guard let minutes = stop.warningMinutes.filter({ now >= next.start.addingTimeInterval(-TimeInterval($0 * 60)) }).min() else { continue }
             if let mark = snapshot.hardStopWarnings[key], mark.occurrence == next.key, mark.minutes <= minutes { continue }
             snapshot.hardStopWarnings[key] = HardStopWarningMark(occurrence: next.key, minutes: minutes)
-            events.append(.hardStopWarning(id: stop.id, startsAt: next.start, waitingForCall: inCall && stop.duringCalls == .waitForCallToEnd))
+            events.append(.hardStopWarning(id: stop.id, occurrenceKey: next.key, startsAt: next.start, waitingForCall: inCall && stop.duringCalls == .waitForCallToEnd))
         }
         return events
     }

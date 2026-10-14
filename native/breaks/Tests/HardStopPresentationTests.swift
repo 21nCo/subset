@@ -10,9 +10,14 @@ final class HardStopPresentationTests: XCTestCase {
 
     private let locale = Locale(identifier: "en_GB")
 
-    /// Monday 10 August 2026 at `hour`:`minute` UTC, plus `seconds`.
-    private func at(_ hour: Int, _ minute: Int, _ seconds: Int = 0) -> Date {
-        calendar.date(from: DateComponents(year: 2026, month: 8, day: 10, hour: hour, minute: minute, second: seconds))!
+    /// Monday 10 August 2026 at `hour`:`minute` UTC, plus `seconds`, `dayOffset` days later.
+    private func at(_ hour: Int, _ minute: Int, _ seconds: Int = 0, dayOffset: Int = 0) -> Date {
+        calendar.date(from: DateComponents(year: 2026, month: 8, day: 10 + dayOffset, hour: hour, minute: minute, second: seconds))!
+    }
+
+    /// The key of the occurrence that starts at `hour`:`minute` on the day of `at(hour, minute, dayOffset:)`.
+    private func key(_ hour: Int, _ minute: Int, dayOffset: Int = 0) -> Int {
+        HardStop.Occurrence.key(year: 2026, month: 8, day: 10 + dayOffset, hour: hour, minute: minute)
     }
 
     private func lunch(
@@ -65,8 +70,8 @@ final class HardStopPresentationTests: XCTestCase {
     func testWarningNoticeShowsNameTimeAndCountdownWithStartNow() {
         let stop = lunch()
         var scheduler = makeScheduler([stop])
-        XCTAssertEqual(scheduler.tick(now: at(12, 20)), [.hardStopWarning(id: stop.id, startsAt: at(12, 30), waitingForCall: false)])
-        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, startsAt: at(12, 30))
+        XCTAssertEqual(scheduler.tick(now: at(12, 20)), [.hardStopWarning(id: stop.id, occurrenceKey: key(12, 30), startsAt: at(12, 30), waitingForCall: false)])
+        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
 
         let notice = present(scheduler, at: at(12, 25, 30), notice: subject).notice
         XCTAssertEqual(notice?.title, "Lunch — hard stop at 12:30, in 04:30")
@@ -89,8 +94,8 @@ final class HardStopPresentationTests: XCTestCase {
         var scheduler = makeScheduler([stop])
         // The meeting signal also pauses reminders.
         XCTAssertEqual(scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting])),
-                       [.hardStopWarning(id: stop.id, startsAt: at(12, 30), waitingForCall: true), .paused(.meeting)])
-        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, startsAt: at(12, 30))
+                       [.hardStopWarning(id: stop.id, occurrenceKey: key(12, 30), startsAt: at(12, 30), waitingForCall: true), .paused(.meeting)])
+        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
 
         // Before the start, during a call: the countdown and the call note.
         let before = present(scheduler, at: at(12, 28), notice: subject, inCall: true).notice
@@ -111,7 +116,7 @@ final class HardStopPresentationTests: XCTestCase {
         let anyway = lunch(duringCalls: .startAnyway)
         var starts = makeScheduler([anyway])
         _ = starts.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
-        let anywaySubject = HardStopPresentation.NoticeSubject.warning(id: anyway.id, startsAt: at(12, 30))
+        let anywaySubject = HardStopPresentation.NoticeSubject.warning(id: anyway.id, occurrenceKey: key(12, 30))
         XCTAssertNil(present(starts, at: at(12, 25), notice: anywaySubject, inCall: true).notice?.detail)
         XCTAssertNil(present(starts, at: at(12, 30), notice: anywaySubject, inCall: true).notice)
     }
@@ -120,11 +125,56 @@ final class HardStopPresentationTests: XCTestCase {
         let stop = lunch()
         var scheduler = makeScheduler([stop])
         _ = scheduler.tick(now: at(12, 20))
-        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, startsAt: at(12, 30))
+        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
         scheduler.settings.hardStops[0].isEnabled = false
         XCTAssertNil(present(scheduler, at: at(12, 21), notice: subject).notice)
         scheduler.settings.hardStops = []
         XCTAssertNil(present(scheduler, at: at(12, 21), notice: subject).notice)
+    }
+
+    func testStartNowStartsOnlyTheOccurrenceItsWarningNames() {
+        // Monday's open-ended Lunch still waits for a call when Tuesday's warning comes.
+        let stop = HardStop(name: "Lunch", hour: 12, minute: 30, end: .untilDismissed, repeats: .weekdays([2, 3]),
+                            warningMinutes: [120], escapeHatch: .dismissEarly, duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString], key(12, 30))
+        XCTAssertTrue(scheduler.tick(now: at(10, 30, dayOffset: 1), inputs: .init(signals: [.meeting]))
+            .contains(.hardStopWarning(id: stop.id, occurrenceKey: key(12, 30, dayOffset: 1), startsAt: at(12, 30, dayOffset: 1), waitingForCall: true)))
+
+        // Tuesday's notice offers no Start now while Monday's occurrence comes first, and pressing it starts nothing.
+        let tuesday = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30, dayOffset: 1))
+        let notice = present(scheduler, at: at(10, 31, dayOffset: 1), notice: tuesday, inCall: true).notice
+        XCTAssertEqual(notice?.title, "Lunch — hard stop at 12:30, in 1:59:00")
+        XCTAssertEqual(notice?.canStartNow, false)
+        XCTAssertTrue(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(12, 30, dayOffset: 1), now: at(10, 31, dayOffset: 1)).isEmpty)
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+
+        // Start now for an occurrence starts that one, with its own end.
+        var timed = makeScheduler([lunch()])
+        _ = timed.tick(now: at(12, 20))
+        XCTAssertTrue(timed.startHardStopEarly(id: timed.settings.hardStops[0].id, occurrenceKey: key(12, 30, dayOffset: 7), now: at(12, 21)).isEmpty,
+                      "Not next week's occurrence")
+        XCTAssertEqual(timed.startHardStopEarly(id: timed.settings.hardStops[0].id, occurrenceKey: key(12, 30), now: at(12, 21)),
+                       [.hardStopStarted(id: timed.settings.hardStops[0].id, endsAt: at(13, 0))])
+    }
+
+    func testWarningSurvivesATimeZoneChange() {
+        let stop = lunch()
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 20))
+        var queue = HardStopNoticeQueue()
+        queue.add(.warning(id: stop.id, occurrenceKey: key(12, 30)))
+
+        // An hour west, 12:30 local is 13:30 UTC: the same occurrence, now further ahead.
+        scheduler.calendar.timeZone = TimeZone(secondsFromGMT: -3600)!
+        queue.prune(scheduler: scheduler, inCall: false, now: at(12, 21))
+        XCTAssertEqual(queue.shown, .warning(id: stop.id, occurrenceKey: key(12, 30)))
+        let notice = present(scheduler, at: at(12, 21), notice: queue.shown).notice
+        XCTAssertEqual(notice?.title, "Lunch — hard stop at 12:30, in 1:09:00")
+        XCTAssertEqual(notice?.canStartNow, true)
+        XCTAssertEqual(scheduler.tick(now: at(12, 22)).filter { if case .hardStopWarning = $0 { true } else { false } }, [],
+                       "The scheduler does not warn again, so the queued warning is the only one")
     }
 
     func testWarningForALaterStopShowsWhileAStopRuns() {
@@ -134,9 +184,9 @@ final class HardStopPresentationTests: XCTestCase {
         var scheduler = makeScheduler([lunch, walk])
         XCTAssertEqual(scheduler.tick(now: at(12, 30)), [
             .hardStopStarted(id: lunch.id, endsAt: at(13, 0)),
-            .hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)
+            .hardStopWarning(id: walk.id, occurrenceKey: key(13, 5), startsAt: at(13, 5), waitingForCall: false)
         ])
-        let subject = HardStopPresentation.NoticeSubject.warning(id: walk.id, startsAt: at(13, 5))
+        let subject = HardStopPresentation.NoticeSubject.warning(id: walk.id, occurrenceKey: key(13, 5))
 
         // Under the overlay the notice still applies, without Start now while Lunch runs.
         let covered = present(scheduler, at: at(12, 31), notice: subject).notice
@@ -157,7 +207,7 @@ final class HardStopPresentationTests: XCTestCase {
         let inside = walk(hour: 12, minute: 45)
         var scheduler = makeScheduler([lunch, inside])
         _ = scheduler.tick(now: at(12, 30))
-        XCTAssertNil(present(scheduler, at: at(12, 40), notice: .warning(id: inside.id, startsAt: at(12, 45))).notice)
+        XCTAssertNil(present(scheduler, at: at(12, 40), notice: .warning(id: inside.id, occurrenceKey: key(12, 45))).notice)
     }
 
     // MARK: - Notice queue
@@ -170,12 +220,12 @@ final class HardStopPresentationTests: XCTestCase {
         var scheduler = makeScheduler([lunch, walk])
         _ = scheduler.tick(now: at(12, 30))
         _ = scheduler.extendHardStop(now: at(12, 40))
-        XCTAssertEqual(scheduler.tick(now: at(12, 44)), [.hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)])
+        XCTAssertEqual(scheduler.tick(now: at(12, 44)), [.hardStopWarning(id: walk.id, occurrenceKey: key(13, 5), startsAt: at(13, 5), waitingForCall: false)])
         XCTAssertEqual(HardStopPresentation.extensionWarningDue(scheduler, now: at(12, 44)), at(12, 45))
 
         // The controller queues the warning from the events, then the extension notice.
         var queue = HardStopNoticeQueue()
-        let warning = HardStopPresentation.NoticeSubject.warning(id: walk.id, startsAt: at(13, 5))
+        let warning = HardStopPresentation.NoticeSubject.warning(id: walk.id, occurrenceKey: key(13, 5))
         queue.add(warning)
         queue.add(.extensionEnding)
         queue.prune(scheduler: scheduler, inCall: false, now: at(12, 44))
@@ -198,17 +248,17 @@ final class HardStopPresentationTests: XCTestCase {
     func testNoticeQueueShowsTheEarliestStopAndTheNextAfterClosing() {
         let early = UUID(), late = UUID()
         var queue = HardStopNoticeQueue()
-        queue.add(.warning(id: late, startsAt: at(14, 0)))
-        queue.add(.warning(id: early, startsAt: at(13, 0)))
-        XCTAssertEqual(queue.shown, .warning(id: early, startsAt: at(13, 0)))
+        queue.add(.warning(id: late, occurrenceKey: key(14, 0)))
+        queue.add(.warning(id: early, occurrenceKey: key(13, 0)))
+        XCTAssertEqual(queue.shown, .warning(id: early, occurrenceKey: key(13, 0)))
         queue.closeShown()
-        XCTAssertEqual(queue.shown, .warning(id: late, startsAt: at(14, 0)), "Closing one shows the next instead of dropping it")
+        XCTAssertEqual(queue.shown, .warning(id: late, occurrenceKey: key(14, 0)), "Closing one shows the next instead of dropping it")
         // A later warning time for the same stop shows it again once closed.
         queue.closeShown()
         XCTAssertNil(queue.shown)
-        queue.add(.warning(id: late, startsAt: at(14, 0)))
-        queue.add(.warning(id: late, startsAt: at(14, 0)))
-        XCTAssertEqual(queue.subjects, [.warning(id: late, startsAt: at(14, 0))])
+        queue.add(.warning(id: late, occurrenceKey: key(14, 0)))
+        queue.add(.warning(id: late, occurrenceKey: key(14, 0)))
+        XCTAssertEqual(queue.subjects, [.warning(id: late, occurrenceKey: key(14, 0))])
     }
 
     // MARK: - Overlay
@@ -397,8 +447,8 @@ final class HardStopPresentationTests: XCTestCase {
         let walk = walk(hour: 13, minute: 5)
         var scheduler = makeScheduler([lunch, walk])
         _ = scheduler.tick(now: at(12, 30))
-        XCTAssertEqual(scheduler.tick(now: at(12, 55)), [.hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)])
-        let shown = present(scheduler, at: at(12, 55), notice: .warning(id: walk.id, startsAt: at(13, 5)))
+        XCTAssertEqual(scheduler.tick(now: at(12, 55)), [.hardStopWarning(id: walk.id, occurrenceKey: key(13, 5), startsAt: at(13, 5), waitingForCall: false)])
+        let shown = present(scheduler, at: at(12, 55), notice: .warning(id: walk.id, occurrenceKey: key(13, 5)))
         XCTAssertNotNil(shown.overlay)
         XCTAssertNotNil(shown.notice)
         XCTAssertEqual(HardStopPresentation.noticeLayer(showsHardStopNotice: shown.notice != nil, overlayVisible: shown.overlay != nil),
@@ -430,6 +480,21 @@ final class HardStopPresentationTests: XCTestCase {
 
         _ = open.dismissHardStop(now: at(12, 32))
         XCTAssertNil(present(open, at: at(12, 32)).menuBar, "The regular label returns after the stop")
+    }
+
+    func testMenuBarNamesTheEarliestWaitingStop() {
+        // Their ids sort in the opposite order to their starts.
+        let first = HardStop(id: UUID(uuidString: "FFFFFFFF-0000-0000-0000-000000000000")!, name: "Lunch", hour: 12, minute: 30,
+                             repeats: .weekdays([2]), warningMinutes: [], escapeHatch: .none, duringCalls: .waitForCallToEnd)
+        let second = HardStop(id: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!, name: "Stretch", hour: 12, minute: 40,
+                              repeats: .weekdays([2]), warningMinutes: [], escapeHatch: .none, duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([first, second])
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        _ = scheduler.tick(now: at(12, 40), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall.count, 2)
+        let menuBar = present(scheduler, at: at(12, 41), inCall: true).menuBar
+        XCTAssertEqual(menuBar?.text, "Hard stop · after call")
+        XCTAssertEqual(menuBar?.statusLine, "Lunch starts when your call ends")
     }
 
     // MARK: - Confirmation

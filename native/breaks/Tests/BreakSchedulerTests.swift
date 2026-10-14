@@ -423,6 +423,11 @@ final class BreakSchedulerTests: XCTestCase {
         calendar.date(from: DateComponents(year: 2026, month: 8, day: 10 + dayOffset, hour: hour, minute: minute, second: seconds))!
     }
 
+    /// The key of the occurrence that starts at `hour`:`minute` on the day of `at(hour, minute, dayOffset:)`.
+    private func key(_ hour: Int, _ minute: Int, dayOffset: Int = 0) -> Int {
+        HardStop.Occurrence.key(year: 2026, month: 8, day: 10 + dayOffset, hour: hour, minute: minute)
+    }
+
     private func hardStop(
         hour: Int = 10,
         minute: Int = 30,
@@ -483,13 +488,13 @@ final class BreakSchedulerTests: XCTestCase {
         let events = runTimed(&scheduler, from: t0, through: at(10, 31))
         let warnings = events.filter { if case .hardStopWarning = $0.1 { true } else { false } }
         XCTAssertEqual(warnings.map(\.0), [at(10, 20), at(10, 25), at(10, 28)])
-        XCTAssertTrue(warnings.allSatisfy { $0.1 == .hardStopWarning(id: stop.id, startsAt: at(10, 30), waitingForCall: false) })
+        XCTAssertTrue(warnings.allSatisfy { $0.1 == .hardStopWarning(id: stop.id, occurrenceKey: key(10, 30), startsAt: at(10, 30), waitingForCall: false) })
     }
 
     func testMissedHardStopWarningsAreNotReplayed() throws {
         let stop = hardStop(warnings: [10, 5, 2])
         var scheduler = makeScheduler(stops: [stop])
-        let warning = BreakScheduler.Event.hardStopWarning(id: stop.id, startsAt: at(10, 30), waitingForCall: false)
+        let warning = BreakScheduler.Event.hardStopWarning(id: stop.id, occurrenceKey: key(10, 30), startsAt: at(10, 30), waitingForCall: false)
         XCTAssertEqual(scheduler.tick(now: at(10, 21)), [warning])
         // Asleep from 10:21 to 10:29: the 5-minute warning is skipped, and only the latest (2 minutes) is shown.
         XCTAssertEqual(scheduler.tick(now: at(10, 29)), [warning])
@@ -690,7 +695,7 @@ final class BreakSchedulerTests: XCTestCase {
         // The call ends at 10:40: the stop starts on that tick, and its end does not move.
         var waits = makeScheduler(stops: [stop])
         let during = runTimed(&waits, from: at(10, 27), through: at(10, 39, 59), inputs: call).map(\.1).filter(isHardStopEvent)
-        XCTAssertEqual(during, [.hardStopWarning(id: stop.id, startsAt: at(10, 30), waitingForCall: true)])
+        XCTAssertEqual(during, [.hardStopWarning(id: stop.id, occurrenceKey: key(10, 30), startsAt: at(10, 30), waitingForCall: true)])
         XCTAssertEqual(waits.tick(now: at(10, 40)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
 
         // The meeting signal counts as a call even when it does not pause reminders.
@@ -705,7 +710,7 @@ final class BreakSchedulerTests: XCTestCase {
         var missed = makeScheduler(stops: [stop])
         let events = runTimed(&missed, from: at(10, 29), through: at(11, 0), inputs: call).map(\.1).filter(isHardStopEvent)
         XCTAssertEqual(events, [
-            .hardStopWarning(id: stop.id, startsAt: at(10, 30), waitingForCall: true),
+            .hardStopWarning(id: stop.id, occurrenceKey: key(10, 30), startsAt: at(10, 30), waitingForCall: true),
             .hardStopEnded(id: stop.id, reason: .missed)
         ])
         XCTAssertEqual(missed.records.last?.hardStopEndReason, .missed)
@@ -1137,38 +1142,38 @@ final class BreakSchedulerTests: XCTestCase {
         let stop = hardStop(warnings: [10], escapeHatch: .dismissEarly)
         var scheduler = makeScheduler(stops: [stop])
         _ = scheduler.tick(now: at(10, 20))
-        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 22)))
-        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, now: at(10, 22)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 22)))
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 22)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
         XCTAssertEqual(scheduler.phase, .breaking)
         XCTAssertEqual(scheduler.snapshot.breakEndsAt, at(11, 0), "Starting early does not move the end")
-        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 23)), "Already running")
-        XCTAssertTrue(scheduler.startHardStopEarly(id: stop.id, now: at(10, 23)).isEmpty)
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 23)), "Already running")
+        XCTAssertTrue(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 23)).isEmpty)
         // The occurrence does not start again at its scheduled time, even after it was dismissed.
         _ = scheduler.dismissHardStop(now: at(10, 25))
         XCTAssertTrue(runTimed(&scheduler, from: at(10, 25), through: at(10, 31)).map(\.1).filter(isHardStopEvent).isEmpty)
         XCTAssertEqual(scheduler.records.last?.startedAt, at(10, 22))
-        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 31)))
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 31)))
 
         // A running break ends and counts as completed.
         var breaking = makeScheduler(stops: [stop])
         _ = breaking.startBreak(now: at(10, 21))
-        XCTAssertEqual(breaking.startHardStopEarly(id: stop.id, now: at(10, 21, 5)), [
+        XCTAssertEqual(breaking.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 21, 5)), [
             .breakEnded(completed: true), .hardStopStarted(id: stop.id, endsAt: at(11, 0))
         ])
 
         // Not more than the longest warning lead time ahead, and not for a disabled stop.
         var early = makeScheduler(stops: [hardStop(hour: 13, minute: 0)])
-        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(10, 59)))
-        XCTAssertTrue(early.startHardStopEarly(id: early.settings.hardStops[0].id, now: at(10, 59)).isEmpty)
-        XCTAssertTrue(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(11, 0)))
+        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, occurrenceKey: key(13, 0), now: at(10, 59)))
+        XCTAssertTrue(early.startHardStopEarly(id: early.settings.hardStops[0].id, occurrenceKey: key(13, 0), now: at(10, 59)).isEmpty)
+        XCTAssertTrue(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, occurrenceKey: key(13, 0), now: at(11, 0)))
         early.settings.hardStops[0].isEnabled = false
-        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, now: at(11, 0)))
+        XCTAssertFalse(early.canStartHardStopEarly(id: early.settings.hardStops[0].id, occurrenceKey: key(13, 0), now: at(11, 0)))
 
         // A stop that waits for a call starts despite the call.
         var waiting = makeScheduler(stops: [stop])
         _ = waiting.tick(now: at(10, 30), inputs: .init(signals: [.meeting]))
         XCTAssertNil(waiting.snapshot.activeHardStop)
-        XCTAssertEqual(waiting.startHardStopEarly(id: stop.id, now: at(10, 32)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
+        XCTAssertEqual(waiting.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(10, 32)), [.hardStopStarted(id: stop.id, endsAt: at(11, 0))])
         XCTAssertTrue(waiting.snapshot.hardStopsWaitingForCall.isEmpty)
         XCTAssertEqual(waiting.tick(now: at(10, 33), inputs: .init(signals: [.meeting])), [])
         XCTAssertEqual(waiting.phase, .breaking)
@@ -1180,15 +1185,31 @@ final class BreakSchedulerTests: XCTestCase {
         var scheduler = makeScheduler(stops: [stop])
         _ = scheduler.tick(now: at(10, 30), inputs: .init(signals: [.meeting]))
         XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall.count, 1)
-        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 25, dayOffset: 1)))
+        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: key(10, 30, dayOffset: 1), now: at(10, 25, dayOffset: 1)))
         XCTAssertTrue(scheduler.records.isEmpty, "Asking changes nothing")
-        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, now: at(10, 25, dayOffset: 1)), [
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30, dayOffset: 1), now: at(10, 25, dayOffset: 1)), [
             .hardStopEnded(id: stop.id, reason: .missed),
             .hardStopStarted(id: stop.id, endsAt: at(11, 0, dayOffset: 1))
         ])
         XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30)])
         XCTAssertEqual(scheduler.records.first?.hardStopEndReason, .missed)
         XCTAssertEqual(scheduler.snapshot.activeHardStop?.occurrenceKey, scheduler.snapshot.handledHardStops[stop.id.uuidString])
+    }
+
+    func testStartNowWaitsBehindAnEarlierOpenWaitOfTheSameStop() {
+        // Monday's open-ended occurrence still waits for a call on Tuesday, when Tuesday's warning is shown.
+        let stop = hardStop(end: .untilDismissed, repeats: .weekdays([2, 3]), warnings: [120], escapeHatch: .dismissEarly)
+        var scheduler = makeScheduler(stops: [stop])
+        _ = scheduler.tick(now: at(10, 30), inputs: .init(signals: [.meeting]))
+        _ = scheduler.tick(now: at(9, 0, dayOffset: 1), inputs: .init(signals: [.meeting]))
+        XCTAssertFalse(scheduler.canStartHardStopEarly(id: stop.id, occurrenceKey: key(10, 30, dayOffset: 1), now: at(9, 0, dayOffset: 1)))
+        XCTAssertTrue(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30, dayOffset: 1), now: at(9, 0, dayOffset: 1)).isEmpty)
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString], key(10, 30))
+
+        // Monday's own occurrence can still start now.
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, occurrenceKey: key(10, 30), now: at(9, 1, dayOffset: 1)),
+                       [.hardStopStarted(id: stop.id, endsAt: nil)])
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.occurrenceKey, key(10, 30))
     }
 
     func testEndHardStopExtensionShowsTheStopAgain() {

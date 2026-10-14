@@ -190,10 +190,10 @@ final class MacBreakController: ObservableObject {
         perform { HardStopPresentation.perform(target, on: &$0, now: $1) }
     }
 
-    /// **Start now** on the hard-stop notice: starts the warned stop, or ends the extension that is running out.
+    /// **Start now** on the hard-stop notice: starts the occurrence it warns about, or ends the extension that is running out.
     func startHardStopNow() {
         switch hardStopNoticeSubject {
-        case .warning(let id, _): perform { $0.startHardStopEarly(id: id, now: $1) }
+        case .warning(let id, let key): perform { $0.startHardStopEarly(id: id, occurrenceKey: key, now: $1) }
         case .extensionEnding: perform { $0.endHardStopExtension(now: $1) }
         case nil: break
         }
@@ -314,8 +314,8 @@ final class MacBreakController: ObservableObject {
                 break
             case .wellness(let reminder):
                 nudges.show(reminder, large: settings.wellness.largePresentation)
-            case .hardStopWarning(let id, let startsAt, _):
-                showHardStopWarning(id: id, startsAt: startsAt)
+            case .hardStopWarning(let id, let key, _, _):
+                showHardStopWarning(id: id, occurrenceKey: key)
             case .hardStopStarted:
                 // Its warning is pruned below; one for a later stop stays.
                 overlay.show()
@@ -352,8 +352,8 @@ final class MacBreakController: ObservableObject {
     /// Queues a hard-stop warning. Hard-stop warnings ignore the heads-up switch, since each stop sets its own. The
     /// panel shows the notice before an extension runs out first, then the warning for the stop that starts first;
     /// the others wait.
-    private func showHardStopWarning(id: UUID, startsAt: Date) {
-        hardStopNotices.add(.warning(id: id, startsAt: startsAt))
+    private func showHardStopWarning(id: UUID, occurrenceKey: Int) {
+        hardStopNotices.add(.warning(id: id, occurrenceKey: occurrenceKey))
         syncHardStopNotice(bringToFront: true)
     }
 

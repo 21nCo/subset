@@ -6,8 +6,9 @@ import Foundation
 struct HardStopPresentation: Equatable {
     /// Why the hard-stop notice is open.
     enum NoticeSubject: Equatable {
-        /// A warning for the occurrence of stop `id` that starts at `startsAt`.
-        case warning(id: UUID, startsAt: Date)
+        /// A warning for occurrence `occurrenceKey` of stop `id`. The key, unlike the start, survives a time zone
+        /// change, so the warning stays and shows the occurrence's current start.
+        case warning(id: UUID, occurrenceKey: Int)
         /// The running stop's extension runs out soon.
         case extensionEnding
     }
@@ -116,28 +117,32 @@ struct HardStopPresentation: Equatable {
                     statusLine: "\(active.name), \(until.lowercasedFirst)"
                 )
             }
-        } else if let waiting = snapshot.hardStopsWaitingForCall.keys.sorted().compactMap({ key in
-            scheduler.settings.hardStops.first { $0.id.uuidString == key }
-        }).first {
+        } else if let waiting = snapshot.hardStopsWaitingForCall.compactMap({ id, key in
+            scheduler.settings.hardStops.first { $0.id.uuidString == id }.flatMap { stop in
+                stop.occurrence(forKey: key, calendar: calendar).map { (stop: stop, start: $0.start) }
+            }
+        }).min(by: { $0.start < $1.start })?.stop {
+            // The stop the user is held for: the waiting occurrence that started first.
             menuBar = MenuBar(text: "Hard stop · after call", symbol: "phone.fill", statusLine: "\(waiting.name) starts when your call ends")
         }
 
         switch noticeSubject {
-        case .warning(let id, let startsAt):
+        case .warning(let id, let key):
+            guard let stop = scheduler.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
+                  let occurrence = stop.occurrence(forKey: key, calendar: calendar),
+                  !(snapshot.handledHardStops[id.uuidString].map { key <= $0 } ?? false) else { break }
+            let startsAt = occurrence.start
             // While a stop runs, a warning applies only to a stop that starts once it has ended; one that starts
             // inside it joins it instead.
-            guard active.map({ startsAt >= $0.endsAt ?? .distantFuture }) ?? true,
-                  let stop = scheduler.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
-                  let occurrence = stop.occurrences(around: startsAt, calendar: calendar).first(where: { $0.start == startsAt }),
-                  !(snapshot.handledHardStops[id.uuidString].map { occurrence.key <= $0 } ?? false) else { break }
-            let waitsForCall = snapshot.hardStopsWaitingForCall[id.uuidString] == occurrence.key
+            guard active.map({ startsAt >= $0.endsAt ?? .distantFuture }) ?? true else { break }
+            let waitsForCall = snapshot.hardStopsWaitingForCall[id.uuidString] == key
                 || (inCall && stop.duringCalls == .waitForCallToEnd)
             // Past its start, a stop that is not waiting for a call starts on the next tick.
             guard startsAt > now || waitsForCall else { break }
             notice = Self.notice(
                 name: stop.name, at: time(startsAt), startsIn: startsAt.timeIntervalSince(now),
                 detail: waitsForCall ? Self.callWaitDetail : nil,
-                canStartNow: scheduler.canStartHardStopEarly(id: id, now: now)
+                canStartNow: scheduler.canStartHardStopEarly(id: id, occurrenceKey: key, now: now)
             )
         case .extensionEnding:
             // Once the stop's end has passed, the next tick ends it, so the notice no longer applies.
@@ -337,10 +342,11 @@ struct HardStopNoticeQueue: Equatable {
         }
     }
 
-    private static func order(_ subject: Subject) -> Date {
+    /// Occurrence keys are the local start day and time as `yyyyMMddHHmm`, so they order warnings by start.
+    private static func order(_ subject: Subject) -> Int {
         switch subject {
-        case .extensionEnding: .distantPast
-        case .warning(_, let startsAt): startsAt
+        case .extensionEnding: .min
+        case .warning(_, let key): key
         }
     }
 }
