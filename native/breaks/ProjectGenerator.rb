@@ -191,6 +191,10 @@ add_sources(mac_group, mac_target, %w[
   FloatingPanels.swift
   MacSettingsView.swift
 ])
+# The Mac's hard-stop presentation is pure Foundation, so the hostless Mac test bundle compiles and tests it.
+hard_stop_presentation = mac_group.new_file("HardStopPresentation.swift")
+[mac_target, mac_tests_target].each { |target| target.add_file_references([hard_stop_presentation]) }
+mac_tests_target.add_file_references([tests_group.new_file("HardStopPresentationTests.swift")])
 mac_assets = mac_group.new_file("Assets.xcassets")
 mac_target.resources_build_phase.add_file_reference(mac_assets)
 
