@@ -650,6 +650,33 @@ final class HardStopSettingsTests: XCTestCase {
         }
     }
 
+    func testALongAbsenceAfterAReleasedWaitResetsTheFocusCountedSoFar() {
+        // Call waits for the call that is running at 12:20, after focus since 4:30. At 12:21 it is deleted, turned
+        // off, or moved to 15:00, while the user has been away for 2 minutes: the countdown is full but the stretch is not.
+        let releases: [(name: String, release: (inout BreakScheduler, HardStop) -> Void)] = [
+            ("deleted", { scheduler, call in _ = scheduler.deleteHardStop(id: call.id, now: self.at(12, 21)) }),
+            ("turned off", { scheduler, _ in scheduler.settings.hardStops[0].isEnabled = false }),
+            ("rescheduled away", { scheduler, _ in scheduler.settings.hardStops[0].hour = 15 }),
+        ]
+        for (name, release) in releases {
+            let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+            var scheduler = makeScheduler([call], start: at(4, 30))
+            _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+            release(&scheduler, call)
+            XCTAssertEqual(scheduler.tick(now: at(12, 21), inputs: .init(idleSeconds: 2 * 60)), [.paused(.idle)], name)
+            XCTAssertEqual(scheduler.snapshot.pausedRemaining, 8 * 3600, name)
+            XCTAssertEqual(scheduler.snapshot.pausedFocus, 469 * 60, name)
+
+            // Away long enough to reset: the stretch resets once, though the countdown already showed a full interval.
+            XCTAssertEqual(scheduler.tick(now: at(12, 46), inputs: .init(idleSeconds: 30 * 60)), [.focusReset], name)
+            XCTAssertEqual(scheduler.snapshot.pausedFocus, 0, name)
+            XCTAssertEqual(scheduler.tick(now: at(12, 46, 1), inputs: .init(idleSeconds: 30 * 60 + 1)), [], name)
+            XCTAssertEqual(scheduler.tick(now: at(12, 47), inputs: .init(idleSeconds: 0)), [.resumed(.idle)], name)
+            XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(12, 47).addingTimeInterval(8 * 3600), name)
+            XCTAssertEqual(scheduler.focusElapsed(now: at(12, 57)), 10 * 60, name)
+        }
+    }
+
     func testAPausedSnapshotSavedBeforeThePausedFocusWasStoredResumesFromItsCountdown() throws {
         var scheduler = makeScheduler([], start: at(12, 0))
         _ = scheduler.pause(now: at(13, 0))

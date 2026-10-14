@@ -1128,7 +1128,10 @@ struct BreakScheduler: Sendable {
             if idle < idleSettings.pauseAfter {
                 return resume(now: now)
             }
-            if idle >= idleSettings.resetAfter, snapshot.pausedRemaining != settings.workInterval {
+            // The countdown and the counted focus are reset together; after a release or a snooze either can be
+            // reset while the other is not.
+            let alreadyReset = snapshot.pausedRemaining == settings.workInterval && focusCountedBeforePause == 0
+            if idle >= idleSettings.resetAfter, !alreadyReset {
                 snapshot.pausedRemaining = settings.workInterval
                 snapshot.pausedFocus = 0
                 return [.focusReset]
