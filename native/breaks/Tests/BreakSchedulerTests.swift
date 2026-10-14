@@ -1179,6 +1179,28 @@ final class BreakSchedulerTests: XCTestCase {
         }
     }
 
+    func testOccurrencesHeldBehindAWaitingOneJoinInOrderAfterIt() throws {
+        // A waits for Monday's call until dismissed; B starts anyway inside it at 10:45. Tuesday's and Wednesday's A
+        // start inside B but are held behind Monday's A. When the call ends on Wednesday, all three join B.
+        let a = hardStop(end: .untilDismissed, repeats: .weekdays([2, 3, 4]))
+        let b = hardStop(hour: 10, minute: 45, end: .untilDismissed, repeats: .once(on: t0, calendar: calendar), duringCalls: .startAnyway)
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        var scheduler = makeScheduler(stops: [a, b])
+        XCTAssertTrue(scheduler.tick(now: at(10, 30), inputs: call).isEmpty)
+        XCTAssertEqual(scheduler.tick(now: at(10, 45), inputs: call), [.hardStopStarted(id: b.id, endsAt: nil)])
+        XCTAssertTrue(scheduler.tick(now: at(10, 40, dayOffset: 1), inputs: call).isEmpty)
+        XCTAssertTrue(scheduler.tick(now: at(10, 40, dayOffset: 2), inputs: call).isEmpty)
+        XCTAssertTrue(scheduler.tick(now: at(10, 40, 1, dayOffset: 2)).isEmpty)
+
+        let restored = try relaunch(scheduler, at: at(10, 41, dayOffset: 2))
+        for var host in [scheduler, restored] {
+            XCTAssertEqual(host.dismissHardStop(now: at(10, 41, dayOffset: 2)), [.hardStopEnded(id: b.id, reason: .dismissed)])
+            XCTAssertEqual(host.records.map(\.startedAt), [at(10, 45), at(10, 40, 1, dayOffset: 2), at(10, 30, dayOffset: 1), at(10, 30, dayOffset: 2)])
+            XCTAssertEqual(Set(host.records.map(\.hardStopEndReason)), [.dismissed])
+            XCTAssertTrue(runTimed(&host, from: at(10, 41, dayOffset: 2), through: at(11, 0, dayOffset: 2), step: 30).filter { isHardStopEvent($0.1) }.isEmpty)
+        }
+    }
+
     func testOperationsSeeAStopThatStartedInsideBeforeTheNextTick() {
         // B starts at 10:45 inside A and ends later with no escape hatch. Extending at 10:45, before that tick,
         // follows B's rule.

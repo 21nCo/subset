@@ -639,15 +639,16 @@ struct BreakScheduler: Sendable {
     /// Merges into the running stop every unhandled occurrence that starts inside it (at or after its scheduled
     /// start and before its end) by `now`, in start order. Occurrences are worked out day by day from the running
     /// stop's start, so a chain of overlapping stops gives the same result whether or not every tick ran, even
-    /// after a gap of several days. `mergedThrough` remembers the last day already worked out.
+    /// after a gap of several days. `mergedThrough` remembers the first day not yet fully worked out.
     ///
     /// A later occurrence never merges past an earlier occurrence of the same stop that is waiting for a call. When
     /// that earlier one's end has passed, it is first recorded as missed; one that is still open stays waiting, and
-    /// the later occurrence joins later.
+    /// the later occurrence is worked out again once it no longer waits, so it joins in order.
     private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) -> [Event] {
         var events: [Event] = []
         guard var active = snapshot.activeHardStop else { return events }
         var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
+        var deferredFrom: Date?
         while day <= now, day < active.endsAt ?? .distantFuture {
             let candidates = stops
                 .compactMap { stop in stop.occurrence(onDayOf: day, calendar: calendar).map { (stop: stop, occurrence: $0) } }
@@ -658,7 +659,10 @@ struct BreakScheduler: Sendable {
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
                 if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
                     guard let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
-                          let end = waiting.end, end <= now else { continue }
+                          let end = waiting.end, end <= now else {
+                        deferredFrom = deferredFrom ?? day
+                        continue
+                    }
                     events.append(recordMissed(item.stop, waiting, end: end))
                 }
                 merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
@@ -667,7 +671,7 @@ struct BreakScheduler: Sendable {
             day = next
         }
         // Day granularity, so the saved snapshot changes at most once a day while a stop runs.
-        active.mergedThrough = calendar.startOfDay(for: now)
+        active.mergedThrough = deferredFrom ?? calendar.startOfDay(for: now)
         snapshot.activeHardStop = active
         return events
     }
