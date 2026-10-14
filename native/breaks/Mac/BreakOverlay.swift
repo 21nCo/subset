@@ -327,6 +327,7 @@ private struct HardStopActions: View {
             default: break
             }
         }
+        // The hold has already lapsed in the state machine; this clears its progress.
         .onChange(of: controller.sleeps) { _, _ in pressCancelled() }
         .onDisappear { deadline?.cancel() }
     }
@@ -343,13 +344,13 @@ private struct HardStopActions: View {
     }
 
     private func pressBegan(_ target: HardStopConfirmation.Target) {
-        confirmation.pressBegan(target, at: .now)
+        confirmation.pressBegan(target, at: .now, sleeps: controller.sleeps)
         schedule(after: HardStopConfirmation.holdDuration)
     }
 
     private func pressEnded() {
         deadline?.cancel()
-        run(confirmation.pressEnded(at: .now))
+        run(confirmation.pressEnded(at: .now, sleeps: controller.sleeps))
     }
 
     /// An interrupted press or a sleep drops the hold without running it.
@@ -369,13 +370,15 @@ private struct HardStopActions: View {
         run(confirmation.confirm(at: .now))
     }
 
-    /// Completes a hold, or closes the confirm window, when its time is up.
+    /// Completes a hold, or closes the confirm window, when its time is up. It reads the sleep count then, so a sleep
+    /// during the hold cancels it even if the deadline resumes before the view hears of the sleep.
     private func schedule(after delay: TimeInterval) {
         deadline?.cancel()
+        let controller = controller
         deadline = Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            run(confirmation.update(now: .now))
+            run(confirmation.update(now: .now, sleeps: controller.sleeps))
         }
     }
 

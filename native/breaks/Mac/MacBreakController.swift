@@ -18,7 +18,8 @@ final class MacBreakController: ObservableObject {
     @Published private(set) var hardStopNotices = HardStopNoticeQueue()
     /// True while the meeting signal (microphone or camera in use) is on, read even when it does not pause reminders.
     @Published private(set) var inCall = false
-    /// Counts the times the Mac went to sleep, so a hold on the hard-stop screen does not carry across a sleep.
+    /// Counts the times the Mac went to sleep, so a hold on the hard-stop screen does not carry across a sleep. It
+    /// changes as the sleep notification arrives, before any hold deadline can run after the wake.
     @Published private(set) var sleeps = 0
 
     private let repository: BreakRepository
@@ -137,8 +138,6 @@ final class MacBreakController: ObservableObject {
         guard timer == nil else { return }
         now = .now
         core.reconcileRestoredState(now: now)
-        // A stop waiting for a call gets its notice back; the first tick shows it if it still applies.
-        hardStopNotices.addWaitingStops(of: core)
         save()
         // A restored hard stop is shown by the tick below, after the scheduler has ended, resumed, or kept it.
         if phase == .breaking, snapshot.activeKind != .hardStop { overlay.show() }
@@ -152,7 +151,8 @@ final class MacBreakController: ObservableObject {
 
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            // Counted now, on the main queue, not in a later task that might run only after the wake.
+            MainActor.assumeIsolated {
                 self?.sleptAt = .now
                 self?.sleeps += 1
             }
@@ -351,16 +351,17 @@ final class MacBreakController: ObservableObject {
 
     /// Keeps the screen in line with the running hard stop: the overlay comes back after a relaunch or wake, notices
     /// close once they no longer apply (their stop started, was missed, or was removed, or the extension ended), and
-    /// the notice before an extension runs out appears once.
+    /// the notice before an extension runs out, and that of a stop that starts waiting for a call (also one restored
+    /// or made by the first tick after a relaunch), appear once.
     private func reconcileHardStop() {
         if hardStop.overlay != nil, !overlay.isVisible { overlay.show() }
+        var bringToFront = hardStopNotices.addNewWaits(of: core)
         if let until = HardStopPresentation.extensionWarningDue(core, now: now), warnedExtensionUntil != until {
             warnedExtensionUntil = until
             hardStopNotices.add(.extensionEnding)
-            syncHardStopNotice(bringToFront: true)
-        } else {
-            syncHardStopNotice()
+            bringToFront = true
         }
+        syncHardStopNotice(bringToFront: bringToFront)
     }
 
     /// Queues a hard-stop warning. Hard-stop warnings ignore the heads-up switch, since each stop sets its own. The

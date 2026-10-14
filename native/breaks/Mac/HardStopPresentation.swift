@@ -5,7 +5,7 @@ import Foundation
 /// and views read only from it and hold no hard-stop rules of their own.
 struct HardStopPresentation: Equatable {
     /// Why the hard-stop notice is open.
-    enum NoticeSubject: Equatable {
+    enum NoticeSubject: Hashable {
         /// A warning for occurrence `occurrenceKey` of stop `id`. The key, unlike the start, survives a time zone
         /// change, so the warning stays and shows the occurrence's current start.
         case warning(id: UUID, occurrenceKey: Int)
@@ -248,6 +248,9 @@ struct HardStopConfirmation: Equatable {
 
     static let holdDuration: TimeInterval = 3
     static let confirmWindow: TimeInterval = 5
+    /// How late after `holdDuration` a hold can still confirm. Later means the app was suspended during the hold (a
+    /// sleep it may not have heard of yet), so the hold lapses.
+    static let holdLateness: TimeInterval = 2
 
     enum State: Equatable {
         case idle
@@ -256,6 +259,8 @@ struct HardStopConfirmation: Equatable {
     }
 
     private(set) var state: State = .idle
+    /// The host's sleep count when the hold began.
+    private var holdSleeps = 0
 
     /// The action being held or awaiting **Confirm**.
     var pending: Target? {
@@ -265,17 +270,19 @@ struct HardStopConfirmation: Equatable {
         }
     }
 
-    /// The pointer went down on the button for `target`.
-    mutating func pressBegan(_ target: Target, at now: Date) {
+    /// The pointer went down on the button for `target`. `sleeps` counts the times the Mac went to sleep; the hold
+    /// lapses if it changes before the hold confirms.
+    mutating func pressBegan(_ target: Target, at now: Date, sleeps: Int) {
         state = .holding(target, since: now)
+        holdSleeps = sleeps
     }
 
-    /// The pointer was released or left the button. Returns the target when the hold lasted long enough and
-    /// `update(now:)` has not already returned it.
-    mutating func pressEnded(at now: Date) -> Target? {
+    /// The pointer was released or left the button. Returns the target when the hold lasted long enough, without a
+    /// sleep, and `update(now:sleeps:)` has not already returned it.
+    mutating func pressEnded(at now: Date, sleeps: Int) -> Target? {
         guard case .holding(let target, let since) = state else { return nil }
         state = .idle
-        return now.timeIntervalSince(since) >= Self.holdDuration ? target : nil
+        return holdCompletes(since: since, now: now, sleeps: sleeps) ? target : nil
     }
 
     /// The system cancelled the press (an interrupted drag) or the Mac went to sleep during it. Drops the hold without
@@ -285,12 +292,14 @@ struct HardStopConfirmation: Equatable {
         if case .holding = state { state = .idle }
     }
 
-    /// Returns the target whose hold has lasted long enough while still held, once. Also closes an expired confirm window.
-    mutating func update(now: Date) -> Target? {
+    /// Returns the target whose hold has lasted long enough while still held, once. A hold cut by a sleep, or one whose
+    /// deadline comes far too late, lapses instead, whatever order the host hears of the sleep in. Also closes an
+    /// expired confirm window.
+    mutating func update(now: Date, sleeps: Int) -> Target? {
         switch state {
-        case .holding(let target, let since) where now.timeIntervalSince(since) >= Self.holdDuration:
+        case .holding(let target, let since) where sleeps != holdSleeps || now.timeIntervalSince(since) >= Self.holdDuration:
             state = .idle
-            return target
+            return holdCompletes(since: since, now: now, sleeps: sleeps) ? target : nil
         case .awaitingConfirm(_, let until) where now >= until:
             state = .idle
         default:
@@ -325,6 +334,11 @@ struct HardStopConfirmation: Equatable {
         state = .idle
     }
 
+    private func holdCompletes(since: Date, now: Date, sleeps: Int) -> Bool {
+        let held = now.timeIntervalSince(since)
+        return sleeps == holdSleeps && held >= Self.holdDuration && held <= Self.holdDuration + Self.holdLateness
+    }
+
     /// From 0 to 1 while `target` is held, otherwise 0.
     func holdProgress(of target: Target, now: Date) -> Double {
         guard case .holding(target, let since) = state else { return 0 }
@@ -338,9 +352,9 @@ struct HardStopConfirmation: Equatable {
     }
 }
 
-/// The pointer side of a hold button: turns drag updates into a press that begins, ends or is cancelled. Leaving the
-/// button ends the press, and returning to it does not start another. The drag ending or being cancelled resets it,
-/// so the next drag is a new press.
+/// The pointer side of a hold button: turns drag updates into a press that begins, ends or is cancelled. A press
+/// begins only when the first update is over the button. Leaving the button ends the press, and returning to it does
+/// not start another. The drag ending or being cancelled resets it, so the next drag is a new press.
 struct HoldPress: Equatable {
     enum Change: Equatable {
         case began
@@ -357,8 +371,8 @@ struct HoldPress: Equatable {
     mutating func changed(inside: Bool) -> Change? {
         if !isTracking {
             isTracking = true
-            isPressed = true
-            return .began
+            isPressed = inside
+            return inside ? .began : nil
         }
         guard isPressed, !inside else { return nil }
         isPressed = false
@@ -386,6 +400,8 @@ struct HardStopNoticeQueue: Equatable {
     typealias Subject = HardStopPresentation.NoticeSubject
 
     private(set) var subjects: [Subject] = []
+    /// The waits whose notice was queued, while they last.
+    private var queuedWaits: Set<Subject> = []
 
     /// The notice the panel shows.
     var shown: Subject? { subjects.first }
@@ -397,15 +413,21 @@ struct HardStopNoticeQueue: Equatable {
         subjects.sort { Self.order($0) < Self.order($1) }
     }
 
-    /// After a relaunch, queues the notice of each stop that waits for a call. Its start has passed, so no warning
-    /// comes for it again, and without the notice it could not be started now. One closed before quitting comes back
-    /// once, like a warning; one that no longer applies is pruned.
-    mutating func addWaitingStops(of scheduler: BreakScheduler) {
-        for stop in scheduler.settings.hardStops {
-            if let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString] {
-                add(.warning(id: stop.id, occurrenceKey: key))
-            }
-        }
+    /// Queues the notice of each enabled stop that started waiting for a call since it last ran, once per wait. Its
+    /// start has passed, so no warning comes for it, and without the notice it could not be started now. Run after
+    /// every tick, it covers a wait restored after a relaunch, one the first tick creates, and one that begins while the
+    /// app runs. A notice closed during the wait is not queued again; one closed before quitting comes back once, like
+    /// a warning. Returns true when it queued one.
+    @discardableResult
+    mutating func addNewWaits(of scheduler: BreakScheduler) -> Bool {
+        let waits = Set(scheduler.settings.hardStops.compactMap { stop -> Subject? in
+            guard stop.isEnabled, let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString] else { return nil }
+            return .warning(id: stop.id, occurrenceKey: key)
+        })
+        let new = waits.subtracting(queuedWaits)
+        new.forEach { add($0) }
+        queuedWaits = waits
+        return !new.isEmpty
     }
 
     /// The shown notice was closed.
