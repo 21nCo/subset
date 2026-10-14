@@ -519,16 +519,21 @@ final class HardStopPresentationTests: XCTestCase {
                                       calendar: calendar)
         restored.reconcileRestoredState(now: at(13, 20))
         XCTAssertEqual(restored.tick(now: at(13, 20)), [.hardStopEnded(id: stop.id, reason: .ended)])
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 20), afterRelaunch: true))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 0, 1), afterRelaunch: true))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 20), sleptAt: nil,
+                                                        afterRelaunch: true))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: at(13, 0), now: at(13, 0, 1), sleptAt: nil,
+                                                        afterRelaunch: true))
 
         // An end reached while the app runs chimes; a dismissal or a missed stop never does.
         let end = running.snapshot.activeHardStop?.endsAt
         XCTAssertEqual(end, at(13, 0))
         XCTAssertEqual(running.tick(now: at(13, 0, 1)), [.hardStopEnded(id: stop.id, reason: .ended)])
-        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 1), afterRelaunch: false))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, scheduledEnd: end, now: at(12, 40), afterRelaunch: false))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, scheduledEnd: end, now: at(13, 0, 1), afterRelaunch: false))
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 1), sleptAt: nil,
+                                                       afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, scheduledEnd: end, now: at(12, 40), sleptAt: nil,
+                                                        afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, scheduledEnd: end, now: at(13, 0, 1), sleptAt: nil,
+                                                        afterRelaunch: false))
     }
 
     func testStopThatEndedWhileTheMacSleptEndsWithoutAChime() {
@@ -537,13 +542,50 @@ final class HardStopPresentationTests: XCTestCase {
         _ = scheduler.tick(now: at(12, 30))
         let end = scheduler.snapshot.activeHardStop?.endsAt
         // Asleep from 12:50 to 15:00: the first tick after the wake, whether the timer or the wake notice runs it,
-        // ends the stop, and that end is silent.
+        // ends the stop with the sleep still recorded, and that end is silent.
         _ = scheduler.tick(now: at(12, 50))
         XCTAssertEqual(scheduler.tick(now: at(15, 0)), [.hardStopEnded(id: stop.id, reason: .ended)])
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(15, 0), afterRelaunch: false))
-        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1, 1), afterRelaunch: false))
-        // A tick a little late, as the timer may be while awake, still chimes.
-        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(15, 0), sleptAt: at(12, 50),
+                                                        afterRelaunch: false))
+        // A tick more than a minute late is silent even with no sleep recorded; a little late, as the timer may be
+        // while awake, still chimes.
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1, 1), sleptAt: nil,
+                                                        afterRelaunch: false))
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 1), sleptAt: nil,
+                                                       afterRelaunch: false))
+    }
+
+    func testStopThatEndedDuringAShortSleepEndsWithoutAChime() {
+        let stop = lunch()
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30))
+        let end = scheduler.snapshot.activeHardStop?.endsAt
+        // Asleep from 12:40; the wake comes 30 seconds after the 13:00 end. The timer tick that runs before the wake
+        // notice and the wake notice's own tick both still see the sleep, so either one that reports the end is silent.
+        _ = scheduler.tick(now: at(12, 40))
+        XCTAssertEqual(scheduler.tick(now: at(13, 0, 30)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 30),
+                                                        sleptAt: at(12, 40), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 31),
+                                                        sleptAt: at(12, 40), afterRelaunch: false))
+        // An end at the moment the Mac goes to sleep passed during the sleep too.
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 1),
+                                                        sleptAt: at(13, 0), afterRelaunch: false))
+
+        // A sleep from 12:40 to 12:50 is no longer recorded once its wake tick has run, so an end at 13:00 while
+        // awake chimes once, even a second late.
+        var awake = makeScheduler([stop])
+        _ = awake.tick(now: at(12, 30))
+        _ = awake.tick(now: at(12, 50))
+        XCTAssertEqual(awake.tick(now: at(13, 0, 1)), [.hardStopEnded(id: stop.id, reason: .ended)])
+        XCTAssertTrue(HardStopPresentation.chimesOnEnd(.ended, scheduledEnd: end, now: at(13, 0, 1), sleptAt: nil,
+                                                       afterRelaunch: false))
+        XCTAssertEqual(awake.tick(now: at(13, 0, 2)), [], "The end is reported once")
+        // A dismissal or a missed stop stays silent, asleep or awake.
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.dismissed, scheduledEnd: end, now: at(12, 45),
+                                                        sleptAt: at(12, 40), afterRelaunch: false))
+        XCTAssertFalse(HardStopPresentation.chimesOnEnd(.missed, scheduledEnd: end, now: at(13, 0, 30),
+                                                        sleptAt: at(12, 40), afterRelaunch: false))
     }
 
     func testFadingOverlayKeepsTheHardStopScreenAfterItsStopEnds() throws {

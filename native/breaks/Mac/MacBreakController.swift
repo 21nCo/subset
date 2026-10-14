@@ -31,6 +31,7 @@ final class MacBreakController: ObservableObject {
     private var timer: Timer?
     private var lastSignalReadAt = Date.distantPast
     private var observers: [NSObjectProtocol] = []
+    /// When the Mac went to sleep, kept until the first tick after the wake has run.
     private var sleptAt: Date?
     /// The meeting signal from the last signal read, including one read only for hard stops.
     private var callReading = false
@@ -248,11 +249,12 @@ final class MacBreakController: ObservableObject {
     // MARK: - Tick and effects
 
     /// Time asleep is time away. The input that wakes the Mac resets the idle reading, so pass the sleep
-    /// gap through the idle path: a long sleep then starts a fresh interval instead of a break.
+    /// gap through the idle path: a long sleep then starts a fresh interval instead of a break. The sleep stays
+    /// recorded through this tick, so a hard stop that ended during it ends silently, also when a timer tick ran first.
     private func didWake() {
         let gap = sleptAt.map { Date.now.timeIntervalSince($0) } ?? 0
-        sleptAt = nil
         tick(awayAtLeast: gap)
+        sleptAt = nil
     }
 
     private func tick(awayAtLeast away: TimeInterval = 0) {
@@ -345,7 +347,9 @@ final class MacBreakController: ObservableObject {
                 // A missed stop never showed; another stop or a break may be on screen.
                 guard reason != .missed, !startsHardStop else { break }
                 overlay.hide()
-                if HardStopPresentation.chimesOnEnd(reason, scheduledEnd: hardStopEnd, now: now, afterRelaunch: isRestoring) {
+                if HardStopPresentation.chimesOnEnd(
+                    reason, scheduledEnd: hardStopEnd, now: now, sleptAt: sleptAt, afterRelaunch: isRestoring
+                ) {
                     playSound(completion: true)
                 }
             }

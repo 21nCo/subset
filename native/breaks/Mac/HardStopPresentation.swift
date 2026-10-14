@@ -206,16 +206,20 @@ struct HardStopPresentation: Equatable {
     }
 
     /// How late a tick may report a stop's end and still chime: well past the timer's one-second ticks, far short of
-    /// a sleep worth noticing.
+    /// a gap worth noticing.
     static let endChimeTolerance: TimeInterval = 60
 
-    /// Whether a stop's end plays the completion chime: only an end reached while the app ran, reported by a tick
-    /// soon after `scheduledEnd`. An end that passed while the Mac slept or the app was not running, reported by the
-    /// first tick after the wake or launch, in either order with the wake notice, ends silently, like a regular break
-    /// that ran out then.
-    static func chimesOnEnd(_ reason: HardStopEndReason, scheduledEnd: Date?, now: Date, afterRelaunch: Bool) -> Bool {
-        reason == .ended && !afterRelaunch
-            && (scheduledEnd.map { now.timeIntervalSince($0) <= endChimeTolerance } ?? true)
+    /// Whether a stop's end plays the completion chime: only an end reached while the Mac was awake and the app ran,
+    /// reported by a tick soon after `scheduledEnd`. `sleptAt` is when the Mac last went to sleep, kept until the first
+    /// tick after the wake has run, so an end at or after it passed during the sleep and ends silently, however soon
+    /// the wake comes and whether the timer or the wake notice reports it. An end reported by the first tick after a
+    /// launch is silent too, like a regular break that ran out then.
+    static func chimesOnEnd(
+        _ reason: HardStopEndReason, scheduledEnd: Date?, now: Date, sleptAt: Date?, afterRelaunch: Bool
+    ) -> Bool {
+        guard reason == .ended, !afterRelaunch else { return false }
+        if let sleptAt, scheduledEnd.map({ $0 >= sleptAt }) ?? true { return false }
+        return scheduledEnd.map { now.timeIntervalSince($0) <= endChimeTolerance } ?? true
     }
 
     /// Runs a confirmed Extend or Dismiss, only while the overlay at `now` still shows that action for that stop, so a
