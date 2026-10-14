@@ -837,6 +837,7 @@ struct BreakScheduler: Sendable {
     /// the later occurrence is worked out again once it no longer waits, so it joins in order.
     private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) -> [Event] {
         var events: [Event] = []
+        handleRescheduledRunningOccurrences()
         guard var active = snapshot.activeHardStop else { return events }
         var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
         var deferredFrom: Date?
@@ -869,6 +870,20 @@ struct BreakScheduler: Sendable {
         active.mergedThrough = deferredFrom ?? calendar.startOfDay(for: now)
         snapshot.activeHardStop = active
         return events
+    }
+
+    /// A stop that is part of the running one keeps that occurrence when its start time is edited: the occurrence the
+    /// edited stop has on the same scheduled day counts as handled, so it never joins, starts, or warns again that
+    /// day. The edit applies from its next day. Keys hold the configured day and time, so this is unaffected by
+    /// time zone changes, and a stop has one occurrence a day, so a later-day occurrence still joins as before.
+    private mutating func handleRescheduledRunningOccurrences() {
+        guard let active = snapshot.activeHardStop else { return }
+        for (id, key) in [(active.id, active.occurrenceKey)] + active.merged.map({ ($0.id, $0.occurrenceKey) }) {
+            guard let stop = settings.hardStops.first(where: { $0.id == id }) else { continue }
+            let day = HardStop.Occurrence.parts(of: key)
+            let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
+            snapshot.handledHardStops[id.uuidString] = max(sameDay, snapshot.handledHardStops[id.uuidString] ?? sameDay)
+        }
     }
 
     /// Focus time the timer counted before a hard stop starts: none after a break (its record holds the stretch),

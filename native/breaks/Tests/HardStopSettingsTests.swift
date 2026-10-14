@@ -778,6 +778,76 @@ final class HardStopSettingsTests: XCTestCase {
             .filter { if case .breakStarted = $0 { true } else { false } }, [])
     }
 
+    func testEditingTheStartOfARunningStopKeepsItsOccurrenceAndAppliesFromTheNextDay() {
+        // Focus runs 10:30 to 11:30 on Mondays and Tuesdays; at 10:32 its start moves inside, or after, that window.
+        for (hour, minute) in [(10, 35), (11, 0), (14, 0)] {
+            let label = "start moved to \(hour):\(minute)"
+            let focus = stop("Focus", hour: 10, minute: 30, end: .after(60 * 60), repeats: .weekdays([2, 3]))
+            var scheduler = makeScheduler([focus], start: at(9, 0))
+            // No regular break comes due over the two days.
+            scheduler.settings.workInterval = 3 * 86_400
+            _ = scheduler.tick(now: at(10, 30))
+            scheduler.settings.hardStops[0].hour = hour
+            scheduler.settings.hardStops[0].minute = minute
+
+            var events: [BreakScheduler.Event] = []
+            for now in [at(10, 32), at(10, 35), at(10, 40), at(11, 0), at(11, 29)] {
+                events += scheduler.tick(now: now)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, at(11, 30), label)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [], label)
+            }
+            for now in [at(11, 30), at(11, 31), at(11, 45), at(13, 50), at(14, 0), at(14, 30)] {
+                events += scheduler.tick(now: now)
+            }
+            XCTAssertEqual(events, [.hardStopEnded(id: focus.id, reason: .ended)], label)
+            XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30)], label)
+            XCTAssertEqual(scheduler.records.map(\.endedAt), [at(11, 30)], label)
+            // The menu shows the next day's occurrence, at the new time.
+            let start = at(hour, minute, dayOffset: 1)
+            XCTAssertEqual(scheduler.nextHardStop(after: at(11, 31))?.start, start, label)
+
+            // The next day it warns and starts at the new time.
+            XCTAssertEqual(scheduler.tick(now: start.addingTimeInterval(-600)), [.hardStopWarning(id: focus.id, occurrenceKey: HardStop.Occurrence.key(year: 2026, month: 8, day: 11, hour: hour, minute: minute), startsAt: start, waitingForCall: false)], label)
+            XCTAssertEqual(scheduler.tick(now: start), [.hardStopStarted(id: focus.id, endsAt: start.addingTimeInterval(3600))], label)
+        }
+    }
+
+    func testEditingTheStartOfAStopMergedIntoTheRunningOneKeepsItsPart() {
+        // Long runs 12:30 to 13:30; Walk joins it at 12:45 until 13:15, and at 12:55 its start moves to 12:50 or 13:10.
+        for (minute, newEnd) in [(50, at(13, 30)), (10, at(13, 40))] {
+            let label = "Walk moved to minute \(minute)"
+            let long = stop("Long", end: .after(60 * 60), repeats: .weekdays([2, 3]))
+            let walk = stop("Walk", hour: 12, minute: 45, repeats: .weekdays([2, 3]), escapeHatch: .dismissEarly)
+            var scheduler = makeScheduler([long, walk], start: at(9, 0))
+            scheduler.settings.workInterval = 3 * 86_400
+            _ = scheduler.tick(now: at(12, 30))
+            _ = scheduler.tick(now: at(12, 45))
+            scheduler.settings.hardStops[1].hour = minute == 50 ? 12 : 13
+            scheduler.settings.hardStops[1].minute = minute
+
+            var events: [BreakScheduler.Event] = []
+            for now in [at(12, 56), at(13, 10), at(13, 15), at(13, 20), at(13, 29)] {
+                events += scheduler.tick(now: now)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, at(13, 30), label)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.id), [walk.id], label)
+                XCTAssertNil(scheduler.snapshot.activeHardStop?.escapeHatchOwner, label)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop?.escapeHatch, HardStop.EscapeHatch.none, label)
+            }
+            for now in [at(13, 30), at(13, 31), at(13, 45)] {
+                events += scheduler.tick(now: now)
+            }
+            XCTAssertEqual(events, [.hardStopEnded(id: long.id, reason: .ended)], label)
+            XCTAssertEqual(scheduler.records.map(\.startedAt), [at(12, 30), at(12, 45)], label)
+            XCTAssertEqual(scheduler.records.map(\.endedAt), [at(13, 30), at(13, 15)], label)
+
+            // The next day Walk joins Long at its new time, and its new end applies.
+            _ = scheduler.tick(now: at(12, 30, dayOffset: 1))
+            _ = scheduler.tick(now: at(minute == 50 ? 12 : 13, minute, dayOffset: 1))
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.id), [walk.id], label)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, newEnd.addingTimeInterval(86_400), label)
+        }
+    }
+
     func testDeletingAnotherStopLeavesTheRunningOneAlone() {
         let lunch = stop()
         let later = stop("Later", hour: 16)
