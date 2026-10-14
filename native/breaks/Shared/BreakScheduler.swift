@@ -1,7 +1,7 @@
 import Foundation
 
 /// The platform-independent break schedule: focus intervals, heads-up, breaks, snoozes, pauses,
-/// smart pause, idle handling, and blink and posture cadence.
+/// smart pause, idle handling, blink and posture cadence, and hard stops.
 ///
 /// It is a value type with no timers, UI, or system APIs. A platform host (the iOS `BreakEngine` or the
 /// macOS `MacBreakController`) calls `tick(now:inputs:)` about once a second, feeds in the activity signals
@@ -20,6 +20,15 @@ struct BreakScheduler: Sendable {
         /// The user was away long enough that the absence counts as rest; the next interval starts fresh.
         case focusReset
         case wellness(WellnessReminder)
+        /// A hard stop starts soon. `waitingForCall` is true when a call is running and the stop will wait for it.
+        case hardStopWarning(id: UUID, startsAt: Date, waitingForCall: Bool)
+        /// A hard stop blocks the screen until `endsAt`, or until dismissed when nil.
+        case hardStopStarted(id: UUID, endsAt: Date?)
+        /// The stop is hidden until `until`; its end does not move.
+        case hardStopExtended(id: UUID, until: Date)
+        /// An extension ran out and the stop is shown again.
+        case hardStopResumed(id: UUID)
+        case hardStopEnded(id: UUID, reason: HardStopEndReason)
     }
 
     enum WellnessReminder: String, Equatable, Sendable {
@@ -50,7 +59,8 @@ struct BreakScheduler: Sendable {
     /// When the focus timer last started or resumed counting. Idle time before this was never counted.
     private var countingSince: Date?
 
-    init(settings: BreakSettings, snapshot: EngineSnapshot, records: [BreakRecord], calendar: Calendar = .current) {
+    /// The default calendar follows the user's time zone changes, so times are worked out with the current one each tick.
+    init(settings: BreakSettings, snapshot: EngineSnapshot, records: [BreakRecord], calendar: Calendar = .autoupdatingCurrent) {
         self.settings = settings
         self.snapshot = snapshot
         self.records = records
@@ -91,8 +101,11 @@ struct BreakScheduler: Sendable {
         max(0, settings.snoozesAllowedPerDay - snapshot.snoozesUsedToday)
     }
 
+    /// Discipline levels do not apply to hard stops: a hard stop is never skipped, snoozed, or ended early. Nor is
+    /// a break that runs while a due stop waits for a call; it ends on time.
     func canSkipBreak(now: Date) -> Bool {
-        switch settings.discipline {
+        guard !hardStopHoldsSchedule else { return false }
+        return switch settings.discipline {
         case .casual: true
         case .balanced: now.timeIntervalSince(snapshot.breakStartedAt ?? now) >= Self.balancedSkipDelay
         case .hardcore: false
@@ -101,15 +114,50 @@ struct BreakScheduler: Sendable {
 
     /// Seconds until a Balanced break can be skipped, or nil when no wait applies.
     func skipAvailableIn(now: Date) -> TimeInterval? {
-        guard settings.discipline == .balanced, snapshot.phase == .breaking, !canSkipBreak(now: now) else { return nil }
+        guard settings.discipline == .balanced, snapshot.phase == .breaking, !hardStopHoldsSchedule, !canSkipBreak(now: now) else { return nil }
         return Self.balancedSkipDelay - now.timeIntervalSince(snapshot.breakStartedAt ?? now)
     }
 
     func canEndEarly(now: Date) -> Bool {
-        settings.allowEarlyEnd && breakProgress(now: now) >= settings.earlyEndProgress
+        !hardStopHoldsSchedule && settings.allowEarlyEnd && breakProgress(now: now) >= settings.earlyEndProgress
     }
 
-    var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore }
+    var canSkipUpcomingBreak: Bool { settings.discipline != .hardcore && !hardStopHoldsSchedule }
+
+    /// True while a hard stop runs, or is due and waits for a call. Either holds the regular schedule.
+    var hardStopHoldsSchedule: Bool {
+        snapshot.activeHardStop != nil || !snapshot.hardStopsWaitingForCall.isEmpty
+    }
+
+    /// True when the shown hard stop's escape hatch has an extension left. Like `extendHardStop`, this follows
+    /// any stop that has started inside the running one, even before the next tick merges it.
+    func canExtendHardStop(now: Date) -> Bool {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.extendAllowed(now: now)
+    }
+
+    /// A stop without an end can always be dismissed; one with an end only when its escape hatch allows it, and
+    /// not once its end has passed (the next tick ends it). Like `dismissHardStop`, this follows any stop that has
+    /// started inside the running one.
+    func canDismissHardStop(now: Date) -> Bool {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.dismissAllowed(now: now)
+    }
+
+    private func extendAllowed(now: Date) -> Bool {
+        guard let active = snapshot.activeHardStop, active.extendedUntil == nil,
+              active.endsAt.map({ now < $0 }) ?? true,
+              case .extend(_, let times) = active.escapeHatch else { return false }
+        return active.ownerExtensionsUsed < times
+    }
+
+    private func dismissAllowed(now: Date) -> Bool {
+        guard let active = snapshot.activeHardStop else { return false }
+        guard let end = active.endsAt else { return true }
+        return now < end && active.escapeHatch == .dismissEarly
+    }
 
     /// A break may be snoozed while it runs only when it could also be skipped, and a snooze is left.
     /// A planned break is not snoozed: the snooze would replace it with an ordinary interval break.
@@ -127,6 +175,8 @@ struct BreakScheduler: Sendable {
         case .short, .manual: settings.shortBreakDuration
         case .long: settings.longBreakDuration
         case .planned: settings.plannedBreaks.first?.duration ?? settings.longBreakDuration
+        // A hard stop's length comes from its own end, not from the break settings.
+        case .hardStop: 0
         }
     }
 
@@ -144,9 +194,43 @@ struct BreakScheduler: Sendable {
         var events: [Event] = []
         resetDailyCountersIfNeeded(now: now)
 
+        let hardStopEvents = advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
+        events += hardStopEvents
+        if snapshot.activeHardStop != nil {
+            // A running hard stop overrides pauses, idle, office hours, and regular and planned breaks, and
+            // keeps the heads-up and nudges off.
+            clearWellnessCadence()
+            return events
+        }
+        if !snapshot.hardStopsWaitingForCall.isEmpty {
+            // A due stop that waits for a call holds the regular schedule too. A break that is already running
+            // still ends on time; a heads-up is withdrawn.
+            if snapshot.phase == .breaking, now >= snapshot.breakEndsAt ?? .distantFuture {
+                events += finishBreak(completed: true, now: now)
+            } else if snapshot.phase == .headsUp {
+                snapshot.phase = .focusing
+                events.append(.headsUpCancelled)
+            }
+            clearWellnessCadence()
+            return events
+        }
+        if hardStopEvents.contains(where: { if case .hardStopEnded(_, .missed) = $0 { true } else { false } }),
+           snapshot.phase != .breaking {
+            // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop. A
+            // pause from before the stop does not come back; live signals may pause the new interval below. The
+            // stretch counted until now is kept on the missed record, as on the record of a stop that ran, and
+            // belongs to the day it ended on.
+            let focus = countedFocus(now: now)
+            if focus > 0, let last = records.indices.last, records[last].hardStopEndReason == .missed {
+                records[last].focusDuration = focus
+                records[last].focusEndedAt = now
+            }
+            startFocusInterval(at: now)
+        }
+
         if snapshot.phase == .breaking {
             if now >= snapshot.breakEndsAt ?? .distantFuture {
-                events += endBreak(completed: true, now: now)
+                events += finishBreak(completed: true, now: now)
             }
             clearWellnessCadence()
             return events
@@ -206,7 +290,7 @@ struct BreakScheduler: Sendable {
     // MARK: - Operations
 
     mutating func startBreak(kind: BreakKind = .manual, duration: TimeInterval? = nil, plannedName: String? = nil, now: Date) -> [Event] {
-        guard snapshot.phase != .breaking else { return [] }
+        guard snapshot.phase != .breaking, !hardStopHoldsSchedule, kind != .hardStop else { return [] }
         let resolved = duration ?? self.duration(for: kind)
         snapshot.phase = .breaking
         snapshot.breakStartedAt = now
@@ -224,6 +308,7 @@ struct BreakScheduler: Sendable {
     /// Used when a background monitor reports that a planned break began (the iOS Device Activity extension).
     mutating func startPlannedBreak(id: UUID, now: Date) -> [Event] {
         guard
+            !hardStopHoldsSchedule,
             let planned = settings.plannedBreaks.first(where: { $0.id == id }),
             let occurrence = planned.occurrence(on: now, calendar: calendar),
             isUndelivered(planned, occurrence: occurrence),
@@ -233,7 +318,14 @@ struct BreakScheduler: Sendable {
         return startPlannedBreak(planned, occurrence: occurrence, now: now)
     }
 
+    /// Ends a regular or planned break. A hard stop ends only through its own rules and `dismissHardStop`, and a
+    /// break that runs while a due stop waits for a call ends only on time.
     mutating func endBreak(completed: Bool, now: Date) -> [Event] {
+        guard !hardStopHoldsSchedule else { return [] }
+        return finishBreak(completed: completed, now: now)
+    }
+
+    private mutating func finishBreak(completed: Bool, now: Date) -> [Event] {
         guard snapshot.phase == .breaking else { return [] }
         let startedAt = snapshot.breakStartedAt ?? now
         let kind = snapshot.activeKind ?? .manual
@@ -251,7 +343,7 @@ struct BreakScheduler: Sendable {
             switch kind {
             case .short: snapshot.completedShortBreaks += 1
             case .long: snapshot.completedShortBreaks = 0
-            case .planned, .manual: break
+            case .planned, .manual, .hardStop: break
             }
         }
         startFocusInterval(at: now)
@@ -266,7 +358,9 @@ struct BreakScheduler: Sendable {
 
     /// Postpones the upcoming break, or (when allowed) the break that is running. Uses one daily snooze.
     /// A snoozed active break is not recorded as skipped.
+    /// Has no effect while a hard stop runs or waits for a call, and then uses no snooze.
     mutating func snooze(minutes: Int, now: Date) -> [Event] {
+        guard !hardStopHoldsSchedule else { return [] }
         resetDailyCountersIfNeeded(now: now)
         guard minutes > 0, snoozesRemaining > 0 else { return [] }
         let duringBreak = snapshot.phase == .breaking
@@ -305,6 +399,7 @@ struct BreakScheduler: Sendable {
     }
 
     mutating func pause(reason: PauseReason = .manual, until: Date? = nil, now: Date, creditingIdle idle: TimeInterval = 0) -> [Event] {
+        guard !hardStopHoldsSchedule else { return [] }
         switch snapshot.phase {
         case .breaking:
             return []
@@ -338,23 +433,34 @@ struct BreakScheduler: Sendable {
         return [.resumed(reason)]
     }
 
-    /// Clears today's history and counters.
+    /// Clears today's history and counters, by the day rules of the statistics. An earlier record whose focus
+    /// stretch ended today (a stop missed after midnight) stays in the history without that stretch.
     mutating func resetToday(now: Date) {
         let start = calendar.startOfDay(for: now)
         records.removeAll { $0.startedAt >= start }
+        for index in records.indices where records[index].focusEnd >= start {
+            records[index].focusDuration = nil
+            records[index].focusEndedAt = nil
+        }
         snapshot.snoozesUsedToday = 0
         snapshot.snoozeDay = start
         snapshot.completedShortBreaks = 0
     }
 
-    /// Repairs a snapshot loaded after a relaunch. Returns true when a restored break is still running.
+    /// Repairs a snapshot loaded after a relaunch. Returns true when a restored regular or planned break is
+    /// still running. A restored hard stop returns false: the next tick ends, resumes, or keeps it and reports
+    /// that through its events. One-off hard stops whose date has passed are removed.
     @discardableResult
     mutating func reconcileRestoredState(now: Date) -> Bool {
+        // With a hard stop running, the next tick merges the stops that started inside it before one-off stops
+        // are removed, so none that joined it while the host was off is lost.
+        if snapshot.activeHardStop != nil { return false }
+        removeExpiredOnceStops(now: now)
         if snapshot.phase == .breaking {
             let end = snapshot.breakEndsAt ?? now
             if end > now { return true }
             // The break ran its full length while the app was not running: record it as completed.
-            _ = endBreak(completed: true, now: end)
+            _ = finishBreak(completed: true, now: end)
             startFocusInterval(at: now)
             return false
         }
@@ -384,6 +490,410 @@ struct BreakScheduler: Sendable {
         settings.desktop.idle.resetAfter = max(settings.desktop.idle.pauseAfter, settings.desktop.idle.resetAfter)
         settings.wellness.blinkInterval = max(60, settings.wellness.blinkInterval)
         settings.wellness.postureInterval = max(60, settings.wellness.postureInterval)
+        if settings.hardStops.count > HardStop.maximumCount {
+            settings.hardStops.removeLast(settings.hardStops.count - HardStop.maximumCount)
+        }
+        for index in settings.hardStops.indices {
+            Self.normalize(&settings.hardStops[index])
+        }
+    }
+
+    private static func normalize(_ stop: inout HardStop) {
+        func clamp<T: Comparable>(_ value: T, _ range: ClosedRange<T>) -> T { min(range.upperBound, max(range.lowerBound, value)) }
+        stop.hour = clamp(stop.hour, 0...23)
+        stop.minute = clamp(stop.minute, 0...59)
+        switch stop.end {
+        case .at(let hour, let minute): stop.end = .at(hour: clamp(hour, 0...23), minute: clamp(minute, 0...59))
+        case .after(let duration): stop.end = .after(clamp(duration, HardStop.durationRange))
+        case .untilDismissed: break
+        }
+        switch stop.repeats {
+        case .weekdays(let weekdays):
+            stop.repeats = .weekdays(weekdays.filter((1...7).contains))
+        case .once(let date):
+            // Bounded so an occurrence key cannot overflow; an impossible day never occurs and then expires.
+            stop.repeats = .once(DateComponents(year: date.year.map { clamp($0, 1...9999) }, month: date.month.map { clamp($0, 1...12) },
+                                                day: date.day.map { clamp($0, 1...31) }))
+        }
+        let warnings = Set(stop.warningMinutes.filter(HardStop.warningRange.contains)).sorted(by: >)
+        stop.warningMinutes = Array(warnings.prefix(HardStop.maximumWarnings))
+        if case .extend(let minutes, let times) = stop.escapeHatch {
+            stop.escapeHatch = .extend(minutes: clamp(minutes, HardStop.extendMinutesRange), times: clamp(times, HardStop.extendTimesRange))
+        }
+    }
+
+    // MARK: - Hard stops
+
+    /// Hides the shown hard stop for the escape hatch's minutes without moving its end. Returns no events, and
+    /// changes nothing, when the escape hatch has no extension left.
+    mutating func extendHardStop(now: Date) -> [Event] {
+        var next = self
+        let events = next.reconcileMerges(now: now)
+        guard next.extendAllowed(now: now), var active = next.snapshot.activeHardStop,
+              case .extend(let minutes, _) = active.escapeHatch else { return [] }
+        self = next
+        let until = now.addingTimeInterval(TimeInterval(minutes * 60))
+        active.ownerExtensionsUsed += 1
+        active.extendedUntil = until
+        snapshot.activeHardStop = active
+        clearActiveBreak()
+        snapshot.phase = .focusing
+        // While hidden, the countdown shows when the stop returns or ends.
+        snapshot.focusStartedAt = now
+        snapshot.nextBreakAt = min(until, active.endsAt ?? until)
+        countingSince = now
+        return events + [.hardStopExtended(id: active.id, until: until)]
+    }
+
+    /// Ends the running hard stop early. Returns no events, and changes nothing, unless it lasts until dismissed
+    /// or its escape hatch allows dismissing it.
+    mutating func dismissHardStop(now: Date) -> [Event] {
+        var next = self
+        let events = next.reconcileMerges(now: now)
+        guard next.dismissAllowed(now: now) else { return [] }
+        self = next
+        return events + finishHardStop(.dismissed, endedAt: now, now: now)
+    }
+
+    /// A stop that starts inside the running one by `now` may change its end and escape hatch, so an operation
+    /// merges it first, even when no tick has run since it started. Like a tick, it first records as missed an
+    /// earlier occurrence of the same stop that waited for a call and whose end has passed, so the later one joins.
+    private mutating func reconcileMerges(now: Date) -> [Event] {
+        guard let before = snapshot.activeHardStop else { return [] }
+        let events = mergeOverlappingStops(stops: settings.hardStops.filter(\.isEnabled), now: now)
+        guard let active = snapshot.activeHardStop, active.endsAt != before.endsAt else { return events }
+        if let until = active.extendedUntil {
+            snapshot.nextBreakAt = min(until, active.endsAt ?? until)
+        } else {
+            showHardStop()
+        }
+        return events
+    }
+
+    /// Moves hard stops forward for one tick: merges, misses, ends, resumes, starts, and warns.
+    private mutating func advanceHardStops(now: Date, inCall: Bool) -> [Event] {
+        var events: [Event] = []
+        let stops = settings.hardStops.filter(\.isEnabled)
+
+        // Merging comes first, so a stop that started inside the running one joins it even if it waits for
+        // calls or its own window passed while the host was asleep.
+        if snapshot.activeHardStop != nil {
+            events += mergeOverlappingStops(stops: stops, now: now)
+        }
+        // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
+        events += missWaitingStops(now: now)
+
+        // The earliest due occurrence of each stop that has not been handled; a later one of the same stop then
+        // joins it instead of replacing it. One that waits for a call is held back.
+        var due: [(stop: HardStop, occurrence: HardStop.Occurrence)] = []
+        for stop in stops {
+            let key = stop.id.uuidString
+            var candidates = stop.occurrences(around: now, calendar: calendar).filter {
+                stop.isDue($0, now: now, calendar: calendar) && !isHandled(stop, $0)
+            }
+            // An occurrence that already waits stays due until its end: a stop without an end waits for the call
+            // however long it lasts, and one whose start moved later with the time zone still starts when the call ends.
+            if let waitingKey = snapshot.hardStopsWaitingForCall[key],
+               let waiting = stop.occurrence(forKey: waitingKey, calendar: calendar),
+               waiting.end.map({ now < $0 }) ?? true, !isHandled(stop, waiting) {
+                candidates.append(waiting)
+            }
+            guard let occurrence = candidates.min(by: { $0.key < $1.key }) else { continue }
+            if inCall, stop.duringCalls == .waitForCallToEnd {
+                snapshot.hardStopsWaitingForCall[key] = occurrence.key
+            } else {
+                due.append((stop, occurrence))
+            }
+        }
+        due.sort { $0.occurrence.start < $1.occurrence.start }
+
+        if let active = snapshot.activeHardStop {
+            if let end = active.endsAt, now >= end {
+                events += finishHardStop(.ended, endedAt: end, now: now)
+            } else if let until = active.extendedUntil, now >= until {
+                snapshot.activeHardStop?.extendedUntil = nil
+                showHardStop()
+                events.append(.hardStopResumed(id: active.id))
+            } else if let until = active.extendedUntil {
+                // A merge may have moved the end of a hidden stop.
+                snapshot.nextBreakAt = min(until, active.endsAt ?? until)
+            } else {
+                showHardStop()
+            }
+        }
+        // A due stop that could not start earlier (it waited for a call that has now ended) joins a running one,
+        // as does one that starts inside it. One that started before it for another reason (it was just added or
+        // rescheduled) waits until the running one ends.
+        if var active = snapshot.activeHardStop {
+            for item in due where !isHandled(item.stop, item.occurrence)
+                && (item.occurrence.start >= active.occurrence || snapshot.hardStopsWaitingForCall[item.stop.id.uuidString] == item.occurrence.key) {
+                merge(item.stop, item.occurrence, joinedAt: now, into: &active)
+            }
+            snapshot.activeHardStop = active
+            if active.extendedUntil == nil { showHardStop() }
+        }
+
+        // Every due stop left starts at or after the end of a stop that just ended, so none is already handled.
+        if snapshot.activeHardStop == nil, let first = due.first(where: { !isHandled($0.stop, $0.occurrence) }) {
+            // A running regular or planned break ends and counts as completed (its record keeps the focus stretch
+            // before it); a heads-up is withdrawn.
+            if snapshot.phase == .breaking {
+                events += finishBreak(completed: true, now: now)
+            } else if snapshot.phase == .headsUp {
+                events.append(.headsUpCancelled)
+            }
+            markHandled(first.stop, first.occurrence)
+            snapshot.activeHardStop = ActiveHardStop(
+                id: first.stop.id,
+                name: first.stop.name,
+                occurrence: min(first.occurrence.start, now),
+                occurrenceKey: first.occurrence.key,
+                startedAt: now,
+                endsAt: first.occurrence.end,
+                escapeHatch: first.stop.escapeHatch,
+                focusDuration: countedFocus(now: now)
+            )
+            if snapshot.activeHardStop?.focusDuration == 0 { snapshot.activeHardStop?.focusDuration = nil }
+            // Other due stops that start inside it, including ones waiting for a call, join it at once.
+            events += mergeOverlappingStops(stops: stops, now: now)
+            showHardStop()
+            if let active = snapshot.activeHardStop {
+                events.append(.hardStopStarted(id: active.id, endsAt: active.endsAt))
+            }
+        }
+
+        removeExpiredOnceStops(now: now)
+        events += hardStopWarnings(stops: stops, now: now, inCall: inCall)
+        pruneHardStopProgress()
+        return events
+    }
+
+    /// Merges into the running stop every unhandled occurrence that starts inside it (at or after its scheduled
+    /// start and before its end) by `now`, in start order. Occurrences are worked out day by day from the running
+    /// stop's start, so a chain of overlapping stops gives the same result whether or not every tick ran, even
+    /// after a gap of several days. `mergedThrough` remembers the first day not yet fully worked out.
+    ///
+    /// A later occurrence never merges past an earlier occurrence of the same stop that is waiting for a call. When
+    /// that earlier one's end has passed, it is first recorded as missed; one that is still open stays waiting, and
+    /// the later occurrence is worked out again once it no longer waits, so it joins in order.
+    private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) -> [Event] {
+        var events: [Event] = []
+        guard var active = snapshot.activeHardStop else { return events }
+        var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
+        var deferredFrom: Date?
+        while day <= now, day < active.endsAt ?? .distantFuture {
+            let candidates = stops
+                .compactMap { stop in stop.occurrence(onDayOf: day, calendar: calendar).map { (stop: stop, occurrence: $0) } }
+                .sorted { $0.occurrence.start < $1.occurrence.start }
+            for item in candidates where !isHandled(item.stop, item.occurrence) {
+                guard item.occurrence.start >= active.occurrence, item.occurrence.start <= now,
+                      item.occurrence.start < active.endsAt ?? .distantFuture,
+                      item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
+                if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
+                    guard let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
+                          let end = waiting.end, end <= now else {
+                        deferredFrom = deferredFrom ?? day
+                        continue
+                    }
+                    events.append(recordMissed(item.stop, waiting, end: end, now: now))
+                }
+                merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        // Day granularity, so the saved snapshot changes at most once a day while a stop runs.
+        active.mergedThrough = deferredFrom ?? calendar.startOfDay(for: now)
+        snapshot.activeHardStop = active
+        return events
+    }
+
+    /// Focus time the timer counted before a hard stop starts: none after a break (its record holds the stretch),
+    /// and while paused only the time counted before the pause.
+    private func countedFocus(now: Date) -> TimeInterval {
+        switch snapshot.phase {
+        case .paused: max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+        case .focusing, .headsUp, .breaking: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
+        }
+    }
+
+    /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
+    private mutating func missWaitingStops(now: Date) -> [Event] {
+        var events: [Event] = []
+        for (key, waitingKey) in snapshot.hardStopsWaitingForCall.sorted(by: { $0.value < $1.value }) {
+            guard let stop = settings.hardStops.first(where: { $0.id.uuidString == key && $0.isEnabled }),
+                  let occurrence = stop.occurrence(forKey: waitingKey, calendar: calendar),
+                  !isHandled(stop, occurrence) else {
+                snapshot.hardStopsWaitingForCall[key] = nil
+                continue
+            }
+            // A stop without an end always waits, so it is never missed.
+            guard let end = occurrence.end else { continue }
+            guard now >= end else { continue }
+            events.append(recordMissed(stop, occurrence, end: end, now: now))
+        }
+        return events
+    }
+
+    /// A planned break held while the stop waited is dropped, as one that overlaps a stop that ran.
+    private mutating func recordMissed(_ stop: HardStop, _ occurrence: HardStop.Occurrence, end: Date, now: Date) -> Event {
+        markHandled(stop, occurrence)
+        dropPlannedBreaks(overlappingFrom: occurrence.start, to: end, now: now)
+        appendRecord(BreakRecord(
+            startedAt: occurrence.start,
+            endedAt: end,
+            plannedDuration: max(0, end.timeIntervalSince(occurrence.start)),
+            kind: .hardStop,
+            completed: false,
+            skipped: false,
+            hardStopEndReason: .missed,
+            extensionsUsed: 0
+        ))
+        removeOnceStops([(stop.id, occurrence.key)])
+        return .hardStopEnded(id: stop.id, reason: .missed)
+    }
+
+    /// Warnings are not replayed: only the latest one whose time has passed is shown, once, while the start is
+    /// still ahead. A stop that will start inside the running one gets none.
+    private mutating func hardStopWarnings(stops: [HardStop], now: Date, inCall: Bool) -> [Event] {
+        var events: [Event] = []
+        for stop in stops {
+            let key = stop.id.uuidString
+            // A handled occurrence can lie ahead again after the time zone moves west; it is not warned again.
+            guard let next = stop.occurrences(around: now, calendar: calendar).first(where: { $0.start > now && !isHandled(stop, $0) }) else { continue }
+            if let active = snapshot.activeHardStop, next.start < active.endsAt ?? .distantFuture { continue }
+            guard let minutes = stop.warningMinutes.filter({ now >= next.start.addingTimeInterval(-TimeInterval($0 * 60)) }).min() else { continue }
+            if let mark = snapshot.hardStopWarnings[key], mark.occurrence == next.key, mark.minutes <= minutes { continue }
+            snapshot.hardStopWarnings[key] = HardStopWarningMark(occurrence: next.key, minutes: minutes)
+            events.append(.hardStopWarning(id: stop.id, startsAt: next.start, waitingForCall: inCall && stop.duringCalls == .waitForCallToEnd))
+        }
+        return events
+    }
+
+    /// The stop that ends later sets the escape hatch, with its own extension allowance. A stop without an end ends latest.
+    private mutating func merge(_ stop: HardStop, _ occurrence: HardStop.Occurrence, joinedAt: Date, into active: inout ActiveHardStop) {
+        markHandled(stop, occurrence)
+        active.merged.append(MergedHardStop(id: stop.id, occurrenceKey: occurrence.key, joinedAt: joinedAt, endsAt: occurrence.end))
+        let endsLater = switch (occurrence.end, active.endsAt) {
+        case (nil, nil): false
+        case (nil, _?): true
+        case (_?, nil): false
+        case let (end?, current?): end > current
+        }
+        if endsLater {
+            active.endsAt = occurrence.end
+            active.escapeHatch = stop.escapeHatch
+            active.escapeHatchOwner = active.merged.count - 1
+        }
+    }
+
+    private mutating func finishHardStop(_ reason: HardStopEndReason, endedAt: Date, now: Date) -> [Event] {
+        guard let active = snapshot.activeHardStop else { return [] }
+        appendRecord(BreakRecord(
+            startedAt: active.startedAt,
+            endedAt: endedAt,
+            plannedDuration: active.endsAt.map { max(0, $0.timeIntervalSince(active.startedAt)) } ?? 0,
+            kind: .hardStop,
+            completed: reason == .ended,
+            skipped: false,
+            focusDuration: active.focusDuration,
+            hardStopEndReason: reason,
+            extensionsUsed: active.extensionsUsed
+        ))
+        // Each merged occurrence is recorded too, from when it joined. One whose own end came first ended normally.
+        // Each counts the extensions it used while its escape hatch controlled the stop; the focus stretch is
+        // counted on the running stop's record only.
+        for joined in active.merged {
+            let ownEnd = joined.endsAt.map { min($0, endedAt) } ?? endedAt
+            let endedOnTime = joined.endsAt.map { $0 <= endedAt } ?? false
+            appendRecord(BreakRecord(
+                startedAt: joined.joinedAt,
+                endedAt: max(joined.joinedAt, ownEnd),
+                plannedDuration: joined.endsAt.map { max(0, $0.timeIntervalSince(joined.joinedAt)) } ?? 0,
+                kind: .hardStop,
+                completed: endedOnTime || reason == .ended,
+                skipped: false,
+                hardStopEndReason: endedOnTime ? .ended : reason,
+                extensionsUsed: joined.extensionsUsed ?? 0
+            ))
+        }
+        removeOnceStops([(active.id, active.occurrenceKey)] + active.merged.map { ($0.id, $0.occurrenceKey) })
+        dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
+        snapshot.activeHardStop = nil
+        clearActiveBreak()
+        // A fresh focus interval starts after a hard stop; a pause from before it does not come back.
+        startFocusInterval(at: now)
+        return [.hardStopEnded(id: active.id, reason: reason)]
+    }
+
+    /// Shows the running hard stop as a break of kind `.hardStop`, replacing any pause.
+    private mutating func showHardStop() {
+        guard let active = snapshot.activeHardStop else { return }
+        snapshot.phase = .breaking
+        snapshot.activeKind = .hardStop
+        snapshot.activePlannedBreakName = active.name
+        snapshot.breakStartedAt = active.startedAt
+        snapshot.breakEndsAt = active.endsAt
+        snapshot.pausedRemaining = nil
+        snapshot.pauseReason = nil
+        snapshot.pausedUntil = nil
+        snapshot.deliveredHeadsUpFor = nil
+    }
+
+    /// A planned break that overlaps a hard stop is dropped instead of starting, for the time left, after it.
+    private mutating func dropPlannedBreaks(overlappingFrom start: Date, to end: Date, now: Date) {
+        for planned in settings.plannedBreaks where planned.isEnabled {
+            guard let occurrence = planned.occurrence(on: now, calendar: calendar),
+                  occurrence < end, occurrence.addingTimeInterval(max(60, planned.duration)) > start else { continue }
+            snapshot.deliveredPlannedOccurrences[planned.id.uuidString] = occurrence
+        }
+    }
+
+    /// Occurrences are compared by key, so a time zone change does not make a handled occurrence due again.
+    private func isHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) -> Bool {
+        snapshot.handledHardStops[stop.id.uuidString].map { occurrence.key <= $0 } ?? false
+    }
+
+    private mutating func markHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) {
+        let key = stop.id.uuidString
+        snapshot.handledHardStops[key] = max(occurrence.key, snapshot.handledHardStops[key] ?? occurrence.key)
+        snapshot.hardStopsWaitingForCall[key] = nil
+    }
+
+    /// Removes one-off stops whose occurrence is one of `occurrences`. One rescheduled to another time while its
+    /// old occurrence ran keeps its new occurrence.
+    private mutating func removeOnceStops(_ occurrences: [(id: UUID, key: Int)]) {
+        settings.hardStops.removeAll { stop in
+            // The key comes from the configured date and time only, so a time zone change does not keep the stop.
+            guard case .once(let date) = stop.repeats, let year = date.year, let month = date.month, let day = date.day else { return false }
+            let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)
+            return occurrences.contains { $0.id == stop.id && $0.key == key }
+        }
+    }
+
+    /// Removes one-off stops that can no longer start, except one that is running or waiting for a call.
+    private mutating func removeExpiredOnceStops(now: Date) {
+        let keep = Set((snapshot.activeHardStop.map { [$0.id] + $0.merged.map(\.id) } ?? []).map(\.uuidString))
+            .union(snapshot.hardStopsWaitingForCall.keys)
+        settings.hardStops.removeAll { stop in
+            !keep.contains(stop.id.uuidString) && stop.isExpiredOnce(now: now, calendar: calendar)
+        }
+    }
+
+    /// Drops progress kept for stops that no longer exist, except the running and merged ones, so restoring a
+    /// deleted stop while it runs does not record its occurrence twice.
+    private mutating func pruneHardStopProgress() {
+        let running = snapshot.activeHardStop.map { [$0.id] + $0.merged.map(\.id) } ?? []
+        let ids = Set((settings.hardStops.map(\.id) + running).map(\.uuidString))
+        if !snapshot.hardStopWarnings.keys.allSatisfy(ids.contains) {
+            snapshot.hardStopWarnings = snapshot.hardStopWarnings.filter { ids.contains($0.key) }
+        }
+        if !snapshot.handledHardStops.keys.allSatisfy(ids.contains) {
+            snapshot.handledHardStops = snapshot.handledHardStops.filter { ids.contains($0.key) }
+        }
+        if !snapshot.hardStopsWaitingForCall.keys.allSatisfy(ids.contains) {
+            snapshot.hardStopsWaitingForCall = snapshot.hardStopsWaitingForCall.filter { ids.contains($0.key) }
+        }
     }
 
     // MARK: - Smart pause and idle

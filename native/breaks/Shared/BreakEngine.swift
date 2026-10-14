@@ -240,6 +240,9 @@ final class BreakEngine: ObservableObject {
             case .focusReset, .wellness:
                 // iOS delivers posture and blink reminders as scheduled notifications.
                 break
+            case .hardStopWarning, .hardStopStarted, .hardStopExtended, .hardStopResumed, .hardStopEnded:
+                // Hard stops have no iOS presentation.
+                break
             }
         }
     }
