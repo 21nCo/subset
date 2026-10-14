@@ -364,6 +364,24 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(settings.hardStops.first?.escapeHatch, .dismissEarly)
     }
 
+    func testRenamingAStopThatLastsUntilDismissedKeepsItsStoredEscapeHatch() {
+        // The model and its validation accept an extension on a stop that lasts until dismissed.
+        let original = stop(end: .untilDismissed, escapeHatch: .extend(minutes: 20, times: 2))
+        var settings = BreakSettings()
+        settings.hardStops = [original]
+        var draft = HardStopDraft(original, now: at(10, 0), calendar: calendar)
+        XCTAssertFalse(draft.showsEscapeHatch)
+        draft.name = "Renamed"
+        XCTAssertEqual(settings.saveHardStop(draft.stop(calendar: calendar), isNew: false, now: at(10, 0), calendar: calendar), [])
+        XCTAssertEqual(settings.hardStops.first?.name, "Renamed")
+        XCTAssertEqual(settings.hardStops.first?.escapeHatch, .extend(minutes: 20, times: 2))
+
+        // A stop switched to until dismissed in the editor saves the hidden escape hatch as dismiss early.
+        var switched = HardStopDraft(stop(escapeHatch: .extend(minutes: 20, times: 2)), now: at(10, 0), calendar: calendar)
+        switched.endKind = .untilDismissed
+        XCTAssertEqual(switched.stop(calendar: calendar).escapeHatch, .dismissEarly)
+    }
+
     func testAnEditOfAStopThatIsGoneIsNotSaved() {
         // A one-off stop that ran (or one deleted elsewhere) while its editor was open.
         let ran = stop("Ran", repeats: .once(DateComponents(year: 2026, month: 8, day: 10)))
@@ -470,6 +488,42 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:])
         XCTAssertEqual(scheduler.snapshot.hardStopWarnings, [:])
         XCTAssertEqual(scheduler.tick(now: at(12, 30)).filter(isStart), [])
+    }
+
+    func testDeletingOrTurningOffTheLastWaitingStopReleasesTheHeldScheduleWithAFreshFocusInterval() {
+        for turnOff in [false, true] {
+            // The regular break was due at 12:30, while Call waited for the call that is running.
+            let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+            var scheduler = makeScheduler([call], start: at(4, 30))
+            _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+            XCTAssertNotNil(scheduler.snapshot.hardStopsWaitingForCall[call.id.uuidString])
+
+            if turnOff {
+                scheduler.settings.hardStops[0].isEnabled = false
+                _ = scheduler.tick(now: at(12, 21))
+            } else {
+                XCTAssertEqual(scheduler.deleteHardStop(id: call.id, now: at(12, 21)), [])
+            }
+            XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:], "turned off: \(turnOff)")
+            XCTAssertEqual(scheduler.phase, .focusing, "turned off: \(turnOff)")
+            XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(12, 21).addingTimeInterval(8 * 3600), "turned off: \(turnOff)")
+            let events = scheduler.tick(now: at(12, 31))
+            XCTAssertEqual(events.filter { if case .breakStarted = $0 { true } else { false } }, [], "turned off: \(turnOff)")
+            XCTAssertEqual(scheduler.records, [], "turned off: \(turnOff)")
+        }
+    }
+
+    func testDeletingOneOfTwoWaitingStopsKeepsTheScheduleHeld() {
+        let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+        let other = stop("Other", hour: 12, minute: 10, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([call, other], start: at(4, 30))
+        _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall.count, 2)
+
+        XCTAssertEqual(scheduler.deleteHardStop(id: call.id, now: at(12, 21)), [])
+        XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(12, 30))
+        XCTAssertEqual(scheduler.tick(now: at(12, 31), inputs: .init(signals: [.meeting]))
+            .filter { if case .breakStarted = $0 { true } else { false } }, [])
     }
 
     func testDeletingAnotherStopLeavesTheRunningOneAlone() {

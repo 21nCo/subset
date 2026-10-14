@@ -142,6 +142,8 @@ struct HardStopDraft: Equatable, Identifiable {
     var extendMinutes: Int
     var extendTimes: Int
     var duringCalls: HardStop.CallBehavior
+    /// The escape hatch of a stored stop that lasts until dismissed, kept while the editor hides the escape hatch.
+    let storedUntilDismissedEscapeHatch: HardStop.EscapeHatch?
 
     /// A new stop with the model's defaults, at 5:00 PM on weekdays.
     static func new(now: Date) -> HardStopDraft {
@@ -194,6 +196,7 @@ struct HardStopDraft: Equatable, Identifiable {
             escapeKind = .dismissEarly
         }
         duringCalls = stop.duringCalls
+        storedUntilDismissedEscapeHatch = !isNew && stop.end == .untilDismissed ? stop.escapeHatch : nil
     }
 
     /// The editor hides the escape hatch for a stop that lasts until dismissed; such a stop can always be dismissed.
@@ -205,11 +208,14 @@ struct HardStopDraft: Equatable, Identifiable {
         case .afterLength: .after(TimeInterval(lengthMinutes * 60))
         case .untilDismissed: .untilDismissed
         }
-        let escapeHatch: HardStop.EscapeHatch = switch showsEscapeHatch ? escapeKind : .dismissEarly {
+        let shownEscapeHatch: HardStop.EscapeHatch = switch escapeKind {
         case .none: .none
         case .extend: .extend(minutes: extendMinutes, times: extendTimes)
         case .dismissEarly: .dismissEarly
         }
+        // A stop that lasts until dismissed keeps its stored escape hatch; a new one, or one switched to it, saves
+        // dismiss early.
+        let escapeHatch = showsEscapeHatch ? shownEscapeHatch : storedUntilDismissedEscapeHatch ?? .dismissEarly
         return HardStop(
             id: id,
             name: name,
