@@ -447,6 +447,42 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(scheduler.tick(now: at(12, 51)).filter(isStart), [])
     }
 
+    func testDeletingAJoinedStopAfterItsOwnEndOnlyRemovesIt() throws {
+        // Long runs 12:30 to 13:30; Walk joins it at 12:45 and its own end is 13:15.
+        let cases: [(deleteAt: Date, ticks: [Date])] = [
+            (at(13, 15), [at(12, 30), at(12, 45)]),
+            (at(13, 15), [at(12, 30)]),
+            (at(13, 20), [at(12, 30), at(12, 45)]),
+            (at(13, 20), [at(12, 30), at(12, 45), at(13, 16)]),
+            (at(13, 20), [at(12, 30)]),
+        ]
+        for (deleteAt, ticks) in cases {
+            let label = "delete at \(deleteAt), ticks \(ticks)"
+            let long = stop("Long", end: .after(60 * 60))
+            let walk = stop("Walk", hour: 12, minute: 45)
+            var scheduler = makeScheduler([long, walk])
+            for tick in ticks { _ = scheduler.tick(now: tick) }
+            XCTAssertFalse(scheduler.isHardStopRunning(id: walk.id, now: deleteAt), label)
+            XCTAssertNil(scheduler.runningHardStop(containing: walk.id, now: deleteAt), label)
+            XCTAssertTrue(scheduler.isHardStopRunning(id: long.id, now: deleteAt), label)
+
+            XCTAssertEqual(scheduler.deleteHardStop(id: walk.id, now: deleteAt), [], label)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.id, long.id, label)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, at(13, 30), label)
+            XCTAssertEqual(scheduler.phase, .breaking, label)
+            XCTAssertEqual(scheduler.settings.hardStops.map(\.id), [long.id], label)
+            XCTAssertEqual(scheduler.records, [], label)
+
+            XCTAssertEqual(scheduler.tick(now: at(13, 30)), [.hardStopEnded(id: long.id, reason: .ended)], label)
+            let records = scheduler.records
+            XCTAssertEqual(records.count, 2, label)
+            XCTAssertEqual(records.map(\.hardStopEndReason), [.ended, .ended], label)
+            XCTAssertEqual(records.map(\.completed), [true, true], label)
+            XCTAssertEqual(records.map(\.startedAt), [at(12, 30), at(12, 45)], label)
+            XCTAssertEqual(records.map(\.endedAt), [at(13, 30), at(13, 15)], label)
+        }
+    }
+
     func testDeletingAStopWhoseEndHasPassedBeforeTheTickRecordsItAsEnded() {
         for extended in [false, true] {
             // Lunch runs 12:30 to 13:00; no tick comes at or after its end.
@@ -490,13 +526,15 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(scheduler.tick(now: at(12, 30)).filter(isStart), [])
     }
 
-    func testDeletingOrTurningOffTheLastWaitingStopReleasesTheHeldScheduleWithAFreshFocusInterval() {
+    func testDeletingOrTurningOffTheLastWaitingStopReleasesTheHeldScheduleAndKeepsTheFocusCountedSoFar() throws {
         for turnOff in [false, true] {
             // The regular break was due at 12:30, while Call waited for the call that is running.
             let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
             var scheduler = makeScheduler([call], start: at(4, 30))
             _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
             XCTAssertNotNil(scheduler.snapshot.hardStopsWaitingForCall[call.id.uuidString])
+            let focused = scheduler.stats(now: at(12, 21))
+            XCTAssertEqual(focused.focusTime, 471 * 60)
 
             if turnOff {
                 scheduler.settings.hardStops[0].isEnabled = false
@@ -507,10 +545,75 @@ final class HardStopSettingsTests: XCTestCase {
             XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:], "turned off: \(turnOff)")
             XCTAssertEqual(scheduler.phase, .focusing, "turned off: \(turnOff)")
             XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(12, 21).addingTimeInterval(8 * 3600), "turned off: \(turnOff)")
+            // The stretch since 4:30 still counts: no record holds it, so it stays the current one.
+            let released = scheduler.stats(now: at(12, 21))
+            XCTAssertEqual(released.focusTime, focused.focusTime, "turned off: \(turnOff)")
+            XCTAssertEqual(released.longestStretch, focused.longestStretch, "turned off: \(turnOff)")
+            XCTAssertEqual(released.screenScore, focused.screenScore, "turned off: \(turnOff)")
             let events = scheduler.tick(now: at(12, 31))
             XCTAssertEqual(events.filter { if case .breakStarted = $0 { true } else { false } }, [], "turned off: \(turnOff)")
             XCTAssertEqual(scheduler.records, [], "turned off: \(turnOff)")
+            XCTAssertEqual(scheduler.stats(now: at(12, 31)).focusTime, 481 * 60, "turned off: \(turnOff)")
+
+            // After a relaunch the saved snapshot and history give the same statistics and schedule.
+            let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONEncoder().encode(scheduler.snapshot))
+            let records = try JSONDecoder().decode([BreakRecord].self, from: JSONEncoder().encode(scheduler.records))
+            var relaunched = BreakScheduler(settings: scheduler.settings, snapshot: snapshot, records: records, calendar: calendar)
+            XCTAssertEqual(relaunched.stats(now: at(12, 32)).focusTime, 482 * 60, "turned off: \(turnOff)")
+            XCTAssertEqual(relaunched.stats(now: at(12, 32)).longestStretch, 482 * 60, "turned off: \(turnOff)")
+            XCTAssertEqual(relaunched.tick(now: at(12, 32)).filter { if case .breakStarted = $0 { true } else { false } }, [])
         }
+    }
+
+    func testAWaitingStopRescheduledAwayFromItsOccurrenceNeverStartsIt() throws {
+        // Call (12:00 for 2 hours) waits for the call that is running at 12:20; the regular break was due at 12:30.
+        // At 12:21 it is moved to tomorrow, to 15:00, or to Tuesdays only.
+        let edits: [(name: String, edit: (inout HardStop) -> Void, newStart: Date)] = [
+            ("one-off moved to tomorrow", { $0.repeats = .once(DateComponents(year: 2026, month: 8, day: 11)) }, at(12, 0, dayOffset: 1)),
+            ("start moved", { $0.hour = 15 }, at(15, 0)),
+            ("today dropped from its days", { $0.repeats = .weekdays([3]) }, at(12, 0, dayOffset: 1)),
+        ]
+        for (name, edit, newStart) in edits {
+            var call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), repeats: .weekdays([2]), duringCalls: .waitForCallToEnd)
+            if name.hasPrefix("one-off") { call.repeats = .once(DateComponents(year: 2026, month: 8, day: 10)) }
+            var scheduler = makeScheduler([call], start: at(4, 30))
+            _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+            let oldKey = try XCTUnwrap(scheduler.snapshot.hardStopsWaitingForCall[call.id.uuidString], name)
+            edit(&scheduler.settings.hardStops[0])
+            let focused = scheduler.stats(now: at(12, 21)).focusTime
+
+            // Start now on the old occurrence's notice starts nothing, before or after the next tick.
+            XCTAssertFalse(scheduler.canStartHardStopEarly(id: call.id, occurrenceKey: oldKey, now: at(12, 21)), name)
+            XCTAssertEqual(scheduler.startHardStopEarly(id: call.id, occurrenceKey: oldKey, now: at(12, 21)), [], name)
+            XCTAssertNil(scheduler.waitingOccurrence(of: scheduler.settings.hardStops[0]), name)
+
+            // The call ends: the old occurrence does not start, and the held schedule is released.
+            let events = scheduler.tick(now: at(12, 25))
+            XCTAssertEqual(events.filter(isStart), [], name)
+            XCTAssertEqual(events.filter { if case .breakStarted = $0 { true } else { false } }, [], name)
+            XCTAssertNil(scheduler.snapshot.activeHardStop, name)
+            XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:], name)
+            XCTAssertEqual(scheduler.snapshot.nextBreakAt, at(12, 25).addingTimeInterval(8 * 3600), name)
+            XCTAssertEqual(scheduler.stats(now: at(12, 21)).focusTime, focused, name)
+            XCTAssertEqual(scheduler.records, [], name)
+            XCTAssertFalse(scheduler.canStartHardStopEarly(id: call.id, occurrenceKey: oldKey, now: at(12, 26)), name)
+            XCTAssertEqual(scheduler.startHardStopEarly(id: call.id, occurrenceKey: oldKey, now: at(12, 26)), [], name)
+            XCTAssertEqual(scheduler.tick(now: at(12, 27)).filter(isStart), [], name)
+
+            // The new occurrence still starts on its day.
+            XCTAssertEqual(scheduler.tick(now: newStart).filter(isStart), [.hardStopStarted(id: call.id, endsAt: newStart.addingTimeInterval(2 * 3600))], name)
+        }
+    }
+
+    func testAWaitingStopEditedWithoutMovingItsOccurrenceKeepsWaiting() {
+        // A rename or a new length keeps the occurrence, which starts when the call ends.
+        let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([call], start: at(4, 30))
+        _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+        scheduler.settings.hardStops[0].name = "Calls done"
+        scheduler.settings.hardStops[0].end = .after(3 * 3600)
+        XCTAssertNotNil(scheduler.waitingOccurrence(of: scheduler.settings.hardStops[0]))
+        XCTAssertEqual(scheduler.tick(now: at(12, 25)).filter(isStart), [.hardStopStarted(id: call.id, endsAt: at(15, 0))])
     }
 
     func testDeletingOneOfTwoWaitingStopsKeepsTheScheduleHeld() {
@@ -534,6 +637,30 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(scheduler.deleteHardStop(id: later.id, now: at(12, 35)), [])
         XCTAssertEqual(scheduler.snapshot.activeHardStop?.id, lunch.id)
         XCTAssertEqual(scheduler.phase, .breaking)
+    }
+
+    // MARK: - Time pickers
+
+    func testTimePickersKeepTimesTheClocksSkipOrRepeatToday() throws {
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
+        // Noon on the spring-forward day (2:00 to 3:00) and on the fall-back day (2:00 to 1:00), and on an ordinary day.
+        for now in try [instant("2026-03-08T16:00:00Z"), instant("2026-11-01T17:00:00Z"), instant("2026-08-10T16:00:00Z")] {
+            for hour in 0..<24 {
+                for minute in stride(from: 0, to: 60, by: 5) {
+                    let date = HardStopClock.date(hour: hour, minute: minute, near: now, calendar: newYork)
+                    let time = HardStopClock.time(of: date, calendar: newYork)
+                    XCTAssertEqual([time.hour, time.minute], [hour, minute], "\(now)")
+                    // A picker that moves the minute on keeps the hour, even in a skipped or repeated hour.
+                    let moved = HardStopClock.time(of: date.addingTimeInterval(5 * 60), calendar: newYork)
+                    XCTAssertEqual(moved.hour * 60 + moved.minute, (hour * 60 + minute + 5) % (24 * 60), "\(now)")
+                }
+            }
+        }
+        // An ordinary day is used as it is.
+        let ordinary = try instant("2026-08-10T16:00:00Z")
+        XCTAssertEqual(HardStopClock.referenceDay(near: ordinary, calendar: newYork), newYork.startOfDay(for: ordinary))
     }
 
     // MARK: - Menu bar and summaries

@@ -485,11 +485,9 @@ private struct HardStopEditor: View {
 
     private func clock(_ hour: Binding<Int>, _ minute: Binding<Int>) -> Binding<Date> {
         Binding(
-            get: { controller.calendar.date(bySettingHour: hour.wrappedValue, minute: minute.wrappedValue, second: 0, of: .now) ?? .now },
+            get: { HardStopClock.date(hour: hour.wrappedValue, minute: minute.wrappedValue, near: .now, calendar: controller.calendar) },
             set: { date in
-                let parts = controller.calendar.dateComponents([.hour, .minute], from: date)
-                hour.wrappedValue = parts.hour ?? 0
-                minute.wrappedValue = parts.minute ?? 0
+                (hour.wrappedValue, minute.wrappedValue) = HardStopClock.time(of: date, calendar: controller.calendar)
             }
         )
     }

@@ -208,11 +208,9 @@ private struct HardStopQuickAddView: View {
 
     private var time: Binding<Date> {
         Binding(
-            get: { controller.calendar.date(bySettingHour: values.hour, minute: values.minute, second: 0, of: .now) ?? .now },
+            get: { HardStopClock.date(hour: values.hour, minute: values.minute, near: .now, calendar: controller.calendar) },
             set: { date in
-                let parts = controller.calendar.dateComponents([.hour, .minute], from: date)
-                values.hour = parts.hour ?? 0
-                values.minute = parts.minute ?? 0
+                (values.hour, values.minute) = HardStopClock.time(of: date, calendar: controller.calendar)
             }
         )
     }

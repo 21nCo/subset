@@ -273,6 +273,36 @@ extension BreakScheduler {
     }
 }
 
+/// The date a time picker edits for a stop's hour and minute. It is built on a day near today whose clocks do not
+/// change, so every hour and minute exists once on it: on a day whose clocks change, a time they skip or repeat would
+/// otherwise come back from the picker as another time.
+enum HardStopClock {
+    static func date(hour: Int, minute: Int, near now: Date, calendar: Calendar) -> Date {
+        calendar.date(bySettingHour: hour, minute: minute, second: 0, of: referenceDay(near: now, calendar: calendar)) ?? now
+    }
+
+    static func time(of date: Date, calendar: Calendar) -> (hour: Int, minute: Int) {
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        return (parts.hour ?? 0, parts.minute ?? 0)
+    }
+
+    /// The start of the first day from today on whose clocks do not change; today when none in the next two weeks.
+    static func referenceDay(near now: Date, calendar: Calendar) -> Date {
+        let today = calendar.startOfDay(for: now)
+        var day = today
+        for _ in 0..<14 {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            let zone = calendar.timeZone
+            if zone.secondsFromGMT(for: day) == zone.secondsFromGMT(for: next),
+               zone.nextDaylightSavingTimeTransition(after: day).map({ $0 >= next }) ?? true {
+                return day
+            }
+            day = next
+        }
+        return today
+    }
+}
+
 /// The text Settings and the menu bar use for a hard stop.
 enum HardStopText {
     /// A row summary such as "Weekdays 1:00 PM · 45 min".
