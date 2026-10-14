@@ -18,6 +18,8 @@ final class MacBreakController: ObservableObject {
     @Published private(set) var hardStopNotices = HardStopNoticeQueue()
     /// True while the meeting signal (microphone or camera in use) is on, read even when it does not pause reminders.
     @Published private(set) var inCall = false
+    /// Counts the times the Mac went to sleep, so a hold on the hard-stop screen does not carry across a sleep.
+    @Published private(set) var sleeps = 0
 
     private let repository: BreakRepository
     private let signals = ActivitySignals()
@@ -135,6 +137,8 @@ final class MacBreakController: ObservableObject {
         guard timer == nil else { return }
         now = .now
         core.reconcileRestoredState(now: now)
+        // A stop waiting for a call gets its notice back; the first tick shows it if it still applies.
+        hardStopNotices.addWaitingStops(of: core)
         save()
         // A restored hard stop is shown by the tick below, after the scheduler has ended, resumed, or kept it.
         if phase == .breaking, snapshot.activeKind != .hardStop { overlay.show() }
@@ -148,7 +152,10 @@ final class MacBreakController: ObservableObject {
 
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.sleptAt = .now }
+            Task { @MainActor [weak self] in
+                self?.sleptAt = .now
+                self?.sleeps += 1
+            }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.didWake() }

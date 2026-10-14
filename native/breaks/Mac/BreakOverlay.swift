@@ -294,6 +294,7 @@ private struct HardStopActions: View {
                             progress: confirmation.holdProgress(of: target, now: context.date),
                             onPressBegan: { pressBegan(target) },
                             onPressEnded: pressEnded,
+                            onPressCancelled: pressCancelled,
                             onActivate: { activate(target) }
                         )
                         .focused($focus, equals: .action(action))
@@ -326,6 +327,7 @@ private struct HardStopActions: View {
             default: break
             }
         }
+        .onChange(of: controller.sleeps) { _, _ in pressCancelled() }
         .onDisappear { deadline?.cancel() }
     }
 
@@ -348,6 +350,13 @@ private struct HardStopActions: View {
     private func pressEnded() {
         deadline?.cancel()
         run(confirmation.pressEnded(at: .now))
+    }
+
+    /// An interrupted press or a sleep drops the hold without running it.
+    private func pressCancelled() {
+        guard case .holding = confirmation.state else { return }
+        deadline?.cancel()
+        confirmation.pressCancelled()
     }
 
     private func activate(_ target: HardStopConfirmation.Target) {
@@ -405,16 +414,18 @@ private struct ConfirmControl: View {
     }
 }
 
-/// A button that reports pointer press and release (leaving the button counts as a release), and activation by
-/// Space or VoiceOver. It is not a `Button`, so a click never runs it, and it has no Return shortcut.
+/// A button that reports pointer press, release (leaving the button counts as a release) and cancellation, and
+/// activation by Space or VoiceOver. It is not a `Button`, so a click never runs it, and it has no Return shortcut.
 private struct HoldToConfirmButton: View {
     let title: String
     let progress: Double
     let onPressBegan: () -> Void
     let onPressEnded: () -> Void
+    let onPressCancelled: () -> Void
     let onActivate: () -> Void
-    @State private var isTracking = false
-    @State private var isPressed = false
+    @State private var press = HoldPress()
+    /// Reset by SwiftUI when the drag ends or is cancelled; `onEnded` runs only for an ended one.
+    @GestureState private var isDragging = false
     @State private var size = CGSize.zero
 
     var body: some View {
@@ -438,24 +449,14 @@ private struct HoldToConfirmButton: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        if !isTracking {
-                            // A new press. Returning to the button after leaving it does not start another.
-                            isTracking = true
-                            isPressed = true
-                            onPressBegan()
-                        } else if isPressed, !CGRect(origin: .zero, size: size).contains(value.location) {
-                            isPressed = false
-                            onPressEnded()
-                        }
-                    }
-                    .onEnded { _ in
-                        isTracking = false
-                        guard isPressed else { return }
-                        isPressed = false
-                        onPressEnded()
-                    }
+                    .updating($isDragging) { _, dragging, _ in dragging = true }
+                    .onChanged { value in report(press.changed(inside: CGRect(origin: .zero, size: size).contains(value.location))) }
+                    .onEnded { _ in report(press.ended()) }
             )
+            // A drag that stopped without `onEnded` was cancelled. After a release `onEnded` has already reset the press.
+            .onChange(of: isDragging) { _, dragging in
+                if !dragging { report(press.cancelled()) }
+            }
             // Edit interactions keep it focusable even when keyboard navigation is off in System Settings.
             .focusable(interactions: .edit)
             .onKeyPress(.space) {
@@ -467,5 +468,14 @@ private struct HoldToConfirmButton: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityHint("Press and hold for \(Int(HardStopConfirmation.holdDuration)) seconds, or activate it and then Confirm within \(Int(HardStopConfirmation.confirmWindow)) seconds.")
             .accessibilityAction { onActivate() }
+    }
+
+    private func report(_ change: HoldPress.Change?) {
+        switch change {
+        case .began: onPressBegan()
+        case .ended: onPressEnded()
+        case .cancelled: onPressCancelled()
+        case nil: break
+        }
     }
 }

@@ -168,12 +168,18 @@ struct HardStopNoticeView: View {
             HStack(alignment: .top) {
                 Image(systemName: "hand.raised")
                     .accessibilityHidden(true)
-                Text(notice.title)
-                    .font(.headline)
-                    .monospacedDigit()
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(notice.spokenTitle)
+                // The name takes one line and is cut short when long; the time and countdown always show below it.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(notice.name)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(notice.timing)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(notice.spokenTitle)
                 Spacer()
                 Button {
                     controller.closeHardStopNotice()

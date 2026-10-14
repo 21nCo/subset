@@ -89,6 +89,25 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(scheduler, at: at(12, 30), notice: subject).notice)
     }
 
+    func testLongNameNeverHidesTheTimeAndCountdown() {
+        let name = String(repeating: "Quarterly planning review with the whole team ", count: 4)
+        var stop = lunch()
+        stop.name = name
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
+
+        // The panel shows the name on a line of its own, cut short, and the time and countdown below it in full.
+        let notice = present(scheduler, at: at(12, 25, 30), notice: subject).notice
+        XCTAssertEqual(notice?.name, name)
+        XCTAssertEqual(notice?.timing, "Hard stop at 12:30, in 04:30")
+        XCTAssertEqual(notice?.title, "\(name) — hard stop at 12:30, in 04:30")
+        XCTAssertEqual(notice?.spokenTitle, "\(name), hard stop at 12:30, in \(TimeInterval(270).spokenDuration)")
+
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(present(scheduler, at: at(12, 31), notice: subject, inCall: true).notice?.timing, "Hard stop at 12:30")
+    }
+
     func testWarningNoticeWhileWaitingForACall() {
         let stop = lunch()
         var scheduler = makeScheduler([stop])
@@ -467,6 +486,29 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(scheduler, at: at(13, 0, 30), notice: .extensionEnding).notice)
     }
 
+    func testExtensionNoticeClosesWhenTheExtensionRunsOut() {
+        let stop = lunch(escapeHatch: .extend(minutes: 15, times: 1))
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.extendHardStop(now: at(12, 41))
+        var queue = HardStopNoticeQueue()
+        queue.add(.extensionEnding)
+        XCTAssertEqual(present(scheduler, at: at(12, 55, 59), notice: .extensionEnding).notice?.canStartNow, true)
+
+        // The extension ran out at 12:56 and the stop ends at 13:00, but no tick has shown the stop again yet.
+        for now in [at(12, 56), at(12, 57)] {
+            XCTAssertNil(present(scheduler, at: now, notice: .extensionEnding).notice)
+            XCTAssertFalse(scheduler.canEndHardStopExtension(now: now))
+            let before = scheduler.snapshot
+            XCTAssertEqual(scheduler.endHardStopExtension(now: now), [])
+            XCTAssertEqual(scheduler.snapshot, before)
+            queue.prune(scheduler: scheduler, inCall: false, now: now)
+            XCTAssertNil(queue.shown)
+        }
+        // The tick shows it again.
+        XCTAssertEqual(scheduler.tick(now: at(12, 57)), [.hardStopResumed(id: stop.id)])
+    }
+
     func testStopThatEndedWhileTheAppWasOffEndsWithoutAChime() {
         let stop = lunch()
         var running = makeScheduler([stop])
@@ -595,6 +637,75 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertEqual(menuBar?.statusLine, "Lunch starts when your call ends")
     }
 
+    func testMenuBarIgnoresTheWaitOfADisabledStop() {
+        let first = HardStop(name: "Lunch", hour: 12, minute: 30, repeats: .weekdays([2]), warningMinutes: [],
+                             escapeHatch: .none, duringCalls: .waitForCallToEnd)
+        let second = HardStop(name: "Stretch", hour: 12, minute: 40, repeats: .weekdays([2]), warningMinutes: [],
+                              escapeHatch: .none, duringCalls: .waitForCallToEnd)
+        var scheduler = makeScheduler([first, second])
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        _ = scheduler.tick(now: at(12, 40), inputs: .init(signals: [.meeting]))
+
+        // Disabled with no tick since: its wait is still saved, but the menu bar names the other stop.
+        scheduler.settings.hardStops[0].isEnabled = false
+        scheduler.normalizeSettings()
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall.count, 2)
+        XCTAssertEqual(present(scheduler, at: at(12, 41), inCall: true).menuBar?.statusLine, "Stretch starts when your call ends")
+
+        scheduler.settings.hardStops[1].isEnabled = false
+        scheduler.normalizeSettings()
+        XCTAssertNil(present(scheduler, at: at(12, 41), inCall: true).menuBar)
+    }
+
+    func testRelaunchBringsBackTheNoticeOfAStopWaitingForACall() {
+        let stop = lunch()
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+        _ = scheduler.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString], key(12, 30))
+        func relaunch(_ change: (inout BreakSettings) -> Void = { _ in /* as saved */ }) -> BreakScheduler {
+            var settings = scheduler.settings
+            change(&settings)
+            var relaunched = BreakScheduler(settings: settings, snapshot: scheduler.snapshot, records: [], calendar: calendar)
+            relaunched.reconcileRestoredState(now: at(12, 35))
+            return relaunched
+        }
+
+        // Relaunched during the call: its start has passed, so no warning comes again, and the notice is rebuilt.
+        var relaunched = relaunch()
+        var queue = HardStopNoticeQueue()
+        queue.addWaitingStops(of: relaunched)
+        let events = relaunched.tick(now: at(12, 35), inputs: .init(signals: [.meeting]))
+        XCTAssertFalse(events.contains { if case .hardStopWarning = $0 { true } else { false } })
+        queue.prune(scheduler: relaunched, inCall: true, now: at(12, 35))
+        let subject = HardStopPresentation.NoticeSubject.warning(id: stop.id, occurrenceKey: key(12, 30))
+        XCTAssertEqual(queue.subjects, [subject])
+        let notice = present(relaunched, at: at(12, 35), notice: subject, inCall: true).notice
+        XCTAssertEqual(notice?.title, "Lunch — hard stop at 12:30")
+        XCTAssertEqual(notice?.detail, "Starts when your call ends")
+        XCTAssertEqual(notice?.canStartNow, true)
+        // Start now starts that occurrence, and the notice closes.
+        XCTAssertTrue(relaunched.startHardStopEarly(id: stop.id, occurrenceKey: key(12, 30), now: at(12, 36))
+            .contains(.hardStopStarted(id: stop.id, endsAt: at(13, 0))))
+        queue.prune(scheduler: relaunched, inCall: true, now: at(12, 36))
+        XCTAssertNil(queue.shown)
+
+        // Relaunched after the call ended: the first tick starts the stop, and the notice goes.
+        var ended = relaunch()
+        var endedQueue = HardStopNoticeQueue()
+        endedQueue.addWaitingStops(of: ended)
+        XCTAssertTrue(ended.tick(now: at(12, 35)).contains(.hardStopStarted(id: stop.id, endsAt: at(13, 0))))
+        endedQueue.prune(scheduler: ended, inCall: false, now: at(12, 35))
+        XCTAssertNil(endedQueue.shown)
+
+        // A disabled stop's wait gets no notice.
+        let disabled = relaunch { $0.hardStops[0].isEnabled = false }
+        var disabledQueue = HardStopNoticeQueue()
+        disabledQueue.addWaitingStops(of: disabled)
+        disabledQueue.prune(scheduler: disabled, inCall: true, now: at(12, 35))
+        XCTAssertNil(disabledQueue.shown)
+    }
+
     // MARK: - Confirmation
 
     private let lunchContext = HardStopPresentation.StopContext(id: UUID(), occurrenceKey: 1, endsAt: nil)
@@ -631,6 +742,50 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertEqual(confirmation.holdProgress(of: target(.extend(minutes: 15)), now: start.addingTimeInterval(3)), 0)
         // A click is a cancelled hold too: it does not arm the keyboard confirmation.
         XCTAssertNil(confirmation.confirm(at: start.addingTimeInterval(3)))
+    }
+
+    func testInterruptedHoldNeverConfirms() {
+        let start = at(12, 0)
+        var confirmation = HardStopConfirmation()
+        confirmation.pressBegan(target(.dismiss), at: start)
+        confirmation.pressCancelled()
+        XCTAssertEqual(confirmation.state, .idle)
+        // Neither the deadline nor a later release runs it, even past 3 seconds.
+        XCTAssertNil(confirmation.update(now: start.addingTimeInterval(3)))
+        XCTAssertNil(confirmation.pressEnded(at: start.addingTimeInterval(10)))
+        XCTAssertEqual(confirmation.holdProgress(of: target(.dismiss), now: start.addingTimeInterval(2)), 0)
+
+        // The next press starts a fresh hold.
+        let again = start.addingTimeInterval(4)
+        confirmation.pressBegan(target(.extend(minutes: 15)), at: again)
+        XCTAssertEqual(confirmation.holdProgress(of: target(.extend(minutes: 15)), now: again.addingTimeInterval(1.5)), 0.5)
+        XCTAssertNil(confirmation.update(now: again.addingTimeInterval(2.9)))
+        XCTAssertEqual(confirmation.update(now: again.addingTimeInterval(3)), target(.extend(minutes: 15)))
+
+        // A pending Confirm is not a press, so it stays.
+        confirmation.activate(target(.dismiss), at: start)
+        confirmation.pressCancelled()
+        XCTAssertEqual(confirmation.confirm(at: start.addingTimeInterval(1)), target(.dismiss))
+    }
+
+    func testHoldPressReportsAnInterruptedDragAsCancelled() {
+        var press = HoldPress()
+        XCTAssertEqual(press.changed(inside: true), .began)
+        XCTAssertNil(press.changed(inside: true))
+        // Interrupted: cancelled, never a release, and the press is reset.
+        XCTAssertEqual(press.cancelled(), .cancelled)
+        XCTAssertEqual(press, HoldPress())
+        XCTAssertNil(press.ended())
+        // The next drag is a new press.
+        XCTAssertEqual(press.changed(inside: true), .began)
+        // Leaving the button ends it once; coming back does not start another.
+        XCTAssertEqual(press.changed(inside: false), .ended)
+        XCTAssertNil(press.changed(inside: true))
+        XCTAssertNil(press.ended())
+        // A release ends it once; the gesture reset after it reports nothing.
+        XCTAssertEqual(press.changed(inside: true), .began)
+        XCTAssertEqual(press.ended(), .ended)
+        XCTAssertNil(press.cancelled())
     }
 
     func testKeyboardConfirmsInTwoStepsWithinFiveSeconds() {

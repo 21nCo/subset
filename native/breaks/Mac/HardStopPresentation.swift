@@ -34,12 +34,17 @@ struct HardStopPresentation: Equatable {
     }
 
     struct Notice: Equatable {
-        var title: String
+        var name: String
+        /// "Hard stop at <time>, in <countdown>", shown on its own line so a long name never hides it.
+        var timing: String
         var spokenTitle: String
         /// "Starts when your call ends" while the stop waits for a call.
         var detail: String?
         /// Whether **Start now** is offered. The notice can always be closed; it never offers Snooze or Skip.
         var canStartNow: Bool
+
+        /// "<name> — hard stop at <time>, in <countdown>".
+        var title: String { "\(name) — \(timing.lowercasedFirst)" }
     }
 
     struct Overlay: Equatable {
@@ -117,12 +122,7 @@ struct HardStopPresentation: Equatable {
                     statusLine: "\(active.name), \(until.lowercasedFirst)"
                 )
             }
-        } else if let waiting = snapshot.hardStopsWaitingForCall.compactMap({ id, key in
-            scheduler.settings.hardStops.first { $0.id.uuidString == id }.flatMap { stop in
-                stop.occurrence(forKey: key, calendar: calendar).map { (stop: stop, start: $0.start) }
-            }
-        }).min(by: { $0.start < $1.start })?.stop {
-            // The stop the user is held for: the waiting occurrence that started first.
+        } else if let waiting = Self.earliestWaitingStop(scheduler) {
             menuBar = MenuBar(text: "Hard stop · after call", symbol: "phone.fill", statusLine: "\(waiting.name) starts when your call ends")
         }
 
@@ -145,8 +145,9 @@ struct HardStopPresentation: Equatable {
                 canStartNow: scheduler.canStartHardStopEarly(id: id, occurrenceKey: key, now: now)
             )
         case .extensionEnding:
-            // Once the stop's end has passed, the next tick ends it, so the notice no longer applies.
-            guard let active, let until = active.extendedUntil,
+            // Once the extension or the stop's end has passed, the next tick shows or ends the stop, so the notice
+            // no longer applies.
+            guard let active, let until = active.extendedUntil, now < until,
                   active.endsAt.map({ until < $0 && now < $0 }) ?? true else { break }
             notice = Self.notice(
                 name: active.name, at: time(until), startsIn: until.timeIntervalSince(now),
@@ -155,6 +156,18 @@ struct HardStopPresentation: Equatable {
         case nil:
             break
         }
+    }
+
+    /// The stop the user is held for while no stop runs: of the enabled stops waiting for a call, the one whose waiting
+    /// occurrence started first. A disabled stop's wait is dropped by the next tick and is not shown meanwhile.
+    private static func earliestWaitingStop(_ scheduler: BreakScheduler) -> HardStop? {
+        var earliest: (stop: HardStop, start: Date)?
+        for stop in scheduler.settings.hardStops where stop.isEnabled {
+            guard let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString],
+                  let start = stop.occurrence(forKey: key, calendar: scheduler.calendar)?.start else { continue }
+            if earliest.map({ start < $0.start }) ?? true { earliest = (stop, start) }
+        }
+        return earliest?.stop
     }
 
     /// When the notice before the running stop's extension runs out is due at `now`, the time the extension ends;
@@ -214,7 +227,8 @@ struct HardStopPresentation: Equatable {
     private static func notice(name: String, at time: String, startsIn: TimeInterval, detail: String?, canStartNow: Bool) -> Notice {
         let ahead = startsIn > 0
         return Notice(
-            title: ahead ? "\(name) — hard stop at \(time), in \(startsIn.clockDuration)" : "\(name) — hard stop at \(time)",
+            name: name,
+            timing: ahead ? "Hard stop at \(time), in \(startsIn.clockDuration)" : "Hard stop at \(time)",
             spokenTitle: ahead ? "\(name), hard stop at \(time), in \(startsIn.spokenDuration)" : "\(name), hard stop at \(time)",
             detail: detail,
             canStartNow: canStartNow
@@ -262,6 +276,13 @@ struct HardStopConfirmation: Equatable {
         guard case .holding(let target, let since) = state else { return nil }
         state = .idle
         return now.timeIntervalSince(since) >= Self.holdDuration ? target : nil
+    }
+
+    /// The system cancelled the press (an interrupted drag) or the Mac went to sleep during it. Drops the hold without
+    /// running it, however long it lasted, so only a continuous hold that ends by itself or by a release confirms. A
+    /// pending **Confirm** is not a press and stays.
+    mutating func pressCancelled() {
+        if case .holding = state { state = .idle }
     }
 
     /// Returns the target whose hold has lasted long enough while still held, once. Also closes an expired confirm window.
@@ -317,6 +338,46 @@ struct HardStopConfirmation: Equatable {
     }
 }
 
+/// The pointer side of a hold button: turns drag updates into a press that begins, ends or is cancelled. Leaving the
+/// button ends the press, and returning to it does not start another. The drag ending or being cancelled resets it,
+/// so the next drag is a new press.
+struct HoldPress: Equatable {
+    enum Change: Equatable {
+        case began
+        /// Released or left the button: the hold confirms if it lasted long enough.
+        case ended
+        /// Interrupted: the hold never confirms.
+        case cancelled
+    }
+
+    private(set) var isTracking = false
+    private(set) var isPressed = false
+
+    /// The drag moved, with the pointer over the button (`inside`) or not.
+    mutating func changed(inside: Bool) -> Change? {
+        if !isTracking {
+            isTracking = true
+            isPressed = true
+            return .began
+        }
+        guard isPressed, !inside else { return nil }
+        isPressed = false
+        return .ended
+    }
+
+    /// The pointer was released.
+    mutating func ended() -> Change? {
+        defer { self = HoldPress() }
+        return isPressed ? .ended : nil
+    }
+
+    /// The drag was cancelled without a release.
+    mutating func cancelled() -> Change? {
+        defer { self = HoldPress() }
+        return isPressed ? .cancelled : nil
+    }
+}
+
 /// The hard-stop notices waiting for the panel, which shows one at a time: the notice before an extension runs out
 /// first, then warnings by start time. A notice that is closed, or no longer applies, gives way to the next one, so a
 /// warning that arrives while another notice is open, or while a stop covers the screen, is shown later instead of
@@ -334,6 +395,17 @@ struct HardStopNoticeQueue: Equatable {
         subjects.removeAll { $0 == subject }
         subjects.append(subject)
         subjects.sort { Self.order($0) < Self.order($1) }
+    }
+
+    /// After a relaunch, queues the notice of each stop that waits for a call. Its start has passed, so no warning
+    /// comes for it again, and without the notice it could not be started now. One closed before quitting comes back
+    /// once, like a warning; one that no longer applies is pruned.
+    mutating func addWaitingStops(of scheduler: BreakScheduler) {
+        for stop in scheduler.settings.hardStops {
+            if let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString] {
+                add(.warning(id: stop.id, occurrenceKey: key))
+            }
+        }
     }
 
     /// The shown notice was closed.

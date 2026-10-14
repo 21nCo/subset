@@ -172,7 +172,8 @@ struct BreakScheduler: Sendable {
     }
 
     private func extensionEndAllowed(now: Date) -> Bool {
-        guard let active = snapshot.activeHardStop, active.extendedUntil != nil else { return false }
+        // An extension that has run out is over: the next tick shows the stop again or ends it.
+        guard let active = snapshot.activeHardStop, let until = active.extendedUntil, now < until else { return false }
         return active.endsAt.map { now < $0 } ?? true
     }
 
