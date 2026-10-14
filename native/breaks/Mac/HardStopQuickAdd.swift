@@ -24,6 +24,13 @@ struct HardStopQuickAdd: Equatable {
         let clock = calendar.dateComponents([.hour, .minute], from: start)
         hour = clock.hour ?? 0
         minute = clock.minute ?? 0
+        // When clocks go back, a stop's time in the repeated hour means its first pass, which may already be over.
+        // Move on to the first 5-minute time today whose start is still at least 30 minutes away.
+        guard calendar.isDate(start, inSameDayAs: now) else { return }
+        while hour * 60 + minute < 24 * 60 - 5,
+              let today = stop(onDayOf: now, calendar: calendar).start(onDayOf: now, calendar: calendar), today < later {
+            (hour, minute) = ((hour * 60 + minute + 5) / 60, (minute + 5) % 60)
+        }
     }
 
     /// True when the chosen time is earlier than `now` today, so the stop is for tomorrow. A time in the current

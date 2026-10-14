@@ -146,6 +146,22 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertTrue(repeated.startsTomorrow(now: fall, calendar: newYork))
         var settings = BreakSettings()
         XCTAssertEqual(settings.saveHardStop(repeated.stop(now: fall, calendar: newYork), isNew: true, now: fall, calendar: newYork), [])
+
+        // Half an hour from the first 1:40 (EDT) or the second 1:05 (EST) is in the second pass of the repeated hour,
+        // which a stop's 1:xx cannot mean. The default moves on to 2:00 EST today rather than an hour already gone.
+        for now in try [instant("2026-11-01T05:40:00Z"), instant("2026-11-01T06:05:00Z")] {
+            let values = HardStopQuickAdd(now: now, calendar: newYork)
+            XCTAssertEqual([values.hour, values.minute], [2, 0])
+            XCTAssertFalse(values.startsTomorrow(now: now, calendar: newYork))
+            var settings = BreakSettings()
+            let quick = values.stop(now: now, calendar: newYork)
+            XCTAssertEqual(settings.saveHardStop(quick, isNew: true, now: now, calendar: newYork), [])
+            let saved = try XCTUnwrap(settings.hardStops.first { $0.id == quick.id })
+            let start = try XCTUnwrap(saved.start(onDayOf: now, calendar: newYork))
+            XCTAssertEqual(start, try instant("2026-11-01T07:00:00Z"))
+            XCTAssertGreaterThanOrEqual(start, now.addingTimeInterval(30 * 60))
+            XCTAssertEqual(newYork.dateComponents([.year, .month, .day], from: start), DateComponents(year: 2026, month: 11, day: 1))
+        }
     }
 
     // MARK: - Quick add: the stop
