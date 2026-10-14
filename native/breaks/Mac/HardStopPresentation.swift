@@ -12,6 +12,14 @@ struct HardStopPresentation: Equatable {
         case extensionEnding
     }
 
+    /// The running stop an overlay action applies to: its occurrence and its end. A confirmation is for this stop
+    /// only, so it lapses when another stop takes the screen or a merged stop moves the end.
+    struct StopContext: Hashable {
+        var id: UUID
+        var occurrenceKey: Int
+        var endsAt: Date?
+    }
+
     enum OverlayAction: Hashable {
         case extend(minutes: Int)
         case dismiss
@@ -34,6 +42,7 @@ struct HardStopPresentation: Equatable {
     }
 
     struct Overlay: Equatable {
+        var context: StopContext
         var name: String
         /// "Until <time>" or "Until you dismiss it".
         var until: String
@@ -65,7 +74,9 @@ struct HardStopPresentation: Equatable {
         func time(_ date: Date) -> String { date.formatted(style) }
 
         let snapshot = scheduler.snapshot
-        if let active = snapshot.activeHardStop {
+        // As the operations see it: a stop that started inside the running one is merged, even before a tick.
+        let active = scheduler.activeHardStop(now: now)
+        if let active {
             if let until = active.extendedUntil {
                 // Hidden by an extension: the countdown runs to when the stop returns, or ends if that comes first.
                 let back = min(until, active.endsAt ?? until)
@@ -92,6 +103,7 @@ struct HardStopPresentation: Equatable {
                     }
                 }
                 overlay = Overlay(
+                    context: StopContext(id: active.id, occurrenceKey: active.occurrenceKey, endsAt: active.endsAt),
                     name: active.name,
                     until: until,
                     remaining: active.endsAt.map { max(0, $0.timeIntervalSince(now)) },
@@ -112,7 +124,9 @@ struct HardStopPresentation: Equatable {
 
         switch noticeSubject {
         case .warning(let id, let startsAt):
-            guard snapshot.activeHardStop == nil,
+            // While a stop runs, a warning applies only to a stop that starts once it has ended; one that starts
+            // inside it joins it instead.
+            guard active.map({ startsAt >= $0.endsAt ?? .distantFuture }) ?? true,
                   let stop = scheduler.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
                   let occurrence = stop.occurrences(around: startsAt, calendar: calendar).first(where: { $0.start == startsAt }),
                   !(snapshot.handledHardStops[id.uuidString].map { occurrence.key <= $0 } ?? false) else { break }
@@ -126,7 +140,7 @@ struct HardStopPresentation: Equatable {
                 canStartNow: scheduler.canStartHardStopEarly(id: id, now: now)
             )
         case .extensionEnding:
-            guard let active = snapshot.activeHardStop, let until = active.extendedUntil,
+            guard let active, let until = active.extendedUntil,
                   active.endsAt.map({ until < $0 }) ?? true else { break }
             notice = Self.notice(
                 name: active.name, at: time(until), startsIn: until.timeIntervalSince(now),
@@ -139,11 +153,24 @@ struct HardStopPresentation: Equatable {
 
     /// When the notice before the running stop's extension runs out is due at `now`, the time the extension ends;
     /// otherwise nil. An extension that outlasts the stop's end gets none, since the stop ends instead of coming back.
-    static func extensionWarningDue(_ snapshot: EngineSnapshot, now: Date) -> Date? {
-        guard let active = snapshot.activeHardStop, let until = active.extendedUntil,
+    static func extensionWarningDue(_ scheduler: BreakScheduler, now: Date) -> Date? {
+        guard let active = scheduler.activeHardStop(now: now), let until = active.extendedUntil,
               active.endsAt.map({ until < $0 }) ?? true,
               now < until, until.timeIntervalSince(now) <= extensionWarningLead else { return nil }
         return until
+    }
+
+    /// Runs a confirmed Extend or Dismiss, only while the overlay at `now` still shows that action for that stop, so a
+    /// confirmation never applies to another stop or another extension length. Returns the scheduler's events.
+    static func perform(
+        _ target: HardStopConfirmation.Target, on scheduler: inout BreakScheduler, now: Date
+    ) -> [BreakScheduler.Event] {
+        guard let overlay = HardStopPresentation(scheduler: scheduler, noticeSubject: nil, inCall: false, now: now).overlay,
+              overlay.context == target.context, overlay.actions.contains(target.action) else { return [] }
+        return switch target.action {
+        case .extend: scheduler.extendHardStop(now: now)
+        case .dismiss: scheduler.dismissHardStop(now: now)
+        }
     }
 
     private static func notice(name: String, at time: String, startsIn: TimeInterval, detail: String?, canStartNow: Bool) -> Notice {
@@ -159,40 +186,52 @@ struct HardStopPresentation: Equatable {
 
 /// Confirms an Extend or Dismiss before it runs. With the pointer, the button is held for `holdDuration`; with the
 /// keyboard or VoiceOver, the button is activated and then **Confirm** within `confirmWindow`. A pure value, driven
-/// by the overlay with the current time.
+/// by the overlay with the current time. Each confirmation is for one action on one stop, and lapses when the
+/// overlay stops offering it.
 struct HardStopConfirmation: Equatable {
-    typealias Action = HardStopPresentation.OverlayAction
+    struct Target: Hashable {
+        var context: HardStopPresentation.StopContext
+        var action: HardStopPresentation.OverlayAction
+    }
 
     static let holdDuration: TimeInterval = 3
     static let confirmWindow: TimeInterval = 5
 
     enum State: Equatable {
         case idle
-        case holding(Action, since: Date)
-        case awaitingConfirm(Action, until: Date)
+        case holding(Target, since: Date)
+        case awaitingConfirm(Target, until: Date)
     }
 
     private(set) var state: State = .idle
 
-    /// The pointer went down on the button for `action`.
-    mutating func pressBegan(_ action: Action, at now: Date) {
-        state = .holding(action, since: now)
-    }
-
-    /// The pointer was released or left the button. Returns the action when the hold lasted long enough and
-    /// `update(now:)` has not already returned it.
-    mutating func pressEnded(at now: Date) -> Action? {
-        guard case .holding(let action, let since) = state else { return nil }
-        state = .idle
-        return now.timeIntervalSince(since) >= Self.holdDuration ? action : nil
-    }
-
-    /// Returns the action whose hold has lasted long enough while still held, once. Also closes an expired confirm window.
-    mutating func update(now: Date) -> Action? {
+    /// The action being held or awaiting **Confirm**.
+    var pending: Target? {
         switch state {
-        case .holding(let action, let since) where now.timeIntervalSince(since) >= Self.holdDuration:
+        case .idle: nil
+        case .holding(let target, _), .awaitingConfirm(let target, _): target
+        }
+    }
+
+    /// The pointer went down on the button for `target`.
+    mutating func pressBegan(_ target: Target, at now: Date) {
+        state = .holding(target, since: now)
+    }
+
+    /// The pointer was released or left the button. Returns the target when the hold lasted long enough and
+    /// `update(now:)` has not already returned it.
+    mutating func pressEnded(at now: Date) -> Target? {
+        guard case .holding(let target, let since) = state else { return nil }
+        state = .idle
+        return now.timeIntervalSince(since) >= Self.holdDuration ? target : nil
+    }
+
+    /// Returns the target whose hold has lasted long enough while still held, once. Also closes an expired confirm window.
+    mutating func update(now: Date) -> Target? {
+        switch state {
+        case .holding(let target, let since) where now.timeIntervalSince(since) >= Self.holdDuration:
             state = .idle
-            return action
+            return target
         case .awaitingConfirm(_, let until) where now >= until:
             state = .idle
         default:
@@ -201,25 +240,35 @@ struct HardStopConfirmation: Equatable {
         return nil
     }
 
-    /// The keyboard or VoiceOver activated the button for `action`: the first of two steps.
-    mutating func activate(_ action: Action, at now: Date) {
-        state = .awaitingConfirm(action, until: now.addingTimeInterval(Self.confirmWindow))
+    /// The keyboard or VoiceOver activated the button for `target`: the first of two steps.
+    mutating func activate(_ target: Target, at now: Date) {
+        state = .awaitingConfirm(target, until: now.addingTimeInterval(Self.confirmWindow))
     }
 
-    /// **Confirm** was activated. Returns the action when it came within the confirm window.
-    mutating func confirm(at now: Date) -> Action? {
-        guard case .awaitingConfirm(let action, let until) = state else { return nil }
+    /// **Confirm** was activated. Returns the target when it came within the confirm window.
+    mutating func confirm(at now: Date) -> Target? {
+        guard case .awaitingConfirm(let target, let until) = state else { return nil }
         state = .idle
-        return now < until ? action : nil
+        return now < until ? target : nil
+    }
+
+    /// Drops a hold or a pending **Confirm** that the overlay no longer offers: another stop took the screen, the end
+    /// moved, or the action changed or went away. Returns true when it dropped one.
+    @discardableResult
+    mutating func keep(only overlay: HardStopPresentation.Overlay?) -> Bool {
+        guard let pending else { return false }
+        if let overlay, overlay.context == pending.context, overlay.actions.contains(pending.action) { return false }
+        state = .idle
+        return true
     }
 
     mutating func cancel() {
         state = .idle
     }
 
-    /// From 0 to 1 while `action` is held, otherwise 0.
-    func holdProgress(of action: Action, now: Date) -> Double {
-        guard case .holding(action, let since) = state else { return 0 }
+    /// From 0 to 1 while `target` is held, otherwise 0.
+    func holdProgress(of target: Target, now: Date) -> Double {
+        guard case .holding(target, let since) = state else { return 0 }
         return min(1, max(0, now.timeIntervalSince(since) / Self.holdDuration))
     }
 
@@ -227,6 +276,46 @@ struct HardStopConfirmation: Equatable {
     func confirmSecondsLeft(now: Date) -> Int? {
         guard case .awaitingConfirm(_, let until) = state, now < until else { return nil }
         return Int(until.timeIntervalSince(now).rounded(.up))
+    }
+}
+
+/// The hard-stop notices waiting for the panel, which shows one at a time: the notice before an extension runs out
+/// first, then warnings by start time. A notice that is closed, or no longer applies, gives way to the next one, so a
+/// warning that arrives while another notice is open, or while a stop covers the screen, is shown later instead of
+/// being lost.
+struct HardStopNoticeQueue: Equatable {
+    typealias Subject = HardStopPresentation.NoticeSubject
+
+    private(set) var subjects: [Subject] = []
+
+    /// The notice the panel shows.
+    var shown: Subject? { subjects.first }
+
+    /// Adds a notice. A later warning time for the same occurrence shows it again.
+    mutating func add(_ subject: Subject) {
+        subjects.removeAll { $0 == subject }
+        subjects.append(subject)
+        subjects.sort { Self.order($0) < Self.order($1) }
+    }
+
+    /// The shown notice was closed.
+    mutating func closeShown() {
+        if !subjects.isEmpty { subjects.removeFirst() }
+    }
+
+    /// Drops every notice that no longer applies: its stop started, was missed, removed or disabled, or will join
+    /// the running stop; or the extension it warns about ended.
+    mutating func prune(scheduler: BreakScheduler, inCall: Bool, now: Date) {
+        subjects.removeAll {
+            HardStopPresentation(scheduler: scheduler, noticeSubject: $0, inCall: inCall, now: now).notice == nil
+        }
+    }
+
+    private static func order(_ subject: Subject) -> Date {
+        switch subject {
+        case .extensionEnding: .distantPast
+        case .warning(_, let startsAt): startsAt
+        }
     }
 }
 

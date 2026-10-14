@@ -84,7 +84,8 @@ final class HeadsUpPanelController {
 
     private unowned let controller: MacBreakController
     private var panel: NSPanel?
-    private var kind: Kind?
+    /// What the shown panel holds; nil once it is hidden.
+    private(set) var kind: Kind?
 
     init(controller: MacBreakController) {
         self.controller = controller
@@ -99,7 +100,7 @@ final class HeadsUpPanelController {
         let wasShown = panel != nil
         panel?.orderOut(nil)
         let panel = FloatingPanel(size: kind.size, allowsKey: true)
-        let hosting = FirstMouseHostingView(rootView: NoticeView().environmentObject(controller))
+        let hosting = FirstMouseHostingView(rootView: NoticeView(kind: kind).environmentObject(controller))
         hosting.frame = NSRect(origin: .zero, size: panel.frame.size)
         hosting.autoresizingMask = [.width, .height]
         panel.contentView = hosting
@@ -119,15 +120,29 @@ final class HeadsUpPanelController {
     }
 }
 
-/// A hard-stop notice when one is open, otherwise the regular heads-up.
+/// The regular heads-up, or the open hard-stop notice. Once the hard-stop notice closes, the panel keeps its last
+/// content, inactive, while it fades out.
 private struct NoticeView: View {
     @EnvironmentObject private var controller: MacBreakController
+    let kind: HeadsUpPanelController.Kind
+    @State private var lastHardStopNotice: HardStopPresentation.Notice?
 
     var body: some View {
-        if let notice = controller.hardStop.notice {
-            HardStopNoticeView(notice: notice)
-        } else {
+        switch kind {
+        case .regular:
             HeadsUpNoticeView()
+        case .hardStop:
+            let current = controller.hardStop.notice
+            Group {
+                if let notice = current ?? lastHardStopNotice {
+                    HardStopNoticeView(notice: notice)
+                }
+            }
+            .disabled(current == nil)
+            .onAppear { lastHardStopNotice = current }
+            .onChange(of: current) { _, notice in
+                if let notice { lastHardStopNotice = notice }
+            }
         }
     }
 }

@@ -13,8 +13,9 @@ final class MacBreakController: ObservableObject {
     @Published private(set) var activeMessage: String
     @Published private(set) var launchAtLoginStatus: SMAppService.Status = SMAppService.mainApp.status
     @Published private(set) var launchAtLoginError: String?
-    /// Why the hard-stop notice is open; nil when it is closed or the notice shows the regular heads-up.
-    @Published private(set) var hardStopNoticeSubject: HardStopPresentation.NoticeSubject?
+    /// The hard-stop notices waiting for the panel; the first is shown. Empty when the panel is closed or shows the
+    /// regular heads-up.
+    @Published private(set) var hardStopNotices = HardStopNoticeQueue()
     /// True while the meeting signal (microphone or camera in use) is on, read even when it does not pause reminders.
     @Published private(set) var inCall = false
 
@@ -75,6 +76,9 @@ final class MacBreakController: ObservableObject {
     var nextPlannedBreak: (PlannedBreak, Date)? { core.nextPlannedBreak(after: now) }
     var isWithinOfficeHours: Bool { settings.officeHours.contains(now) }
 
+    /// Why the hard-stop notice is open.
+    var hardStopNoticeSubject: HardStopPresentation.NoticeSubject? { hardStopNotices.shown }
+
     var hardStop: HardStopPresentation {
         HardStopPresentation(scheduler: core, noticeSubject: hardStopNoticeSubject, inCall: inCall, now: now)
     }
@@ -128,7 +132,7 @@ final class MacBreakController: ObservableObject {
         now = .now
         core.reconcileRestoredState(now: now)
         save()
-        // A restored hard stop is shown by the first tick, after the scheduler has ended, resumed, or kept it.
+        // A restored hard stop is shown by the tick below, after the scheduler has ended, resumed, or kept it.
         if phase == .breaking, snapshot.activeKind != .hardStop { overlay.show() }
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -151,6 +155,8 @@ final class MacBreakController: ObservableObject {
             Task { @MainActor [weak self] in self?.overlay.screensChanged() }
         })
         refreshLaunchAtLogin()
+        // Tick once now, so a restored hard stop covers the screens without waiting for the timer.
+        tick()
     }
 
     func stop() {
@@ -175,8 +181,10 @@ final class MacBreakController: ObservableObject {
     func resume() { perform { $0.resume(now: $1) } }
     func dismissHeadsUp() { notice.hide() }
 
-    func extendHardStop() { perform { $0.extendHardStop(now: $1) } }
-    func dismissHardStop() { perform { $0.dismissHardStop(now: $1) } }
+    /// Runs a confirmed Extend or Dismiss, if the overlay still offers it for the same stop.
+    func performHardStopAction(_ target: HardStopConfirmation.Target) {
+        perform { HardStopPresentation.perform(target, on: &$0, now: $1) }
+    }
 
     /// **Start now** on the hard-stop notice: starts the warned stop, or ends the extension that is running out.
     func startHardStopNow() {
@@ -187,10 +195,11 @@ final class MacBreakController: ObservableObject {
         }
     }
 
+    /// Closes the shown hard-stop notice; the next one waiting, if any, takes its place.
     func closeHardStopNotice() {
         guard hardStopNoticeSubject != nil else { return }
-        hardStopNoticeSubject = nil
-        notice.hide()
+        hardStopNotices.closeShown()
+        syncHardStopNotice(bringToFront: true)
     }
 
     func resetToday() {
@@ -279,6 +288,7 @@ final class MacBreakController: ObservableObject {
         for event in events {
             switch event {
             case .headsUp:
+                // Held back while a hard-stop notice is open; it comes back when that notice closes.
                 if settings.reminder.headsUpEnabled, hardStopNoticeSubject == nil { notice.show(kind: .regular) }
             case .headsUpCancelled:
                 hideRegularHeadsUp()
@@ -303,20 +313,17 @@ final class MacBreakController: ObservableObject {
             case .hardStopWarning(let id, let startsAt, _):
                 showHardStopWarning(id: id, startsAt: startsAt)
             case .hardStopStarted:
-                hardStopNoticeSubject = nil
-                notice.hide()
+                // Its warning is pruned below; one for a later stop stays.
                 overlay.show()
                 playSound(completion: false)
             case .hardStopExtended:
                 overlay.hide()
                 warnedExtensionUntil = nil
             case .hardStopResumed:
-                if hardStopNoticeSubject == .extensionEnding { closeHardStopNotice() }
                 overlay.show()
             case .hardStopEnded(_, let reason):
                 // A missed stop never showed; another stop or a break may be on screen.
                 guard reason != .missed, !startsHardStop else { break }
-                if hardStopNoticeSubject == .extensionEnding { closeHardStopNotice() }
                 overlay.hide()
                 if reason == .ended { playSound(completion: true) }
             }
@@ -324,38 +331,43 @@ final class MacBreakController: ObservableObject {
         reconcileHardStop()
     }
 
-    /// Keeps the screen in line with the running hard stop: the overlay comes back after a relaunch or wake, the
-    /// notice closes once its stop started, was missed, or was removed, and the notice before an extension runs
-    /// out appears once.
+    /// Keeps the screen in line with the running hard stop: the overlay comes back after a relaunch or wake, notices
+    /// close once they no longer apply (their stop started, was missed, or was removed, or the extension ended), and
+    /// the notice before an extension runs out appears once.
     private func reconcileHardStop() {
-        let presentation = hardStop
-        if presentation.overlay != nil, !overlay.isVisible { overlay.show() }
-        if hardStopNoticeSubject != nil, presentation.notice == nil { closeHardStopNotice() }
-        if let until = HardStopPresentation.extensionWarningDue(core.snapshot, now: now), warnedExtensionUntil != until {
+        if hardStop.overlay != nil, !overlay.isVisible { overlay.show() }
+        if let until = HardStopPresentation.extensionWarningDue(core, now: now), warnedExtensionUntil != until {
             warnedExtensionUntil = until
-            hardStopNoticeSubject = .extensionEnding
-            notice.show(kind: .hardStop)
-        }
-    }
-
-    /// Shows a hard-stop warning. Hard-stop warnings ignore the heads-up switch, since each stop sets its own; the
-    /// notice keeps the warning for the stop that starts first.
-    private func showHardStopWarning(id: UUID, startsAt: Date) {
-        if case .warning(let shownID, let shownStart) = hardStopNoticeSubject, shownID != id, shownStart < startsAt,
-           hardStop.notice != nil {
-            return
-        }
-        hardStopNoticeSubject = .warning(id: id, startsAt: startsAt)
-        if hardStop.notice == nil {
-            closeHardStopNotice()
+            hardStopNotices.add(.extensionEnding)
+            syncHardStopNotice(bringToFront: true)
         } else {
-            notice.show(kind: .hardStop)
+            syncHardStopNotice()
         }
     }
 
-    /// Hides the notice unless it shows a hard-stop warning, which regular break events do not withdraw.
+    /// Queues a hard-stop warning. Hard-stop warnings ignore the heads-up switch, since each stop sets its own. The
+    /// panel shows the notice before an extension runs out first, then the warning for the stop that starts first;
+    /// the others wait.
+    private func showHardStopWarning(id: UUID, startsAt: Date) {
+        hardStopNotices.add(.warning(id: id, startsAt: startsAt))
+        syncHardStopNotice(bringToFront: true)
+    }
+
+    /// Shows the first hard-stop notice that still applies, or, once none is left, closes the panel and brings back
+    /// a regular heads-up that it held back.
+    private func syncHardStopNotice(bringToFront: Bool = false) {
+        hardStopNotices.prune(scheduler: core, inCall: inCall, now: now)
+        if hardStopNotices.shown != nil {
+            if bringToFront || notice.kind != .hardStop { notice.show(kind: .hardStop) }
+        } else if notice.kind == .hardStop {
+            notice.hide()
+            if phase == .headsUp, settings.reminder.headsUpEnabled { notice.show(kind: .regular) }
+        }
+    }
+
+    /// Hides the notice unless it shows a hard-stop notice, which regular break events do not withdraw.
     private func hideRegularHeadsUp() {
-        if hardStopNoticeSubject == nil { notice.hide() }
+        if notice.kind != .hardStop { notice.hide() }
     }
 
     private func playSound(completion: Bool) {

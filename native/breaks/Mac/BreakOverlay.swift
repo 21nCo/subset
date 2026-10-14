@@ -237,7 +237,9 @@ private struct HardStopOverlayContent: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 if !overlay.actions.isEmpty {
-                    HardStopActions(actions: overlay.actions)
+                    // A new stop gets fresh controls, with no hold or Confirm carried over.
+                    HardStopActions(overlay: overlay)
+                        .id(overlay.context)
                         .padding(.top, 12)
                 }
             }
@@ -246,52 +248,80 @@ private struct HardStopOverlayContent: View {
 }
 
 /// Extend and Dismiss, each confirmed by a 3-second hold with the pointer, or by activating it and then
-/// **Confirm** within 5 seconds with the keyboard (Space) or VoiceOver.
+/// **Confirm** within 5 seconds with the keyboard (Space) or VoiceOver. A hold or Confirm is for the action and stop
+/// it began on: it lapses when the overlay stops offering that action for that stop, and the controller checks again
+/// before running it.
 private struct HardStopActions: View {
+    private enum Field: Hashable {
+        case action(HardStopPresentation.OverlayAction)
+        case confirm
+    }
+
     @EnvironmentObject private var controller: MacBreakController
-    let actions: [HardStopPresentation.OverlayAction]
+    let overlay: HardStopPresentation.Overlay
     @State private var confirmation = HardStopConfirmation()
     @State private var deadline: Task<Void, Never>?
-    @FocusState private var confirmFocused: Bool
+    @FocusState private var focus: Field?
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 0.05, paused: confirmation.state == .idle)) { context in
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
-                    ForEach(actions, id: \.self) { action in
+                    ForEach(overlay.actions, id: \.self) { action in
+                        let target = target(action)
                         HoldToConfirmButton(
                             title: action.title,
-                            progress: confirmation.holdProgress(of: action, now: context.date),
-                            onPressBegan: { pressBegan(action) },
+                            progress: confirmation.holdProgress(of: target, now: context.date),
+                            onPressBegan: { pressBegan(target) },
                             onPressEnded: pressEnded,
-                            onActivate: { activate(action) }
+                            onActivate: { activate(target) }
                         )
+                        .focused($focus, equals: .action(action))
                     }
                 }
-                if case .awaitingConfirm(let action, _) = confirmation.state {
-                    Button("Confirm") { confirm() }
-                        .controlSize(.large)
-                        .focused($confirmFocused)
-                        .onAppear { confirmFocused = true }
-                        .accessibilityHint("\(action.title). Available for \(confirmation.confirmSecondsLeft(now: context.date) ?? 0) seconds")
+                if case .awaitingConfirm(let target, _) = confirmation.state {
+                    ConfirmControl(
+                        hint: "\(target.action.title). Available for \(confirmation.confirmSecondsLeft(now: context.date) ?? 0) seconds",
+                        onConfirm: confirm
+                    )
+                    .focused($focus, equals: .confirm)
                 }
                 Text(hint(now: context.date))
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.6))
             }
         }
+        .onAppear { focus = overlay.actions.first.map(Field.action) }
+        .onChange(of: overlay) { _, overlay in
+            if confirmation.keep(only: overlay) { deadline?.cancel() }
+            if case .action(let action) = focus, !overlay.actions.contains(action) {
+                focus = overlay.actions.first.map(Field.action)
+            }
+        }
+        .onChange(of: confirmation.state) { _, state in
+            // Focus moves to Confirm when it appears, and back to the button once it is gone.
+            switch state {
+            case .awaitingConfirm: focus = .confirm
+            case .idle where focus == .confirm || focus == nil: focus = overlay.actions.first.map(Field.action)
+            default: break
+            }
+        }
         .onDisappear { deadline?.cancel() }
     }
 
+    private func target(_ action: HardStopPresentation.OverlayAction) -> HardStopConfirmation.Target {
+        HardStopConfirmation.Target(context: overlay.context, action: action)
+    }
+
     private func hint(now: Date) -> String {
-        if case .awaitingConfirm(let action, _) = confirmation.state, let seconds = confirmation.confirmSecondsLeft(now: now) {
-            return "Choose Confirm within \(seconds) s to \(action.title.lowercased())."
+        if case .awaitingConfirm(let target, _) = confirmation.state, let seconds = confirmation.confirmSecondsLeft(now: now) {
+            return "Choose Confirm within \(seconds) s to \(target.action.title.lowercased())."
         }
         return "Press and hold for \(Int(HardStopConfirmation.holdDuration)) seconds."
     }
 
-    private func pressBegan(_ action: HardStopPresentation.OverlayAction) {
-        confirmation.pressBegan(action, at: .now)
+    private func pressBegan(_ target: HardStopConfirmation.Target) {
+        confirmation.pressBegan(target, at: .now)
         schedule(after: HardStopConfirmation.holdDuration)
     }
 
@@ -300,8 +330,8 @@ private struct HardStopActions: View {
         run(confirmation.pressEnded(at: .now))
     }
 
-    private func activate(_ action: HardStopPresentation.OverlayAction) {
-        confirmation.activate(action, at: .now)
+    private func activate(_ target: HardStopConfirmation.Target) {
+        confirmation.activate(target, at: .now)
         schedule(after: HardStopConfirmation.confirmWindow)
     }
 
@@ -320,12 +350,38 @@ private struct HardStopActions: View {
         }
     }
 
-    private func run(_ action: HardStopPresentation.OverlayAction?) {
-        switch action {
-        case .extend: controller.extendHardStop()
-        case .dismiss: controller.dismissHardStop()
-        case nil: break
-        }
+    private func run(_ target: HardStopConfirmation.Target?) {
+        if let target { controller.performHardStopAction(target) }
+    }
+}
+
+/// The second step of the keyboard and VoiceOver confirmation. Like the hold buttons, it is not a `Button`: it takes
+/// keyboard focus whatever the system's keyboard navigation setting, runs on Space, a click, or VoiceOver, and has no
+/// Return shortcut.
+private struct ConfirmControl: View {
+    let hint: String
+    let onConfirm: () -> Void
+
+    var body: some View {
+        Text("Confirm")
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.black)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 10)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture { onConfirm() }
+            // Edit interactions keep it focusable even when keyboard navigation is off in System Settings.
+            .focusable(interactions: .edit)
+            .onKeyPress(.space) {
+                onConfirm()
+                return .handled
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Confirm")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(hint)
+            .accessibilityAction { onConfirm() }
     }
 }
 
@@ -380,7 +436,8 @@ private struct HoldToConfirmButton: View {
                         onPressEnded()
                     }
             )
-            .focusable()
+            // Edit interactions keep it focusable even when keyboard navigation is off in System Settings.
+            .focusable(interactions: .edit)
             .onKeyPress(.space) {
                 onActivate()
                 return .handled

@@ -1174,6 +1174,23 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(waiting.phase, .breaking)
     }
 
+    func testStartNowRecordsAnExpiredWaitBeforeStartingTheNextOccurrence() {
+        // Monday's occurrence waits for a call; no tick runs again until Start now on Tuesday's warning.
+        let stop = hardStop(repeats: .weekdays([2, 3]))
+        var scheduler = makeScheduler(stops: [stop])
+        _ = scheduler.tick(now: at(10, 30), inputs: .init(signals: [.meeting]))
+        XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall.count, 1)
+        XCTAssertTrue(scheduler.canStartHardStopEarly(id: stop.id, now: at(10, 25, dayOffset: 1)))
+        XCTAssertTrue(scheduler.records.isEmpty, "Asking changes nothing")
+        XCTAssertEqual(scheduler.startHardStopEarly(id: stop.id, now: at(10, 25, dayOffset: 1)), [
+            .hardStopEnded(id: stop.id, reason: .missed),
+            .hardStopStarted(id: stop.id, endsAt: at(11, 0, dayOffset: 1))
+        ])
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(10, 30)])
+        XCTAssertEqual(scheduler.records.first?.hardStopEndReason, .missed)
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.occurrenceKey, scheduler.snapshot.handledHardStops[stop.id.uuidString])
+    }
+
     func testEndHardStopExtensionShowsTheStopAgain() {
         let stop = hardStop(escapeHatch: .extend(minutes: 15, times: 2))
         var scheduler = makeScheduler(stops: [stop])

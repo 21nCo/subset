@@ -40,6 +40,17 @@ final class HardStopPresentationTests: XCTestCase {
         return BreakScheduler(settings: settings, snapshot: snapshot, records: [], calendar: calendar)
     }
 
+    private func walk(
+        hour: Int = 13,
+        minute: Int = 5,
+        end: HardStop.End = .after(30 * 60),
+        warnings: [Int] = [10],
+        escapeHatch: HardStop.EscapeHatch = .none
+    ) -> HardStop {
+        HardStop(name: "Walk", hour: hour, minute: minute, end: end, repeats: .weekdays([2]), warningMinutes: warnings,
+                 escapeHatch: escapeHatch, duringCalls: .startAnyway)
+    }
+
     private func present(
         _ scheduler: BreakScheduler,
         at now: Date,
@@ -116,6 +127,90 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(scheduler, at: at(12, 21), notice: subject).notice)
     }
 
+    func testWarningForALaterStopShowsWhileAStopRuns() {
+        // Lunch 12:30–13:00 with one 15-minute extension; Walk at 13:05 with a 35-minute warning, due as Lunch starts.
+        let lunch = lunch(escapeHatch: .extend(minutes: 15, times: 1))
+        let walk = walk(warnings: [35])
+        var scheduler = makeScheduler([lunch, walk])
+        XCTAssertEqual(scheduler.tick(now: at(12, 30)), [
+            .hardStopStarted(id: lunch.id, endsAt: at(13, 0)),
+            .hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)
+        ])
+        let subject = HardStopPresentation.NoticeSubject.warning(id: walk.id, startsAt: at(13, 5))
+
+        // Under the overlay the notice still applies, without Start now while Lunch runs.
+        let covered = present(scheduler, at: at(12, 31), notice: subject).notice
+        XCTAssertEqual(covered?.title, "Walk — hard stop at 13:05, in 34:00")
+        XCTAssertEqual(covered?.canStartNow, false)
+        // During Lunch's extension, too.
+        _ = scheduler.extendHardStop(now: at(12, 40))
+        XCTAssertEqual(present(scheduler, at: at(12, 41), notice: subject).notice?.canStartNow, false)
+        // Once Lunch has ended, Start now is offered.
+        _ = scheduler.tick(now: at(12, 55))
+        _ = scheduler.tick(now: at(13, 0))
+        XCTAssertNil(scheduler.snapshot.activeHardStop)
+        XCTAssertEqual(present(scheduler, at: at(13, 0), notice: subject).notice?.canStartNow, true)
+    }
+
+    func testWarningForAStopThatJoinsTheRunningOneDoesNotApply() {
+        let lunch = lunch()
+        let inside = walk(hour: 12, minute: 45)
+        var scheduler = makeScheduler([lunch, inside])
+        _ = scheduler.tick(now: at(12, 30))
+        XCTAssertNil(present(scheduler, at: at(12, 40), notice: .warning(id: inside.id, startsAt: at(12, 45))).notice)
+    }
+
+    // MARK: - Notice queue
+
+    func testWarningWaitsBehindTheExtensionNoticeAndShowsAfterIt() {
+        // Lunch 12:30–13:00 extended at 12:40 for 5 minutes; Walk at 13:05 warns 21 minutes ahead, at 12:44, just as
+        // the notice before the extension runs out is due.
+        let lunch = lunch(escapeHatch: .extend(minutes: 5, times: 2))
+        let walk = walk(warnings: [21])
+        var scheduler = makeScheduler([lunch, walk])
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.extendHardStop(now: at(12, 40))
+        XCTAssertEqual(scheduler.tick(now: at(12, 44)), [.hardStopWarning(id: walk.id, startsAt: at(13, 5), waitingForCall: false)])
+        XCTAssertEqual(HardStopPresentation.extensionWarningDue(scheduler, now: at(12, 44)), at(12, 45))
+
+        // The controller queues the warning from the events, then the extension notice.
+        var queue = HardStopNoticeQueue()
+        let warning = HardStopPresentation.NoticeSubject.warning(id: walk.id, startsAt: at(13, 5))
+        queue.add(warning)
+        queue.add(.extensionEnding)
+        queue.prune(scheduler: scheduler, inCall: false, now: at(12, 44))
+        XCTAssertEqual(queue.shown, .extensionEnding, "The warning does not replace the extension notice")
+        XCTAssertEqual(queue.subjects, [.extensionEnding, warning])
+
+        // The extension runs out: its notice no longer applies, and the warning takes its place.
+        XCTAssertEqual(scheduler.tick(now: at(12, 45)), [.hardStopResumed(id: lunch.id)])
+        queue.prune(scheduler: scheduler, inCall: false, now: at(12, 45))
+        XCTAssertEqual(queue.shown, warning)
+        // It stays until Walk starts.
+        _ = scheduler.tick(now: at(13, 0))
+        queue.prune(scheduler: scheduler, inCall: false, now: at(13, 0))
+        XCTAssertEqual(queue.shown, warning)
+        _ = scheduler.tick(now: at(13, 5))
+        queue.prune(scheduler: scheduler, inCall: false, now: at(13, 5))
+        XCTAssertNil(queue.shown)
+    }
+
+    func testNoticeQueueShowsTheEarliestStopAndTheNextAfterClosing() {
+        let early = UUID(), late = UUID()
+        var queue = HardStopNoticeQueue()
+        queue.add(.warning(id: late, startsAt: at(14, 0)))
+        queue.add(.warning(id: early, startsAt: at(13, 0)))
+        XCTAssertEqual(queue.shown, .warning(id: early, startsAt: at(13, 0)))
+        queue.closeShown()
+        XCTAssertEqual(queue.shown, .warning(id: late, startsAt: at(14, 0)), "Closing one shows the next instead of dropping it")
+        // A later warning time for the same stop shows it again once closed.
+        queue.closeShown()
+        XCTAssertNil(queue.shown)
+        queue.add(.warning(id: late, startsAt: at(14, 0)))
+        queue.add(.warning(id: late, startsAt: at(14, 0)))
+        XCTAssertEqual(queue.subjects, [.warning(id: late, startsAt: at(14, 0))])
+    }
+
     // MARK: - Overlay
 
     func testOverlayTextForEachEndType() {
@@ -173,6 +268,33 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertEqual(spent?.actions, [])
     }
 
+    func testOverlayFollowsAStopThatTookOverBeforeATick() {
+        // Lunch 12:30–13:00 with one 5-minute extension; Walk starts inside it at 12:45, ends 13:30 and so takes over
+        // the escape hatch with two 10-minute extensions. No tick runs between 12:30 and 12:46.
+        let lunch = lunch(escapeHatch: .extend(minutes: 5, times: 1))
+        let walk = walk(hour: 12, minute: 45, end: .at(hour: 13, minute: 30), escapeHatch: .extend(minutes: 10, times: 2))
+        var scheduler = makeScheduler([lunch, walk])
+        _ = scheduler.tick(now: at(12, 30))
+        let before = present(scheduler, at: at(12, 44)).overlay
+        XCTAssertEqual(before?.actions, [.extend(minutes: 5)])
+
+        let overlay = present(scheduler, at: at(12, 46)).overlay
+        XCTAssertEqual(overlay?.actions, [.extend(minutes: 10)])
+        XCTAssertEqual(overlay?.extensionsLeft, "2 extensions left")
+        XCTAssertEqual(overlay?.until, "Until 13:30")
+        XCTAssertEqual(overlay?.context.endsAt, at(13, 30))
+        XCTAssertEqual(present(scheduler, at: at(12, 46)).menuBar?.text, "Hard stop · until 13:30")
+        XCTAssertNil(scheduler.snapshot.activeHardStop?.merged.first, "Presenting does not merge")
+
+        // A confirmation of the old "Extend 5 min" does nothing; the one on screen extends by its 10 minutes.
+        let stale = HardStopConfirmation.Target(context: before!.context, action: .extend(minutes: 5))
+        XCTAssertTrue(HardStopPresentation.perform(stale, on: &scheduler, now: at(12, 46)).isEmpty)
+        XCTAssertNil(scheduler.snapshot.activeHardStop?.extendedUntil)
+        let shown = HardStopConfirmation.Target(context: overlay!.context, action: .extend(minutes: 10))
+        XCTAssertEqual(HardStopPresentation.perform(shown, on: &scheduler, now: at(12, 46)),
+                       [.hardStopExtended(id: lunch.id, until: at(12, 56))])
+    }
+
     // MARK: - Extension ending
 
     func testNoticeBeforeAnExtensionEnds() {
@@ -180,8 +302,8 @@ final class HardStopPresentationTests: XCTestCase {
         var scheduler = makeScheduler([stop])
         _ = scheduler.tick(now: at(12, 30))
         _ = scheduler.extendHardStop(now: at(12, 31))
-        XCTAssertNil(HardStopPresentation.extensionWarningDue(scheduler.snapshot, now: at(12, 44, 59)))
-        XCTAssertEqual(HardStopPresentation.extensionWarningDue(scheduler.snapshot, now: at(12, 45)), at(12, 46))
+        XCTAssertNil(HardStopPresentation.extensionWarningDue(scheduler, now: at(12, 44, 59)))
+        XCTAssertEqual(HardStopPresentation.extensionWarningDue(scheduler, now: at(12, 45)), at(12, 46))
         let notice = present(scheduler, at: at(12, 45), notice: .extensionEnding).notice
         XCTAssertEqual(notice?.title, "Lunch — hard stop at 12:46, in 01:00")
         XCTAssertEqual(notice?.canStartNow, true)
@@ -189,13 +311,13 @@ final class HardStopPresentationTests: XCTestCase {
         // Start now shows the stop again; the notice is gone.
         XCTAssertEqual(scheduler.endHardStopExtension(now: at(12, 45, 10)), [.hardStopResumed(id: stop.id)])
         XCTAssertNil(present(scheduler, at: at(12, 45, 10), notice: .extensionEnding).notice)
-        XCTAssertNil(HardStopPresentation.extensionWarningDue(scheduler.snapshot, now: at(12, 45, 10)))
+        XCTAssertNil(HardStopPresentation.extensionWarningDue(scheduler, now: at(12, 45, 10)))
 
         // An extension that outlasts the stop's end gets no notice: the stop ends instead of coming back.
         var outlasts = makeScheduler([stop])
         _ = outlasts.tick(now: at(12, 30))
         _ = outlasts.extendHardStop(now: at(12, 50))
-        XCTAssertNil(HardStopPresentation.extensionWarningDue(outlasts.snapshot, now: at(12, 59, 30)))
+        XCTAssertNil(HardStopPresentation.extensionWarningDue(outlasts, now: at(12, 59, 30)))
         XCTAssertNil(present(outlasts, at: at(12, 59, 30), notice: .extensionEnding).notice)
     }
 
@@ -224,33 +346,38 @@ final class HardStopPresentationTests: XCTestCase {
 
     // MARK: - Confirmation
 
+    private let lunchContext = HardStopPresentation.StopContext(id: UUID(), occurrenceKey: 1, endsAt: nil)
+    private func target(_ action: HardStopPresentation.OverlayAction) -> HardStopConfirmation.Target {
+        HardStopConfirmation.Target(context: lunchContext, action: action)
+    }
+
     func testPointerHoldConfirmsAfterThreeSeconds() {
         let start = at(12, 0)
         var confirmation = HardStopConfirmation()
-        confirmation.pressBegan(.dismiss, at: start)
-        XCTAssertEqual(confirmation.holdProgress(of: .dismiss, now: start.addingTimeInterval(1.5)), 0.5)
-        XCTAssertEqual(confirmation.holdProgress(of: .extend(minutes: 5), now: start.addingTimeInterval(1.5)), 0)
+        confirmation.pressBegan(target(.dismiss), at: start)
+        XCTAssertEqual(confirmation.holdProgress(of: target(.dismiss), now: start.addingTimeInterval(1.5)), 0.5)
+        XCTAssertEqual(confirmation.holdProgress(of: target(.extend(minutes: 5)), now: start.addingTimeInterval(1.5)), 0)
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(2.9)))
-        XCTAssertEqual(confirmation.update(now: start.addingTimeInterval(3)), .dismiss)
+        XCTAssertEqual(confirmation.update(now: start.addingTimeInterval(3)), target(.dismiss))
         // Reported once: neither a later update nor the release runs it again.
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(3.5)))
         XCTAssertNil(confirmation.pressEnded(at: start.addingTimeInterval(4)))
         XCTAssertEqual(confirmation.state, .idle)
 
         // A release at 3 seconds that comes before the update still confirms, once.
-        confirmation.pressBegan(.extend(minutes: 15), at: start)
-        XCTAssertEqual(confirmation.pressEnded(at: start.addingTimeInterval(3)), .extend(minutes: 15))
+        confirmation.pressBegan(target(.extend(minutes: 15)), at: start)
+        XCTAssertEqual(confirmation.pressEnded(at: start.addingTimeInterval(3)), target(.extend(minutes: 15)))
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(3.1)))
     }
 
     func testReleasingEarlyCancelsTheHold() {
         let start = at(12, 0)
         var confirmation = HardStopConfirmation()
-        confirmation.pressBegan(.extend(minutes: 15), at: start)
+        confirmation.pressBegan(target(.extend(minutes: 15)), at: start)
         XCTAssertNil(confirmation.pressEnded(at: start.addingTimeInterval(2.5)))
         XCTAssertEqual(confirmation.state, .idle)
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(3)))
-        XCTAssertEqual(confirmation.holdProgress(of: .extend(minutes: 15), now: start.addingTimeInterval(3)), 0)
+        XCTAssertEqual(confirmation.holdProgress(of: target(.extend(minutes: 15)), now: start.addingTimeInterval(3)), 0)
         // A click is a cancelled hold too: it does not arm the keyboard confirmation.
         XCTAssertNil(confirmation.confirm(at: start.addingTimeInterval(3)))
     }
@@ -259,11 +386,11 @@ final class HardStopPresentationTests: XCTestCase {
         let start = at(12, 0)
         var confirmation = HardStopConfirmation()
         XCTAssertNil(confirmation.confirm(at: start), "Confirm does nothing before the button is activated")
-        confirmation.activate(.dismiss, at: start)
-        XCTAssertEqual(confirmation.state, .awaitingConfirm(.dismiss, until: start.addingTimeInterval(5)))
+        confirmation.activate(target(.dismiss), at: start)
+        XCTAssertEqual(confirmation.state, .awaitingConfirm(target(.dismiss), until: start.addingTimeInterval(5)))
         XCTAssertEqual(confirmation.confirmSecondsLeft(now: start.addingTimeInterval(0.5)), 5)
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(4.9)))
-        XCTAssertEqual(confirmation.confirm(at: start.addingTimeInterval(4.9)), .dismiss)
+        XCTAssertEqual(confirmation.confirm(at: start.addingTimeInterval(4.9)), target(.dismiss))
         XCTAssertEqual(confirmation.state, .idle)
         XCTAssertNil(confirmation.confirm(at: start.addingTimeInterval(4.95)), "Confirmed once")
     }
@@ -271,14 +398,64 @@ final class HardStopPresentationTests: XCTestCase {
     func testConfirmWindowExpires() {
         let start = at(12, 0)
         var confirmation = HardStopConfirmation()
-        confirmation.activate(.extend(minutes: 15), at: start)
+        confirmation.activate(target(.extend(minutes: 15)), at: start)
         XCTAssertNil(confirmation.confirm(at: start.addingTimeInterval(5)), "Too late")
         XCTAssertEqual(confirmation.state, .idle)
 
-        confirmation.activate(.extend(minutes: 15), at: start)
+        confirmation.activate(target(.extend(minutes: 15)), at: start)
         XCTAssertNil(confirmation.update(now: start.addingTimeInterval(5)))
         XCTAssertEqual(confirmation.state, .idle, "The window closes on its own")
         XCTAssertNil(confirmation.confirmSecondsLeft(now: start.addingTimeInterval(5)))
         XCTAssertNil(confirmation.confirm(at: start.addingTimeInterval(5.1)))
+    }
+
+    func testConfirmationLapsesWhenAnotherStopTakesTheScreen() {
+        // Lunch 12:30–13:00 and Walk 13:00–13:30, both dismissable: Walk starts in the same tick that ends Lunch.
+        let lunch = lunch(escapeHatch: .dismissEarly)
+        let walk = walk(hour: 13, minute: 0, escapeHatch: .dismissEarly)
+        var scheduler = makeScheduler([lunch, walk])
+        _ = scheduler.tick(now: at(12, 30))
+        let lunchOverlay = present(scheduler, at: at(12, 59, 58)).overlay!
+        let dismissLunch = HardStopConfirmation.Target(context: lunchOverlay.context, action: .dismiss)
+
+        var held = HardStopConfirmation()
+        held.pressBegan(dismissLunch, at: at(12, 59, 58))
+        var pending = HardStopConfirmation()
+        pending.activate(dismissLunch, at: at(12, 59, 58))
+        XCTAssertFalse(held.keep(only: lunchOverlay), "Still Lunch's Dismiss")
+
+        XCTAssertEqual(scheduler.tick(now: at(13, 0)).last, .hardStopStarted(id: walk.id, endsAt: at(13, 30)))
+        let walkOverlay = present(scheduler, at: at(13, 0)).overlay!
+        XCTAssertEqual(walkOverlay.actions, [.dismiss])
+        XCTAssertTrue(held.keep(only: walkOverlay))
+        XCTAssertNil(held.update(now: at(13, 0, 1)), "The hold on Lunch does not finish on Walk")
+        XCTAssertTrue(pending.keep(only: walkOverlay))
+        XCTAssertNil(pending.confirm(at: at(13, 0, 1)), "Nor does a pending Confirm")
+
+        // Even a confirmation that reaches the controller does nothing to Walk.
+        XCTAssertTrue(HardStopPresentation.perform(dismissLunch, on: &scheduler, now: at(13, 0, 1)).isEmpty)
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.id, walk.id)
+        let dismissWalk = HardStopConfirmation.Target(context: walkOverlay.context, action: .dismiss)
+        XCTAssertEqual(HardStopPresentation.perform(dismissWalk, on: &scheduler, now: at(13, 0, 4)),
+                       [.hardStopEnded(id: walk.id, reason: .dismissed)])
+    }
+
+    func testConfirmationLapsesWhenItsActionIsNoLongerOffered() {
+        let stop = lunch(end: .after(60 * 60), escapeHatch: .extend(minutes: 5, times: 1))
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30))
+        let overlay = present(scheduler, at: at(12, 31)).overlay!
+        var confirmation = HardStopConfirmation()
+        confirmation.activate(HardStopConfirmation.Target(context: overlay.context, action: .extend(minutes: 5)), at: at(12, 31))
+        // The overlay changes without dropping the action (its countdown): the confirmation stays.
+        XCTAssertFalse(confirmation.keep(only: present(scheduler, at: at(12, 32)).overlay))
+        // The extension is used elsewhere and Extend goes away.
+        var spent = overlay
+        spent.actions = []
+        XCTAssertTrue(confirmation.keep(only: spent))
+        XCTAssertEqual(confirmation.state, .idle)
+        // Hidden by an extension: no overlay, nothing pending.
+        confirmation.activate(HardStopConfirmation.Target(context: overlay.context, action: .extend(minutes: 5)), at: at(12, 33))
+        XCTAssertTrue(confirmation.keep(only: nil))
     }
 }

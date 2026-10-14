@@ -129,6 +129,14 @@ struct BreakScheduler: Sendable {
         snapshot.activeHardStop != nil || !snapshot.hardStopsWaitingForCall.isEmpty
     }
 
+    /// The running hard stop as an operation at `now` sees it: with any stop that has started inside it merged,
+    /// even before the next tick merges it.
+    func activeHardStop(now: Date) -> ActiveHardStop? {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.snapshot.activeHardStop
+    }
+
     /// True when the shown hard stop's escape hatch has an extension left. Like `extendHardStop`, this follows
     /// any stop that has started inside the running one, even before the next tick merges it.
     func canExtendHardStop(now: Date) -> Bool {
@@ -558,17 +566,23 @@ struct BreakScheduler: Sendable {
     /// Starts the stop with `id` now, as **Start now** on its warning does: its next occurrence that starts within the
     /// longest warning lead time, or the due one that waits for a call. Its end does not move, so starting early
     /// makes it longer. Returns no events, and changes nothing, while a stop runs or when no such occurrence exists.
+    /// Like a tick, it first records as missed an occurrence that waited for a call and whose end has passed.
     mutating func startHardStopEarly(id: UUID, now: Date) -> [Event] {
-        guard snapshot.activeHardStop == nil,
-              let stop = settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
-              let occurrence = earlyStartOccurrence(of: stop, now: now) else { return [] }
-        return beginHardStop(stop, occurrence, stops: settings.hardStops.filter(\.isEnabled), now: now)
+        guard snapshot.activeHardStop == nil else { return [] }
+        var next = self
+        let events = next.missWaitingStops(now: now)
+        guard let stop = next.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
+              let occurrence = next.earlyStartOccurrence(of: stop, now: now) else { return [] }
+        self = next
+        return events + beginHardStop(stop, occurrence, stops: settings.hardStops.filter(\.isEnabled), now: now)
     }
 
     func canStartHardStopEarly(id: UUID, now: Date) -> Bool {
-        guard snapshot.activeHardStop == nil,
-              let stop = settings.hardStops.first(where: { $0.id == id && $0.isEnabled }) else { return false }
-        return earlyStartOccurrence(of: stop, now: now) != nil
+        guard snapshot.activeHardStop == nil else { return false }
+        var next = self
+        _ = next.missWaitingStops(now: now)
+        guard let stop = next.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }) else { return false }
+        return next.earlyStartOccurrence(of: stop, now: now) != nil
     }
 
     private func earlyStartOccurrence(of stop: HardStop, now: Date) -> HardStop.Occurrence? {
