@@ -164,35 +164,57 @@ final class HardStopSettingsTests: XCTestCase {
         }
     }
 
+    /// The first clock change in `zone` in 2026 after `start` that sets the clocks back, from the time zone data.
+    private func fallBack2026(in zone: String, after start: String) throws -> Date? {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+        var date = try XCTUnwrap(ISO8601DateFormatter().date(from: start))
+        let end = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-01T00:00:00Z"))
+        while let next = timeZone.nextDaylightSavingTimeTransition(after: date), next < end {
+            if timeZone.secondsFromGMT(for: next) < timeZone.secondsFromGMT(for: next.addingTimeInterval(-1)) { return next }
+            date = next
+        }
+        return nil
+    }
+
     func testQuickAddWhereClocksGoBackAtMidnight() throws {
         var beirut = Calendar(identifier: .gregorian)
         beirut.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Beirut"))
-        func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
+        // Beirut's autumn change (24 October 2026 in current data): at midnight clocks go back to 23:00, so 23:00 to
+        // 24:00 comes twice.
+        guard let change = try fallBack2026(in: "Asia/Beirut", after: "2026-07-01T00:00:00Z"),
+              beirut.dateComponents([.hour, .minute], from: change.addingTimeInterval(-60)) == DateComponents(hour: 23, minute: 59),
+              beirut.dateComponents([.hour, .minute], from: change) == DateComponents(hour: 23, minute: 0) else {
+            throw XCTSkip("The time zone data has no 2026 Beirut change from midnight back to 23:00")
+        }
+        let midnight = change.addingTimeInterval(3600)
+        let day = beirut.dateComponents([.year, .month, .day], from: midnight)
 
-        // Saturday 24 October 2026: at midnight clocks go back to 23:00, so 23:00 to 24:00 comes twice. Half an hour on
-        // from 23:40 (first pass), 23:58, or 23:10 (second pass) is in the second pass, which a stop's 23:xx cannot
-        // mean; the default is midnight, tomorrow by the calendar, not 23:xx a day later.
-        for now in try ["2026-10-24T20:40:00Z", "2026-10-24T20:58:00Z", "2026-10-24T21:10:00Z"].map(instant) {
+        // Half an hour on from 23:40 (first pass), 23:58, or 23:10 (second pass) is in the second pass, which a stop's
+        // 23:xx cannot mean; the default is midnight, tomorrow by the calendar, not 23:xx a day later.
+        for offset in [-20, -2, 10] {
+            let now = change.addingTimeInterval(TimeInterval(offset * 60))
             let values = HardStopQuickAdd(now: now, calendar: beirut)
             XCTAssertEqual([values.hour, values.minute], [0, 0])
             XCTAssertTrue(values.startsTomorrow(now: now, calendar: beirut))
             var settings = BreakSettings()
             let quick = values.stop(now: now, calendar: beirut)
             XCTAssertEqual(settings.saveHardStop(quick, isNew: true, now: now, calendar: beirut), [])
-            XCTAssertEqual(quick.repeats, .once(DateComponents(year: 2026, month: 10, day: 25)))
-            let day = try instant("2026-10-24T22:00:00Z")
-            XCTAssertEqual(settings.hardStops.first?.start(onDayOf: day, calendar: beirut), day)
+            XCTAssertEqual(quick.repeats, .once(DateComponents(year: day.year, month: day.month, day: day.day)))
+            XCTAssertEqual(settings.hardStops.first?.start(onDayOf: midnight, calendar: beirut), midnight)
         }
     }
 
     func testQuickAddDefaultIsTheFirstTimeAtLeastHalfAnHourAheadAroundEachClockChange() throws {
         func instant(_ iso: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: iso)) }
-        let changes = try [
+        var changes = try [
             ("America/New_York", instant("2026-03-08T07:00:00Z")),
             ("America/New_York", instant("2026-11-01T06:00:00Z")),
-            ("Asia/Beirut", instant("2026-10-24T21:00:00Z")),
-            ("America/Santiago", instant("2026-04-05T03:00:00Z")),
         ]
+        // Zones whose clocks go back at midnight, from the time zone data.
+        var missing: [String] = []
+        for (zone, after) in [("Asia/Beirut", "2026-07-01T00:00:00Z"), ("America/Santiago", "2026-01-01T00:00:00Z")] {
+            if let change = try fallBack2026(in: zone, after: after) { changes.append((zone, change)) } else { missing.append(zone) }
+        }
         for (zone, change) in changes {
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
@@ -214,6 +236,9 @@ final class HardStopSettingsTests: XCTestCase {
                     XCTAssertEqual([clock.hour, clock.minute], [values.hour, values.minute], context)
                 }
             }
+        }
+        if !missing.isEmpty {
+            throw XCTSkip("The time zone data has no 2026 change back in \(missing.joined(separator: ", "))")
         }
     }
 
@@ -563,6 +588,82 @@ final class HardStopSettingsTests: XCTestCase {
             XCTAssertEqual(relaunched.stats(now: at(12, 32)).longestStretch, 482 * 60, "turned off: \(turnOff)")
             XCTAssertEqual(relaunched.tick(now: at(12, 32)).filter { if case .breakStarted = $0 { true } else { false } }, [])
         }
+    }
+
+    func testAPauseAfterAReleasedWaitKeepsTheFocusCountedSoFar() throws {
+        // Call (12:00 for 2 hours) waits for the call that is running at 12:20, after focus since 4:30. At 12:21 it
+        // is deleted, turned off, or moved to 15:00; the countdown starts over from 12:21 while the stretch goes on.
+        let releases: [(name: String, release: (inout BreakScheduler, HardStop, Set<PauseReason>) -> Void)] = [
+            ("deleted", { scheduler, call, signals in
+                _ = scheduler.deleteHardStop(id: call.id, now: self.at(12, 21))
+                _ = scheduler.tick(now: self.at(12, 21), inputs: .init(signals: signals))
+            }),
+            ("turned off", { scheduler, _, signals in
+                scheduler.settings.hardStops[0].isEnabled = false
+                _ = scheduler.tick(now: self.at(12, 21), inputs: .init(signals: signals))
+            }),
+            ("rescheduled away", { scheduler, _, signals in
+                scheduler.settings.hardStops[0].hour = 15
+                _ = scheduler.tick(now: self.at(12, 21), inputs: .init(signals: signals))
+            }),
+        ]
+        func released(_ release: (inout BreakScheduler, HardStop, Set<PauseReason>) -> Void,
+                      signals: Set<PauseReason>) -> BreakScheduler {
+            let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), duringCalls: .waitForCallToEnd)
+            var scheduler = makeScheduler([call], start: at(4, 30))
+            _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+            release(&scheduler, call, signals)
+            XCTAssertEqual(scheduler.snapshot.hardStopsWaitingForCall, [:])
+            return scheduler
+        }
+        func assertFocus(_ scheduler: BreakScheduler, _ minutes: Int, at now: Date, _ name: String, line: UInt = #line) {
+            let stats = scheduler.stats(now: now)
+            XCTAssertEqual(stats.focusTime, TimeInterval(minutes * 60), name, line: line)
+            XCTAssertEqual(stats.longestStretch, TimeInterval(minutes * 60), name, line: line)
+        }
+
+        for (name, release) in releases {
+            // The call is still on at the release, so the timer pauses for it, and resumes a minute after it ends.
+            var smart = released(release, signals: [.meeting])
+            XCTAssertEqual(smart.phase, .paused, name)
+            XCTAssertEqual(smart.snapshot.pauseReason, .meeting, name)
+            _ = smart.tick(now: at(12, 30), inputs: .init(signals: [.meeting]))
+            XCTAssertEqual(smart.tick(now: at(12, 31)), [.resumed(.meeting)], name)
+            XCTAssertEqual(smart.snapshot.nextBreakAt, at(12, 31).addingTimeInterval(8 * 3600), name)
+            assertFocus(smart, 481, at: at(12, 41), name)
+
+            // A manual pause from 13:00 to 13:10, with a relaunch while paused.
+            var manual = released(release, signals: [])
+            XCTAssertEqual(manual.phase, .focusing, name)
+            assertFocus(manual, 510, at: at(13, 0), name)
+            XCTAssertEqual(manual.pause(now: at(13, 0)), [.paused(.manual)], name)
+            let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONEncoder().encode(manual.snapshot))
+            let records = try JSONDecoder().decode([BreakRecord].self, from: JSONEncoder().encode(manual.records))
+            var relaunched = BreakScheduler(settings: manual.settings, snapshot: snapshot, records: records, calendar: calendar)
+            _ = relaunched.tick(now: at(13, 5))
+            XCTAssertEqual(relaunched.phase, .paused, name)
+            XCTAssertEqual(relaunched.resume(now: at(13, 10)), [.resumed(.manual)], name)
+            // The countdown goes on from the 7 hours 21 minutes it had left at 13:00.
+            XCTAssertEqual(relaunched.snapshot.nextBreakAt, at(13, 10).addingTimeInterval(7 * 3600 + 21 * 60), name)
+            assertFocus(relaunched, 520, at: at(13, 20), name)
+            XCTAssertEqual(relaunched.tick(now: at(13, 20)).filter { if case .breakStarted = $0 { true } else { false } }, [], name)
+        }
+    }
+
+    func testAPausedSnapshotSavedBeforeThePausedFocusWasStoredResumesFromItsCountdown() throws {
+        var scheduler = makeScheduler([], start: at(12, 0))
+        _ = scheduler.pause(now: at(13, 0))
+        XCTAssertEqual(scheduler.snapshot.pausedFocus, 3600)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(scheduler.snapshot)) as? [String: Any])
+        XCTAssertNotNil(json.removeValue(forKey: "pausedFocus"))
+        let old = try JSONDecoder().decode(EngineSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(old.pausedFocus)
+        XCTAssertEqual(old.pausedRemaining, 7 * 3600)
+
+        var relaunched = BreakScheduler(settings: scheduler.settings, snapshot: old, records: [], calendar: calendar)
+        XCTAssertEqual(relaunched.resume(now: at(14, 0)), [.resumed(.manual)])
+        XCTAssertEqual(relaunched.snapshot.focusStartedAt, at(13, 0))
+        XCTAssertEqual(relaunched.snapshot.nextBreakAt, at(21, 0))
     }
 
     func testAWaitingStopRescheduledAwayFromItsOccurrenceNeverStartsIt() throws {

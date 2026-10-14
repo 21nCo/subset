@@ -87,7 +87,7 @@ struct BreakScheduler: Sendable {
     func focusElapsed(now: Date) -> TimeInterval {
         switch snapshot.phase {
         case .paused:
-            max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+            min(settings.workInterval, focusCountedBeforePause)
         case .focusing, .headsUp, .breaking:
             max(0, min(settings.workInterval, now.timeIntervalSince(snapshot.focusStartedAt)))
         }
@@ -326,6 +326,7 @@ struct BreakScheduler: Sendable {
         snapshot.activeKind = kind
         snapshot.activePlannedBreakName = plannedName
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         clearWellnessCadence()
@@ -439,6 +440,7 @@ struct BreakScheduler: Sendable {
             return [.paused(.manual)]
         case .focusing, .headsUp:
             snapshot.pausedRemaining = min(settings.workInterval, nextBreakRemaining(now: now) + max(0, idle))
+            snapshot.pausedFocus = max(0, now.timeIntervalSince(snapshot.focusStartedAt) - max(0, idle))
             snapshot.phase = .paused
             snapshot.pauseReason = reason
             snapshot.pausedUntil = reason == .manual ? until : nil
@@ -452,9 +454,11 @@ struct BreakScheduler: Sendable {
         let reason = snapshot.pauseReason ?? .manual
         let remaining = min(settings.workInterval, snapshot.pausedRemaining ?? settings.workInterval)
         snapshot.phase = .focusing
-        snapshot.focusStartedAt = now.addingTimeInterval(-(settings.workInterval - remaining))
+        // The stretch goes on from the focus counted before the pause, and the countdown from the time it had left.
+        snapshot.focusStartedAt = now.addingTimeInterval(-focusCountedBeforePause)
         snapshot.nextBreakAt = now.addingTimeInterval(remaining)
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now
@@ -871,9 +875,15 @@ struct BreakScheduler: Sendable {
     /// and while paused only the time counted before the pause.
     private func countedFocus(now: Date) -> TimeInterval {
         switch snapshot.phase {
-        case .paused: max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+        case .paused: focusCountedBeforePause
         case .focusing, .headsUp, .breaking: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
         }
+    }
+
+    /// While paused: the focus counted before the pause. A snapshot saved before it was stored derives it from the
+    /// countdown, as the countdown and the stretch then started together.
+    private var focusCountedBeforePause: TimeInterval {
+        snapshot.pausedFocus ?? max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
     }
 
     /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
@@ -995,6 +1005,7 @@ struct BreakScheduler: Sendable {
         snapshot.breakStartedAt = active.startedAt
         snapshot.breakEndsAt = active.endsAt
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         snapshot.deliveredHeadsUpFor = nil
@@ -1109,6 +1120,7 @@ struct BreakScheduler: Sendable {
             var events = pause(reason: .idle, now: now, creditingIdle: counted)
             if idle >= idleSettings.resetAfter {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 events.append(.focusReset)
             }
             return events
@@ -1118,6 +1130,7 @@ struct BreakScheduler: Sendable {
             }
             if idle >= idleSettings.resetAfter, snapshot.pausedRemaining != settings.workInterval {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 return [.focusReset]
             }
             return []
@@ -1189,6 +1202,7 @@ struct BreakScheduler: Sendable {
         snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
         snapshot.deliveredHeadsUpFor = nil
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now
