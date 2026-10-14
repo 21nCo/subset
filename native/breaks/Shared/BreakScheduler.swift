@@ -433,10 +433,15 @@ struct BreakScheduler: Sendable {
         return [.resumed(reason)]
     }
 
-    /// Clears today's history and counters.
+    /// Clears today's history and counters, by the day rules of the statistics. An earlier record whose focus
+    /// stretch ended today (a stop missed after midnight) stays in the history without that stretch.
     mutating func resetToday(now: Date) {
         let start = calendar.startOfDay(for: now)
         records.removeAll { $0.startedAt >= start }
+        for index in records.indices where records[index].focusEnd >= start {
+            records[index].focusDuration = nil
+            records[index].focusEndedAt = nil
+        }
         snapshot.snoozesUsedToday = 0
         snapshot.snoozeDay = start
         snapshot.completedShortBreaks = 0

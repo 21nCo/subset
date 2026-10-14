@@ -608,6 +608,8 @@ struct BreakRecord: Codable, Equatable, Identifiable, Sendable {
     static let historyLimit = 400
 
     var actualDuration: TimeInterval { max(0, endedAt.timeIntervalSince(startedAt)) }
+    /// The occurrence belongs to the day of `startedAt`; its focus stretch belongs to the day of this time.
+    var focusEnd: Date { focusEndedAt ?? startedAt }
 }
 
 struct EngineSnapshot: Codable, Equatable, Sendable {
@@ -707,7 +709,7 @@ enum BreakMath {
         }
         // A stretch belongs to the day it ended on and counts only its part since midnight.
         let stretches = records.compactMap { record -> TimeInterval? in
-            let focusEnd = record.focusEndedAt ?? record.startedAt
+            let focusEnd = record.focusEnd
             guard let focus = record.focusDuration, focusEnd >= startOfDay, focusEnd <= now else { return nil }
             return min(max(0, focus), focusEnd.timeIntervalSince(startOfDay))
         }

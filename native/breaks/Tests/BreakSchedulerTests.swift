@@ -996,6 +996,47 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(stats.screenScore, 100)
     }
 
+    func testResetTodayClearsAMissedStopsStretchFromToday() throws {
+        // Reset Today clears what the statistics count for today: records that started today, and the part of an
+        // earlier record that belongs to today, its focus stretch. The earlier occurrence stays in the history.
+        let stop = hardStop(hour: 23, minute: 30, end: .after(60 * 60))
+        let base = makeScheduler(stops: [stop])
+        let monday = BreakRecord(startedAt: at(22, 0), endedAt: at(22, 0, 20), plannedDuration: 20, kind: .short, completed: true, skipped: false, focusDuration: 20 * 60)
+        let snapshot = EngineSnapshot(phase: .focusing, focusStartedAt: at(23, 0), nextBreakAt: at(1, 0, dayOffset: 1), snoozeDay: at(0, 0))
+        var missed = BreakScheduler(settings: base.settings, snapshot: snapshot, records: [monday], calendar: calendar)
+        let call = BreakScheduler.Inputs(signals: [.meeting])
+        XCTAssertTrue(missed.tick(now: at(23, 30), inputs: call).isEmpty)
+        XCTAssertEqual(missed.tick(now: at(0, 30, dayOffset: 1), inputs: call).first, .hardStopEnded(id: stop.id, reason: .missed))
+        // A record saved by an older build, without `focusEndedAt`, from earlier today.
+        let legacy = BreakRecord(startedAt: at(0, 5, dayOffset: 1), endedAt: at(0, 5, 20, dayOffset: 1), plannedDuration: 20, kind: .short, completed: true, skipped: false, focusDuration: 5 * 60)
+        var scheduler = BreakScheduler(settings: missed.settings, snapshot: missed.snapshot, records: missed.records + [legacy], calendar: calendar)
+        let now = at(0, 30, dayOffset: 1)
+        XCTAssertEqual(scheduler.stats(now: now).focusTime, 35 * 60)
+        XCTAssertEqual(scheduler.stats(now: now).breaksTaken, 1)
+
+        scheduler.resetToday(now: now)
+        XCTAssertEqual(scheduler.stats(now: now).focusTime, 0)
+        XCTAssertEqual(scheduler.stats(now: now).longestStretch, 0)
+        XCTAssertEqual(scheduler.stats(now: now).breaksTaken, 0)
+        XCTAssertEqual(scheduler.records.first, monday)
+        XCTAssertEqual(scheduler.records.map(\.startedAt), [at(22, 0), at(23, 30)])
+        XCTAssertEqual(scheduler.records.last?.hardStopEndReason, .missed)
+        let afterReset = scheduler.records
+
+        // Resetting again changes nothing; saving and loading keeps today empty and Monday's stretch.
+        scheduler.resetToday(now: now)
+        XCTAssertEqual(scheduler.records, afterReset)
+        let suiteName = "BreakSchedulerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let repository = BreakRepository(defaults: defaults)
+        repository.save(settings: scheduler.settings, snapshot: scheduler.snapshot, records: scheduler.records)
+        let loaded = repository.loadRecords()
+        XCTAssertEqual(loaded, afterReset)
+        XCTAssertEqual(BreakMath.stats(records: loaded, snapshot: scheduler.snapshot, now: now, calendar: calendar).focusTime, 0)
+        XCTAssertEqual(BreakMath.stats(records: loaded, snapshot: scheduler.snapshot, now: at(23, 59), calendar: calendar).focusTime, 20 * 60)
+    }
+
     func testStopThatStartedBeforeTheRunningOneDoesNotJoinIt() {
         // A runs 10:30–11:30. B, added at 10:59, ran from 10:00 to 13:00 and would let A be dismissed. It does not
         // change A; it starts when A ends.
