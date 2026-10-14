@@ -357,6 +357,21 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(outlasts, at: at(12, 59, 30), notice: .extensionEnding).notice)
     }
 
+    func testExtensionNoticeOffersStartNowOnlyWhileTheStopCanComeBack() {
+        let stop = lunch(escapeHatch: .extend(minutes: 15, times: 1))
+        var scheduler = makeScheduler([stop])
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.extendHardStop(now: at(12, 41))
+        let due = present(scheduler, at: at(12, 55), notice: .extensionEnding).notice
+        XCTAssertEqual(due?.title, "Lunch — hard stop at 12:56, in 01:00")
+        XCTAssertEqual(due?.canStartNow, true)
+
+        // Ticks run late: the stop's end has passed but no tick has ended it yet. Start now would do nothing.
+        XCTAssertFalse(scheduler.canEndHardStopExtension(now: at(13, 0, 30)))
+        XCTAssertEqual(scheduler.endHardStopExtension(now: at(13, 0, 30)), [])
+        XCTAssertNil(present(scheduler, at: at(13, 0, 30), notice: .extensionEnding).notice)
+    }
+
     func testStopThatEndedWhileTheAppWasOffEndsWithoutAChime() {
         let stop = lunch()
         var running = makeScheduler([stop])

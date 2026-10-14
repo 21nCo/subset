@@ -140,11 +140,12 @@ struct HardStopPresentation: Equatable {
                 canStartNow: scheduler.canStartHardStopEarly(id: id, now: now)
             )
         case .extensionEnding:
+            // Once the stop's end has passed, the next tick ends it, so the notice no longer applies.
             guard let active, let until = active.extendedUntil,
-                  active.endsAt.map({ until < $0 }) ?? true else { break }
+                  active.endsAt.map({ until < $0 && now < $0 }) ?? true else { break }
             notice = Self.notice(
                 name: active.name, at: time(until), startsIn: until.timeIntervalSince(now),
-                detail: "Your extension is almost over", canStartNow: true
+                detail: "Your extension is almost over", canStartNow: scheduler.canEndHardStopExtension(now: now)
             )
         case nil:
             break

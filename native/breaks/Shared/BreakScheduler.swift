@@ -161,6 +161,20 @@ struct BreakScheduler: Sendable {
         return active.ownerExtensionsUsed < times
     }
 
+    /// True when the running stop is hidden by an extension and its end is still ahead, so **Start now** on the
+    /// notice before the extension ends can show it again. Like `endHardStopExtension`, this follows any stop that
+    /// has started inside the running one.
+    func canEndHardStopExtension(now: Date) -> Bool {
+        var next = self
+        _ = next.reconcileMerges(now: now)
+        return next.extensionEndAllowed(now: now)
+    }
+
+    private func extensionEndAllowed(now: Date) -> Bool {
+        guard let active = snapshot.activeHardStop, active.extendedUntil != nil else { return false }
+        return active.endsAt.map { now < $0 } ?? true
+    }
+
     private func dismissAllowed(now: Date) -> Bool {
         guard let active = snapshot.activeHardStop else { return false }
         guard let end = active.endsAt else { return true }
@@ -620,8 +634,7 @@ struct BreakScheduler: Sendable {
     mutating func endHardStopExtension(now: Date) -> [Event] {
         var next = self
         let events = next.reconcileMerges(now: now)
-        guard let active = next.snapshot.activeHardStop, active.extendedUntil != nil,
-              active.endsAt.map({ now < $0 }) ?? true else { return [] }
+        guard next.extensionEndAllowed(now: now), let active = next.snapshot.activeHardStop else { return [] }
         self = next
         snapshot.activeHardStop?.extendedUntil = nil
         showHardStop()
