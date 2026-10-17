@@ -683,6 +683,12 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     /// `handledHardStops`, so a later edit that changes the stop's start time or repeat is judged only against the
     /// occurrences that really started, merged, ended, or were missed. Empty in older snapshots.
     var supersededHardStops: [String: SupersededHardStops] = [:]
+    /// Per hard stop ID: the keys of its occurrences that were in progress (running, joined to the running stop, or
+    /// waiting for a call) when that stop was saved in Settings. Only these supersede the stop's other occurrences
+    /// (`BreakScheduler.isHandled`); a stop that was not saved during an occurrence keeps the usual overlap rules, and
+    /// saving another stop never adds to it. A key goes once its occurrence is no longer in progress. Empty in older
+    /// snapshots.
+    var hardStopsEditedInProgress: [String: Set<Int>] = [:]
 }
 
 /// The occurrences of a hard stop that an edit saved while it was in progress superseded: they never start, merge, or
@@ -733,6 +739,7 @@ extension EngineSnapshot {
         hardStopsWaitingForCall = try container.decodeIfPresent([String: Int].self, forKey: .hardStopsWaitingForCall) ?? [:]
         hardStopWaitingRules = try container.decodeIfPresent([String: HardStop].self, forKey: .hardStopWaitingRules) ?? [:]
         supersededHardStops = try container.decodeIfPresent([String: SupersededHardStops].self, forKey: .supersededHardStops) ?? [:]
+        hardStopsEditedInProgress = try container.decodeIfPresent([String: Set<Int>].self, forKey: .hardStopsEditedInProgress) ?? [:]
     }
 }
 

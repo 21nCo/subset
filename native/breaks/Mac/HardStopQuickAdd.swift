@@ -310,7 +310,7 @@ extension BreakScheduler {
         var next = settings
         let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: passedOccurrenceKeysAllowed(of: stop.id, now: now))
         guard errors.isEmpty else { return (errors, []) }
-        return ([], updateHardStops(next.hardStops, now: now))
+        return ([], updateHardStops(next.hardStops, edited: stop.id, now: now))
     }
 
     /// Turns the stop with `id` on or off with `updateHardStops`, and returns its events.
@@ -318,7 +318,7 @@ extension BreakScheduler {
         guard let index = settings.hardStops.firstIndex(where: { $0.id == id }) else { return [] }
         var stops = settings.hardStops
         stops[index].isEnabled = isEnabled
-        return updateHardStops(stops, now: now)
+        return updateHardStops(stops, edited: id, now: now)
     }
 
     /// For the editor and the row of a stop that is in progress at `now`: what saving `stop` does. Nil when it is not
