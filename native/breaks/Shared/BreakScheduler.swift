@@ -87,7 +87,7 @@ struct BreakScheduler: Sendable {
     func focusElapsed(now: Date) -> TimeInterval {
         switch snapshot.phase {
         case .paused:
-            max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+            min(settings.workInterval, focusCountedBeforePause)
         case .focusing, .headsUp, .breaking:
             max(0, min(settings.workInterval, now.timeIntervalSince(snapshot.focusStartedAt)))
         }
@@ -322,6 +322,7 @@ struct BreakScheduler: Sendable {
         snapshot.activeKind = kind
         snapshot.activePlannedBreakName = plannedName
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         clearWellnessCadence()
@@ -435,6 +436,7 @@ struct BreakScheduler: Sendable {
             return [.paused(.manual)]
         case .focusing, .headsUp:
             snapshot.pausedRemaining = min(settings.workInterval, nextBreakRemaining(now: now) + max(0, idle))
+            snapshot.pausedFocus = max(0, now.timeIntervalSince(snapshot.focusStartedAt) - max(0, idle))
             snapshot.phase = .paused
             snapshot.pauseReason = reason
             snapshot.pausedUntil = reason == .manual ? until : nil
@@ -448,9 +450,11 @@ struct BreakScheduler: Sendable {
         let reason = snapshot.pauseReason ?? .manual
         let remaining = min(settings.workInterval, snapshot.pausedRemaining ?? settings.workInterval)
         snapshot.phase = .focusing
-        snapshot.focusStartedAt = now.addingTimeInterval(-(settings.workInterval - remaining))
+        // The stretch goes on from the focus counted before the pause, and the countdown from the time it had left.
+        snapshot.focusStartedAt = now.addingTimeInterval(-focusCountedBeforePause)
         snapshot.nextBreakAt = now.addingTimeInterval(remaining)
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now
@@ -597,6 +601,44 @@ struct BreakScheduler: Sendable {
         guard next.dismissAllowed(now: now) else { return [] }
         self = next
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
+    }
+
+    /// The running hard stop that the stop with `id` is part of, shown or hidden by an extension, as its own occurrence
+    /// or one merged into it, while its end is still ahead (once it has passed, the next tick ends it). A merged
+    /// occurrence whose own end has passed is no longer part of it: it is recorded as ended at that end when the
+    /// running stop ends. Like `deleteHardStop`, this follows any stop that has started inside it.
+    func runningHardStop(containing id: UUID, now: Date) -> ActiveHardStop? {
+        guard let active = activeHardStop(now: now), active.endsAt.map({ now < $0 }) ?? true else { return nil }
+        if active.id == id { return active }
+        return active.merged.contains { $0.id == id && $0.endsAt.map { now < $0 } ?? true } ? active : nil
+    }
+
+    func isHardStopRunning(id: UUID, now: Date) -> Bool {
+        runningHardStop(containing: id, now: now) != nil
+    }
+
+    /// Removes the stop with `id` from the settings. When it is part of the running stop (`runningHardStop`), that
+    /// stop ends now and is recorded as dismissed, whatever its escape hatch allows. A running stop whose end has
+    /// passed before the next tick ended it is recorded as ended at that end, as the tick would; a merged occurrence
+    /// whose own end has passed leaves the running stop as it is. Deleting the last stop that waits for a call
+    /// releases the schedule it held (`releaseHeldSchedule`).
+    mutating func deleteHardStop(id: UUID, now: Date) -> [Event] {
+        let wasHeldForCall = !snapshot.hardStopsWaitingForCall.isEmpty
+        let running = runningHardStop(containing: id, now: now) != nil
+        // A stop that started inside the running one joins it first, as on a tick, so its occurrence is recorded.
+        var events = reconcileMerges(now: now)
+        if let active = snapshot.activeHardStop, let end = active.endsAt, now >= end,
+           active.id == id || active.merged.contains(where: { $0.id == id }) {
+            events += finishHardStop(.ended, endedAt: end, now: now)
+        } else if running {
+            events += finishHardStop(.dismissed, endedAt: now, now: now)
+        }
+        settings.hardStops.removeAll { $0.id == id }
+        pruneHardStopProgress()
+        if wasHeldForCall, snapshot.hardStopsWaitingForCall.isEmpty, snapshot.activeHardStop == nil {
+            releaseHeldSchedule(now: now)
+        }
+        return events
     }
 
     /// Starts occurrence `occurrenceKey` of the stop with `id` now, as **Start now** on its warning does: one that
@@ -821,9 +863,15 @@ struct BreakScheduler: Sendable {
     /// and while paused only the time counted before the pause.
     private func countedFocus(now: Date) -> TimeInterval {
         switch snapshot.phase {
-        case .paused: max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+        case .paused: focusCountedBeforePause
         case .focusing, .headsUp, .breaking: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
         }
+    }
+
+    /// While paused: the focus counted before the pause. A snapshot saved before it was stored derives it from the
+    /// countdown, as the countdown and the stretch then started together.
+    private var focusCountedBeforePause: TimeInterval {
+        snapshot.pausedFocus ?? max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
     }
 
     /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
@@ -944,6 +992,7 @@ struct BreakScheduler: Sendable {
         snapshot.breakStartedAt = active.startedAt
         snapshot.breakEndsAt = active.endsAt
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         snapshot.deliveredHeadsUpFor = nil
@@ -1058,6 +1107,7 @@ struct BreakScheduler: Sendable {
             var events = pause(reason: .idle, now: now, creditingIdle: counted)
             if idle >= idleSettings.resetAfter {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 events.append(.focusReset)
             }
             return events
@@ -1065,8 +1115,12 @@ struct BreakScheduler: Sendable {
             if idle < idleSettings.pauseAfter {
                 return resume(now: now)
             }
-            if idle >= idleSettings.resetAfter, snapshot.pausedRemaining != settings.workInterval {
+            // The countdown and the counted focus are reset together; after a release or a snooze either can be
+            // reset while the other is not.
+            let alreadyReset = snapshot.pausedRemaining == settings.workInterval && focusCountedBeforePause == 0
+            if idle >= idleSettings.resetAfter, !alreadyReset {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 return [.focusReset]
             }
             return []
@@ -1120,12 +1174,24 @@ struct BreakScheduler: Sendable {
 
     // MARK: - Helpers
 
+    /// Releases the regular schedule a stop held while it waited for a call, when the last waiting stop is deleted and
+    /// no stop runs: as after a snooze, the countdown starts over from now, so a break that came due while it was held
+    /// does not start at once, and the focus counted so far stays in the current stretch. A running break still ends on time, and a pause still resumes by its own rules.
+    private mutating func releaseHeldSchedule(now: Date) {
+        guard snapshot.activeHardStop == nil, snapshot.hardStopsWaitingForCall.isEmpty,
+              snapshot.phase == .focusing || snapshot.phase == .headsUp else { return }
+        snapshot.phase = .focusing
+        snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
+        snapshot.deliveredHeadsUpFor = nil
+    }
+
     private mutating func startFocusInterval(at now: Date) {
         snapshot.phase = .focusing
         snapshot.focusStartedAt = now
         snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
         snapshot.deliveredHeadsUpFor = nil
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now

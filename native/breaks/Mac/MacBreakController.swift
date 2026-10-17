@@ -28,6 +28,7 @@ final class MacBreakController: ObservableObject {
     private lazy var overlay = BreakOverlayController(controller: self)
     private lazy var notice = HeadsUpPanelController(controller: self)
     private lazy var nudges = WellnessNudgeController()
+    private lazy var quickAdd = HardStopQuickAddPanelController(controller: self)
     private var timer: Timer?
     private var lastSignalReadAt = Date.distantPast
     private var observers: [NSObjectProtocol] = []
@@ -83,6 +84,9 @@ final class MacBreakController: ObservableObject {
     var stats: DashboardStats { core.stats(now: now) }
     var nextPlannedBreak: (PlannedBreak, Date)? { core.nextPlannedBreak(after: now) }
     var isWithinOfficeHours: Bool { settings.officeHours.contains(now) }
+    var calendar: Calendar { core.calendar }
+    var nextHardStop: (stop: HardStop, start: Date)? { core.nextHardStop(after: now) }
+    func runningHardStop(containing id: UUID) -> ActiveHardStop? { core.runningHardStop(containing: id, now: now) }
 
     /// Why the hard-stop notice is open.
     var hardStopNoticeSubject: HardStopPresentation.NoticeSubject? { hardStopNotices.shown }
@@ -217,6 +221,45 @@ final class MacBreakController: ObservableObject {
         guard hardStopNoticeSubject != nil else { return }
         hardStopNotices.closeShown()
         syncHardStopNotice(bringToFront: true)
+    }
+
+    /// Whether the hard stop is running, joined the running one, or waits for a call; the settings keep it as it is
+    /// until it ends.
+    func isHardStopInProgress(id: UUID) -> Bool { core.isHardStopInProgress(id: id, now: now) }
+
+    /// The errors saving `stop` now would give; nothing changes.
+    func hardStopErrors(saving stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
+        var scheduler = core
+        return scheduler.saveHardStop(stop, isNew: isNew, now: now)
+    }
+
+    /// Saves a new or edited hard stop on the clock `hardStopErrors` uses, unless it has errors, which it returns. An
+    /// edit of a stop in progress is refused. The next tick applies the change.
+    func saveHardStop(_ stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
+        var scheduler = core
+        let errors = scheduler.saveHardStop(stop, isNew: isNew, now: now)
+        if errors.isEmpty { settings = scheduler.settings }
+        return errors
+    }
+
+    /// Turns a hard stop on or off on the clock `isHardStopInProgress` uses, unless it is in progress.
+    func setHardStop(id: UUID, isEnabled: Bool) {
+        var scheduler = core
+        if scheduler.setHardStop(id: id, isEnabled: isEnabled, now: now).isEmpty { settings = scheduler.settings }
+    }
+
+    /// Deletes a hard stop on the clock its confirmation (`runningHardStop`) uses. One that is running ends now and is
+    /// recorded as dismissed.
+    func deleteHardStop(id: UUID) {
+        let hardStopEnd = core.snapshot.activeHardStop?.endsAt
+        let events = core.deleteHardStop(id: id, now: now)
+        handle(events, hardStopEnd: hardStopEnd)
+        save()
+    }
+
+    /// Opens the **Hard stop at…** panel.
+    func showHardStopQuickAdd() {
+        quickAdd.show()
     }
 
     func resetToday() {
