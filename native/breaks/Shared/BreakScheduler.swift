@@ -1113,7 +1113,8 @@ struct BreakScheduler: Sendable {
     /// The key of the last occurrence of `stop`, as configured now, that an edit of it saved while its occurrences
     /// `inProgress` were in progress supersedes, so that it and every earlier one never run; nil when there is none. An occurrence in
     /// progress keeps the rules it began with and is never joined again, so none of the stop's occurrences that starts
-    /// before the end it keeps (or, with no end, that had started by `savedAt`, when the edit was saved) runs:
+    /// before the end it keeps (or, with no end, that had started by `savedAt`, when the edit was saved) runs, nor does
+    /// one that comes before it (by key), so an earlier one never replaces an occurrence that waits for a call:
     /// - A repeating stop applies the edit from the next day: when its start time changed, its occurrence on the day of
     ///   the one in progress is superseded. Whether or not it changed, so is a later one that starts before that end.
     /// - A one-off stop's new time is kept when it starts at or after that end, and superseded when it starts before.
@@ -1130,8 +1131,10 @@ struct BreakScheduler: Sendable {
             switch stop.repeats {
             case .weekdays:
                 let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
-                // With its start time unchanged, the occurrence on that day is the one in progress.
-                var through = sameDay == occurrence.key ? nil : sameDay
+                // With its start time unchanged, the occurrence on that day is the one in progress. Every earlier one is
+                // superseded too, as starting or joining marks the earlier ones handled, so a day the edit adds before it
+                // never replaces an occurrence that waits for a call.
+                var through = sameDay == occurrence.key ? occurrence.key - 1 : max(sameDay, occurrence.key - 1)
                 guard let limit, var date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else { return through }
                 while let next = calendar.date(byAdding: .day, value: 1, to: date), next < limit {
                     date = next
@@ -1144,7 +1147,7 @@ struct BreakScheduler: Sendable {
                 // A date or time the stop no longer has is left to expire (`removeExpiredOnceStops`).
                 guard edited != occurrence.key, let scheduled = stop.scheduledOccurrence(forKey: edited, calendar: calendar) else { return nil }
                 let sameDate = occurrence.end == nil && (year, month, dayOfMonth) == (day.year, day.month, day.day)
-                return sameDate || supersedes(scheduled.start) ? edited : nil
+                return edited < occurrence.key || sameDate || supersedes(scheduled.start) ? edited : nil
             }
         }.max()
     }
