@@ -97,6 +97,49 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(bytes < 100_000, "the store directory holds \(bytes) bytes after one segment")
     }
 
+    /// Segments built directly, not through `Activity`, stay bounded through a save, the tail a deletion re-inserts, and
+    /// the blocks rebuilt after reopening.
+    @Test func directlyBuiltSegmentsStayBoundedThroughEveryStoreWrite() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marks = String(repeating: "\u{0301}", count: 100_000)
+        let titles = ["Report" + marks, String(repeating: "\u{8A9E}", count: 400),
+                      String(repeating: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", count: 100)]
+        do {
+            let store = try ActivityStore(directory: directory)
+            for (index, title) in titles.enumerated() {
+                let start = Double(index) * 600
+                try store.save(Segment(start: t0 + start, end: t0 + start + 400, excluded: false, bundleID: "com.example." + marks,
+                                       appName: "App" + marks, windowTitle: title, url: nil))
+                // Deleting inside the segment re-inserts its tail.
+                try store.deleteData(from: t0 + start + 100, to: t0 + start + 200)
+            }
+            #expect(try store.segments(from: .distantPast, to: .distantFuture).first?.windowTitle == "Repor")
+        }
+        let reopened = try ActivityStore(directory: directory)
+        try reopened.save(segment("b", 1_790, 1_800))
+        // A deletion inside a tail read back from the reopened store re-inserts that tail again.
+        try reopened.deleteData(from: t0 + 250, to: t0 + 260)
+
+        var db: OpaquePointer?
+        #expect(sqlite3_open(reopened.databaseURL.path, &db) == SQLITE_OK)
+        defer { sqlite3_close(db) }
+        func longest(_ column: String, in table: String) -> Int {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_prepare_v2(db, "SELECT MAX(length(CAST(\(column) AS BLOB))) FROM \(table)", -1, &statement, nil) == SQLITE_OK,
+                  sqlite3_step(statement) == SQLITE_ROW else { return .max }
+            return Int(sqlite3_column_int64(statement, 0))
+        }
+        #expect(longest("window_title", in: "segments") <= Activity.maxTitleBytes)
+        #expect(longest("dominant_title", in: "blocks") <= Activity.maxTitleBytes)
+        #expect(longest("app_name", in: "segments") <= Segment.maxIdentityBytes)
+        #expect(longest("bundle_id", in: "segments") <= Segment.maxIdentityBytes)
+        #expect(longest("dominant_app_name", in: "blocks") <= Segment.maxIdentityBytes)
+        #expect(longest("apps_json", in: "blocks") <= 2 * Segment.maxIdentityBytes + 100)
+        #expect(try reopened.segmentCount() == 3 * 2 + 2)
+    }
+
     @Test func emptyOrReversedRangesReadNothing() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -410,6 +453,88 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         let wal = (try? Data(contentsOf: URL(fileURLWithPath: store.databaseURL.path + "-wal"))) ?? Data()
         #expect(bytes.range(of: Data("Very private title".utf8)) == nil)
         #expect(wal.range(of: Data("Very private title".utf8)) == nil)
+    }
+}
+
+/// Another connection in a read transaction, which keeps a WAL checkpoint from completing until it ends.
+private func withReader(on store: ActivityStore, _ body: (_ release: () throws -> Void) throws -> Void) throws {
+    let reader = try SQLiteConnection(path: store.databaseURL.path)
+    try reader.execute("BEGIN")
+    try reader.query("SELECT COUNT(*) FROM segments")
+    var open = true
+    defer { if open { try? reader.execute("COMMIT") } }
+    try body { try reader.execute("COMMIT"); open = false }
+}
+
+private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) -> Bool {
+    let bytes = (try? Data(contentsOf: URL(fileURLWithPath: store.databaseURL.path + suffix))) ?? Data()
+    return bytes.range(of: Data(text.utf8)) != nil
+}
+
+@Suite struct CheckpointTests {
+    @Test func deleteAllFailsWhileAReaderBlocksItsCheckpointAndCompletesAfterwards() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try withReader(on: store) { release in
+            try store.save(segment("com.secret.app", 0, 600, title: "SECRET-TITLE"))
+            #expect(throws: StoreError.self) { try store.deleteAll() }
+            // The rows are deleted, but the WAL still holds the title, so the deletion is not done.
+            #expect(try store.segmentCount() == 0)
+            #expect(contains("SECRET-TITLE", store, "-wal"))
+            try release()
+            try store.deleteAll()
+        }
+        #expect(!contains("SECRET-TITLE", store, "") && !contains("SECRET-TITLE", store, "-wal"))
+    }
+
+    /// A reader that began after the deletion lets every frame be copied, but it still keeps the WAL, which holds the
+    /// deleted title, from being truncated.
+    @Test func aCheckpointThatCannotTruncateTheWALIsAFailure() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("com.secret.app", 0, 600, title: "SECRET-TITLE"))
+        try store.deleteData(from: t0, to: t0 + 600)
+        try withReader(on: store) { release in
+            #expect(throws: StoreError.self) { try store.checkpoint() }
+            #expect(contains("SECRET-TITLE", store, "-wal"))
+            try release()
+            try store.checkpoint()
+        }
+        #expect(!contains("SECRET-TITLE", store, "") && !contains("SECRET-TITLE", store, "-wal"))
+    }
+
+    enum Removal: CaseIterable { case idleRetraction, deleteToday, deleteAll }
+
+    /// A removal whose checkpoint a reader blocks stays queued, with its error shown, and the retry after the reader
+    /// ends removes the text from the database and its WAL.
+    @Test(arguments: Removal.allCases)
+    func aRemovalWhoseCheckpointIsBlockedStaysQueuedUntilItCompletes(_ removal: Removal) throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        var writes = PendingWrites()
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        try withReader(on: store) { release in
+            writes.save(segment("com.google.Chrome", 0, 120, title: "SECRET-TITLE", url: "https://secret.example.com/plan"), to: store)
+            #expect(writes.failure == nil)
+            switch removal {
+            case .idleRetraction: writes.retract(since: t0, until: t0 + 200, in: store)
+            case .deleteToday: writes.deleteDay(containing: t0 + 200, calendar: utc, in: store)
+            case .deleteAll: writes.deleteAll(in: store)
+            }
+            #expect(writes.failure != nil && writes.hasPendingDeletion)
+            #expect(contains("SECRET-TITLE", store, "-wal"))
+            try release()
+            let drained = writes.retry(store)
+            #expect(drained && writes.failure == nil && writes.isEmpty)
+        }
+        #expect(try store.segmentCount() == 0)
+        for suffix in ["", "-wal"] {
+            #expect(!contains("SECRET-TITLE", store, suffix) && !contains("secret.example.com", store, suffix), "activity.sqlite\(suffix)")
+        }
     }
 }
 

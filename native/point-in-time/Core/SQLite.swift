@@ -65,6 +65,16 @@ final class SQLiteConnection {
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { throw error() }
     }
 
+    /// Copies the WAL into the database and truncates it, and throws unless that completed. SQLite reports a checkpoint
+    /// that another connection's read blocked in the pragma's result row (busy, log frames, checkpointed frames), not as
+    /// an error, so the row is read and checked.
+    func checkpointTruncatingWAL() throws {
+        let row = try query("PRAGMA wal_checkpoint(TRUNCATE)").first
+        guard let row, row.count == 3, row[0].int == 0, row[1].int == row[2].int else {
+            throw StoreError.sqlite("The WAL checkpoint could not complete because another connection is reading")
+        }
+    }
+
     /// Runs one statement with positional bindings and returns every row as column values.
     @discardableResult
     func query(_ sql: String, _ bindings: [SQLValue] = []) throws -> [[SQLValue]] {

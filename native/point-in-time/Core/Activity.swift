@@ -13,21 +13,16 @@ public struct Activity: Equatable, Sendable {
     public init(bundleID: String, appName: String, windowTitle: String? = nil, url: RedactedURL? = nil) {
         self.bundleID = bundleID
         self.appName = appName
-        self.windowTitle = Activity.normalizedTitle(windowTitle)
+        self.windowTitle = Segment.boundedTitle(windowTitle)
         self.url = url
     }
 
-    /// Window titles are trimmed and capped at 300 characters, and at `maxTitleBytes` of UTF-8, which is what SQLite
-    /// stores. A character count alone does not bound storage: one character can carry any number of combining marks.
+    /// Window titles are trimmed and capped at 300 characters, and at `maxTitleBytes` of UTF-8 (see `Segment`). A
+    /// character count alone does not bound the stored text: one character can carry any number of combining marks.
     public static let maxTitleLength = 300
-    /// Four bytes per character, so a 300-character title of single-scalar characters (CJK included) is never shortened.
+    /// pointInTime's own limit, four bytes per character, so a 300-character title of single-scalar characters (CJK
+    /// included) is never shortened.
     public static let maxTitleBytes = 1_200
-
-    static func normalizedTitle(_ title: String?) -> String? {
-        guard let title else { return nil }
-        let bounded = title.trimmingCharacters(in: .whitespacesAndNewlines).boundedPrefix(characters: maxTitleLength, utf8Bytes: maxTitleBytes)
-        return bounded.isEmpty ? nil : bounded
-    }
 }
 
 extension String {
@@ -61,7 +56,7 @@ public struct RedactedURL: Equatable, Sendable {
     public static let maxPathBytes = 512
 
     /// Returns nil for anything that is not an http(s) URL with a host of at most `maxHostBytes`, such as `file:`,
-    /// `about:`, or extension pages. The path is capped at `maxPathBytes` of UTF-8 on a character boundary.
+    /// `about:`, or extension pages. The path is capped at `maxPathBytes` (see `boundedPath`).
     public init?(_ raw: String) {
         guard let components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
@@ -69,14 +64,39 @@ public struct RedactedURL: Equatable, Sendable {
         self.scheme = scheme
         self.host = host
         let path = components.percentEncodedPath
-        self.path = path.isEmpty ? "/" : path.boundedPrefix(utf8Bytes: Self.maxPathBytes)
+        self.path = path.isEmpty ? "/" : Self.boundedPath(path)
     }
 
-    /// Rebuilds a URL the store already reduced. Internal so no caller can bypass the reduction above.
+    /// Rebuilds a URL the store already reduced. Internal so no caller can bypass the reduction above; the bounds are
+    /// applied again, which leaves a reduced URL unchanged.
     init(scheme: String, host: String, path: String) {
         self.scheme = scheme
-        self.host = host
-        self.path = path
+        self.host = host.boundedPrefix(utf8Bytes: Self.maxHostBytes)
+        self.path = Self.boundedPath(path)
+    }
+
+    /// The longest prefix of a percent-encoded path within `maxPathBytes` that ends on a whole character, never inside
+    /// a `%HH` escape, and never inside the escapes of one UTF-8 sequence, so it stays a valid path that reparses to
+    /// itself and decodes to whole characters. A path within the limit is returned unchanged.
+    static func boundedPath(_ path: String) -> String {
+        var bytes = Array(path.boundedPrefix(utf8Bytes: maxPathBytes).utf8)
+        guard bytes.count < path.utf8.count else { return path }
+        // A `%` or `%H` whose escape was cut.
+        if let percent = bytes.suffix(2).lastIndex(of: UInt8(ascii: "%")) { bytes.removeSubrange(percent...) }
+        // The escapes at the end, last first, and the bytes they encode.
+        var escapes: [(start: Int, byte: UInt8)] = []
+        var end = bytes.count
+        while end >= 3, bytes[end - 3] == UInt8(ascii: "%"), let byte = UInt8(String(decoding: bytes[(end - 2)..<end], as: UTF8.self), radix: 16) {
+            escapes.append((end - 3, byte))
+            end -= 3
+        }
+        // Drop a UTF-8 sequence whose lead byte has fewer escapes after it than the sequence needs.
+        for (index, escape) in escapes.enumerated() where escape.byte & 0xC0 != 0x80 {
+            let length = escape.byte < 0x80 ? 1 : escape.byte >= 0xF0 ? 4 : escape.byte >= 0xE0 ? 3 : 2
+            if length > index + 1 { bytes.removeSubrange(escape.start...) }
+            break
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     public var string: String { "\(scheme)://\(host)\(path)" }
@@ -96,14 +116,17 @@ public enum GapReason: String, Sendable {
 }
 
 /// A contiguous stretch of one activity. Excluded segments carry no app identity, title, or URL.
+///
+/// A segment bounds its own text, whoever builds it: the content is set only by `init`, which applies the bounds, so
+/// no later assignment can hold an unbounded title or identity, and every `RedactedURL` is bounded by its own init.
 public struct Segment: Equatable, Sendable {
     public var start: Date
     public var end: Date
-    public var excluded: Bool
-    public var bundleID: String?
-    public var appName: String?
-    public var windowTitle: String?
-    public var url: RedactedURL?
+    public private(set) var excluded: Bool
+    public private(set) var bundleID: String?
+    public private(set) var appName: String?
+    public private(set) var windowTitle: String?
+    public private(set) var url: RedactedURL?
 
     /// The app's bundle metadata sets both identity fields, so each is capped at `maxIdentityBytes` of UTF-8 here, after
     /// `CapturePolicy` has matched exclusions against the full bundle ID.
@@ -114,10 +137,24 @@ public struct Segment: Equatable, Sendable {
         self.start = start
         self.end = end
         self.excluded = excluded
-        self.bundleID = excluded ? nil : bundleID?.boundedPrefix(utf8Bytes: Self.maxIdentityBytes)
-        self.appName = excluded ? nil : appName?.boundedPrefix(utf8Bytes: Self.maxIdentityBytes)
-        self.windowTitle = excluded ? nil : windowTitle
+        self.bundleID = excluded ? nil : Self.boundedIdentity(bundleID)
+        self.appName = excluded ? nil : Self.boundedIdentity(appName)
+        self.windowTitle = excluded ? nil : Self.boundedTitle(windowTitle)
         self.url = excluded ? nil : url
+    }
+
+    /// A title trimmed and cut to whole characters within `Activity.maxTitleLength` and `Activity.maxTitleBytes`, or nil
+    /// when nothing remains. Trimming again after the cut makes this idempotent, so a stored title reads back unchanged.
+    static func boundedTitle(_ title: String?) -> String? {
+        guard let title else { return nil }
+        let bounded = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .boundedPrefix(characters: Activity.maxTitleLength, utf8Bytes: Activity.maxTitleBytes)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return bounded.isEmpty ? nil : bounded
+    }
+
+    static func boundedIdentity(_ text: String?) -> String? {
+        text?.boundedPrefix(utf8Bytes: maxIdentityBytes)
     }
 
     public var duration: TimeInterval { max(0, end.timeIntervalSince(start)) }

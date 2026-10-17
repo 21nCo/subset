@@ -35,6 +35,28 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(url.path.utf8.count == RedactedURL.maxPathBytes)
         #expect(RedactedURL("https://example.com/caf%C3%A9")?.path == "/caf%C3%A9")
     }
+
+    /// Characters with 1-, 2-, 3- and 4-byte UTF-8 encodings, and a literal percent sign.
+    private static let escaped = ["\u{E9}", "\u{20AC}", "\u{1F600}", "%"]
+
+    /// Pads the path so the 512-byte cut falls before, inside, and after the escapes of each character.
+    @Test(arguments: escaped, 497...512)
+    func pathCutsKeepWholeEscapesAndWholeCharacters(_ character: String, _ padding: Int) throws {
+        let pieces = ["/"] + Array(repeating: "a", count: padding) + [character] + Array(repeating: "b", count: 20)
+        let encoded = pieces.map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }
+        // The expected path: the longest run of whole pieces within the limit, computed apart from the implementation.
+        var expected = ""
+        for piece in encoded {
+            guard expected.utf8.count + piece.utf8.count <= RedactedURL.maxPathBytes else { break }
+            expected += piece
+        }
+        let url = try #require(RedactedURL("https://example.com" + encoded.joined() + "?q=secret#frag"))
+        #expect(url.path == expected)
+        #expect(url.path.utf8.count <= RedactedURL.maxPathBytes)
+        #expect(url.path.removingPercentEncoding != nil)
+        #expect(RedactedURL(url.string)?.path == url.path)
+        #expect(!url.string.contains("secret") && !url.string.contains("frag"))
+    }
 }
 
 @Suite struct PolicyTests {
@@ -76,9 +98,22 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         let stored = Activity(bundleID: "a", appName: "A", windowTitle: title).windowTitle
         #expect(stored.map { Array($0) } == (keptCharacters == 0 ? nil : Array(title.prefix(keptCharacters))), "\(name)")
         #expect((stored?.utf8.count ?? 0) <= Activity.maxTitleBytes, "\(name)")
-        // Re-segmenting the stored text gives the same characters: nothing ends in a split scalar or a cut combining run.
-        #expect(stored.map { String($0).count } == stored.map { Array($0).count }, "\(name)")
         if keptCharacters == title.count { #expect(stored == title, "\(name)") }
+    }
+
+    /// A segment bounds its own text however it is built, so a caller that skips `Activity` stores no more.
+    @Test func segmentsBoundTheirOwnTitle() throws {
+        let marks = String(repeating: "\u{0301}", count: 100_000)
+        func title(_ raw: String) -> String? {
+            Segment(start: t0, end: t0 + 5, excluded: false, bundleID: "a", appName: "A", windowTitle: raw, url: nil).windowTitle
+        }
+        #expect(title("a" + marks) == nil)
+        #expect(title("  Report" + marks) == "Repor")
+        #expect(title(String(repeating: "\u{8A9E}", count: 400)) == String(repeating: "\u{8A9E}", count: 300))
+        #expect(title("  Quarterly report \u{2013} draft  ") == "Quarterly report \u{2013} draft")
+        // Trimming after the cut leaves no trailing space, so bounding a bounded title changes nothing.
+        let cut = try #require(title(String(repeating: "x", count: 299) + " y"))
+        #expect(cut == String(repeating: "x", count: 299) && Segment.boundedTitle(cut) == cut)
     }
 
     @Test func appIdentityIsBoundedAfterExclusionsMatchTheFullBundleID() throws {

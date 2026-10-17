@@ -77,13 +77,8 @@ public final class ActivityStore: @unchecked Sendable {
                     try rebuildBlocks(from: segment.start, to: Date(timeIntervalSince1970: previousEnd))
                     return
                 }
-                try connection.query("""
-                    INSERT INTO segments (start, end, excluded, bundle_id, app_name, window_title, url_scheme, url_host, url_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(start) DO UPDATE SET end = excluded.end
-                    """, [.real(start), .real(end), .integer(segment.excluded ? 1 : 0),
-                          SQLValue(segment.bundleID), SQLValue(segment.appName), SQLValue(segment.windowTitle),
-                          SQLValue(segment.url?.scheme), SQLValue(segment.url?.host), SQLValue(segment.url?.path)])
+                try connection.query("INSERT INTO segments (\(Self.segmentColumns)) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(start) DO UPDATE SET end = excluded.end",
+                                     Self.bindings(for: segment))
                 // A shorter end (idle retracting flushed time) must clear the buckets past it as well.
                 let from = previousEnd.map { Date(timeIntervalSince1970: min($0, end)) } ?? segment.start
                 let to = Date(timeIntervalSince1970: max(previousEnd ?? end, end))
@@ -120,20 +115,24 @@ public final class ActivityStore: @unchecked Sendable {
         }
     }
 
-    /// Deletes all captured data and compacts the file so deleted pages do not linger in the database or its WAL.
+    /// Deletes all captured data and compacts the file so deleted pages do not linger in the database or its WAL. Throws
+    /// when a checkpoint could not complete (see `checkpoint`); running it again finishes the job.
     public func deleteAll() throws {
         try locked {
             try connection.transaction {
                 try connection.execute("DELETE FROM segments; DELETE FROM blocks;")
             }
-            try connection.execute("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            try connection.checkpointTruncatingWAL()
+            try connection.execute("VACUUM;")
+            try connection.checkpointTruncatingWAL()
         }
     }
 
     /// Copies the WAL into the database and truncates it. With `secure_delete` on, deleted rows are then gone from both
-    /// files; the menu calls this after a user-requested deletion.
+    /// files; capture calls this after every idle retraction and Delete Today. Throws when another connection's read
+    /// kept the checkpoint from completing, so the removal stays queued and is retried.
     public func checkpoint() throws {
-        try locked { try connection.execute("PRAGMA wal_checkpoint(TRUNCATE);") }
+        try locked { try connection.checkpointTruncatingWAL() }
     }
 
     // MARK: Reading
@@ -186,12 +185,16 @@ public final class ActivityStore: @unchecked Sendable {
 
     private func insert(_ segment: Segment) throws {
         guard segment.duration > 0 else { return }
-        try connection.query("""
-            INSERT OR REPLACE INTO segments (start, end, excluded, bundle_id, app_name, window_title, url_scheme, url_host, url_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [.real(segment.start.timeIntervalSince1970), .real(segment.end.timeIntervalSince1970), .integer(segment.excluded ? 1 : 0),
-                  SQLValue(segment.bundleID), SQLValue(segment.appName), SQLValue(segment.windowTitle),
-                  SQLValue(segment.url?.scheme), SQLValue(segment.url?.host), SQLValue(segment.url?.path)])
+        try connection.query("INSERT OR REPLACE INTO segments (\(Self.segmentColumns)) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", Self.bindings(for: segment))
+    }
+
+    /// The values for `segmentColumns`, used by every segment write. The text goes through `Segment`'s bounds again, which
+    /// leaves a segment's own text unchanged, so the store never writes more than those bounds allow.
+    private static func bindings(for segment: Segment) -> [SQLValue] {
+        let url = segment.url.map { RedactedURL(scheme: $0.scheme, host: $0.host, path: $0.path) }
+        return [.real(segment.start.timeIntervalSince1970), .real(segment.end.timeIntervalSince1970), .integer(segment.excluded ? 1 : 0),
+                SQLValue(Segment.boundedIdentity(segment.bundleID)), SQLValue(Segment.boundedIdentity(segment.appName)),
+                SQLValue(Segment.boundedTitle(segment.windowTitle)), SQLValue(url?.scheme), SQLValue(url?.host), SQLValue(url?.path)]
     }
 
     /// Recomputes every bucket touched by `[from, to)` from the stored segments. Only buckets that a stored segment or
