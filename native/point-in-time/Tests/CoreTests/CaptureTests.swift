@@ -367,9 +367,9 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(titleOnly("Notes — Project plan", readsTitles: false).title == nil)
     }
 
-    private func kept(_ bundleID: String, title: String, scriptable: Bool = false, opensWebURLs: Bool? = true,
+    private func kept(_ bundleID: String, title: String, opensWebURLs: Bool? = true,
                       report: BrowserWindowReport = .unconfirmed) -> (title: String?, url: RedactedURL?) {
-        let support = BrowserSupport.forApp(bundleID, scriptable: scriptable, opensWebURLs: opensWebURLs)
+        let support = BrowserSupport.forApp(bundleID, opensWebURLs: opensWebURLs)
         return WindowPrivacy.reduce(focusedTitle: title, readsTitles: true, support: support, report: report, privateTitles: titles)
     }
 
@@ -378,7 +378,7 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         let titles = ["Example Domain – Privater Modus", "Example Domain — Navigation privée", "Example Domain — Mozilla Firefox"]
         for bundleID in ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "org.mozilla.firefoxbeta"] {
             // Known even when the Info.plist reports no web URL scheme.
-            #expect(BrowserSupport.forApp(bundleID, scriptable: false, opensWebURLs: false) == .appOnly, "\(bundleID)")
+            #expect(BrowserSupport.forApp(bundleID, opensWebURLs: false) == .appOnly, "\(bundleID)")
             for title in titles {
                 let result = kept(bundleID, title: title, report: .normal(title: title, url: query))
                 #expect(result.title == nil && result.url == nil, "\(title)")
@@ -394,7 +394,7 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         for bundleID in ["com.google.Chrome.canary", "com.google.Chrome.beta", "com.microsoft.edgemac.Beta", "org.chromium.Chromium",
                          "com.operasoftware.Opera", "com.kagi.kagimacOS", "com.duckduckgo.macos.browser"] {
             for opens in [true, false, nil] as [Bool?] {
-                #expect(BrowserSupport.forApp(bundleID, scriptable: false, opensWebURLs: opens) == .appOnly, "\(bundleID)")
+                #expect(BrowserSupport.forApp(bundleID, opensWebURLs: opens) == .appOnly, "\(bundleID)")
             }
             #expect(kept(bundleID, title: incognito).title == nil)
         }
@@ -405,10 +405,10 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
 
     @Test func safariAndAppsThatAreNotBrowsersKeepTheirTitles() {
         // Safari opens web URLs but keeps titles, minus its private-window titles.
-        #expect(BrowserSupport.forApp(BrowserSupport.safari, scriptable: false, opensWebURLs: true) == .titleOnly)
+        #expect(BrowserSupport.forApp(BrowserSupport.safari, opensWebURLs: true) == .titleOnly)
         #expect(kept(BrowserSupport.safari, title: "Example Domain").title == "Example Domain")
         #expect(kept(BrowserSupport.safari, title: "Example Domain, Private Browsing").title == nil)
-        #expect(BrowserSupport.forApp("com.apple.SafariTechnologyPreview", scriptable: false, opensWebURLs: true) == .appOnly)
+        #expect(BrowserSupport.forApp("com.apple.SafariTechnologyPreview", opensWebURLs: true) == .appOnly)
         let notes = kept("com.apple.TextEdit", title: "Project plan.rtf", opensWebURLs: false)
         #expect(notes.title == "Project plan.rtf" && notes.url == nil)
     }
@@ -416,9 +416,22 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     @Test func listedChromiumWithoutAutomationKeepsOnlyTheApp() {
         // Without Automation the reader sends no events and its report stays unconfirmed; the Accessibility title is
         // never used for a listed Chromium browser, so a localized incognito title is not kept either.
-        #expect(BrowserSupport.forApp("com.google.Chrome", scriptable: true, opensWebURLs: true) == .scriptable)
-        let result = kept("com.google.Chrome", title: "Neuer Tab – Inkognito", scriptable: true)
+        #expect(BrowserSupport.forApp("com.google.Chrome", opensWebURLs: true) == .scriptable)
+        let result = kept("com.google.Chrome", title: "Neuer Tab – Inkognito")
         #expect(result.title == nil && result.url == nil)
+    }
+
+    @Test func onlyTheListedChromiumBrowsersAreScriptable() {
+        #expect(Set(BrowserSupport.scriptableChromium.keys) == ["com.google.Chrome", "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser.Browser"])
+        // Vivaldi and Aside answer the same Chromium events but are not on the SET-19 list: app name only, even when a
+        // normal window would report a title and URL, and even if their Info.plist cannot be read or declares no web scheme.
+        for bundleID in ["com.vivaldi.Vivaldi", "at.studio.AsideBrowser"] {
+            for opens in [true, false, nil] as [Bool?] {
+                #expect(BrowserSupport.forApp(bundleID, opensWebURLs: opens) == .appOnly, "\(bundleID)")
+            }
+            let result = kept(bundleID, title: "Example Domain", report: .normal(title: "Example Domain", url: query))
+            #expect(result.title == nil && result.url == nil)
+        }
     }
 
     @Test func webURLSchemesAreReadFromURLTypes() {

@@ -28,6 +28,12 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(folderMode == 0o700)
         #expect(fileMode == 0o600)
         #expect(try store.segmentCount() == 0)
+        // SQLite gives the WAL and shared-memory files the database's mode.
+        try store.save(segment("a", 0, 60, title: "T"))
+        for suffix in ["-wal", "-shm"] {
+            let mode = try FileManager.default.attributesOfItem(atPath: store.databaseURL.path + suffix)[.posixPermissions] as? Int
+            #expect(mode == 0o600, "\(suffix)")
+        }
     }
 
     @Test func refusesToOpenADatabaseWhoseModeCannotBeRestricted() throws {
@@ -235,5 +241,101 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         let wal = (try? Data(contentsOf: URL(fileURLWithPath: store.databaseURL.path + "-wal"))) ?? Data()
         #expect(bytes.range(of: Data("Very private title".utf8)) == nil)
         #expect(wal.range(of: Data("Very private title".utf8)) == nil)
+    }
+}
+
+/// A store whose writes can be made to fail, as a full disk or a locked file would.
+private final class FlakyStorage: CaptureStorage {
+    let store: ActivityStore
+    var failSaves = false, failDeletes = false, failCheckpoints = false
+
+    init(_ store: ActivityStore) { self.store = store }
+
+    private func fail(_ when: Bool) throws { if when { throw StoreError.sqlite("disk I/O error") } }
+    func save(_ segment: Segment) throws { try fail(failSaves); try store.save(segment) }
+    func deleteData(from: Date, to: Date) throws { try fail(failDeletes); try store.deleteData(from: from, to: to) }
+    func checkpoint() throws { try fail(failCheckpoints); try store.checkpoint() }
+    func deleteAll() throws { try fail(failDeletes); try store.deleteAll() }
+}
+
+@Suite struct PendingWritesTests {
+    private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try body(FlakyStorage(try ActivityStore(directory: directory)))
+    }
+
+    @Test func aFailedIdleRetractionIsRetriedUntilTheIdleActivityIsGone() throws {
+        try withStorage { storage in
+            var writes = PendingWrites()
+            // Flushed while the user was in fact away since t0 + 30, then a title change without input closed it.
+            writes.save(segment("com.google.Chrome", 0, 120, title: "Secret plan", url: "https://example.com/secret?q=1"), to: storage)
+            writes.save(segment("com.google.Chrome", 120, 150, title: "Inbox (3)", url: "https://mail.example.com/inbox"), to: storage)
+            #expect(writes.failure == nil)
+
+            // Idle is detected while storage fails: the open segment ends when idle began, and the retraction fails.
+            storage.failSaves = true; storage.failDeletes = true
+            writes.save(segment("com.google.Chrome", 0, 30, title: "Secret plan", url: "https://example.com/secret?q=1"), to: storage)
+            writes.retract(from: t0 + 30, to: t0 + 180, in: storage)
+            #expect(writes.failure != nil)
+
+            // Saves work again but deletion still fails: a later, unrelated save neither runs ahead of the retraction nor
+            // clears the error.
+            storage.failSaves = false
+            writes.save(segment("com.apple.TextEdit", 200, 260, title: "Notes"), to: storage)
+            #expect(writes.failure != nil)
+            #expect(try storage.store.segments(from: t0 + 30, to: t0 + 180).map(\.windowTitle) == ["Inbox (3)"])
+            #expect(try storage.store.segments(from: t0 + 200, to: t0 + 260).isEmpty)
+
+            // The checkpoint failing after a successful delete keeps the retraction queued as well.
+            storage.failDeletes = false; storage.failCheckpoints = true
+            let stillFailing = writes.retry(storage)
+            #expect(!stillFailing)
+            storage.failCheckpoints = false
+            let drained = writes.retry(storage)
+            #expect(drained)
+            #expect(writes.failure == nil && writes.isEmpty)
+
+            let stored = try storage.store.segments(from: .distantPast, to: .distantFuture)
+            #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 30], [200, 260]])
+            let blocks = try storage.store.blocks(from: .distantPast, to: .distantFuture)
+            #expect(blocks.map { [$0.start.timeIntervalSince(t0), $0.activeSeconds] } == [[0, 30], [180, 60]])
+            for suffix in ["", "-wal"] {
+                let bytes = (try? Data(contentsOf: URL(fileURLWithPath: storage.store.databaseURL.path + suffix))) ?? Data()
+                #expect(bytes.range(of: Data("Inbox (3)".utf8)) == nil && bytes.range(of: Data("mail.example.com".utf8)) == nil, "\(suffix)")
+            }
+        }
+    }
+
+    @Test func aFailedSaveIsKeptAndRetriedWithItsNewestEnd() throws {
+        try withStorage { storage in
+            var writes = PendingWrites()
+            storage.failSaves = true
+            writes.save(segment("a", 0, 60, title: "Draft"), to: storage)
+            writes.save(segment("a", 0, 90, title: "Draft"), to: storage)
+            writes.save(segment("b", 90, 120), to: storage)
+            #expect(writes.failure != nil)
+            storage.failSaves = false
+            let drained = writes.retry(storage)
+            #expect(drained)
+            let stored = try storage.store.segments(from: .distantPast, to: .distantFuture)
+            #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 90], [90, 120]])
+        }
+    }
+
+    @Test func deleteAllDropsQueuedWritesSoNothingComesBack() throws {
+        try withStorage { storage in
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60, title: "Kept until deleted"), to: storage)
+            storage.failSaves = true; storage.failDeletes = true
+            writes.save(segment("a", 0, 120, title: "Kept until deleted"), to: storage)
+            writes.deleteAll(in: storage)
+            #expect(writes.failure != nil)
+            storage.failSaves = false; storage.failDeletes = false
+            let drained = writes.retry(storage)
+            #expect(drained)
+            let remaining = try storage.store.segmentCount()
+            #expect(remaining == 0)
+        }
     }
 }

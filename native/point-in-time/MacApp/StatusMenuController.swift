@@ -142,7 +142,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func confirmDelete(all: Bool) {
-        guard let store else { return }
+        guard store != nil else { return }
         let alert = NSAlert()
         alert.messageText = all ? "Delete all captured activity?" : "Delete today’s captured activity?"
         alert.informativeText = all
@@ -153,18 +153,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         alert.buttons.first?.hasDestructiveAction = true
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        // End the open segment first so it cannot be written back after deletion.
-        capture.endSegment()
-        do {
-            if all { try store.deleteAll() }
-            else {
-                try store.deleteData(from: Calendar.current.startOfDay(for: Date()), to: .distantFuture)
-                try store.checkpoint()
-            }
-        } catch {
+        if let error = capture.deleteActivity(all: all) {
             let failure = NSAlert()
-            failure.messageText = "Could not delete activity"
-            failure.informativeText = String(describing: error)
+            failure.messageText = "Could not delete activity yet"
+            failure.informativeText = "pointInTime keeps retrying the deletion and shows the error in its menu until it succeeds.\n\n\(error)"
             failure.runModal()
         }
     }

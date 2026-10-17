@@ -19,20 +19,14 @@ enum AccessibilityAccess {
     }
 }
 
-/// Chromium browsers, whose active tab URL is read over Apple Events once the window's `mode` reads `normal`. Safari
-/// is title-only: its dictionary has no private-window property, so its URLs are not read (see the README).
+/// The Chromium browsers SET-19 lists (`BrowserSupport.scriptableChromium`), whose active tab URL is read over Apple
+/// Events once the window's `mode` reads `normal`. Safari is title-only: its dictionary has no private-window property, so its URLs are not read (see the README).
 struct SupportedBrowser: Hashable, Sendable {
     let bundleID: String
     let name: String
 
-    static let all: [SupportedBrowser] = [
-        SupportedBrowser(bundleID: "com.google.Chrome", name: "Google Chrome"),
-        SupportedBrowser(bundleID: "com.brave.Browser", name: "Brave"),
-        SupportedBrowser(bundleID: "com.microsoft.edgemac", name: "Microsoft Edge"),
-        SupportedBrowser(bundleID: "company.thebrowser.Browser", name: "Arc"),
-        SupportedBrowser(bundleID: "com.vivaldi.Vivaldi", name: "Vivaldi"),
-        SupportedBrowser(bundleID: "at.studio.AsideBrowser", name: "Aside")
-    ]
+    static let all: [SupportedBrowser] = BrowserSupport.scriptableChromium.map { SupportedBrowser(bundleID: $0.key, name: $0.value) }
+        .sorted { $0.name < $1.name }
 
     static func matching(_ bundleID: String) -> SupportedBrowser? { all.first { $0.bundleID == bundleID } }
 
@@ -150,7 +144,7 @@ final class ActivityReader: @unchecked Sendable {
     func read(pid: pid_t, bundleID: String, bundleURL: URL?, readTitle: Bool, completion: @escaping @Sendable (Result) -> Void) {
         queue.async { [self] in
             let browser = SupportedBrowser.matching(bundleID)
-            let support = BrowserSupport.forApp(bundleID, scriptable: browser != nil, opensWebURLs: opensWebURLs(bundleURL))
+            let support = BrowserSupport.forApp(bundleID, opensWebURLs: opensWebURLs(bundleURL))
             // Other browsers keep the app name only, and a scriptable browser's title comes from its report.
             let title = readTitle && support == .titleOnly ? focusedWindowTitle(pid: pid) : nil
             var report = BrowserWindowReport.unconfirmed

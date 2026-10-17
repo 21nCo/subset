@@ -25,21 +25,29 @@ public enum BrowserSupport: Sendable, Equatable {
     ]
 
     /// Browsers known to be app name only even if their Info.plist cannot be read: Chromium channels and builds that
-    /// are not listed, and other browsers. Any app declaring the `http` or `https` URL scheme is app name only as well.
+    /// are not listed (only Chrome, Brave, Edge, and Arc are scriptable), and other browsers. Any app declaring the `http` or `https` URL scheme is app name only as well.
     public static let knownBrowsers: Set<String> = firefoxFamily.union([
         "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary", "org.chromium.Chromium",
         "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary",
         "com.operasoftware.Opera", "com.operasoftware.OperaGX", "com.operasoftware.OperaAir", "com.kagi.kagimacOS",
         "com.duckduckgo.macos.browser", "com.apple.SafariTechnologyPreview", "ru.yandex.desktop.yandex-browser",
-        "com.naver.Whale", "com.sigmaos.sigmaos.macos"
+        "com.naver.Whale", "com.sigmaos.sigmaos.macos", "com.vivaldi.Vivaldi", "at.studio.AsideBrowser"
     ])
 
-    /// How to read the app with `bundleID`. `scriptable` when it is a listed Chromium browser whose window mode the host
-    /// reads over Apple Events; `opensWebURLs` when the app declares the `http` or `https` URL scheme, or nil when its
-    /// Info.plist could not be read, which counts as a browser. Safari keeps its titles; every other browser keeps only
-    /// its name.
-    public static func forApp(_ bundleID: String, scriptable: Bool, opensWebURLs: Bool?) -> BrowserSupport {
-        if scriptable { return .scriptable }
+    /// The Chromium browsers SET-19 lists, by bundle ID with their display names: the only browsers whose window mode,
+    /// title, and URL are read over Apple Events. Every other Chromium browser (Vivaldi, Aside, other channels) is
+    /// app name only.
+    public static let scriptableChromium: [String: String] = [
+        "com.google.Chrome": "Google Chrome", "com.brave.Browser": "Brave", "com.microsoft.edgemac": "Microsoft Edge",
+        "company.thebrowser.Browser": "Arc"
+    ]
+
+    /// How to read the app with `bundleID`. `scriptable` for the listed Chromium browsers, whose window mode the host
+    /// reads over Apple Events; `opensWebURLs` is whether the app declares the `http` or `https` URL scheme, or nil when
+    /// its Info.plist could not be read, which counts as a browser. Safari keeps its titles; every other browser keeps
+    /// only its name.
+    public static func forApp(_ bundleID: String, opensWebURLs: Bool?) -> BrowserSupport {
+        if scriptableChromium[bundleID] != nil { return .scriptable }
         if bundleID == safari { return .titleOnly }
         if opensWebURLs != false || knownBrowsers.contains(bundleID) || bundleID.hasPrefix("org.mozilla.firefox") { return .appOnly }
         return .titleOnly

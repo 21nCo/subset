@@ -14,13 +14,17 @@ final class CaptureController {
     }
 
     private(set) var state: State = .off
-    private(set) var lastError: String?
+    /// A store write that has not succeeded yet, or why the store could not be opened. A failed write stays queued and
+    /// is retried on every tick, and the error stays visible until it succeeds.
+    var lastError: String? { writes.failure ?? storeError }
     /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action. Kept current while
     /// paused or off as well, so the menu never names an app that is no longer in front.
     private(set) var lastForeignApp: (bundleID: String, name: String)?
 
     private let settings: CaptureSettings
     private let store: ActivityStore?
+    private let storeError: String?
+    private var writes = PendingWrites()
     private let reader = ActivityReader()
     private var sequencer = CaptureSequencer(recorder: SegmentRecorder(maxSampleInterval: CaptureController.sampleInterval * 6))
     private var timer: Timer?
@@ -38,7 +42,7 @@ final class CaptureController {
     init(settings: CaptureSettings, store: ActivityStore?, storeError: String?) {
         self.settings = settings
         self.store = store
-        self.lastError = storeError
+        self.storeError = storeError
     }
 
     func start() {
@@ -76,6 +80,7 @@ final class CaptureController {
 
     func tick() {
         let now = Date()
+        if !writes.isEmpty { write { $0.retry($1) } }
         let front = NSWorkspace.shared.frontmostApplication
         if let front, let bundleID = front.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier, bundleID != "com.apple.loginwindow" {
             lastForeignApp = (bundleID, front.localizedName ?? bundleID)
@@ -128,17 +133,20 @@ final class CaptureController {
 
     /// Ends recording when idle began and removes anything stored after that: the flushed part of the open segment,
     /// and segments that closed while the user was away because a title or app changed without input. The WAL is then
-    /// checkpointed, so the retracted titles and URLs do not linger in it.
+    /// checkpointed, so the retracted titles and URLs do not linger in it. A failed retraction stays queued and is
+    /// retried on later ticks.
     private func retractIdleTime(since idleStart: Date, until now: Date) {
         endSegment(at: idleStart)
-        guard let store, now > idleStart else { return }
-        do {
-            try store.deleteData(from: idleStart, to: now)
-            try store.checkpoint()
-        } catch {
-            lastError = String(describing: error)
-            onStateChange?()
-        }
+        write { $0.retract(from: idleStart, to: now, in: $1) }
+    }
+
+    /// Deletes today's or all captured activity after ending the open segment, so it cannot be written back. Returns
+    /// the error when the deletion could not run yet; it stays queued and is retried on later ticks.
+    func deleteActivity(all: Bool) -> String? {
+        endSegment()
+        if all { write { $0.deleteAll(in: $1) } }
+        else { write { $0.retract(from: Calendar.current.startOfDay(for: Date()), to: .distantFuture, in: $1) } }
+        return writes.failure
     }
 
     /// Saves segments that closed and, at most once a minute, the open one.
@@ -151,14 +159,14 @@ final class CaptureController {
     }
 
     private func persist(_ segment: Segment) {
+        write { $0.save(segment, to: $1) }
+    }
+
+    private func write(_ body: (inout PendingWrites, CaptureStorage) -> Bool) {
         guard let store else { return }
-        do {
-            try store.save(segment)
-            if lastError != nil { lastError = nil; onStateChange?() }
-        } catch {
-            lastError = String(describing: error)
-            onStateChange?()
-        }
+        let before = writes.failure
+        _ = body(&writes, store)
+        if writes.failure != before { onStateChange?() }
     }
 
     private func refreshState(now: Date = Date()) {
