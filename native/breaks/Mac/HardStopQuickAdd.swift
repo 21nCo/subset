@@ -249,8 +249,9 @@ extension BreakSettings {
     /// Saves `stop`, replacing the stop with its id, or adding it at the end when `isNew`, only when the settings are
     /// then free of errors for it. Returns those errors (for the stop and for the whole list) and leaves the settings
     /// unchanged when there are any. An edit of a stop that is gone (deleted, or a one-off stop that ran) is not
-    /// saved, so its occurrence does not run again.
-    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date, calendar: Calendar) -> [HardStopFieldError] {
+    /// saved, so its occurrence does not run again. `inProgress` holds the keys of the stop's occurrences in progress,
+    /// which a one-off stop may keep after their own time has passed (`hardStopErrors`).
+    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date, calendar: Calendar, inProgress: Set<Int> = []) -> [HardStopFieldError] {
         var next = self
         if let index = next.hardStops.firstIndex(where: { $0.id == stop.id }) {
             next.hardStops[index] = stop
@@ -259,7 +260,8 @@ extension BreakSettings {
         } else {
             return [.init(stopID: stop.id, field: .list, message: "This hard stop was deleted or has already run.")]
         }
-        let errors = next.hardStopErrors(now: now, calendar: calendar).filter { $0.stopID == nil || $0.stopID == stop.id }
+        let errors = next.hardStopErrors(now: now, calendar: calendar, inProgress: [stop.id: inProgress])
+            .filter { $0.stopID == nil || $0.stopID == stop.id }
         if errors.isEmpty { self = next }
         return errors
     }
@@ -272,16 +274,29 @@ extension BreakScheduler {
     /// it. Such a stop keeps its occurrence as it is when edited or turned off; the change applies after it
     /// (`updateHardStops`).
     func isHardStopInProgress(id: UUID, now: Date) -> Bool {
-        if snapshot.hardStopsWaitingForCall[id.uuidString] != nil { return true }
-        guard let active = activeHardStop(now: now) else { return false }
-        return active.id == id || active.merged.contains { $0.id == id }
+        !inProgressOccurrenceKeys(of: id, now: now).isEmpty
     }
 
-    /// Saves a new or edited stop as `BreakSettings.saveHardStop` validates it, and applies it with `updateHardStops`.
-    /// Returns the errors, and changes nothing when there are any, and the events of applying it.
+    /// The keys of the occurrences of the stop with `id` that are in progress at `now` (`isHardStopInProgress`).
+    private func inProgressOccurrenceKeys(of id: UUID, now: Date) -> Set<Int> {
+        let active = activeHardStop(now: now)
+        return Set([active?.id == id ? active?.occurrenceKey : nil, snapshot.hardStopsWaitingForCall[id.uuidString]].compactMap { $0 }
+            + (active?.merged.filter { $0.id == id }.map(\.occurrenceKey) ?? []))
+    }
+
+    /// The errors saving `stop` at `now` gives (`saveHardStop`); nothing changes. A one-off stop in progress may keep the
+    /// date and time of its occurrence in progress after that time has passed, so it can be renamed or edited until the
+    /// running stop ends.
+    func hardStopErrors(saving stop: HardStop, isNew: Bool, now: Date) -> [HardStopFieldError] {
+        var next = settings
+        return next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: inProgressOccurrenceKeys(of: stop.id, now: now))
+    }
+
+    /// Saves a new or edited stop as `hardStopErrors` validates it, and applies it with `updateHardStops`. Returns the
+    /// errors, and changes nothing when there are any, and the events of applying it.
     mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date) -> (errors: [HardStopFieldError], events: [Event]) {
         var next = settings
-        let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar)
+        let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: inProgressOccurrenceKeys(of: stop.id, now: now))
         guard errors.isEmpty else { return (errors, []) }
         return ([], updateHardStops(next.hardStops, now: now))
     }
@@ -297,10 +312,8 @@ extension BreakScheduler {
     /// For the editor and the row of a stop that is in progress at `now`: what saving `stop` does. Nil when it is not
     /// in progress.
     func hardStopInProgressNote(saving stop: HardStop, now: Date) -> String? {
-        guard isHardStopInProgress(id: stop.id, now: now) else { return nil }
-        let active = activeHardStop(now: now)
-        let inProgress = Set([active?.id == stop.id ? active?.occurrenceKey : nil, snapshot.hardStopsWaitingForCall[stop.id.uuidString]]
-            .compactMap { $0 } + (active?.merged.filter { $0.id == stop.id }.map(\.occurrenceKey) ?? []))
+        let inProgress = inProgressOccurrenceKeys(of: stop.id, now: now)
+        guard !inProgress.isEmpty else { return nil }
         var saved = self
         guard saved.saveHardStop(stop, isNew: false, now: now).errors.isEmpty,
               case .once(let date) = stop.repeats,

@@ -716,11 +716,13 @@ struct BreakScheduler: Sendable {
 
     /// The occurrence of `stop` that waits for a call, with the rules the stop had when it began to wait (or as
     /// configured, for a wait saved by an earlier build). Its name and on/off switch are the stop's own, as the notice
-    /// and the menu bar show them.
+    /// and the menu bar show them. Saved rules are brought into range as settings are, so a malformed snapshot cannot
+    /// overflow the end or extension arithmetic.
     private func waitingOccurrence(of stop: HardStop) -> (stop: HardStop, occurrence: HardStop.Occurrence)? {
         let id = stop.id.uuidString
         guard let key = snapshot.hardStopsWaitingForCall[id] else { return nil }
         var rules = snapshot.hardStopWaitingRules[id] ?? stop
+        Self.normalize(&rules)
         rules.name = stop.name
         rules.isEnabled = stop.isEnabled
         return rules.occurrence(forKey: key, calendar: calendar).map { (rules, $0) }

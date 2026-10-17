@@ -232,8 +232,7 @@ final class MacBreakController: ObservableObject {
 
     /// The errors saving `stop` now would give; nothing changes.
     func hardStopErrors(saving stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
-        var settings = core.settings
-        return settings.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar)
+        core.hardStopErrors(saving: stop, isNew: isNew, now: now)
     }
 
     /// Saves a new or edited hard stop on the clock `hardStopErrors` uses, unless it has errors, which it returns. A stop

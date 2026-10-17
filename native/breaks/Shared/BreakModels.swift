@@ -552,8 +552,10 @@ extension BreakSettings {
     }
 
     /// Field errors for the hard-stop editor. Empty when every stop can be saved. A one-off stop whose
-    /// occurrence can no longer start at `now` is an error, because the scheduler would remove it.
-    func hardStopErrors(now: Date, calendar: Calendar = .current) -> [HardStopFieldError] {
+    /// occurrence can no longer start at `now` is an error, because the scheduler would remove it, unless that occurrence
+    /// is one of the stop's occurrences in progress (`inProgress`, by stop id): it keeps running, and the scheduler
+    /// removes the stop when it ends.
+    func hardStopErrors(now: Date, calendar: Calendar = .current, inProgress: [UUID: Set<Int>] = [:]) -> [HardStopFieldError] {
         var errors: [HardStopFieldError] = []
         if hardStops.count > HardStop.maximumCount {
             errors.append(.init(field: .list, message: "Add at most \(HardStop.maximumCount) hard stops."))
@@ -591,7 +593,9 @@ extension BreakSettings {
             case .once(let date):
                 if !Self.isCalendarDate(date, calendar: calendar) {
                     fail(.repeats, "Choose a date.")
-                } else if timesAreValid, stop.isExpiredOnce(now: now, calendar: calendar) {
+                } else if timesAreValid, stop.isExpiredOnce(now: now, calendar: calendar),
+                          let year = date.year, let month = date.month, let day = date.day,
+                          inProgress[stop.id]?.contains(HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)) != true {
                     fail(.repeats, "This date and time have passed.")
                 }
             }

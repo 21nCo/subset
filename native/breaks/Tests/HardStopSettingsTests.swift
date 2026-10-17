@@ -1041,6 +1041,49 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(hardStopRecords(scheduler).count, 1)
     }
 
+    func testAOneOffInProgressAfterItsOwnTimeCanStillBeEdited() {
+        // The one-off Walk (12:45 to 13:15) joins Long (12:30 to 13:30), and Big (12:40 to 13:40) joins the running one-off
+        // Lunch (12:30 to 13:00) and moves its end to 13:40. After its own end each can still be renamed or given another
+        // end or escape hatch: the running stop keeps its end and records, and the stop is removed when it ends.
+        let long = stop("Long", end: .after(60 * 60))
+        let walk = stop("Walk", hour: 12, minute: 45, repeats: today)
+        let lunch = stop("Lunch", repeats: today)
+        let big = stop("Big", hour: 12, minute: 40, end: .after(60 * 60))
+        let cases: [(name: String, stops: [HardStop], edited: HardStop, editAt: Date, endsAt: Date)] = [
+            ("joined", [long, walk], walk, at(13, 20), at(13, 30)),
+            ("running, extended by a join", [lunch, big], lunch, at(13, 10), at(13, 40)),
+        ]
+        let edits: [(name: String, edit: (inout HardStop) -> Void)] = [
+            ("name", { $0.name = "Renamed" }),
+            ("end", { $0.end = .after(10 * 60) }),
+            ("escape hatch", { $0.escapeHatch = .dismissEarly }),
+        ]
+        for item in cases {
+            for (field, edit) in edits {
+                let label = "\(item.name), \(field)"
+                var scheduler = makeScheduler(item.stops)
+                _ = run(&scheduler, from: at(12, 29), through: item.editAt)
+                let running = scheduler.snapshot.activeHardStop
+                XCTAssertEqual(running?.endsAt, item.endsAt, label)
+                var edited = item.edited
+                edit(&edited)
+                XCTAssertEqual(scheduler.hardStopErrors(saving: edited, isNew: false, now: item.editAt), [], label)
+                XCTAssertEqual(scheduler.hardStopInProgressNote(saving: edited, now: item.editAt), HardStopText.inProgress, label)
+                // A time moved to one that has passed is judged as any other.
+                XCTAssertEqual(scheduler.hardStopErrors(saving: moved(edited, to: 12, 0), isNew: false, now: item.editAt).map(\.field), [.repeats], label)
+                XCTAssertTrue(scheduler.saveHardStop(edited, isNew: false, now: item.editAt) == ([], []), label)
+                XCTAssertEqual(scheduler.snapshot.activeHardStop, running, label)
+                XCTAssertEqual(scheduler.settings.hardStops.first { $0.id == edited.id }, edited, label)
+
+                let events = run(&scheduler, from: item.editAt, through: at(15, 0))
+                XCTAssertEqual(events.map(\.0), [item.endsAt], label)
+                XCTAssertEqual(events.map(\.1), [.hardStopEnded(id: running?.id ?? UUID(), reason: .ended)], label)
+                XCTAssertEqual(hardStopRecords(scheduler).count, 2, label)
+                XCTAssertEqual(scheduler.settings.hardStops.map(\.id), item.stops.map(\.id).filter { $0 != edited.id }, label)
+            }
+        }
+    }
+
     func testAnEditOfAStopWaitingForACallKeepsTheWaitingOccurrence() throws {
         // Call (12:00 for 2 hours, no escape hatch) waits for the call that runs until 12:40. At 12:21 it is renamed,
         // moved to 12:50, shortened to 30 minutes, set to start anyway, and given an escape hatch.
@@ -1103,6 +1146,36 @@ final class HardStopSettingsTests: XCTestCase {
         events += run(&legacy, from: at(12, 41), through: at(23, 59), inputs: inCall)
         XCTAssertEqual(events.map(\.0), [at(12, 40), at(14, 0)])
         XCTAssertEqual(events.map(\.1), [.hardStopStarted(id: call.id, endsAt: at(14, 0)), .hardStopEnded(id: call.id, reason: .ended)])
+    }
+
+    func testMalformedRulesOfARestoredWaitAreBroughtIntoRange() throws {
+        // Call (12:00 for 2 hours, extend 10 minutes once) waits for the call that runs until 12:40. The rules it waits
+        // with are restored malformed; it starts when the call ends with them brought into range, and can be extended.
+        let call = stop("Call", hour: 12, minute: 0, end: .after(2 * 3600), escapeHatch: .extend(minutes: 10, times: 1), duringCalls: .waitForCallToEnd)
+        let inCall: (Date) -> BreakScheduler.Inputs = { [self] in $0 < at(12, 40) ? .init(signals: [.meeting]) : .init() }
+        let cases: [(name: String, edit: (inout HardStop) -> Void, endsAt: Date, escapeHatch: HardStop.EscapeHatch)] = [
+            ("extension too long", { $0.escapeHatch = .extend(minutes: .max, times: 1) }, at(14, 0), .extend(minutes: 60, times: 1)),
+            ("extension too short, too many", { $0.escapeHatch = .extend(minutes: .min, times: .max) }, at(14, 0), .extend(minutes: 5, times: 5)),
+            ("length", { $0.end = .after(.greatestFiniteMagnitude) }, at(4, 0, dayOffset: 1), .extend(minutes: 10, times: 1)),
+            ("end time", { $0.end = .at(hour: 99, minute: -5) }, at(23, 0), .extend(minutes: 10, times: 1)),
+            ("start time", { $0.hour = 99; $0.minute = -1 }, at(14, 0), .extend(minutes: 10, times: 1)),
+        ]
+        for item in cases {
+            var scheduler = makeScheduler([call], start: at(9, 0))
+            _ = scheduler.tick(now: at(12, 20), inputs: .init(signals: [.meeting]))
+            var snapshot = scheduler.snapshot
+            item.edit(&snapshot.hardStopWaitingRules[call.id.uuidString]!)
+            snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONEncoder().encode(snapshot))
+            scheduler = BreakScheduler(settings: scheduler.settings, snapshot: snapshot, records: [], calendar: calendar)
+            scheduler.reconcileRestoredState(now: at(12, 21))
+            XCTAssertEqual(scheduler.hardStopOccurrence(call, key: key(12, 0))?.end, item.endsAt, item.name)
+
+            let events = run(&scheduler, from: at(12, 21), through: at(12, 40), inputs: inCall)
+            XCTAssertEqual(events.map(\.1), [.hardStopStarted(id: call.id, endsAt: item.endsAt)], item.name)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.escapeHatch, item.escapeHatch, item.name)
+            guard case .extend(let minutes, _) = item.escapeHatch else { continue }
+            XCTAssertEqual(scheduler.extendHardStop(now: at(12, 41)), [.hardStopExtended(id: call.id, until: at(12, 41).addingTimeInterval(TimeInterval(minutes * 60)))], item.name)
+        }
     }
 
     func testAOneOffWaitingForACallThatIsMovedRunsAfterItOrIsRemoved() {
