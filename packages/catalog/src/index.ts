@@ -112,5 +112,13 @@ export const capabilities = [
     state: 'building',
     proposedSurfaces: ['macos', 'ios'],
     availableSurfaces: []
+  },
+  {
+    id: 'system',
+    name: 'System',
+    summary: 'See where your Mac’s CPU, memory, and disk space go, grouped by the app, tool, project, or container they came from.',
+    state: 'planned',
+    proposedSurfaces: ['macos', 'agent-cli'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
