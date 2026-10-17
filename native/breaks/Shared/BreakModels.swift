@@ -675,6 +675,32 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     /// rules (its end, escape hatch, and call behavior) when the stop is edited, as a running one keeps the rules it
     /// started with. Empty in older snapshots, whose waits follow the stop as configured.
     var hardStopWaitingRules: [String: HardStop] = [:]
+    /// Per hard stop ID: the occurrences an edit saved while the stop was in progress superseded. Kept apart from
+    /// `handledHardStops`, so a later edit that changes the stop's start time or repeat is judged only against the
+    /// occurrences that really started, merged, ended, or were missed. Empty in older snapshots.
+    var supersededHardStops: [String: SupersededHardStops] = [:]
+}
+
+/// The occurrences of a hard stop that an edit saved while it was in progress superseded: they never start, merge, or
+/// warn while the stop keeps the start time and repeat it was saved with.
+struct SupersededHardStops: Codable, Equatable, Sendable {
+    var hour: Int
+    var minute: Int
+    var repeats: HardStop.Repeat
+    /// The key of the last superseded occurrence (`HardStop.Occurrence.key`). It and every earlier one never run.
+    var throughKey: Int
+
+    init(_ stop: HardStop, throughKey: Int) {
+        hour = stop.hour
+        minute = stop.minute
+        repeats = stop.repeats
+        self.throughKey = throughKey
+    }
+
+    /// True while `stop` keeps the start time and repeat these occurrences were superseded for.
+    func applies(to stop: HardStop) -> Bool {
+        (hour, minute, repeats) == (stop.hour, stop.minute, stop.repeats)
+    }
 }
 
 extension EngineSnapshot {
@@ -702,6 +728,7 @@ extension EngineSnapshot {
         handledHardStops = try container.decodeIfPresent([String: Int].self, forKey: .handledHardStops) ?? [:]
         hardStopsWaitingForCall = try container.decodeIfPresent([String: Int].self, forKey: .hardStopsWaitingForCall) ?? [:]
         hardStopWaitingRules = try container.decodeIfPresent([String: HardStop].self, forKey: .hardStopWaitingRules) ?? [:]
+        supersededHardStops = try container.decodeIfPresent([String: SupersededHardStops].self, forKey: .supersededHardStops) ?? [:]
     }
 }
 

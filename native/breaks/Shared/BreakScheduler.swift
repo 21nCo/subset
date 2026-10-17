@@ -647,13 +647,20 @@ struct BreakScheduler: Sendable {
 
     /// Replaces the hard stops, as Settings does when a stop is added, edited, or turned on or off. An occurrence in
     /// progress (running, joined to the running stop, or waiting for a call) keeps the rules it began with, and the edit
-    /// applies after it (`isHandled`). A stop that has started inside the running one joins it first, with the rules it
-    /// started with, as on a tick, so an edit saved before the next tick does not change it either. Returns the events
-    /// of that join. The next tick applies the rest: a stop turned off while it waits for a call stops waiting.
+    /// applies after it (`isHandled`): the occurrences it supersedes are kept from `now` while the stop keeps the start
+    /// time and repeat it is saved with (`keepSuperseded`). A stop that has started inside the running one joins it
+    /// first, with the rules it started with, as on a tick, so an edit saved before the next tick does not change it
+    /// either. Returns the events of that join. The next tick applies the rest: a stop turned off while it waits for a
+    /// call stops waiting.
     mutating func updateHardStops(_ hardStops: [HardStop], now: Date) -> [Event] {
         let events = reconcileMerges(now: now)
+        // A wait saved by an earlier build has no rules of its own yet; it keeps the ones the stop has before the edit.
+        for id in snapshot.hardStopsWaitingForCall.keys where snapshot.hardStopWaitingRules[id] == nil {
+            snapshot.hardStopWaitingRules[id] = settings.hardStops.first { $0.id.uuidString == id }
+        }
         settings.hardStops = hardStops
         normalizeSettings()
+        for stop in settings.hardStops { keepSuperseded(id: stop.id, savedAt: now) }
         return events
     }
 
@@ -933,9 +940,9 @@ struct BreakScheduler: Sendable {
     }
 
     /// A planned break held while the stop waited is dropped, as one that overlaps a stop that ran. An edit saved while
-    /// it waited applies after it (`markSuperseded`); a one-off stop that has nothing left to run is removed.
+    /// it waited applies after it (`keepSuperseded`); a one-off stop that has nothing left to run is removed.
     private mutating func recordMissed(_ stop: HardStop, _ occurrence: HardStop.Occurrence, end: Date, now: Date) -> Event {
-        markSuperseded(id: stop.id, during: occurrence.key, until: occurrence.end)
+        keepSuperseded(id: stop.id, savedAt: nil)
         markHandled(stop, occurrence)
         dropPlannedBreaks(overlappingFrom: occurrence.start, to: end, now: now)
         appendRecord(BreakRecord(
@@ -1017,9 +1024,7 @@ struct BreakScheduler: Sendable {
             ))
         }
         // An edit saved while it ran applies after it; a one-off stop that has nothing left to run is removed.
-        for (id, key) in [(active.id, active.occurrenceKey)] + active.merged.map({ ($0.id, $0.occurrenceKey) }) {
-            markSuperseded(id: id, during: key, until: active.endsAt)
-        }
+        for id in [active.id] + active.merged.map(\.id) { keepSuperseded(id: id, savedAt: nil) }
         dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
         snapshot.activeHardStop = nil
         removeHandledOnceStops()
@@ -1054,14 +1059,21 @@ struct BreakScheduler: Sendable {
     }
 
     /// True when `occurrence` of `stop` never starts, merges, or warns: it, or a later one of the same stop, started,
-    /// merged, ended, or was missed, or an edit saved while the stop was in progress superseded it
-    /// (`supersededOccurrenceKey`). Occurrences are compared by key, so a time zone change does not make a handled
-    /// occurrence due again.
+    /// merged, ended, or was missed, or an edit saved while the stop was in progress superseded it (`supersededThrough`,
+    /// `keepSuperseded`). Occurrences are compared by key, so a time zone change does not make a handled occurrence due
+    /// again.
     func isHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) -> Bool {
-        if snapshot.handledHardStops[stop.id.uuidString].map({ occurrence.key <= $0 }) ?? false { return true }
-        return occurrencesInProgress(of: stop.id).contains {
-            $0.key != occurrence.key && supersededOccurrenceKey(of: stop, during: $0.key, until: $0.end) == occurrence.key
-        }
+        isHandled(stop, key: occurrence.key)
+    }
+
+    private func isHandled(_ stop: HardStop, key: Int) -> Bool {
+        let id = stop.id.uuidString
+        if snapshot.handledHardStops[id].map({ key <= $0 }) ?? false { return true }
+        // An occurrence in progress is never superseded by an edit saved during it.
+        let inProgress = occurrencesInProgress(of: stop.id)
+        guard !inProgress.contains(where: { $0.key == key }) else { return false }
+        let kept = snapshot.supersededHardStops[id].flatMap { $0.applies(to: stop) ? $0.throughKey : nil }
+        return [kept, supersededThrough(of: stop, during: inProgress, savedAt: nil)].contains { $0.map { key <= $0 } ?? false }
     }
 
     /// The occurrences of the stop with `id` that are in progress, with the end each keeps: its own or a merged part of
@@ -1078,35 +1090,55 @@ struct BreakScheduler: Sendable {
         return occurrences
     }
 
-    /// The occurrence of `stop`, as configured now, that an edit saved while its occurrence `key` was in progress (until
-    /// `end`, or until dismissed when nil) supersedes, so it never runs; nil when there is none. The occurrence in progress
-    /// keeps the rules it began with, and is never joined again:
-    /// - A repeating stop's new time applies from the next day: its occurrence on the same day is superseded.
-    /// - A one-off stop's new time is kept when it starts at or after `end`, and superseded when it starts before. With no
-    ///   end, it is kept on another date and superseded on the same date. A one-off stop that is superseded is removed
-    ///   once the occurrence in progress has ended or been missed (`removeHandledOnceStops`).
-    private func supersededOccurrenceKey(of stop: HardStop, during key: Int, until end: Date?) -> Int? {
-        let day = HardStop.Occurrence.parts(of: key)
-        switch stop.repeats {
-        case .weekdays:
-            let edited = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
-            return edited == key ? nil : edited
-        case .once(let date):
-            guard let year = date.year, let month = date.month, let dayOfMonth = date.day else { return nil }
-            let edited = HardStop.Occurrence.key(year: year, month: month, day: dayOfMonth, hour: stop.hour, minute: stop.minute)
-            // A date or time the stop no longer has is left to expire (`removeExpiredOnceStops`).
-            guard edited != key, let occurrence = stop.scheduledOccurrence(forKey: edited, calendar: calendar) else { return nil }
-            if let end { return occurrence.start < end ? edited : nil }
-            return (year, month, dayOfMonth) == (day.year, day.month, day.day) ? edited : nil
-        }
+    /// The key of the last occurrence of `stop`, as configured now, that an edit saved while its occurrences `inProgress`
+    /// were in progress supersedes, so that it and every earlier one never run; nil when there is none. An occurrence in
+    /// progress keeps the rules it began with and is never joined again, so none of the stop's occurrences that starts
+    /// before the end it keeps (or, with no end, that had started by `savedAt`, when the edit was saved) runs:
+    /// - A repeating stop whose start time changed applies it from the next day: its occurrence on the day of the one in
+    ///   progress is superseded, and so is a later one that starts before that end.
+    /// - A one-off stop's new time is kept when it starts at or after that end, and superseded when it starts before.
+    ///   With no end, it is superseded on the same date or when it had started by `savedAt`. A one-off stop that is
+    ///   superseded is removed once the occurrence in progress has ended or been missed (`removeHandledOnceStops`).
+    private func supersededThrough(of stop: HardStop, during inProgress: [(key: Int, end: Date?)], savedAt: Date?) -> Int? {
+        inProgress.compactMap { occurrence -> Int? in
+            let day = HardStop.Occurrence.parts(of: occurrence.key)
+            let limit = occurrence.end ?? savedAt
+            func supersedes(_ start: Date) -> Bool {
+                guard let limit else { return false }
+                return occurrence.end == nil ? start <= limit : start < limit
+            }
+            switch stop.repeats {
+            case .weekdays:
+                let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
+                guard sameDay != occurrence.key else { return nil }
+                var through = sameDay
+                guard let limit, var date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else { return through }
+                while let next = calendar.date(byAdding: .day, value: 1, to: date), next < limit {
+                    date = next
+                    if let later = stop.occurrence(onDayOf: date, calendar: calendar), supersedes(later.start) { through = later.key }
+                }
+                return through
+            case .once(let date):
+                guard let year = date.year, let month = date.month, let dayOfMonth = date.day else { return nil }
+                let edited = HardStop.Occurrence.key(year: year, month: month, day: dayOfMonth, hour: stop.hour, minute: stop.minute)
+                // A date or time the stop no longer has is left to expire (`removeExpiredOnceStops`).
+                guard edited != occurrence.key, let scheduled = stop.scheduledOccurrence(forKey: edited, calendar: calendar) else { return nil }
+                let sameDate = occurrence.end == nil && (year, month, dayOfMonth) == (day.year, day.month, day.day)
+                return sameDate || supersedes(scheduled.start) ? edited : nil
+            }
+        }.max()
     }
 
-    /// Keeps the occurrence an edit superseded (`supersededOccurrenceKey`) handled once occurrence `key` of the stop with
-    /// `id` is no longer in progress: it has ended, or it waited for a call and was missed.
-    private mutating func markSuperseded(id: UUID, during key: Int, until end: Date?) {
-        guard let stop = settings.hardStops.first(where: { $0.id == id }),
-              let superseded = supersededOccurrenceKey(of: stop, during: key, until: end) else { return }
-        snapshot.handledHardStops[id.uuidString] = max(superseded, snapshot.handledHardStops[id.uuidString] ?? superseded)
+    /// Keeps the occurrences that an edit saved while the stop with `id` was in progress supersedes (`supersededThrough`)
+    /// once they are no longer in progress: when it is saved (at `savedAt`), and when an occurrence of it ends or is
+    /// missed. They are kept only while the stop keeps the start time and repeat they were superseded for, so a later
+    /// edit that changes them is judged only against the occurrences that really ran.
+    private mutating func keepSuperseded(id: UUID, savedAt: Date?) {
+        let key = id.uuidString
+        guard let stop = settings.hardStops.first(where: { $0.id == id }) else { return }
+        let kept = snapshot.supersededHardStops[key].flatMap { $0.applies(to: stop) ? $0.throughKey : nil }
+        let through = [kept, supersededThrough(of: stop, during: occurrencesInProgress(of: id), savedAt: savedAt)].compactMap { $0 }.max()
+        snapshot.supersededHardStops[key] = through.map { SupersededHardStops(stop, throughKey: $0) }
     }
 
     private mutating func markHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) {
@@ -1126,13 +1158,13 @@ struct BreakScheduler: Sendable {
     /// time that is still to come keeps that time.
     private mutating func removeHandledOnceStops() {
         let keep = hardStopsInProgress
-        settings.hardStops.removeAll { stop in
+        let handled = Set(settings.hardStops.filter { stop in
             // The key comes from the configured date and time only, so a time zone change does not keep the stop.
             guard !keep.contains(stop.id.uuidString), case .once(let date) = stop.repeats,
-                  let year = date.year, let month = date.month, let day = date.day,
-                  let handled = snapshot.handledHardStops[stop.id.uuidString] else { return false }
-            return HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute) <= handled
-        }
+                  let year = date.year, let month = date.month, let day = date.day else { return false }
+            return isHandled(stop, key: HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute))
+        }.map(\.id))
+        if !handled.isEmpty { settings.hardStops.removeAll { handled.contains($0.id) } }
     }
 
     /// Removes one-off stops that can no longer start, except one that is running or waiting for a call.
@@ -1160,6 +1192,14 @@ struct BreakScheduler: Sendable {
         // The rules a wait keeps go when it ends.
         if !snapshot.hardStopWaitingRules.keys.allSatisfy({ snapshot.hardStopsWaitingForCall[$0] != nil }) {
             snapshot.hardStopWaitingRules = snapshot.hardStopWaitingRules.filter { snapshot.hardStopsWaitingForCall[$0.key] != nil }
+        }
+        // Superseded occurrences go with their stop, once it changes its start time or repeat, and once they are handled.
+        let stops = settings.hardStops, handled = snapshot.handledHardStops
+        func isLive(_ id: String, _ mark: SupersededHardStops) -> Bool {
+            stops.contains { $0.id.uuidString == id && mark.applies(to: $0) } && handled[id].map { mark.throughKey > $0 } ?? true
+        }
+        if !snapshot.supersededHardStops.allSatisfy({ isLive($0.key, $0.value) }) {
+            snapshot.supersededHardStops = snapshot.supersededHardStops.filter { isLive($0.key, $0.value) }
         }
     }
 
