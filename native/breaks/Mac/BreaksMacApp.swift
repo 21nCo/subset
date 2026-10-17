@@ -186,7 +186,7 @@ private struct HardStopQuickAddView: View {
                     }
                 }
             }
-            Stepper(value: $values.lengthMinutes, in: HardStopQuickAdd.lengthRange, step: 5) {
+            Stepper(value: $values.lengthMinutes, in: HardStopQuickAdd.lengthRange, step: HardStopQuickAdd.lengthStep) {
                 LabeledContent("Length", value: HardStopText.length(minutes: values.lengthMinutes))
             }
             TextField("Name", text: $values.name, prompt: Text(HardStopQuickAdd.defaultName))

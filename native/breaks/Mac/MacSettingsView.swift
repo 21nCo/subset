@@ -391,7 +391,7 @@ private struct HardStopEditor: View {
                     case .atTime:
                         DatePicker("Ends at", selection: clock($draft.endHour, $draft.endMinute), displayedComponents: .hourAndMinute)
                     case .afterLength:
-                        Stepper(value: $draft.lengthMinutes, in: HardStopQuickAdd.lengthRange, step: 5) {
+                        Stepper(value: $draft.lengthMinutes, in: HardStopQuickAdd.lengthRange, step: HardStopQuickAdd.lengthStep) {
                             LabeledContent("Length", value: HardStopText.length(minutes: draft.lengthMinutes))
                         }
                     case .untilDismissed:

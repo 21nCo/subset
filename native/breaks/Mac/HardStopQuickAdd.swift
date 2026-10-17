@@ -7,7 +7,10 @@ import Foundation
 /// The values of the **Hard stop at…** panel and the one-off stop it creates.
 struct HardStopQuickAdd: Equatable {
     static let defaultName = "Hard stop"
-    static let lengthRange = 5...(16 * 60)
+    /// Every whole minute a hard stop can last (`HardStop.durationRange`), which the editor's and the panel's length
+    /// steppers offer one minute at a time.
+    static let lengthRange = Int((HardStop.durationRange.lowerBound / 60).rounded(.up))...Int(HardStop.durationRange.upperBound / 60)
+    static let lengthStep = 1
 
     var hour: Int
     var minute: Int

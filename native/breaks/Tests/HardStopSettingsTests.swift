@@ -276,6 +276,48 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(settings, before)
     }
 
+    func testTheLengthSteppersOfferEveryLengthAHardStopCanHave() {
+        // The editor's and the panel's steppers start from 30 minutes and move by `lengthStep` within `lengthRange`.
+        let range = HardStopQuickAdd.lengthRange
+        XCTAssertEqual(range, 1...(16 * 60))
+        XCTAssertEqual(TimeInterval(range.lowerBound * 60), HardStop.durationRange.lowerBound)
+        XCTAssertEqual(TimeInterval(range.upperBound * 60), HardStop.durationRange.upperBound)
+        XCTAssertEqual(HardStopQuickAdd(now: at(10, 0), calendar: calendar).lengthMinutes, 30)
+
+        let now = at(10, 0)
+        var reachable = Set<Int>()
+        var value = 30
+        while range.contains(value) { reachable.insert(value); value -= HardStopQuickAdd.lengthStep }
+        value = 30
+        while range.contains(value) { reachable.insert(value); value += HardStopQuickAdd.lengthStep }
+        XCTAssertEqual(reachable, Set(range))
+
+        for minutes in range {
+            var values = HardStopQuickAdd(now: now, calendar: calendar)
+            values.lengthMinutes = minutes
+            let quick = values.stop(now: now, calendar: calendar)
+            var draft = HardStopDraft.new(now: now)
+            draft.endKind = .afterLength
+            draft.lengthMinutes = minutes
+            let edited = draft.stop(calendar: calendar)
+            for stop in [quick, edited] {
+                var settings = BreakSettings()
+                XCTAssertEqual(settings.saveHardStop(stop, isNew: true, now: now, calendar: calendar), [], "\(minutes) min")
+                XCTAssertEqual(settings.hardStops.first?.end, .after(TimeInterval(minutes * 60)), "\(minutes) min")
+            }
+        }
+
+        for minutes in [range.lowerBound - 1, range.upperBound + 1] {
+            var values = HardStopQuickAdd(now: now, calendar: calendar)
+            values.lengthMinutes = minutes
+            var settings = BreakSettings()
+            let errors = settings.saveHardStop(values.stop(now: now, calendar: calendar), isNew: true, now: now, calendar: calendar)
+            XCTAssertEqual(errors.map(\.field), [.end], "\(minutes) min")
+            XCTAssertEqual(errors.map(\.message), ["A hard stop lasts from 1 minute to 16 hours."], "\(minutes) min")
+            XCTAssertEqual(settings.hardStops, [])
+        }
+    }
+
     // MARK: - Editor
 
     func testEditorValuesSaveToAValidHardStop() {
