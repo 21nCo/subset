@@ -153,7 +153,7 @@ final class BreaksTests: XCTestCase {
 
         let snapshot = EngineSnapshot(phase: .paused, nextBreakAt: Date(timeIntervalSince1970: 1_000_000), snoozesUsedToday: 2, pauseReason: .manual)
         var legacySnapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
-        for key in ["hardStopWarnings", "handledHardStops", "hardStopsWaitingForCall"] {
+        for key in ["hardStopWarnings", "handledHardStops", "hardStopsWaitingForCall", "hardStopWaitingRules", "supersededHardStops", "hardStopsEditedInProgress"] {
             XCTAssertNotNil(legacySnapshot.removeValue(forKey: key), key)
         }
         XCTAssertNil(legacySnapshot["activeHardStop"])

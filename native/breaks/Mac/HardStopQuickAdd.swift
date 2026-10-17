@@ -249,8 +249,9 @@ extension BreakSettings {
     /// Saves `stop`, replacing the stop with its id, or adding it at the end when `isNew`, only when the settings are
     /// then free of errors for it. Returns those errors (for the stop and for the whole list) and leaves the settings
     /// unchanged when there are any. An edit of a stop that is gone (deleted, or a one-off stop that ran) is not
-    /// saved, so its occurrence does not run again.
-    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date, calendar: Calendar) -> [HardStopFieldError] {
+    /// saved, so its occurrence does not run again. `inProgress` holds the keys of the stop's occurrences in progress,
+    /// which a one-off stop may keep after their own time has passed (`hardStopErrors`).
+    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date, calendar: Calendar, inProgress: Set<Int> = []) -> [HardStopFieldError] {
         var next = self
         if let index = next.hardStops.firstIndex(where: { $0.id == stop.id }) {
             next.hardStops[index] = stop
@@ -259,16 +260,10 @@ extension BreakSettings {
         } else {
             return [.init(stopID: stop.id, field: .list, message: "This hard stop was deleted or has already run.")]
         }
-        let errors = next.hardStopErrors(now: now, calendar: calendar).filter { $0.stopID == nil || $0.stopID == stop.id }
+        let errors = next.hardStopErrors(now: now, calendar: calendar, inProgress: [stop.id: inProgress])
+            .filter { $0.stopID == nil || $0.stopID == stop.id }
         if errors.isEmpty { self = next }
         return errors
-    }
-}
-
-extension HardStopFieldError {
-    /// The settings keep a stop that is in progress as it is (`BreakScheduler.isHardStopInProgress`).
-    static func inProgress(_ id: UUID) -> Self {
-        .init(stopID: id, field: .list, message: "This hard stop is in progress. You can change it after it ends.")
     }
 }
 
@@ -276,34 +271,75 @@ extension BreakScheduler {
     /// Whether the stop with `id` is in progress at `now`: it is the running stop (shown, or hidden by an extension), it
     /// joined the running stop (until that stop ends, even after its own part has ended), or it waits for a call. Like
     /// `runningHardStop`, this follows a stop that has started inside the running one, even before the next tick merges
-    /// it. Settings do not change such a stop until it ends; it can only be deleted (`deleteHardStop`).
+    /// it, and, as a save does, an occurrence whose end has passed is no longer in progress. Such a stop keeps its
+    /// occurrence as it is when edited or turned off; the change applies after it (`updateHardStops`).
     func isHardStopInProgress(id: UUID, now: Date) -> Bool {
-        if snapshot.hardStopsWaitingForCall[id.uuidString] != nil { return true }
-        guard let active = activeHardStop(now: now) else { return false }
-        return active.id == id || active.merged.contains { $0.id == id }
+        !hardStopOccurrenceKeysInProgress(of: id, now: now).isEmpty
     }
 
-    /// Saves a new or edited stop as `BreakSettings.saveHardStop` does, except that an edit of a stop in progress at
-    /// `now` is refused with its error. Returns the errors; the settings change only when there are none.
-    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date) -> [HardStopFieldError] {
-        guard !isHardStopInProgress(id: stop.id, now: now) else { return [.inProgress(stop.id)] }
-        return settings.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar)
+    /// The keys of `stop` that may be saved after their time has passed: its occurrences in progress at `now`, and, while
+    /// it is in progress, the one-off date and time it is saved with when an occurrence in progress supersedes it
+    /// (`isSupersededBySave`), since the stop is removed when that occurrence ends instead of starting again. Only a valid
+    /// date and start time are worked out: a malformed one gets its field error (`hardStopErrors`) instead.
+    private func passedOccurrenceKeysAllowed(saving stop: HardStop, now: Date) -> Set<Int> {
+        var keys = hardStopOccurrenceKeysInProgress(of: stop.id, now: now)
+        guard !keys.isEmpty, let index = settings.hardStops.firstIndex(where: { $0.id == stop.id }), case .once(let date) = stop.repeats,
+              (0...23).contains(stop.hour), (0...59).contains(stop.minute), BreakSettings.isCalendarDate(date, calendar: calendar),
+              let year = date.year, let month = date.month, let day = date.day else { return keys }
+        let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)
+        var saved = self
+        var stops = settings.hardStops
+        stops[index] = stop
+        _ = saved.updateHardStops(stops, edited: stop.id, now: now)
+        if saved.isSupersededBySave(stop, key: key) { keys.insert(key) }
+        return keys
     }
 
-    /// Turns the stop with `id` on or off, unless it is in progress at `now`. Returns the errors; the settings change
-    /// only when there are none.
-    mutating func setHardStop(id: UUID, isEnabled: Bool, now: Date) -> [HardStopFieldError] {
-        guard !isHardStopInProgress(id: id, now: now) else { return [.inProgress(id)] }
+    /// The errors saving `stop` at `now` gives (`saveHardStop`); nothing changes. A one-off stop in progress may keep the
+    /// date and time of its occurrence in progress, or one that occurrence supersedes, after that time has passed, so it
+    /// can be renamed or edited until the running stop ends.
+    func hardStopErrors(saving stop: HardStop, isNew: Bool, now: Date) -> [HardStopFieldError] {
+        var next = settings
+        return next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: passedOccurrenceKeysAllowed(saving: stop, now: now))
+    }
+
+    /// Saves a new or edited stop as `hardStopErrors` validates it, and applies it with `updateHardStops`. Returns the
+    /// errors, and changes nothing when there are any, and the events of applying it.
+    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date) -> (errors: [HardStopFieldError], events: [Event]) {
+        var next = settings
+        let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: passedOccurrenceKeysAllowed(saving: stop, now: now))
+        guard errors.isEmpty else { return (errors, []) }
+        return ([], updateHardStops(next.hardStops, edited: stop.id, now: now))
+    }
+
+    /// Turns the stop with `id` on or off with `updateHardStops`, and returns its events.
+    mutating func setHardStop(id: UUID, isEnabled: Bool, now: Date) -> [Event] {
         guard let index = settings.hardStops.firstIndex(where: { $0.id == id }) else { return [] }
-        settings.hardStops[index].isEnabled = isEnabled
-        return []
+        var stops = settings.hardStops
+        stops[index].isEnabled = isEnabled
+        return updateHardStops(stops, edited: id, now: now)
+    }
+
+    /// For the editor and the row of a stop that is in progress at `now`: what saving `stop` does. Nil when it is not
+    /// in progress.
+    func hardStopInProgressNote(saving stop: HardStop, now: Date) -> String? {
+        let inProgress = hardStopOccurrenceKeysInProgress(of: stop.id, now: now)
+        guard !inProgress.isEmpty else { return nil }
+        var saved = self
+        guard saved.saveHardStop(stop, isNew: false, now: now).errors.isEmpty,
+              case .once(let date) = stop.repeats,
+              let day = calendar.date(from: DateComponents(year: date.year, month: date.month, day: date.day)),
+              let occurrence = stop.occurrence(onDayOf: day, calendar: calendar),
+              !inProgress.contains(occurrence.key), saved.isSupersededBySave(stop, key: occurrence.key) else { return HardStopText.inProgress }
+        return HardStopText.inProgressSuperseded
     }
 }
 
 extension BreakScheduler {
     /// The enabled stop whose next occurrence starts first after `now`, and that start. Repeating stops are looked up
     /// two weeks ahead, so a weekly one whose next day has no occurrence (the clocks skip its time) is still found.
-    /// An occurrence that already ran, joined another, or was missed is skipped.
+    /// An occurrence that already ran, joined another, or was missed is skipped, as is one that an edit saved while the
+    /// stop was in progress superseded (`isHandled`).
     func nextHardStop(after now: Date) -> (stop: HardStop, start: Date)? {
         let today = calendar.startOfDay(for: now)
         var next: (stop: HardStop, start: Date)?
@@ -312,10 +348,9 @@ extension BreakScheduler {
             case .weekdays: (0...14).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
             case .once(let date): [calendar.date(from: DateComponents(year: date.year, month: date.month, day: date.day))].compactMap { $0 }
             }
-            let handled = snapshot.handledHardStops[stop.id.uuidString] ?? .min
             let start = days.lazy
                 .compactMap { stop.occurrence(onDayOf: $0, calendar: calendar) }
-                .first { $0.start > now && $0.key > handled }?.start
+                .first { $0.start > now && !isHandled(stop, $0) }?.start
             if let start, start < next?.start ?? .distantFuture { next = (stop, start) }
         }
         return next
@@ -354,6 +389,11 @@ enum HardStopClock {
 
 /// The text Settings and the menu bar use for a hard stop.
 enum HardStopText {
+    /// Shown for a stop that is running, joined the running one, or waits for a call.
+    static let inProgress = "This hard stop is in progress. It keeps its current settings until it ends; changes apply after that."
+    /// Shown when a one-off stop in progress is moved to a time before it ends.
+    static let inProgressSuperseded = "This hard stop is in progress, and this time comes before it ends, so it is not used. The stop is removed when it ends."
+
     /// A row summary such as "Weekdays 1:00 PM · 45 min".
     static func summary(of stop: HardStop, locale: Locale = .autoupdatingCurrent, calendar: Calendar = .autoupdatingCurrent) -> String {
         let time = Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar, timeZone: calendar.timeZone)
