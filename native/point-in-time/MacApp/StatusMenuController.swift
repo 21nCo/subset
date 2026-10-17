@@ -58,9 +58,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             }
             menu.addItem(action(settings.trackingEnabled ? "Turn Tracking Off" : "Turn Tracking On") { [weak self] in
                 guard let self else { return }
+                // Ended first, like every control: each settings change samples, and turning tracking on begins the
+                // first window read, which ending the segment afterwards would void.
+                self.capture.endSegment()
                 self.settings.trackingEnabled.toggle()
                 self.settings.pausedUntil = nil
-                self.capture.endSegment()
             })
         } else {
             menu.addItem(action("Set Up pointInTime…", showWelcome))
@@ -141,8 +143,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private func pause(for seconds: TimeInterval) { pause(until: Date().addingTimeInterval(seconds)) }
 
     private func pause(until date: Date) {
-        settings.pausedUntil = date
         capture.endSegment()
+        settings.pausedUntil = date
     }
 
     private func confirmDelete(all: Bool) {

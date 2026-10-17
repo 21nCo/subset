@@ -61,7 +61,8 @@ final class CaptureController {
         tick()
     }
 
-    /// Ends and saves the open segment, for example when a control changes.
+    /// Ends and saves the open segment and voids reads in flight, for example when a control changes. Controls call it
+    /// before they change the settings: each change samples at once and may begin a read, which this would void.
     func endSegment() {
         let now = Date()
         mutate { $0.endSegment(at: now) }

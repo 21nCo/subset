@@ -394,7 +394,8 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 
     @Test func chromiumBlankTabIsNormalWithoutTitleOrURL() {
-        #expect(chromium { $0.tabs = [1: (nil, "")] }.report == .normal(title: nil, url: nil))
+        let read = chromium { $0.tabs = [1: (nil, "")] }
+        #expect(read.report == .normal(title: nil, url: nil))
     }
 
     private let titles = PrivateWindowTitles(tables: [

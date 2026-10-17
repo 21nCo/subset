@@ -478,7 +478,9 @@ private func withWriter(on store: ActivityStore, _ body: (_ release: () throws -
 /// The longest a contended store call may block its caller, which is the main actor in the app.
 private let callerBudget = Duration.milliseconds(250)
 
-/// Runs `body` and expects it to return within `callerBudget`, whether it throws or not.
+/// Runs `body` and expects it to return within `callerBudget`, whether it throws or not. Call it outside `#expect` and
+/// assert its result: Swift 6.2 can give a closure written inside `#expect` the symbol of an earlier closure of the
+/// same type in the same scope, and then runs that one instead.
 private func expectFast<T>(_ what: String, _ body: () throws -> T) -> T? {
     let clock = ContinuousClock()
     let start = clock.now
@@ -556,7 +558,8 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
             }
             // Each sample's retry fails fast and keeps the removal queued with its error shown.
             for attempt in 1...3 {
-                #expect(expectFast("retry \(attempt)") { writes.retry(store) } == false)
+                let drained = expectFast("retry \(attempt)") { writes.retry(store) }
+                #expect(drained == false)
                 #expect(writes.failure != nil && writes.hasPendingDeletion)
             }
             #expect(contains("SECRET-TITLE", store, "-wal"))
@@ -601,7 +604,8 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
             _ = expectFast("retract") { writes.retract(since: t0 + 60, until: t0 + 130, in: store) }
             _ = expectFast("save after") { writes.save(segment("com.apple.Notes", 130, 200, title: "Notes"), to: store) }
             for attempt in 1...3 {
-                #expect(expectFast("retry \(attempt)") { writes.retry(store) } == false)
+                let drained = expectFast("retry \(attempt)") { writes.retry(store) }
+                #expect(drained == false)
             }
             #expect(writes.failure != nil && writes.count == 3, "\(writes.queue)")
             try release()
@@ -1379,6 +1383,40 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             let after = "\(Int(resumed) + 1)-\(Int(resumed) + 10) After"
             let kept = try stored(storage.store)
             #expect(kept == (mask == .clockBehind ? ["0-100 Stored", after] : [after]))
+        }
+    }
+
+    /// Turning tracking on, also from a pause, keeps the first window read and its start time, because the menu ends the
+    /// segment before it changes the settings: each change samples at once, and ending the segment after the change that
+    /// begins the read voids it. Turning tracking off in the same order still ends and saves the open segment.
+    @Test(arguments: [false, true])
+    func turningTrackingOnKeepsTheFirstRead(fromPause: Bool) throws {
+        try withStorage { storage in
+            var session = CaptureSession(storage: storage, maxSampleInterval: 30)
+            var reads: [CaptureSequencer.Ticket] = []
+            // What a settings change does in the app: it samples, and begins a window read while recording.
+            func settingsChanged(_ conditions: CaptureConditions, at second: TimeInterval) {
+                session.update(conditions, at: t0 + second)
+                if let ticket = session.beginRead(of: 42, at: t0 + second) { reads.append(ticket) }
+            }
+            settingsChanged(CaptureConditions(trackingOn: false, paused: fromPause), at: 0)
+            #expect(session.state == .off && reads.isEmpty)
+            // Turn Tracking On: end the segment, then toggle tracking and clear the pause.
+            session.endSegment(at: t0 + 10)
+            settingsChanged(CaptureConditions(paused: fromPause), at: 10)
+            settingsChanged(CaptureConditions(), at: 10)
+            #expect(session.state == .recording && reads.count == 1)
+            let first = try #require(reads.first)
+            #expect(session.isCurrent(first))
+            session.complete(first, with: content("a", "First"))
+            #expect(session.open?.start == t0 + 10)
+            session.sample(content("a", "First"), at: t0 + 40)
+            // Turn Tracking Off in the same order.
+            session.endSegment(at: t0 + 50)
+            settingsChanged(CaptureConditions(trackingOn: false), at: 50)
+            settingsChanged(CaptureConditions(trackingOn: false), at: 50)
+            #expect(session.state == .off && session.open == nil && reads.count == 1)
+            #expect(try stored(storage.store) == ["10-50 First"])
         }
     }
 
