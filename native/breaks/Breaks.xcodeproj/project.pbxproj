@@ -72,6 +72,9 @@
 		F7FD855BD1CEC59DF9323D20 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1A00FD957CBEA59C188FB21 /* Foundation.framework */; };
 		F95A901C6D06C09F862C9C16 /* DeviceActivityMonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDEAE7E452237489258D291E /* DeviceActivityMonitorExtension.swift */; };
 		FB266393C46DFC7A0EB19A7B /* ActivitySignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BF9D23539D6A0F4F41278F /* ActivitySignals.swift */; };
+		5AC1B7A33CFE92CDFB044FD6 /* HardStopPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */; };
+		5CC61FAF7F1700F05D9AA674 /* HardStopPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */; };
+		FA16F8BDE3E2B986476456A1 /* HardStopPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -177,6 +180,8 @@
 		F67EB0BA5CAA70712D459DB1 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		F79A62E490E9C335939891AA /* OnboardingView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		F8455C5AEE97E7E95B4DF4FA /* AppTheme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
+		C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopPresentation.swift; sourceTree = "<group>"; };
+		C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HardStopPresentationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -333,6 +338,7 @@
 			children = (
 				B6CF369583749DFDA69E03CA /* BreaksTests.swift */,
 				E96CA3DA367F98CF35CE6DEE /* BreakSchedulerTests.swift */,
+				C5EE5AF830F4AD1E06DA166B /* HardStopPresentationTests.swift */,
 			);
 			name = Tests;
 			path = Tests;
@@ -390,6 +396,7 @@
 				3864A0D17E9550F7B41AFB91 /* BreakOverlay.swift */,
 				327CECA38854C2FBC9ED41F0 /* FloatingPanels.swift */,
 				6C5D20DAE7FB51D38EE86CA9 /* MacSettingsView.swift */,
+				C708EFC765CFD30A493FEC00 /* HardStopPresentation.swift */,
 				B963808371F77BE2BD14450A /* Assets.xcassets */,
 			);
 			name = Mac;
@@ -724,6 +731,7 @@
 				9477376E3CEA6E8CEF539023 /* BreakOverlay.swift in Sources */,
 				E69E6658C9847917FC99B0F8 /* FloatingPanels.swift in Sources */,
 				4127D5B153F497EF5A90F621 /* MacSettingsView.swift in Sources */,
+				5AC1B7A33CFE92CDFB044FD6 /* HardStopPresentation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -746,6 +754,8 @@
 				E1C785BFC9FB56633A1CA2D1 /* BreakScheduler.swift in Sources */,
 				31B8AB10A71774E1823CCBA3 /* BreaksTests.swift in Sources */,
 				8D4B54961734337B39AAB24E /* BreakSchedulerTests.swift in Sources */,
+				5CC61FAF7F1700F05D9AA674 /* HardStopPresentation.swift in Sources */,
+				FA16F8BDE3E2B986476456A1 /* HardStopPresentationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

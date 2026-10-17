@@ -2,6 +2,7 @@
   import { onMount, tick, type Snippet } from 'svelte';
   import ArrowClockwiseIcon from 'phosphor-svelte/lib/ArrowClockwiseIcon';
   import ArrowRightIcon from 'phosphor-svelte/lib/ArrowRightIcon';
+  import ArrowsOutSimpleIcon from 'phosphor-svelte/lib/ArrowsOutSimpleIcon';
   import ClockIcon from 'phosphor-svelte/lib/ClockIcon';
   import ClockCountdownIcon from 'phosphor-svelte/lib/ClockCountdownIcon';
   import DotsThreeIcon from 'phosphor-svelte/lib/DotsThreeIcon';
@@ -20,7 +21,8 @@
   import { createUsageStatus, usageFreshness, type UsageAccount, type UsageProvider, type UsageStatus, type UsageWindow } from './index.js';
   import {
     accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, planName, providerMeta, resetDetails, spanLabel, summarize,
-    sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
+    paceText, sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
+    clipSeries, DEFAULT_TREND_RANGE, TREND_RANGES, trendRange, trendReady, trendSpanText, type TrendRange, type TrendRangeId,
   } from './present.js';
 
   type Hint = { message?: string; action?: { label: string; run: () => void; busy?: boolean } } | null;
@@ -72,9 +74,12 @@
     setShowTrends, showCredits = true, setShowCredits,
   }: Props = $props();
 
-  let now = $state(Date.now());
+  let clock = $state(Date.now());
+  // History can be up to one tick newer than the clock; read the time again when it arrives so trends keep their newest point.
+  const historyAt = $derived.by(() => { void history; return Date.now(); });
+  const now = $derived(Math.max(clock, historyAt));
   onMount(() => {
-    const timer = setInterval(() => { now = Date.now(); }, 30_000);
+    const timer = setInterval(() => { clock = Date.now(); }, 30_000);
     // Menus close on any press outside them.
     const outside = (event: PointerEvent) => {
       if (!(event.target as Element | null)?.closest?.('.card-menu, .sort')) { menuFor = null; sortOpen = false; }
@@ -185,18 +190,48 @@
   let trendModule: Promise<typeof import('./UsageTrend.svelte')> | undefined;
   const loadTrend = () => (trendModule ??= import('./UsageTrend.svelte'));
 
-  // A trend needs at least three observations across 30 minutes to say anything.
-  function trendSeries(account: UsageAccount) {
+  // Windows with three recorded observations across 30 minutes of the range; the axis and label run from the first
+  // drawn point (the cutoff once the range is covered) to now.
+  function trendView(account: UsageAccount, range: TrendRange) {
     const windows = showTrends ? history?.series[account.id] : undefined;
-    if (!windows) return [];
-    return shownWindows(account)
-      .map((window) => ({
-        name: windowTitle(account, window),
-        points: (windows[historyWindowKey(window)] ?? []).map(([time, used]): [number, number] => [time, percentMode === 'used' ? used : Math.round((100 - used) * 100) / 100]),
-      }))
-      .filter((item) => item.points.length >= 3 && item.points.at(-1)![0] - item.points[0][0] >= 30 * 60_000)
-      .slice(0, 4);
+    if (!windows) return null;
+    const series = shownWindows(account)
+      .map((window) => ({ name: windowTitle(account, window), ...clipSeries(windows[historyWindowKey(window)] ?? [], now, range.ms) }))
+      .filter((item) => trendReady(item.observed))
+      .slice(0, 4)
+      .map(({ name, points }) => ({
+        name, points: points.map(([time, used]): [number, number] => [time, percentMode === 'used' ? used : Math.round((100 - used) * 100) / 100]),
+      }));
+    if (!series.length) return null;
+    const start = Math.min(...series.map((item) => item.points[0][0]));
+    return { series, start, end: now, label: `Trend · last ${trendSpanText(start, now, range)} · ${percentMode}` };
   }
+  const cardRange = trendRange(DEFAULT_TREND_RANGE);
+
+  // Expanded trend dialog; the range is not saved and resets to 48 hours on each open.
+  let trendDialog: HTMLDialogElement | undefined = $state();
+  let trendAccountId = $state<string | null>(null);
+  let trendRangeId = $state<TrendRangeId>(DEFAULT_TREND_RANGE);
+  let trendOpener: HTMLElement | null = null;
+  const trendAccount = $derived(trendAccountId ? status.accounts.find((account) => account.id === trendAccountId) ?? null : null);
+  async function showTrend(account: UsageAccount, opener: HTMLElement) {
+    trendOpener = opener;
+    trendRangeId = DEFAULT_TREND_RANGE;
+    trendAccountId = account.id;
+    await tick();
+    if (!trendDialog?.open) trendDialog?.showModal();
+  }
+  function closedTrend() {
+    trendAccountId = null;
+    if (trendOpener?.isConnected) trendOpener.focus();
+    trendOpener = null;
+  }
+  // Turning trend charts off or losing the account closes the dialog.
+  // Read both dependencies before the non-reactive `open` check so they stay tracked.
+  $effect(() => {
+    const stale = !showTrends || !trendAccount;
+    if (stale && trendDialog?.open) trendDialog.close();
+  });
 
   function permissionLine(account: UsageAccount) {
     if (account.provider !== 'codex-chatgpt' || account.ordinaryUsageAllowed === true || account.ordinaryUsageAllowed === undefined) return null;
@@ -375,6 +410,7 @@
         {@const stale = usageFreshness(account.observedAt, now) === 'Stale'}
         {@const name = accountName(account)}
         {@const tag = accountTag?.(account) ?? null}
+        {@const trend = trendView(account, cardRange)}
         <li>
           <article class="card" id={`card-${account.id}`} class:issue={badge.tone === 'bad'} aria-labelledby={`account-${account.id}`}>
             <header class="card-head">
@@ -448,7 +484,7 @@
                         {:else if pace && pace.exhaustsInMs === 0}
                           <span class="pace tone-bad">Limit reached</span>
                         {:else if pace}
-                          <span class="pace" title="Estimate from the average rate since this window started">On pace · {Math.min(pace.projectedPercent, 100)}% by reset</span>
+                          <span class="pace" title="Estimate from the average rate since this window started">{paceText(pace, percentMode).line}</span>
                         {/if}
                         <button type="button" class="reset" onclick={() => showResets(account, window)} title={exactTime(window.resetsAt)}>{windowResetText(window, now, account.provider)}</button>
                       </span>
@@ -457,12 +493,15 @@
                 </ul>
               {/if}
 
-              {#if trendSeries(account).length}
-                {@const trend = trendSeries(account)}
+              {#if trend}
                 <div class="trend-block">
-                  <span class="trend-label">Trend · last {compactDuration(now - Math.min(...trend.map((item) => item.points[0][0])))} · {percentMode}</span>
+                  <div class="trend-head">
+                    <span class="trend-label">{trend.label}</span>
+                    <button type="button" class="icon trend-expand" aria-label="Expand trend chart" title="Expand trend chart" aria-haspopup="dialog"
+                      onclick={(event) => showTrend(account, event.currentTarget)}><ArrowsOutSimpleIcon size={14} weight="bold" /></button>
+                  </div>
                   {#await loadTrend() then { default: UsageTrend }}
-                    <UsageTrend series={trend} label={`${name} ${percentMode} trend`} remainingMode={percentMode === 'remaining'} />
+                    <UsageTrend series={trend.series} start={trend.start} end={trend.end} label={`${name} ${percentMode} trend`} remainingMode={percentMode === 'remaining'} />
                   {:catch}
                     <span class="trend-label">Trend chart unavailable.</span>
                   {/await}
@@ -561,7 +600,7 @@
               <div><dt>Resets</dt><dd>{exactTime(details.resetsAt)}{details.remainingMs !== null ? ` · ${details.remainingMs > 0 ? `in ${compactDuration(details.remainingMs)}` : 'due'}` : ''}</dd></div>
               <div><dt>Window started</dt><dd>{details.windowStart ? exactTime(details.windowStart) : 'Unavailable'}</dd></div>
               <div class="wide"><dt>Usage</dt><dd>{window.usedPercent === null ? 'Unknown' : `${percent(window.usedPercent)} used · ${percent(window.remainingPercent ?? 100 - window.usedPercent)} left`}</dd></div>
-              <div class="wide"><dt>At this pace</dt><dd>{!pace ? 'Not enough of the window has passed to estimate.' : pace.exhaustsInMs === 0 ? 'Limit reached.' : pace.beforeReset ? `Runs out in ${compactDuration(pace.exhaustsInMs)}, before the reset.` : `${Math.min(pace.projectedPercent, 100)}% used by the reset.`}</dd></div>
+              <div class="wide"><dt>At this pace</dt><dd>{!pace ? 'Not enough of the window has passed to estimate.' : pace.exhaustsInMs === 0 ? 'Limit reached.' : pace.beforeReset ? `Runs out in ${compactDuration(pace.exhaustsInMs)}, before the reset.` : paceText(pace, percentMode).sentence}</dd></div>
             </dl>
           </section>
         {:else}
@@ -600,6 +639,39 @@
           </section>
         {/if}
         <p class="muted-text">Window start and pace are estimates from the reported reset time and window length.</p>
+      </div>
+    {/if}
+  </dialog>
+
+  <dialog bind:this={trendDialog} class="resets trend-dialog" aria-labelledby="trend-title" onclose={closedTrend}
+    onclick={(event) => { if (event.target === trendDialog) trendDialog?.close(); }}>
+    {#if trendAccount}
+      {@const range = trendRange(trendRangeId)}
+      {@const trend = trendView(trendAccount, range)}
+      <div class="sheet">
+        <header>
+          <ProviderIcon provider={trendAccount.provider} size={34} />
+          <div class="sheet-title">
+            <h2 id="trend-title">{accountName(trendAccount)} trend</h2>
+            <p>{trend?.label ?? providerMeta[trendAccount.provider].name}</p>
+          </div>
+          <button type="button" class="icon" onclick={() => trendDialog?.close()} aria-label="Close"><XIcon size={18} weight="bold" /></button>
+        </header>
+        <label class="range">
+          <span>Range</span>
+          <select bind:value={trendRangeId}>
+            {#each TREND_RANGES as option (option.id)}<option value={option.id}>{option.label}</option>{/each}
+          </select>
+        </label>
+        {#if trend}
+          {#await loadTrend() then { default: UsageTrend }}
+            <UsageTrend series={trend.series} start={trend.start} end={trend.end} label={`${accountName(trendAccount)} ${percentMode} trend`} remainingMode={percentMode === 'remaining'} height={280} />
+          {:catch}
+            <p class="muted-text">Trend chart unavailable.</p>
+          {/await}
+        {:else}
+          <p class="muted-text">A trend needs three recorded observations across at least 30 minutes of the selected range.</p>
+        {/if}
       </div>
     {/if}
   </dialog>
@@ -733,6 +805,11 @@
   .reset { border: 0; background: none; padding: 0; color: var(--text-3); font-size: .78rem; text-decoration: underline dotted; text-underline-offset: 3px; }
   .reset:hover { color: var(--text); }
   .trend-block { display: grid; gap: 2px; }
+  .trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  /* The expand button shows on hover or keyboard focus, and always on devices without hover. */
+  .trend-expand { width: 24px; height: 24px; margin: -5px 0; border-radius: 6px; opacity: 0; }
+  .trend-block:hover .trend-expand, .trend-block:focus-within .trend-expand { opacity: 1; }
+  @media (hover: none) { .trend-expand { opacity: 1; } }
   .filter-bar { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
   /* Chips scroll sideways instead of wrapping; the sort button stays in view. */
   .filters { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; min-width: 0; flex: 1; scrollbar-width: none; }
@@ -777,6 +854,10 @@
   .footnote { margin-top: 24px; font-size: .78rem; color: var(--text-3); line-height: 1.5; }
 
   .resets { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgb(0 0 0 / .22); }
+  .trend-dialog { width: min(880px, calc(100vw - 24px)); }
+  .range { justify-self: start; display: inline-flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--text-3); }
+  .range select { height: 32px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); font: inherit; font-size: .86rem; }
+  .range select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .resets::backdrop { background: rgb(10 10 12 / .45); backdrop-filter: blur(2px); }
   .sheet { display: grid; gap: 16px; padding: 22px; }
   .sheet > header { display: flex; align-items: center; gap: 12px; }

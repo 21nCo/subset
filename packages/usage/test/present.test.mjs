@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accountBadge, compactDuration, needsAttention, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
+import { accountBadge, compactDuration, needsAttention, paceText, resetText, spanLabel, summarize, usedTone, windowPace, windowTitle } from '../dist/present.js';
 import { createUsageStatus } from '../dist/index.js';
 
 const now = Date.parse('2026-10-08T12:00:00Z');
@@ -40,6 +40,22 @@ test('estimates pace from the average rate and stays quiet early in a window', (
   assert.equal(windowPace(window({ resetsAt: new Date(now + 299 * 60_000).toISOString() }), now), null);
   assert.equal(windowPace(window({ durationMinutes: null }), now), null);
   assert.equal(windowPace(window({ usedPercent: 100 }), now).exhaustsInMs, 0);
+});
+
+test('words the pace projection in the chosen used or remaining mode', () => {
+  // 30% used halfway through the window: on pace for 60% used, so 40% left, at the reset.
+  const onPace = windowPace(window({ usedPercent: 30, remainingPercent: 70 }), now);
+  assert.equal(onPace.beforeReset, false);
+  assert.deepEqual(paceText(onPace, 'used'), { line: 'On pace · 60% by reset', sentence: '60% used by the reset.' });
+  assert.deepEqual(paceText(onPace, 'remaining'), { line: 'On pace · 40% left by reset', sentence: '40% left at the reset.' });
+  // A projection above 100% caps at 100% used and floors at 0% left.
+  const over = { projectedPercent: 140, exhaustsInMs: 60_000, beforeReset: false };
+  assert.deepEqual(paceText(over, 'used'), { line: 'On pace · 100% by reset', sentence: '100% used by the reset.' });
+  assert.deepEqual(paceText(over, 'remaining'), { line: 'On pace · 0% left by reset', sentence: '0% left at the reset.' });
+  const idle = windowPace(window({ usedPercent: 0, remainingPercent: 100 }), now);
+  assert.equal(idle.projectedPercent, 0);
+  assert.deepEqual(paceText(idle, 'used'), { line: 'On pace · 0% by reset', sentence: '0% used by the reset.' });
+  assert.deepEqual(paceText(idle, 'remaining'), { line: 'On pace · 100% left by reset', sentence: '100% left at the reset.' });
 });
 
 test('maps states to badges and summarizes attention, next reset, and highest usage', () => {
@@ -136,4 +152,78 @@ test('orders Gemini before third-party groups and lists the next three resets', 
   assert.deepEqual(windowGroups(google).map((group) => group.id), ['gemini', '3p']);
   const status = createUsageStatus([google, account({ id: 'c', windows: [w('codex', 5), w('other', 600)] })]);
   assert.deepEqual(summarize(status, now).nextResets.map((reset) => [reset.accountId, reset.window]), [['c', '5-hour usage'], ['g', 'Third-party · 5-hour usage'], ['g', 'Gemini · 5-hour usage']]);
+});
+
+test('clips trend series to a range, anchoring the last earlier point at the cutoff', async () => {
+  const { clipSeries, trendRange, trendSpanText } = await import('../dist/present.js');
+  const hour = 3_600_000;
+  const day = trendRange('48h').ms;
+  const cutoff = now - day;
+  // Entirely inside the range: unchanged.
+  const inside = [[now - 10 * hour, 20], [now - 5 * hour, 30], [now - hour, 35]];
+  assert.deepEqual(clipSeries(inside, now, day), { points: inside, observed: inside });
+  // Straddling the cutoff: older points drop and the last of them is drawn at the cutoff, but is not an observation.
+  const straddle = [[now - 72 * hour, 5], [now - 60 * hour, 80], [now - 40 * hour, 2], [now - hour, 10]];
+  assert.deepEqual(clipSeries(straddle, now, day), { points: [[cutoff, 80], [now - 40 * hour, 2], [now - hour, 10]], observed: [[now - 40 * hour, 2], [now - hour, 10]] });
+  // Everything older than the range: nothing to show.
+  assert.deepEqual(clipSeries([[now - 80 * hour, 10], [now - 49 * hour, 12]], now, day), { points: [], observed: [] });
+  assert.deepEqual(clipSeries([], now, day), { points: [], observed: [] });
+  // All history keeps every point.
+  assert.deepEqual(clipSeries(straddle, now, trendRange('all').ms), { points: straddle, observed: straddle });
+  // Remaining-mode values (and fractions) pass through as given, including the moved anchor.
+  const remaining = [[now - 30 * hour, 62.5], [now - 26 * hour, 37.25], [now - 2 * hour, 99.99]];
+  assert.deepEqual(clipSeries(remaining, now, trendRange('24h').ms).points, [[now - 24 * hour, 37.25], [now - 2 * hour, 99.99]]);
+  // The label names the full range once covered, otherwise the shorter span shown.
+  assert.equal(trendSpanText(now - 48 * hour, now, trendRange('48h')), '48h');
+  assert.equal(trendSpanText(now - 29 * hour, now, trendRange('48h')), '1d 5h');
+  assert.equal(trendSpanText(now - (5 * 24 + 3) * hour, now, trendRange('all')), '5d 3h');
+});
+
+test('a trend needs three recorded observations across 30 minutes of its range, not counting the anchor', async () => {
+  const { clipSeries, trendRange, trendReady } = await import('../dist/present.js');
+  const hour = 3_600_000;
+  const day = trendRange('48h').ms;
+  const ready = (points, range = day) => trendReady(clipSeries(points, now, range).observed);
+  // Two recent observations plus an older one drawn at the cutoff: three points spanning 48h, but only two observations.
+  assert.equal(clipSeries([[now - 60 * hour, 40], [now - 5 * 60_000, 41], [now, 42]], now, day).points.length, 3);
+  assert.equal(ready([[now - 60 * hour, 40], [now - 5 * 60_000, 41], [now, 42]]), false);
+  // Three recent observations spanning less than 30 minutes.
+  assert.equal(ready([[now - 60 * hour, 40], [now - 29 * 60_000, 41], [now - 10 * 60_000, 42], [now, 43]]), false);
+  // A qualifying series keeps its anchor for drawing.
+  const qualifying = [[now - 60 * hour, 40], [now - 40 * 60_000, 41], [now - 10 * 60_000, 42], [now, 43]];
+  assert.equal(ready(qualifying), true);
+  assert.deepEqual(clipSeries(qualifying, now, day).points[0], [now - day, 40]);
+  // All history counts every recorded point.
+  assert.equal(ready([[now - 60 * hour, 40], [now - 5 * 60_000, 41], [now, 42]], trendRange('all').ms), true);
+});
+
+test('a finite trend range ends at its end time', async () => {
+  const { clipSeries, trendRange, trendReady } = await import('../dist/present.js');
+  const hour = 3_600_000;
+  const day = trendRange('48h').ms;
+  // A point at exactly the end is kept; later (clock-rollback) points are not.
+  assert.deepEqual(clipSeries([[now - 2 * hour, 10], [now - hour, 11], [now, 12], [now + 1, 13]], now, day).observed, [[now - 2 * hour, 10], [now - hour, 11], [now, 12]]);
+  // Entirely future-dated: nothing to show.
+  assert.deepEqual(clipSeries([[now + hour, 10], [now + 2 * hour, 11], [now + 3 * hour, 12]], now, day), { points: [], observed: [] });
+  // Old plus future-dated: no observation in the range, so no anchor and no trend.
+  const oldAndFuture = [[now - 72 * hour, 5], [now + hour, 10], [now + 2 * hour, 11]];
+  assert.deepEqual(clipSeries(oldAndFuture, now, day), { points: [], observed: [] });
+  assert.equal(trendReady(clipSeries(oldAndFuture, now, day).observed), false);
+});
+
+test('a reset exactly at the trend cutoff keeps its marker in used and remaining modes', async () => {
+  const { clipSeries, historyResets, trendRange } = await import('../dist/present.js');
+  const hour = 3_600_000;
+  const day = trendRange('48h').ms;
+  const cutoff = now - day;
+  const series = [[cutoff - hour, 80], [cutoff, 2], [now - hour, 10], [now, 11]];
+  const { points } = clipSeries(series, now, day);
+  assert.deepEqual(historyResets(series), [cutoff]);
+  assert.deepEqual(historyResets(points), [cutoff]);
+  // Remaining mode draws 100 - used; the chart detects resets as rises, as UsageTrend does.
+  const remaining = points.map(([time, used]) => [time, 100 - used]);
+  assert.deepEqual(historyResets(remaining.map(([time, value]) => [time, 100 - value])), [cutoff]);
+  // The anchor is drawn but not counted, and an unchanged value at the cutoff needs no anchor.
+  assert.equal(clipSeries(series, now, day).observed.length, 3);
+  assert.deepEqual(clipSeries([[cutoff - hour, 3], [cutoff, 3], [now, 4]], now, day).points, [[cutoff, 3], [now, 4]]);
 });
