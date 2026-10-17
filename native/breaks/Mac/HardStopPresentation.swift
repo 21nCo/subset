@@ -159,11 +159,12 @@ struct HardStopPresentation: Equatable {
     }
 
     /// The stop the user is held for while no stop runs: of the enabled stops waiting for a call, the one whose waiting
-    /// occurrence started first. The wait of a stop that was turned off or rescheduled is dropped by the next tick and is not shown meanwhile.
+    /// occurrence started first. A disabled stop's wait is dropped by the next tick and is not shown meanwhile.
     private static func earliestWaitingStop(_ scheduler: BreakScheduler) -> HardStop? {
         var earliest: (stop: HardStop, start: Date)?
         for stop in scheduler.settings.hardStops where stop.isEnabled {
-            guard let start = scheduler.waitingOccurrence(of: stop)?.start else { continue }
+            guard let key = scheduler.snapshot.hardStopsWaitingForCall[stop.id.uuidString],
+                  let start = stop.occurrence(forKey: key, calendar: scheduler.calendar)?.start else { continue }
             if earliest.map({ start < $0.start }) ?? true { earliest = (stop, start) }
         }
         return earliest?.stop

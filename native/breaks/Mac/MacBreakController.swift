@@ -223,6 +223,31 @@ final class MacBreakController: ObservableObject {
         syncHardStopNotice(bringToFront: true)
     }
 
+    /// Whether the hard stop is running, joined the running one, or waits for a call; the settings keep it as it is
+    /// until it ends.
+    func isHardStopInProgress(id: UUID) -> Bool { core.isHardStopInProgress(id: id) }
+
+    /// The errors saving `stop` now would give; nothing changes.
+    func hardStopErrors(saving stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
+        var scheduler = core
+        return scheduler.saveHardStop(stop, isNew: isNew, now: now)
+    }
+
+    /// Saves a new or edited hard stop on the clock `hardStopErrors` uses, unless it has errors, which it returns. An
+    /// edit of a stop in progress is refused. The next tick applies the change.
+    func saveHardStop(_ stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
+        var scheduler = core
+        let errors = scheduler.saveHardStop(stop, isNew: isNew, now: now)
+        if errors.isEmpty { settings = scheduler.settings }
+        return errors
+    }
+
+    /// Turns a hard stop on or off, unless it is in progress.
+    func setHardStop(id: UUID, isEnabled: Bool) {
+        var scheduler = core
+        if scheduler.setHardStop(id: id, isEnabled: isEnabled).isEmpty { settings = scheduler.settings }
+    }
+
     /// Deletes a hard stop. One that is running ends now and is recorded as dismissed.
     func deleteHardStop(id: UUID) {
         now = .now

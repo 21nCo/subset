@@ -218,7 +218,6 @@ struct BreakScheduler: Sendable {
         var events: [Event] = []
         resetDailyCountersIfNeeded(now: now)
 
-        let wasHeldForCall = !snapshot.hardStopsWaitingForCall.isEmpty
         let hardStopEvents = advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
         events += hardStopEvents
         if snapshot.activeHardStop != nil {
@@ -251,9 +250,6 @@ struct BreakScheduler: Sendable {
                 records[last].focusEndedAt = now
             }
             startFocusInterval(at: now)
-        } else if wasHeldForCall {
-            // Its wait ended without a record: the stop was turned off, deleted, or rescheduled while it waited.
-            releaseHeldSchedule(now: now)
         }
 
         if snapshot.phase == .breaking {
@@ -684,18 +680,12 @@ struct BreakScheduler: Sendable {
         return (stop, occurrence)
     }
 
-    /// Occurrence `key` of `stop` as a warning and Start now see it: one the stop as configured now still has, whether
-    /// or not it waits for a call.
+    /// Occurrence `key` of `stop` as a warning and Start now see it. One that waits for a call keeps its identity, as
+    /// it does for the tick; any other must still be an occurrence of the stop as configured now.
     func hardStopOccurrence(_ stop: HardStop, key: Int) -> HardStop.Occurrence? {
-        stop.scheduledOccurrence(forKey: key, calendar: calendar)
-    }
-
-    /// The occurrence of `stop` that waits for a call, worked out with the current calendar, so one whose start moved
-    /// later with the time zone still starts when the call ends. Nil when none waits, or when the stop was rescheduled
-    /// (its date, days or start time changed) so that it no longer has that occurrence; the next tick or operation
-    /// then drops the wait.
-    func waitingOccurrence(of stop: HardStop) -> HardStop.Occurrence? {
-        snapshot.hardStopsWaitingForCall[stop.id.uuidString].flatMap { stop.scheduledOccurrence(forKey: $0, calendar: calendar) }
+        snapshot.hardStopsWaitingForCall[stop.id.uuidString] == key
+            ? stop.occurrence(forKey: key, calendar: calendar)
+            : stop.scheduledOccurrence(forKey: key, calendar: calendar)
     }
 
     /// Shows the hidden stop again before its extension runs out, as **Start now** on the notice before an extension
@@ -748,7 +738,9 @@ struct BreakScheduler: Sendable {
             }
             // An occurrence that already waits stays due until its end: a stop without an end waits for the call
             // however long it lasts, and one whose start moved later with the time zone still starts when the call ends.
-            if let waiting = waitingOccurrence(of: stop), waiting.end.map({ now < $0 }) ?? true, !isHandled(stop, waiting) {
+            if let waitingKey = snapshot.hardStopsWaitingForCall[key],
+               let waiting = stop.occurrence(forKey: waitingKey, calendar: calendar),
+               waiting.end.map({ now < $0 }) ?? true, !isHandled(stop, waiting) {
                 candidates.append(waiting)
             }
             guard let occurrence = candidates.min(by: { $0.key < $1.key }) else { continue }
@@ -837,7 +829,6 @@ struct BreakScheduler: Sendable {
     /// the later occurrence is worked out again once it no longer waits, so it joins in order.
     private mutating func mergeOverlappingStops(stops: [HardStop], now: Date) -> [Event] {
         var events: [Event] = []
-        handleRescheduledRunningOccurrences()
         guard var active = snapshot.activeHardStop else { return events }
         var day = calendar.startOfDay(for: active.mergedThrough ?? active.occurrence)
         var deferredFrom: Date?
@@ -850,16 +841,12 @@ struct BreakScheduler: Sendable {
                       item.occurrence.start < active.endsAt ?? .distantFuture,
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
                 if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
-                    if let waiting = waitingOccurrence(of: item.stop) {
-                        guard let end = waiting.end, end <= now else {
-                            deferredFrom = deferredFrom ?? day
-                            continue
-                        }
-                        events.append(recordMissed(item.stop, waiting, end: end, now: now))
-                    } else {
-                        // The stop was rescheduled away from the occurrence that waited, which never starts.
-                        snapshot.hardStopsWaitingForCall[item.stop.id.uuidString] = nil
+                    guard let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
+                          let end = waiting.end, end <= now else {
+                        deferredFrom = deferredFrom ?? day
+                        continue
                     }
+                    events.append(recordMissed(item.stop, waiting, end: end, now: now))
                 }
                 merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
             }
@@ -870,20 +857,6 @@ struct BreakScheduler: Sendable {
         active.mergedThrough = deferredFrom ?? calendar.startOfDay(for: now)
         snapshot.activeHardStop = active
         return events
-    }
-
-    /// A stop that is part of the running one keeps that occurrence when its start time is edited: the occurrence the
-    /// edited stop has on the same scheduled day counts as handled, so it never joins, starts, or warns again that
-    /// day. The edit applies from its next day. Keys hold the configured day and time, so this is unaffected by
-    /// time zone changes, and a stop has one occurrence a day, so a later-day occurrence still joins as before.
-    private mutating func handleRescheduledRunningOccurrences() {
-        guard let active = snapshot.activeHardStop else { return }
-        for (id, key) in [(active.id, active.occurrenceKey)] + active.merged.map({ ($0.id, $0.occurrenceKey) }) {
-            guard let stop = settings.hardStops.first(where: { $0.id == id }) else { continue }
-            let day = HardStop.Occurrence.parts(of: key)
-            let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
-            snapshot.handledHardStops[id.uuidString] = max(sameDay, snapshot.handledHardStops[id.uuidString] ?? sameDay)
-        }
     }
 
     /// Focus time the timer counted before a hard stop starts: none after a break (its record holds the stretch),
@@ -902,12 +875,11 @@ struct BreakScheduler: Sendable {
     }
 
     /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
-    /// The wait of a stop that was turned off, deleted, or rescheduled away from that occurrence is dropped unrecorded.
     private mutating func missWaitingStops(now: Date) -> [Event] {
         var events: [Event] = []
-        for (key, _) in snapshot.hardStopsWaitingForCall.sorted(by: { $0.value < $1.value }) {
+        for (key, waitingKey) in snapshot.hardStopsWaitingForCall.sorted(by: { $0.value < $1.value }) {
             guard let stop = settings.hardStops.first(where: { $0.id.uuidString == key && $0.isEnabled }),
-                  let occurrence = waitingOccurrence(of: stop),
+                  let occurrence = stop.occurrence(forKey: waitingKey, calendar: calendar),
                   !isHandled(stop, occurrence) else {
                 snapshot.hardStopsWaitingForCall[key] = nil
                 continue
@@ -1202,10 +1174,9 @@ struct BreakScheduler: Sendable {
 
     // MARK: - Helpers
 
-    /// Releases the regular schedule a stop held while it waited for a call, when its wait ends without a record (it
-    /// was turned off, deleted, or rescheduled) and no stop runs: as after a snooze, the countdown starts over from
-    /// now, so a break that came due while it was held does not start at once, and the focus counted so far stays in
-    /// the current stretch. A running break still ends on time, and a pause still resumes by its own rules.
+    /// Releases the regular schedule a stop held while it waited for a call, when the last waiting stop is deleted and
+    /// no stop runs: as after a snooze, the countdown starts over from now, so a break that came due while it was held
+    /// does not start at once, and the focus counted so far stays in the current stretch. A running break still ends on time, and a pause still resumes by its own rules.
     private mutating func releaseHeldSchedule(now: Date) {
         guard snapshot.activeHardStop == nil, snapshot.hardStopsWaitingForCall.isEmpty,
               snapshot.phase == .focusing || snapshot.phase == .headsUp else { return }

@@ -218,11 +218,8 @@ private struct HardStopQuickAddView: View {
     /// Adds the stop when it is valid at the moment Add is pressed; the next tick picks it up. Uses the controller's
     /// clock, as the Tomorrow label does, so the day saved is the day shown.
     private func add() {
-        let now = controller.now
-        var settings = controller.settings
-        errors = settings.saveHardStop(values.stop(now: now, calendar: controller.calendar), isNew: true, now: now, calendar: controller.calendar)
+        errors = controller.saveHardStop(values.stop(now: controller.now, calendar: controller.calendar), isNew: true)
         guard errors.isEmpty else { return }
-        controller.settings = settings
         close()
     }
 }

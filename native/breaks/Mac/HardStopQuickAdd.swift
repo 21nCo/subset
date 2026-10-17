@@ -262,6 +262,40 @@ extension BreakSettings {
     }
 }
 
+extension HardStopFieldError {
+    /// The settings keep a stop that is in progress as it is (`BreakScheduler.isHardStopInProgress`).
+    static func inProgress(_ id: UUID) -> Self {
+        .init(stopID: id, field: .list, message: "This hard stop is in progress. You can change it after it ends.")
+    }
+}
+
+extension BreakScheduler {
+    /// Whether the stop with `id` is in progress: it is the running stop (shown, or hidden by an extension), it joined
+    /// the running stop (until that stop ends, even after its own part has ended), or it waits for a call. Settings do
+    /// not change such a stop until it ends; it can only be deleted (`deleteHardStop`).
+    func isHardStopInProgress(id: UUID) -> Bool {
+        if snapshot.hardStopsWaitingForCall[id.uuidString] != nil { return true }
+        guard let active = snapshot.activeHardStop else { return false }
+        return active.id == id || active.merged.contains { $0.id == id }
+    }
+
+    /// Saves a new or edited stop as `BreakSettings.saveHardStop` does, except that an edit of a stop in progress is
+    /// refused with its error. Returns the errors; the settings change only when there are none.
+    mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date) -> [HardStopFieldError] {
+        guard !isHardStopInProgress(id: stop.id) else { return [.inProgress(stop.id)] }
+        return settings.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar)
+    }
+
+    /// Turns the stop with `id` on or off, unless it is in progress. Returns the errors; the settings change only when
+    /// there are none.
+    mutating func setHardStop(id: UUID, isEnabled: Bool) -> [HardStopFieldError] {
+        guard !isHardStopInProgress(id: id) else { return [.inProgress(id)] }
+        guard let index = settings.hardStops.firstIndex(where: { $0.id == id }) else { return [] }
+        settings.hardStops[index].isEnabled = isEnabled
+        return []
+    }
+}
+
 extension BreakScheduler {
     /// The enabled stop whose next occurrence starts first after `now`, and that start. Repeating stops are looked up
     /// two weeks ahead, so a weekly one whose next day has no occurrence (the clocks skip its time) is still found.

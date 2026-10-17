@@ -299,14 +299,21 @@ private struct ScheduleSettingsTab: View {
         Section {
             ForEach(controller.settings.hardStops) { stop in
                 HStack {
+                    let inProgress = controller.isHardStopInProgress(id: stop.id)
                     Toggle(isOn: enabled(stop.id)) {
                         VStack(alignment: .leading) {
                             Text(stop.name)
                             Text(HardStopText.summary(of: stop, calendar: controller.calendar))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            if inProgress {
+                                Text(HardStopFieldError.inProgress(stop.id).message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .disabled(inProgress)
                     Button("Edit…") { editing = HardStopDraft(stop, now: controller.now, calendar: controller.calendar) }
                     Button {
                         deleting = stop
@@ -322,18 +329,16 @@ private struct ScheduleSettingsTab: View {
         } header: {
             Text("Hard stops")
         } footer: {
-            Text("A hard stop covers the screen at a set time, even while reminders are paused or outside office hours. Up to \(HardStop.maximumCount). Changes apply within a second; one that is running keeps its settings until it ends.")
+            Text("A hard stop covers the screen at a set time, even while reminders are paused or outside office hours. Up to \(HardStop.maximumCount). Changes apply within a second. A stop that is running or waiting for a call can be changed after it ends.")
         }
     }
 
-    /// Looks the stop up by id, since the scheduler removes a one-off stop once it has run.
+    /// Looks the stop up by id, since the scheduler removes a one-off stop once it has run. A stop in progress keeps
+    /// its state.
     private func enabled(_ id: UUID) -> Binding<Bool> {
         Binding(
             get: { controller.settings.hardStops.first { $0.id == id }?.isEnabled ?? false },
-            set: { isOn in
-                guard let index = controller.settings.hardStops.firstIndex(where: { $0.id == id }) else { return }
-                controller.settings.hardStops[index].isEnabled = isOn
-            }
+            set: { controller.setHardStop(id: id, isEnabled: $0) }
         )
     }
 
@@ -374,6 +379,7 @@ private struct HardStopEditor: View {
         VStack(spacing: 0) {
             Form {
                 Section {
+                    FieldError(errors, .list)
                     TextField("Name", text: $draft.name)
                     FieldError(errors, .name)
                     DatePicker("Starts at", selection: clock($draft.hour, $draft.minute), displayedComponents: .hourAndMinute)
@@ -444,7 +450,6 @@ private struct HardStopEditor: View {
                         Text("Wait for the call to end").tag(HardStop.CallBehavior.waitForCallToEnd)
                         Text("Start anyway").tag(HardStop.CallBehavior.startAnyway)
                     }
-                    FieldError(errors, .list)
                 }
             }
             .formStyle(.grouped)
@@ -461,17 +466,15 @@ private struct HardStopEditor: View {
         .frame(width: 460, height: 560)
     }
 
-    /// The errors saving the draft at this moment would give; the settings do not change.
+    /// The errors saving the draft at this moment would give, including that the stop is in progress; the settings
+    /// do not change.
     private var errors: [HardStopFieldError] {
-        var settings = controller.settings
-        return settings.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew, now: controller.now, calendar: controller.calendar)
+        controller.hardStopErrors(saving: draft.stop(calendar: controller.calendar), isNew: draft.isNew)
     }
 
     /// Saves on the clock `errors` uses, so a save the button allows is not refused.
     private func save() {
-        var settings = controller.settings
-        guard settings.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew, now: controller.now, calendar: controller.calendar).isEmpty else { return }
-        controller.settings = settings
+        guard controller.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew).isEmpty else { return }
         dismiss()
     }
 
