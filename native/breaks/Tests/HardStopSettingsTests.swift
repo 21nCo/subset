@@ -937,8 +937,8 @@ final class HardStopSettingsTests: XCTestCase {
     }
 
     func testARunningOneOffMovedBeforeItsEndNeverRunsAndIsRemovedWhenItEnds() {
-        // Lunch runs 12:30 to 13:00. At 12:31 it is moved inside its own run, or to a time before it that is still open.
-        for (hour, minute) in [(12, 45), (12, 15)] {
+        // Lunch runs 12:30 to 13:00. At 12:31 it is moved inside its own run, or to a time before it, still open or passed.
+        for (hour, minute) in [(12, 45), (12, 15), (12, 0)] {
             let label = "moved to \(hour):\(minute)"
             let lunch = stop(repeats: today)
             var scheduler = makeScheduler([lunch])
@@ -1069,8 +1069,9 @@ final class HardStopSettingsTests: XCTestCase {
                 edit(&edited)
                 XCTAssertEqual(scheduler.hardStopErrors(saving: edited, isNew: false, now: item.editAt), [], label)
                 XCTAssertEqual(scheduler.hardStopInProgressNote(saving: edited, now: item.editAt), HardStopText.inProgress, label)
-                // A time moved to one that has passed is judged as any other.
-                XCTAssertEqual(scheduler.hardStopErrors(saving: moved(edited, to: 12, 0), isNew: false, now: item.editAt).map(\.field), [.repeats], label)
+                // A time that has passed comes before the running stop's end, so it is superseded and can be saved too.
+                XCTAssertEqual(scheduler.hardStopErrors(saving: moved(edited, to: 12, 0), isNew: false, now: item.editAt), [], label)
+                XCTAssertEqual(scheduler.hardStopInProgressNote(saving: moved(edited, to: 12, 0), now: item.editAt), HardStopText.inProgressSuperseded, label)
                 XCTAssertTrue(scheduler.saveHardStop(edited, isNew: false, now: item.editAt) == ([], []), label)
                 XCTAssertEqual(scheduler.snapshot.activeHardStop, running, label)
                 XCTAssertEqual(scheduler.settings.hardStops.first { $0.id == edited.id }, edited, label)
@@ -1194,6 +1195,8 @@ final class HardStopSettingsTests: XCTestCase {
             (14, 0, at(13, 5), [(at(13, 0), missed)] + atTwo, [.missed, .ended]),
             (12, 45, at(12, 40), [(at(12, 40), started), (at(13, 0), ended)], [.ended]),
             (12, 45, at(13, 5), [(at(13, 0), missed)], [.missed]),
+            (11, 30, at(12, 40), [(at(12, 40), started), (at(13, 0), ended)], [.ended]),
+            (11, 30, at(13, 5), [(at(13, 0), missed)], [.missed]),
         ]
         for item in cases {
             let label = "moved to \(item.hour):\(item.minute), call until \(item.callEnds)"
@@ -1401,29 +1404,60 @@ final class HardStopSettingsTests: XCTestCase {
         }
     }
 
-    func testAStopWithoutAnEndEditedToATimeThatHasPassedNeverJoinsItRetroactively() throws {
-        // Evening runs from Monday to Wednesday from 17:00 until dismissed. At 10:00 on Tuesday, while Monday's still runs, it
-        // is moved to 09:00: Tuesday's 09:00 had already started, so it does not join; Wednesday's, which starts after the
-        // save, does.
-        let evening = stop("Evening", hour: 17, minute: 0, end: .untilDismissed, repeats: .weekdays([2, 3, 4]), escapeHatch: .dismissEarly)
-        var scheduler = makeScheduler([evening], start: at(9, 0))
-        _ = scheduler.tick(now: at(17, 0))
-        _ = scheduler.tick(now: at(9, 59, dayOffset: 1))
-        XCTAssertTrue(scheduler.saveHardStop(moved(evening, to: 9, 0), isNew: false, now: at(10, 0, dayOffset: 1)) == ([], []))
-        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [])
+    func testAStopWithoutAnEndEditedWhileItRunsNeverJoinsItOnALaterDay() throws {
+        // Evening runs from Monday to Thursday from 17:00 until dismissed. At 10:00 on Tuesday, while Monday's still runs, it
+        // is moved to 09:00 or renamed. While Monday's runs, none of its later occurrences (Tuesday's 17:00, Wednesday's
+        // 09:00) joins it or is shown as next, also after a relaunch. Dismissed at 12:00 on Wednesday, it has one record,
+        // and the edit applies after that: on Thursday at 09:00, or on Wednesday at 17:00.
+        let evening = stop("Evening", hour: 17, minute: 0, end: .untilDismissed, repeats: .weekdays([2, 3, 4, 5]), escapeHatch: .dismissEarly)
+        var renamed = evening
+        renamed.name = "Renamed"
+        for (edited, nextDay) in [(moved(evening, to: 9, 0), 3), (renamed, 2)] {
+            let label = "\(edited.name) at \(edited.hour)"
+            var scheduler = makeScheduler([evening], start: at(9, 0))
+            _ = scheduler.tick(now: at(17, 0))
+            _ = scheduler.tick(now: at(9, 59, dayOffset: 1))
+            XCTAssertTrue(scheduler.saveHardStop(edited, isNew: false, now: at(10, 0, dayOffset: 1)) == ([], []), label)
+            let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONEncoder().encode(scheduler.snapshot))
+            scheduler = BreakScheduler(settings: scheduler.settings, snapshot: snapshot, records: scheduler.records, calendar: calendar)
+            scheduler.reconcileRestoredState(now: at(10, 0, dayOffset: 1))
+            XCTAssertNil(scheduler.nextHardStop(after: at(10, 0, dayOffset: 1)), label)
 
-        // It holds after a relaunch too.
-        let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONEncoder().encode(scheduler.snapshot))
-        scheduler = BreakScheduler(settings: scheduler.settings, snapshot: snapshot, records: scheduler.records, calendar: calendar)
-        scheduler.reconcileRestoredState(now: at(10, 0, dayOffset: 1))
-        XCTAssertEqual(scheduler.tick(now: at(10, 0, 1, dayOffset: 1)), [])
-        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [])
-        XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, nil)
+            XCTAssertEqual(run(&scheduler, from: at(10, 0, dayOffset: 1), through: at(12, 0, dayOffset: 2)).map(\.1), [], label)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.occurrenceKey, key(17, 0), label)
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [], label)
+            XCTAssertEqual(scheduler.dismissHardStop(now: at(12, 0, dayOffset: 2)), [.hardStopEnded(id: evening.id, reason: .dismissed)], label)
+            XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(17, 0)], label)
+            let next = at(edited.hour, 0, dayOffset: nextDay)
+            XCTAssertEqual(scheduler.nextHardStop(after: at(12, 0, dayOffset: 2))?.start, next, label)
+            XCTAssertEqual(run(&scheduler, from: at(12, 0, dayOffset: 2), through: next).map(\.1), [
+                warning(edited, edited.hour, 0, dayOffset: nextDay), .hardStopStarted(id: evening.id, endsAt: nil),
+            ], label)
+        }
+    }
 
-        _ = scheduler.tick(now: at(9, 0, dayOffset: 2))
-        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.occurrenceKey), [key(9, 0, dayOffset: 2)])
-        XCTAssertEqual(scheduler.dismissHardStop(now: at(9, 30, dayOffset: 2)), [.hardStopEnded(id: evening.id, reason: .dismissed)])
-        XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(17, 0), at(9, 0, dayOffset: 2)])
+    func testAStopJoinedToOneWithoutAnEndAndEditedNeverJoinsItAgain() {
+        // Long (Mondays from 17:00 until dismissed) runs, and Walk (every day at 18:00 for 15 minutes) joins it. Renamed at
+        // 10:00 on Tuesday, Walk's Tuesday 18:00 never joins Long; never saved, it does. Once Long is dismissed at 12:00 on
+        // Wednesday, Walk next runs on its own at 18:00.
+        let long = stop("Long", hour: 17, minute: 0, end: .untilDismissed, repeats: .weekdays([2]), escapeHatch: .dismissEarly)
+        let walk = stop("Walk", hour: 18, minute: 0, end: .after(15 * 60), repeats: daily)
+        var renamed = walk
+        renamed.name = "Stroll"
+        for edited in [renamed, nil] {
+            let label = edited == nil ? "unedited" : "renamed"
+            var scheduler = makeScheduler([long, walk], start: at(9, 0))
+            _ = run(&scheduler, from: at(16, 59), through: at(10, 0, dayOffset: 1))
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.occurrenceKey), [key(18, 0)], label)
+            if let edited { XCTAssertTrue(scheduler.saveHardStop(edited, isNew: false, now: at(10, 0, dayOffset: 1)) == ([], []), label) }
+
+            _ = run(&scheduler, from: at(10, 0, dayOffset: 1), through: at(12, 0, dayOffset: 2))
+            XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.occurrenceKey),
+                           [key(18, 0)] + (edited == nil ? [key(18, 0, dayOffset: 1)] : []), label)
+            XCTAssertEqual(scheduler.dismissHardStop(now: at(12, 0, dayOffset: 2)), [.hardStopEnded(id: long.id, reason: .dismissed)], label)
+            XCTAssertEqual(hardStopRecords(scheduler).count, edited == nil ? 3 : 2, label)
+            XCTAssertEqual(nextHardStop(of: walk.id, in: scheduler, after: at(12, 0, dayOffset: 2))?.start, at(18, 0, dayOffset: 2), label)
+        }
     }
 
     func testAnEditThatKeepsTheStartTimeNeverJoinsTheRunningStopOnALaterDay() throws {
@@ -1499,7 +1533,7 @@ final class HardStopSettingsTests: XCTestCase {
     func testARenamedStopWithoutAnEndWaitingForACallNeverRunsTwice() {
         // Evening (Monday to Wednesday from 17:00 until dismissed) waits for the call that runs from Monday 16:00 until
         // Tuesday 18:00. At 17:30 on Tuesday, after Tuesday's 17:00 has started, it is renamed: Monday's occurrence starts
-        // when the call ends, Tuesday's never joins it, and Wednesday's does.
+        // when the call ends, and no later one joins it, Wednesday's neither. Dismissed on Wednesday, it has one record.
         var evening = stop("Evening", hour: 17, minute: 0, end: .untilDismissed, repeats: .weekdays([2, 3, 4]),
                            escapeHatch: .dismissEarly, duringCalls: .waitForCallToEnd)
         let inCall: (Date) -> BreakScheduler.Inputs = { [self] in $0 < at(18, 0, dayOffset: 1) ? .init(signals: [.meeting]) : .init() }
@@ -1509,13 +1543,14 @@ final class HardStopSettingsTests: XCTestCase {
         evening.name = "Renamed"
         XCTAssertTrue(scheduler.saveHardStop(evening, isNew: false, now: at(17, 30, dayOffset: 1)) == ([], []))
 
-        let events = run(&scheduler, from: at(17, 30, dayOffset: 1), through: at(17, 0, dayOffset: 2), inputs: inCall)
+        let events = run(&scheduler, from: at(17, 30, dayOffset: 1), through: at(17, 30, dayOffset: 2), inputs: inCall)
         XCTAssertEqual(events.map(\.0), [at(18, 0, dayOffset: 1)])
         XCTAssertEqual(events.map(\.1), [.hardStopStarted(id: evening.id, endsAt: nil)])
         XCTAssertEqual(scheduler.snapshot.activeHardStop?.occurrenceKey, key(17, 0))
-        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.occurrenceKey), [key(17, 0, dayOffset: 2)])
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [])
         XCTAssertEqual(scheduler.dismissHardStop(now: at(17, 30, dayOffset: 2)), [.hardStopEnded(id: evening.id, reason: .dismissed)])
-        XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(18, 0, dayOffset: 1), at(17, 0, dayOffset: 2)])
+        XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(18, 0, dayOffset: 1)])
+        XCTAssertEqual(scheduler.nextHardStop(after: at(17, 30, dayOffset: 2))?.start, at(17, 0, dayOffset: 7))
     }
 
     func testADayAddedBeforeAWaitingStopWithoutAnEndNeverReplacesItsOccurrence() throws {
@@ -1590,7 +1625,9 @@ final class HardStopSettingsTests: XCTestCase {
         quick.repeats = .once(DateComponents(year: 2026, month: 8, day: 20))
         let other = stop("Other", hour: 6, repeats: .weekdays([6]))
         return [
-            ("no save", { _ in }),
+            ("no save", { _ in
+                // The control: nothing else is saved.
+            }),
             ("quick add", { XCTAssertEqual($0.saveHardStop(quick, isNew: true, now: now).errors, []) }),
             ("another stop turned off", { scheduler in
                 XCTAssertEqual(scheduler.saveHardStop(other, isNew: true, now: now).errors, [])
@@ -1731,6 +1768,76 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(hardStopRecords(scheduler).count, 1)
     }
 
+    func testAnEditSavedAfterAStopsEndBeforeTheNextTickAppliesAtOnce() {
+        // Lunch (12:30 to 13:00, weekly or a one-off) runs, shown or hidden by an extension, or waits for a call that lasts
+        // until 13:30. Its end has passed, but no tick has ended or missed it yet, when it is moved to 14:00, also after it
+        // is turned off and on again: it is no longer in progress, so 14:00 is listed, warned about, and starts today.
+        let inCall: (Date) -> BreakScheduler.Inputs = { [self] in $0 < at(13, 30) ? .init(signals: [.meeting]) : .init() }
+        for state in ["shown", "hidden", "waiting"] {
+            for repeats in [HardStop.Repeat.weekdays([2]), today] {
+                for now in [at(13, 0), at(13, 0).addingTimeInterval(0.5), at(13, 0, 30)] {
+                    for toggled in [false, true] {
+                        let label = "\(state), \(repeats), \(now), toggled \(toggled)"
+                        let lunch = stop(repeats: repeats, escapeHatch: .extend(minutes: 15, times: 1),
+                                         duringCalls: state == "waiting" ? .waitForCallToEnd : .startAnyway)
+                        var scheduler = makeScheduler([lunch], start: at(9, 0))
+                        _ = run(&scheduler, from: at(12, 29), through: at(12, 50), inputs: inCall)
+                        if state == "hidden" { XCTAssertNotEqual(scheduler.extendHardStop(now: at(12, 50)), [], label) }
+                        let moved = moved(lunch, to: 14, 0)
+                        XCTAssertFalse(scheduler.isHardStopInProgress(id: lunch.id, now: now), label)
+                        XCTAssertNil(scheduler.hardStopInProgressNote(saving: moved, now: now), label)
+                        if toggled {
+                            XCTAssertEqual(scheduler.setHardStop(id: lunch.id, isEnabled: false, now: now), [], label)
+                            XCTAssertEqual(scheduler.setHardStop(id: lunch.id, isEnabled: true, now: now), [], label)
+                        }
+                        XCTAssertTrue(scheduler.saveHardStop(moved, isNew: false, now: now) == ([], []), label)
+                        XCTAssertEqual(scheduler.snapshot.hardStopsEditedInProgress, [:], label)
+                        XCTAssertEqual(scheduler.nextHardStop(after: at(13, 1))?.start, at(14, 0), label)
+
+                        let events = run(&scheduler, from: at(13, 0), through: at(14, 31), inputs: inCall)
+                        XCTAssertEqual(events.map(\.0), [at(13, 1), at(13, 50), at(14, 0), at(14, 30)], label)
+                        XCTAssertEqual(events.map(\.1), [
+                            .hardStopEnded(id: lunch.id, reason: state == "waiting" ? .missed : .ended), warning(lunch, 14, 0),
+                            .hardStopStarted(id: lunch.id, endsAt: at(14, 30)), .hardStopEnded(id: lunch.id, reason: .ended),
+                        ], label)
+                        XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(12, 30), at(14, 0)], label)
+                        XCTAssertEqual(scheduler.settings.hardStops, repeats == today ? [] : [moved], label)
+                    }
+                }
+            }
+        }
+    }
+
+    func testAOneOffMovedPastItsEndInAZoneFurtherWestRunsAtItsNewTime() throws {
+        // The one-off Lunch runs from 12:30 to 13:00 UTC. The Mac moves to UTC-4, and at 12:35 UTC Lunch is moved to 10:00
+        // there, which is 14:00 UTC, after its end: it is listed, shown as next, warned about, and starts then, and is
+        // removed when it ends, or when it is dismissed, without starting again.
+        for dismissed in [false, true] {
+            let label = dismissed ? "dismissed" : "ended"
+            let lunch = stop(repeats: today, escapeHatch: .dismissEarly)
+            var scheduler = makeScheduler([lunch])
+            _ = scheduler.tick(now: at(12, 30))
+            scheduler.calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: -4 * 3600))
+            let moved = moved(lunch, to: 10, 0)
+            XCTAssertEqual(scheduler.hardStopInProgressNote(saving: moved, now: at(12, 35)), HardStopText.inProgress, label)
+            XCTAssertTrue(scheduler.saveHardStop(moved, isNew: false, now: at(12, 35)) == ([], []), label)
+            XCTAssertEqual(run(&scheduler, from: at(12, 35), through: at(13, 1)).map(\.1), [.hardStopEnded(id: lunch.id, reason: .ended)], label)
+            XCTAssertEqual(scheduler.settings.hardStops, [moved], label)
+            XCTAssertEqual(scheduler.nextHardStop(after: at(13, 1))?.start, at(14, 0), label)
+
+            let events = run(&scheduler, from: at(13, 1), through: at(14, 10))
+            XCTAssertEqual(events.map(\.0), [at(13, 50), at(14, 0)], label)
+            XCTAssertEqual(events.map(\.1), [
+                .hardStopWarning(id: lunch.id, occurrenceKey: key(10, 0), startsAt: at(14, 0), waitingForCall: false),
+                .hardStopStarted(id: lunch.id, endsAt: at(14, 30)),
+            ], label)
+            if dismissed { XCTAssertEqual(scheduler.dismissHardStop(now: at(14, 10)), [.hardStopEnded(id: lunch.id, reason: .dismissed)], label) }
+            XCTAssertEqual(run(&scheduler, from: at(14, 10), through: at(15, 0)).map(\.1), dismissed ? [] : [.hardStopEnded(id: lunch.id, reason: .ended)], label)
+            XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(12, 30), at(14, 0)], label)
+            XCTAssertEqual(scheduler.settings.hardStops, [], label)
+        }
+    }
+
     func testTheInProgressNoteSaysWhatAnEditDoes() {
         let lunch = stop(repeats: today)
         let weekly = stop("Weekly", hour: 16)
@@ -1748,7 +1855,7 @@ final class HardStopSettingsTests: XCTestCase {
     func testAOneOffSupersededByItsOccurrenceInProgressCanStillBeEditedAfterItsNewTime() {
         // Walk (a one-off at 12:45) joins Long, which runs from 12:30 to 13:30, and is moved at 12:50 to 12:55, inside Long:
         // that time never runs. After 13:25, when it would have ended, the note still says so, and Walk can still be
-        // renamed until Long ends; a move to another time that has passed is still refused.
+        // renamed until Long ends, or moved to another time before Long's end that has passed.
         let long = stop("Long", end: .after(60 * 60))
         let original = stop("Walk", hour: 12, minute: 45, repeats: today)
         let walk = moved(original, to: 12, 55)
@@ -1764,8 +1871,8 @@ final class HardStopSettingsTests: XCTestCase {
             XCTAssertEqual(scheduler.hardStopInProgressNote(saving: renamed, now: now), HardStopText.inProgressSuperseded, "\(now)")
             XCTAssertEqual(scheduler.hardStopErrors(saving: renamed, isNew: false, now: now), [], "\(now)")
         }
-        XCTAssertEqual(scheduler.hardStopErrors(saving: moved(walk, to: 12, 50), isNew: false, now: at(13, 26)).map(\.message),
-                       ["This date and time have passed."])
+        XCTAssertEqual(scheduler.hardStopErrors(saving: moved(walk, to: 12, 50), isNew: false, now: at(13, 26)), [])
+        XCTAssertEqual(scheduler.hardStopInProgressNote(saving: moved(walk, to: 12, 50), now: at(13, 26)), HardStopText.inProgressSuperseded)
         XCTAssertTrue(scheduler.saveHardStop(renamed, isNew: false, now: at(13, 26)) == ([], []))
         XCTAssertEqual(scheduler.snapshot.activeHardStop, running)
         let events = run(&scheduler, from: at(13, 26), through: at(15, 0))

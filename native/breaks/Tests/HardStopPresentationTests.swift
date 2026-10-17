@@ -337,7 +337,8 @@ final class HardStopPresentationTests: XCTestCase {
     }
 
     func testNoticeQueueShowsTheEarliestStopAndTheNextAfterClosing() {
-        let early = UUID(), late = UUID()
+        let early = UUID()
+        let late = UUID()
         var queue = HardStopNoticeQueue()
         queue.add(.warning(id: late, occurrenceKey: key(14, 0)))
         queue.add(.warning(id: early, occurrenceKey: key(13, 0)))

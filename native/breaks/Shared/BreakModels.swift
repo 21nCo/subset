@@ -671,7 +671,7 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     /// Per hard stop ID: the warnings already delivered for its next occurrence.
     var hardStopWarnings: [String: HardStopWarningMark] = [:]
     /// Per hard stop ID: the key of the latest occurrence that started, merged, ended, or was missed. It and every
-    /// earlier occurrence never start again.
+    /// earlier occurrence never start again; for a one-off stop, which has a single occurrence, only it.
     var handledHardStops: [String: Int] = [:]
     /// Per hard stop ID: the key of the due occurrence that is waiting for a call to end.
     var hardStopsWaitingForCall: [String: Int] = [:]

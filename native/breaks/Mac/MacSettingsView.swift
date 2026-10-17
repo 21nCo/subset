@@ -327,7 +327,7 @@ private struct ScheduleSettingsTab: View {
         } header: {
             Text("Hard stops")
         } footer: {
-            Text("A hard stop covers the screen at a set time, even while reminders are paused or outside office hours. Up to \(HardStop.maximumCount). Changes apply within a second. A stop that is running or waiting for a call keeps its current settings until it ends.")
+            Text("A hard stop covers the screen at a set time, even while reminders are paused or outside office hours. Up to \(HardStop.maximumCount). Changes apply within a second. A stop that is running or waiting for a call keeps its current settings until it ends; turning off a stop that waits for a call stops it waiting.")
         }
     }
 
