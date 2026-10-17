@@ -195,6 +195,10 @@ add_sources(mac_group, mac_target, %w[
 hard_stop_presentation = mac_group.new_file("HardStopPresentation.swift")
 [mac_target, mac_tests_target].each { |target| target.add_file_references([hard_stop_presentation]) }
 mac_tests_target.add_file_references([tests_group.new_file("HardStopPresentationTests.swift")])
+# So are the hard-stop editor and quick-add rules.
+hard_stop_quick_add = mac_group.new_file("HardStopQuickAdd.swift")
+[mac_target, mac_tests_target].each { |target| target.add_file_references([hard_stop_quick_add]) }
+mac_tests_target.add_file_references([tests_group.new_file("HardStopSettingsTests.swift")])
 mac_assets = mac_group.new_file("Assets.xcassets")
 mac_target.resources_build_phase.add_file_reference(mac_assets)
 

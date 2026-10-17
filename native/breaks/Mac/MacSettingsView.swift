@@ -228,9 +228,12 @@ private struct SmartPauseSettingsTab: View {
 
 private struct ScheduleSettingsTab: View {
     @EnvironmentObject private var controller: MacBreakController
+    @State private var editing: HardStopDraft?
+    @State private var deleting: HardStop?
 
     var body: some View {
         Form {
+            hardStops
             Section {
                 Toggle("Only remind during office hours", isOn: $controller.settings.officeHours.isEnabled)
                 if controller.settings.officeHours.isEnabled {
@@ -269,6 +272,74 @@ private struct ScheduleSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(item: $editing) { draft in
+            HardStopEditor(draft: draft)
+                .environmentObject(controller)
+        }
+        .confirmationDialog(
+            "Delete “\(deleting?.name ?? "")”?",
+            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+            presenting: deleting
+        ) { stop in
+            Button("Delete", role: .destructive) { controller.deleteHardStop(id: stop.id) }
+        } message: { stop in
+            if let running = controller.runningHardStop(containing: stop.id) {
+                if running.id == stop.id {
+                    Text("This hard stop is running. Deleting it ends it now and records it as dismissed.")
+                } else {
+                    Text("This hard stop has joined “\(running.name)”, which is running. Deleting it ends “\(running.name)” now too and records both as dismissed.")
+                }
+            } else {
+                Text("This hard stop will be removed.")
+            }
+        }
+    }
+
+    @ViewBuilder private var hardStops: some View {
+        Section {
+            ForEach(controller.settings.hardStops) { stop in
+                HStack {
+                    let inProgress = controller.isHardStopInProgress(id: stop.id)
+                    Toggle(isOn: enabled(stop.id)) {
+                        VStack(alignment: .leading) {
+                            Text(stop.name)
+                            Text(HardStopText.summary(of: stop, calendar: controller.calendar))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if inProgress {
+                                Text(HardStopFieldError.inProgress(stop.id).message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .disabled(inProgress)
+                    Button("Edit…") { editing = HardStopDraft(stop, now: controller.now, calendar: controller.calendar) }
+                    Button {
+                        deleting = stop
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Delete \(stop.name)")
+                }
+            }
+            Button("Add Hard Stop…") { editing = .new(now: controller.now) }
+                .disabled(controller.settings.hardStops.count >= HardStop.maximumCount)
+        } header: {
+            Text("Hard stops")
+        } footer: {
+            Text("A hard stop covers the screen at a set time, even while reminders are paused or outside office hours. Up to \(HardStop.maximumCount). Changes apply within a second. A stop that is running or waiting for a call can be changed after it ends.")
+        }
+    }
+
+    /// Looks the stop up by id, since the scheduler removes a one-off stop once it has run. A stop in progress keeps
+    /// its state.
+    private func enabled(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { controller.settings.hardStops.first { $0.id == id }?.isEnabled ?? false },
+            set: { controller.setHardStop(id: id, isEnabled: $0) }
+        )
     }
 
     private func timeBinding(hour: WritableKeyPath<BreakSettings, Int>, minute: WritableKeyPath<BreakSettings, Int>) -> Binding<Date> {
@@ -293,6 +364,150 @@ private struct ScheduleSettingsTab: View {
                 planned.wrappedValue.minute = parts.minute ?? 0
             }
         )
+    }
+}
+
+/// Creates or edits one hard stop. It shows the settings' validation errors as the values change and saves only a
+/// valid stop.
+private struct HardStopEditor: View {
+    @EnvironmentObject private var controller: MacBreakController
+    @Environment(\.dismiss) private var dismiss
+    @State var draft: HardStopDraft
+
+    var body: some View {
+        let errors = self.errors
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    FieldError(errors, .list)
+                    TextField("Name", text: $draft.name)
+                    FieldError(errors, .name)
+                    DatePicker("Starts at", selection: clock($draft.hour, $draft.minute), displayedComponents: .hourAndMinute)
+                    FieldError(errors, .start)
+                    Picker("Ends", selection: $draft.endKind) {
+                        ForEach(HardStopDraft.EndKind.allCases) { Text($0.title).tag($0) }
+                    }
+                    switch draft.endKind {
+                    case .atTime:
+                        DatePicker("Ends at", selection: clock($draft.endHour, $draft.endMinute), displayedComponents: .hourAndMinute)
+                    case .afterLength:
+                        Stepper(value: $draft.lengthMinutes, in: HardStopQuickAdd.lengthRange, step: HardStopQuickAdd.lengthStep) {
+                            LabeledContent("Length", value: HardStopText.length(minutes: draft.lengthMinutes))
+                        }
+                    case .untilDismissed:
+                        EmptyView()
+                    }
+                    FieldError(errors, .end)
+                }
+                Section("Repeat") {
+                    Picker("Repeat", selection: $draft.repeatKind) {
+                        ForEach(HardStopDraft.RepeatKind.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    switch draft.repeatKind {
+                    case .weekdays: WeekdayPicker(selection: $draft.weekdays)
+                    case .once: DatePicker("Date", selection: $draft.date, displayedComponents: .date)
+                    }
+                    FieldError(errors, .repeats)
+                }
+                Section("Warnings") {
+                    ForEach(draft.warningMinutes.indices, id: \.self) { index in
+                        let minutes = warning(index)
+                        HStack {
+                            Stepper(value: minutes, in: HardStop.warningRange) {
+                                Text("\(minutes.wrappedValue) min before")
+                            }
+                            Button {
+                                if draft.warningMinutes.indices.contains(index) { draft.warningMinutes.remove(at: index) }
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Remove warning \(minutes.wrappedValue) minutes before")
+                        }
+                    }
+                    Button("Add Warning") { draft.warningMinutes.append(5) }
+                        .disabled(draft.warningMinutes.count >= HardStop.maximumWarnings)
+                    FieldError(errors, .warningMinutes)
+                }
+                Section {
+                    if draft.showsEscapeHatch {
+                        Picker("Escape hatch", selection: $draft.escapeKind) {
+                            ForEach(HardStopDraft.EscapeKind.allCases) { Text($0.title).tag($0) }
+                        }
+                        if draft.escapeKind == .extend {
+                            Stepper(value: $draft.extendMinutes, in: HardStop.extendMinutesRange, step: 5) {
+                                LabeledContent("Extend by", value: "\(draft.extendMinutes) min")
+                            }
+                            Stepper(value: $draft.extendTimes, in: HardStop.extendTimesRange) {
+                                LabeledContent("Up to", value: draft.extendTimes == 1 ? "1 time" : "\(draft.extendTimes) times")
+                            }
+                        }
+                        FieldError(errors, .escapeHatch)
+                    }
+                    Picker("During calls", selection: $draft.duringCalls) {
+                        Text("Wait for the call to end").tag(HardStop.CallBehavior.waitForCallToEnd)
+                        Text("Start anyway").tag(HardStop.CallBehavior.startAnyway)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!errors.isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 460, height: 560)
+    }
+
+    /// The errors saving the draft at this moment would give, including that the stop is in progress; the settings
+    /// do not change.
+    private var errors: [HardStopFieldError] {
+        controller.hardStopErrors(saving: draft.stop(calendar: controller.calendar), isNew: draft.isNew)
+    }
+
+    /// Saves on the clock `errors` uses, so a save the button allows is not refused.
+    private func save() {
+        guard controller.saveHardStop(draft.stop(calendar: controller.calendar), isNew: draft.isNew).isEmpty else { return }
+        dismiss()
+    }
+
+    /// Checked by index, since a removed row can render once more after its warning is gone.
+    private func warning(_ index: Int) -> Binding<Int> {
+        Binding(
+            get: { draft.warningMinutes.indices.contains(index) ? draft.warningMinutes[index] : HardStop.warningRange.lowerBound },
+            set: { if draft.warningMinutes.indices.contains(index) { draft.warningMinutes[index] = $0 } }
+        )
+    }
+
+    private func clock(_ hour: Binding<Int>, _ minute: Binding<Int>) -> Binding<Date> {
+        Binding(
+            get: { HardStopClock.date(hour: hour.wrappedValue, minute: minute.wrappedValue, near: .now, calendar: controller.calendar) },
+            set: { date in
+                (hour.wrappedValue, minute.wrappedValue) = HardStopClock.time(of: date, calendar: controller.calendar)
+            }
+        )
+    }
+}
+
+/// The validation messages for one field of the hard-stop editor.
+private struct FieldError: View {
+    let messages: [String]
+
+    init(_ errors: [HardStopFieldError], _ field: HardStopFieldError.Field) {
+        messages = errors.filter { $0.field == field }.map(\.message)
+    }
+
+    var body: some View {
+        ForEach(messages, id: \.self) { message in
+            Text(message).font(.caption).foregroundStyle(.red)
+        }
     }
 }
 

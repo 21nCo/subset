@@ -260,6 +260,23 @@ final class BreakSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.snapshot.nextBreakAt, back.addingTimeInterval(20 * 60))
     }
 
+    func testLongAbsenceAfterASnoozeResetsTheFocusCountedSoFar() {
+        var scheduler = makeScheduler { $0.workInterval = 5 * 60 }
+        // Snoozed 15 minutes at 10:04, then away from 10:04: the paused countdown is capped at a full interval,
+        // but 4 minutes of focus are counted.
+        XCTAssertEqual(scheduler.snooze(minutes: 15, now: t0.addingTimeInterval(4 * 60)), [.breakSnoozed(minutes: 15, duringBreak: false)])
+        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(5 * 60), inputs: .init(idleSeconds: 60)), [.paused(.idle)])
+        XCTAssertEqual(scheduler.snapshot.pausedRemaining, 5 * 60)
+        XCTAssertEqual(scheduler.snapshot.pausedFocus, 4 * 60)
+
+        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(9 * 60), inputs: .init(idleSeconds: 5 * 60)), [.focusReset])
+        XCTAssertEqual(scheduler.snapshot.pausedFocus, 0)
+        XCTAssertEqual(scheduler.tick(now: t0.addingTimeInterval(9 * 60 + 1), inputs: .init(idleSeconds: 5 * 60 + 1)), [])
+        let back = t0.addingTimeInterval(10 * 60)
+        XCTAssertEqual(scheduler.tick(now: back, inputs: .init(idleSeconds: 0)), [.resumed(.idle)])
+        XCTAssertEqual(scheduler.focusElapsed(now: back.addingTimeInterval(60)), 60)
+    }
+
     func testIdleAfterSmartPauseCreditsOnlyCountedTime() {
         var scheduler = makeScheduler { $0.smartPause.gracePeriod = 0 }
         // 5 minutes of focus, then a 10-minute call; there was no input for its last 4 minutes.

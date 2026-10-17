@@ -646,6 +646,9 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var focusStartedAt = Date()
     var nextBreakAt = Date().addingTimeInterval(20 * 60)
     var pausedRemaining: TimeInterval?
+    /// While paused: the focus counted before the pause. Kept apart from `pausedRemaining`, because the countdown can
+    /// start over (a snooze, or a released hard-stop wait) while the stretch goes on. Nil in older snapshots.
+    var pausedFocus: TimeInterval?
     var breakStartedAt: Date?
     var breakEndsAt: Date?
     var activeKind: BreakKind?
@@ -678,6 +681,7 @@ extension EngineSnapshot {
         focusStartedAt = try container.decode(Date.self, forKey: .focusStartedAt)
         nextBreakAt = try container.decode(Date.self, forKey: .nextBreakAt)
         pausedRemaining = try container.decodeIfPresent(TimeInterval.self, forKey: .pausedRemaining)
+        pausedFocus = try container.decodeIfPresent(TimeInterval.self, forKey: .pausedFocus)
         breakStartedAt = try container.decodeIfPresent(Date.self, forKey: .breakStartedAt)
         breakEndsAt = try container.decodeIfPresent(Date.self, forKey: .breakEndsAt)
         activeKind = try container.decodeIfPresent(BreakKind.self, forKey: .activeKind)
