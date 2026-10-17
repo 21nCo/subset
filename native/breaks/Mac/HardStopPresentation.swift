@@ -130,7 +130,7 @@ struct HardStopPresentation: Equatable {
         case .warning(let id, let key):
             guard let stop = scheduler.settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
                   let occurrence = scheduler.hardStopOccurrence(stop, key: key),
-                  !(snapshot.handledHardStops[id.uuidString].map { key <= $0 } ?? false) else { break }
+                  !scheduler.isHandled(stop, occurrence) else { break }
             let startsAt = occurrence.start
             // While a stop runs, a warning applies only to a stop that starts once it has ended; one that starts
             // inside it joins it instead.

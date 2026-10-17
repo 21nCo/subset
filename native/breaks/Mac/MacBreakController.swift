@@ -223,29 +223,42 @@ final class MacBreakController: ObservableObject {
         syncHardStopNotice(bringToFront: true)
     }
 
-    /// Whether the hard stop is running, joined the running one, or waits for a call; the settings keep it as it is
-    /// until it ends.
+    /// Whether the hard stop is running, joined the running one, or waits for a call; it keeps that occurrence as it
+    /// is when edited, and the change applies after it.
     func isHardStopInProgress(id: UUID) -> Bool { core.isHardStopInProgress(id: id, now: now) }
+
+    /// For a stop in progress: what saving `stop` does (`hardStopInProgressNote`); nil otherwise.
+    func hardStopInProgressNote(saving stop: HardStop) -> String? { core.hardStopInProgressNote(saving: stop, now: now) }
 
     /// The errors saving `stop` now would give; nothing changes.
     func hardStopErrors(saving stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
-        var scheduler = core
-        return scheduler.saveHardStop(stop, isNew: isNew, now: now)
+        core.hardStopErrors(saving: stop, isNew: isNew, now: now)
     }
 
-    /// Saves a new or edited hard stop on the clock `hardStopErrors` uses, unless it has errors, which it returns. An
-    /// edit of a stop in progress is refused. The next tick applies the change.
+    /// Saves a new or edited hard stop on the clock `hardStopErrors` uses, unless it has errors, which it returns. A stop
+    /// in progress keeps its occurrence; the change applies after it (`BreakScheduler.updateHardStops`).
     func saveHardStop(_ stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
-        var scheduler = core
-        let errors = scheduler.saveHardStop(stop, isNew: isNew, now: now)
-        if errors.isEmpty { settings = scheduler.settings }
-        return errors
+        updateHardStops { $0.saveHardStop(stop, isNew: isNew, now: $1) }
     }
 
-    /// Turns a hard stop on or off on the clock `isHardStopInProgress` uses, unless it is in progress.
+    /// Turns a hard stop on or off on the clock `isHardStopInProgress` uses. One in progress keeps its occurrence.
     func setHardStop(id: UUID, isEnabled: Bool) {
+        updateHardStops { ([], $0.setHardStop(id: id, isEnabled: isEnabled, now: $1)) }
+    }
+
+    /// Runs a change to the hard stops on the shown clock, as the editor validated it, and performs its events.
+    @discardableResult
+    private func updateHardStops(_ change: (inout BreakScheduler, Date) -> (errors: [HardStopFieldError], events: [BreakScheduler.Event])) -> [HardStopFieldError] {
+        let hardStopEnd = core.snapshot.activeHardStop?.endsAt
         var scheduler = core
-        if scheduler.setHardStop(id: id, isEnabled: isEnabled, now: now).isEmpty { settings = scheduler.settings }
+        let result = change(&scheduler, now)
+        guard result.errors.isEmpty else { return result.errors }
+        core = scheduler
+        // A stop that waits for calls may have been added or turned off, so the call signal is read again.
+        lastSignalReadAt = .distantPast
+        handle(result.events, hardStopEnd: hardStopEnd)
+        save()
+        return []
     }
 
     /// Deletes a hard stop on the clock its confirmation (`runningHardStop`) uses. One that is running ends now and is
