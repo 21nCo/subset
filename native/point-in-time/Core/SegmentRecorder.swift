@@ -10,8 +10,8 @@ public struct SegmentRecorder: Sendable {
     /// the open segment ends at its last confirmation instead of claiming the unobserved time.
     public let maxSampleInterval: TimeInterval
     /// Nothing may start before the end of what was already closed, so a clock that steps backwards cannot create
-    /// overlapping segments.
-    private var floor: Date = .distantPast
+    /// overlapping segments. The host seeds it with the latest end already stored, so this holds across launches too.
+    public private(set) var floor: Date = .distantPast
 
     public init(maxSampleInterval: TimeInterval = 30) {
         self.maxSampleInterval = maxSampleInterval
@@ -40,6 +40,13 @@ public struct SegmentRecorder: Sendable {
         content.end = date
         open = content
         return closed
+    }
+
+    /// Moves the floor to `date`, for example to the latest stored end, or back to now after every row was deleted.
+    /// Only while no segment is open.
+    public mutating func setFloor(_ date: Date) {
+        precondition(open == nil)
+        floor = date
     }
 
     /// Ends recording at `date`, for example when idle began or the Mac went to sleep. The end never precedes the
@@ -84,6 +91,14 @@ public struct CaptureSequencer: Sendable {
     }
 
     public var open: Segment? { recorder.open }
+    /// Nothing recorded from now on may start before this: the floor, or the end of the open segment.
+    public var recordedThrough: Date { max(recorder.floor, recorder.open?.end ?? .distantPast) }
+
+    /// See `SegmentRecorder.setFloor`; reads in flight are void.
+    public mutating func setFloor(_ date: Date) {
+        newEpoch(foreground: nil)
+        recorder.setFloor(date)
+    }
 
     /// The system reported another app in front at `date`: the open segment ends there and reads in flight are void.
     public mutating func foregroundChanged(at date: Date) -> [Segment] {

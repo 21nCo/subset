@@ -26,7 +26,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let (symbol, label): (String, String) = switch capture.state {
         case .recording, .idle: ("record.circle", "pointInTime is tracking")
         case .paused: ("pause.circle", "pointInTime is paused")
-        case .storeUnavailable: ("exclamationmark.circle", "pointInTime cannot open its activity store")
+        case .storeUnavailable: ("exclamationmark.circle", "pointInTime cannot open or read its activity store")
         case .writesBacklogged: ("exclamationmark.circle", "pointInTime cannot save to its activity store")
         default: ("circle.dashed", "pointInTime is not tracking")
         }
@@ -92,8 +92,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             } else { "Paused" }
         case .off: settings.onboardingCompleted ? "Tracking is off" : "Not set up yet"
         case .asleep, .locked, .inactiveSession: "Not recording while the Mac is asleep, locked, or switched away"
-        case .storeUnavailable: "Tracking unavailable: the activity store could not be opened"
+        case .storeUnavailable: "Tracking unavailable: the activity store could not be opened or read"
         case .writesBacklogged: "Not recording until the activity store accepts the queued writes"
+        case .clockBehind: "Not recording until the clock passes the latest recorded activity"
         }
     }
 

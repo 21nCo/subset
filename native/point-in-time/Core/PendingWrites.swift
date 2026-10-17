@@ -19,22 +19,22 @@ extension ActivityStore: CaptureStorage {}
 ///
 /// Recovering leaves the store exactly as if every admitted write had been applied in request order, whatever the wall
 /// clock did. Compaction only rewrites the queue into one with that result, and only when it can prove it, using the
-/// latest end of every segment stored or queued: the stored maximum, read from storage once, and the end of every
-/// segment admitted since. While that bound is no later than a retraction's end, nothing reaches past its range, so the
+/// latest end of every segment stored or queued: the stored maximum, read from storage, and the end of every segment
+/// admitted since. While that bound is no later than a retraction's end, nothing reaches past its range, so the
 /// retraction removes everything from its start onwards: it may drop the queued saves inside its range, which it
 /// deletes anyway, and when the bound is also no later than the end of a queued retraction directly before it, the two
-/// become one covering both ranges and the gap between them, which removes the same. With a clock that only moves
-/// forward the bound always holds. After the clock moves back, rows can end later than the request time, so retractions
-/// stay separate and keep every queued save until the clock passes the bound again; until storage has reported its
-/// maximum, nothing is compacted at all.
+/// become one covering both ranges and the gap between them, which removes the same. After the clock moves back, rows
+/// can end later than the request time, so retractions stay separate and keep every queued save; until storage has
+/// reported its maximum, nothing is compacted at all. The bound is re-read after a retraction or deletion has been
+/// applied, and a queued Delete All starts it afresh, so a removal lets compaction resume.
 ///
-/// Once the queue holds `capacity` writes, new saves are refused (that time is not captured); retractions and deletions
-/// are always admitted, and never dropped or made to delete more to fit. With a forward clock every retraction merges or
-/// follows a save, so the queue holds at most `capacity + 1`. Retractions that cannot merge can grow it to the hard
-/// limit of `2 * capacity`, at which point `isFull` asks capture to stop recording until it drains, so no idle
-/// retraction arises; beyond it, each Delete Today requested while it is full can add one entry, and Delete All
-/// replaces the whole queue. Each `retry` applies at most `writesPerRetry` writes, so recovering from a long outage
-/// never blocks the caller for long; `drain` applies the whole queue, for example before quitting.
+/// One signal governs capture: `acceptsCapture` holds only while the queue has room for the next save and for the save
+/// that closes the segment it starts, and capture stops as soon as it fails (see `CaptureSession`). Saves are refused
+/// once the queue holds `capacity` writes (that time is not captured), which capture that obeys the signal never
+/// reaches. Retractions and deletions are always admitted, and never dropped or made to delete more to fit; each adds at
+/// most one write, and Delete All replaces the whole queue. Each `retry` applies at most `writesPerRetry` writes, so
+/// recovering from a long outage never blocks the caller for long; `drain` applies the whole queue, for example before
+/// quitting.
 public struct PendingWrites: Sendable {
     enum Write: Equatable, Sendable {
         case save(Segment)
@@ -52,10 +52,10 @@ public struct PendingWrites: Sendable {
     public private(set) var failure: String?
     /// Saves refused because the queue was full; that time was not captured.
     private(set) var refusedSaves = 0
-    /// Whether storage has reported the latest end of what it holds, and that end.
+    /// Whether storage has reported the latest end of what it holds since the last removal was applied, and that end.
     private var knowsStoredEnd = false
     private var storedEnd: Date?
-    /// The latest end of every segment this queue applied or still holds; refused saves are never stored.
+    /// The latest end of every segment admitted since storage last reported its end; refused saves are never stored.
     private var admittedEnd = Date.distantPast
 
     public init(capacity: Int = 256, writesPerRetry: Int = 8) {
@@ -68,10 +68,9 @@ public struct PendingWrites: Sendable {
     public var count: Int { entries.count - head }
     var queue: ArraySlice<Write> { entries[head...] }
 
-    /// The most writes capture can queue; see the type's documentation.
-    public var hardLimit: Int { 2 * capacity }
-    /// Whether capture should stop recording until the queue drains below `hardLimit`.
-    public var isFull: Bool { count >= hardLimit }
+    /// Whether the next save and the save that closes the segment it starts would both be admitted. Capture records only
+    /// while this holds.
+    public var acceptsCapture: Bool { count + 2 <= capacity }
 
     /// Whether a deletion or idle retraction is still queued, so activity that should be gone is still stored.
     public var hasPendingDeletion: Bool {
@@ -128,6 +127,14 @@ public struct PendingWrites: Sendable {
         return retry(storage)
     }
 
+    /// Reads the latest end of what storage holds, which also bounds compaction from now on.
+    public mutating func readStoredEnd(from storage: CaptureStorage) throws -> Date? {
+        let end = try storage.latestSegmentEnd()
+        storedEnd = end
+        knowsStoredEnd = true
+        return end
+    }
+
     /// Removes everything recorded since the start of the day that contains `now`, until `now`.
     @discardableResult
     public mutating func deleteDay(containing now: Date, calendar: Calendar, in storage: CaptureStorage) -> Bool {
@@ -139,6 +146,8 @@ public struct PendingWrites: Sendable {
     public mutating func deleteAll(in storage: CaptureStorage) -> Bool {
         entries = [.deleteAll]
         head = 0
+        // Once it is applied nothing stored before it remains, and every later write is queued after it.
+        (knowsStoredEnd, storedEnd, admittedEnd) = (true, nil, .distantPast)
         return retry(storage)
     }
 
@@ -172,6 +181,7 @@ public struct PendingWrites: Sendable {
                 return false
             }
             dequeue()
+            if case .save = write {} else { forgetStoredEnd() }
         }
         guard isEmpty else { return false }
         failure = nil
@@ -189,14 +199,18 @@ public struct PendingWrites: Sendable {
         }
     }
 
-    /// Reads the latest stored end once, before the first write; a failed read is tried again on the next write, and
-    /// nothing is compacted until one succeeds. Saves applied in between are counted in `admittedEnd` either way.
+    /// Reads the latest stored end when it is not known; a failed read is tried again on the next write, and nothing is
+    /// compacted until one succeeds. Saves admitted in between are counted in `admittedEnd` either way.
     private mutating func learnStoredEnd(_ storage: CaptureStorage) {
-        guard !knowsStoredEnd else { return }
-        do {
-            storedEnd = try storage.latestSegmentEnd()
-            knowsStoredEnd = true
-        } catch {}
+        if !knowsStoredEnd { _ = try? readStoredEnd(from: storage) }
+    }
+
+    /// An applied removal can lower the stored maximum, so it is read again before the next compaction; the saves still
+    /// queued are not stored yet and keep counting.
+    private mutating func forgetStoredEnd() {
+        knowsStoredEnd = false
+        storedEnd = nil
+        admittedEnd = queue.reduce(.distantPast) { if case .save(let segment) = $1 { max($0, segment.end) } else { $0 } }
     }
 
     /// Drops queued saves that lie inside `[lower, upper)`, the range of the retraction being queued after them, which

@@ -1,42 +1,33 @@
 import AppKit
 import PointInTimeCore
 
-/// Wires macOS signals to the segment recorder and the store. Samples every few seconds while tracking is allowed;
-/// sleep, lock, fast user switching, idle, pause, tracking off, and a full write queue end the current segment.
+/// Wires macOS signals to the capture session and the store. Samples every few seconds while tracking is allowed;
+/// `CaptureSession` decides when capture stops (sleep, lock, fast user switching, idle, pause, tracking off, a write
+/// backlog, or a clock behind recorded activity) and what is saved.
 @MainActor
 final class CaptureController {
     static let sampleInterval: TimeInterval = 5
-    static let idleThreshold: TimeInterval = 120
-    static let flushInterval: TimeInterval = 60
 
-    enum State: Equatable {
-        case off, paused, idle, asleep, locked, inactiveSession, recording, storeUnavailable, writesBacklogged
-    }
-
-    private(set) var state: State = .off
-    /// A store write that has not succeeded yet, or why the store could not be opened. A failed write stays queued and
-    /// is retried on every tick, and the error stays visible until the queue drains.
-    var lastError: String? { writes.failure ?? storeError }
+    var state: CaptureState { session.state }
+    /// A store write that has not succeeded yet, why the store could not be read, or why it could not be opened. A
+    /// failed write stays queued and is retried on every tick, and the error stays visible until the queue drains.
+    var lastError: String? { session.writes.failure ?? session.readError ?? storeError }
     /// Whether a deletion or idle retraction has not succeeded yet. The queue lives in memory, so quitting cancels it.
-    var hasPendingDeletion: Bool { writes.hasPendingDeletion }
+    var hasPendingDeletion: Bool { session.writes.hasPendingDeletion }
     /// Whether recorded activity has not been saved yet. The queue lives in memory, so quitting discards it.
-    var hasUnsavedActivity: Bool { writes.hasPendingSave }
+    var hasUnsavedActivity: Bool { session.writes.hasPendingSave }
     /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action. Kept current while
     /// paused or off as well, so the menu never names an app that is no longer in front.
     private(set) var lastForeignApp: (bundleID: String, name: String)?
 
     private let settings: CaptureSettings
-    private let store: ActivityStore?
     private let storeError: String?
-    private var writes = PendingWrites()
+    private var session: CaptureSession
     private let reader = ActivityReader()
-    private var sequencer = CaptureSequencer(recorder: SegmentRecorder(maxSampleInterval: CaptureController.sampleInterval * 6))
     private var timer: Timer?
-    private var lastFlush = Date.distantPast
-    private var asleep = false, locked = false, sessionInactive = false
-    /// When recording last resumed after sleep, lock, pause, or tracking off. Idle retraction never reaches before it,
-    /// so input-free time spent asleep or paused cannot delete what was recorded earlier.
-    private var recordingSince = Date.distantPast
+    private var asleep = false
+    private var locked = false
+    private var sessionInactive = false
     /// Keeps App Nap from stretching the sample timer while recording, idle, or timed-paused; a throttled timer would end
     /// segments early or a pause late.
     private var samplingActivity: NSObjectProtocol?
@@ -45,21 +36,21 @@ final class CaptureController {
 
     init(settings: CaptureSettings, store: ActivityStore?, storeError: String?) {
         self.settings = settings
-        self.store = store
         self.storeError = storeError
+        session = CaptureSession(storage: store, maxSampleInterval: Self.sampleInterval * 6)
     }
 
     func start() {
         let workspace = NSWorkspace.shared.notificationCenter
         let distributed = DistributedNotificationCenter.default()
-        observe(workspace, NSWorkspace.willSleepNotification) { $0.asleep = true; $0.endSegment() }
-        observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.asleep = true; $0.endSegment() }
+        observe(workspace, NSWorkspace.willSleepNotification) { $0.asleep = true; $0.tick() }
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.asleep = true; $0.tick() }
         observe(workspace, NSWorkspace.didWakeNotification) { $0.asleep = false; $0.tick() }
         observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.asleep = false; $0.tick() }
-        observe(workspace, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true; $0.endSegment() }
+        observe(workspace, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true; $0.tick() }
         observe(workspace, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false; $0.tick() }
         observe(workspace, NSWorkspace.didActivateApplicationNotification) { $0.foregroundChanged() }
-        observe(distributed, Notification.Name("com.apple.screenIsLocked")) { $0.locked = true; $0.endSegment() }
+        observe(distributed, Notification.Name("com.apple.screenIsLocked")) { $0.locked = true; $0.tick() }
         observe(distributed, Notification.Name("com.apple.screenIsUnlocked")) { $0.locked = false; $0.tick() }
         let timer = Timer(timeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -71,139 +62,85 @@ final class CaptureController {
     }
 
     /// Ends and saves the open segment, for example when a control changes.
-    func endSegment(at date: Date = Date()) {
-        if let segment = sequencer.gap(at: date) { persist(segment) }
-        refreshState()
+    func endSegment() {
+        let now = Date()
+        mutate { $0.endSegment(at: now) }
     }
 
     /// Before quitting: ends the open segment and applies every queued write that storage accepts, not just one retry's
     /// worth, whether or not a segment was open. Whatever still fails stays reported by `hasUnsavedActivity` and
     /// `hasPendingDeletion`.
     func finishWrites() {
-        endSegment()
-        if !writes.isEmpty { write { $0.drain($1) } }
+        let now = Date()
+        mutate { $0.finish(at: now) }
     }
 
     /// Another app came to the front: what was in front ends now, and reads started before now are void.
     private func foregroundChanged() {
-        apply(sequencer.foregroundChanged(at: Date()), at: Date())
+        let now = Date()
+        mutate { $0.foregroundChanged(at: now) }
         tick()
     }
 
     func tick() {
         let now = Date()
-        if !writes.isEmpty { write { $0.retry($1) } }
         let front = NSWorkspace.shared.frontmostApplication
         if let front, let bundleID = front.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier, bundleID != "com.apple.loginwindow" {
             lastForeignApp = (bundleID, front.localizedName ?? bundleID)
         }
-        refreshState(now: now)
-        guard state == .recording || state == .idle else {
-            if sequencer.open != nil { endSegment(at: now) }
-            return
-        }
-        let idle = secondsSinceLastInput()
-        if idle >= Self.idleThreshold {
-            if state != .idle { retractIdleTime(since: max(now.addingTimeInterval(-idle), recordingSince), until: now) }
-            setState(.idle)
-            return
-        }
-        setState(.recording)
-        guard let app = front, let bundleID = app.bundleIdentifier else {
-            apply(sequencer.sample(nil, at: now), at: now)
-            return
-        }
-        if bundleID == Bundle.main.bundleIdentifier || bundleID == "com.apple.loginwindow" {
+        let conditions = CaptureConditions(
+            trackingOn: settings.onboardingCompleted && settings.trackingEnabled,
+            paused: settings.pausedUntil.map { $0 > now } ?? false,
+            asleep: asleep, locked: locked, sessionInactive: sessionInactive,
+            secondsSinceInput: secondsSinceLastInput())
+        mutate { $0.update(conditions, at: now) }
+        guard state == .recording else { return }
+        guard let app = front, let bundleID = app.bundleIdentifier,
+              bundleID != Bundle.main.bundleIdentifier, bundleID != "com.apple.loginwindow" else {
             // pointInTime's own windows are not activity, and loginwindow in front means the lock screen or no app.
-            apply(sequencer.sample(nil, at: now), at: now)
+            mutate { $0.sample(nil, at: now) }
             return
         }
         let name = app.localizedName ?? bundleID
         let policy = settings.policy
         if policy.excludedBundleIDs.contains(bundleID) {
             // Excluded apps are never read: no title or URL request is made.
-            apply(sequencer.sample(policy.content(for: Activity(bundleID: bundleID, appName: name), at: now), at: now), at: now)
+            mutate { $0.sample(policy.content(for: Activity(bundleID: bundleID, appName: name), at: now), at: now) }
             return
         }
         let pid = app.processIdentifier
-        guard let ticket = sequencer.beginRead(of: pid, at: now) else { return }
+        guard let ticket = session.beginRead(of: pid, at: now) else { return }
         reader.read(pid: pid, bundleID: bundleID, bundleURL: app.bundleURL, readTitle: AccessibilityAccess.isGranted) { result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.state == .recording, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                      self.sequencer.isCurrent(ticket) else {
+                      self.session.isCurrent(ticket) else {
                     // The foreground moved on while this read ran; read what is in front now instead of waiting a tick.
-                    self.sequencer.discard(ticket)
+                    self.session.discard(ticket)
                     if self.state == .recording { self.tick() }
                     return
                 }
                 let activity = Activity(bundleID: bundleID, appName: name, windowTitle: result.title, url: result.url)
-                self.apply(self.sequencer.complete(ticket, with: self.settings.policy.content(for: activity, at: now)), at: now)
+                let content = self.settings.policy.content(for: activity, at: now)
+                self.mutate { $0.complete(ticket, with: content) }
             }
         }
-    }
-
-    /// Ends recording when idle began and removes anything stored after that: the flushed part of the open segment,
-    /// and segments that closed while the user was away because a title or app changed without input. The WAL is then
-    /// checkpointed, so the retracted titles and URLs do not linger in it. A failed retraction stays queued and is
-    /// retried on later ticks.
-    private func retractIdleTime(since idleStart: Date, until now: Date) {
-        endSegment(at: idleStart)
-        write { $0.retract(since: idleStart, until: now, in: $1) }
     }
 
     /// Deletes today's or all captured activity after ending the open segment, so it cannot be written back. Returns
     /// the error when the deletion could not run yet; it stays queued and is retried on later ticks.
     func deleteActivity(all: Bool) -> String? {
-        endSegment()
-        if all { write { $0.deleteAll(in: $1) } }
-        else { write { $0.deleteDay(containing: Date(), calendar: .current, in: $1) } }
-        return writes.failure
+        let now = Date()
+        mutate { $0.delete(all: all, at: now, calendar: .current) }
+        return session.writes.failure
     }
 
-    /// Saves segments that closed and, at most once a minute, the open one.
-    private func apply(_ closed: [Segment], at date: Date) {
-        for segment in closed { persist(segment) }
-        if let open = sequencer.open, date.timeIntervalSince(lastFlush) >= Self.flushInterval {
-            persist(open)
-            lastFlush = date
-        }
-    }
-
-    private func persist(_ segment: Segment) {
-        write { $0.save(segment, to: $1) }
-    }
-
-    private func write(_ body: (inout PendingWrites, CaptureStorage) -> Bool) {
-        guard let store else { return }
-        let before = writes.failure
-        _ = body(&writes, store)
-        if writes.failure != before { onStateChange?() }
-    }
-
-    private func refreshState(now: Date = Date()) {
-        let next: State
-        if store == nil { next = .storeUnavailable }
-        // Writes that keep failing filled the queue to its hard limit: recording stops, so no idle retraction is added,
-        // until enough of them have succeeded.
-        else if writes.isFull { next = .writesBacklogged }
-        else if !settings.onboardingCompleted || !settings.trackingEnabled { next = .off }
-        else if settings.isPaused(at: now) { next = .paused }
-        else if asleep { next = .asleep }
-        else if locked { next = .locked }
-        else if sessionInactive { next = .inactiveSession }
-        else if state == .idle || state == .recording { next = state }
-        else { next = .recording }
-        setState(next, now: now)
-    }
-
-    private func setState(_ next: State, now: Date = Date()) {
-        // A pause can change from timed to until-resumed without leaving `paused`, which changes the App Nap hold.
-        guard next != state else { updateSamplingActivity(); return }
-        if next == .recording, state != .idle { recordingSince = now }
-        state = next
+    /// Changes the session and reports a changed state or error to the menu.
+    private func mutate(_ body: (inout CaptureSession) -> Void) {
+        let before = (state, lastError)
+        body(&session)
         updateSamplingActivity()
-        onStateChange?()
+        if before != (state, lastError) { onStateChange?() }
     }
 
     /// Holds the App Nap opt-out while recording or idle, and through a timed pause so the timer that ends it is not
