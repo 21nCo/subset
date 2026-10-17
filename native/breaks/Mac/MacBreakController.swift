@@ -225,7 +225,7 @@ final class MacBreakController: ObservableObject {
 
     /// Whether the hard stop is running, joined the running one, or waits for a call; the settings keep it as it is
     /// until it ends.
-    func isHardStopInProgress(id: UUID) -> Bool { core.isHardStopInProgress(id: id) }
+    func isHardStopInProgress(id: UUID) -> Bool { core.isHardStopInProgress(id: id, now: now) }
 
     /// The errors saving `stop` now would give; nothing changes.
     func hardStopErrors(saving stop: HardStop, isNew: Bool) -> [HardStopFieldError] {
@@ -242,15 +242,15 @@ final class MacBreakController: ObservableObject {
         return errors
     }
 
-    /// Turns a hard stop on or off, unless it is in progress.
+    /// Turns a hard stop on or off on the clock `isHardStopInProgress` uses, unless it is in progress.
     func setHardStop(id: UUID, isEnabled: Bool) {
         var scheduler = core
-        if scheduler.setHardStop(id: id, isEnabled: isEnabled).isEmpty { settings = scheduler.settings }
+        if scheduler.setHardStop(id: id, isEnabled: isEnabled, now: now).isEmpty { settings = scheduler.settings }
     }
 
-    /// Deletes a hard stop. One that is running ends now and is recorded as dismissed.
+    /// Deletes a hard stop on the clock its confirmation (`runningHardStop`) uses. One that is running ends now and is
+    /// recorded as dismissed.
     func deleteHardStop(id: UUID) {
-        now = .now
         let hardStopEnd = core.snapshot.activeHardStop?.endsAt
         let events = core.deleteHardStop(id: id, now: now)
         handle(events, hardStopEnd: hardStopEnd)

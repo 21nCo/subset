@@ -748,8 +748,8 @@ final class HardStopSettingsTests: XCTestCase {
         for item in cases {
             var scheduler = makeScheduler(item.stops, start: at(9, 0))
             item.start(&scheduler)
-            XCTAssertTrue(scheduler.isHardStopInProgress(id: item.edited.id), item.name)
-            XCTAssertFalse(scheduler.isHardStopInProgress(id: later.id), item.name)
+            XCTAssertTrue(scheduler.isHardStopInProgress(id: item.edited.id, now: item.editAt), item.name)
+            XCTAssertFalse(scheduler.isHardStopInProgress(id: later.id, now: item.editAt), item.name)
             let settings = scheduler.settings
             let snapshot = scheduler.snapshot
             for (field, edit) in edits {
@@ -761,7 +761,7 @@ final class HardStopSettingsTests: XCTestCase {
                 XCTAssertEqual(scheduler.saveHardStop(edited, isNew: false, now: item.editAt), [.inProgress(item.edited.id)], "\(item.name), \(field)")
                 XCTAssertEqual(scheduler.settings, settings, "\(item.name), \(field)")
             }
-            XCTAssertEqual(scheduler.setHardStop(id: item.edited.id, isEnabled: false), [.inProgress(item.edited.id)], item.name)
+            XCTAssertEqual(scheduler.setHardStop(id: item.edited.id, isEnabled: false, now: item.editAt), [.inProgress(item.edited.id)], item.name)
             XCTAssertEqual(scheduler.settings, settings, item.name)
             XCTAssertEqual(scheduler.snapshot, snapshot, item.name)
             XCTAssertEqual(HardStopFieldError.inProgress(item.edited.id).message, "This hard stop is in progress. You can change it after it ends.")
@@ -770,7 +770,7 @@ final class HardStopSettingsTests: XCTestCase {
             var renamed = later
             renamed.name = "Evening"
             XCTAssertEqual(scheduler.saveHardStop(renamed, isNew: false, now: item.editAt), [], item.name)
-            XCTAssertEqual(scheduler.setHardStop(id: later.id, isEnabled: false), [], item.name)
+            XCTAssertEqual(scheduler.setHardStop(id: later.id, isEnabled: false, now: item.editAt), [], item.name)
             var quickAdd = HardStopQuickAdd(now: item.editAt, calendar: calendar)
             quickAdd.hour = 17
             quickAdd.minute = 0
@@ -782,7 +782,7 @@ final class HardStopSettingsTests: XCTestCase {
             // Once it ends, it can be changed.
             for (index, now) in item.ends.enumerated() {
                 _ = scheduler.tick(now: now)
-                XCTAssertEqual(scheduler.isHardStopInProgress(id: item.edited.id), index < item.ends.count - 1, "\(item.name) at \(now)")
+                XCTAssertEqual(scheduler.isHardStopInProgress(id: item.edited.id, now: now), index < item.ends.count - 1, "\(item.name) at \(now)")
             }
             XCTAssertNil(scheduler.snapshot.activeHardStop, item.name)
             for (field, edit) in edits {
@@ -792,9 +792,82 @@ final class HardStopSettingsTests: XCTestCase {
                 XCTAssertEqual(copy.saveHardStop(edited, isNew: false, now: item.ends.last!), [], "\(item.name), \(field) after it ends")
                 XCTAssertEqual(copy.settings.hardStops.first { $0.id == item.edited.id }, edited, "\(item.name), \(field) after it ends")
             }
-            XCTAssertEqual(scheduler.setHardStop(id: item.edited.id, isEnabled: false), [], item.name)
+            XCTAssertEqual(scheduler.setHardStop(id: item.edited.id, isEnabled: false, now: item.ends.last!), [], item.name)
             XCTAssertEqual(scheduler.settings.hardStops.first { $0.id == item.edited.id }?.isEnabled, false, item.name)
         }
+    }
+
+    func testAStopThatStartedInsideTheRunningOneIsInProgressBeforeTheTickMergesIt() {
+        // Long runs 12:30 to 13:30; Walk starts inside it at 12:45, but the last tick ran at 12:44:59.
+        let long = stop("Long", end: .after(60 * 60), escapeHatch: .extend(minutes: 10, times: 1))
+        let walk = stop("Walk", hour: 12, minute: 45, escapeHatch: .dismissEarly)
+        let edits: [(name: String, edit: (inout HardStop) -> Void)] = [
+            ("name", { $0.name = "Renamed" }),
+            ("start", { $0.hour = 15 }),
+            ("end", { $0.end = .at(hour: 15, minute: 0) }),
+            ("repeat", { $0.repeats = .weekdays([3]) }),
+            ("warnings", { $0.warningMinutes = [5] }),
+            ("escape hatch", { $0.escapeHatch = .none }),
+            ("during calls", { $0.duringCalls = .waitForCallToEnd }),
+            ("turned off", { $0.isEnabled = false }),
+        ]
+        var scheduler = makeScheduler([long, walk], start: at(9, 0))
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.tick(now: at(12, 44, 59))
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged, [])
+
+        // Before Walk starts, it can still be changed.
+        XCTAssertFalse(scheduler.isHardStopInProgress(id: walk.id, now: at(12, 44, 59)))
+        for (field, edit) in edits {
+            var copy = scheduler
+            var edited = walk
+            edit(&edited)
+            XCTAssertEqual(copy.saveHardStop(edited, isNew: false, now: at(12, 44, 59)), [], field)
+            XCTAssertEqual(copy.settings.hardStops.last, edited, field)
+        }
+
+        // Once it has started, it is part of Long's occurrence, as the next tick will see it.
+        XCTAssertTrue(scheduler.isHardStopInProgress(id: walk.id, now: at(12, 45)))
+        XCTAssertFalse(scheduler.isHardStopInProgress(id: walk.id, now: at(12, 44, 59)))
+        let settings = scheduler.settings
+        let snapshot = scheduler.snapshot
+        for (field, edit) in edits {
+            var edited = walk
+            edit(&edited)
+            XCTAssertEqual(scheduler.saveHardStop(edited, isNew: false, now: at(12, 45)), [.inProgress(walk.id)], field)
+        }
+        XCTAssertEqual(scheduler.setHardStop(id: walk.id, isEnabled: false, now: at(12, 45)), [.inProgress(walk.id)])
+        XCTAssertEqual(scheduler.settings, settings)
+        XCTAssertEqual(scheduler.snapshot, snapshot)
+
+        // The tick merges Walk as it is saved: Long keeps its end and escape hatch.
+        _ = scheduler.tick(now: at(12, 45, 1))
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.merged.map(\.id), [walk.id])
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.endsAt, at(13, 30))
+        XCTAssertEqual(scheduler.snapshot.activeHardStop?.escapeHatch, .extend(minutes: 10, times: 1))
+    }
+
+    func testDeletingAStopDecidesOnTheClockItsConfirmationUses() {
+        // Long runs 12:30 to 13:30; Walk starts inside it at 12:45, and the last tick ran at 12:44:59. The
+        // confirmation (`runningHardStop`) and the delete use the same clock, so they agree on either side of 12:45.
+        let long = stop("Long", end: .after(60 * 60))
+        let walk = stop("Walk", hour: 12, minute: 45)
+        var scheduler = makeScheduler([long, walk], start: at(9, 0))
+        _ = scheduler.tick(now: at(12, 30))
+        _ = scheduler.tick(now: at(12, 44, 59))
+
+        var before = scheduler
+        XCTAssertNil(before.runningHardStop(containing: walk.id, now: at(12, 44, 59)))
+        XCTAssertEqual(before.deleteHardStop(id: walk.id, now: at(12, 44, 59)), [])
+        XCTAssertEqual(before.snapshot.activeHardStop?.id, long.id)
+        XCTAssertEqual(before.snapshot.activeHardStop?.endsAt, at(13, 30))
+        XCTAssertEqual(before.records.compactMap(\.hardStopEndReason), [])
+
+        var after = scheduler
+        XCTAssertEqual(after.runningHardStop(containing: walk.id, now: at(12, 45))?.id, long.id)
+        XCTAssertEqual(after.deleteHardStop(id: walk.id, now: at(12, 45)), [.hardStopEnded(id: long.id, reason: .dismissed)])
+        XCTAssertNil(after.snapshot.activeHardStop)
+        XCTAssertEqual(after.records.compactMap(\.hardStopEndReason), [.dismissed, .dismissed])
     }
 
     // MARK: - Time pickers
