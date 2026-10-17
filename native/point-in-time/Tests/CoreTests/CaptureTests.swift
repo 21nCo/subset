@@ -367,21 +367,65 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         #expect(titleOnly("Notes — Project plan", readsTitles: false).title == nil)
     }
 
+    private func kept(_ bundleID: String, title: String, scriptable: Bool = false, opensWebURLs: Bool? = true,
+                      report: BrowserWindowReport = .unconfirmed) -> (title: String?, url: RedactedURL?) {
+        let support = BrowserSupport.forApp(bundleID, scriptable: scriptable, opensWebURLs: opensWebURLs)
+        return WindowPrivacy.reduce(focusedTitle: title, readsTitles: true, support: support, report: report, privateTitles: titles)
+    }
+
     @Test func firefoxFamilyBrowsersKeepOnlyTheApp() {
         // German and French private windows carry no English marker, so a title rule would have kept them.
         let titles = ["Example Domain – Privater Modus", "Example Domain — Navigation privée", "Example Domain — Mozilla Firefox"]
         for bundleID in ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "org.mozilla.firefoxbeta"] {
-            let support = BrowserSupport.forApp(bundleID, scriptable: false)
-            #expect(support == .appOnly, "\(bundleID)")
+            // Known even when the Info.plist reports no web URL scheme.
+            #expect(BrowserSupport.forApp(bundleID, scriptable: false, opensWebURLs: false) == .appOnly, "\(bundleID)")
             for title in titles {
-                let kept = WindowPrivacy.reduce(focusedTitle: title, readsTitles: true, support: support,
-                                                report: .normal(title: title, url: query), privateTitles: self.titles)
-                #expect(kept.title == nil && kept.url == nil, "\(title)")
+                let result = kept(bundleID, title: title, report: .normal(title: title, url: query))
+                #expect(result.title == nil && result.url == nil, "\(title)")
             }
         }
         #expect(!WindowPrivacy.looksPrivate(title: titles[0]) && !WindowPrivacy.looksPrivate(title: titles[1]))
-        #expect(BrowserSupport.forApp("com.apple.Safari", scriptable: false) == .titleOnly)
-        #expect(BrowserSupport.forApp("com.google.Chrome", scriptable: true) == .scriptable)
+    }
+
+    @Test func unlistedBrowsersKeepOnlyTheApp() {
+        // Chrome Canary's German incognito title has no English marker, so the title rule alone would have kept it.
+        let incognito = "Neuer Tab – Google Chrome Canary – Inkognito"
+        #expect(!WindowPrivacy.looksPrivate(title: incognito))
+        for bundleID in ["com.google.Chrome.canary", "com.google.Chrome.beta", "com.microsoft.edgemac.Beta", "org.chromium.Chromium",
+                         "com.operasoftware.Opera", "com.kagi.kagimacOS", "com.duckduckgo.macos.browser"] {
+            for opens in [true, false, nil] as [Bool?] {
+                #expect(BrowserSupport.forApp(bundleID, scriptable: false, opensWebURLs: opens) == .appOnly, "\(bundleID)")
+            }
+            #expect(kept(bundleID, title: incognito).title == nil)
+        }
+        // A browser on no list is recognized by the web URL scheme in its Info.plist, or fails closed when it is unreadable.
+        #expect(kept("com.example.newbrowser", title: incognito, opensWebURLs: true).title == nil)
+        #expect(kept("com.example.newbrowser", title: incognito, opensWebURLs: nil).title == nil)
+    }
+
+    @Test func safariAndAppsThatAreNotBrowsersKeepTheirTitles() {
+        // Safari opens web URLs but keeps titles, minus its private-window titles.
+        #expect(BrowserSupport.forApp(BrowserSupport.safari, scriptable: false, opensWebURLs: true) == .titleOnly)
+        #expect(kept(BrowserSupport.safari, title: "Example Domain").title == "Example Domain")
+        #expect(kept(BrowserSupport.safari, title: "Example Domain, Private Browsing").title == nil)
+        #expect(BrowserSupport.forApp("com.apple.SafariTechnologyPreview", scriptable: false, opensWebURLs: true) == .appOnly)
+        let notes = kept("com.apple.TextEdit", title: "Project plan.rtf", opensWebURLs: false)
+        #expect(notes.title == "Project plan.rtf" && notes.url == nil)
+    }
+
+    @Test func listedChromiumWithoutAutomationKeepsOnlyTheApp() {
+        // Without Automation the reader sends no events and its report stays unconfirmed; the Accessibility title is
+        // never used for a listed Chromium browser, so a localized incognito title is not kept either.
+        #expect(BrowserSupport.forApp("com.google.Chrome", scriptable: true, opensWebURLs: true) == .scriptable)
+        let result = kept("com.google.Chrome", title: "Neuer Tab – Inkognito", scriptable: true)
+        #expect(result.title == nil && result.url == nil)
+    }
+
+    @Test func webURLSchemesAreReadFromURLTypes() {
+        #expect(BrowserSupport.declaresWebURLs([["CFBundleURLName": "Web site URL", "CFBundleURLSchemes": ["http", "https"]]]))
+        #expect(BrowserSupport.declaresWebURLs([["CFBundleURLSchemes": ["myapp"]], ["CFBundleURLSchemes": ["HTTPS"]]]))
+        #expect(!BrowserSupport.declaresWebURLs([["CFBundleURLSchemes": ["myapp", "httpx"]]]))
+        #expect(!BrowserSupport.declaresWebURLs(nil) && !BrowserSupport.declaresWebURLs("https"))
     }
 }
 

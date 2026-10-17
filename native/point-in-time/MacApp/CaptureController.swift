@@ -29,7 +29,8 @@ final class CaptureController {
     /// When recording last resumed after sleep, lock, pause, or tracking off. Idle retraction never reaches before it,
     /// so input-free time spent asleep or paused cannot delete what was recorded earlier.
     private var recordingSince = Date.distantPast
-    /// Keeps App Nap from stretching the sample timer while recording; a throttled timer would end segments early.
+    /// Keeps App Nap from stretching the sample timer while recording, idle, or timed-paused; a throttled timer would end
+    /// segments early or a pause late.
     private var samplingActivity: NSObjectProtocol?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     var onStateChange: (() -> Void)?
@@ -109,7 +110,7 @@ final class CaptureController {
         }
         let pid = app.processIdentifier
         guard let ticket = sequencer.beginRead(of: pid, at: now) else { return }
-        reader.read(pid: pid, bundleID: bundleID, readTitle: AccessibilityAccess.isGranted) { result in
+        reader.read(pid: pid, bundleID: bundleID, bundleURL: app.bundleURL, readTitle: AccessibilityAccess.isGranted) { result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.state == .recording, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
@@ -174,10 +175,19 @@ final class CaptureController {
     }
 
     private func setState(_ next: State, now: Date = Date()) {
-        guard next != state else { return }
+        // A pause can change from timed to until-resumed without leaving `paused`, which changes the App Nap hold.
+        guard next != state else { updateSamplingActivity(); return }
         if next == .recording, state != .idle { recordingSince = now }
         state = next
-        if state == .recording || state == .idle {
+        updateSamplingActivity()
+        onStateChange?()
+    }
+
+    /// Holds the App Nap opt-out while recording or idle, and through a timed pause so the timer that ends it is not
+    /// throttled past its end date. Paused until resumed, off, asleep, or locked need no timely sample.
+    private func updateSamplingActivity() {
+        let timedPause = state == .paused && (settings.pausedUntil.map { $0 != .distantFuture } ?? false)
+        if state == .recording || state == .idle || timedPause {
             if samplingActivity == nil {
                 samplingActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
                                                                          reason: "Sampling the frontmost app")
@@ -186,7 +196,6 @@ final class CaptureController {
             ProcessInfo.processInfo.endActivity(activity)
             samplingActivity = nil
         }
-        onStateChange?()
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name, _ handler: @escaping @MainActor (CaptureController) -> Void) {

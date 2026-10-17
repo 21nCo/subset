@@ -31,7 +31,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>pointInTime asks your browser for the active tab’s site and page path, and whether the window is private, so it can record which sites you worked in. Nothing is kept from a window the browser does not confirm is a normal window, and query strings are never recorded.</string>
+	<string>pointInTime asks this browser whether its front window is private and, for a normal window, for the active tab’s title, site and page path, so it can record which sites you worked in. Without this permission, or for a window the browser does not confirm is normal, only the browser’s name is recorded. Query strings are never recorded.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright 21N</string>
 </dict>

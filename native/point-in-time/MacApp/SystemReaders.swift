@@ -147,11 +147,11 @@ final class ActivityReader: @unchecked Sendable {
         var url: RedactedURL?
     }
 
-    func read(pid: pid_t, bundleID: String, readTitle: Bool, completion: @escaping @Sendable (Result) -> Void) {
+    func read(pid: pid_t, bundleID: String, bundleURL: URL?, readTitle: Bool, completion: @escaping @Sendable (Result) -> Void) {
         queue.async { [self] in
             let browser = SupportedBrowser.matching(bundleID)
-            let support = BrowserSupport.forApp(bundleID, scriptable: browser != nil)
-            // Firefox-family browsers keep the app name only, and a scriptable browser's title comes from its report.
+            let support = BrowserSupport.forApp(bundleID, scriptable: browser != nil, opensWebURLs: opensWebURLs(bundleURL))
+            // Other browsers keep the app name only, and a scriptable browser's title comes from its report.
             let title = readTitle && support == .titleOnly ? focusedWindowTitle(pid: pid) : nil
             var report = BrowserWindowReport.unconfirmed
             if let browser, Self.permission(for: browser.bundleID, ask: false) == .granted {
@@ -176,6 +176,19 @@ final class ActivityReader: @unchecked Sendable {
         case OSStatus(errAEEventWouldRequireUserConsent): return .notDetermined
         default: return .unavailable // procNotFound: the browser is not running
         }
+    }
+
+    /// Whether the app at `bundleURL` declares the `http` or `https` URL scheme; nil when its Info.plist cannot be read.
+    /// Read on every sample, not cached, so an app updated while pointInTime runs is judged by its current Info.plist.
+    /// iPhone and iPad apps keep their Info.plist at the top of the bundle rather than in Contents.
+    private func opensWebURLs(_ bundleURL: URL?) -> Bool? {
+        guard let bundleURL else { return nil }
+        for path in ["Contents/Info.plist", "Info.plist"] {
+            if let info = NSDictionary(contentsOf: bundleURL.appendingPathComponent(path)) {
+                return BrowserSupport.declaresWebURLs(info["CFBundleURLTypes"])
+            }
+        }
+        return nil
     }
 
     private func focusedWindowTitle(pid: pid_t) -> String? {
