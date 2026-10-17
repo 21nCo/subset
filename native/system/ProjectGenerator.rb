@@ -1,12 +1,17 @@
+# Pin the gem CI installs: newer releases write a different preferredProjectObjectVersion, so a plain require would
+# make the committed project depend on whichever xcodeproj the host happens to have.
+gem "xcodeproj", "= 1.27.0"
 require "xcodeproj"
 require "fileutils"
+require "tmpdir"
 
 # Generates System.xcodeproj from the same sources as Package.swift: a static SystemCore library, the Subset System
 # menu-bar app that links it, and the core unit tests. Run `ruby ProjectGenerator.rb` from this folder after adding
 # or removing a source file; CI regenerates the project and fails if the committed copy differs.
 Dir.chdir(__dir__)
 project_path = File.join(__dir__, "System.xcodeproj")
-project = Xcodeproj::Project.new(project_path)
+project = Xcodeproj::Project.new(project_path, false, 46)
+project.root_object.preferred_project_object_version = "77"
 
 project.root_object.attributes["LastSwiftUpdateCheck"] = "2640"
 project.root_object.attributes["LastUpgradeCheck"] = "2640"
@@ -104,13 +109,18 @@ end
 project.predictabilize_uuids
 # Target dependency proxies hash the targets' IDs, so a second pass settles them on the derived IDs.
 project.predictabilize_uuids
-# Remove the old project only after generation has succeeded, so a failure leaves it intact.
-FileUtils.rm_rf(project_path) if File.exist?(project_path)
-project.save
 
-scheme = Xcodeproj::XCScheme.new
-scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
-scheme.configure_with_targets(app_target, test_target, launch_target: true)
-scheme.save_as(project_path, "SubsetSystem", true)
+# Write the project and its scheme to a temporary folder and replace the old project only after both saves succeed,
+# so a failure leaves it intact.
+Dir.mktmpdir("System-xcodeproj", __dir__) do |staging|
+  staged_path = File.join(staging, File.basename(project_path))
+  project.save(staged_path)
+  scheme = Xcodeproj::XCScheme.new
+  scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
+  scheme.configure_with_targets(app_target, test_target, launch_target: true)
+  scheme.save_as(staged_path, "SubsetSystem", true)
+  FileUtils.rm_rf(project_path)
+  FileUtils.mv(staged_path, project_path)
+end
 
 puts "Generated #{project_path}"
