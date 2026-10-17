@@ -21,8 +21,18 @@ public enum StoreError: Error, Equatable, CustomStringConvertible {
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// A minimal SQLite connection. Callers serialize access; `ActivityStore` holds a lock around every use.
+///
+/// Capture writes from the main actor, so a statement that another connection's lock blocks waits about
+/// `busyWaitNanoseconds` and then fails with SQLITE_BUSY; the WAL checkpoint does not wait at all. The failed write
+/// stays queued in `PendingWrites` and is retried on the next sample, so contention delays a write instead of the app.
 final class SQLiteConnection {
+    /// How long one lock request waits for another connection, 100 ms. pointInTime is the only writer, so this only covers
+    /// another process's brief write; a longer hold is a failure that the write queue retries.
+    static let busyWaitNanoseconds: UInt64 = 100_000_000
+
     private var handle: OpaquePointer?
+    private var busyWait = SQLiteConnection.busyWaitNanoseconds
+    private var busySince: UInt64 = 0
 
     /// Opens `path` read-write, creating it if needed.
     convenience init(path: String) throws {
@@ -54,7 +64,21 @@ final class SQLiteConnection {
             throw StoreError.open(message)
         }
         handle = db
-        sqlite3_busy_timeout(db, 2_000)
+        // The connection closes in deinit, so it outlives every call of the handler.
+        sqlite3_busy_handler(db, { context, attempt in
+            guard let context else { return 0 }
+            return Unmanaged<SQLiteConnection>.fromOpaque(context).takeUnretainedValue().waitsWhileBusy(attempt) ? 1 : 0
+        }, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    /// SQLite's own busy timeout adds up the sleeps it asks for, which macOS can stretch several times over, so the wait
+    /// is measured on the clock instead.
+    private func waitsWhileBusy(_ attempt: Int32) -> Bool {
+        let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if attempt == 0 { busySince = now }
+        guard now - busySince < busyWait else { return false }
+        usleep(2_000)
+        return true
     }
 
     deinit {
@@ -67,8 +91,11 @@ final class SQLiteConnection {
 
     /// Copies the WAL into the database and truncates it, and throws unless that completed. SQLite reports a checkpoint
     /// that another connection's read blocked in the pragma's result row (busy, log frames, checkpointed frames), not as
-    /// an error, so the row is read and checked.
+    /// an error, so the row is read and checked. A truncating checkpoint waits on the busy handler until every reader
+    /// ends, which can be any length of time, so it runs without one and reports a blocked checkpoint at once.
     func checkpointTruncatingWAL() throws {
+        busyWait = 0
+        defer { busyWait = Self.busyWaitNanoseconds }
         let row = try query("PRAGMA wal_checkpoint(TRUNCATE)").first
         guard let row, row.count == 3, row[0].int == 0, row[1].int == row[2].int else {
             throw StoreError.sqlite("The WAL checkpoint could not complete because another connection is reading")

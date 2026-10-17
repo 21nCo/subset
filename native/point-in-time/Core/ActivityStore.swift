@@ -2,6 +2,10 @@ import Foundation
 
 /// The local source of truth for captured segments and their three-minute blocks. One SQLite database in a private
 /// folder; nothing here touches the network.
+///
+/// Capture calls the store from the main actor. While another connection holds the write lock, a call waits about
+/// 100 ms and throws; while another connection reads, a checkpoint throws at once (see `SQLiteConnection`). The write
+/// that failed stays queued in `PendingWrites`, with its error shown, and is retried on the next sample.
 public final class ActivityStore: @unchecked Sendable {
     /// The newest schema this build can read and write. Opening a newer database fails instead of guessing.
     public static let supportedSchemaVersion = 1
@@ -129,8 +133,9 @@ public final class ActivityStore: @unchecked Sendable {
     }
 
     /// Copies the WAL into the database and truncates it. With `secure_delete` on, deleted rows are then gone from both
-    /// files; capture calls this after every idle retraction and Delete Today. Throws when another connection's read
-    /// kept the checkpoint from completing, so the removal stays queued and is retried.
+    /// files; capture calls this after every idle retraction and Delete Today. Throws at once, without waiting for the
+    /// reader, when another connection's read kept the checkpoint from completing, so the removal stays queued and is
+    /// retried.
     public func checkpoint() throws {
         try locked { try connection.checkpointTruncatingWAL() }
     }

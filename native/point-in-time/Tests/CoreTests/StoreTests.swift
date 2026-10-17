@@ -466,6 +466,28 @@ private func withReader(on store: ActivityStore, _ body: (_ release: () throws -
     try body { try reader.execute("COMMIT"); open = false }
 }
 
+/// Another connection holding the write lock, as another process writing the database would.
+private func withWriter(on store: ActivityStore, _ body: (_ release: () throws -> Void) throws -> Void) throws {
+    let writer = try SQLiteConnection(path: store.databaseURL.path)
+    try writer.execute("BEGIN IMMEDIATE")
+    var open = true
+    defer { if open { try? writer.execute("COMMIT") } }
+    try body { try writer.execute("COMMIT"); open = false }
+}
+
+/// The longest a contended store call may block its caller, which is the main actor in the app.
+private let callerBudget = Duration.milliseconds(250)
+
+/// Runs `body` and expects it to return within `callerBudget`, whether it throws or not.
+private func expectFast<T>(_ what: String, _ body: () throws -> T) -> T? {
+    let clock = ContinuousClock()
+    let start = clock.now
+    let result = try? body()
+    let elapsed = clock.now - start
+    #expect(elapsed < callerBudget, "\(what) took \(elapsed)")
+    return result
+}
+
 private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) -> Bool {
     let bytes = (try? Data(contentsOf: URL(fileURLWithPath: store.databaseURL.path + suffix))) ?? Data()
     return bytes.range(of: Data(text.utf8)) != nil
@@ -478,7 +500,10 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
         let store = try ActivityStore(directory: directory)
         try withReader(on: store) { release in
             try store.save(segment("com.secret.app", 0, 600, title: "SECRET-TITLE"))
-            #expect(throws: StoreError.self) { try store.deleteAll() }
+            // A blocked checkpoint fails at once instead of waiting for the reader, on every attempt.
+            for attempt in 1...3 {
+                _ = expectFast("deleteAll attempt \(attempt)") { #expect(throws: StoreError.self) { try store.deleteAll() } }
+            }
             // The rows are deleted, but the WAL still holds the title, so the deletion is not done.
             #expect(try store.segmentCount() == 0)
             #expect(contains("SECRET-TITLE", store, "-wal"))
@@ -497,7 +522,9 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
         try store.save(segment("com.secret.app", 0, 600, title: "SECRET-TITLE"))
         try store.deleteData(from: t0, to: t0 + 600)
         try withReader(on: store) { release in
-            #expect(throws: StoreError.self) { try store.checkpoint() }
+            for attempt in 1...3 {
+                _ = expectFast("checkpoint attempt \(attempt)") { #expect(throws: StoreError.self) { try store.checkpoint() } }
+            }
             #expect(contains("SECRET-TITLE", store, "-wal"))
             try release()
             try store.checkpoint()
@@ -520,12 +547,18 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
         try withReader(on: store) { release in
             writes.save(segment("com.google.Chrome", 0, 120, title: "SECRET-TITLE", url: "https://secret.example.com/plan"), to: store)
             #expect(writes.failure == nil)
-            switch removal {
-            case .idleRetraction: writes.retract(since: t0, until: t0 + 200, in: store)
-            case .deleteToday: writes.deleteDay(containing: t0 + 200, calendar: utc, in: store)
-            case .deleteAll: writes.deleteAll(in: store)
+            _ = expectFast("\(removal)") {
+                switch removal {
+                case .idleRetraction: writes.retract(since: t0, until: t0 + 200, in: store)
+                case .deleteToday: writes.deleteDay(containing: t0 + 200, calendar: utc, in: store)
+                case .deleteAll: writes.deleteAll(in: store)
+                }
             }
-            #expect(writes.failure != nil && writes.hasPendingDeletion)
+            // Each sample's retry fails fast and keeps the removal queued with its error shown.
+            for attempt in 1...3 {
+                #expect(expectFast("retry \(attempt)") { writes.retry(store) } == false)
+                #expect(writes.failure != nil && writes.hasPendingDeletion)
+            }
             #expect(contains("SECRET-TITLE", store, "-wal"))
             try release()
             let drained = writes.retry(store)
@@ -535,6 +568,49 @@ private func contains(_ text: String, _ store: ActivityStore, _ suffix: String) 
         for suffix in ["", "-wal"] {
             #expect(!contains("SECRET-TITLE", store, suffix) && !contains("secret.example.com", store, suffix), "activity.sqlite\(suffix)")
         }
+    }
+}
+
+/// Another process holding the write lock delays capture's writes, not the app: each write fails within the budget, stays
+/// queued in order, and is applied once the lock is released.
+@Suite struct WriteContentionTests {
+    @Test func storeWritesBlockedByAnotherWriterFailWithinTheBudget() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("com.apple.TextEdit", 0, 60, title: "Kept"))
+        try withWriter(on: store) { release in
+            for attempt in 1...3 {
+                _ = expectFast("save \(attempt)") { #expect(throws: StoreError.self) { try store.save(segment("com.apple.Notes", 60, 120)) } }
+                _ = expectFast("deleteData \(attempt)") { #expect(throws: StoreError.self) { try store.deleteData(from: t0, to: t0 + 60) } }
+                _ = expectFast("deleteAll \(attempt)") { #expect(throws: StoreError.self) { try store.deleteAll() } }
+                _ = expectFast("checkpoint \(attempt)") { #expect(throws: StoreError.self) { try store.checkpoint() } }
+            }
+            try release()
+        }
+        #expect(try store.segments(from: .distantPast, to: .distantFuture).map(\.windowTitle) == ["Kept"])
+    }
+
+    @Test func queuedWritesBlockedByAnotherWriterFailFastAndApplyInOrderAfterwards() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        var writes = PendingWrites()
+        try withWriter(on: store) { release in
+            _ = expectFast("save") { writes.save(segment("com.apple.TextEdit", 0, 120, title: "Draft"), to: store) }
+            _ = expectFast("retract") { writes.retract(since: t0 + 60, until: t0 + 130, in: store) }
+            _ = expectFast("save after") { writes.save(segment("com.apple.Notes", 130, 200, title: "Notes"), to: store) }
+            for attempt in 1...3 {
+                #expect(expectFast("retry \(attempt)") { writes.retry(store) } == false)
+            }
+            #expect(writes.failure != nil && writes.count == 3, "\(writes.queue)")
+            try release()
+        }
+        #expect(writes.retry(store) && writes.failure == nil)
+        // Applied in request order: the retraction shortens the first save and leaves the later one.
+        let stored = try store.segments(from: .distantPast, to: .distantFuture)
+        #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 60], [130, 200]])
+        #expect(stored.map(\.windowTitle) == ["Draft", "Notes"])
     }
 }
 
