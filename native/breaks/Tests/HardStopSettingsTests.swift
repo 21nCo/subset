@@ -1768,42 +1768,119 @@ final class HardStopSettingsTests: XCTestCase {
         XCTAssertEqual(hardStopRecords(scheduler).count, 1)
     }
 
-    func testAnEditSavedAfterAStopsEndBeforeTheNextTickAppliesAtOnce() {
+    func testAChangeAfterAStopsEndBeforeTheNextTickSeesWhatThatTickLeaves() {
         // Lunch (12:30 to 13:00, weekly or a one-off) runs, shown or hidden by an extension, or waits for a call that lasts
-        // until 13:30. Its end has passed, but no tick has ended or missed it yet, when it is moved to 14:00, also after it
-        // is turned off and on again: it is no longer in progress, so 14:00 is listed, warned about, and starts today.
+        // until 13:30, and may be saved at 12:45 while it is in progress. Its end has passed, but no tick has ended or missed
+        // it, when it is changed again: moved to 14:00 or into its old window (12:59, 12:45), turned off and on, or deleted.
+        // The change sees what that tick would leave: Lunch's record ends at 13:00 and never takes in the new time, the editor
+        // agrees with the save, and everything after is as if the change came just after the tick. A one-off that the tick
+        // would remove, as its occurrence has run, can still be moved to a time ahead, and runs then.
+        typealias Change = (inout BreakScheduler, HardStop, Date) -> (errors: [HardStopFieldError], events: [BreakScheduler.Event])
+        let changes: [(name: String, change: Change)] = [
+            ("14:00", { $0.saveHardStop(self.moved($1, to: 14, 0), isNew: false, now: $2) }),
+            ("12:59", { $0.saveHardStop(self.moved($1, to: 12, 59), isNew: false, now: $2) }),
+            ("12:45", { $0.saveHardStop(self.moved($1, to: 12, 45), isNew: false, now: $2) }),
+            ("toggled", { ([], $0.setHardStop(id: $1.id, isEnabled: false, now: $2) + $0.setHardStop(id: $1.id, isEnabled: true, now: $2)) }),
+            ("deleted", { ([], $0.deleteHardStop(id: $1.id, now: $2)) }),
+        ]
         let inCall: (Date) -> BreakScheduler.Inputs = { [self] in $0 < at(13, 30) ? .init(signals: [.meeting]) : .init() }
         for state in ["shown", "hidden", "waiting"] {
             for repeats in [HardStop.Repeat.weekdays([2]), today] {
-                for now in [at(13, 0), at(13, 0).addingTimeInterval(0.5), at(13, 0, 30)] {
-                    for toggled in [false, true] {
-                        let label = "\(state), \(repeats), \(now), toggled \(toggled)"
-                        let lunch = stop(repeats: repeats, escapeHatch: .extend(minutes: 15, times: 1),
-                                         duringCalls: state == "waiting" ? .waitForCallToEnd : .startAnyway)
-                        var scheduler = makeScheduler([lunch], start: at(9, 0))
-                        _ = run(&scheduler, from: at(12, 29), through: at(12, 50), inputs: inCall)
-                        if state == "hidden" { XCTAssertNotEqual(scheduler.extendHardStop(now: at(12, 50)), [], label) }
-                        let moved = moved(lunch, to: 14, 0)
-                        XCTAssertFalse(scheduler.isHardStopInProgress(id: lunch.id, now: now), label)
-                        XCTAssertNil(scheduler.hardStopInProgressNote(saving: moved, now: now), label)
-                        if toggled {
-                            XCTAssertEqual(scheduler.setHardStop(id: lunch.id, isEnabled: false, now: now), [], label)
-                            XCTAssertEqual(scheduler.setHardStop(id: lunch.id, isEnabled: true, now: now), [], label)
-                        }
-                        XCTAssertTrue(scheduler.saveHardStop(moved, isNew: false, now: now) == ([], []), label)
-                        XCTAssertEqual(scheduler.snapshot.hardStopsEditedInProgress, [:], label)
-                        XCTAssertEqual(scheduler.nextHardStop(after: at(13, 1))?.start, at(14, 0), label)
+                for first in ["not saved", "renamed", "12:40", "15:00"] {
+                    for (name, change) in changes {
+                        for now in [at(13, 0), at(13, 0).addingTimeInterval(0.5), at(13, 0, 30)] {
+                            let label = "\(state), \(repeats), \(first), \(name) at \(now)"
+                            let lunch = stop(repeats: repeats, escapeHatch: .extend(minutes: 15, times: 1),
+                                             duringCalls: state == "waiting" ? .waitForCallToEnd : .startAnyway)
+                            var scheduler = makeScheduler([lunch], start: at(9, 0))
+                            _ = run(&scheduler, from: at(12, 29), through: at(12, 44), inputs: inCall)
+                            if state == "hidden" { XCTAssertNotEqual(scheduler.extendHardStop(now: at(12, 44)), [], label) }
+                            var saved = lunch
+                            switch first {
+                            case "renamed": saved.name = "Long lunch"
+                            case "12:40": saved = moved(lunch, to: 12, 40)
+                            case "15:00": saved = moved(lunch, to: 15, 0)
+                            default: break
+                            }
+                            if first != "not saved" { XCTAssertTrue(scheduler.saveHardStop(saved, isNew: false, now: at(12, 45)).errors.isEmpty, label) }
+                            _ = run(&scheduler, from: at(12, 45), through: at(12, 59), inputs: inCall)
 
-                        let events = run(&scheduler, from: at(13, 0), through: at(14, 31), inputs: inCall)
-                        XCTAssertEqual(events.map(\.0), [at(13, 1), at(13, 50), at(14, 0), at(14, 30)], label)
-                        XCTAssertEqual(events.map(\.1), [
-                            .hardStopEnded(id: lunch.id, reason: state == "waiting" ? .missed : .ended), warning(lunch, 14, 0),
-                            .hardStopStarted(id: lunch.id, endsAt: at(14, 30)), .hardStopEnded(id: lunch.id, reason: .ended),
-                        ], label)
-                        XCTAssertEqual(hardStopRecords(scheduler).map(\.startedAt), [at(12, 30), at(14, 0)], label)
-                        XCTAssertEqual(scheduler.settings.hardStops, repeats == today ? [] : [moved], label)
+                            // The control: the tick at `now` ends or misses Lunch, and the change comes after it.
+                            var control = scheduler
+                            let controlTick = control.tick(now: now, inputs: inCall(now)).filter(isHardStopEvent)
+                            let listed = control.settings.hardStops.contains { $0.id == lunch.id }
+                            XCTAssertFalse(scheduler.isHardStopInProgress(id: lunch.id, now: now), label)
+                            for time in [(14, 0), (12, 59), (12, 45)] {
+                                let edit = moved(saved, to: time.0, time.1)
+                                XCTAssertNil(scheduler.hardStopInProgressNote(saving: edit, now: now), label)
+                                if listed {
+                                    XCTAssertEqual(scheduler.hardStopErrors(saving: edit, isNew: false, now: now),
+                                                   control.hardStopErrors(saving: edit, isNew: false, now: now), label)
+                                }
+                            }
+
+                            let result = change(&scheduler, saved, now)
+                            XCTAssertEqual(result.errors, [], label)
+                            let next = nextHardStop(of: lunch.id, in: scheduler, after: now)?.start
+                            let events = result.events.filter(isHardStopEvent) + run(&scheduler, from: at(13, 0), through: at(15, 31), inputs: inCall).map(\.1)
+                            let records = hardStopRecords(scheduler)
+                            XCTAssertEqual(records.first.map { [$0.startedAt, $0.endedAt] }, [at(12, 30), at(13, 0)], label)
+                            XCTAssertEqual(records.first?.hardStopEndReason, state == "waiting" ? .missed : .ended, label)
+                            // Nothing joins it: a later record before 13:00 is only a wait for the new time that was missed.
+                            XCTAssertTrue(records.dropFirst().allSatisfy { $0.startedAt >= at(13, 0) || $0.hardStopEndReason == .missed }, label)
+                            if name == "14:00" {
+                                XCTAssertEqual(next, at(14, 0), label)
+                                XCTAssertTrue(events.contains(warning(lunch, 14, 0)), label)
+                                XCTAssertEqual(records.map(\.startedAt), [at(12, 30), at(14, 0)], label)
+                            }
+                            if listed {
+                                let controlResult = change(&control, saved, now)
+                                XCTAssertEqual(controlResult.errors, [], label)
+                                XCTAssertEqual(next, nextHardStop(of: lunch.id, in: control, after: now)?.start, label)
+                                let controlEvents = controlTick + controlResult.events.filter(isHardStopEvent)
+                                    + run(&control, from: at(13, 0), through: at(15, 31), inputs: inCall).map(\.1)
+                                XCTAssertEqual(events, controlEvents, label)
+                                XCTAssertEqual(history(scheduler), history(control), label)
+                                XCTAssertEqual(scheduler.settings.hardStops, control.settings.hardStops, label)
+                            } else if name == "toggled" || name == "deleted" {
+                                XCTAssertEqual(scheduler.settings.hardStops, [], label)
+                                XCTAssertEqual(records.count, 1, label)
+                            }
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    func testAMalformedEditOfAStopInProgressGetsItsFieldErrorWithoutWorkingOutItsOccurrence() {
+        // Lunch, a one-off from 12:30 to 13:00, runs, joins Long (12:00 to 13:30), or waits for a call. An edit to a date or
+        // start time that does not exist gets its field error from the editor and the save, and changes nothing.
+        let inCall: (Date) -> BreakScheduler.Inputs = { [self] in $0 < at(13, 30) ? .init(signals: [.meeting]) : .init() }
+        for state in ["running", "merged", "waiting"] {
+            let lunch = stop(repeats: today, duringCalls: state == "waiting" ? .waitForCallToEnd : .startAnyway)
+            let long = stop("Long", hour: 12, minute: 0, end: .after(90 * 60))
+            var scheduler = makeScheduler(state == "merged" ? [long, lunch] : [lunch], start: at(9, 0))
+            _ = run(&scheduler, from: at(11, 59), through: at(12, 31), inputs: inCall)
+            XCTAssertTrue(scheduler.isHardStopInProgress(id: lunch.id, now: at(12, 31)), state)
+            var edits: [(HardStopFieldError.Field, HardStop)] = []
+            for date in [DateComponents(year: 1_000_000_000_000, month: 8, day: 10), DateComponents(year: 2026, month: 13, day: 10),
+                         DateComponents(year: 2026, month: 8, day: 0)] {
+                var edit = lunch
+                edit.repeats = .once(date)
+                edits.append((.repeats, edit))
+            }
+            var hour = lunch
+            hour.hour = 25
+            edits.append((.start, hour))
+            for (field, edit) in edits {
+                let label = "\(state), \(edit.repeats) at \(edit.hour)"
+                let before = scheduler
+                XCTAssertEqual(scheduler.hardStopErrors(saving: edit, isNew: false, now: at(12, 31)).map(\.field), [field], label)
+                XCTAssertEqual(scheduler.saveHardStop(edit, isNew: false, now: at(12, 31)).errors.map(\.field), [field], label)
+                XCTAssertEqual(scheduler.hardStopInProgressNote(saving: edit, now: at(12, 31)), HardStopText.inProgress, label)
+                XCTAssertEqual(scheduler.settings, before.settings, label)
+                XCTAssertEqual(scheduler.snapshot, before.snapshot, label)
             }
         }
     }

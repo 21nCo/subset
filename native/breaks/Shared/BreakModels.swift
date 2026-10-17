@@ -613,7 +613,7 @@ extension BreakSettings {
     }
 
     /// True when `date` names a day that exists, such as 28 February but not 30 February.
-    private static func isCalendarDate(_ date: DateComponents, calendar: Calendar) -> Bool {
+    static func isCalendarDate(_ date: DateComponents, calendar: Calendar) -> Bool {
         guard let year = date.year, let month = date.month, let day = date.day, (1...9999).contains(year),
               let resolved = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { return false }
         let parts = calendar.dateComponents([.year, .month, .day], from: resolved)

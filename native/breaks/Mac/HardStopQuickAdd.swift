@@ -279,10 +279,12 @@ extension BreakScheduler {
 
     /// The keys of `stop` that may be saved after their time has passed: its occurrences in progress at `now`, and, while
     /// it is in progress, the one-off date and time it is saved with when an occurrence in progress supersedes it
-    /// (`isSupersededBySave`), since the stop is removed when that occurrence ends instead of starting again.
+    /// (`isSupersededBySave`), since the stop is removed when that occurrence ends instead of starting again. Only a valid
+    /// date and start time are worked out: a malformed one gets its field error (`hardStopErrors`) instead.
     private func passedOccurrenceKeysAllowed(saving stop: HardStop, now: Date) -> Set<Int> {
         var keys = hardStopOccurrenceKeysInProgress(of: stop.id, now: now)
         guard !keys.isEmpty, let index = settings.hardStops.firstIndex(where: { $0.id == stop.id }), case .once(let date) = stop.repeats,
+              (0...23).contains(stop.hour), (0...59).contains(stop.minute), BreakSettings.isCalendarDate(date, calendar: calendar),
               let year = date.year, let month = date.month, let day = date.day else { return keys }
         let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)
         var saved = self
