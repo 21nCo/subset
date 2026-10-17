@@ -24,6 +24,17 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     func rejectsNonWebURLs(_ raw: String) {
         #expect(RedactedURL(raw) == nil)
     }
+
+    @Test func hostAndPathAreBoundedInBytes() throws {
+        let label = String(repeating: "a", count: 63)
+        let longestHost = [label, label, label, String(repeating: "a", count: 57), "com"].joined(separator: ".")
+        #expect(longestHost.utf8.count == RedactedURL.maxHostBytes)
+        #expect(RedactedURL("https://\(longestHost)/x")?.host == longestHost)
+        #expect(RedactedURL("https://a\(longestHost)/x") == nil)
+        let url = try #require(RedactedURL("https://example.com/" + String(repeating: "p", count: 5_000)))
+        #expect(url.path.utf8.count == RedactedURL.maxPathBytes)
+        #expect(RedactedURL("https://example.com/caf%C3%A9")?.path == "/caf%C3%A9")
+    }
 }
 
 @Suite struct PolicyTests {
@@ -46,6 +57,40 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     @Test func titlesAreTrimmedAndCapped() {
         #expect(Activity(bundleID: "a", appName: "A", windowTitle: "   ").windowTitle == nil)
         #expect(Activity(bundleID: "a", appName: "A", windowTitle: String(repeating: "x", count: 1_000)).windowTitle?.count == Activity.maxTitleLength)
+    }
+
+    private static let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}" // one character, 25 bytes
+    /// Title and the number of leading characters kept, keyed by name so the test log does not print 100,000 marks.
+    private static let boundedTitles: [String: (String, Int)] = [
+        "ordinary": (String(repeating: "x", count: 300), 300),
+        "CJK at the character cap": (String(repeating: "\u{8A9E}", count: 300), 300),
+        "CJK over the character cap": (String(repeating: "\u{8A9E}", count: 400), 300),
+        "emoji ZWJ sequences": (String(repeating: family, count: 60), 48),
+        "one character of combining marks": ("a" + String(repeating: "\u{0301}", count: 100_000), 0),
+        "combining marks after a prefix": ("Repo" + "e" + String(repeating: "\u{0301}", count: 2_000), 4),
+    ]
+
+    @Test(arguments: boundedTitles.keys.sorted())
+    func titlesAreBoundedInBytesOnCharacterBoundaries(_ name: String) throws {
+        let (title, keptCharacters) = try #require(Self.boundedTitles[name])
+        let stored = Activity(bundleID: "a", appName: "A", windowTitle: title).windowTitle
+        #expect(stored.map { Array($0) } == (keptCharacters == 0 ? nil : Array(title.prefix(keptCharacters))), "\(name)")
+        #expect((stored?.utf8.count ?? 0) <= Activity.maxTitleBytes, "\(name)")
+        // Re-segmenting the stored text gives the same characters: nothing ends in a split scalar or a cut combining run.
+        #expect(stored.map { String($0).count } == stored.map { Array($0).count }, "\(name)")
+        if keptCharacters == title.count { #expect(stored == title, "\(name)") }
+    }
+
+    @Test func appIdentityIsBoundedAfterExclusionsMatchTheFullBundleID() throws {
+        let longID = "com.example." + String(repeating: "x", count: 1_000)
+        let heavyName = "App" + String(repeating: "\u{0301}", count: 100_000)
+        let segment = try #require(CapturePolicy().content(for: Activity(bundleID: longID, appName: heavyName), at: t0))
+        #expect(segment.bundleID == String(longID.prefix(Segment.maxIdentityBytes)))
+        #expect(segment.appName == "Ap")
+        let excluded = try #require(CapturePolicy(excludedBundleIDs: [longID]).content(for: Activity(bundleID: longID, appName: heavyName), at: t0))
+        #expect(excluded.excluded && excluded.bundleID == nil && excluded.appName == nil)
+        // Ordinary identities are untouched.
+        #expect(content("com.apple.Safari")?.bundleID == "com.apple.Safari")
     }
 }
 

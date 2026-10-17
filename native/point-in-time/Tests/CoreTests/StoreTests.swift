@@ -64,6 +64,39 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(try store.segments(from: t0, to: t0 + 60).first?.windowTitle == "before\u{0}after")
     }
 
+    @Test func capturedTextIsBoundedInStorageBytes() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        let marks = String(repeating: "\u{0301}", count: 100_000)
+        let activity = Activity(bundleID: "com.example." + String(repeating: "x", count: 1_000), appName: "App" + marks,
+                                windowTitle: "Report" + marks, url: RedactedURL("https://example.com/" + String(repeating: "p", count: 5_000)))
+        var captured = try #require(CapturePolicy().content(for: activity, at: t0))
+        captured.end = t0 + 60
+        try store.save(captured)
+
+        #expect(try store.blocks(from: t0, to: t0 + 60).first?.dominantTitle == "Repor")
+        var db: OpaquePointer?
+        #expect(sqlite3_open(store.databaseURL.path, &db) == SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        #expect(sqlite3_prepare_v2(db, """
+            SELECT length(CAST(s.window_title AS BLOB)), length(CAST(s.app_name AS BLOB)), length(CAST(s.bundle_id AS BLOB)),
+                   length(CAST(s.url_path AS BLOB)), length(CAST(b.dominant_title AS BLOB)), length(CAST(b.apps_json AS BLOB))
+            FROM segments s, blocks b
+            """, -1, &statement, nil) == SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        #expect(sqlite3_step(statement) == SQLITE_ROW)
+        let lengths = (0..<6).map { Int(sqlite3_column_int64(statement, Int32($0))) }
+        #expect(lengths[0] <= Activity.maxTitleBytes && lengths[4] <= Activity.maxTitleBytes)
+        #expect(lengths[1] <= Segment.maxIdentityBytes && lengths[2] <= Segment.maxIdentityBytes)
+        #expect(lengths[3] <= RedactedURL.maxPathBytes)
+        #expect(lengths[5] <= 2 * Segment.maxIdentityBytes + 100)
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
+        let bytes = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
+        #expect(bytes < 100_000, "the store directory holds \(bytes) bytes after one segment")
+    }
+
     @Test func emptyOrReversedRangesReadNothing() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
