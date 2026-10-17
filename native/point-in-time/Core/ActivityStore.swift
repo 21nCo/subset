@@ -163,6 +163,13 @@ public final class ActivityStore: @unchecked Sendable {
         }
     }
 
+    /// The latest end of any stored segment, or nil when none is stored.
+    public func latestSegmentEnd() throws -> Date? {
+        try locked {
+            try connection.query("SELECT MAX(end) FROM segments").first?.first?.double.map(Date.init(timeIntervalSince1970:))
+        }
+    }
+
     public func segmentCount() throws -> Int {
         try locked { try connection.query("SELECT COUNT(*) FROM segments").first?.first?.int ?? 0 }
     }
@@ -248,14 +255,16 @@ public final class ActivityStore: @unchecked Sendable {
     ]
 
     /// Reads the schema version through a read-only connection, which changes no file, and refuses a newer one. A WAL
-    /// database whose -shm file is missing cannot be read that way; it is read with a writable -shm instead, which SQLite
+    /// database without a WAL file, as a store closed before its first write is left, has nothing outside its main file
+    /// and is read from that alone. One with a WAL but no -shm file is read with a writable -shm instead, which SQLite
     /// may create, while the database and its WAL stay unchanged.
     private static func refuseNewerSchema(at path: String) throws {
         let version: Int
         do {
-            version = try storedVersion(SQLiteConnection(readingOnly: path, sharedMemoryReadOnly: true))
+            version = try storedVersion(SQLiteConnection(readingOnly: path, .sharedMemoryReadOnly))
         } catch {
-            version = try storedVersion(SQLiteConnection(readingOnly: path, sharedMemoryReadOnly: false))
+            let hasWAL = FileManager.default.fileExists(atPath: path + "-wal")
+            version = try storedVersion(SQLiteConnection(readingOnly: path, hasWAL ? .sharedMemoryWritable : .withoutWAL))
         }
         try refuse(newerThanSupported: version)
     }

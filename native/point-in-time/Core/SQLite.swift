@@ -29,11 +29,19 @@ final class SQLiteConnection {
         try self.init(filename: path, flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
     }
 
-    /// Opens `path` only to read it. Closing a read-only connection never checkpoints or removes a WAL. With
-    /// `sharedMemoryReadOnly`, the WAL index (-shm) is opened read-only as well, so reading changes no file at all;
-    /// that fails for a WAL database whose -shm file is missing.
-    convenience init(readingOnly path: String, sharedMemoryReadOnly: Bool) throws {
-        let uri = URL(fileURLWithPath: path).absoluteString + (sharedMemoryReadOnly ? "?mode=ro&readonly_shm=1" : "?mode=ro")
+    /// How a read-only connection treats the WAL index (-shm) and the WAL.
+    enum ReadOnlyMode: String {
+        /// Opens the -shm read-only as well, so reading changes no file at all; fails when the -shm file is missing.
+        case sharedMemoryReadOnly = "mode=ro&readonly_shm=1"
+        /// Needs a writable -shm to read the WAL and may create one.
+        case sharedMemoryWritable = "mode=ro"
+        /// Reads only the main file and creates nothing; correct only when there is no WAL file to read.
+        case withoutWAL = "mode=ro&immutable=1"
+    }
+
+    /// Opens `path` only to read it. Closing a read-only connection never checkpoints or removes a WAL.
+    convenience init(readingOnly path: String, _ mode: ReadOnlyMode) throws {
+        let uri = URL(fileURLWithPath: path).absoluteString + "?" + mode.rawValue
         try self.init(filename: uri, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
     }
 

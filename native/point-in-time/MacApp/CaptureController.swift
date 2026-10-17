@@ -2,7 +2,7 @@ import AppKit
 import PointInTimeCore
 
 /// Wires macOS signals to the segment recorder and the store. Samples every few seconds while tracking is allowed;
-/// sleep, lock, fast user switching, idle, pause, and tracking off end the current segment.
+/// sleep, lock, fast user switching, idle, pause, tracking off, and a full write queue end the current segment.
 @MainActor
 final class CaptureController {
     static let sampleInterval: TimeInterval = 5
@@ -10,7 +10,7 @@ final class CaptureController {
     static let flushInterval: TimeInterval = 60
 
     enum State: Equatable {
-        case off, paused, idle, asleep, locked, inactiveSession, recording, storeUnavailable
+        case off, paused, idle, asleep, locked, inactiveSession, recording, storeUnavailable, writesBacklogged
     }
 
     private(set) var state: State = .off
@@ -184,6 +184,9 @@ final class CaptureController {
     private func refreshState(now: Date = Date()) {
         let next: State
         if store == nil { next = .storeUnavailable }
+        // Writes that keep failing filled the queue to its hard limit: recording stops, so no idle retraction is added,
+        // until enough of them have succeeded.
+        else if writes.isFull { next = .writesBacklogged }
         else if !settings.onboardingCompleted || !settings.trackingEnabled { next = .off }
         else if settings.isPaused(at: now) { next = .paused }
         else if asleep { next = .asleep }
