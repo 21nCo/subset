@@ -31,6 +31,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        capture?.endSegment()
+        capture?.finishWrites()
     }
 }

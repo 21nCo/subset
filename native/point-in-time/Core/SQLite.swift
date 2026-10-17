@@ -24,10 +24,22 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 final class SQLiteConnection {
     private var handle: OpaquePointer?
 
-    init(path: String, readOnly: Bool = false) throws {
-        let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+    /// Opens `path` read-write, creating it if needed.
+    convenience init(path: String) throws {
+        try self.init(filename: path, flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+    }
+
+    /// Opens `path` only to read it. Closing a read-only connection never checkpoints or removes a WAL. With
+    /// `sharedMemoryReadOnly`, the WAL index (-shm) is opened read-only as well, so reading changes no file at all;
+    /// that fails for a WAL database whose -shm file is missing.
+    convenience init(readingOnly path: String, sharedMemoryReadOnly: Bool) throws {
+        let uri = URL(fileURLWithPath: path).absoluteString + (sharedMemoryReadOnly ? "?mode=ro&readonly_shm=1" : "?mode=ro")
+        try self.init(filename: uri, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+    }
+
+    private init(filename: String, flags: Int32) throws {
         var db: OpaquePointer?
-        let status = sqlite3_open_v2(path, &db, flags | SQLITE_OPEN_FULLMUTEX, nil)
+        let status = sqlite3_open_v2(filename, &db, flags | SQLITE_OPEN_FULLMUTEX, nil)
         guard status == SQLITE_OK, let db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "status \(status)"
             if let db { sqlite3_close(db) }

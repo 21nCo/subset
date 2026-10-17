@@ -19,8 +19,14 @@ public final class ActivityStore: @unchecked Sendable {
     }
 
     /// Opens or creates `activity.sqlite` in `directory`, which is created with mode 0700. The database is mode 0600;
-    /// SQLite gives its WAL and shared-memory files the same mode.
-    public init(directory: URL) throws {
+    /// SQLite gives its WAL and shared-memory files the same mode. A database written by a newer schema is refused
+    /// without being changed.
+    public convenience init(directory: URL) throws {
+        try self.init(directory: directory, beforeMigrating: {})
+    }
+
+    /// `beforeMigrating` runs after the read-only schema check, so tests can change the database in between.
+    init(directory: URL, beforeMigrating: () throws -> Void) throws {
         let fileManager = FileManager.default
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -39,15 +45,20 @@ public final class ActivityStore: @unchecked Sendable {
         } catch {
             throw StoreError.filesystem(error.localizedDescription)
         }
+        // A newer database is refused before a read-write connection exists: closing that connection could checkpoint
+        // the newer database's WAL into its file.
+        try Self.refuseNewerSchema(at: databaseURL.path)
         connection = try SQLiteConnection(path: databaseURL.path)
-        // A newer database is refused before anything writes to it, including the journal mode change below.
-        try refuseNewerSchema()
-        try connection.execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;")
+        try connection.execute("PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;")
+        try beforeMigrating()
+        // The version is checked again under the write lock, so one that advanced since the check above is refused too,
+        // and only then does the journal mode change.
         try migrate()
+        try connection.execute("PRAGMA journal_mode=WAL;")
     }
 
     public func schemaVersion() throws -> Int {
-        try locked { try currentVersion() }
+        try locked { try Self.storedVersion(connection) }
     }
 
     // MARK: Writing
@@ -217,11 +228,7 @@ public final class ActivityStore: @unchecked Sendable {
         }
     }
 
-    private func currentVersion() throws -> Int {
-        try connection.query("SELECT MAX(version) FROM schema_version").first?.first?.int ?? 0
-    }
-
-    /// Forward-only migrations, each applied in its own transaction and recorded in `schema_version`.
+    /// Forward-only migrations, applied in order and recorded in `schema_version`.
     private static let migrations: [Int: String] = [
         1: """
         CREATE TABLE segments (
@@ -240,21 +247,40 @@ public final class ActivityStore: @unchecked Sendable {
         """
     ]
 
-    /// Reads the schema version without writing. A database without a `schema_version` table is version 0.
-    private func refuseNewerSchema() throws {
-        guard try !connection.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").isEmpty else { return }
-        let current = try currentVersion()
-        guard current <= Self.supportedSchemaVersion else {
-            throw StoreError.newerSchema(found: current, supported: Self.supportedSchemaVersion)
+    /// Reads the schema version through a read-only connection, which changes no file, and refuses a newer one. A WAL
+    /// database whose -shm file is missing cannot be read that way; it is read with a writable -shm instead, which SQLite
+    /// may create, while the database and its WAL stay unchanged.
+    private static func refuseNewerSchema(at path: String) throws {
+        let version: Int
+        do {
+            version = try storedVersion(SQLiteConnection(readingOnly: path, sharedMemoryReadOnly: true))
+        } catch {
+            version = try storedVersion(SQLiteConnection(readingOnly: path, sharedMemoryReadOnly: false))
+        }
+        try refuse(newerThanSupported: version)
+    }
+
+    /// The schema version recorded in the database; one without a `schema_version` table is version 0.
+    private static func storedVersion(_ connection: SQLiteConnection) throws -> Int {
+        guard try !connection.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").isEmpty else { return 0 }
+        return try connection.query("SELECT MAX(version) FROM schema_version").first?.first?.int ?? 0
+    }
+
+    private static func refuse(newerThanSupported version: Int) throws {
+        guard version <= supportedSchemaVersion else {
+            throw StoreError.newerSchema(found: version, supported: supportedSchemaVersion)
         }
     }
 
+    /// Reads the version and applies every missing migration in one write transaction, so nothing changes between the
+    /// check and the migrations, and a newer version is refused before anything is written.
     private func migrate() throws {
-        try connection.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL)")
-        let current = try currentVersion()
-        for version in (current + 1)...max(current + 1, Self.supportedSchemaVersion) where version <= Self.supportedSchemaVersion {
-            guard let sql = Self.migrations[version] else { continue }
-            try connection.transaction {
+        try connection.transaction {
+            let current = try Self.storedVersion(connection)
+            try Self.refuse(newerThanSupported: current)
+            try connection.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL)")
+            for version in (current + 1)...max(current + 1, Self.supportedSchemaVersion) where version <= Self.supportedSchemaVersion {
+                guard let sql = Self.migrations[version] else { continue }
                 try connection.execute(sql)
                 try connection.query("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)", [.integer(Int64(version)), .real(Date().timeIntervalSince1970)])
             }

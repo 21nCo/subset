@@ -32,7 +32,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         try store.save(segment("a", 0, 60, title: "T"))
         for suffix in ["-wal", "-shm"] {
             let mode = try FileManager.default.attributesOfItem(atPath: store.databaseURL.path + suffix)[.posixPermissions] as? Int
-            #expect(mode == 0o600, "\(suffix)")
+            #expect(mode == 0o600, "activity.sqlite\(suffix)")
         }
     }
 
@@ -115,10 +115,80 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
 
         #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
         for suffix in ["-wal", "-shm", "-journal"] {
-            #expect(!FileManager.default.fileExists(atPath: path + suffix), "\(suffix)")
+            #expect(!FileManager.default.fileExists(atPath: path + suffix), "activity.sqlite\(suffix)")
         }
         // Header bytes 18 and 19 are 1 for a rollback journal and 2 for WAL.
         #expect(before[18] == 1 && before[19] == 1)
+    }
+
+    @Test(arguments: [true, false])
+    func refusesANewerWALDatabaseWithoutCheckpointingIt(keepSharedMemory: Bool) throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("activity.sqlite").path
+        // A newer version left frames in its WAL that were never checkpointed, as after a crash: copy the files while
+        // the writer still has them open, then put the copies back after it closes.
+        var db: OpaquePointer?
+        #expect(sqlite3_open(path, &db) == SQLITE_OK)
+        #expect(sqlite3_exec(db, """
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+            INSERT INTO schema_version VALUES (1, 0);
+            PRAGMA wal_checkpoint(TRUNCATE);
+            PRAGMA wal_autocheckpoint=0;
+            INSERT INTO schema_version VALUES (2, 0);
+            CREATE TABLE newer (value TEXT);
+            """, nil, nil, nil) == SQLITE_OK)
+        let suffixes = keepSharedMemory ? ["", "-wal", "-shm"] : ["", "-wal"]
+        let crashed = try suffixes.map { try Data(contentsOf: URL(fileURLWithPath: path + $0)) }
+        sqlite3_close(db)
+        for (suffix, bytes) in zip(suffixes, crashed) { try bytes.write(to: URL(fileURLWithPath: path + suffix)) }
+        try? FileManager.default.removeItem(atPath: path + (keepSharedMemory ? "-journal" : "-shm"))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path + "-wal")).count > 0)
+
+        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) { try ActivityStore(directory: directory) }
+
+        // The database and its WAL are unchanged. With its -shm present nothing changes at all; without it, SQLite
+        // needs a writable WAL index to read the WAL and may create one.
+        for (suffix, bytes) in zip(suffixes, crashed) where suffix != "-shm" || keepSharedMemory {
+            let unchanged = (try? Data(contentsOf: URL(fileURLWithPath: path + suffix))) == bytes
+            #expect(unchanged, "activity.sqlite\(suffix)")
+        }
+        #expect(!FileManager.default.fileExists(atPath: path + "-journal"))
+    }
+
+    @Test func refusesASchemaThatAdvancesAfterTheReadOnlyCheck() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try ActivityStore(directory: directory).save(segment("a", 0, 60, title: "Kept"))
+        let path = directory.appendingPathComponent("activity.sqlite").path
+        func contents() -> [String] {
+            var db: OpaquePointer?
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement); sqlite3_close(db) }
+            guard sqlite3_open(path, &db) == SQLITE_OK, sqlite3_prepare_v2(db, """
+                SELECT 'table ' || name FROM sqlite_master UNION ALL SELECT 'version ' || version FROM schema_version
+                UNION ALL SELECT 'segment ' || start || ' ' || end || ' ' || window_title FROM segments
+                """, -1, &statement, nil) == SQLITE_OK else { return [] }
+            var rows: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW { rows.append(String(cString: sqlite3_column_text(statement, 0))) }
+            return rows.sorted()
+        }
+
+        var advanced: [String] = []
+        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) {
+            try ActivityStore(directory: directory) {
+                // Another, newer copy of the app migrates the database after the read-only check passed.
+                var db: OpaquePointer?
+                #expect(sqlite3_open(path, &db) == SQLITE_OK)
+                #expect(sqlite3_exec(db, "INSERT INTO schema_version VALUES (2, 0)", nil, nil, nil) == SQLITE_OK)
+                sqlite3_close(db)
+                advanced = contents()
+            }
+        }
+        #expect(advanced.contains("version 2") && advanced.contains { $0.hasPrefix("segment ") })
+        #expect(contents() == advanced)
     }
 
     @Test func extendingAnOpenSegmentUpdatesItsBlocks() throws {
@@ -308,7 +378,7 @@ private final class FlakyStorage: CaptureStorage {
             // Idle is detected while storage fails: the open segment ends when idle began, and the retraction fails.
             storage.failSaves = true; storage.failDeletes = true
             writes.save(segment("com.google.Chrome", 0, 30, title: "Secret plan", url: "https://example.com/secret?q=1"), to: storage)
-            writes.retract(from: t0 + 30, to: t0 + 180, in: storage)
+            writes.retract(since: t0 + 30, until: t0 + 180, in: storage)
             #expect(writes.failure != nil)
 
             // Saves work again but deletion still fails: a later, unrelated save neither runs ahead of the retraction nor
@@ -334,7 +404,7 @@ private final class FlakyStorage: CaptureStorage {
             #expect(blocks.map { [$0.start.timeIntervalSince(t0), $0.activeSeconds] } == [[0, 30], [180, 60]])
             for suffix in ["", "-wal"] {
                 let bytes = (try? Data(contentsOf: URL(fileURLWithPath: storage.store.databaseURL.path + suffix))) ?? Data()
-                #expect(bytes.range(of: Data("Inbox (3)".utf8)) == nil && bytes.range(of: Data("mail.example.com".utf8)) == nil, "\(suffix)")
+                #expect(bytes.range(of: Data("Inbox (3)".utf8)) == nil && bytes.range(of: Data("mail.example.com".utf8)) == nil, "activity.sqlite\(suffix)")
             }
         }
     }
@@ -380,14 +450,12 @@ private final class FlakyStorage: CaptureStorage {
             #expect(writes.queue.first == .save(segment("a", 0, 5)) && writes.queue.last == .save(segment("a", 90, 95)))
 
             // A retraction is admitted at capacity and drops the queued saves it covers.
-            writes.retract(from: t0 + 50, to: t0 + 200, in: storage)
+            writes.retract(since: t0 + 50, until: t0 + 200, in: storage)
             #expect(writes.count == 6 && writes.hasPendingDeletion)
-            // More retractions than capacity never grow the queue past capacity + 1: at capacity the newest absorbs the
-            // previous one.
-            for index in 0..<100 { writes.retract(from: t0 + 1_000 + Double(index) * 500, to: t0 + 1_100 + Double(index) * 500, in: storage) }
-            // Four fit below capacity; each later one absorbs the newest queued retraction.
-            #expect(writes.count == 10)
-            #expect(writes.queue.last == .retract(from: t0 + 2_500, to: t0 + 1_100 + 99 * 500))
+            // Retractions that follow it directly merge with it, so they never grow the queue.
+            for index in 0..<100 { writes.retract(since: t0 + 1_000 + Double(index) * 500, until: t0 + 1_100 + Double(index) * 500, in: storage) }
+            #expect(writes.count == 6)
+            #expect(writes.queue.last == .retract(from: t0 + 50, to: t0 + 1_100 + 99 * 500))
 
             writes.deleteAll(in: storage)
             #expect(writes.queue == [.deleteAll] && writes.failure != nil)
@@ -403,12 +471,14 @@ private final class FlakyStorage: CaptureStorage {
             storage.failSaves = false
             storage.calls = []
             var rounds = 0
-            while !writes.retry(storage) {
+            // Bounded, so a queue that stopped draining fails the test instead of hanging it.
+            for _ in 0..<50 where !writes.isEmpty {
+                let drained = writes.retry(storage)
                 rounds += 1
-                #expect(storage.calls.count == 8 * rounds)
-                #expect(writes.failure != nil)
+                #expect(storage.calls.count == min(8 * rounds, 150))
+                #expect(drained == writes.isEmpty && (writes.failure == nil) == drained)
             }
-            #expect(rounds == 18 && writes.failure == nil && writes.isEmpty)
+            #expect(rounds == 19 && writes.failure == nil && writes.isEmpty)
             #expect(storage.calls == (0..<150).map { "save \($0 * 10)" })
             let stored = try storage.store.segmentCount()
             #expect(stored == 150)
@@ -427,7 +497,7 @@ private final class FlakyStorage: CaptureStorage {
             #expect(writes.count == 4)
 
             // Idle began at 20; the shorter save above was refused, so the retraction alone has to remove the rest.
-            writes.retract(from: t0 + 20, to: t0 + 400, in: storage)
+            writes.retract(since: t0 + 20, until: t0 + 400, in: storage)
             storage.failSaves = false; storage.failDeletes = false
             let drained = writes.retry(storage)
             #expect(drained && writes.failure == nil)
@@ -435,8 +505,210 @@ private final class FlakyStorage: CaptureStorage {
             #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 20]])
             for suffix in ["", "-wal"] {
                 let bytes = (try? Data(contentsOf: URL(fileURLWithPath: storage.store.databaseURL.path + suffix))) ?? Data()
-                #expect(bytes.range(of: Data("Away".utf8)) == nil, "\(suffix)")
+                #expect(bytes.range(of: Data("Away".utf8)) == nil, "activity.sqlite\(suffix)")
             }
         }
+    }
+
+    @Test func aFailedDeleteTodayNeverRemovesCapturesMadeAfterIt() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 4, writesPerRetry: 8)
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            writes.save(segment("com.google.Chrome", 0, 60, title: "Morning plan", url: "https://morning.example.com/plan"), to: storage)
+            // Delete Today fails; it ends the open segment first, as the app does.
+            storage.failSaves = true; storage.failDeletes = true
+            writes.save(segment("com.google.Chrome", 0, 100, title: "Morning plan", url: "https://morning.example.com/plan"), to: storage)
+            writes.deleteDay(containing: t0 + 100, calendar: utc, in: storage)
+            // Three captures made after the request fill the queue; the last one was flushed while the user was away.
+            writes.save(segment("a", 100, 150, title: "After one"), to: storage)
+            writes.save(segment("b", 150, 200, title: "After two"), to: storage)
+            writes.save(segment("c", 200, 260, title: "After three"), to: storage)
+            #expect(writes.count == 4)
+            // Idle began at 230: the open segment ends there and the rest is retracted, at capacity.
+            writes.save(segment("c", 200, 230, title: "After three"), to: storage)
+            writes.retract(since: t0 + 230, until: t0 + 400, in: storage)
+            #expect(writes.count == 5)
+
+            storage.failSaves = false; storage.failDeletes = false
+            let drained = writes.retry(storage)
+            #expect(drained && writes.failure == nil)
+            let stored = try storage.store.segments(from: .distantPast, to: .distantFuture)
+            #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[100, 150], [150, 200], [200, 230]])
+            #expect(stored.map(\.windowTitle) == ["After one", "After two", "After three"])
+            for suffix in ["", "-wal"] {
+                let bytes = (try? Data(contentsOf: URL(fileURLWithPath: storage.store.databaseURL.path + suffix))) ?? Data()
+                #expect(bytes.range(of: Data("Morning plan".utf8)) == nil && bytes.range(of: Data("morning.example.com".utf8)) == nil, "activity.sqlite\(suffix)")
+            }
+        }
+    }
+
+    @Test func retractionsSeparatedByQueuedSavesStaySeparate() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 4, writesPerRetry: 8)
+            // Flushed while the user was in fact away from 40.
+            writes.save(segment("a", 0, 90, title: "One"), to: storage)
+            storage.failSaves = true; storage.failDeletes = true
+            writes.save(segment("a", 0, 40, title: "One"), to: storage)
+            writes.retract(since: t0 + 40, until: t0 + 100, in: storage)
+            writes.save(segment("b", 100, 150, title: "Two"), to: storage)
+            writes.save(segment("c", 150, 200, title: "Three"), to: storage)
+            #expect(writes.count == 4)
+            // At capacity, the next segment is refused and idle from 230 is retracted after the queued saves.
+            writes.save(segment("d", 200, 260, title: "Four"), to: storage)
+            writes.save(segment("d", 200, 230, title: "Four"), to: storage)
+            writes.retract(since: t0 + 230, until: t0 + 300, in: storage)
+            #expect(writes.count == 5)
+            #expect(writes.queue.filter { if case .retract = $0 { true } else { false } }.count == 2)
+
+            storage.failSaves = false; storage.failDeletes = false
+            let drained = writes.retry(storage)
+            #expect(drained)
+            let stored = try storage.store.segments(from: .distantPast, to: .distantFuture)
+            #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 40], [100, 150], [150, 200]])
+        }
+    }
+
+    @Test func anAlternatingOutageNeverHoldsMoreThanCapacityPlusOne() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 3, writesPerRetry: 2)
+            storage.failSaves = true; storage.failDeletes = true
+            for index in 0..<300 {
+                let at = Double(index) * 10
+                if index % 3 == 2 { writes.retract(since: t0 + at + 5, until: t0 + at + 10, in: storage) }
+                else { writes.save(segment("a", at, at + 5), to: storage) }
+                #expect(writes.count <= 4)
+            }
+            #expect(writes.refusedSaves > 0)
+        }
+    }
+
+    @Test func drainingAppliesTheWholeQueueInOrder() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 50, writesPerRetry: 8)
+            storage.failSaves = true; storage.failDeletes = true
+            for index in 0..<30 { writes.save(segment("a", Double(index) * 10, Double(index) * 10 + 5), to: storage) }
+            writes.retract(since: t0 + 295, until: t0 + 400, in: storage)
+            storage.failSaves = false; storage.failDeletes = false
+            storage.calls = []
+            // No new save: nothing is open when quitting, and the drain still applies everything queued.
+            let drained = writes.drain(storage)
+            #expect(drained && writes.isEmpty && writes.failure == nil)
+            #expect(storage.calls == (0..<30).map { "save \($0 * 10)" } + ["delete 295", "checkpoint"])
+            let stored = try storage.store.segmentCount()
+            #expect(stored == 30)
+        }
+    }
+
+    @Test func drainingStopsAtTheFirstFailureAndKeepsIt() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 50, writesPerRetry: 8)
+            storage.failSaves = true; storage.failDeletes = true
+            for index in 0..<12 { writes.save(segment("a", Double(index) * 10, Double(index) * 10 + 5), to: storage) }
+            writes.retract(since: t0 + 200, until: t0 + 300, in: storage)
+            for index in 30..<40 { writes.save(segment("a", Double(index) * 10, Double(index) * 10 + 5), to: storage) }
+            storage.failSaves = false
+            storage.calls = []
+            let drained = writes.drain(storage)
+            #expect(!drained && writes.failure != nil && writes.count == 11)
+            #expect(storage.calls == (0..<12).map { "save \($0 * 10)" } + ["delete 200"])
+            let stored = try storage.store.segmentCount()
+            #expect(stored == 12)
+        }
+    }
+
+    /// Random sequences of captures, idle retractions, Delete Today, Delete All, failure windows, and retries end in
+    /// exactly the state of applying every admitted write in request order; only saves refused at capacity are missing.
+    @Test(arguments: 0..<24)
+    func recoveryMatchesApplyingAdmittedWritesInOrder(seed: UInt64) throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = FlakyStorage(try ActivityStore(directory: directory.appendingPathComponent("queued")))
+        let reference = try ActivityStore(directory: directory.appendingPathComponent("reference"))
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        var random = SplitMix(seed: seed)
+        var writes = PendingWrites(capacity: 4, writesPerRetry: 2)
+        // Starts ten minutes before a UTC midnight, so Delete Today sometimes covers the day before and sometimes not.
+        var now = utc.startOfDay(for: t0).addingTimeInterval(86_400 - 600)
+        var open: Segment?
+        var recordingSince = now
+        var titles = 0
+
+        func save(_ segment: Segment) throws {
+            let refused = writes.refusedSaves
+            writes.save(segment, to: storage)
+            if writes.refusedSaves == refused { try reference.save(segment) }
+        }
+        func endOpen(at end: Date) throws {
+            guard var segment = open else { return }
+            segment.end = max(segment.start, end)
+            try save(segment)
+            open = nil
+        }
+
+        for _ in 0..<60 {
+            now.addTimeInterval(Double(random.next(5...40)))
+            switch random.next(0...99) {
+            case 0..<55:
+                if open == nil || random.next(0...2) == 0 {
+                    try endOpen(at: now)
+                    titles += 1
+                    open = Segment(start: now, end: now, excluded: false, bundleID: "app\(titles % 3)", appName: "App", windowTitle: "Title \(titles)", url: nil)
+                } else {
+                    open?.end = now
+                    try save(open!)
+                }
+            case 55..<70:
+                let idleStart = max(recordingSince, now.addingTimeInterval(-Double(random.next(0...200))))
+                try endOpen(at: idleStart)
+                writes.retract(since: idleStart, until: now, in: storage)
+                try reference.deleteData(from: idleStart, to: now)
+                recordingSince = now
+            case 70..<76:
+                try endOpen(at: now)
+                writes.deleteDay(containing: now, calendar: utc, in: storage)
+                try reference.deleteData(from: utc.startOfDay(for: now), to: now)
+            case 76..<79:
+                try endOpen(at: now)
+                writes.deleteAll(in: storage)
+                try reference.deleteAll()
+            case 79..<92:
+                storage.failSaves = random.next(0...1) == 0
+                storage.failDeletes = random.next(0...1) == 0
+                storage.failCheckpoints = random.next(0...3) == 0
+            default:
+                writes.retry(storage)
+            }
+            #expect(writes.count <= writes.capacity + 1)
+        }
+        try endOpen(at: now)
+        storage.failSaves = false; storage.failDeletes = false; storage.failCheckpoints = false
+        let drained = writes.drain(storage)
+        #expect(drained)
+
+        func rows(_ store: ActivityStore) throws -> [String] {
+            try store.segments(from: .distantPast, to: .distantFuture).map {
+                "\($0.start.timeIntervalSince1970) \($0.end.timeIntervalSince1970) \($0.bundleID ?? "") \($0.windowTitle ?? "")"
+            } + store.blocks(from: .distantPast, to: .distantFuture).map {
+                "block \($0.start.timeIntervalSince1970) \($0.activeSeconds) \($0.dominantTitle ?? "")"
+            }
+        }
+        #expect(try rows(storage.store) == rows(reference))
+    }
+}
+
+/// A small seeded generator, so a failing sequence can be replayed.
+private struct SplitMix {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed &+ 0x9E37_79B9_7F4A_7C15 }
+
+    mutating func next(_ range: ClosedRange<Int>) -> Int {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        value ^= value >> 31
+        return range.lowerBound + Int(value % UInt64(range.count))
     }
 }

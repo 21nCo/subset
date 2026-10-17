@@ -161,12 +161,23 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Pending deletions live only in memory, so quitting while one is still failing cancels it; ask first.
+    /// Queued writes live only in memory. Quitting first applies every one that storage accepts; if some still fail,
+    /// quitting would lose them, so ask first.
     private func quit() {
-        if capture.hasPendingDeletion {
+        capture.finishWrites()
+        let unsaved = capture.hasUnsavedActivity
+        let deletion = capture.hasPendingDeletion
+        if unsaved || deletion {
+            var losses: [String] = []
+            if unsaved {
+                losses.append("Some recorded activity could not be saved yet. Quitting discards it, so that time will be missing.")
+            }
+            if deletion {
+                losses.append("A deletion you asked for, or the removal of time recorded while you were idle, has not succeeded yet. Quitting cancels it, and that activity stays on this Mac.")
+            }
             let alert = NSAlert()
-            alert.messageText = "Quit before activity is deleted?"
-            alert.informativeText = "pointInTime could not delete some activity yet: a deletion you asked for, or time recorded while you were idle. Quitting cancels that deletion, and the activity stays on this Mac.\n\n\(capture.lastError ?? "")"
+            alert.messageText = "Quit before pointInTime finishes writing?"
+            alert.informativeText = (losses + [capture.lastError].compactMap { $0 }).joined(separator: "\n\n")
             alert.addButton(withTitle: "Keep Running")
             alert.addButton(withTitle: "Quit Anyway")
             alert.buttons.last?.hasDestructiveAction = true

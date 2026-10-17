@@ -19,6 +19,8 @@ final class CaptureController {
     var lastError: String? { writes.failure ?? storeError }
     /// Whether a deletion or idle retraction has not succeeded yet. The queue lives in memory, so quitting cancels it.
     var hasPendingDeletion: Bool { writes.hasPendingDeletion }
+    /// Whether recorded activity has not been saved yet. The queue lives in memory, so quitting discards it.
+    var hasUnsavedActivity: Bool { writes.hasPendingSave }
     /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action. Kept current while
     /// paused or off as well, so the menu never names an app that is no longer in front.
     private(set) var lastForeignApp: (bundleID: String, name: String)?
@@ -68,10 +70,18 @@ final class CaptureController {
         tick()
     }
 
-    /// Ends and saves the open segment, for example before quitting or when a control changes.
+    /// Ends and saves the open segment, for example when a control changes.
     func endSegment(at date: Date = Date()) {
         if let segment = sequencer.gap(at: date) { persist(segment) }
         refreshState()
+    }
+
+    /// Before quitting: ends the open segment and applies every queued write that storage accepts, not just one retry's
+    /// worth, whether or not a segment was open. Whatever still fails stays reported by `hasUnsavedActivity` and
+    /// `hasPendingDeletion`.
+    func finishWrites() {
+        endSegment()
+        if !writes.isEmpty { write { $0.drain($1) } }
     }
 
     /// Another app came to the front: what was in front ends now, and reads started before now are void.
@@ -139,7 +149,7 @@ final class CaptureController {
     /// retried on later ticks.
     private func retractIdleTime(since idleStart: Date, until now: Date) {
         endSegment(at: idleStart)
-        write { $0.retract(from: idleStart, to: now, in: $1) }
+        write { $0.retract(since: idleStart, until: now, in: $1) }
     }
 
     /// Deletes today's or all captured activity after ending the open segment, so it cannot be written back. Returns
@@ -147,7 +157,7 @@ final class CaptureController {
     func deleteActivity(all: Bool) -> String? {
         endSegment()
         if all { write { $0.deleteAll(in: $1) } }
-        else { write { $0.retract(from: Calendar.current.startOfDay(for: Date()), to: .distantFuture, in: $1) } }
+        else { write { $0.deleteDay(containing: Date(), calendar: .current, in: $1) } }
         return writes.failure
     }
 

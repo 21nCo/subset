@@ -15,9 +15,16 @@ extension ActivityStore: CaptureStorage {}
 /// out of order, so a retried save can never bring back time that a later retraction or deletion removed. A failure
 /// therefore neither drops recorded time nor keeps retracted time, and stays visible until the queue drains.
 ///
+/// Recovering leaves the store as if every admitted write had been applied in request order. Two compactions keep the
+/// queue small without changing that result: a retraction drops the queued saves inside its own range, which it would
+/// delete anyway, and a retraction that directly follows another queued retraction merges with it. A retraction always
+/// ends at the time it was requested, and every segment ends no later than the time it was saved, so while the earlier
+/// retraction is still queued nothing stored lies between the two ranges and the merged range deletes nothing more.
+///
 /// The queue is bounded so a store that keeps failing cannot grow it without limit: once it holds `capacity` writes,
-/// new saves are refused (that time is not captured), while retractions and deletions are always admitted. Each call
-/// applies at most `writesPerRetry` writes, so recovering from a long outage never blocks the caller for long.
+/// new saves are refused (that time is not captured), while retractions and deletions are always admitted, so it never
+/// holds more than `capacity + 1`. Each `retry` applies at most `writesPerRetry` writes, so recovering from a long
+/// outage never blocks the caller for long; `drain` applies the whole queue, for example before quitting.
 public struct PendingWrites: Sendable {
     enum Write: Equatable, Sendable {
         case save(Segment)
@@ -33,6 +40,8 @@ public struct PendingWrites: Sendable {
     private var head = 0
     /// The last write error, kept until every queued write has succeeded.
     public private(set) var failure: String?
+    /// Saves refused because the queue was full; that time was not captured.
+    private(set) var refusedSaves = 0
 
     public init(capacity: Int = 256, writesPerRetry: Int = 8) {
         precondition(capacity > 0 && writesPerRetry > 0)
@@ -49,6 +58,11 @@ public struct PendingWrites: Sendable {
         queue.contains { if case .save = $0 { false } else { true } }
     }
 
+    /// Whether recorded activity is still queued, so it is not stored yet.
+    public var hasPendingSave: Bool {
+        queue.contains { if case .save = $0 { true } else { false } }
+    }
+
     /// Saves `segment` (see `ActivityStore.save`). Returns whether the queue drained.
     @discardableResult
     public mutating func save(_ segment: Segment, to storage: CaptureStorage) -> Bool {
@@ -57,33 +71,35 @@ public struct PendingWrites: Sendable {
             entries[entries.count - 1] = .save(segment)
         } else if count < capacity {
             entries.append(.save(segment))
+        } else {
+            // The queue is full and this segment is not captured. A shorter save that idle would have made is covered by
+            // the retraction that follows it, which is always admitted.
+            refusedSaves += 1
         }
-        // Otherwise the queue is full and this segment is not captured. A shorter save that idle would have made is
-        // covered by the retraction that follows it, which is always admitted.
         return retry(storage)
     }
 
-    /// Removes everything recorded in `[from, to)` and checkpoints the WAL. Returns whether the queue drained.
+    /// Removes everything recorded from `from` until `now`, the time of the request, and checkpoints the WAL. Returns
+    /// whether the queue drained.
     @discardableResult
-    public mutating func retract(from: Date, to: Date, in storage: CaptureStorage) -> Bool {
-        if to > from {
-            var lower = from, upper = to
-            if case .retract(let queuedLower, let queuedUpper)? = queue.last, from <= queuedUpper, to >= queuedLower {
-                entries.removeLast()
-                lower = min(lower, queuedLower)
-                upper = max(upper, queuedUpper)
-            } else if count >= capacity, let index = queue.lastIndex(where: { if case .retract = $0 { true } else { false } }),
-                      case .retract(let queuedLower, let queuedUpper) = entries[index] {
-                // At capacity the newest retraction absorbs the previous one and moves it last, so the queue stays bounded.
-                // This also deletes what was recorded between the two ranges: a full queue errs toward deleting.
-                entries.remove(at: index)
-                lower = min(lower, queuedLower)
-                upper = max(upper, queuedUpper)
+    public mutating func retract(since from: Date, until now: Date, in storage: CaptureStorage) -> Bool {
+        if now > from {
+            dropSaves(within: from, now)
+            if case .retract(let queuedFrom, let queuedTo)? = queue.last {
+                // Nothing stored lies between the two ranges (see the type's documentation), so one deletion of both
+                // ranges and the gap between them removes exactly what the two would.
+                entries[entries.count - 1] = .retract(from: min(from, queuedFrom), to: max(now, queuedTo))
+            } else {
+                entries.append(.retract(from: from, to: now))
             }
-            dropSaves(within: lower, upper)
-            entries.append(.retract(from: lower, to: upper))
         }
         return retry(storage)
+    }
+
+    /// Removes everything recorded since the start of the day that contains `now`, until `now`.
+    @discardableResult
+    public mutating func deleteDay(containing now: Date, calendar: Calendar, in storage: CaptureStorage) -> Bool {
+        retract(since: calendar.startOfDay(for: now), until: now, in: storage)
     }
 
     /// Deletes every segment and block. Writes still queued are dropped, because the deletion would remove their result.
@@ -98,7 +114,18 @@ public struct PendingWrites: Sendable {
     /// drained; `failure` stays set until it has.
     @discardableResult
     public mutating func retry(_ storage: CaptureStorage) -> Bool {
-        for _ in 0..<writesPerRetry {
+        apply(upTo: writesPerRetry, storage)
+    }
+
+    /// Applies every queued write in order, stopping at the first failure, for example before quitting. The queue is
+    /// bounded, so this is bounded work. Returns whether the queue drained; `failure` stays set until it has.
+    @discardableResult
+    public mutating func drain(_ storage: CaptureStorage) -> Bool {
+        apply(upTo: count, storage)
+    }
+
+    private mutating func apply(upTo limit: Int, _ storage: CaptureStorage) -> Bool {
+        for _ in 0..<limit {
             guard let write = queue.first else { break }
             do {
                 switch write {
@@ -130,7 +157,8 @@ public struct PendingWrites: Sendable {
         }
     }
 
-    /// Drops queued saves that lie inside `[lower, upper)`: the retraction queued after them would delete their rows.
+    /// Drops queued saves that lie inside `[lower, upper)`, the range of the retraction being queued after them, which
+    /// would delete their rows.
     private mutating func dropSaves(within lower: Date, _ upper: Date) {
         let kept = queue.filter { write in
             guard case .save(let segment) = write else { return true }
