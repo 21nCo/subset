@@ -274,6 +274,33 @@ final class HardStopPresentationTests: XCTestCase {
         XCTAssertNil(present(scheduler, at: at(12, 40), notice: .warning(id: inside.id, occurrenceKey: key(12, 45))).notice)
     }
 
+    func testWarningForAnOccurrenceAnEditSupersededIsDropped() {
+        // A one-off Lunch runs from 12:30 to 13:55. At 12:31 it is moved to 14:00, after its end, and warned about at 13:50.
+        // At 13:51, while it still runs, it is made weekly on Mondays at 14:00, so today's 14:00 never runs.
+        var lunch = HardStop(name: "Lunch", hour: 12, minute: 30, end: .after(85 * 60),
+                             repeats: .once(DateComponents(year: 2026, month: 8, day: 10)), warningMinutes: [10],
+                             escapeHatch: .none, duringCalls: .startAnyway)
+        var scheduler = makeScheduler([lunch])
+        _ = scheduler.tick(now: at(12, 30))
+        lunch.hour = 14
+        lunch.minute = 0
+        XCTAssertTrue(scheduler.saveHardStop(lunch, isNew: false, now: at(12, 31)).errors.isEmpty)
+        XCTAssertEqual(scheduler.tick(now: at(13, 50)),
+                       [.hardStopWarning(id: lunch.id, occurrenceKey: key(14, 0), startsAt: at(14, 0), waitingForCall: false)])
+        var queue = HardStopNoticeQueue()
+        queue.add(.warning(id: lunch.id, occurrenceKey: key(14, 0)))
+        queue.prune(scheduler: scheduler, inCall: false, now: at(13, 50))
+        XCTAssertEqual(queue.shown, .warning(id: lunch.id, occurrenceKey: key(14, 0)))
+
+        lunch.repeats = .weekdays([2])
+        XCTAssertTrue(scheduler.saveHardStop(lunch, isNew: false, now: at(13, 51)).errors.isEmpty)
+        queue.prune(scheduler: scheduler, inCall: false, now: at(13, 51))
+        XCTAssertNil(queue.shown)
+        XCTAssertNil(present(scheduler, at: at(13, 51), notice: .warning(id: lunch.id, occurrenceKey: key(14, 0))).notice)
+        let events = (56...70).flatMap { scheduler.tick(now: at(13, 0).addingTimeInterval(TimeInterval($0 * 60))) }
+        XCTAssertEqual(events, [.hardStopEnded(id: lunch.id, reason: .ended)])
+    }
+
     // MARK: - Notice queue
 
     func testWarningWaitsBehindTheExtensionNoticeAndShowsAfterIt() {

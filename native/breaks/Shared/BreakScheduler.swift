@@ -1096,8 +1096,8 @@ struct BreakScheduler: Sendable {
     /// were in progress supersedes, so that it and every earlier one never run; nil when there is none. An occurrence in
     /// progress keeps the rules it began with and is never joined again, so none of the stop's occurrences that starts
     /// before the end it keeps (or, with no end, that had started by `savedAt`, when the edit was saved) runs:
-    /// - A repeating stop whose start time changed applies it from the next day: its occurrence on the day of the one in
-    ///   progress is superseded, and so is a later one that starts before that end.
+    /// - A repeating stop applies the edit from the next day: when its start time changed, its occurrence on the day of
+    ///   the one in progress is superseded. Whether or not it changed, so is a later one that starts before that end.
     /// - A one-off stop's new time is kept when it starts at or after that end, and superseded when it starts before.
     ///   With no end, it is superseded on the same date or when it had started by `savedAt`. A one-off stop that is
     ///   superseded is removed once the occurrence in progress has ended or been missed (`removeHandledOnceStops`).
@@ -1112,8 +1112,8 @@ struct BreakScheduler: Sendable {
             switch stop.repeats {
             case .weekdays:
                 let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
-                guard sameDay != occurrence.key else { return nil }
-                var through = sameDay
+                // With its start time unchanged, the occurrence on that day is the one in progress.
+                var through = sameDay == occurrence.key ? nil : sameDay
                 guard let limit, var date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else { return through }
                 while let next = calendar.date(byAdding: .day, value: 1, to: date), next < limit {
                     date = next

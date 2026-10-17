@@ -553,8 +553,8 @@ extension BreakSettings {
 
     /// Field errors for the hard-stop editor. Empty when every stop can be saved. A one-off stop whose
     /// occurrence can no longer start at `now` is an error, because the scheduler would remove it, unless that occurrence
-    /// is one of the stop's occurrences in progress (`inProgress`, by stop id): it keeps running, and the scheduler
-    /// removes the stop when it ends.
+    /// is one the stop may keep (`inProgress`, by stop id): one in progress, or one an occurrence in progress supersedes.
+    /// The occurrence in progress keeps running, and the scheduler removes the stop when it ends.
     func hardStopErrors(now: Date, calendar: Calendar = .current, inProgress: [UUID: Set<Int>] = [:]) -> [HardStopFieldError] {
         var errors: [HardStopFieldError] = []
         if hardStops.count > HardStop.maximumCount {

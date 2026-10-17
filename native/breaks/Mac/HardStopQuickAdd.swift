@@ -284,19 +284,31 @@ extension BreakScheduler {
             + (active?.merged.filter { $0.id == id }.map(\.occurrenceKey) ?? []))
     }
 
+    /// The keys of the stop with `id` that may be saved after their time has passed: its occurrences in progress at
+    /// `now`, and, while it is in progress, the one-off date and time it has saved when an occurrence in progress
+    /// supersedes it (`isHandled`), since the stop is removed when that occurrence ends instead of starting again.
+    private func passedOccurrenceKeysAllowed(of id: UUID, now: Date) -> Set<Int> {
+        var keys = inProgressOccurrenceKeys(of: id, now: now)
+        guard !keys.isEmpty, let saved = settings.hardStops.first(where: { $0.id == id }), case .once(let date) = saved.repeats,
+              let year = date.year, let month = date.month, let day = date.day else { return keys }
+        let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: saved.hour, minute: saved.minute)
+        if let occurrence = hardStopOccurrence(saved, key: key), isHandled(saved, occurrence) { keys.insert(key) }
+        return keys
+    }
+
     /// The errors saving `stop` at `now` gives (`saveHardStop`); nothing changes. A one-off stop in progress may keep the
-    /// date and time of its occurrence in progress after that time has passed, so it can be renamed or edited until the
-    /// running stop ends.
+    /// date and time of its occurrence in progress, or one that occurrence supersedes, after that time has passed, so it
+    /// can be renamed or edited until the running stop ends.
     func hardStopErrors(saving stop: HardStop, isNew: Bool, now: Date) -> [HardStopFieldError] {
         var next = settings
-        return next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: inProgressOccurrenceKeys(of: stop.id, now: now))
+        return next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: passedOccurrenceKeysAllowed(of: stop.id, now: now))
     }
 
     /// Saves a new or edited stop as `hardStopErrors` validates it, and applies it with `updateHardStops`. Returns the
     /// errors, and changes nothing when there are any, and the events of applying it.
     mutating func saveHardStop(_ stop: HardStop, isNew: Bool, now: Date) -> (errors: [HardStopFieldError], events: [Event]) {
         var next = settings
-        let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: inProgressOccurrenceKeys(of: stop.id, now: now))
+        let errors = next.saveHardStop(stop, isNew: isNew, now: now, calendar: calendar, inProgress: passedOccurrenceKeysAllowed(of: stop.id, now: now))
         guard errors.isEmpty else { return (errors, []) }
         return ([], updateHardStops(next.hardStops, now: now))
     }
