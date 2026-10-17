@@ -69,6 +69,9 @@ app_target.build_configurations.each do |config|
   config.build_settings.delete("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME")
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/../Frameworks"]
 end
+# new_target names the product after the target; point Products and the scheme at the bundle PRODUCT_NAME builds.
+app_target.product_reference.path = "Subset System.app"
+app_target.product_reference.name = "Subset System.app"
 
 test_target.build_configurations.each do |config|
   COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }

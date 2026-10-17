@@ -14,8 +14,8 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "C2B60A8FB524FF9EF886A8FEA5D1127E"
-               BuildableName = "SubsetSystem.app"
+               BlueprintIdentifier = "4A727F6FADCF8BF5A8292AFC19399117"
+               BuildableName = "Subset System.app"
                BlueprintName = "SubsetSystem"
                ReferencedContainer = "container:System.xcodeproj">
             </BuildableReference>
@@ -44,8 +44,8 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "C2B60A8FB524FF9EF886A8FEA5D1127E"
-            BuildableName = "SubsetSystem.app"
+            BlueprintIdentifier = "4A727F6FADCF8BF5A8292AFC19399117"
+            BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
          </BuildableReference>
@@ -77,8 +77,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "C2B60A8FB524FF9EF886A8FEA5D1127E"
-            BuildableName = "SubsetSystem.app"
+            BlueprintIdentifier = "4A727F6FADCF8BF5A8292AFC19399117"
+            BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
          </BuildableReference>
@@ -94,8 +94,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "C2B60A8FB524FF9EF886A8FEA5D1127E"
-            BuildableName = "SubsetSystem.app"
+            BlueprintIdentifier = "4A727F6FADCF8BF5A8292AFC19399117"
+            BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
          </BuildableReference>
