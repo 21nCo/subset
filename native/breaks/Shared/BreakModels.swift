@@ -671,6 +671,10 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var handledHardStops: [String: Int] = [:]
     /// Per hard stop ID: the key of the due occurrence that is waiting for a call to end.
     var hardStopsWaitingForCall: [String: Int] = [:]
+    /// Per hard stop ID: the stop as it was when its waiting occurrence began to wait. That occurrence keeps these
+    /// rules (its end, escape hatch, and call behavior) when the stop is edited, as a running one keeps the rules it
+    /// started with. Empty in older snapshots, whose waits follow the stop as configured.
+    var hardStopWaitingRules: [String: HardStop] = [:]
 }
 
 extension EngineSnapshot {
@@ -697,6 +701,7 @@ extension EngineSnapshot {
         hardStopWarnings = try container.decodeIfPresent([String: HardStopWarningMark].self, forKey: .hardStopWarnings) ?? [:]
         handledHardStops = try container.decodeIfPresent([String: Int].self, forKey: .handledHardStops) ?? [:]
         hardStopsWaitingForCall = try container.decodeIfPresent([String: Int].self, forKey: .hardStopsWaitingForCall) ?? [:]
+        hardStopWaitingRules = try container.decodeIfPresent([String: HardStop].self, forKey: .hardStopWaitingRules) ?? [:]
     }
 }
 
