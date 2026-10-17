@@ -28,6 +28,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         case .paused: ("pause.circle", "pointInTime is paused")
         case .storeUnavailable: ("exclamationmark.circle", "pointInTime cannot open or read its activity store")
         case .writesBacklogged: ("exclamationmark.circle", "pointInTime cannot save to its activity store")
+        case .clockBehind: ("clock.badge.exclamationmark", "pointInTime is not recording until the clock passes recorded activity")
         default: ("circle.dashed", "pointInTime is not tracking")
         }
         item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)

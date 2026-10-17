@@ -1,6 +1,8 @@
 import Foundation
 
-/// What capture is doing. `CaptureSession` checks these in order of precedence, from the store down to idle.
+/// What capture is doing, for the menu. `CaptureSession` picks one in order of precedence, from the store down to
+/// idle, so a state shown can hide a lower one (a backlog shown while the Mac is also asleep); the session's own rules
+/// read the conditions, never this precedence.
 public enum CaptureState: Equatable, Sendable {
     /// The store could not be opened, or the latest end of what it holds has not been read yet.
     case storeUnavailable
@@ -13,14 +15,6 @@ public enum CaptureState: Equatable, Sendable {
     /// Tracking, but nothing is recorded because there was no input for `CaptureSession.idleThreshold`.
     case idle
     case recording
-
-    /// A user choice or system state during which input-free time is not the user being idle.
-    var interruptsTracking: Bool {
-        switch self {
-        case .storeUnavailable, .off, .paused, .asleep, .locked, .inactiveSession: true
-        case .writesBacklogged, .clockBehind, .idle, .recording: false
-        }
-    }
 }
 
 /// What the host observed when it sampled.
@@ -50,9 +44,12 @@ public struct CaptureConditions: Equatable, Sendable {
 ///   and a save that leaves the queue without room stops it at once, while the open segment's closing save still fits.
 ///   Capture therefore never makes a save the queue refuses, and the queue holds at most `capacity` writes plus one for
 ///   each Delete Today requested while capture is stopped. Tracking off and pause outrank the store and the clock.
-/// - Idle retraction never reaches before the moment tracking last resumed after the store was read, tracking off, a
-///   pause, sleep, lock, or a session switch. A backlog or a clock behind recorded activity does not move it, so
-///   input-free time recorded before them is still removed.
+/// - Idle retraction never reaches before the moment recording last became possible again: after the store was read,
+///   and after tracking off, a pause, sleep, lock, or a session switch, read from the conditions whatever state is shown,
+///   and after the clock was behind recorded activity, so it never reaches rows recorded in another clock frame. A
+///   backlog alone does not move it, so input-free time recorded before a backlog is still removed after it.
+/// - Every update that leaves the session stopped (any state but recording or idle) ends recording, with or without an
+///   open segment, so no window read begun before the stop is applied after it.
 /// - The latest stored end, read before the first sample, seeds both the recorder floor and the queue's compaction
 ///   bound, so nothing recorded after a relaunch with an earlier clock overlaps what is stored. Delete All resets the
 ///   floor to the time it was requested.
@@ -67,8 +64,10 @@ public struct CaptureSession {
     private var sequencer: CaptureSequencer
     private let storage: CaptureStorage?
     private var seeded = false
-    /// When tracking last resumed after an interruption; idle retraction never reaches before it.
+    /// When recording last became possible again; idle retraction never reaches before it.
     private var recordingSince = Date.distantPast
+    /// Whether an interruption or a clock behind recorded activity was seen since `recordingSince` was last set.
+    private var resumePending = true
     private var lastFlush = Date.distantPast
 
     public init(storage: CaptureStorage?, maxSampleInterval: TimeInterval, writes: PendingWrites = PendingWrites()) {
@@ -79,14 +78,19 @@ public struct CaptureSession {
 
     public var open: Segment? { sequencer.open }
 
-    /// Retries queued writes and decides the state from `conditions` at `now`. Stopping ends the open segment; becoming
-    /// idle ends it when input stopped and retracts what was stored since.
+    /// Retries queued writes and decides the state from `conditions` at `now`. Stopping ends recording and voids reads in
+    /// flight; becoming idle ends the open segment when input stopped and retracts what was stored since.
     public mutating func update(_ conditions: CaptureConditions, at now: Date) {
         if let storage, !writes.isEmpty { writes.retry(storage) }
         seed()
+        if interrupts(conditions) || now < sequencer.recordedThrough {
+            resumePending = true
+        } else if resumePending {
+            resumePending = false
+            recordingSince = now
+        }
         let previous = state
         state = decide(conditions, at: now)
-        if previous.interruptsTracking, !state.interruptsTracking { recordingSince = now }
         switch state {
         case .recording: break
         case .idle:
@@ -96,7 +100,7 @@ public struct CaptureSession {
             if let storage { writes.retract(since: idleStart, until: now, in: storage) }
             stopWithoutRoom(at: now)
         default:
-            if sequencer.open != nil { stop(at: now) }
+            stop(at: now)
         }
     }
 
@@ -155,6 +159,13 @@ public struct CaptureSession {
         if let storage, !writes.isEmpty { writes.drain(storage) }
     }
 
+    /// A user choice or system state during which input-free time is not the user being idle, read from the conditions:
+    /// the state shown may rank a backlog or a clock behind recorded activity above it.
+    private func interrupts(_ conditions: CaptureConditions) -> Bool {
+        storage == nil || !seeded || !conditions.trackingOn || conditions.paused || conditions.asleep || conditions.locked
+            || conditions.sessionInactive
+    }
+
     private func decide(_ conditions: CaptureConditions, at now: Date) -> CaptureState {
         if storage == nil || !seeded { return .storeUnavailable }
         if !conditions.trackingOn { return .off }
@@ -200,7 +211,8 @@ public struct CaptureSession {
         stop(at: date)
     }
 
-    /// Ends the open segment at `date`, never before its last sample, and saves it.
+    /// Ends recording at `date`, never before the open segment's last sample, saves the segment if one was open, and
+    /// voids reads in flight.
     private mutating func stop(at date: Date) {
         if let segment = sequencer.gap(at: max(date, sequencer.open?.end ?? date)) { save(segment) }
     }

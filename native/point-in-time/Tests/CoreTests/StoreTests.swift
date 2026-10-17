@@ -1034,8 +1034,124 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
         }
     }
 
-    /// Random outages, clock steps, relaunches, controls, input, and app switches: the session never tracks while a save
-    /// would be refused, the queue stays within its bound, and nothing it stores overlaps.
+    /// A state the menu shows above sleep, lock, and a session switch.
+    enum Mask: CaseIterable, Sendable { case backlog, clockBehind }
+    /// A user choice or system state that interrupts tracking.
+    enum Interruption: CaseIterable, Sendable {
+        case asleep, locked, sessionInactive, paused, off
+
+        func conditions(secondsSinceInput: TimeInterval = 0) -> CaptureConditions {
+            CaptureConditions(trackingOn: self != .off, paused: self == .paused, asleep: self == .asleep, locked: self == .locked,
+                              sessionInactive: self == .sessionInactive, secondsSinceInput: secondsSinceInput)
+        }
+    }
+
+    private func stored(_ store: ActivityStore) throws -> [String] {
+        try store.segments(from: .distantPast, to: .distantFuture).map {
+            "\(Int($0.start.timeIntervalSince(t0)))-\(Int($0.end.timeIntervalSince(t0))) \($0.windowTitle ?? "")"
+        }
+    }
+
+    /// Sleep, lock, or a session switch while the menu shows a backlog or a clock behind recorded activity still ends
+    /// input-free time: idle after it never retracts what was recorded before it.
+    @Test(arguments: Mask.allCases, [Interruption.asleep, .locked, .sessionInactive])
+    func anInterruptionHiddenByTheMenuStateStillKeepsTheHistoryBeforeIt(mask: Mask, interruption: Interruption) throws {
+        try withStorage { storage in
+            var session = CaptureSession(storage: storage, maxSampleInterval: 30, writes: PendingWrites(capacity: 3))
+            // The last input was at 0.
+            for second in stride(from: 0.0, through: 55, by: 5) {
+                session.update(CaptureConditions(secondsSinceInput: second), at: t0 + second)
+                session.sample(content("a", "One"), at: t0 + second)
+            }
+            let interruptedAt: TimeInterval
+            switch mask {
+            case .backlog:
+                // The title changes as writes start failing; the flush leaves no room, so capture stops at 60.
+                storage.failSaves = true
+                session.update(CaptureConditions(secondsSinceInput: 60), at: t0 + 60)
+                session.sample(content("a", "Two"), at: t0 + 60)
+                interruptedAt = 70
+            case .clockBehind:
+                // The clock steps back behind the open segment, which ends at its last sample.
+                session.update(CaptureConditions(secondsSinceInput: 40), at: t0 + 40)
+                interruptedAt = 45
+            }
+            session.update(interruption.conditions(secondsSinceInput: interruptedAt), at: t0 + interruptedAt)
+            #expect(session.state == (mask == .backlog ? .writesBacklogged : .clockBehind))
+            storage.failSaves = false
+            for _ in 0..<3 { session.update(CaptureConditions(secondsSinceInput: 1_000), at: t0 + 1_000) }
+            #expect(session.state == .idle && session.writes.isEmpty)
+            // Without the outage the same flow also keeps 60-70 "Two"; the backlog stopped capture before it.
+            let kept = try stored(storage.store)
+            #expect(kept == [mask == .backlog ? "0-60 One" : "0-55 One"])
+        }
+    }
+
+    /// Rows stored by an earlier run, ahead of a clock that was set back, belong to another clock frame: idle detected
+    /// once the clock passes them retracts nothing of them, however long input stopped.
+    @Test func idleAfterTheClockPassesStoredActivityNeverRetractsIt() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do { try ActivityStore(directory: directory).save(segment("a", 0, 180, title: "Stored")) }
+        let store = try ActivityStore(directory: directory)
+        var session = CaptureSession(storage: store, maxSampleInterval: 30)
+        // Relaunched at 15 with the last input at 10.
+        for second in stride(from: 15.0, through: 195, by: 15) {
+            session.update(CaptureConditions(secondsSinceInput: second - 10), at: t0 + second)
+            #expect(session.state == (second < 180 ? .clockBehind : .idle))
+        }
+        session.finish(at: t0 + 200)
+        #expect(try stored(store) == ["0-180 Stored"])
+        let blocks = try store.blocks(from: .distantPast, to: .distantFuture)
+        #expect(blocks.map(\.activeSeconds) == [180] && blocks.map(\.dominantTitle) == ["Stored"])
+    }
+
+    /// A window read in flight when capture stops is never applied after it, whether or not a segment was open and
+    /// whatever the menu shows meanwhile; only one read is in flight until the stale one is discarded.
+    @Test(arguments: Interruption.allCases, [Mask?.none, .backlog, .clockBehind])
+    func aReadInFlightIsVoidedByEveryStop(interruption: Interruption, mask: Mask?) throws {
+        try withStorage { storage in
+            let start: TimeInterval = mask == .clockBehind ? 100 : 0
+            if mask == .clockBehind { try storage.store.save(segment("a", 0, 100, title: "Stored")) }
+            var session = CaptureSession(storage: storage, maxSampleInterval: 30, writes: PendingWrites(capacity: 2))
+            session.update(CaptureConditions(), at: t0 + start)
+            #expect(session.state == .recording && session.open == nil)
+            let begun = session.beginRead(of: 42, at: t0 + start)
+            let ticket = try #require(begun)
+            switch mask {
+            case nil: break
+            case .backlog:
+                storage.failDeletes = true
+                session.delete(all: false, at: t0 + start + 1, calendar: .current)
+            case .clockBehind:
+                session.update(CaptureConditions(), at: t0 + 50)
+                #expect(session.state == .clockBehind)
+            }
+            let base = mask == .clockBehind ? 50.0 : start + 1
+            session.update(interruption.conditions(), at: t0 + base + 1)
+            session.update(CaptureConditions(), at: t0 + base + 2)
+            storage.failDeletes = false
+            let resumed = mask == .clockBehind ? 110.0 : base + 3
+            session.update(CaptureConditions(), at: t0 + resumed)
+            #expect(session.state == .recording && !session.isCurrent(ticket))
+            #expect(session.beginRead(of: 42, at: t0 + resumed) == nil)
+            session.complete(ticket, with: content("a", "Before"))
+            #expect(session.open == nil)
+            let next = session.beginRead(of: 42, at: t0 + resumed + 1)
+            let fresh = try #require(next)
+            session.complete(fresh, with: content("a", "After"))
+            session.sample(content("a", "After"), at: t0 + resumed + 10)
+            session.finish(at: t0 + resumed + 10)
+            let after = "\(Int(resumed) + 1)-\(Int(resumed) + 10) After"
+            let kept = try stored(storage.store)
+            #expect(kept == (mask == .clockBehind ? ["0-100 Stored", after] : [after]))
+        }
+    }
+
+    /// Random outages, clock steps, relaunches, controls, sleep, lock, session switches, window reads, input, and app
+    /// switches: the session never tracks while a save would be refused, the queue stays within its bound, nothing it
+    /// stores overlaps, no segment or read crosses an interruption, and idle never retracts what was recorded before the
+    /// last resumption from one.
     @Test(arguments: 200..<240)
     func trackingAlwaysHasRoomAndStoredActivityNeverOverlaps(seed: UInt64) throws {
         let directory = temporaryDirectory()
@@ -1046,17 +1162,37 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             CaptureSession(storage: storage, maxSampleInterval: 30, writes: PendingWrites(capacity: 4, writesPerRetry: 1))
         }
         func recover() { storage.failSaves = false; storage.failDeletes = false; storage.failCheckpoints = false; storage.failReads = false }
+        func toggle(_ on: Bool) -> Bool { on ? random.next(0...2) != 0 : random.next(0...19) == 0 }
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(identifier: "UTC")!
         var session = newSession()
         var now = t0, idle = 0.0, deleteTodaysWithoutRoom = 0
+        var asleep = false, locked = false, sessionInactive = false
+        // Reads in flight, and whether an interruption has happened since each began.
+        var reads: [(ticket: CaptureSequencer.Ticket, stale: Bool)] = []
+        // The reference idle boundary: the last update without an interruption after one, from the conditions alone.
+        var resumedAt = Date.distantPast, resumePending = true, steppedBack = false
+        func checkOpen() {
+            if let open = session.open, !steppedBack { #expect(open.start >= resumedAt) }
+        }
         for _ in 0..<150 {
             let step = Double(random.next(1...40))
             now += step
             idle = random.next(0...3) == 0 ? 0 : idle + step
-            if random.next(0...14) == 0 { now -= Double(random.next(30...600)) }
+            if random.next(0...14) == 0 { now -= Double(random.next(30...600)); steppedBack = true }
+            asleep = toggle(asleep)
+            locked = toggle(locked)
+            sessionInactive = toggle(sessionInactive)
             switch random.next(0...99) {
-            case 0..<45: session.sample(content("app\(random.next(0...2))", "Title \(random.next(0...3))"), at: now)
+            case 0..<30: session.sample(content("app\(random.next(0...2))", "Title \(random.next(0...3))"), at: now)
+            case 30..<38:
+                if let ticket = session.beginRead(of: Int32(random.next(1...2)), at: now) { reads.append((ticket, false)) }
+            case 38..<45:
+                guard !reads.isEmpty else { break }
+                let read = reads.removeFirst()
+                let before = session.open
+                session.complete(read.ticket, with: content("app\(random.next(0...2))", "Title \(random.next(0...3))"))
+                if read.stale { #expect(session.open == before) }
             case 45..<55: session.foregroundChanged(at: now)
             case 55..<70:
                 storage.failSaves = random.next(0...1) == 0
@@ -1073,10 +1209,37 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
                 #expect(session.writes.isEmpty)
                 storage = FlakyStorage(try ActivityStore(directory: directory))
                 session = newSession()
+                reads = []
+                resumePending = true
             default: break
             }
-            session.update(CaptureConditions(trackingOn: random.next(0...19) != 0, paused: random.next(0...19) == 0,
-                                             asleep: random.next(0...29) == 0, secondsSinceInput: idle), at: now)
+            checkOpen()
+            let conditions = CaptureConditions(trackingOn: random.next(0...19) != 0, paused: random.next(0...19) == 0, asleep: asleep,
+                                               locked: locked, sessionInactive: sessionInactive, secondsSinceInput: idle)
+            // When nothing else is written, entering idle shows exactly what idle retracts.
+            let healthy = !storage.failSaves && !storage.failDeletes && !storage.failCheckpoints && !storage.failReads
+            let rowsBefore = healthy && session.writes.isEmpty && session.state != .idle
+                ? try storage.store.segments(from: .distantPast, to: .distantFuture) : nil
+            session.update(conditions, at: now)
+            if !conditions.trackingOn || conditions.paused || asleep || locked || sessionInactive || session.state == .storeUnavailable {
+                resumePending = true
+                #expect(session.open == nil)
+                for index in reads.indices {
+                    #expect(!session.isCurrent(reads[index].ticket))
+                    reads[index].stale = true
+                }
+            } else if resumePending {
+                resumePending = false
+                resumedAt = now
+                steppedBack = false
+            }
+            if let rowsBefore, session.state == .idle {
+                let rowsAfter = try storage.store.segments(from: .distantPast, to: .distantFuture)
+                for row in rowsBefore where row.start < resumedAt {
+                    let kept = rowsAfter.contains { $0.start == row.start && $0.end >= min(row.end, resumedAt) && $0.sameContent(as: row) }
+                    #expect(kept, "idle at \(now.timeIntervalSince(t0)) retracted \(row.start.timeIntervalSince(t0)) before the resumption")
+                }
+            }
             if session.writes.acceptsCapture { deleteTodaysWithoutRoom = 0 }
             if session.state == .recording || session.state == .idle { #expect(session.writes.acceptsCapture) }
             #expect(session.writes.count <= session.writes.capacity + deleteTodaysWithoutRoom && session.writes.refusedSaves == 0)
