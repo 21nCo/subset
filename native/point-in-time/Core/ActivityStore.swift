@@ -40,6 +40,8 @@ public final class ActivityStore: @unchecked Sendable {
             throw StoreError.filesystem(error.localizedDescription)
         }
         connection = try SQLiteConnection(path: databaseURL.path)
+        // A newer database is refused before anything writes to it, including the journal mode change below.
+        try refuseNewerSchema()
         try connection.execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;")
         try migrate()
     }
@@ -238,12 +240,18 @@ public final class ActivityStore: @unchecked Sendable {
         """
     ]
 
-    private func migrate() throws {
-        try connection.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL)")
+    /// Reads the schema version without writing. A database without a `schema_version` table is version 0.
+    private func refuseNewerSchema() throws {
+        guard try !connection.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").isEmpty else { return }
         let current = try currentVersion()
         guard current <= Self.supportedSchemaVersion else {
             throw StoreError.newerSchema(found: current, supported: Self.supportedSchemaVersion)
         }
+    }
+
+    private func migrate() throws {
+        try connection.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL)")
+        let current = try currentVersion()
         for version in (current + 1)...max(current + 1, Self.supportedSchemaVersion) where version <= Self.supportedSchemaVersion {
             guard let sql = Self.migrations[version] else { continue }
             try connection.transaction {

@@ -78,7 +78,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(action("Delete All Data…") { [weak self] in self?.confirmDelete(all: true) })
         menu.addItem(.separator())
         menu.addItem(action("Welcome and Permissions…", showWelcome))
-        menu.addItem(action("Quit pointInTime", key: "q") { NSApp.terminate(nil) })
+        menu.addItem(action("Quit pointInTime", key: "q") { [weak self] in self?.quit() })
     }
 
     private func statusLine() -> String {
@@ -156,9 +156,24 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         if let error = capture.deleteActivity(all: all) {
             let failure = NSAlert()
             failure.messageText = "Could not delete activity yet"
-            failure.informativeText = "pointInTime keeps retrying the deletion and shows the error in its menu until it succeeds.\n\n\(error)"
+            failure.informativeText = "While pointInTime keeps running, it retries the deletion every few seconds and shows the error in its menu until it succeeds. Quitting pointInTime before then cancels the deletion, and the activity stays on this Mac.\n\n\(error)"
             failure.runModal()
         }
+    }
+
+    /// Pending deletions live only in memory, so quitting while one is still failing cancels it; ask first.
+    private func quit() {
+        if capture.hasPendingDeletion {
+            let alert = NSAlert()
+            alert.messageText = "Quit before activity is deleted?"
+            alert.informativeText = "pointInTime could not delete some activity yet: a deletion you asked for, or time recorded while you were idle. Quitting cancels that deletion, and the activity stays on this Mac.\n\n\(capture.lastError ?? "")"
+            alert.addButton(withTitle: "Keep Running")
+            alert.addButton(withTitle: "Quit Anyway")
+            alert.buttons.last?.hasDestructiveAction = true
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+        }
+        NSApp.terminate(nil)
     }
 
     private func disabled(_ title: String) -> NSMenuItem {

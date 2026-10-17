@@ -15,8 +15,10 @@ final class CaptureController {
 
     private(set) var state: State = .off
     /// A store write that has not succeeded yet, or why the store could not be opened. A failed write stays queued and
-    /// is retried on every tick, and the error stays visible until it succeeds.
+    /// is retried on every tick, and the error stays visible until the queue drains.
     var lastError: String? { writes.failure ?? storeError }
+    /// Whether a deletion or idle retraction has not succeeded yet. The queue lives in memory, so quitting cancels it.
+    var hasPendingDeletion: Bool { writes.hasPendingDeletion }
     /// The most recent foreground app other than pointInTime, offered by the menu's Exclude action. Kept current while
     /// paused or off as well, so the menu never names an app that is no longer in front.
     private(set) var lastForeignApp: (bundleID: String, name: String)?

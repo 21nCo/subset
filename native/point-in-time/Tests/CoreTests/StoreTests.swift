@@ -96,6 +96,31 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(throws: StoreError.newerSchema(found: 99, supported: 1)) { try ActivityStore(directory: directory) }
     }
 
+    @Test func refusesANewerSchemaWithoutTouchingItsJournalOrBytes() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("activity.sqlite").path
+        var db: OpaquePointer?
+        #expect(sqlite3_open(path, &db) == SQLITE_OK)
+        #expect(sqlite3_exec(db, """
+            PRAGMA journal_mode=DELETE;
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+            INSERT INTO schema_version VALUES (2, 0);
+            """, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) { try ActivityStore(directory: directory) }
+
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
+        for suffix in ["-wal", "-shm", "-journal"] {
+            #expect(!FileManager.default.fileExists(atPath: path + suffix), "\(suffix)")
+        }
+        // Header bytes 18 and 19 are 1 for a rollback journal and 2 for WAL.
+        #expect(before[18] == 1 && before[19] == 1)
+    }
+
     @Test func extendingAnOpenSegmentUpdatesItsBlocks() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -244,18 +269,25 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
     }
 }
 
-/// A store whose writes can be made to fail, as a full disk or a locked file would.
+/// A store whose writes can be made to fail, as a full disk or a locked file would. It logs every call it receives.
 private final class FlakyStorage: CaptureStorage {
     let store: ActivityStore
     var failSaves = false, failDeletes = false, failCheckpoints = false
+    var calls: [String] = []
 
     init(_ store: ActivityStore) { self.store = store }
 
     private func fail(_ when: Bool) throws { if when { throw StoreError.sqlite("disk I/O error") } }
-    func save(_ segment: Segment) throws { try fail(failSaves); try store.save(segment) }
-    func deleteData(from: Date, to: Date) throws { try fail(failDeletes); try store.deleteData(from: from, to: to) }
-    func checkpoint() throws { try fail(failCheckpoints); try store.checkpoint() }
-    func deleteAll() throws { try fail(failDeletes); try store.deleteAll() }
+    func save(_ segment: Segment) throws {
+        calls.append("save \(Int(segment.start.timeIntervalSince(t0)))")
+        try fail(failSaves); try store.save(segment)
+    }
+    func deleteData(from: Date, to: Date) throws {
+        calls.append("delete \(Int(from.timeIntervalSince(t0)))")
+        try fail(failDeletes); try store.deleteData(from: from, to: to)
+    }
+    func checkpoint() throws { calls.append("checkpoint"); try fail(failCheckpoints); try store.checkpoint() }
+    func deleteAll() throws { calls.append("deleteAll"); try fail(failDeletes); try store.deleteAll() }
 }
 
 @Suite struct PendingWritesTests {
@@ -336,6 +368,75 @@ private final class FlakyStorage: CaptureStorage {
             #expect(drained)
             let remaining = try storage.store.segmentCount()
             #expect(remaining == 0)
+        }
+    }
+
+    @Test func aSustainedOutageKeepsTheQueueBoundedAndStillAdmitsDeletions() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 10, writesPerRetry: 4)
+            storage.failSaves = true; storage.failDeletes = true
+            for index in 0..<1_000 { writes.save(segment("a", Double(index) * 10, Double(index) * 10 + 5), to: storage) }
+            #expect(writes.count == 10)
+            #expect(writes.queue.first == .save(segment("a", 0, 5)) && writes.queue.last == .save(segment("a", 90, 95)))
+
+            // A retraction is admitted at capacity and drops the queued saves it covers.
+            writes.retract(from: t0 + 50, to: t0 + 200, in: storage)
+            #expect(writes.count == 6 && writes.hasPendingDeletion)
+            // More retractions than capacity never grow the queue past capacity + 1: at capacity the newest absorbs the
+            // previous one.
+            for index in 0..<100 { writes.retract(from: t0 + 1_000 + Double(index) * 500, to: t0 + 1_100 + Double(index) * 500, in: storage) }
+            // Four fit below capacity; each later one absorbs the newest queued retraction.
+            #expect(writes.count == 10)
+            #expect(writes.queue.last == .retract(from: t0 + 2_500, to: t0 + 1_100 + 99 * 500))
+
+            writes.deleteAll(in: storage)
+            #expect(writes.queue == [.deleteAll] && writes.failure != nil)
+        }
+    }
+
+    @Test func aLargeRecoveryAppliesABoundedNumberOfWritesPerRetryInOrder() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 200, writesPerRetry: 8)
+            storage.failSaves = true
+            for index in 0..<150 { writes.save(segment("a", Double(index) * 10, Double(index) * 10 + 5), to: storage) }
+            #expect(writes.count == 150)
+            storage.failSaves = false
+            storage.calls = []
+            var rounds = 0
+            while !writes.retry(storage) {
+                rounds += 1
+                #expect(storage.calls.count == 8 * rounds)
+                #expect(writes.failure != nil)
+            }
+            #expect(rounds == 18 && writes.failure == nil && writes.isEmpty)
+            #expect(storage.calls == (0..<150).map { "save \($0 * 10)" })
+            let stored = try storage.store.segmentCount()
+            #expect(stored == 150)
+        }
+    }
+
+    @Test func aRetractionAdmittedAtCapacityLeavesNoRetractedActivity() throws {
+        try withStorage { storage in
+            var writes = PendingWrites(capacity: 4, writesPerRetry: 8)
+            writes.save(segment("com.google.Chrome", 0, 60, title: "Secret plan", url: "https://secret.example.com/plan?q=1"), to: storage)
+            storage.failSaves = true; storage.failDeletes = true
+            writes.save(segment("com.google.Chrome", 0, 120, title: "Secret plan", url: "https://secret.example.com/plan?q=1"), to: storage)
+            for index in 1...5 { writes.save(segment("b", 120 + Double(index) * 10, 125 + Double(index) * 10, title: "Away \(index)"), to: storage) }
+            #expect(writes.count == 4)
+            writes.save(segment("com.google.Chrome", 0, 20, title: "Secret plan", url: "https://secret.example.com/plan?q=1"), to: storage)
+            #expect(writes.count == 4)
+
+            // Idle began at 20; the shorter save above was refused, so the retraction alone has to remove the rest.
+            writes.retract(from: t0 + 20, to: t0 + 400, in: storage)
+            storage.failSaves = false; storage.failDeletes = false
+            let drained = writes.retry(storage)
+            #expect(drained && writes.failure == nil)
+            let stored = try storage.store.segments(from: .distantPast, to: .distantFuture)
+            #expect(stored.map { [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0)] } == [[0, 20]])
+            for suffix in ["", "-wal"] {
+                let bytes = (try? Data(contentsOf: URL(fileURLWithPath: storage.store.databaseURL.path + suffix))) ?? Data()
+                #expect(bytes.range(of: Data("Away".utf8)) == nil, "\(suffix)")
+            }
         }
     }
 }
