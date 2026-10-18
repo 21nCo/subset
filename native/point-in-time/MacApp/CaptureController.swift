@@ -3,7 +3,9 @@ import PointInTimeCore
 
 /// Wires macOS signals to the capture session and the store. Samples every few seconds while tracking is allowed;
 /// `CaptureSession` decides when capture stops (sleep, lock, fast user switching, idle, pause, tracking off, a write
-/// backlog, or a clock behind recorded activity) and what is saved.
+/// backlog, or a clock behind recorded activity) and what is saved. System sleep and display sleep are kept apart in
+/// `SleepSignals`, so the Mac stays asleep for capture until both have woken; if macOS never posts a display wake, the
+/// menu shows Asleep until the display next sleeps and wakes.
 @MainActor
 final class CaptureController {
     static let sampleInterval: TimeInterval = 5
@@ -25,7 +27,7 @@ final class CaptureController {
     private var session: CaptureSession
     private let reader = ActivityReader()
     private var timer: Timer?
-    private var asleep = false
+    private var sleep = SleepSignals()
     private var locked = false
     private var sessionInactive = false
     /// Keeps App Nap from stretching the sample timer while recording, idle, or timed-paused; a throttled timer would end
@@ -43,10 +45,10 @@ final class CaptureController {
     func start() {
         let workspace = NSWorkspace.shared.notificationCenter
         let distributed = DistributedNotificationCenter.default()
-        observe(workspace, NSWorkspace.willSleepNotification) { $0.asleep = true; $0.tick() }
-        observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.asleep = true; $0.tick() }
-        observe(workspace, NSWorkspace.didWakeNotification) { $0.asleep = false; $0.tick() }
-        observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.asleep = false; $0.tick() }
+        observe(workspace, NSWorkspace.willSleepNotification) { $0.sleep.systemWillSleep(); $0.tick() }
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.sleep.screensDidSleep(); $0.tick() }
+        observe(workspace, NSWorkspace.didWakeNotification) { $0.sleep.systemDidWake(); $0.tick() }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.sleep.screensDidWake(); $0.tick() }
         observe(workspace, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true; $0.tick() }
         observe(workspace, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false; $0.tick() }
         observe(workspace, NSWorkspace.didActivateApplicationNotification) { $0.foregroundChanged() }
@@ -92,7 +94,7 @@ final class CaptureController {
         let conditions = CaptureConditions(
             trackingOn: settings.onboardingCompleted && settings.trackingEnabled,
             paused: settings.pausedUntil.map { $0 > now } ?? false,
-            asleep: asleep, locked: locked, sessionInactive: sessionInactive,
+            asleep: sleep.asleep, locked: locked, sessionInactive: sessionInactive,
             secondsSinceInput: secondsSinceLastInput())
         mutate { $0.update(conditions, at: now) }
         guard state == .recording else { return }

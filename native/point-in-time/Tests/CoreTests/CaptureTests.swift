@@ -129,6 +129,54 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
     }
 }
 
+@Suite struct SleepSignalsTests {
+    enum Event: CaseIterable, Sendable {
+        case systemWillSleep, systemDidWake, screensDidSleep, screensDidWake
+
+        var isSystem: Bool { self == .systemWillSleep || self == .systemDidWake }
+        var isSleep: Bool { self == .systemWillSleep || self == .screensDidSleep }
+
+        func apply(to signals: inout SleepSignals) {
+            switch self {
+            case .systemWillSleep: signals.systemWillSleep()
+            case .systemDidWake: signals.systemDidWake()
+            case .screensDidSleep: signals.screensDidSleep()
+            case .screensDidWake: signals.screensDidWake()
+            }
+        }
+    }
+
+    /// Both sleeps in either order, then both wakes in either order: asleep until the second wake.
+    @Test(arguments: [[Event.screensDidSleep, .systemWillSleep], [.systemWillSleep, .screensDidSleep]],
+          [[Event.systemDidWake, .screensDidWake], [.screensDidWake, .systemDidWake]])
+    func theMacStaysAsleepUntilBothHaveWoken(sleeps: [Event], wakes: [Event]) {
+        var signals = SleepSignals()
+        for event in sleeps { event.apply(to: &signals) }
+        #expect(signals.asleep)
+        wakes[0].apply(to: &signals)
+        #expect(signals.asleep, "\(wakes[0]) alone woke the Mac")
+        wakes[1].apply(to: &signals)
+        #expect(!signals.asleep)
+    }
+
+    /// Every sequence of up to six notifications, duplicates and wakes without a sleep included: the Mac is asleep
+    /// exactly when the latest system notification or the latest display notification was a sleep.
+    @Test func everyOrderAndDuplicateKeepsTheOtherConditionUnchanged() {
+        var sequences: [[Event]] = [[]]
+        for _ in 0..<6 {
+            sequences = sequences.flatMap { prefix in Event.allCases.map { prefix + [$0] } }
+            for sequence in sequences {
+                var signals = SleepSignals()
+                for event in sequence { event.apply(to: &signals) }
+                let system = sequence.last { $0.isSystem }?.isSleep ?? false
+                let display = sequence.last { !$0.isSystem }?.isSleep ?? false
+                #expect(signals.systemAsleep == system && signals.displayAsleep == display && signals.asleep == (system || display),
+                        "\(sequence)")
+            }
+        }
+    }
+}
+
 @Suite struct RecorderTests {
     @Test func extendsSameContentAndSplitsOnChange() {
         var recorder = SegmentRecorder()

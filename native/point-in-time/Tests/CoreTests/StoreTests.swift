@@ -1420,10 +1420,58 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
         }
     }
 
-    /// Random outages, clock steps, relaunches, controls, sleep, lock, session switches, window reads, input, and app
-    /// switches: the session never tracks while a save would be refused, the queue stays within its bound, nothing it
-    /// stores overlaps, no segment or read crosses an interruption, and idle never retracts what was recorded before the
-    /// last resumption from one.
+    /// The display sleeps 5 seconds after the last input, then the system sleeps and wakes without the display (a dark
+    /// wake). Nothing is recorded and no read begins until the display wakes too, with or without input at that moment,
+    /// and a read begun before the display slept stores nothing.
+    @Test(arguments: [false, true])
+    func aWakeWithoutTheDisplayRecordsNothingUntilTheDisplayWakes(inputAtWake: Bool) throws {
+        try withStorage { storage in
+            var session = CaptureSession(storage: storage, maxSampleInterval: 30)
+            var signals = SleepSignals()
+            var lastInput: TimeInterval = 0
+            func update(_ second: TimeInterval) {
+                session.update(CaptureConditions(asleep: signals.asleep, secondsSinceInput: second - lastInput), at: t0 + second)
+            }
+            for second in stride(from: 0.0, through: 45, by: 5) {
+                lastInput = second
+                update(second)
+                session.sample(content("a", "Before"), at: t0 + second)
+            }
+            let begun = session.beginRead(of: 42, at: t0 + 45)
+            let ticket = try #require(begun)
+            signals.screensDidSleep()
+            update(50)
+            signals.systemWillSleep()
+            update(55)
+            signals.systemDidWake()
+            for second in stride(from: 60.0, through: 95, by: 5) {
+                update(second)
+                session.sample(content("a", "During"), at: t0 + second)
+                let read = session.beginRead(of: 42, at: t0 + second)
+                #expect(session.state == .asleep && read == nil && session.open == nil, "at \(second)")
+            }
+            #expect(!session.isCurrent(ticket))
+            session.complete(ticket, with: content("a", "During"))
+            #expect(session.open == nil)
+            signals.screensDidWake()
+            for second in stride(from: 100.0, through: 160, by: 5) {
+                if inputAtWake { lastInput = second }
+                update(second)
+                #expect(session.state == .recording)
+                session.sample(content("a", "After"), at: t0 + second)
+            }
+            // Without input since 45, idle at 170 reaches back only to the display wake, never into what was recorded before.
+            update(170)
+            #expect(session.state == (inputAtWake ? .recording : .idle))
+            session.finish(at: t0 + 170)
+            #expect(try stored(storage.store) == (inputAtWake ? ["0-50 Before", "100-170 After"] : ["0-50 Before"]))
+        }
+    }
+
+    /// Random outages, clock steps, relaunches, controls, system and display sleep (notified in either order, sometimes
+    /// twice or unmatched), lock, session switches, window reads, input, and app switches: the session never tracks while
+    /// a save would be refused, the queue stays within its bound, nothing it stores overlaps, no segment or read crosses
+    /// an interruption, and idle never retracts what was recorded before the last resumption from one.
     @Test(arguments: 200..<240)
     func trackingAlwaysHasRoomAndStoredActivityNeverOverlaps(seed: UInt64) throws {
         let directory = temporaryDirectory()
@@ -1439,7 +1487,8 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
         utc.timeZone = TimeZone(identifier: "UTC")!
         var session = newSession()
         var now = t0, idle = 0.0, deleteTodaysWithoutRoom = 0
-        var asleep = false, locked = false, sessionInactive = false
+        var systemAsleep = false, displayAsleep = false, locked = false, sessionInactive = false
+        var signals = SleepSignals()
         // Reads in flight, and whether an interruption has happened since each began.
         var reads: [(ticket: CaptureSequencer.Ticket, stale: Bool)] = []
         // The reference idle boundary: the last update without an interruption after one, from the conditions alone.
@@ -1452,7 +1501,21 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             now += step
             idle = random.next(0...3) == 0 ? 0 : idle + step
             if random.next(0...14) == 0 { now -= Double(random.next(30...600)); steppedBack = true }
-            asleep = toggle(asleep)
+            // macOS posts system and display sleep separately and in either order, sometimes twice, and can post a wake
+            // without its sleep; the session sees only what the notifications leave in `signals`.
+            let wasSystemAsleep = systemAsleep, wasDisplayAsleep = displayAsleep
+            systemAsleep = toggle(systemAsleep)
+            displayAsleep = toggle(displayAsleep)
+            var notifications: [SleepSignalsTests.Event] = []
+            if systemAsleep != wasSystemAsleep || random.next(0...9) == 0 {
+                notifications.append(systemAsleep ? .systemWillSleep : .systemDidWake)
+            }
+            if displayAsleep != wasDisplayAsleep || random.next(0...9) == 0 {
+                notifications.append(displayAsleep ? .screensDidSleep : .screensDidWake)
+            }
+            if random.next(0...1) == 0 { notifications.reverse() }
+            for notification in notifications { notification.apply(to: &signals) }
+            let asleep = systemAsleep || displayAsleep
             locked = toggle(locked)
             sessionInactive = toggle(sessionInactive)
             switch random.next(0...99) {
@@ -1486,7 +1549,7 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             default: break
             }
             checkOpen()
-            let conditions = CaptureConditions(trackingOn: random.next(0...19) != 0, paused: random.next(0...19) == 0, asleep: asleep,
+            let conditions = CaptureConditions(trackingOn: random.next(0...19) != 0, paused: random.next(0...19) == 0, asleep: signals.asleep,
                                                locked: locked, sessionInactive: sessionInactive, secondsSinceInput: idle)
             // When nothing else is written, entering idle shows exactly what idle retracts.
             let healthy = !storage.failSaves && !storage.failDeletes && !storage.failCheckpoints && !storage.failReads

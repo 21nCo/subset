@@ -38,6 +38,24 @@ public struct CaptureConditions: Equatable, Sendable {
     }
 }
 
+/// System sleep and display sleep, tracked apart because macOS reports them separately and in either order: the display
+/// can sleep first and stay asleep through a wake without it (a dark wake), and a lock or idle need not follow. The Mac
+/// counts as asleep while either is, so one wake never clears the other. Each notification sets its own flag, so a
+/// duplicate or a wake without a matching sleep changes nothing else.
+public struct SleepSignals: Equatable, Sendable {
+    public private(set) var systemAsleep = false
+    public private(set) var displayAsleep = false
+
+    public init() {}
+
+    public var asleep: Bool { systemAsleep || displayAsleep }
+
+    public mutating func systemWillSleep() { systemAsleep = true }
+    public mutating func systemDidWake() { systemAsleep = false }
+    public mutating func screensDidSleep() { displayAsleep = true }
+    public mutating func screensDidWake() { displayAsleep = false }
+}
+
 /// Capture's state, recorder, and write queue, kept together so the rules between them hold in one place:
 /// - Tracking (recording or idle) holds only while the store's latest end has been read, the user's choices allow it,
 ///   the queue accepts capture, and the clock is not behind recorded activity. Otherwise capture stops in a named state,
@@ -122,9 +140,10 @@ public struct CaptureSession {
 
     public func isCurrent(_ ticket: CaptureSequencer.Ticket) -> Bool { sequencer.isCurrent(ticket) }
 
-    /// Applies a finished read while recording; otherwise drops it.
+    /// Applies a finished read while recording and still current; otherwise drops it, without flushing or saving at the
+    /// stale read's date.
     public mutating func complete(_ ticket: CaptureSequencer.Ticket, with content: Segment?) {
-        guard state == .recording else {
+        guard state == .recording, sequencer.isCurrent(ticket) else {
             sequencer.discard(ticket)
             return
         }
