@@ -80,8 +80,9 @@ jobs:
             if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
             # A rerun after a failure finds its own tags already made: if creating the tag fails, it must already be on
             # this commit (a tag on any other commit, or a failed lookup, stops the job).
-            if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null 2>&1; then
-              existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
+            # The create error is kept in the log; commits/<tag> resolves lightweight and annotated tags to their commit.
+            if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null; then
+              existing="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
               if [ "$existing" != "$GITHUB_SHA" ]; then
                 echo "Could not create tag $tag; it is on ${existing:-an unknown commit}, not $GITHUB_SHA." >&2
                 exit 1
