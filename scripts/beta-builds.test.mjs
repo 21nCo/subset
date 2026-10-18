@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { marketingVersion, nextBuildNumber, planTarget } from './beta-builds.mjs';
+import { currentBeta, marketingVersion, nextBuildNumber, planTarget } from './beta-builds.mjs';
 import { betaVerdict, isNewerBeta } from './npm-beta-guard.mjs';
 
 test('reads the one MARKETING_VERSION of a project', () => {
@@ -55,4 +55,17 @@ test('publishes a beta only before its release and never behind a newer beta', (
   assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.3').publish, true);
   // A rerun of the beta the channel already points at publishes again (npm then refuses the duplicate version).
   assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.2').publish, true);
+});
+
+test('a named, unchanged target reuses only a published beta of its current version', () => {
+  const target = { prefix: 'macos/breaks/v', version: '0.1.1', tags: ['macos/breaks/v0.1.1-beta.3'], forced: true };
+  assert.deepEqual(planTarget({ ...target, changed: false, reusable: 'macos/breaks/v0.1.1-beta.3' }),
+    { skip: 'unchanged since macos/breaks/v0.1.1-beta.3, which is published', reuse: 'macos/breaks/v0.1.1-beta.3' });
+  // Without a published beta to reuse (a failed build, a legacy dev build), a named target is built.
+  assert.deepEqual(planTarget({ ...target, changed: false }), { tag: 'macos/breaks/v0.1.1-beta.4' });
+  assert.deepEqual(planTarget({ ...target, changed: true, reusable: 'macos/breaks/v0.1.1-beta.3' }), { tag: 'macos/breaks/v0.1.1-beta.4' });
+  assert.equal(currentBeta('macos/breaks/v0.1.1-beta.3', 'macos/breaks/v', '0.1.1'), 'macos/breaks/v0.1.1-beta.3');
+  assert.equal(currentBeta('macos/breaks/v0.1.1-dev.2', 'macos/breaks/v', '0.1.1'), undefined);
+  assert.equal(currentBeta('macos/breaks/v0.1.0-beta.9', 'macos/breaks/v', '0.1.1'), undefined);
+  assert.equal(currentBeta(undefined, 'usage-v', '0.2.0'), undefined);
 });

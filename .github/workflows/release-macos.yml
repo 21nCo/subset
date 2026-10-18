@@ -6,7 +6,7 @@ name: Release macOS app
 #
 # A beta build tag like macos/breaks/v0.1.1-beta.3 builds the same way, with files named <App>-0.1.1-beta.3 and
 # CFBundleVersion 3, and publishes them as a GitHub PRE-RELEASE (not a draft, never "latest") so testers can
-# download it. Beta builds are tagged and started by beta-builds.yml on every merge to dev that changes the app.
+# download it. Beta builds are tagged and started by beta-builds.yml when a beta is requested.
 # A beta build is for testing and is never listed as available in the catalog. Older test builds used -dev.<n>
 # tags, which still build the same way.
 #

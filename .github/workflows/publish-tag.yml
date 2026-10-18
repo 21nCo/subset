@@ -5,7 +5,7 @@ name: Publish tagged package
 #
 # A beta tag like usage-v0.2.0-beta.3 (package.json at 0.2.0) publishes 0.2.0-beta.3 under the `beta`
 # dist-tag, so `npx @subset.dev/usage@beta` installs it and the default install is unchanged. beta-builds.yml
-# creates these tags and starts this workflow on merges to dev.
+# creates these tags and starts this workflow when betas are requested.
 on:
   push:
     tags:
