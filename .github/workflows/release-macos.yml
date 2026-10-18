@@ -98,6 +98,8 @@ jobs:
           name: app-archive
           path: ${{ runner.temp }}/app.xcarchive.tar.gz
           if-no-files-found: error
+          # A rerun of all jobs replaces the first attempt's archive.
+          overwrite: true
           # Long enough for a release that waits on environment approval.
           retention-days: 7
 

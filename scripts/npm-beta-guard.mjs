@@ -39,11 +39,16 @@ async function main() {
   if (!namePattern.test(name ?? '') || !versionPattern.test(version ?? '') || !betaPattern.test(betaVersion ?? '')) {
     throw new Error('Usage: npm-beta-guard.mjs <@scope/name> <x.y.z> <x.y.z-beta.n>');
   }
-  const response = await fetch(`https://registry.npmjs.org/${name.replace('/', '%2f')}`, { headers: { Accept: 'application/json' } });
+  // A stalled registry must not hold the package's publish slot until the job times out.
+  const response = await fetch(`https://registry.npmjs.org/${name.replace('/', '%2f')}`, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!response.ok && response.status !== 404) throw new Error(`The npm registry answered ${response.status} for ${name}`);
   const verdict = betaVerdict(response.status === 404 ? null : await response.json(), version, betaVersion);
   if (verdict.error) throw new Error(`${name} ${verdict.error}`);
-  console.log(verdict.publish ? `Publishing ${name}@${betaVersion} under beta.` : `Not publishing ${name}@${betaVersion}: ${verdict.reason}.`);
+  // The workflow log already names the package and version; only the verdict is printed.
+  console.log(verdict.publish ? 'The beta is newer than the beta dist-tag: publishing.' : 'The beta dist-tag already points at a newer beta: not publishing.');
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `publish=${verdict.publish}\n`);
 }
 

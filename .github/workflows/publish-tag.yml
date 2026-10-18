@@ -100,16 +100,20 @@ jobs:
           name: npm-package
           path: ${{ runner.temp }}/package/*.tgz
           if-no-files-found: error
+          # A rerun of all jobs replaces the first attempt's package.
+          overwrite: true
           retention-days: 7
 
-  # One publish per package at a time, so the registry check below still holds when npm publish runs: two betas
-  # whose builds overlap publish in turn, and the older one, if it comes second, is skipped instead of moving the
-  # `beta` dist-tag backward. (GitHub keeps one pending run per group; a newer pending run replaces an older one.)
+  # One publish per package and dist-tag at a time, so the registry check below still holds when npm publish runs:
+  # two betas whose builds overlap publish in turn, and the older one, if it comes second, is skipped instead of
+  # moving the `beta` dist-tag backward. GitHub keeps one pending run per group and a newer pending run replaces an
+  # older one, which is harmless between betas; keying by dist-tag keeps a beta from ever replacing a pending live
+  # publish.
   publish:
     needs: build
     runs-on: ubuntu-latest
     concurrency:
-      group: npm-publish-${{ needs.build.outputs.pkg_slug }}
+      group: npm-publish-${{ needs.build.outputs.pkg_slug }}-${{ needs.build.outputs.npm_tag }}
       cancel-in-progress: false
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
