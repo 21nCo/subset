@@ -1,4 +1,4 @@
 [
-  { "slug": "usage", "path": "packages/usage-cli", "name": "@subset.dev/usage" },
-  { "slug": "minutes", "path": "packages/minutes-cli", "name": "@subset.dev/minutes" }
+  { "slug": "usage", "path": "packages/usage-cli", "name": "@subset.dev/usage", "inputs": ["packages/usage-cli", "packages/usage", "apps/usage"] },
+  { "slug": "minutes", "path": "packages/minutes-cli", "name": "@subset.dev/minutes", "inputs": ["packages/minutes-cli", "packages/minutes"] }
 ]

@@ -22,9 +22,9 @@ jobs:
 
   # Builds the Breaks menu bar app and runs its unit tests. Only the macOS scheme: the runner image has no
   # matching iOS Simulator runtime, so the iOS targets are left out on purpose. No secrets and no signing.
-  # Runs for pull requests and pushes to main, not for every branch push, to save macOS runner minutes.
+  # Runs for pull requests and pushes to dev and main, not for every branch push, to save macOS runner minutes.
   breaks-macos:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
     runs-on: macos-26
     timeout-minutes: 30
     permissions:
