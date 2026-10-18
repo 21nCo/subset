@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Plans the beta builds for a merge to dev: each macOS app (native/<id>/macos-release.json) and npm package
-// (release-packages.json) whose inputs changed since its last tagged build gets the next beta tag:
+// Plans the beta builds that the Beta builds workflow makes from dev: each macOS app (native/<id>/macos-release.json)
+// and npm package (release-packages.json) named in --only, or else whose inputs changed since its last tagged build,
+// gets the next beta tag:
 //   macos/<app-id>/v<x.y.z>-beta.<n>   built, signed, and notarized by release-macos.yml as a GitHub pre-release
 //   <slug>-v<x.y.z>-beta.<n>           published by publish-tag.yml under the npm `beta` dist-tag
 // x.y.z is the app's MARKETING_VERSION or the package.json version, and must not be released live yet. n counts

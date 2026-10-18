@@ -29,7 +29,7 @@ The directory imports metadata; it does not own feature logic, credentials, or t
 
 Packages must not import from `apps/`. Apps may import packages through package exports, not through relative paths into sibling source trees. A capability must not import Nucleus, Outright, or another consuming product. Put product-specific adapters in the consuming product or in an explicitly named integration package, with the dependency pointing toward the capability. Do not move domain logic into Nucleus's domain-free `@21n/ui` package. If Subset needs generic primitives, evaluate `@uifn/*` and `@21n/ui` according to their actual portability and ownership contracts before creating new ones.
 
-Packages published to npm must use the `@subset.dev/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication, with one exception: a merge to `dev` publishes beta versions of the changed public packages under the npm `beta` dist-tag (see [docs/macos-release.md](docs/macos-release.md#beta-builds)). Live (`latest`) versions are published only with a live release tag.
+Packages published to npm must use the `@subset.dev/<name>` organization scope. Internal `@subset/*` workspaces remain private; app hosts must remain private. Set `private: false` only for a package whose name, exports, version, and release process are ready for publication. A Git push does not authorize npm publication. The **Beta builds** workflow publishes beta versions under the npm `beta` dist-tag when it is run for acceptance testing (see [docs/macos-release.md](docs/macos-release.md#beta-builds)). Live (`latest`) versions are published only with a live release tag.
 
 Do not create a cross-platform abstraction merely to make two examples look alike. Share the operation and data contract when that is the stable seam; make separate web or native views when platform behavior differs.
 
@@ -87,7 +87,7 @@ For macOS distribution, build and verify a signed, notarized artifact before pub
 
 ## Required workflow and enforcement
 
-Branches: `dev` is the default branch and takes all pull requests (its ruleset allows no direct pushes); every merge to it runs the beta planner, which builds betas of the macOS apps and npm packages it changed unless their version is already released live (or, for npm, the package has never been released). `main` receives only pull requests from `dev`, and live releases are tagged from it.
+Branches: `dev` is the default branch and takes all pull requests (its ruleset allows no direct pushes); merges to it build nothing on their own. Betas of macOS apps and npm packages are built on request with the **Beta builds** workflow: the Linear loop starts it when a parent issue's implementation is merged and acceptance testing is due, and it can be run by hand. `main` receives only pull requests from `dev`, and live releases are tagged from it.
 
 1. Inspect `git status`, relevant code, this guide, and the capability's README before editing. Preserve unrelated or dirty work.
 2. State the capability boundary and consuming surfaces before implementation. Record any new shared package or cross-repo dependency in its README.

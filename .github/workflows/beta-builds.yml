@@ -1,32 +1,40 @@
 name: Beta builds
+run-name: Beta builds${{ inputs.issue && format(' for {0}', inputs.issue) || '' }}${{ inputs.request && format(' [{0}]', inputs.request) || '' }}
 
-# Every merge to dev starts a beta build of each macOS app and npm package it changed, so the change can be
-# tested before it is promoted to main and released live:
+# Builds betas for acceptance testing, on request rather than on every merge: when a parent issue's implementation
+# is merged into dev, the Linear loop (thyaravind/automations, beta-handoff.mjs) starts this workflow for that
+# issue's apps and packages, then sends the owner the download and what to verify. It can also be run by hand.
 #   macOS apps    tag macos/<app-id>/v<x.y.z>-beta.<n> and run release-macos.yml: a signed, notarized GitHub
 #                 pre-release that the app's dev landing page offers for download
 #   npm packages  tag <slug>-v<x.y.z>-beta.<n> and run publish-tag.yml: published under the npm `beta` dist-tag
-# scripts/beta-builds.mjs decides what to build. An app or package is skipped when nothing it is built from
-# changed since its last build, or when its version is already released live (bump it to get betas again).
+# scripts/beta-builds.mjs decides what to build. Targets named in `only` are built even if unchanged; without
+# `only`, every target whose inputs changed since its last build is built. A target whose version is already
+# released live is skipped (bump it to get betas again).
 #
 # Tags pushed with the workflow token start no workflows, so this job starts each build itself; a run started
 # from a tag passes the macos-release environment's tag policy. If starting a build fails after its tag was made,
-# re-run the failed job: it reuses the tag and starts the build again (a later merge would treat it as built).
+# re-run the failed job: it reuses the tag and starts the build again.
 on:
-  push:
-    branches:
-      - dev
   workflow_dispatch:
     inputs:
       only:
-        description: 'Build just these targets, even if unchanged (space-separated, e.g. "macos/breaks npm/usage")'
+        description: 'Build just these targets, even if unchanged (space-separated, e.g. "macos/breaks npm/usage"); empty builds every changed target'
+        required: false
+        type: string
+      issue:
+        description: 'Linear issue these betas are for (e.g. SET-24), shown in the run name'
+        required: false
+        type: string
+      request:
+        description: 'Request ID from the caller, shown in the run name so it can find this run'
         required: false
         type: string
 
 permissions:
   contents: read
 
-# One plan at a time, so two merges never pick the same build number. A queued run that is replaced by a newer
-# one loses nothing: each plan compares against the last build, not the last push.
+# One plan at a time, so two runs never pick the same build number. GitHub keeps one pending run per group and a
+# newer one replaces it; the replaced run's caller sees it cancelled and can start it again.
 concurrency:
   group: beta-builds
   cancel-in-progress: false
@@ -50,6 +58,14 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+
+      - name: Check the run labels
+        env:
+          ISSUE: ${{ inputs.issue }}
+          REQUEST: ${{ inputs.request }}
+        run: |
+          if [ -n "$ISSUE" ] && ! [[ "$ISSUE" =~ ^[A-Z][A-Z0-9]*-[1-9][0-9]*$ ]]; then echo "issue must look like SET-24" >&2; exit 1; fi
+          if [ -n "$REQUEST" ] && ! [[ "$REQUEST" =~ ^[A-Za-z0-9._-]{1,80}$ ]]; then echo "request must be 1-80 letters, digits, dots, dashes or underscores" >&2; exit 1; fi
 
       - name: Plan beta builds
         id: plan
