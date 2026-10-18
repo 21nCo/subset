@@ -25,29 +25,32 @@ test('parses macOS release tags', () => {
   }
 });
 
-test('parses macOS dev build tags', () => {
-  assert.deepEqual(parseReleaseTag('macos/breaks/v0.1.1-dev.1'), { appId: 'breaks', version: '0.1.1', dev: '1' });
-  assert.deepEqual(parseReleaseTag('macos/pdf-review/v2.0.0-dev.42'), { appId: 'pdf-review', version: '2.0.0', dev: '42' });
+test('parses macOS beta and dev build tags', () => {
+  assert.deepEqual(parseReleaseTag('macos/breaks/v0.1.1-beta.3'), { appId: 'breaks', version: '0.1.1', prerelease: { channel: 'beta', build: '3' } });
+  assert.deepEqual(parseReleaseTag('macos/breaks/v0.1.1-dev.1'), { appId: 'breaks', version: '0.1.1', prerelease: { channel: 'dev', build: '1' } });
+  assert.deepEqual(parseReleaseTag('macos/pdf-review/v2.0.0-beta.42').prerelease, { channel: 'beta', build: '42' });
   for (const tag of [
-    'macos/breaks/v0.1.1-dev.0',
-    'macos/breaks/v0.1.1-dev.01',
-    'macos/breaks/v0.1.1-dev.',
-    'macos/breaks/v0.1.1-dev.-1',
-    'macos/breaks/v0.1.1-dev.1.2',
-    'macos/breaks/v0.1.1-dev1',
-    'macos/breaks/v0.1.1-beta.1',
-    'macos/breaks/v0.1.1-dev.1x',
-    'macos/breaks/v0.1-dev.1',
+    'macos/breaks/v0.1.1-beta.0',
+    'macos/breaks/v0.1.1-beta.01',
+    'macos/breaks/v0.1.1-beta.',
+    'macos/breaks/v0.1.1-beta.-1',
+    'macos/breaks/v0.1.1-beta.1.2',
+    'macos/breaks/v0.1.1-beta1',
+    'macos/breaks/v0.1.1-rc.1',
+    'macos/breaks/v0.1.1-beta.1x',
+    'macos/breaks/v0.1-beta.1',
   ]) {
-    assert.throws(() => parseReleaseTag(tag), /-dev\.<n>/, tag);
+    assert.throws(() => parseReleaseTag(tag), /-beta\.<n>/, tag);
   }
 });
 
-test('names dev builds after the dev tag', () => {
+test('names beta builds after the tag', () => {
   assert.equal(releaseVersion('0.1.1'), '0.1.1');
-  assert.equal(releaseVersion('0.1.1', '3'), '0.1.1-dev.3');
-  const { version, dev } = parseReleaseTag('macos/breaks/v0.1.1-dev.3');
-  assert.equal(`macos/breaks/v${releaseVersion(version, dev)}`, 'macos/breaks/v0.1.1-dev.3');
+  assert.equal(releaseVersion('0.1.1', { channel: 'beta', build: '3' }), '0.1.1-beta.3');
+  for (const tag of ['macos/breaks/v0.1.1-beta.3', 'macos/breaks/v0.1.1-dev.2']) {
+    const { version, prerelease } = parseReleaseTag(tag);
+    assert.equal(`macos/breaks/v${releaseVersion(version, prerelease)}`, tag);
+  }
 });
 
 test('macOS release tags never match the npm publish trigger', () => {
@@ -56,17 +59,18 @@ test('macOS release tags never match the npm publish trigger', () => {
   assert.equal(npmTrigger.test('macos/breaks/v0.1.0'), false);
   assert.equal(npmTrigger.test('macos/pdf-review/v0.1.0'), false);
   assert.equal(npmTrigger.test('macos/breaks/v0.1.1-dev.1'), false);
+  assert.equal(npmTrigger.test('macos/breaks/v0.1.1-beta.1'), false);
   assert.equal(npmTrigger.test('usage-v0.1.0'), true);
 });
 
-test('dev tags match the workflow trigger and the environment tag policy', () => {
+test('beta tags match the workflow trigger and the environment tag policy', () => {
   // GitHub's * does not cross a slash. The trigger is read from release-macos.yml; the macos-release environment's
   // tag rule (macos/*/v*) lives in the repository settings, not in a file.
   const workflow = readFileSync(new URL('../.github/workflows/release-macos.yml', import.meta.url), 'utf8');
   const trigger = /^\s+tags:\n\s+- '([^']+)'$/m.exec(workflow)?.[1];
   assert.equal(trigger, 'macos/*/v*.*.*');
   const glob = (pattern) => new RegExp(`^${pattern.replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*')}$`);
-  for (const tag of ['macos/breaks/v0.1.0', 'macos/breaks/v0.1.1-dev.1', 'macos/pdf-review/v12.3.4-dev.27']) {
+  for (const tag of ['macos/breaks/v0.1.0', 'macos/breaks/v0.1.1-beta.1', 'macos/breaks/v0.1.1-dev.1', 'macos/pdf-review/v12.3.4-beta.27']) {
     assert.equal(glob(trigger).test(tag), true, tag);
     assert.equal(glob('macos/*/v*').test(tag), true, tag);
   }
@@ -136,8 +140,13 @@ test('parses arguments', () => {
     out: 'x',
   });
   assert.equal(parseArgs(['breaks', '--skip-notarize']).skipNotarize, true);
-  assert.equal(parseArgs(['breaks', '--dev', '7']).dev, '7');
-  for (const dev of ['0', '01', '-1', '1.2', 'x', '1234567890']) assert.throws(() => parseArgs(['breaks', '--dev', dev]), /positive integer/, dev);
+  assert.deepEqual(parseArgs(['breaks', '--beta', '7']).prerelease, { channel: 'beta', build: '7' });
+  assert.deepEqual(parseArgs(['breaks', '--dev', '7']).prerelease, { channel: 'dev', build: '7' });
+  for (const build of ['0', '01', '-1', '1.2', 'x', '1234567890']) {
+    assert.throws(() => parseArgs(['breaks', '--beta', build]), /positive integer/, build);
+    assert.throws(() => parseArgs(['breaks', '--dev', build]), /positive integer/, build);
+  }
+  assert.throws(() => parseArgs(['breaks', '--beta', '1', '--dev', '1']), /cannot be combined/);
   assert.throws(() => parseArgs([]), /Usage/);
   assert.throws(() => parseArgs(['breaks', 'extra']), /Usage/);
   assert.throws(() => parseArgs(['../x']), /Invalid app id/);
@@ -145,12 +154,12 @@ test('parses arguments', () => {
   assert.throws(() => parseArgs(['breaks', '--version']), /needs a value/);
   assert.throws(() => parseArgs(['breaks', '--team', 'abc']), /team ID/);
   assert.throws(() => parseArgs(['breaks', '--sign']), /Unknown option/);
-  assert.deepEqual(parseArgs(['minutes', '--archive-only', '--archive-out', 'a.tgz', '--dev', '2']), {
+  assert.deepEqual(parseArgs(['minutes', '--archive-only', '--archive-out', 'a.tgz', '--beta', '2']), {
     appId: 'minutes',
     skipNotarize: false,
     archiveOnly: true,
     archiveOut: 'a.tgz',
-    dev: '2',
+    prerelease: { channel: 'beta', build: '2' },
   });
   assert.equal(parseArgs(['minutes', '--from-archive', 'a.tgz', '--version', '0.1.0']).fromArchive, 'a.tgz');
   assert.throws(() => parseArgs(['minutes', '--archive-only']), /needs --archive-out/);

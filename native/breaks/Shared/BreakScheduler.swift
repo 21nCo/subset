@@ -87,7 +87,7 @@ struct BreakScheduler: Sendable {
     func focusElapsed(now: Date) -> TimeInterval {
         switch snapshot.phase {
         case .paused:
-            max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+            min(settings.workInterval, focusCountedBeforePause)
         case .focusing, .headsUp, .breaking:
             max(0, min(settings.workInterval, now.timeIntervalSince(snapshot.focusStartedAt)))
         }
@@ -218,6 +218,7 @@ struct BreakScheduler: Sendable {
         var events: [Event] = []
         resetDailyCountersIfNeeded(now: now)
 
+        let wasHeldForCall = !snapshot.hardStopsWaitingForCall.isEmpty
         let hardStopEvents = advanceHardStops(now: now, inCall: inputs.signals.contains(.meeting))
         events += hardStopEvents
         if snapshot.activeHardStop != nil {
@@ -238,19 +239,8 @@ struct BreakScheduler: Sendable {
             clearWellnessCadence()
             return events
         }
-        if hardStopEvents.contains(where: { if case .hardStopEnded(_, .missed) = $0 { true } else { false } }),
-           snapshot.phase != .breaking {
-            // The schedule was held while the stop waited, so a fresh focus interval starts, as after any stop. A
-            // pause from before the stop does not come back; live signals may pause the new interval below. The
-            // stretch counted until now is kept on the missed record, as on the record of a stop that ran, and
-            // belongs to the day it ended on.
-            let focus = countedFocus(now: now)
-            if focus > 0, let last = records.indices.last, records[last].hardStopEndReason == .missed {
-                records[last].focusDuration = focus
-                records[last].focusEndedAt = now
-            }
-            startFocusInterval(at: now)
-        }
+        // Live signals may pause the new interval below.
+        resumeHeldSchedule(after: hardStopEvents, wasHeldForCall: wasHeldForCall, now: now)
 
         if snapshot.phase == .breaking {
             if now >= snapshot.breakEndsAt ?? .distantFuture {
@@ -322,6 +312,7 @@ struct BreakScheduler: Sendable {
         snapshot.activeKind = kind
         snapshot.activePlannedBreakName = plannedName
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         clearWellnessCadence()
@@ -435,6 +426,7 @@ struct BreakScheduler: Sendable {
             return [.paused(.manual)]
         case .focusing, .headsUp:
             snapshot.pausedRemaining = min(settings.workInterval, nextBreakRemaining(now: now) + max(0, idle))
+            snapshot.pausedFocus = max(0, now.timeIntervalSince(snapshot.focusStartedAt) - max(0, idle))
             snapshot.phase = .paused
             snapshot.pauseReason = reason
             snapshot.pausedUntil = reason == .manual ? until : nil
@@ -448,9 +440,11 @@ struct BreakScheduler: Sendable {
         let reason = snapshot.pauseReason ?? .manual
         let remaining = min(settings.workInterval, snapshot.pausedRemaining ?? settings.workInterval)
         snapshot.phase = .focusing
-        snapshot.focusStartedAt = now.addingTimeInterval(-(settings.workInterval - remaining))
+        // The stretch goes on from the focus counted before the pause, and the countdown from the time it had left.
+        snapshot.focusStartedAt = now.addingTimeInterval(-focusCountedBeforePause)
         snapshot.nextBreakAt = now.addingTimeInterval(remaining)
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now
@@ -599,6 +593,70 @@ struct BreakScheduler: Sendable {
         return events + finishHardStop(.dismissed, endedAt: now, now: now)
     }
 
+    /// The running hard stop that the stop with `id` is part of, shown or hidden by an extension, as its own occurrence
+    /// or one merged into it, while its end is still ahead (once it has passed, the next tick ends it). A merged
+    /// occurrence whose own end has passed is no longer part of it: it is recorded as ended at that end when the
+    /// running stop ends. Like `deleteHardStop`, this follows any stop that has started inside it.
+    func runningHardStop(containing id: UUID, now: Date) -> ActiveHardStop? {
+        guard let active = activeHardStop(now: now), active.endsAt.map({ now < $0 }) ?? true else { return nil }
+        if active.id == id { return active }
+        return active.merged.contains { $0.id == id && $0.endsAt.map { now < $0 } ?? true } ? active : nil
+    }
+
+    func isHardStopRunning(id: UUID, now: Date) -> Bool {
+        runningHardStop(containing: id, now: now) != nil
+    }
+
+    /// Removes the stop with `id` from the settings. When it is part of the running stop (`runningHardStop`), that
+    /// stop ends now and is recorded as dismissed, whatever its escape hatch allows. Elapsed state is settled first, as
+    /// on a tick (`settleElapsedHardStops`): a running stop whose end has passed is recorded as ended at that end, and a
+    /// wait whose end has passed as missed; a merged occurrence whose own end has passed leaves the running stop as it
+    /// is. Deleting the last stop that waits for a call releases the schedule it held (`resumeHeldSchedule`).
+    mutating func deleteHardStop(id: UUID, now: Date) -> [Event] {
+        let wasHeldForCall = !snapshot.hardStopsWaitingForCall.isEmpty
+        // Elapsed state is settled first, as on a tick, so a stop that started inside the running one is recorded.
+        var events = settleElapsedHardStops(now: now)
+        if runningHardStop(containing: id, now: now) != nil {
+            events += finishHardStop(.dismissed, endedAt: now, now: now)
+        }
+        settings.hardStops.removeAll { $0.id == id }
+        pruneHardStopProgress()
+        if snapshot.hardStopsWaitingForCall.isEmpty, snapshot.activeHardStop == nil {
+            resumeHeldSchedule(after: events, wasHeldForCall: wasHeldForCall, now: now)
+        }
+        return events
+    }
+
+    /// Replaces the hard stops, as Settings does when the stop with `edited` is added, edited, or turned on or off. An
+    /// occurrence of it in progress (running, joined to the running stop, or waiting for a call) keeps the rules it
+    /// began with, and the edit applies after it: the save is recorded against those occurrences
+    /// (`hardStopsEditedInProgress`), so they supersede the stop's other occurrences (`isHandled`), and the ones they
+    /// supersede are kept from `now` while the stop keeps the start time and repeat it is saved with
+    /// (`keepSuperseded`). Every other stop keeps its state. A stop that has started inside the running one joins it
+    /// first, and elapsed state is settled with the rules from before the edit (`settleElapsedHardStops`), as on a tick,
+    /// so an edit saved before the next tick changes neither: an occurrence whose end has passed by `now` has ended or
+    /// been missed, and the edit applies at once. A one-off stop whose occurrence is then handled is removed, as on a
+    /// tick. Returns the events of settling. The next tick applies the rest: a stop turned off while it waits for a call
+    /// stops waiting.
+    mutating func updateHardStops(_ hardStops: [HardStop], edited: UUID, now: Date) -> [Event] {
+        let wasHeldForCall = !snapshot.hardStopsWaitingForCall.isEmpty
+        let events = settleElapsedHardStops(now: now)
+        if snapshot.hardStopsWaitingForCall.isEmpty, snapshot.activeHardStop == nil {
+            resumeHeldSchedule(after: events, wasHeldForCall: wasHeldForCall, now: now)
+        }
+        // A wait saved by an earlier build has no rules of its own yet; it keeps the ones the stop has before the edit.
+        for id in snapshot.hardStopsWaitingForCall.keys where snapshot.hardStopWaitingRules[id] == nil {
+            snapshot.hardStopWaitingRules[id] = settings.hardStops.first { $0.id.uuidString == id }
+        }
+        let inProgress = occurrencesInProgress(of: edited).map(\.key)
+        if !inProgress.isEmpty { snapshot.hardStopsEditedInProgress[edited.uuidString, default: []].formUnion(inProgress) }
+        settings.hardStops = hardStops
+        normalizeSettings()
+        keepSuperseded(id: edited, until: now)
+        removeHandledOnceStops()
+        return events
+    }
+
     /// Starts occurrence `occurrenceKey` of the stop with `id` now, as **Start now** on its warning does: one that
     /// starts within the longest warning lead time, or is due, or waits for a call. Its end does not move, so starting
     /// early makes it longer. Returns no events, and changes nothing, while a stop runs or when that occurrence cannot
@@ -625,9 +683,12 @@ struct BreakScheduler: Sendable {
         guard let stop = settings.hardStops.first(where: { $0.id == id && $0.isEnabled }),
               let occurrence = hardStopOccurrence(stop, key: key), !isHandled(stop, occurrence) else { return nil }
         if let waitingKey = snapshot.hardStopsWaitingForCall[stop.id.uuidString] {
-            // Waits whose end has passed were recorded as missed first, so this one is still open.
+            // Waits whose end has passed were recorded as missed first, so this one is still open. It starts with the
+            // rules it has waited with.
             if waitingKey < key { return nil }
-            if waitingKey == key { return occurrence.end.map { now < $0 } ?? true ? (stop, occurrence) : nil }
+            if waitingKey == key {
+                return occurrence.end.map { now < $0 } ?? true ? (waitingOccurrence(of: stop)?.stop ?? stop, occurrence) : nil
+            }
         }
         let earlierDue = stop.occurrences(around: now, calendar: calendar).contains {
             $0.key < key && !isHandled(stop, $0) && stop.isDue($0, now: now, calendar: calendar)
@@ -638,12 +699,26 @@ struct BreakScheduler: Sendable {
         return (stop, occurrence)
     }
 
-    /// Occurrence `key` of `stop` as a warning and Start now see it. One that waits for a call keeps its identity, as
-    /// it does for the tick; any other must still be an occurrence of the stop as configured now.
+    /// Occurrence `key` of `stop` as a warning and Start now see it. One that waits for a call keeps its identity and
+    /// the rules it has waited with, as it does for the tick; any other must still be an occurrence of the stop as
+    /// configured now.
     func hardStopOccurrence(_ stop: HardStop, key: Int) -> HardStop.Occurrence? {
-        snapshot.hardStopsWaitingForCall[stop.id.uuidString] == key
-            ? stop.occurrence(forKey: key, calendar: calendar)
-            : stop.scheduledOccurrence(forKey: key, calendar: calendar)
+        if snapshot.hardStopsWaitingForCall[stop.id.uuidString] == key { return waitingOccurrence(of: stop)?.occurrence }
+        return stop.scheduledOccurrence(forKey: key, calendar: calendar)
+    }
+
+    /// The occurrence of `stop` that waits for a call, with the rules the stop had when it began to wait (or as
+    /// configured, for a wait saved by an earlier build). Its name and on/off switch are the stop's own, as the notice
+    /// and the menu bar show them. Saved rules are brought into range as settings are, so a malformed snapshot cannot
+    /// overflow the end or extension arithmetic.
+    private func waitingOccurrence(of stop: HardStop) -> (stop: HardStop, occurrence: HardStop.Occurrence)? {
+        let id = stop.id.uuidString
+        guard let key = snapshot.hardStopsWaitingForCall[id] else { return nil }
+        var rules = snapshot.hardStopWaitingRules[id] ?? stop
+        Self.normalize(&rules)
+        rules.name = stop.name
+        rules.isEnabled = stop.isEnabled
+        return rules.occurrence(forKey: key, calendar: calendar).map { (rules, $0) }
     }
 
     /// Shows the hidden stop again before its extension runs out, as **Start now** on the notice before an extension
@@ -673,47 +748,75 @@ struct BreakScheduler: Sendable {
         return events
     }
 
+    /// Brings the hard stops up to `now` with the rules they have, as a tick does before anything else, so an operation
+    /// sees what a tick at `now` would leave: a stop that has started inside the running one joins it, even if it
+    /// waits for calls or its own window passed while the host was asleep (`reconcileMerges`); a waiting occurrence
+    /// whose end has passed is missed (`missWaitingStops`); and the running stop whose end has passed ends at that end,
+    /// recorded once, with its merged occurrences. An edit saved while they were in progress then applies after them
+    /// (`keepSuperseded`).
+    private mutating func settleElapsedHardStops(now: Date) -> [Event] {
+        var events = reconcileMerges(now: now)
+        events += missWaitingStops(now: now)
+        if let end = snapshot.activeHardStop?.endsAt, now >= end {
+            events += finishHardStop(.ended, endedAt: end, now: now)
+        }
+        return events
+    }
+
+    /// Once no stop runs or waits after the hard stops moved on at `now` with `events`: when a stop that waited was just
+    /// missed, a fresh focus interval starts, as after any stop, since the schedule was held while it waited. A pause
+    /// from before the stop does not come back. The stretch counted until now is kept on the missed record, as on the
+    /// record of a stop that ran, and belongs to the day it ended on. When the last wait ended without its stop starting
+    /// or being missed (the stop was turned off or deleted), the schedule it held is released.
+    private mutating func resumeHeldSchedule(after events: [Event], wasHeldForCall: Bool, now: Date) {
+        if events.contains(where: { if case .hardStopEnded(_, .missed) = $0 { true } else { false } }), snapshot.phase != .breaking {
+            let focus = countedFocus(now: now)
+            if focus > 0, let last = records.indices.last, records[last].hardStopEndReason == .missed {
+                records[last].focusDuration = focus
+                records[last].focusEndedAt = now
+            }
+            startFocusInterval(at: now)
+        } else if wasHeldForCall {
+            releaseHeldSchedule(now: now)
+        }
+    }
+
     /// Moves hard stops forward for one tick: merges, misses, ends, resumes, starts, and warns.
     private mutating func advanceHardStops(now: Date, inCall: Bool) -> [Event] {
         var events: [Event] = []
         let stops = settings.hardStops.filter(\.isEnabled)
 
-        // Merging comes first, so a stop that started inside the running one joins it even if it waits for
-        // calls or its own window passed while the host was asleep.
-        if snapshot.activeHardStop != nil {
-            events += mergeOverlappingStops(stops: stops, now: now)
-        }
-        // Then a waiting occurrence whose window passed is missed, before a newer one of the same stop replaces it.
-        events += missWaitingStops(now: now)
+        // Elapsed state is settled first: a waiting occurrence whose window passed is missed before a newer one of the
+        // same stop replaces it, and a running stop whose end has passed ends before anything starts.
+        events += settleElapsedHardStops(now: now)
 
         // The earliest due occurrence of each stop that has not been handled; a later one of the same stop then
         // joins it instead of replacing it. One that waits for a call is held back.
         var due: [(stop: HardStop, occurrence: HardStop.Occurrence)] = []
         for stop in stops {
             let key = stop.id.uuidString
-            var candidates = stop.occurrences(around: now, calendar: calendar).filter {
-                stop.isDue($0, now: now, calendar: calendar) && !isHandled(stop, $0)
-            }
             // An occurrence that already waits stays due until its end: a stop without an end waits for the call
             // however long it lasts, and one whose start moved later with the time zone still starts when the call ends.
-            if let waitingKey = snapshot.hardStopsWaitingForCall[key],
-               let waiting = stop.occurrence(forKey: waitingKey, calendar: calendar),
-               waiting.end.map({ now < $0 }) ?? true, !isHandled(stop, waiting) {
-                candidates.append(waiting)
+            // It keeps the rules it began to wait with, so an edit neither moves its end nor starts it during the call.
+            let waiting = waitingOccurrence(of: stop).flatMap { waiting in
+                (waiting.occurrence.end.map { now < $0 } ?? true) && !isHandled(stop, waiting.occurrence) ? waiting : nil
             }
-            guard let occurrence = candidates.min(by: { $0.key < $1.key }) else { continue }
-            if inCall, stop.duringCalls == .waitForCallToEnd {
-                snapshot.hardStopsWaitingForCall[key] = occurrence.key
+            var candidates = stop.occurrences(around: now, calendar: calendar)
+                .filter { stop.isDue($0, now: now, calendar: calendar) && !isHandled(stop, $0) && $0.key != waiting?.occurrence.key }
+                .map { (stop: stop, occurrence: $0) }
+            if let waiting { candidates.append(waiting) }
+            guard let item = candidates.min(by: { $0.occurrence.key < $1.occurrence.key }) else { continue }
+            if inCall, item.stop.duringCalls == .waitForCallToEnd {
+                if snapshot.hardStopsWaitingForCall[key] != item.occurrence.key { snapshot.hardStopWaitingRules[key] = stop }
+                snapshot.hardStopsWaitingForCall[key] = item.occurrence.key
             } else {
-                due.append((stop, occurrence))
+                due.append(item)
             }
         }
         due.sort { $0.occurrence.start < $1.occurrence.start }
 
         if let active = snapshot.activeHardStop {
-            if let end = active.endsAt, now >= end {
-                events += finishHardStop(.ended, endedAt: end, now: now)
-            } else if let until = active.extendedUntil, now >= until {
+            if let until = active.extendedUntil, now >= until {
                 snapshot.activeHardStop?.extendedUntil = nil
                 showHardStop()
                 events.append(.hardStopResumed(id: active.id))
@@ -742,6 +845,7 @@ struct BreakScheduler: Sendable {
         }
 
         removeExpiredOnceStops(now: now)
+        removeHandledOnceStops()
         events += hardStopWarnings(stops: stops, now: now, inCall: inCall)
         pruneHardStopProgress()
         return events
@@ -792,21 +896,30 @@ struct BreakScheduler: Sendable {
         var deferredFrom: Date?
         while day <= now, day < active.endsAt ?? .distantFuture {
             let candidates = stops
-                .compactMap { stop in stop.occurrence(onDayOf: day, calendar: calendar).map { (stop: stop, occurrence: $0) } }
+                .flatMap { stop -> [(stop: HardStop, occurrence: HardStop.Occurrence)] in
+                    // An occurrence that waits for a call keeps the rules it began to wait with, and stays a candidate
+                    // on its own day after an edit moves the stop's time or days.
+                    let waiting = waitingOccurrence(of: stop).flatMap { calendar.isDate($0.occurrence.start, inSameDayAs: day) ? $0 : nil }
+                    let scheduled = stop.occurrence(onDayOf: day, calendar: calendar).flatMap { occurrence in
+                        occurrence.key == snapshot.hardStopsWaitingForCall[stop.id.uuidString] ? nil : (stop: stop, occurrence: occurrence)
+                    }
+                    return [waiting, scheduled].compactMap { $0 }
+                }
                 .sorted { $0.occurrence.start < $1.occurrence.start }
             for item in candidates where !isHandled(item.stop, item.occurrence) {
                 guard item.occurrence.start >= active.occurrence, item.occurrence.start <= now,
                       item.occurrence.start < active.endsAt ?? .distantFuture,
                       item.occurrence.end.map({ $0 > active.startedAt }) ?? true else { continue }
                 if let waitingKey = snapshot.hardStopsWaitingForCall[item.stop.id.uuidString], waitingKey < item.occurrence.key {
-                    guard let waiting = item.stop.occurrence(forKey: waitingKey, calendar: calendar),
-                          let end = waiting.end, end <= now else {
+                    guard let waiting = waitingOccurrence(of: item.stop)?.occurrence, let end = waiting.end, end <= now else {
                         deferredFrom = deferredFrom ?? day
                         continue
                     }
                     events.append(recordMissed(item.stop, waiting, end: end, now: now))
                 }
                 merge(item.stop, item.occurrence, joinedAt: max(item.occurrence.start, active.startedAt), into: &active)
+                // Kept current, so whether a later candidate is handled is worked out with this one's part and end.
+                snapshot.activeHardStop = active
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
             day = next
@@ -821,17 +934,24 @@ struct BreakScheduler: Sendable {
     /// and while paused only the time counted before the pause.
     private func countedFocus(now: Date) -> TimeInterval {
         switch snapshot.phase {
-        case .paused: max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
+        case .paused: focusCountedBeforePause
         case .focusing, .headsUp, .breaking: max(0, now.timeIntervalSince(snapshot.focusStartedAt))
         }
+    }
+
+    /// While paused: the focus counted before the pause. A snapshot saved before it was stored derives it from the
+    /// countdown, as the countdown and the stretch then started together.
+    private var focusCountedBeforePause: TimeInterval {
+        snapshot.pausedFocus ?? max(0, settings.workInterval - (snapshot.pausedRemaining ?? settings.workInterval))
     }
 
     /// A stop that waited for a call and whose occurrence can no longer start is missed: it is recorded and never starts.
     private mutating func missWaitingStops(now: Date) -> [Event] {
         var events: [Event] = []
-        for (key, waitingKey) in snapshot.hardStopsWaitingForCall.sorted(by: { $0.value < $1.value }) {
+        for key in snapshot.hardStopsWaitingForCall.sorted(by: { $0.value < $1.value }).map(\.key) {
+            // A stop turned off or deleted stops waiting, unrecorded.
             guard let stop = settings.hardStops.first(where: { $0.id.uuidString == key && $0.isEnabled }),
-                  let occurrence = stop.occurrence(forKey: waitingKey, calendar: calendar),
+                  let occurrence = waitingOccurrence(of: stop)?.occurrence,
                   !isHandled(stop, occurrence) else {
                 snapshot.hardStopsWaitingForCall[key] = nil
                 continue
@@ -844,8 +964,10 @@ struct BreakScheduler: Sendable {
         return events
     }
 
-    /// A planned break held while the stop waited is dropped, as one that overlaps a stop that ran.
+    /// A planned break held while the stop waited is dropped, as one that overlaps a stop that ran. An edit saved while
+    /// it waited applies after it (`keepSuperseded`); a one-off stop that has nothing left to run is removed.
     private mutating func recordMissed(_ stop: HardStop, _ occurrence: HardStop.Occurrence, end: Date, now: Date) -> Event {
+        keepSuperseded(id: stop.id, until: end)
         markHandled(stop, occurrence)
         dropPlannedBreaks(overlappingFrom: occurrence.start, to: end, now: now)
         appendRecord(BreakRecord(
@@ -858,7 +980,7 @@ struct BreakScheduler: Sendable {
             hardStopEndReason: .missed,
             extensionsUsed: 0
         ))
-        removeOnceStops([(stop.id, occurrence.key)])
+        removeHandledOnceStops()
         return .hardStopEnded(id: stop.id, reason: .missed)
     }
 
@@ -926,9 +1048,11 @@ struct BreakScheduler: Sendable {
                 extensionsUsed: joined.extensionsUsed ?? 0
             ))
         }
-        removeOnceStops([(active.id, active.occurrenceKey)] + active.merged.map { ($0.id, $0.occurrenceKey) })
+        // An edit saved while it ran applies after it; a one-off stop that has nothing left to run is removed.
+        for id in [active.id] + active.merged.map(\.id) { keepSuperseded(id: id, until: endedAt) }
         dropPlannedBreaks(overlappingFrom: active.startedAt, to: endedAt, now: now)
         snapshot.activeHardStop = nil
+        removeHandledOnceStops()
         clearActiveBreak()
         // A fresh focus interval starts after a hard stop; a pause from before it does not come back.
         startFocusInterval(at: now)
@@ -944,6 +1068,7 @@ struct BreakScheduler: Sendable {
         snapshot.breakStartedAt = active.startedAt
         snapshot.breakEndsAt = active.endsAt
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         snapshot.deliveredHeadsUpFor = nil
@@ -958,32 +1083,161 @@ struct BreakScheduler: Sendable {
         }
     }
 
-    /// Occurrences are compared by key, so a time zone change does not make a handled occurrence due again.
-    private func isHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) -> Bool {
-        snapshot.handledHardStops[stop.id.uuidString].map { occurrence.key <= $0 } ?? false
+    /// True when `occurrence` of `stop` never starts, merges, or warns: it, or a later one of the same stop, started,
+    /// merged, ended, or was missed, or an edit of this stop saved while it was in progress superseded it
+    /// (`supersededThrough`, `keepSuperseded`). Occurrences are compared by key, so a time zone change does not make a
+    /// handled occurrence due again. A one-off stop has a single occurrence, so only that one is handled: a time it is
+    /// moved to is judged by when it starts, not by how its key orders against the one that ran.
+    ///
+    /// Supersession is anchored to that save: only the occurrences that were in progress when the stop itself was saved
+    /// (`hardStopsEditedInProgress`) supersede its other occurrences. A stop that was never saved during an occurrence,
+    /// or one whose other stops were, keeps the usual overlap rules: a later occurrence that starts inside the running
+    /// stop joins it. A stop saved during an occurrence without an end never joins it: until that occurrence ends, none
+    /// of the stop's other occurrences runs.
+    func isHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) -> Bool {
+        isHandled(stop, key: occurrence.key)
+    }
+
+    private func isHandled(_ stop: HardStop, key: Int) -> Bool {
+        let id = stop.id.uuidString
+        if let handled = snapshot.handledHardStops[id], Self.isOnce(stop) ? key == handled : key <= handled { return true }
+        // An occurrence in progress is never superseded by an edit saved during it.
+        let inProgress = occurrencesInProgress(of: stop.id)
+        guard !inProgress.contains(where: { $0.key == key }) else { return false }
+        return [keptSuperseded(stop), supersededThrough(of: stop, during: edited(inProgress, of: stop.id), until: nil)]
+            .contains { $0.map { key <= $0 } ?? false }
+    }
+
+    /// True when an edit of `stop` saved while it was in progress superseded occurrence `key` however long the occurrence
+    /// in progress lasts (`keepSuperseded`), as the editor's note says.
+    func isSupersededBySave(_ stop: HardStop, key: Int) -> Bool {
+        keptSuperseded(stop).map { key <= $0 } ?? false
+    }
+
+    private func keptSuperseded(_ stop: HardStop) -> Int? {
+        snapshot.supersededHardStops[stop.id.uuidString].flatMap { $0.applies(to: stop) ? $0.throughKey : nil }
+    }
+
+    /// The occurrences `inProgress` of the stop with `id` during which that stop was saved (`hardStopsEditedInProgress`).
+    private func edited(_ inProgress: [(key: Int, end: Date?)], of id: UUID) -> [(key: Int, end: Date?)] {
+        let edited = snapshot.hardStopsEditedInProgress[id.uuidString] ?? []
+        return inProgress.filter { edited.contains($0.key) }
+    }
+
+    /// The occurrences of the stop with `id` that are in progress, with the end each keeps: its own or a merged part of
+    /// the running stop, which lasts until that stop ends, and one waiting for a call.
+    private func occurrencesInProgress(of id: UUID) -> [(key: Int, end: Date?)] {
+        var occurrences: [(key: Int, end: Date?)] = []
+        if let active = snapshot.activeHardStop {
+            if active.id == id { occurrences.append((active.occurrenceKey, active.endsAt)) }
+            occurrences += active.merged.filter { $0.id == id }.map { ($0.occurrenceKey, active.endsAt) }
+        }
+        if let stop = settings.hardStops.first(where: { $0.id == id }), let waiting = waitingOccurrence(of: stop)?.occurrence {
+            occurrences.append((waiting.key, waiting.end))
+        }
+        return occurrences
+    }
+
+    /// The keys of the occurrences of the stop with `id` that a save at `now` finds in progress (`updateHardStops`), once
+    /// elapsed state is settled (`settleElapsedHardStops`): this follows a stop that has started inside the running one,
+    /// and an occurrence whose end has passed is not in progress, even before the next tick merges, ends or misses them.
+    func hardStopOccurrenceKeysInProgress(of id: UUID, now: Date) -> Set<Int> {
+        var next = self
+        _ = next.settleElapsedHardStops(now: now)
+        return Set(next.occurrencesInProgress(of: id).map(\.key))
+    }
+
+    /// The key of the last occurrence of `stop`, as configured now, that an edit of it saved while its occurrences
+    /// `inProgress` were in progress supersedes, so that it and every earlier one never run; nil when there is none. An occurrence in
+    /// progress keeps the rules it began with and is never joined again, so none of the stop's occurrences that starts
+    /// before the end it keeps runs, nor does an earlier one of a repeating stop (by key), so an earlier one never
+    /// replaces an occurrence that waits for a call. One without an end has no end yet while it is in progress (`until` is nil):
+    /// every other occurrence is superseded until it ends; at `until` (when the edit is saved, or when it ends or is
+    /// missed) the ones that had started by then are:
+    /// - A repeating stop applies the edit from the next day: when its start time changed, its occurrence on the day of
+    ///   the one in progress is superseded. Whether or not it changed, so is a later one that starts before that end.
+    /// - A one-off stop's new time is kept when it starts at or after that end, and superseded when it starts before.
+    ///   With no end, it is superseded on the same date or when it had started by `until`. Times are compared by when they
+    ///   start, so one moved after the end in another time zone runs. A one-off stop that is superseded is removed once
+    ///   the occurrence in progress has ended or been missed (`removeHandledOnceStops`).
+    private func supersededThrough(of stop: HardStop, during inProgress: [(key: Int, end: Date?)], until: Date?) -> Int? {
+        inProgress.compactMap { occurrence -> Int? in
+            if occurrence.end == nil, until == nil { return Int.max }
+            let day = HardStop.Occurrence.parts(of: occurrence.key)
+            let limit = occurrence.end ?? until
+            func supersedes(_ start: Date) -> Bool {
+                guard let limit else { return false }
+                return occurrence.end == nil ? start <= limit : start < limit
+            }
+            switch stop.repeats {
+            case .weekdays:
+                let sameDay = HardStop.Occurrence.key(year: day.year, month: day.month, day: day.day, hour: stop.hour, minute: stop.minute)
+                // With its start time unchanged, the occurrence on that day is the one in progress. Every earlier one is
+                // superseded too, as starting or joining marks the earlier ones handled, so a day the edit adds before it
+                // never replaces an occurrence that waits for a call.
+                var through = sameDay == occurrence.key ? occurrence.key - 1 : max(sameDay, occurrence.key - 1)
+                guard let limit, var date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else { return through }
+                while let next = calendar.date(byAdding: .day, value: 1, to: date), next < limit {
+                    date = next
+                    if let later = stop.occurrence(onDayOf: date, calendar: calendar), supersedes(later.start) { through = later.key }
+                }
+                return through
+            case .once(let date):
+                guard let year = date.year, let month = date.month, let dayOfMonth = date.day else { return nil }
+                let edited = HardStop.Occurrence.key(year: year, month: month, day: dayOfMonth, hour: stop.hour, minute: stop.minute)
+                // A date or time the stop no longer has is left to expire (`removeExpiredOnceStops`).
+                guard edited != occurrence.key, let scheduled = stop.scheduledOccurrence(forKey: edited, calendar: calendar) else { return nil }
+                let sameDate = occurrence.end == nil && (year, month, dayOfMonth) == (day.year, day.month, day.day)
+                return sameDate || supersedes(scheduled.start) ? edited : nil
+            }
+        }.max()
+    }
+
+    /// Keeps the occurrences that an edit saved while the stop with `id` was in progress supersedes (`supersededThrough`)
+    /// once they are no longer in progress: when it is saved, and when an occurrence it was saved during ends or is
+    /// missed, each at `until`. They are kept only while the stop keeps the start time and repeat they were superseded for, so a later
+    /// edit that changes them is judged only against the occurrences that really ran.
+    private mutating func keepSuperseded(id: UUID, until: Date) {
+        let key = id.uuidString
+        guard let stop = settings.hardStops.first(where: { $0.id == id }) else { return }
+        let through = [keptSuperseded(stop), supersededThrough(of: stop, during: edited(occurrencesInProgress(of: id), of: id), until: until)]
+            .compactMap { $0 }.max()
+        snapshot.supersededHardStops[key] = through.map { SupersededHardStops(stop, throughKey: $0) }
     }
 
     private mutating func markHandled(_ stop: HardStop, _ occurrence: HardStop.Occurrence) {
         let key = stop.id.uuidString
-        snapshot.handledHardStops[key] = max(occurrence.key, snapshot.handledHardStops[key] ?? occurrence.key)
+        snapshot.handledHardStops[key] = Self.isOnce(stop) ? occurrence.key : max(occurrence.key, snapshot.handledHardStops[key] ?? occurrence.key)
         snapshot.hardStopsWaitingForCall[key] = nil
     }
 
-    /// Removes one-off stops whose occurrence is one of `occurrences`. One rescheduled to another time while its
-    /// old occurrence ran keeps its new occurrence.
-    private mutating func removeOnceStops(_ occurrences: [(id: UUID, key: Int)]) {
-        settings.hardStops.removeAll { stop in
+    private static func isOnce(_ stop: HardStop) -> Bool {
+        if case .once = stop.repeats { true } else { false }
+    }
+
+    /// The stops whose occurrence runs, is part of the running stop, or waits for a call.
+    private var hardStopsInProgress: Set<String> {
+        Set((snapshot.activeHardStop.map { [$0.id] + $0.merged.map(\.id) } ?? []).map(\.uuidString))
+            .union(snapshot.hardStopsWaitingForCall.keys)
+    }
+
+    /// Removes one-off stops whose occurrence is handled: it ran, joined another, or was missed, or an edit saved while
+    /// it was in progress superseded it. One that is still in progress is kept until it ends, and one rescheduled to a
+    /// time that is still to come keeps that time.
+    private mutating func removeHandledOnceStops() {
+        let keep = hardStopsInProgress
+        let handled = Set(settings.hardStops.filter { stop in
             // The key comes from the configured date and time only, so a time zone change does not keep the stop.
-            guard case .once(let date) = stop.repeats, let year = date.year, let month = date.month, let day = date.day else { return false }
-            let key = HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)
-            return occurrences.contains { $0.id == stop.id && $0.key == key }
-        }
+            guard !keep.contains(stop.id.uuidString), case .once(let date) = stop.repeats,
+                  let year = date.year, let month = date.month, let day = date.day else { return false }
+            return isHandled(stop, key: HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute))
+        }.map(\.id))
+        if !handled.isEmpty { settings.hardStops.removeAll { handled.contains($0.id) } }
     }
 
     /// Removes one-off stops that can no longer start, except one that is running or waiting for a call.
     private mutating func removeExpiredOnceStops(now: Date) {
-        let keep = Set((snapshot.activeHardStop.map { [$0.id] + $0.merged.map(\.id) } ?? []).map(\.uuidString))
-            .union(snapshot.hardStopsWaitingForCall.keys)
+        let keep = hardStopsInProgress
         settings.hardStops.removeAll { stop in
             !keep.contains(stop.id.uuidString) && stop.isExpiredOnce(now: now, calendar: calendar)
         }
@@ -1003,6 +1257,28 @@ struct BreakScheduler: Sendable {
         if !snapshot.hardStopsWaitingForCall.keys.allSatisfy(ids.contains) {
             snapshot.hardStopsWaitingForCall = snapshot.hardStopsWaitingForCall.filter { ids.contains($0.key) }
         }
+        // The rules a wait keeps go when it ends.
+        if !snapshot.hardStopWaitingRules.keys.allSatisfy({ snapshot.hardStopsWaitingForCall[$0] != nil }) {
+            snapshot.hardStopWaitingRules = snapshot.hardStopWaitingRules.filter { snapshot.hardStopsWaitingForCall[$0.key] != nil }
+        }
+        // Superseded occurrences go with their stop, once it changes its start time or repeat, and once they are handled.
+        let stops = settings.hardStops
+        let handled = snapshot.handledHardStops
+        func isLive(_ id: String, _ mark: SupersededHardStops) -> Bool {
+            stops.contains { $0.id.uuidString == id && mark.applies(to: $0) } && handled[id].map { mark.throughKey > $0 } ?? true
+        }
+        if !snapshot.supersededHardStops.allSatisfy({ isLive($0.key, $0.value) }) {
+            snapshot.supersededHardStops = snapshot.supersededHardStops.filter { isLive($0.key, $0.value) }
+        }
+        // A save is remembered only for the occurrences in progress it was made during (`keepSuperseded` has kept what
+        // they supersede by the time they end or are missed).
+        var edits: [String: Set<Int>] = [:]
+        for (id, keys) in snapshot.hardStopsEditedInProgress {
+            guard let uuid = UUID(uuidString: id) else { continue }
+            let live = keys.intersection(occurrencesInProgress(of: uuid).map(\.key))
+            if !live.isEmpty { edits[id] = live }
+        }
+        if edits != snapshot.hardStopsEditedInProgress { snapshot.hardStopsEditedInProgress = edits }
     }
 
     // MARK: - Smart pause and idle
@@ -1058,6 +1334,7 @@ struct BreakScheduler: Sendable {
             var events = pause(reason: .idle, now: now, creditingIdle: counted)
             if idle >= idleSettings.resetAfter {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 events.append(.focusReset)
             }
             return events
@@ -1065,8 +1342,12 @@ struct BreakScheduler: Sendable {
             if idle < idleSettings.pauseAfter {
                 return resume(now: now)
             }
-            if idle >= idleSettings.resetAfter, snapshot.pausedRemaining != settings.workInterval {
+            // The countdown and the counted focus are reset together; after a release or a snooze either can be
+            // reset while the other is not.
+            let alreadyReset = snapshot.pausedRemaining == settings.workInterval && focusCountedBeforePause == 0
+            if idle >= idleSettings.resetAfter, !alreadyReset {
                 snapshot.pausedRemaining = settings.workInterval
+                snapshot.pausedFocus = 0
                 return [.focusReset]
             }
             return []
@@ -1120,12 +1401,24 @@ struct BreakScheduler: Sendable {
 
     // MARK: - Helpers
 
+    /// Releases the regular schedule a stop held while it waited for a call, when the last waiting stop is deleted and
+    /// no stop runs: as after a snooze, the countdown starts over from now, so a break that came due while it was held
+    /// does not start at once, and the focus counted so far stays in the current stretch. A running break still ends on time, and a pause still resumes by its own rules.
+    private mutating func releaseHeldSchedule(now: Date) {
+        guard snapshot.activeHardStop == nil, snapshot.hardStopsWaitingForCall.isEmpty,
+              snapshot.phase == .focusing || snapshot.phase == .headsUp else { return }
+        snapshot.phase = .focusing
+        snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
+        snapshot.deliveredHeadsUpFor = nil
+    }
+
     private mutating func startFocusInterval(at now: Date) {
         snapshot.phase = .focusing
         snapshot.focusStartedAt = now
         snapshot.nextBreakAt = now.addingTimeInterval(settings.workInterval)
         snapshot.deliveredHeadsUpFor = nil
         snapshot.pausedRemaining = nil
+        snapshot.pausedFocus = nil
         snapshot.pauseReason = nil
         snapshot.pausedUntil = nil
         countingSince = now

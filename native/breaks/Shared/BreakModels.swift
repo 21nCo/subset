@@ -552,8 +552,10 @@ extension BreakSettings {
     }
 
     /// Field errors for the hard-stop editor. Empty when every stop can be saved. A one-off stop whose
-    /// occurrence can no longer start at `now` is an error, because the scheduler would remove it.
-    func hardStopErrors(now: Date, calendar: Calendar = .current) -> [HardStopFieldError] {
+    /// occurrence can no longer start at `now` is an error, because the scheduler would remove it, unless that occurrence
+    /// is one the stop may keep (`inProgress`, by stop id): one in progress, or one an occurrence in progress supersedes.
+    /// The occurrence in progress keeps running, and the scheduler removes the stop when it ends.
+    func hardStopErrors(now: Date, calendar: Calendar = .current, inProgress: [UUID: Set<Int>] = [:]) -> [HardStopFieldError] {
         var errors: [HardStopFieldError] = []
         if hardStops.count > HardStop.maximumCount {
             errors.append(.init(field: .list, message: "Add at most \(HardStop.maximumCount) hard stops."))
@@ -591,7 +593,9 @@ extension BreakSettings {
             case .once(let date):
                 if !Self.isCalendarDate(date, calendar: calendar) {
                     fail(.repeats, "Choose a date.")
-                } else if timesAreValid, stop.isExpiredOnce(now: now, calendar: calendar) {
+                } else if timesAreValid, stop.isExpiredOnce(now: now, calendar: calendar),
+                          let year = date.year, let month = date.month, let day = date.day,
+                          inProgress[stop.id]?.contains(HardStop.Occurrence.key(year: year, month: month, day: day, hour: stop.hour, minute: stop.minute)) != true {
                     fail(.repeats, "This date and time have passed.")
                 }
             }
@@ -609,7 +613,7 @@ extension BreakSettings {
     }
 
     /// True when `date` names a day that exists, such as 28 February but not 30 February.
-    private static func isCalendarDate(_ date: DateComponents, calendar: Calendar) -> Bool {
+    static func isCalendarDate(_ date: DateComponents, calendar: Calendar) -> Bool {
         guard let year = date.year, let month = date.month, let day = date.day, (1...9999).contains(year),
               let resolved = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { return false }
         let parts = calendar.dateComponents([.year, .month, .day], from: resolved)
@@ -646,6 +650,9 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     var focusStartedAt = Date()
     var nextBreakAt = Date().addingTimeInterval(20 * 60)
     var pausedRemaining: TimeInterval?
+    /// While paused: the focus counted before the pause. Kept apart from `pausedRemaining`, because the countdown can
+    /// start over (a snooze, or a released hard-stop wait) while the stretch goes on. Nil in older snapshots.
+    var pausedFocus: TimeInterval?
     var breakStartedAt: Date?
     var breakEndsAt: Date?
     var activeKind: BreakKind?
@@ -664,10 +671,46 @@ struct EngineSnapshot: Codable, Equatable, Sendable {
     /// Per hard stop ID: the warnings already delivered for its next occurrence.
     var hardStopWarnings: [String: HardStopWarningMark] = [:]
     /// Per hard stop ID: the key of the latest occurrence that started, merged, ended, or was missed. It and every
-    /// earlier occurrence never start again.
+    /// earlier occurrence never start again; for a one-off stop, which has a single occurrence, only it.
     var handledHardStops: [String: Int] = [:]
     /// Per hard stop ID: the key of the due occurrence that is waiting for a call to end.
     var hardStopsWaitingForCall: [String: Int] = [:]
+    /// Per hard stop ID: the stop as it was when its waiting occurrence began to wait. That occurrence keeps these
+    /// rules (its end, escape hatch, and call behavior) when the stop is edited, as a running one keeps the rules it
+    /// started with. Empty in older snapshots, whose waits follow the stop as configured.
+    var hardStopWaitingRules: [String: HardStop] = [:]
+    /// Per hard stop ID: the occurrences an edit saved while the stop was in progress superseded. Kept apart from
+    /// `handledHardStops`, so a later edit that changes the stop's start time or repeat is judged only against the
+    /// occurrences that really started, merged, ended, or were missed. Empty in older snapshots.
+    var supersededHardStops: [String: SupersededHardStops] = [:]
+    /// Per hard stop ID: the keys of its occurrences that were in progress (running, joined to the running stop, or
+    /// waiting for a call) when that stop was saved in Settings. Only these supersede the stop's other occurrences
+    /// (`BreakScheduler.isHandled`); a stop that was not saved during an occurrence keeps the usual overlap rules, and
+    /// saving another stop never adds to it. A key goes once its occurrence is no longer in progress. Empty in older
+    /// snapshots.
+    var hardStopsEditedInProgress: [String: Set<Int>] = [:]
+}
+
+/// The occurrences of a hard stop that an edit saved while it was in progress superseded: they never start, merge, or
+/// warn while the stop keeps the start time and repeat it was saved with.
+struct SupersededHardStops: Codable, Equatable, Sendable {
+    var hour: Int
+    var minute: Int
+    var repeats: HardStop.Repeat
+    /// The key of the last superseded occurrence (`HardStop.Occurrence.key`). It and every earlier one never run.
+    var throughKey: Int
+
+    init(_ stop: HardStop, throughKey: Int) {
+        hour = stop.hour
+        minute = stop.minute
+        repeats = stop.repeats
+        self.throughKey = throughKey
+    }
+
+    /// True while `stop` keeps the start time and repeat these occurrences were superseded for.
+    func applies(to stop: HardStop) -> Bool {
+        (hour, minute, repeats) == (stop.hour, stop.minute, stop.repeats)
+    }
 }
 
 extension EngineSnapshot {
@@ -678,6 +721,7 @@ extension EngineSnapshot {
         focusStartedAt = try container.decode(Date.self, forKey: .focusStartedAt)
         nextBreakAt = try container.decode(Date.self, forKey: .nextBreakAt)
         pausedRemaining = try container.decodeIfPresent(TimeInterval.self, forKey: .pausedRemaining)
+        pausedFocus = try container.decodeIfPresent(TimeInterval.self, forKey: .pausedFocus)
         breakStartedAt = try container.decodeIfPresent(Date.self, forKey: .breakStartedAt)
         breakEndsAt = try container.decodeIfPresent(Date.self, forKey: .breakEndsAt)
         activeKind = try container.decodeIfPresent(BreakKind.self, forKey: .activeKind)
@@ -693,6 +737,9 @@ extension EngineSnapshot {
         hardStopWarnings = try container.decodeIfPresent([String: HardStopWarningMark].self, forKey: .hardStopWarnings) ?? [:]
         handledHardStops = try container.decodeIfPresent([String: Int].self, forKey: .handledHardStops) ?? [:]
         hardStopsWaitingForCall = try container.decodeIfPresent([String: Int].self, forKey: .hardStopsWaitingForCall) ?? [:]
+        hardStopWaitingRules = try container.decodeIfPresent([String: HardStop].self, forKey: .hardStopWaitingRules) ?? [:]
+        supersededHardStops = try container.decodeIfPresent([String: SupersededHardStops].self, forKey: .supersededHardStops) ?? [:]
+        hardStopsEditedInProgress = try container.decodeIfPresent([String: Set<Int>].self, forKey: .hardStopsEditedInProgress) ?? [:]
     }
 }
 
