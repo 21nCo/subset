@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Builds a Developer ID-signed, notarized, stapled macOS release of one native app:
-//   node scripts/release-macos.mjs <app-id> [--version <x.y.z>] [--dev <n>] [--out <dir>] [--skip-notarize]
+//   node scripts/release-macos.mjs <app-id> [--version <x.y.z>] [--beta <n>] [--out <dir>] [--skip-notarize]
 //
-// --dev <n> makes development build n of the app's MARKETING_VERSION: the files are named <App>-<x.y.z>-dev.<n>
-// and the app's CFBundleVersion (CURRENT_PROJECT_VERSION) is set to n, so each dev build is distinguishable while
-// CFBundleShortVersionString stays x.y.z. A dev build is signed and notarized like a live one.
+// --beta <n> makes beta build n of the app's MARKETING_VERSION: the files are named <App>-<x.y.z>-beta.<n> and the
+// app's CFBundleVersion (CURRENT_PROJECT_VERSION) is set to n, so each beta build is distinguishable while
+// CFBundleShortVersionString stays x.y.z. A beta build is signed and notarized like a live one. --dev <n> makes the
+// same kind of build named x.y.z-dev.<n>, the label test builds used before betas.
 //
 // The app is described by native/<app-id>/macos-release.json ({ project, scheme, app }). Signing uses the
 // "Developer ID Application" identity for the team in that file (or --team / APPLE_TEAM_ID) from the
@@ -13,7 +14,7 @@
 // API key (APPLE_API_KEY_PATH, APPLE_API_KEY_ID, APPLE_API_ISSUER). Credentials are never printed.
 //
 // Output: <out>/<App>-<version>.dmg, <App>-<version>.zip, and SHA256SUMS, where <version> is x.y.z or
-// x.y.z-dev.<n>. Nothing is uploaded or published.
+// x.y.z-beta.<n>. Nothing is uploaded or published.
 //
 // Building and signing can run separately, so no project, package, or npm code ever runs while signing
 // credentials are present:
@@ -32,25 +33,26 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const appIdPattern = /^[a-z0-9][a-z0-9-]*$/;
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const teamPattern = /^[A-Z0-9]{10}$/;
-// A dev build number is a positive integer without leading zeros; it becomes CFBundleVersion.
-const devBuildPattern = /^[1-9]\d{0,8}$/;
+// A beta (or older dev) build number is a positive integer without leading zeros; it becomes CFBundleVersion.
+const buildNumberPattern = /^[1-9]\d{0,8}$/;
 
-// A live release tag is macos/<app-id>/v<x.y.z>; a dev build tag is macos/<app-id>/v<x.y.z>-dev.<n>. The slashes
-// keep both from matching publish-tag.yml's *-v*.*.*. Dev tags also return `dev` (n, as a string).
+// A live release tag is macos/<app-id>/v<x.y.z>; a beta build tag is macos/<app-id>/v<x.y.z>-beta.<n> (older test
+// builds used -dev.<n>). The slashes keep them from matching publish-tag.yml's *-v*.*.*. A test build tag also
+// returns `prerelease`: its channel and build number n (as a string).
 export function parseReleaseTag(tag) {
-  const match = /^macos\/(?<appId>[a-z0-9][a-z0-9-]*)\/v(?<version>\d+\.\d+\.\d+)(?:-dev\.(?<dev>[1-9]\d{0,8}))?$/.exec(tag ?? '');
-  if (!match) throw new Error(`Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>, got ${JSON.stringify(tag)}`);
-  const { appId, version, dev } = match.groups;
-  return dev === undefined ? { appId, version } : { appId, version, dev };
+  const match = /^macos\/(?<appId>[a-z0-9][a-z0-9-]*)\/v(?<version>\d+\.\d+\.\d+)(?:-(?<channel>beta|dev)\.(?<build>[1-9]\d{0,8}))?$/.exec(tag ?? '');
+  if (!match) throw new Error(`Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-beta.<n>, got ${JSON.stringify(tag)}`);
+  const { appId, version, channel, build } = match.groups;
+  return channel === undefined ? { appId, version } : { appId, version, prerelease: { channel, build } };
 }
 
-// The version a build's files and release are named for: x.y.z for a live release, x.y.z-dev.<n> for a dev build.
-export function releaseVersion(version, dev) {
-  return dev === undefined ? version : `${version}-dev.${dev}`;
+// The version a build's files and release are named for: x.y.z for a live release, x.y.z-beta.<n> for a beta build.
+export function releaseVersion(version, prerelease) {
+  return prerelease === undefined ? version : `${version}-${prerelease.channel}.${prerelease.build}`;
 }
 
 // Catalog surfaces list only live releases (AGENTS.md rule 4). The version must be a plain x.y.z, and no link may
-// name a pre-release version such as 0.1.1-dev.2 (a dev tag like /v0.1.1-dev.2 or a file like App-0.1.1-dev.2.dmg).
+// name a pre-release version such as 0.1.1-beta.2 (a beta tag like /v0.1.1-beta.2 or a file like App-0.1.1-beta.2.dmg).
 // The lookbehind starts a version only at the beginning of a digit run, so long digit runs scan in linear time.
 const liveVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const prereleaseLinkPattern = /(?<!\d)\d+\.\d+\.\d+-(?:dev|alpha|beta|rc|pre|preview|canary|nightly)(?![a-z])/i;
@@ -126,6 +128,7 @@ export function isRepoRelativePath(value) {
 
 const valueOptions = {
   '--version': 'version',
+  '--beta': 'beta',
   '--dev': 'dev',
   '--out': 'out',
   '--team': 'team',
@@ -135,7 +138,8 @@ const valueOptions = {
 };
 const optionChecks = [
   ['version', versionPattern, (value) => `--version must be x.y.z, got ${value}`],
-  ['dev', devBuildPattern, (value) => `--dev must be a positive integer, got ${value}`],
+  ['beta', buildNumberPattern, (value) => `--beta must be a positive integer, got ${value}`],
+  ['dev', buildNumberPattern, (value) => `--dev must be a positive integer, got ${value}`],
   ['team', teamPattern, () => '--team must be a 10-character Apple team ID'],
 ];
 
@@ -148,6 +152,14 @@ function checkOptions(options) {
   for (const [key, pattern, message] of optionChecks) {
     if (options[key] !== undefined && !pattern.test(options[key])) throw new Error(message(options[key]));
   }
+  if (options.beta !== undefined && options.dev !== undefined) throw new Error('--beta and --dev cannot be combined');
+}
+
+// --beta n and --dev n become { channel, build }.
+function withPrerelease({ beta, dev, ...options }) {
+  if (beta !== undefined) return { ...options, prerelease: { channel: 'beta', build: beta } };
+  if (dev !== undefined) return { ...options, prerelease: { channel: 'dev', build: dev } };
+  return options;
 }
 
 export function parseArgs(argv) {
@@ -166,11 +178,11 @@ export function parseArgs(argv) {
     else rest.push(arg);
   }
   if (rest.length !== 1) {
-    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--archive-only --archive-out file | --from-archive file]');
+    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--beta n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--archive-only --archive-out file | --from-archive file]');
   }
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
   checkOptions(options);
-  return { appId: rest[0], ...options };
+  return { appId: rest[0], ...withPrerelease(options) };
 }
 
 function run(command, args, { capture = false, cwd = repoRoot } = {}) {
@@ -324,7 +336,7 @@ function projectVersion(options, manifest) {
 
 // Archives the app with an ad-hoc signature: entitlements and the hardened runtime are applied, but no signing
 // identity is used, so this step needs no credentials. Export re-signs it with Developer ID.
-function archiveApp({ appId, manifest, team, version }, dev, workDir) {
+function archiveApp({ appId, manifest, team, version }, prerelease, workDir) {
   const archivePath = path.join(workDir, `${manifest.app}.xcarchive`);
   run('xcodebuild', [
     'archive',
@@ -340,10 +352,10 @@ function archiveApp({ appId, manifest, team, version }, dev, workDir) {
     'CODE_SIGN_IDENTITY=-',
     'PROVISIONING_PROFILE_SPECIFIER=',
     'ENABLE_HARDENED_RUNTIME=YES',
-    // A dev build stamps its number into CFBundleVersion for every target, so embedded extensions still match.
-    ...(dev === undefined ? [] : [`CURRENT_PROJECT_VERSION=${dev}`]),
+    // A beta build stamps its number into CFBundleVersion for every target, so embedded extensions still match.
+    ...(prerelease === undefined ? [] : [`CURRENT_PROJECT_VERSION=${prerelease.build}`]),
   ]);
-  checkBundleVersions(archivedApp(archivePath, manifest), version, dev);
+  checkBundleVersions(archivedApp(archivePath, manifest), version, prerelease);
   return archivePath;
 }
 
@@ -369,7 +381,7 @@ function unpackArchive(file, manifest, workDir) {
 
 // Re-signs the archive with the Developer ID identity, then refuses anything not signed by this team's Developer
 // ID with the hardened runtime. Returns the exported app and its signature details.
-function exportSigned(archivePath, { manifest, team, version }, dev, workDir) {
+function exportSigned(archivePath, { manifest, team, version }, prerelease, workDir) {
   const exportOptions = path.join(workDir, 'ExportOptions.plist');
   writeFileSync(
     exportOptions,
@@ -389,7 +401,7 @@ function exportSigned(archivePath, { manifest, team, version }, dev, workDir) {
   run('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportDir, '-exportOptionsPlist', exportOptions]);
   const appPath = path.join(exportDir, `${manifest.app}.app`);
   if (!existsSync(appPath)) throw new Error(`Export did not produce ${manifest.app}.app`);
-  checkBundleVersions(appPath, version, dev);
+  checkBundleVersions(appPath, version, prerelease);
 
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
   // codesign prints signature details on stderr.
@@ -407,13 +419,15 @@ function plistValue(plist, key) {
   return execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' }).trim();
 }
 
-// The app must carry the release's version, and a dev build its build number.
-function checkBundleVersions(appPath, version, dev) {
+// The app must carry the release's version, and a beta build its build number.
+function checkBundleVersions(appPath, version, prerelease) {
   const plist = path.join(appPath, 'Contents', 'Info.plist');
   const shortVersion = plistValue(plist, 'CFBundleShortVersionString');
   const bundleVersion = plistValue(plist, 'CFBundleVersion');
   if (shortVersion !== version) throw new Error(`App has CFBundleShortVersionString ${shortVersion}, expected ${version}`);
-  if (dev !== undefined && bundleVersion !== dev) throw new Error(`Dev build ${dev} has CFBundleVersion ${bundleVersion}, expected ${dev}`);
+  if (prerelease !== undefined && bundleVersion !== prerelease.build) {
+    throw new Error(`Build ${releaseVersion(version, prerelease)} has CFBundleVersion ${bundleVersion}, expected ${prerelease.build}`);
+  }
   console.log(`CFBundleShortVersionString ${shortVersion}, CFBundleVersion ${bundleVersion}`);
 }
 
@@ -433,9 +447,9 @@ function writeArchiveOnly(options) {
   const version = projectVersion(options, manifest);
   const workDir = mkdtempSync(path.join(tmpdir(), 'release-macos-archive-'));
   try {
-    const archivePath = archiveApp({ appId: options.appId, manifest, team, version }, options.dev, workDir);
+    const archivePath = archiveApp({ appId: options.appId, manifest, team, version }, options.prerelease, workDir);
     run('tar', ['-czf', path.resolve(options.archiveOut), '-C', workDir, path.basename(archivePath)]);
-    console.log(`\nArchived ${manifest.app} ${releaseVersion(version, options.dev)} (ad-hoc signed) to ${options.archiveOut}`);
+    console.log(`\nArchived ${manifest.app} ${releaseVersion(version, options.prerelease)} (ad-hoc signed) to ${options.archiveOut}`);
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }
@@ -450,7 +464,7 @@ function main() {
   if (!options.fromArchive) prepareInputs(manifest, options.appId);
   const version = options.fromArchive ? options.version : projectVersion(options, manifest);
   const release = { appId: options.appId, manifest, team, version };
-  const fullVersion = releaseVersion(version, options.dev);
+  const fullVersion = releaseVersion(version, options.prerelease);
   // Resolve credentials before the slow build so a missing setup fails fast.
   const authArgs = options.skipNotarize ? null : notaryAuthArgs(options);
 
@@ -468,11 +482,11 @@ function main() {
   let archivePath;
   if (options.fromArchive) {
     archivePath = unpackArchive(options.fromArchive, manifest, workDir);
-    checkBundleVersions(archivedApp(archivePath, manifest), version, options.dev);
+    checkBundleVersions(archivedApp(archivePath, manifest), version, options.prerelease);
   } else {
-    archivePath = archiveApp(release, options.dev, workDir);
+    archivePath = archiveApp(release, options.prerelease, workDir);
   }
-  const { appPath, signature } = exportSigned(archivePath, release, options.dev, workDir);
+  const { appPath, signature } = exportSigned(archivePath, release, options.prerelease, workDir);
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);

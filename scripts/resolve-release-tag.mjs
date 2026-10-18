@@ -84,7 +84,11 @@ if (packageJson.private !== false) {
   fail(`${target.name} at ${target.path} is not marked private: false, so it is not ready to publish`);
 }
 
-if (packageJson.version !== version) {
+// A beta tag (<slug>-v<x.y.z>-beta.<n>, made by beta-builds.mjs on merges to dev) publishes the package.json version
+// x.y.z with that suffix, so a beta needs no version commit.
+const beta = /^\d+\.\d+\.\d+$/.test(packageJson.version) && /^(\d+\.\d+\.\d+)-beta\.[1-9]\d*$/.exec(version)?.[1] === packageJson.version;
+
+if (packageJson.version !== version && !beta) {
   fail(`Tag version ${version} does not match ${target.name}@${packageJson.version} in ${target.path}/package.json`);
 }
 
@@ -93,8 +97,9 @@ await writeOutputs({
   pkg_name: target.name,
   pkg_version: packageJson.version,
   pkg_path: target.path,
+  publish_version: version,
   // Only a hyphen before `+build` metadata marks a prerelease.
-  npm_tag: version.split('+', 1)[0].includes('-') ? 'next' : 'latest',
+  npm_tag: beta ? 'beta' : version.split('+', 1)[0].includes('-') ? 'next' : 'latest',
 });
 
 console.log(
@@ -103,7 +108,7 @@ console.log(
       tag,
       slug: target.slug,
       name: target.name,
-      version: packageJson.version,
+      version,
       path: target.path,
     },
     null,

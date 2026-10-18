@@ -4,9 +4,11 @@ name: Release macOS app
 # app's MARKETING_VERSION) to build a Developer ID-signed, notarized, stapled DMG and zip. The result goes to
 # a DRAFT GitHub Release: nothing is public until someone verifies the download and publishes the draft.
 #
-# A dev build tag like macos/breaks/v0.1.1-dev.3 builds the same way, with files named <App>-0.1.1-dev.3 and
+# A beta build tag like macos/breaks/v0.1.1-beta.3 builds the same way, with files named <App>-0.1.1-beta.3 and
 # CFBundleVersion 3, and publishes them as a GitHub PRE-RELEASE (not a draft, never "latest") so testers can
-# download it. A dev build is for testing and is never listed as available in the catalog.
+# download it. Beta builds are tagged and started by beta-builds.yml on every merge to dev that changes the app.
+# A beta build is for testing and is never listed as available in the catalog. Older test builds used -dev.<n>
+# tags, which still build the same way.
 #
 # Two jobs keep project code away from the signing credentials. `build` has no environment, secrets, or write
 # token: it prepares inputs (npm workspaces, fetched frameworks, Swift packages) and archives the app with an
@@ -28,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag in the form macos/<app-id>/v<version> or macos/<app-id>/v<version>-dev.<n>'
+        description: 'Release tag in the form macos/<app-id>/v<version> or macos/<app-id>/v<version>-beta.<n>'
         required: true
         type: string
 
@@ -54,7 +56,7 @@ jobs:
         run: |
           case "$RELEASE_TAG" in
             macos/*/v*.*.*) ;;
-            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>." >&2; exit 1 ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-beta.<n>." >&2; exit 1 ;;
           esac
 
       - name: Checkout release tag
@@ -83,12 +85,12 @@ jobs:
         run: |
           eval "$(node --input-type=module -e '
             import { parseReleaseTag } from "./scripts/release-macos.mjs";
-            const { appId, version, dev } = parseReleaseTag(process.env.RELEASE_TAG);
-            console.log(`app_id=${appId}; version=${version}; dev=${dev ?? ""}`);
+            const { appId, version, prerelease } = parseReleaseTag(process.env.RELEASE_TAG);
+            console.log(`app_id=${appId}; version=${version}; channel=${prerelease?.channel ?? ""}; build=${prerelease?.build ?? ""}`);
           ')"
-          dev_args=()
-          if [ -n "$dev" ]; then dev_args=(--dev "$dev"); fi
-          node scripts/release-macos.mjs "$app_id" --version "$version" "${dev_args[@]}" --archive-only --archive-out "$RUNNER_TEMP/app.xcarchive.tar.gz"
+          build_args=()
+          if [ -n "$channel" ]; then build_args=("--$channel" "$build"); fi
+          node scripts/release-macos.mjs "$app_id" --version "$version" "${build_args[@]}" --archive-only --archive-out "$RUNNER_TEMP/app.xcarchive.tar.gz"
 
       - name: Hand the archive to the signing job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -115,7 +117,7 @@ jobs:
         run: |
           case "$RELEASE_TAG" in
             macos/*/v*.*.*) ;;
-            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-dev.<n>." >&2; exit 1 ;;
+            *) echo "Release tag must look like macos/<app-id>/v<x.y.z> or macos/<app-id>/v<x.y.z>-beta.<n>." >&2; exit 1 ;;
           esac
           if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
             echo "Run this workflow from tag $RELEASE_TAG (Use workflow from), not $GITHUB_REF." >&2
@@ -164,9 +166,12 @@ jobs:
           node --input-type=module -e '
             import { appendFileSync } from "node:fs";
             import { parseReleaseTag, releaseVersion } from "./scripts/release-macos.mjs";
-            const { appId, version, dev } = parseReleaseTag(process.env.RELEASE_TAG);
-            // dev is empty for a live release tag.
-            appendFileSync(process.env.GITHUB_OUTPUT, `app_id=${appId}\nversion=${version}\ndev=${dev ?? ""}\nrelease_version=${releaseVersion(version, dev)}\n`);
+            const { appId, version, prerelease } = parseReleaseTag(process.env.RELEASE_TAG);
+            // channel and build are empty for a live release tag.
+            appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `app_id=${appId}\nversion=${version}\nchannel=${prerelease?.channel ?? ""}\nbuild=${prerelease?.build ?? ""}\nrelease_version=${releaseVersion(version, prerelease)}\n`
+            );
           '
 
       - name: Select Xcode
@@ -215,19 +220,20 @@ jobs:
           # Tag-derived values reach the shell through env vars, never through expression interpolation.
           APP_ID: ${{ steps.tag.outputs.app_id }}
           APP_VERSION: ${{ steps.tag.outputs.version }}
-          DEV_BUILD: ${{ steps.tag.outputs.dev }}
+          BUILD_CHANNEL: ${{ steps.tag.outputs.channel }}
+          BUILD_NUMBER: ${{ steps.tag.outputs.build }}
         run: |
-          dev_args=()
-          if [ -n "$DEV_BUILD" ]; then dev_args=(--dev "$DEV_BUILD"); fi
+          build_args=()
+          if [ -n "$BUILD_CHANNEL" ]; then build_args=("--$BUILD_CHANNEL" "$BUILD_NUMBER"); fi
           # --from-archive: re-sign the build job's archive with Developer ID and notarize it. Only this script and
           # Apple's tools run here, no app, package, or npm build code; the archive's entries are checked before
           # unpacking.
-          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${dev_args[@]}" --from-archive "$RUNNER_TEMP/archive/app.xcarchive.tar.gz" --out "$RUNNER_TEMP/release"
+          node scripts/release-macos.mjs "$APP_ID" --version "$APP_VERSION" "${build_args[@]}" --from-archive "$RUNNER_TEMP/archive/app.xcarchive.tar.gz" --out "$RUNNER_TEMP/release"
 
       # A draft is visible only to repository collaborators. Publishing it, and linking it from the catalog or
       # a landing page, is a separate, manual step after the download has been checked on a clean Mac.
       - name: Create draft GitHub Release
-        if: steps.tag.outputs.dev == ''
+        if: steps.tag.outputs.channel == ''
         env:
           GH_TOKEN: ${{ github.token }}
           OUT_DIR: ${{ steps.build.outputs.out_dir }}
@@ -242,10 +248,10 @@ jobs:
             --notes "Developer ID-signed and notarized build of $APP_NAME $VERSION. SHA-256 checksums are in SHA256SUMS." \
             "$OUT_DIR"/*.dmg "$OUT_DIR"/*.zip "$OUT_DIR"/SHA256SUMS
 
-      # Dev builds are published as pre-releases so testers can download them without a GitHub account. A
-      # pre-release is never marked latest, and the catalog check rejects any dev build listed as available.
-      - name: Create dev build pre-release
-        if: steps.tag.outputs.dev != ''
+      # Beta builds are published as pre-releases so testers can download them without a GitHub account. A
+      # pre-release is never marked latest, and the catalog check rejects any beta build listed as available.
+      - name: Create beta build pre-release
+        if: steps.tag.outputs.channel != ''
         env:
           GH_TOKEN: ${{ github.token }}
           OUT_DIR: ${{ steps.build.outputs.out_dir }}
@@ -257,8 +263,8 @@ jobs:
             --prerelease \
             --latest=false \
             --verify-tag \
-            --title "$APP_NAME $VERSION (dev build)" \
-            --notes "Development build of $APP_NAME $VERSION for testing. This is not a release: it is not listed in the Subset catalog and may change or be removed. It is Developer ID-signed and notarized; SHA-256 checksums are in SHA256SUMS." \
+            --title "$APP_NAME $VERSION (beta build)" \
+            --notes "Beta build of $APP_NAME $VERSION for testing. This is not a release: it is not listed in the Subset catalog and may change or be removed. It is Developer ID-signed and notarized; SHA-256 checksums are in SHA256SUMS." \
             "$OUT_DIR"/*.dmg "$OUT_DIR"/*.zip "$OUT_DIR"/SHA256SUMS
 
       - name: Remove signing material

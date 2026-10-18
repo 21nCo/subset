@@ -2,6 +2,10 @@ name: Publish tagged package
 
 # Push a tag like usage-v0.1.0 (slug from release-packages.json, version matching the
 # package.json) to build, test, and publish that one package to npm.
+#
+# A beta tag like usage-v0.2.0-beta.3 (package.json at 0.2.0) publishes 0.2.0-beta.3 under the `beta`
+# dist-tag, so `npx @subset.dev/usage@beta` installs it and the default install is unchanged. beta-builds.yml
+# creates these tags and starts this workflow on merges to dev.
 on:
   push:
     tags:
@@ -71,13 +75,36 @@ jobs:
       - name: Test package
         run: npm test --workspace=${{ steps.resolve.outputs.pkg_name }}
 
+      # A beta must come before its live release, and npm would make a package's first version `latest`.
+      - name: Check the beta's version is unreleased
+        if: steps.resolve.outputs.npm_tag == 'beta'
+        env:
+          PKG_NAME: ${{ steps.resolve.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.resolve.outputs.pkg_version }}
+        run: |
+          if [ -z "$(npm view "$PKG_NAME" dist-tags.latest 2>/dev/null)" ]; then
+            echo "$PKG_NAME has no live release yet; publish its first version with a live tag." >&2
+            exit 1
+          fi
+          if [ -n "$(npm view "$PKG_NAME@$PKG_VERSION" version 2>/dev/null)" ]; then
+            echo "$PKG_NAME@$PKG_VERSION is already released; bump the version in package.json for a new beta." >&2
+            exit 1
+          fi
+
+      - name: Set the beta version
+        if: steps.resolve.outputs.npm_tag == 'beta'
+        working-directory: ${{ steps.resolve.outputs.pkg_path }}
+        env:
+          PUBLISH_VERSION: ${{ steps.resolve.outputs.publish_version }}
+        run: npm pkg set version="$PUBLISH_VERSION"
+
       - name: Pack package
         working-directory: ${{ steps.resolve.outputs.pkg_path }}
         run: npm pack --json
 
       - name: Publish package
         working-directory: ${{ steps.resolve.outputs.pkg_path }}
-        # Prereleases publish under the `next` dist-tag so they never become the default install.
+        # Betas publish under `beta` and other prereleases under `next`, so they never become the default install.
         run: npm publish --access public --tag "${{ steps.resolve.outputs.npm_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

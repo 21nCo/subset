@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { prereleaseProblems } from './release-macos.mjs';
+import { isRepoRelativePath, prereleaseProblems } from './release-macos.mjs';
 
 const root = new URL('../', import.meta.url);
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, root), 'utf8'));
@@ -92,6 +92,13 @@ for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
   assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
   assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
+  // beta-builds.mjs publishes a beta when any of these folders changed; the package's own folder is always one.
+  if (target.inputs !== undefined) {
+    assert.ok(Array.isArray(target.inputs) && target.inputs.includes(target.path), `${target.slug} inputs must include its path ${target.path}`);
+    for (const input of target.inputs) {
+      assert.ok(isRepoRelativePath(input) && existsSync(new URL(`${input}/`, root)), `${target.slug} input ${input} is not a folder in the repository`);
+    }
+  }
 }
 
 // Catalog availability (AGENTS.md rule 4 and workflow item 5). The check:workspaces script builds the catalog
