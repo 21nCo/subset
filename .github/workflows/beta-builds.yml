@@ -79,7 +79,10 @@ jobs:
             esac
             if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
             # A rerun after a failure finds its own tags already made: reuse a tag on this commit, refuse any other.
-            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+            # gh prints the error body to stdout on a 404, so the output counts only when the lookup succeeded.
+            if ! existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)"; then
+              existing=""
+            fi
             if [ -z "$existing" ]; then
               gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
             elif [ "$existing" != "$GITHUB_SHA" ]; then
