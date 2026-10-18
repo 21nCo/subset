@@ -7,8 +7,8 @@ run-name: Beta builds${{ inputs.issue && format(' for {0}', inputs.issue) || '' 
 #   macOS apps    tag macos/<app-id>/v<x.y.z>-beta.<n> and run release-macos.yml: a signed, notarized GitHub
 #                 pre-release that the app's dev landing page offers for download
 #   npm packages  tag <slug>-v<x.y.z>-beta.<n> and run publish-tag.yml: published under the npm `beta` dist-tag
-# scripts/beta-builds.mjs decides what to build. Targets named in `only` are built even if unchanged; without
-# `only`, every target whose inputs changed since its last build is built. A target whose version is already
+# scripts/beta-builds.mjs decides what to build. Targets named in `only` are built even if unchanged, unless
+# `skip_unchanged` is set; without `only`, every target whose inputs changed since its last build is built. A target whose version is already
 # released live is skipped (bump it to get betas again).
 #
 # Tags pushed with the workflow token start no workflows, so this job starts each build itself; a run started
@@ -21,6 +21,11 @@ on:
         description: 'Build just these targets, even if unchanged (space-separated, e.g. "macos/breaks npm/usage"); empty builds every changed target'
         required: false
         type: string
+      skip_unchanged:
+        description: 'Skip targets in `only` that are unchanged since their last build (their newest beta is still current)'
+        required: false
+        type: boolean
+        default: false
       issue:
         description: 'Linear issue these betas are for (e.g. SET-24), shown in the run name'
         required: false
@@ -71,7 +76,13 @@ jobs:
         id: plan
         env:
           ONLY: ${{ inputs.only }}
-        run: node scripts/beta-builds.mjs --only "$ONLY"
+          SKIP_UNCHANGED: ${{ inputs.skip_unchanged }}
+        run: |
+          if [ "$SKIP_UNCHANGED" = true ]; then
+            node scripts/beta-builds.mjs --only "$ONLY" --skip-unchanged
+          else
+            node scripts/beta-builds.mjs --only "$ONLY"
+          fi
 
   start:
     needs: plan

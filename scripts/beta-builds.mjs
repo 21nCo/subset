@@ -7,9 +7,10 @@
 // x.y.z is the app's MARKETING_VERSION or the package.json version, and must not be released live yet. n counts
 // up across all test builds of that version (including older -dev.<n> builds), so CFBundleVersion only grows.
 //
-//   node scripts/beta-builds.mjs [--only "macos/<app-id> npm/<slug> ..."]
+//   node scripts/beta-builds.mjs [--only "macos/<app-id> npm/<slug> ..."] [--skip-unchanged]
 //
-// --only plans just the named targets, even if they did not change. Prints the plan as JSON and, in CI, writes it
+// --only plans just the named targets, even if they did not change; with --skip-unchanged, a named target that is
+// unchanged since its last build is skipped, so its newest beta can be tested again instead. Prints the plan as JSON and, in CI, writes it
 // to the `plan` output. It creates no tags and starts nothing; beta-builds.yml does that.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -125,6 +126,7 @@ function npmTargets() {
 function main() {
   const onlyIndex = process.argv.indexOf('--only');
   const only = onlyIndex === -1 ? [] : (process.argv[onlyIndex + 1] ?? '').split(/\s+/).filter(Boolean);
+  const skipUnchanged = process.argv.includes('--skip-unchanged');
   const targets = [...macosTargets(), ...npmTargets()];
   const unknown = only.filter((name) => !targets.some((target) => target.name === name));
   if (unknown.length > 0) throw new Error(`Unknown target ${unknown.join(', ')}; expected one of ${targets.map((target) => target.name).join(', ')}`);
@@ -139,7 +141,7 @@ function main() {
     }
     const tags = listTags(`${target.prefix}*`);
     const changed = changedSinceLastBuild(`${target.prefix}*`, target.paths);
-    const result = planTarget({ ...target, tags, changed, forced: only.includes(target.name) });
+    const result = planTarget({ ...target, tags, changed, forced: only.includes(target.name) && !skipUnchanged });
     if (result.skip) skipped.push({ name: target.name, reason: result.skip });
     else builds.push({ name: target.name, kind: target.kind, tag: result.tag });
   }
