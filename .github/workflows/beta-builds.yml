@@ -1,0 +1,91 @@
+name: Beta builds
+
+# Every merge to dev starts a beta build of each macOS app and npm package it changed, so the change can be
+# tested before it is promoted to main and released live:
+#   macOS apps    tag macos/<app-id>/v<x.y.z>-beta.<n> and run release-macos.yml: a signed, notarized GitHub
+#                 pre-release that the app's dev landing page offers for download
+#   npm packages  tag <slug>-v<x.y.z>-beta.<n> and run publish-tag.yml: published under the npm `beta` dist-tag
+# scripts/beta-builds.mjs decides what to build. An app or package is skipped when nothing it is built from
+# changed since its last build, or when its version is already released live (bump it to get betas again).
+#
+# Tags pushed with the workflow token start no workflows, so this job starts each build itself; a run started
+# from a tag passes the macos-release environment's tag policy. If starting a build fails after its tag was made,
+# re-run the failed job: it reuses the tag and starts the build again (a later merge would treat it as built).
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Build just these targets, even if unchanged (space-separated, e.g. "macos/breaks npm/usage")'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One plan at a time, so two merges never pick the same build number. A queued run that is replaced by a newer
+# one loses nothing: each plan compares against the last build, not the last push.
+concurrency:
+  group: beta-builds
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - name: Checkout dev with tags
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Plan beta builds
+        id: plan
+        env:
+          ONLY: ${{ inputs.only }}
+        run: node scripts/beta-builds.mjs --only "$ONLY"
+
+  start:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).builds[0] != null
+    runs-on: ubuntu-latest
+    # Runs no repository code: it only creates the planned tags and starts the release workflows from them.
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Tag and start each build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN: ${{ needs.plan.outputs.plan }}
+        run: |
+          echo "$PLAN" | jq -r '.builds[] | "\(.kind) \(.tag)"' | while read -r kind tag; do
+            case "$kind" in
+              macos) workflow=release-macos.yml; pattern='^macos/[a-z0-9][a-z0-9-]*/v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$' ;;
+              npm) workflow=publish-tag.yml; pattern='^[a-z0-9][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$' ;;
+              *) echo "Unknown build kind $kind" >&2; exit 1 ;;
+            esac
+            if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
+            # A rerun after a failure finds its own tags already made: reuse a tag on this commit, refuse any other.
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+            if [ -z "$existing" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
+            elif [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "Tag $tag already exists on $existing, not $GITHUB_SHA." >&2
+              exit 1
+            fi
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$tag" -f release_tag="$tag"
+            echo "Started $workflow for $tag at $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

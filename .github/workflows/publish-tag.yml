@@ -2,6 +2,10 @@ name: Publish tagged package
 
 # Push a tag like usage-v0.1.0 (slug from release-packages.json, version matching the
 # package.json) to build, test, and publish that one package to npm.
+#
+# A beta tag like usage-v0.2.0-beta.3 (package.json at 0.2.0) publishes 0.2.0-beta.3 under the `beta`
+# dist-tag, so `npx @subset.dev/usage@beta` installs it and the default install is unchanged. beta-builds.yml
+# creates these tags and starts this workflow on merges to dev.
 on:
   push:
     tags:
@@ -21,8 +25,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      pkg_slug: ${{ steps.resolve.outputs.pkg_slug }}
+      pkg_name: ${{ steps.resolve.outputs.pkg_name }}
+      pkg_version: ${{ steps.resolve.outputs.pkg_version }}
+      publish_version: ${{ steps.resolve.outputs.publish_version }}
+      npm_tag: ${{ steps.resolve.outputs.npm_tag }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
@@ -71,13 +81,78 @@ jobs:
       - name: Test package
         run: npm test --workspace=${{ steps.resolve.outputs.pkg_name }}
 
+      - name: Set the beta version
+        if: steps.resolve.outputs.npm_tag == 'beta'
+        working-directory: ${{ steps.resolve.outputs.pkg_path }}
+        env:
+          PUBLISH_VERSION: ${{ steps.resolve.outputs.publish_version }}
+        run: npm pkg set version="$PUBLISH_VERSION"
+
       - name: Pack package
         working-directory: ${{ steps.resolve.outputs.pkg_path }}
-        run: npm pack --json
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --json --pack-destination "$RUNNER_TEMP/package"
+
+      - name: Hand the package to the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/package/*.tgz
+          if-no-files-found: error
+          # A rerun of all jobs replaces the first attempt's package.
+          overwrite: true
+          retention-days: 7
+
+  # One publish per package and dist-tag at a time, so the registry check below still holds when npm publish runs:
+  # two betas whose builds overlap publish in turn, and the older one, if it comes second, is skipped instead of
+  # moving the `beta` dist-tag backward. GitHub keeps one pending run per group and a newer pending run replaces an
+  # older one, which is harmless between betas; keying by dist-tag keeps a beta from ever replacing a pending live
+  # publish.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-${{ needs.build.outputs.pkg_slug }}-${{ needs.build.outputs.npm_tag }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      PKG_NAME: ${{ needs.build.outputs.pkg_name }}
+      PKG_VERSION: ${{ needs.build.outputs.pkg_version }}
+      PUBLISH_VERSION: ${{ needs.build.outputs.publish_version }}
+      NPM_TAG: ${{ needs.build.outputs.npm_tag }}
+
+    steps:
+      # Only for the registry check script; nothing is installed or built here.
+      - name: Checkout release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download the package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/package
+
+      # A beta must come before its live release, npm would make a package's first version `latest`, and an older
+      # beta must not replace a newer one under `beta`. Registry errors fail the run.
+      - name: Check the beta against the registry
+        id: guard
+        if: env.NPM_TAG == 'beta'
+        run: node scripts/npm-beta-guard.mjs "$PKG_NAME" "$PKG_VERSION" "$PUBLISH_VERSION"
 
       - name: Publish package
-        working-directory: ${{ steps.resolve.outputs.pkg_path }}
-        # Prereleases publish under the `next` dist-tag so they never become the default install.
-        run: npm publish --access public --tag "${{ steps.resolve.outputs.npm_tag }}"
+        if: env.NPM_TAG != 'beta' || steps.guard.outputs.publish == 'true'
+        # Betas publish under `beta` and other prereleases under `next`, so they never become the default install.
+        run: npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$NPM_TAG"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
