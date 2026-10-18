@@ -31,9 +31,14 @@ export function betaVerdict(packument, version, betaVersion) {
   return { publish: true };
 }
 
+const namePattern = /^@[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/;
+const versionPattern = /^\d+\.\d+\.\d+$/;
+
 async function main() {
   const [name, version, betaVersion] = process.argv.slice(2);
-  if (!name || !version || !betaVersion) throw new Error('Usage: npm-beta-guard.mjs <name> <x.y.z> <x.y.z-beta.n>');
+  if (!namePattern.test(name ?? '') || !versionPattern.test(version ?? '') || !betaPattern.test(betaVersion ?? '')) {
+    throw new Error('Usage: npm-beta-guard.mjs <@scope/name> <x.y.z> <x.y.z-beta.n>');
+  }
   const response = await fetch(`https://registry.npmjs.org/${name.replace('/', '%2f')}`, { headers: { Accept: 'application/json' } });
   if (!response.ok && response.status !== 404) throw new Error(`The npm registry answered ${response.status} for ${name}`);
   const verdict = betaVerdict(response.status === 404 ? null : await response.json(), version, betaVersion);
@@ -43,8 +48,10 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  try {
+    await main();
+  } catch (error) {
     console.error(`npm-beta-guard: ${error.message}`);
     process.exit(1);
-  });
+  }
 }
