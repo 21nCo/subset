@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { marketingVersion, nextBuildNumber, planTarget } from './beta-builds.mjs';
+import { betaVerdict, isNewerBeta } from './npm-beta-guard.mjs';
 
 test('reads the one MARKETING_VERSION of a project', () => {
   assert.equal(marketingVersion('MARKETING_VERSION = 0.1.1;\n\t\tMARKETING_VERSION = 0.1.1;'), '0.1.1');
@@ -14,6 +15,8 @@ test('numbers beta builds after every earlier test build of the version', () => 
   const tags = ['macos/breaks/v0.1.0', 'macos/breaks/v0.1.1-dev.1', 'macos/breaks/v0.1.1-dev.2', 'macos/breaks/v0.1.2-beta.9'];
   assert.equal(nextBuildNumber(tags, 'macos/breaks/v', '0.1.1'), 3);
   assert.equal(nextBuildNumber([...tags, 'macos/breaks/v0.1.1-beta.3'], 'macos/breaks/v', '0.1.1'), 4);
+  // The highest number counts, not how many tags there are, so a deleted tag's number is never reused.
+  assert.equal(nextBuildNumber(['macos/breaks/v0.1.1-dev.1', 'macos/breaks/v0.1.1-beta.4'], 'macos/breaks/v', '0.1.1'), 5);
   assert.equal(nextBuildNumber(tags, 'macos/breaks/v', '0.2.0'), 1);
   // Other apps, look-alike versions, and malformed numbers don't count.
   assert.equal(nextBuildNumber(['macos/breaks-pro/v0.1.1-beta.5', 'macos/breaks/v10.1.1-beta.5', 'macos/breaks/v0.1.1-beta.07'], 'macos/breaks/v', '0.1.1'), 1);
@@ -28,4 +31,28 @@ test('plans a beta only for a changed, unreleased version', () => {
   assert.deepEqual(planTarget({ ...target, changed: false, forced: true }), { tag: 'macos/breaks/v0.1.1-beta.3' });
   assert.match(planTarget({ ...target, version: '0.1.0', changed: true }).skip, /already released/);
   assert.match(planTarget({ ...target, version: '0.1.0', changed: false, forced: true }).skip, /already released/);
+});
+
+test('orders beta versions', () => {
+  assert.equal(isNewerBeta('0.2.0-beta.2', '0.2.0-beta.1'), true);
+  assert.equal(isNewerBeta('0.2.0-beta.10', '0.2.0-beta.9'), true);
+  assert.equal(isNewerBeta('0.2.1-beta.1', '0.2.0-beta.7'), true);
+  assert.equal(isNewerBeta('0.2.0-beta.1', '0.2.0-beta.2'), false);
+  assert.equal(isNewerBeta('0.2.0-beta.1', '0.2.0-beta.1'), false);
+  assert.equal(isNewerBeta('0.2.0-beta.1', '0.1.9-next.3'), true);
+  assert.equal(isNewerBeta('0.2.0-beta.1', undefined), true);
+  assert.throws(() => isNewerBeta('0.2.0', '0.2.0-beta.1'), /not an x\.y\.z-beta\.n/);
+});
+
+test('publishes a beta only before its release and never behind a newer beta', () => {
+  const packument = { 'dist-tags': { latest: '0.1.0' }, versions: { '0.1.0': {} } };
+  assert.deepEqual(betaVerdict(packument, '0.2.0', '0.2.0-beta.1'), { publish: true });
+  assert.match(betaVerdict(null, '0.2.0', '0.2.0-beta.1').error, /no live release/);
+  assert.match(betaVerdict({ 'dist-tags': {}, versions: {} }, '0.2.0', '0.2.0-beta.1').error, /no live release/);
+  assert.match(betaVerdict(packument, '0.1.0', '0.1.0-beta.1').error, /already released/);
+  const ahead = { ...packument, 'dist-tags': { latest: '0.1.0', beta: '0.2.0-beta.2' } };
+  assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.1').publish, false);
+  assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.3').publish, true);
+  // A rerun of the beta the channel already points at publishes again (npm then refuses the duplicate version).
+  assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.2').publish, true);
 });

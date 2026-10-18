@@ -20,7 +20,12 @@ import { validateManifest } from './release-macos.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const versionPattern = /^\d+\.\d+\.\d+$/;
 
-const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+// The root manifest and lockfile pin the npm dependencies every npm build installs, so a change to either counts as a
+// change to each npm package and to each app that bundles npm workspaces.
+const npmDependencyFiles = ['package.json', 'package-lock.json'];
+// git from a fixed location, never from PATH.
+const gitPath = '/usr/bin/git';
 
 // The one MARKETING_VERSION a project sets. Read from project.pbxproj because planning runs without Xcode;
 // release-macos.mjs checks the built app against it.
@@ -34,7 +39,8 @@ export function marketingVersion(pbxproj) {
 
 // The next test build number of `<prefix><version>`: one more than any existing -beta.<n> or -dev.<n> tag of it.
 export function nextBuildNumber(tags, prefix, version) {
-  const pattern = new RegExp(`^${escapeRegExp(`${prefix}${version}`)}-(?:beta|dev)\\.([1-9]\\d*)$`);
+  const base = escapeRegExp(prefix + version);
+  const pattern = new RegExp(String.raw`^${base}-(?:beta|dev)\.([1-9]\d*)$`);
   return Math.max(0, ...tags.map((tag) => Number(pattern.exec(tag)?.[1] ?? 0))) + 1;
 }
 
@@ -46,7 +52,7 @@ export function planTarget({ prefix, version, tags, changed, forced }) {
 }
 
 function git(args) {
-  return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim();
+  return execFileSync(gitPath, args, { cwd: repoRoot, encoding: 'utf8' }).trim();
 }
 
 const listTags = (pattern) => git(['tag', '--list', pattern]).split('\n').filter(Boolean);
@@ -54,10 +60,10 @@ const listTags = (pattern) => git(['tag', '--list', pattern]).split('\n').filter
 // Whether `paths` changed between the newest of the target's tags that HEAD contains and HEAD; null if HEAD
 // contains none of them.
 function changedSinceLastBuild(tagPattern, paths) {
-  const [last] = git(['for-each-ref', '--merged=HEAD', '--sort=-creatordate', '--count=1', '--format=%(refname)', `refs/tags/${tagPattern}`]).split('\n').filter(Boolean);
+  const last = git(['for-each-ref', '--merged=HEAD', '--sort=-creatordate', '--count=1', '--format=%(refname)', `refs/tags/${tagPattern}`]);
   if (!last) return null;
   try {
-    execFileSync('git', ['diff', '--quiet', `${last}^{commit}`, 'HEAD', '--', ...paths], { cwd: repoRoot, stdio: 'ignore' });
+    execFileSync(gitPath, ['diff', '--quiet', `${last}^{commit}`, 'HEAD', '--', ...paths], { cwd: repoRoot, stdio: 'ignore' });
     return false;
   } catch (error) {
     if (error.status === 1) return true;
@@ -92,7 +98,8 @@ function macosTargets() {
       if (workspaces.includes(undefined)) return { name, error: 'a listed npm workspace does not exist' };
       try {
         const version = marketingVersion(readFileSync(path.join(repoRoot, 'native', id, manifest.project, 'project.pbxproj'), 'utf8'));
-        return { name, kind: 'macos', prefix: `macos/${id}/v`, version, paths: [`native/${id}`, ...workspaces] };
+        const paths = [`native/${id}`, ...workspaces, ...(workspaces.length > 0 ? npmDependencyFiles : [])];
+        return { name, kind: 'macos', prefix: `macos/${id}/v`, version, paths };
       } catch (error) {
         return { name, error: error.message };
       }
@@ -106,9 +113,10 @@ function npmTargets() {
     const name = `npm/${slug}`;
     if (isPrivate !== false) return { name, error: 'package is not public' };
     if (!versionPattern.test(version)) return { name, error: `package.json version ${version} is not x.y.z` };
-    const target = { name, kind: 'npm', prefix: `${slug}-v`, version, paths: inputs ?? [packagePath] };
+    const target = { name, kind: 'npm', prefix: `${slug}-v`, version, paths: [...(inputs ?? [packagePath]), ...npmDependencyFiles] };
     // npm makes the first version of a package `latest` whatever its dist-tag, so a package's first release is live.
-    const released = listTags(`${slug}-v*`).some((tag) => new RegExp(`^${escapeRegExp(slug)}-v\\d+\\.\\d+\\.\\d+$`).test(tag));
+    const liveTag = new RegExp(String.raw`^${escapeRegExp(slug)}-v\d+\.\d+\.\d+$`);
+    const released = listTags(`${slug}-v*`).some((tag) => liveTag.test(tag));
     return released ? target : { ...target, skip: 'never released; publish its first version live' };
   });
 }

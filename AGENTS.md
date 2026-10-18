@@ -87,7 +87,7 @@ For macOS distribution, build and verify a signed, notarized artifact before pub
 
 ## Required workflow and enforcement
 
-Branches: `dev` is the default branch and takes all pull requests; every merge to it starts beta builds of the macOS apps and npm packages it changed. `main` receives only pull requests from `dev`, and live releases are tagged from it.
+Branches: `dev` is the default branch and takes all pull requests (its ruleset allows no direct pushes); every merge to it runs the beta planner, which builds betas of the macOS apps and npm packages it changed unless their version is already released live (or, for npm, the package has never been released). `main` receives only pull requests from `dev`, and live releases are tagged from it.
 
 1. Inspect `git status`, relevant code, this guide, and the capability's README before editing. Preserve unrelated or dirty work.
 2. State the capability boundary and consuming surfaces before implementation. Record any new shared package or cross-repo dependency in its README.

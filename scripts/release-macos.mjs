@@ -178,7 +178,7 @@ export function parseArgs(argv) {
     else rest.push(arg);
   }
   if (rest.length !== 1) {
-    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--beta n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--archive-only --archive-out file | --from-archive file]');
+    throw new Error('Usage: release-macos.mjs <app-id> [--version x.y.z] [--beta n | --dev n] [--out dir] [--team ID] [--notary-profile name] [--skip-notarize] [--archive-only --archive-out file | --from-archive file]');
   }
   if (!appIdPattern.test(rest[0])) throw new Error(`Invalid app id ${JSON.stringify(rest[0])}`);
   checkOptions(options);

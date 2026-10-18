@@ -257,14 +257,17 @@ jobs:
           OUT_DIR: ${{ steps.build.outputs.out_dir }}
           APP_NAME: ${{ steps.build.outputs.app }}
           VERSION: ${{ steps.tag.outputs.release_version }}
+          CHANNEL: ${{ steps.tag.outputs.channel }}
         run: |
+          # "beta build", or "dev build" for a tag from before beta builds.
+          if [ "$CHANNEL" = dev ]; then label=Dev; else label=Beta; fi
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --prerelease \
             --latest=false \
             --verify-tag \
-            --title "$APP_NAME $VERSION (beta build)" \
-            --notes "Beta build of $APP_NAME $VERSION for testing. This is not a release: it is not listed in the Subset catalog and may change or be removed. It is Developer ID-signed and notarized; SHA-256 checksums are in SHA256SUMS." \
+            --title "$APP_NAME $VERSION ($CHANNEL build)" \
+            --notes "$label build of $APP_NAME $VERSION for testing. This is not a release: it is not listed in the Subset catalog and may change or be removed. It is Developer ID-signed and notarized; SHA-256 checksums are in SHA256SUMS." \
             "$OUT_DIR"/*.dmg "$OUT_DIR"/*.zip "$OUT_DIR"/SHA256SUMS
 
       - name: Remove signing material

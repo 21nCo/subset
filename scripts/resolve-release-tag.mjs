@@ -92,14 +92,17 @@ if (packageJson.version !== version && !beta) {
   fail(`Tag version ${version} does not match ${target.name}@${packageJson.version} in ${target.path}/package.json`);
 }
 
+// Only a hyphen before `+build` metadata marks a prerelease.
+let npmTag = version.split('+', 1)[0].includes('-') ? 'next' : 'latest';
+if (beta) npmTag = 'beta';
+
 await writeOutputs({
   pkg_slug: target.slug,
   pkg_name: target.name,
   pkg_version: packageJson.version,
   pkg_path: target.path,
   publish_version: version,
-  // Only a hyphen before `+build` metadata marks a prerelease.
-  npm_tag: beta ? 'beta' : version.split('+', 1)[0].includes('-') ? 'next' : 'latest',
+  npm_tag: npmTag,
 });
 
 console.log(

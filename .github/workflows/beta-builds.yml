@@ -9,7 +9,8 @@ name: Beta builds
 # changed since its last build, or when its version is already released live (bump it to get betas again).
 #
 # Tags pushed with the workflow token start no workflows, so this job starts each build itself; a run started
-# from a tag passes the macos-release environment's tag policy.
+# from a tag passes the macos-release environment's tag policy. If starting a build fails after its tag was made,
+# re-run the failed job: it reuses the tag and starts the build again (a later merge would treat it as built).
 on:
   push:
     branches:
@@ -77,7 +78,14 @@ jobs:
               *) echo "Unknown build kind $kind" >&2; exit 1 ;;
             esac
             if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
-            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
+            # A rerun after a failure finds its own tags already made: reuse a tag on this commit, refuse any other.
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+            if [ -z "$existing" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
+            elif [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "Tag $tag already exists on $existing, not $GITHUB_SHA." >&2
+              exit 1
+            fi
             gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$tag" -f release_tag="$tag"
             echo "Started $workflow for $tag at $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
           done

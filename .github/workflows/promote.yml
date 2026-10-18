@@ -2,13 +2,17 @@ name: Promote
 
 # Changes reach main only from dev: feature branches merge into dev, where they get beta builds, and a pull
 # request from dev promotes them to main. The main branch ruleset requires this check.
+#
+# pull_request_target runs this file as it is on main, never a pull request's copy, so a pull request cannot
+# rewrite the check to pass. The job reads only the event's branch names and must never check out or run code
+# from the pull request. Because the file is read from main, the first promotion (the one that brings this file
+# to main) has no check to report; see docs/macos-release.md.
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - main
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   from-dev:
@@ -16,7 +20,7 @@ jobs:
     steps:
       - name: Require dev as the source branch
         env:
-          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           if [ "$HEAD_REF" != "dev" ] || [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
