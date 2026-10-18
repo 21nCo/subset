@@ -1,6 +1,6 @@
 name: Promote
 
-# Changes reach main only from dev: feature branches merge into dev, where betas are built for acceptance testing, and a pull
+# Changes reach main only from dev: feature branches merge into dev, where betas can be built on request for acceptance testing, and a pull
 # request from dev promotes them to main. The main branch ruleset requires this check.
 #
 # pull_request_target runs this file as it is on main, never a pull request's copy, so a pull request cannot

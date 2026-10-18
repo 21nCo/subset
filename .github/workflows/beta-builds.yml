@@ -39,7 +39,8 @@ permissions:
   contents: read
 
 # One plan at a time, so two runs never pick the same build number. GitHub keeps one pending run per group and a
-# newer one replaces it; the replaced run's caller sees it cancelled and can start it again.
+# newer one replaces it; the replaced run's caller sees it cancelled and starts it again with a new request ID
+# (beta-handoff.mjs does this).
 concurrency:
   group: beta-builds
   cancel-in-progress: false
@@ -50,6 +51,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Reads earlier runs, to refuse a request ID that was already used.
+      actions: read
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
     steps:
@@ -66,15 +69,25 @@ jobs:
 
       - name: Check the run labels
         env:
+          GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ inputs.issue }}
           REQUEST: ${{ inputs.request }}
         run: |
           if [ -n "$ISSUE" ] && ! [[ "$ISSUE" =~ ^[A-Z][A-Z0-9]*-[1-9][0-9]*$ ]]; then echo "issue must look like SET-24" >&2; exit 1; fi
           if [ -n "$REQUEST" ] && ! [[ "$REQUEST" =~ ^[A-Za-z0-9._-]{1,80}$ ]]; then echo "request must be 1-80 letters, digits, dots, dashes or underscores" >&2; exit 1; fi
+          # A request is built once: a caller that sends the same request again (for example after an unclear
+          # response) gets this failure instead of a second set of betas. A re-run of this run keeps its ID.
+          if [ -n "$REQUEST" ]; then
+            earlier="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow beta-builds.yml --limit 200 --json databaseId,displayTitle \
+              --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID and (.displayTitle | endswith(\"[$REQUEST]\")))] | first | .databaseId // empty")"
+            if [ -n "$earlier" ]; then echo "Request $REQUEST was already made by run $earlier." >&2; exit 1; fi
+          fi
 
       - name: Plan beta builds
         id: plan
         env:
+          # Read-only lookups of earlier betas' releases (--skip-unchanged).
+          GITHUB_TOKEN: ${{ github.token }}
           ONLY: ${{ inputs.only }}
           SKIP_UNCHANGED: ${{ inputs.skip_unchanged }}
         run: |
@@ -113,6 +126,12 @@ jobs:
               if [ "$existing" != "$GITHUB_SHA" ]; then
                 echo "Could not create tag $tag; it is on ${existing:-an unknown commit}, not $GITHUB_SHA." >&2
                 exit 1
+              fi
+              # On a re-run, a build an earlier attempt already started is left alone.
+              started="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --branch "$tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+              if [ -n "$started" ]; then
+                echo "$workflow for $tag was already started (run $started)" | tee -a "$GITHUB_STEP_SUMMARY"
+                continue
               fi
             fi
             gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$tag" -f release_tag="$tag"
