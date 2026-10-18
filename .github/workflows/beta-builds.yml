@@ -78,16 +78,14 @@ jobs:
               *) echo "Unknown build kind $kind" >&2; exit 1 ;;
             esac
             if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
-            # A rerun after a failure finds its own tags already made: reuse a tag on this commit, refuse any other.
-            # gh prints the error body to stdout on a 404, so the output counts only when the lookup succeeded.
-            if ! existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)"; then
-              existing=""
-            fi
-            if [ -z "$existing" ]; then
-              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null
-            elif [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "Tag $tag already exists on $existing, not $GITHUB_SHA." >&2
-              exit 1
+            # A rerun after a failure finds its own tags already made: if creating the tag fails, it must already be on
+            # this commit (a tag on any other commit, or a failed lookup, stops the job).
+            if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null 2>&1; then
+              existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
+              if [ "$existing" != "$GITHUB_SHA" ]; then
+                echo "Could not create tag $tag; it is on ${existing:-an unknown commit}, not $GITHUB_SHA." >&2
+                exit 1
+              fi
             fi
             gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$tag" -f release_tag="$tag"
             echo "Started $workflow for $tag at $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
