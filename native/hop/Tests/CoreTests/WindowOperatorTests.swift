@@ -5,7 +5,7 @@ import XCTest
 
 /// Every request the fakes receive, in one log, so the order across the Accessibility and app adapters is checked.
 private enum Call: Equatable {
-    case isMinimized, setMinimized(Bool), raise, makeMain, pressCloseButton, makeFrontmost, isFocused
+    case isMinimized, setMinimized(Bool), raise, makeMain, pressCloseButton, makeFrontmost, isFrontmost, isFocused, probe
     case lookUpApp, unhide, activate, hide, terminate
 }
 
@@ -28,11 +28,16 @@ private final class FakeAccessibility: WindowAccessibility, @unchecked Sendable 
     var minimized = false
     /// The read on which the window first reads back as focused (1 is the first read), or nil for never.
     var focusedFromRead: Int? = 1
+    /// The read on which the app first reads back as frontmost, or nil for never.
+    var frontmostFromRead: Int? = 1
+    /// How many of the first focused-window reads fail as if the app were slow to answer.
+    var slowFocusedReads = 0
     /// Failures by request; a request not listed succeeds.
     var failures: [Call: AccessibilityFailure] = [:]
     /// Runs inside the request before it answers, for example to make the app exit.
     var during: [Call: () -> Void] = [:]
     private var reads = 0
+    private var frontmostReads = 0
 
     init(log: CallLog) {
         self.log = log
@@ -60,11 +65,20 @@ private final class FakeAccessibility: WindowAccessibility, @unchecked Sendable 
     func pressCloseButton(_: HopCore.WindowRef, pid _: pid_t) throws(AccessibilityFailure) { try answer(.pressCloseButton) }
     func makeFrontmost(pid _: pid_t) throws(AccessibilityFailure) { try answer(.makeFrontmost) }
 
+    func isFrontmost(pid _: pid_t) throws(AccessibilityFailure) -> Bool {
+        try answer(.isFrontmost)
+        frontmostReads += 1
+        return frontmostFromRead.map { frontmostReads >= $0 } ?? false
+    }
+
     func isFocused(_: HopCore.WindowRef, pid _: pid_t) throws(AccessibilityFailure) -> Bool {
         try answer(.isFocused)
         reads += 1
+        if reads <= slowFocusedReads { throw .timedOut }
         return focusedFromRead.map { reads >= $0 } ?? false
     }
+
+    func probe(_: HopCore.WindowRef, pid _: pid_t) throws(AccessibilityFailure) { try answer(.probe) }
 }
 
 extension Call: Hashable {}
@@ -133,7 +147,7 @@ final class WindowOperatorTests: XCTestCase {
     func testFocusRaisesMakesMainActivatesThenConfirmsByReadingTheFocusedWindowBack() async {
         let result = await perform(.focus)
         XCTAssertEqual(result, .done)
-        XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused])
+        XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFrontmost, .isFocused])
     }
 
     func testFocusUnminimizesAMinimizedWindowBeforeRaisingIt() async {
@@ -141,7 +155,7 @@ final class WindowOperatorTests: XCTestCase {
         let result = await perform(.focus)
         XCTAssertEqual(result, .done)
         XCTAssertEqual(log.calls, [
-            .lookUpApp, .isMinimized, .setMinimized(false), .raise, .makeMain, .activate, .makeFrontmost, .isFocused,
+            .lookUpApp, .isMinimized, .setMinimized(false), .raise, .makeMain, .activate, .makeFrontmost, .isFrontmost, .isFocused,
         ])
     }
 
@@ -150,7 +164,7 @@ final class WindowOperatorTests: XCTestCase {
         apps = FakeApps(log: log, state: RunningAppState(bundleIdentifier: "com.example.editor", isHidden: true))
         let result = await perform(.focus, on: entry(appHidden: false))
         XCTAssertEqual(result, .done)
-        XCTAssertEqual(log.calls, [.lookUpApp, .unhide, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused])
+        XCTAssertEqual(log.calls, [.lookUpApp, .unhide, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFrontmost, .isFocused])
     }
 
     func testFocusKeepsReadingBackUntilTheWindowHasFocus() async {
@@ -167,6 +181,50 @@ final class WindowOperatorTests: XCTestCase {
         XCTAssertEqual(result, .refused("did not come to front"))
         XCTAssertGreaterThanOrEqual(ContinuousClock.now - start, .milliseconds(300))
         XCTAssertGreaterThan(log.calls.filter { $0 == .isFocused }.count, 1, "the focused window is read until the deadline")
+        XCTAssertEqual(log.calls.suffix(2), [.probe, .lookUpApp], "the window is checked once before refusing")
+    }
+
+    func testFocusIsRefusedWhenTheAppDoesNotComeToTheFrontEvenIfItsFocusedWindowIsTheWindow() async {
+        // Activation was not taken: the app stays in the background, where its focused window is already this one.
+        apps.delivers = false
+        accessibility.failures = [.makeFrontmost: .failed]
+        accessibility.frontmostFromRead = nil
+        let result = await perform(.focus, readBackTimeout: .milliseconds(300))
+        XCTAssertEqual(result, .refused("did not come to front"))
+        XCTAssertTrue(log.calls.contains(.activate))
+        XCTAssertGreaterThan(log.calls.filter { $0 == .isFrontmost }.count, 1, "frontmost is read until the deadline")
+    }
+
+    func testFocusWaitsForTheAppToComeToTheFront() async {
+        accessibility.frontmostFromRead = 3
+        let result = await perform(.focus)
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(log.calls.filter { $0 == .isFrontmost }.count, 3)
+        XCTAssertEqual(log.calls.last, .isFocused)
+    }
+
+    func testAReadBackThatTheAppIsSlowToAnswerIsRetried() async {
+        accessibility.slowFocusedReads = 2
+        let result = await perform(.focus)
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(log.calls.filter { $0 == .isFocused }.count, 3)
+    }
+
+    func testAWindowThatClosesBeforeItReadsBackIsWindowGone() async {
+        // The read-back fails, and the window itself no longer exists, while its app runs.
+        accessibility.focusedFromRead = nil
+        accessibility.failures = [.probe: .invalidElement]
+        let result = await perform(.focus, readBackTimeout: .milliseconds(100))
+        XCTAssertEqual(result, .windowGone)
+        XCTAssertEqual(log.calls.suffix(2), [.probe, .lookUpApp])
+    }
+
+    func testAWindowThatStillExistsButNeverReadsBackIsRefused() async {
+        accessibility.focusedFromRead = nil
+        accessibility.failures = [.probe: .timedOut]
+        let result = await perform(.focus, readBackTimeout: .milliseconds(100))
+        XCTAssertEqual(result, .refused("did not come to front"))
+        XCTAssertTrue(log.calls.contains(.probe))
     }
 
     func testAConfirmationThatArrivesAfterTheDeadlineDoesNotCount() async {
@@ -194,7 +252,7 @@ final class WindowOperatorTests: XCTestCase {
         accessibility.failures = [.raise: .unsupported, .makeMain: .failed]
         let result = await perform(.focus)
         XCTAssertEqual(result, .done)
-        XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused])
+        XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFrontmost, .isFocused])
     }
 
     func testAWindowWhoseMinimizedStateCannotBeReadIsFocusedAsNotMinimized() async {
@@ -207,7 +265,7 @@ final class WindowOperatorTests: XCTestCase {
             let windowOperator = AccessibilityWindowOperator(accessibility: accessibility, apps: apps)
             let result = await windowOperator.perform(.focus, on: entry())
             XCTAssertEqual(result, .done, "\(failure)")
-            XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused], "\(failure)")
+            XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFrontmost, .isFocused], "\(failure)")
         }
     }
 

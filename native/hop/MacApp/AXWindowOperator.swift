@@ -59,6 +59,13 @@ private struct AXWindowAccessibility: WindowAccessibility {
         try set(kAXFrontmostAttribute, of: AXWindowSource.appElement(pid), to: true)
     }
 
+    func isFrontmost(pid: pid_t) throws(AccessibilityFailure) -> Bool {
+        guard let frontmost = try copy(kAXFrontmostAttribute, of: AXWindowSource.appElement(pid)) as? Bool else {
+            throw .unsupported
+        }
+        return frontmost
+    }
+
     func isFocused(_ window: HopCore.WindowRef, pid: pid_t) throws(AccessibilityFailure) -> Bool {
         let target = try element(window, pid: pid)
         var value: CFTypeRef?
@@ -69,6 +76,10 @@ private struct AXWindowAccessibility: WindowAccessibility {
         }
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
         return CFEqual(value, target)
+    }
+
+    func probe(_ window: HopCore.WindowRef, pid: pid_t) throws(AccessibilityFailure) {
+        _ = try copy(kAXRoleAttribute, of: element(window, pid: pid))
     }
 
     /// The window's element with the messaging timeout set, or `.invalidElement` when its ref is no longer kept. The

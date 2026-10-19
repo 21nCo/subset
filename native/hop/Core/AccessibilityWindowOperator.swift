@@ -32,8 +32,13 @@ public protocol WindowAccessibility: Sendable {
     func pressCloseButton(_ window: WindowRef, pid: pid_t) throws(AccessibilityFailure)
     /// Sets the app element's `kAXFrontmost` to true.
     func makeFrontmost(pid: pid_t) throws(AccessibilityFailure)
+    /// The app element's `kAXFrontmost`.
+    func isFrontmost(pid: pid_t) throws(AccessibilityFailure) -> Bool
     /// Whether the app's `kAXFocusedWindow` is the window; false when the app has no focused window.
     func isFocused(_ window: WindowRef, pid: pid_t) throws(AccessibilityFailure) -> Bool
+    /// Reads an attribute of the window itself, only to learn whether it still exists: `.invalidElement` when it
+    /// does not.
+    func probe(_ window: WindowRef, pid: pid_t) throws(AccessibilityFailure)
 }
 
 /// A running app, as the operator needs it.
@@ -72,9 +77,10 @@ public protocol AppControl: Sendable {
 ///
 /// **focus** unhides the app if it is hidden, sets `kAXMinimized` false if the window is minimized, raises the window,
 /// makes it the app's main window, activates the app, and makes the app frontmost; a step the window does not support
-/// is skipped, and a window whose minimized state cannot be read is taken as not minimized. It succeeds when the app's
-/// focused window reads back as this window within `readBackTimeout` (0.5 s), and is otherwise
-/// `.refused("did not come to front")`. **minimize** sets `kAXMinimized` true. **close** presses the close button and
+/// is skipped, and a window whose minimized state cannot be read is taken as not minimized. Whether activation was
+/// taken does not matter by itself: focus succeeds when, within `readBackTimeout` (0.5 s), the app reads back as
+/// frontmost and its focused window as this window. Otherwise it is `.windowGone` if the window has meanwhile closed,
+/// and `.refused("did not come to front")` if not. **minimize** sets `kAXMinimized` true. **close** presses the close button and
 /// is done even if the app then asks to save: Hop leaves that prompt to the user. **hideApp** hides the app, and is
 /// done when it was hidden already. **quitApp** asks the app to quit normally, never by force, and Finder is never
 /// quit.
@@ -147,18 +153,29 @@ public final class AccessibilityWindowOperator: WindowOperator {
             try Self.step { () throws(AccessibilityFailure) in try accessibility.makeMain(ref, pid: pid) }
             _ = apps.activate(pid)
             try Self.step { () throws(AccessibilityFailure) in try accessibility.makeFrontmost(pid: pid) }
-            guard try readBack(ref, pid: pid) else { throw .failed }
+            if try readBack(ref, pid: pid) { return }
+            // The window may have closed while it was coming forward; one that still exists did not come forward.
+            do throws(AccessibilityFailure) {
+                try accessibility.probe(ref, pid: pid)
+            } catch {
+                if error == .invalidElement || error == .notPermitted { throw error }
+            }
+            throw .failed
         }
     }
 
-    /// Reads the app's focused window until it is the window or `readBackTimeout` has passed. A read that fails
-    /// because the app is slow or cannot say is retried until then. No read starts after the deadline, and a read
-    /// that answers after it does not count, so focus is never confirmed late.
+    /// Reads back whether the app is frontmost and its focused window is the window, until both are or
+    /// `readBackTimeout` has passed. A background app's focused window can already be the window, so frontmost is
+    /// read too. A read that fails because the app is slow or cannot say is retried until then. No read starts after
+    /// the deadline, and a read that answers after it does not count, so focus is never confirmed late.
     private func readBack(_ window: WindowRef, pid: pid_t) throws(AccessibilityFailure) -> Bool {
         let deadline = ContinuousClock.now + readBackTimeout
         while ContinuousClock.now < deadline {
             do throws(AccessibilityFailure) {
-                if try accessibility.isFocused(window, pid: pid) { return ContinuousClock.now <= deadline }
+                if try accessibility.isFrontmost(pid: pid), ContinuousClock.now < deadline,
+                   try accessibility.isFocused(window, pid: pid) {
+                    return ContinuousClock.now <= deadline
+                }
             } catch {
                 switch error {
                 case .timedOut, .unsupported, .failed: break
