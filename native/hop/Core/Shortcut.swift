@@ -16,7 +16,7 @@ public struct ModifierMask: OptionSet, Sendable, Hashable {
 
     /// The modifiers among a keyboard event's raw `CGEventFlags`, whose device-independent bits are fixed in
     /// CGEventTypes.h: Shift 0x20000, Control 0x40000, Option 0x80000, Command 0x100000. Caps Lock (0x10000), the keypad
-    /// flag (0x200000), Help and Fn (0x800000), and the device-dependent left/right bits are dropped.
+    /// flag (0x200000), Help (0x400000), Fn (0x800000), and the device-dependent left/right bits are dropped.
     public init(eventFlags: UInt64) {
         self = []
         if eventFlags & 0x20000 != 0 { insert(.shift) }
@@ -38,6 +38,10 @@ public enum KeyCode {
     /// The modifier keys themselves (Command, Shift, Caps Lock, Option, Control, their right-hand twins, and Fn).
     /// They arrive as flag changes, not key presses, so none of them can be a shortcut key.
     public static let modifierKeys: Set<UInt16> = [0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F]
+
+    /// The keys an active switch already gives a meaning (Esc cancels, ← and → step), so none of them can be the
+    /// shortcut key.
+    public static let reserved: Set<UInt16> = [escape, leftArrow, rightArrow]
 }
 
 /// The hold-to-switch shortcut: hold `holdModifier` and press `keyCode` to switch forward; add Shift to switch
@@ -47,7 +51,7 @@ public struct Shortcut: Sendable, Hashable {
     public enum Invalid: Error, Equatable {
         /// The holding modifier is not exactly Option or exactly Control.
         case holdModifier(ModifierMask)
-        /// The key is a modifier key or Esc, which cancels a switch.
+        /// The key is a modifier key, Esc (which cancels a switch), or ← or → (which step one).
         case keyCode(UInt16)
     }
 
@@ -60,7 +64,7 @@ public struct Shortcut: Sendable, Hashable {
     public init(holdModifier: ModifierMask, keyCode: UInt16) throws(Invalid) {
         guard holdModifier == .option || holdModifier == .control else { throw .holdModifier(holdModifier) }
         // Key codes are 7-bit on every Mac keyboard; a larger value cannot come from a key press.
-        guard keyCode < 0x80, keyCode != KeyCode.escape, !KeyCode.modifierKeys.contains(keyCode) else {
+        guard keyCode < 0x80, !KeyCode.reserved.contains(keyCode), !KeyCode.modifierKeys.contains(keyCode) else {
             throw .keyCode(keyCode)
         }
         self.holdModifier = holdModifier

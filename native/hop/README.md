@@ -8,7 +8,7 @@ This folder holds the app shell ([SET-90](https://linear.app/21n/issue/SET-90)) 
 
 **User outcome:** move to any open window, not just any app, from the keyboard.
 
-**Sources of truth** (only the shortcut is read so far):
+**Sources of truth** (so far only the shortcut is read, plus a temporary count of running apps that stands in for the window list until SET-92):
 
 | Data | Source | Issue |
 | --- | --- | --- |
@@ -91,22 +91,23 @@ The default mode needs only Accessibility.
 
 **Onboarding.** The onboarding window opens by itself only on the first launch without trust (the `onboarding.shown` user default records that it has), and otherwise from **Allow Accessibility Access…**. It says that Hop needs Accessibility to see and raise windows and to notice its shortcut, and that nothing leaves the Mac. **Open Privacy & Security** calls `AXIsProcessTrustedWithOptions` with the prompt option, the public way to add Hop to the Accessibility list (macOS may show its own permission alert as well), and opens `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`.
 
-**Shortcut.** Hold ⌥ and press Tab to start a switch forward, or ⌥⇧Tab to start it backward. `ShortcutStore` reads the shortcut from the `shortcut.holdModifier` and `shortcut.keyCode` user defaults, which the Settings window will write (SET-95); a missing, malformed or disallowed value reads as the default. Only ⌥ or ⌃ can be held, with ⇧ for the backward direction; ⌘ is refused, because taking over ⌘Tab needs a private API. Esc and the modifier keys cannot be the shortcut key.
+**Shortcut.** Hold ⌥ and press Tab to start a switch forward, or ⌥⇧Tab to start it backward. `ShortcutStore` reads the shortcut from the `shortcut.holdModifier` and `shortcut.keyCode` user defaults, which the Settings window will write (SET-95); a missing, malformed or disallowed value reads as the default. Only ⌥ or ⌃ can be held, with ⇧ for the backward direction; ⌘ is refused, because taking over ⌘Tab needs a private API. Esc, ← and → (which cancel and step an active switch) and the modifier keys cannot be the shortcut key.
 
 **Event tap.** `CGEvent.tapCreate` at `.cgSessionEventTap`, inserted at the head, for key-down, key-up and flags-changed events, on the main run loop in the common modes. Every event goes through `ShortcutRecognizer`, which is pure and unit-tested, and the tap does only what it returns:
 
 | Input | Idle | Switch active |
 | --- | --- | --- |
-| The shortcut (⌥Tab), with at least one window | Swallowed; starts the switch on the previous window (index 1, or 0 with one window) | Swallowed; next window |
+| The shortcut (⌥Tab), while the window count is above 0 (until SET-92, the count of running apps; see below) | Swallowed; starts the switch on the previous window (index 1, or 0 with one window) | Swallowed; next window |
 | The shortcut with ⇧ (⌥⇧Tab) | Swallowed; starts the switch on the previous window too (index 1, or 0) | Swallowed; previous window |
 | → / ← with the holding modifier, optionally plus ⇧ | Passes | Swallowed; next / previous window |
 | Esc with the holding modifier, optionally plus ⇧ | Passes | Swallowed; cancels |
 | Release of the holding modifier | Passes | Passes; commits the selection |
-| Any other key, or the shortcut, an arrow or Esc with other modifiers (⌃Tab, ⌘⌥Tab, ⌃⌥Tab, ⌘⌥→) | Passes | Passes; changes nothing |
-| Auto-repeat and key-up of a held key | Swallowed exactly when the press's first key-down was, even after the switch ended | Same; repeats of a swallowed Tab or arrow keep stepping, other repeats change nothing |
+| Any other key, or the shortcut, an arrow or Esc with other modifiers (⌃Tab, ⌘⌥Tab, ⌃⌥Tab, ⌘⌥→) | Passes | Passes; changes nothing while the holding modifier is down (⌘⌥Tab, ⌃⌥Tab, ⌘⌥→) |
+| Any key event without the holding modifier | As above | Commits the selection, because the modifier's release was missed; a new key-down passes, and a repeat or key-up keeps its press's disposition |
+| Auto-repeat and key-up of a held key | Swallowed exactly when the press's first key-down was, even after the switch ended, unless the tap was disabled or removed in between | Same; repeats of a swallowed Tab or arrow keep stepping, other repeats change nothing |
 | The tap disabled by the system (timeout or user input) | Re-enabled at once | Re-enabled at once; cancels |
 
-Modifier changes always pass, so no app sees a modifier stuck down. Each physical press is decided once, at its first key-down: an app receives all of a press (its key-down, repeats and key-up) or none of it, so a key held from before a switch keeps working in its app and never steps or cancels the switch, and a Tab held after ⌥ is released never reaches the app. A repeat never starts or cancels a switch. Selections wrap around; a window list that shrinks below the selection clamps it, and one that empties cancels the switch. A key event that arrives without the holding modifier while a switch is active means its release was missed, so the switch commits and the event passes. If the system disables the tap and trust is gone, the tap is removed instead of re-enabled.
+Modifier changes always pass, so no app sees a modifier stuck down. Each physical press is decided once, at its first key-down: an app receives all of a press (its key-down, repeats and key-up) or none of it, so a key held from before a switch keeps working in its app and never steps or cancels the switch, and a Tab held after ⌥ is released never reaches the app. The exception is an interruption: when the system disables the tap or Hop removes it, Hop forgets the presses in progress, because their key-ups may have been missed, so a key-up whose key-down was swallowed can then reach an app. A repeat never starts or cancels a switch. Selections wrap around; a window list that shrinks below the selection clamps it, and one that empties cancels the switch. A key event that arrives without the holding modifier while a switch is active means its release was missed, so the switch commits; the event passes if it is a new key-down and otherwise keeps its press's disposition. If the system disables the tap and trust is gone, the tap is removed instead of re-enabled.
 
 Until the window list arrives (SET-92), the session's window count is the number of running apps with a Dock presence (`WindowCountPlaceholder`), updated when an app launches or quits, so a switch can start and commit; with none, ⌥Tab passes through. Until the overlay and focusing arrive (SET-94), a committed switch only logs its index at debug level (`log stream --level debug --predicate 'subsystem == "dev.subset.hop"'`), and a cancelled one logs that it was cancelled. Nothing about a window, and never a title, is logged.
 

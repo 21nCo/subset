@@ -33,6 +33,17 @@ final class ShortcutTests: XCTestCase {
         }
     }
 
+    func testTheArrowsThatStepASwitchAreRejected() {
+        // While a switch is active ← and → step it; as the shortcut key one of them would step both ways at once.
+        for modifier: ModifierMask in [.option, .control] {
+            for code in [KeyCode.leftArrow, KeyCode.rightArrow] {
+                XCTAssertThrowsError(try Shortcut(holdModifier: modifier, keyCode: code)) { error in
+                    XCTAssertEqual(error as? Shortcut.Invalid, .keyCode(code))
+                }
+            }
+        }
+    }
+
     func testEventFlagsMapOnlyTheFourModifiers() {
         let all: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
         XCTAssertEqual(ModifierMask(eventFlags: all.rawValue), .all)
@@ -81,6 +92,8 @@ final class ShortcutStoreTests: XCTestCase {
             (ModifierMask.command.rawValue, Int(KeyCode.tab)), // ⌘Tab needs a private API
             (ModifierMask.option.rawValue | 1 << 8, Int(KeyCode.tab)), // unknown modifier bits
             (ModifierMask.option.rawValue, Int(KeyCode.escape)),
+            (ModifierMask.option.rawValue, Int(KeyCode.leftArrow)),
+            (ModifierMask.control.rawValue, Int(KeyCode.rightArrow)),
             (ModifierMask.option.rawValue, -1),
             (ModifierMask.option.rawValue, 70_000),
             ("option", Int(KeyCode.grave)),
@@ -91,5 +104,18 @@ final class ShortcutStoreTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
             XCTAssertEqual(store(modifier: modifier, keyCode: keyCode), .default, "\(String(describing: modifier)), \(String(describing: keyCode))")
         }
+    }
+
+    func testAStoredArrowShortcutLeavesTheArrowsSteppingTheirOwnWays() {
+        defaults.set(ModifierMask.option.rawValue, forKey: ShortcutStore.holdModifierKey)
+        defaults.set(Int(KeyCode.leftArrow), forKey: ShortcutStore.keyCodeKey)
+        let shortcut = ShortcutStore(defaults: defaults).shortcut
+        XCTAssertEqual(shortcut, .default)
+        var session = SwitchSession(count: 3)
+        session.handle(.trigger(.forward))
+        let left = TapInput.key(KeyEvent(.keyDown, keyCode: KeyCode.leftArrow, modifiers: .option))
+        let right = TapInput.key(KeyEvent(.keyDown, keyCode: KeyCode.rightArrow, modifiers: .option))
+        XCTAssertEqual(EventClassifier.classify(left, session: session, shortcut: shortcut), Classification(.swallow, .step(.backward)))
+        XCTAssertEqual(EventClassifier.classify(right, session: session, shortcut: shortcut), Classification(.swallow, .step(.forward)))
     }
 }
