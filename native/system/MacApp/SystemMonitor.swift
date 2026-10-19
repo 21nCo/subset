@@ -70,7 +70,7 @@ final class SystemMonitor {
 
 /// Owns the sampler off the main actor, so reading several hundred processes never blocks the UI.
 private actor SamplingWorker {
-    private var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource())
+    private var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource(), origin: .live())
     private let memorySource = LiveSystemMemorySource()
 
     func sample() -> (processes: Result<ProcessSnapshot, any Error>, memory: SystemMemory) {
