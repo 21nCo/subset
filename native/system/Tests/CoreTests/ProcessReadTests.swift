@@ -54,6 +54,47 @@ final class ProcessReadTests: XCTestCase {
         XCTAssertEqual(script.remaining, 0)
     }
 
+    func testANameTheKernelCutShortIsTakenFromTheExecutable() throws {
+        // pbi_name keeps 31 bytes and the p_comm fallback for another user's process 16.
+        let cases = [
+            ("com.apple.quicklook.ThumbnailsA", "/System/Library/Frameworks/QuickLookThumbnailing.framework/Support/com.apple.quicklook.ThumbnailsAgent", "com.apple.quicklook.ThumbnailsAgent"),
+            ("mobileactivation", "/usr/libexec/mobileactivationd", "mobileactivationd"),
+        ]
+        for (kernelName, path, expected) in cases {
+            let script = Script(basics: [basics(start: 1, name: kernelName), basics(start: 1, name: kernelName)], usage: [.restricted], paths: [path])
+
+            XCTAssertEqual(try XCTUnwrap(LibprocProcessSource.read(50, with: script.reads)).name, expected)
+        }
+    }
+
+    func testAKernelNameThatIsNotCutShortIsKept() throws {
+        let cases: [(kernelName: String, path: String?)] = [
+            ("Google Chrome Helper", "/Applications/Google Chrome.app/Contents/Frameworks/Helpers/chrome_crashpad_handler"),
+            ("node", "/usr/local/bin/node"),
+            ("loginwindow", nil),
+        ]
+        for (kernelName, path) in cases {
+            let script = Script(
+                basics: [basics(start: 1, name: kernelName), basics(start: 1, name: kernelName)],
+                usage: [.restricted],
+                paths: path.map { [$0] } ?? []
+            )
+
+            XCTAssertEqual(try XCTUnwrap(LibprocProcessSource.read(50, with: script.reads)).name, kernelName)
+        }
+    }
+
+    func testAPIDListThatFillsTheBufferIsReadAgainWithMoreRoom() throws {
+        // The list grew between the count and the buffered read: a full buffer may be cut short, so it is read again
+        // with twice the count plus headroom.
+        let list = ScriptedPIDList([(10, 0), (74, 0), (80, 0)])
+
+        let pids = try LibprocProcessSource.listPIDs(with: list.call)
+
+        XCTAssertEqual(pids.count, 80)
+        XCTAssertEqual(list.bufferSizes, [74, 212].map { Int32($0 * MemoryLayout<pid_t>.stride) })
+    }
+
     func testAFailedPIDListThatLibprocReportsAsZeroThrows() {
         // libproc turns a failed __proc_info into a count of 0, never -1.
         let list = ScriptedPIDList([(3, 0), (0, EPERM)])
@@ -121,14 +162,19 @@ private final class Script: @unchecked Sendable {
 private final class ScriptedPIDList: @unchecked Sendable {
     private let lock = NSLock()
     private var results: [(count: Int32, errno: Int32)]
+    private var sizes: [Int32] = []
 
     init(_ results: [(count: Int32, errno: Int32)]) {
         self.results = results
     }
 
+    /// The byte size of each buffered call.
+    var bufferSizes: [Int32] { lock.withLock { sizes } }
+
     var call: LibprocProcessSource.ListAllPIDs {
-        { buffer, _ in
+        { buffer, size in
             self.lock.withLock {
+                if buffer != nil { self.sizes.append(size) }
                 let result = self.results.isEmpty ? (count: 0, errno: ESRCH) : self.results.removeFirst()
                 if let buffer, result.count > 0 { buffer[0] = 50 }
                 return result

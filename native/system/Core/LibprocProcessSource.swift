@@ -75,17 +75,26 @@ public struct LibprocProcessSource: ProcessSource {
             let path = reads.executablePath(pid)
             guard let current = reads.basics(pid) else { return nil }
             guard current.identity == basics.identity else { continue }
-            let name = basics.name.isEmpty ? path.map { String($0.split(separator: "/").last ?? "") } ?? "" : basics.name
             return RawProcessRecord(
                 identity: basics.identity,
                 ppid: basics.ppid,
                 uid: basics.uid,
                 executablePath: path,
-                name: name,
+                name: displayName(kernelName: basics.name, executablePath: path),
                 usage: usage
             )
         }
         return nil
+    }
+
+    /// The kernel keeps a process name in a fixed-width buffer (`pbi_name` holds 31 bytes, `p_comm` 16), so a long
+    /// name comes back cut short. The executable's file name replaces the kernel name when that name is empty or a
+    /// strict prefix of it; any other kernel name, such as one a process set for itself, is kept.
+    static func displayName(kernelName: String, executablePath: String?) -> String {
+        guard let path = executablePath, let last = path.split(separator: "/").last else { return kernelName }
+        let fileName = String(last)
+        let isTruncated = fileName.utf8.count > kernelName.utf8.count && fileName.utf8.starts(with: kernelName.utf8)
+        return isTruncated ? fileName : kernelName
     }
 
     struct ProcessBasics: Sendable {

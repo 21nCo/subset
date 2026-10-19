@@ -20,10 +20,14 @@ final class LiveSamplingTests: XCTestCase {
         XCTAssertNil(mine.cpuPercent)
         XCTAssertNil(first.machineCPUPercent)
 
-        // Burn some CPU so the second sample has a measurable delta.
-        let deadline = Date().addingTimeInterval(0.2)
+        // Burn some CPU so the second sample has a measurable delta. The kernel folds ticks into the host counters
+        // lazily (gaps near a second are normal on an idle Mac), so keep spinning until they have moved.
+        let hostCPU = LiveHostCPUSource()
+        let firstTicks = try XCTUnwrap(hostCPU.read())
+        let minimum = Date().addingTimeInterval(0.2)
+        let deadline = Date().addingTimeInterval(5)
         var spin = 0
-        while Date() < deadline { spin &+= 1 }
+        while Date() < minimum || (hostCPU.read() == firstTicks && Date() < deadline) { spin &+= 1 }
         XCTAssertNotEqual(spin, 0)
 
         let second = try sampler.sample()
