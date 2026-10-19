@@ -102,6 +102,14 @@ public struct LibprocProcessSource: ProcessSource {
         basics(pid)?.identity
     }
 
+    /// Whether the PID still belongs to `identity` and runs `executablePath`. The path is read before the identity,
+    /// so an unchanged identity means the path is that process's.
+    static func check(_ identity: ProcessIdentity, executablePath: String?) -> ProcessImageCheck {
+        let path = Self.executablePath(identity.pid)
+        guard currentIdentity(of: identity.pid) == identity else { return .exited }
+        return path == executablePath ? .unchanged : .executableChanged
+    }
+
     struct ProcessBasics: Sendable {
         let identity: ProcessIdentity
         let ppid: Int32
@@ -169,7 +177,7 @@ public struct LibprocProcessSource: ProcessSource {
         }
     }
 
-    private static func executablePath(_ pid: pid_t) -> String? {
+    static func executablePath(_ pid: pid_t) -> String? {
         // PROC_PIDPATHINFO_MAXSIZE (4 × MAXPATHLEN) is not imported into Swift.
         var buffer = [UInt8](repeating: 0, count: 4 * Int(MAXPATHLEN))
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))

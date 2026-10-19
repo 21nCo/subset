@@ -54,14 +54,16 @@ struct FileStamp: Hashable, Sendable {
 /// rebuilt file is read again.
 ///
 /// The reads are by PID, so an entry is published only when the read must describe the file as stamped: the
-/// process started after the file last changed, the file did not change during the read, and the PID still
-/// belongs to the same process afterwards. A process that started before the file changed may still run the
-/// replaced version, so it is read directly and neither uses nor fills the entry. Only values are kept: a failure
-/// such as an exited process says nothing about the file. Without an executable path, or when `stat` fails (the
-/// file was deleted), the read is not cached.
+/// process started after the file last changed, the file did not change during the read, and afterwards the PID
+/// still belongs to the same process and that process still runs the file. `exec` keeps the PID and start time, so
+/// without the last check a process that ran `exec` during the read would file its new executable's signature
+/// under the old path. A process that started before the file changed may still run the replaced version, so it is
+/// read directly and neither uses nor fills the entry; so is one that no longer runs the file when it is checked
+/// before an entry is used. Only values are kept: a failure such as an exited process says nothing about the file.
+/// Without an executable path, or when `stat` fails (the file was deleted), the read is not cached.
 public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked Sendable {
     private let reader: any CodeSignatureReading
-    private let isCurrent: @Sendable (ProcessIdentity) -> Bool
+    private let check: @Sendable (ProcessIdentity, String?) -> ProcessImageCheck
     private let lock = NSLock()
     /// One entry per path, so a modified file replaces its earlier entry instead of adding one.
     private var cache: [String: (stamp: FileStamp, signature: Signal<CodeSignature>)] = [:]
@@ -69,22 +71,26 @@ public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked S
     /// rather than grow for as long as the app runs.
     static let capacity = 4096
 
-    /// `isCurrent` tells whether a PID still belongs to an identity; by default the kernel is asked.
+    /// `check` tells whether a PID still belongs to an identity and runs an executable; by default the kernel is
+    /// asked.
     public init(
         reader: any CodeSignatureReading = SecCodeSignatureReader(),
-        isCurrent: (@Sendable (ProcessIdentity) -> Bool)? = nil
+        check: (@Sendable (ProcessIdentity, String?) -> ProcessImageCheck)? = nil
     ) {
         self.reader = reader
-        self.isCurrent = isCurrent ?? { LibprocProcessSource.currentIdentity(of: $0.pid) == $0 }
+        self.check = check ?? LibprocProcessSource.check
     }
 
     public func codeSignature(of identity: ProcessIdentity, executablePath: String?) -> Signal<CodeSignature> {
         guard let executablePath, let stamp = FileStamp(path: executablePath), stamp.predates(identity) else {
             return reader.codeSignature(of: identity, executablePath: executablePath)
         }
-        if let cached = lock.withLock({ cache[executablePath] }), cached.stamp == stamp { return cached.signature }
+        if let cached = lock.withLock({ cache[executablePath] }), cached.stamp == stamp {
+            if check(identity, executablePath) == .unchanged { return cached.signature }
+            return reader.codeSignature(of: identity, executablePath: executablePath)
+        }
         let signature = reader.codeSignature(of: identity, executablePath: executablePath)
-        if signature.value != nil, FileStamp(path: executablePath) == stamp, isCurrent(identity) {
+        if signature.value != nil, FileStamp(path: executablePath) == stamp, check(identity, executablePath) == .unchanged {
             lock.withLock {
                 if cache.count >= Self.capacity, cache[executablePath] == nil { cache.removeAll(keepingCapacity: true) }
                 cache[executablePath] = (stamp, signature)

@@ -81,6 +81,26 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.jobs.first { $0.label == "dev.fixture.stale" }?.orphaned, true)
     }
 
+    func testAgentsOfAppsInSubfoldersAreReadUpToTwoLevelsDown() throws {
+        // /Applications/Utilities and a vendor's folder; a third level is past the scan.
+        var helpers: [String: String] = [:]
+        for (label, bundle) in [("dev.utility", "Utilities/Utility.app"), ("dev.vendor", "Vendor/Suite/Tool.app"),
+                                ("dev.deep", "One/Two/Three/Deep.app")] {
+            helpers[label] = try embeddedAgent(label, in: bundle)
+        }
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.utility"]).value?.map(\.label), ["dev.utility"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.vendor"]).value?.map(\.label), ["dev.vendor"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.deep"]).value, [])
+
+        // An app installed later into a subfolder is found without any change to the top-level folder.
+        let later = try embeddedAgent("dev.later", in: "Utilities/Later.app")
+        index.refreshIfChanged()
+        XCTAssertEqual(index.launchdJobs(forExecutable: later).value?.map(\.label), ["dev.later"])
+    }
+
     func testPlistsWithoutALabelOrProgramOrThatDoNotParseAreListedAsUnreadable() throws {
         try Data("not a plist".utf8).write(to: agents.appendingPathComponent("broken.plist"))
         try plist(agents, "no-label", ["Program": "/usr/bin/true"])
@@ -180,6 +200,16 @@ final class LaunchdJobIndexTests: XCTestCase {
         try Data("#!/bin/sh\n".utf8).write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url.path
+    }
+
+    /// Creates an app bundle below the applications folder with one agent running its helper, and returns the
+    /// helper's path.
+    private func embeddedAgent(_ label: String, in bundle: String) throws -> String {
+        let helper = try executable("Applications/\(bundle)/Contents/MacOS/Helper")
+        let bundleAgents = applications.appendingPathComponent(bundle + "/Contents/Library/LaunchAgents")
+        try FileManager.default.createDirectory(at: bundleAgents, withIntermediateDirectories: true)
+        try plist(bundleAgents, label, ["Label": label, "BundleProgram": "Contents/MacOS/Helper"])
+        return helper
     }
 
     private func plist(_ folder: URL, _ name: String, _ contents: [String: Any]) throws {

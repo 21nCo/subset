@@ -78,6 +78,53 @@ final class OriginSignalReaderTests: XCTestCase {
         XCTAssertEqual(origin.terminal.failure, .processExited)
     }
 
+    func testAProcessThatRunsExecIsReadAgainAsItsNewExecutable() throws {
+        // `exec node server.js` from a shell keeps the PID and start time.
+        let fixtures = signedFixtures(pids: [90])
+        fixtures.signatures[90] = .value(CodeSignature(signingID: "com.apple.sh", teamID: nil, isPlatformBinary: true), source: .codeSigning)
+        fixtures.launchdJobs["/usr/local/bin/node"] = [job("dev.server", "/dev.server.plist")]
+        let shell = record(90, start: 1, path: "/bin/sh")
+        let node = record(90, start: 1, path: "/usr/local/bin/node")
+        var sampler = Sampler(source: FixtureProcessSource([sample([shell]), sample([shell]), sample([node]), sample([node])]), origin: fixtures.originReader())
+
+        for _ in 0..<2 {
+            let facts = try XCTUnwrap(try sampler.sample().processes.first)
+            XCTAssertEqual(facts.signingID, "com.apple.sh")
+            XCTAssertEqual(facts.launchdMatch, LaunchdMatch.none)
+        }
+        XCTAssertEqual(fixtures.calls(.codeSignature, pid: 90), 1, "an unchanged executable is read once")
+
+        fixtures.signatures[90] = .value(CodeSignature(signingID: "node", teamID: "HX7739G8FX", isPlatformBinary: false), source: .codeSigning)
+        for _ in 0..<2 {
+            let facts = try XCTUnwrap(try sampler.sample().processes.first)
+            XCTAssertEqual(facts.signingID, "node")
+            XCTAssertEqual(facts.origin?.launchdJobs.value?.map(\.label), ["dev.server"])
+            XCTAssertEqual(facts.launchdLabel, "dev.server")
+        }
+        for kind: FixtureSignalReaders.Reader in [.responsible, .coalition, .codeSignature, .workingDirectory, .terminal] {
+            XCTAssertEqual(fixtures.calls(kind, pid: 90), 2, "\(kind) once per executable")
+        }
+        XCTAssertEqual(fixtures.launchdCalls(executable: "/usr/local/bin/node"), 1)
+    }
+
+    func testAProcessThatRunsExecDuringItsReadsIsNotCachedAndIsReadAgainNextSample() throws {
+        let fixtures = signedFixtures(pids: [91])
+        // Sampled as the shell, but running node by the time its reads are checked.
+        fixtures.execs[91] = "/usr/local/bin/node"
+        var sampler = Sampler(source: FixtureProcessSource([
+            sample([record(91, start: 1, path: "/bin/sh")]),
+            sample([record(91, start: 1, path: "/usr/local/bin/node")])
+        ]), origin: fixtures.originReader())
+
+        XCTAssertNil(try sampler.sample().processes.first?.origin, "not read yet, rather than exited")
+        let origin = try XCTUnwrap(try sampler.sample().processes.first?.origin)
+
+        XCTAssertEqual(origin.coalition, .value(1091, source: .coalitionInfo))
+        XCTAssertEqual(fixtures.calls(.coalition, pid: 91), 2)
+        XCTAssertEqual(fixtures.launchdCalls(executable: "/bin/sh"), 1)
+        XCTAssertEqual(fixtures.launchdCalls(executable: "/usr/local/bin/node"), 1)
+    }
+
     func testReadsStopAtTheBudgetOldestFirstAndTheRestFollowNextSample() throws {
         let fixtures = signedFixtures(pids: [40, 41, 42])
         // The clock advances 600 ms per read: the first read is free, the second starts at 600 ms, the third would
@@ -177,12 +224,12 @@ final class OriginSignalReaderTests: XCTestCase {
         RawProcessSample(timestamp: 0, timebase: timebase, processes: processes)
     }
 
-    private func record(_ pid: pid_t, start: UInt64, ppid: Int32 = 1, usage: UsageReading = .unavailable) -> RawProcessRecord {
+    private func record(_ pid: pid_t, start: UInt64, ppid: Int32 = 1, usage: UsageReading = .unavailable, path: String? = nil) -> RawProcessRecord {
         RawProcessRecord(
             identity: ProcessIdentity(pid: pid, startTime: start),
             ppid: ppid,
             uid: 501,
-            executablePath: "/usr/bin/p\(pid)",
+            executablePath: path ?? "/usr/bin/p\(pid)",
             name: "p\(pid)",
             usage: usage
         )

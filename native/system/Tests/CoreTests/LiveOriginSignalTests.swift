@@ -36,6 +36,31 @@ final class LiveOriginSignalTests: XCTestCase {
         XCTAssertEqual(LiveProcessContextReader.terminal(device: 0x1000003, name: { _ in "??" }), .device("1,3"))
     }
 
+    func testExecKeepsTheIdentityAndTheCheckSeesTheNewExecutable() throws {
+        // A shell that runs `exec /bin/sleep` once it reads a line, as `exec node server.js` wrappers do.
+        let shell = Process()
+        let input = Pipe()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", "read line; exec /bin/sleep 30"]
+        shell.standardInput = input
+        try shell.run()
+        defer { shell.terminate() }
+        let pid = shell.processIdentifier
+        let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: pid))
+        let before = try XCTUnwrap(LibprocProcessSource.executablePath(pid))
+        XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: before), .unchanged)
+
+        input.fileHandleForWriting.write(Data("go\n".utf8))
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while LibprocProcessSource.executablePath(pid) == before, Date() < deadline { usleep(10_000) }
+        let after = try XCTUnwrap(LibprocProcessSource.executablePath(pid))
+
+        XCTAssertEqual(URL(fileURLWithPath: after).resolvingSymlinksInPath().path, URL(fileURLWithPath: "/bin/sleep").resolvingSymlinksInPath().path)
+        XCTAssertEqual(LibprocProcessSource.currentIdentity(of: pid), identity, "exec keeps the PID and start time")
+        XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: before), .executableChanged)
+        XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: after), .unchanged)
+    }
+
     func testItsOwnCodeSignatureIsRead() throws {
         let path = Bundle.main.executablePath
         let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: getpid()))

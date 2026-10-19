@@ -18,6 +18,8 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
     public var terminals: [pid_t: Signal<ControllingTerminal>] = [:]
     /// PIDs that have changed hands by the time the reader checks the identity again.
     public var reusedPIDs: Set<pid_t> = []
+    /// The executable a PID has run `exec` to by the time the reader checks it again.
+    public var execs: [pid_t: String] = [:]
     private let lock = NSLock()
     private var calls: [Reader: [pid_t: Int]] = [:]
     private var launchdCalls: [String: Int] = [:]
@@ -32,9 +34,18 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
     public func originReader(now: @escaping @Sendable () -> UInt64 = { 0 }) -> OriginSignalReader {
         OriginSignalReader(
             responsible: self, coalition: self, codeSignature: self, launchd: self, context: self,
-            isCurrent: { [self] identity in lock.withLock { !reusedPIDs.contains(identity.pid) } },
+            check: { [self] in check($0, executablePath: $1) },
             now: now
         )
+    }
+
+    /// Answers from `reusedPIDs` and `execs`; any other process still runs the executable it was read with.
+    public func check(_ identity: ProcessIdentity, executablePath: String?) -> ProcessImageCheck {
+        lock.withLock {
+            if reusedPIDs.contains(identity.pid) { return .exited }
+            guard let path = execs[identity.pid] else { return .unchanged }
+            return path == executablePath ? .unchanged : .executableChanged
+        }
     }
 
     private func record(_ reader: Reader, _ pid: pid_t) {

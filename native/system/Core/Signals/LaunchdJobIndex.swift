@@ -12,7 +12,8 @@ public protocol LaunchdJobReading: Sendable {
 public struct LaunchdFolders: Sendable {
     /// Folders of job plists.
     public var plistFolders: [(path: String, domain: LaunchdDomain)]
-    /// Folders of installed apps, each `.app` in which may embed agents in `Contents/Library/LaunchAgents`.
+    /// Folders of installed apps, each `.app` in which, or in a subfolder up to two levels down, may embed agents in
+    /// `Contents/Library/LaunchAgents`.
     public var applicationFolders: [String]
 
     public init(plistFolders: [(path: String, domain: LaunchdDomain)], applicationFolders: [String]) {
@@ -105,10 +106,7 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         var scan = Scan()
         var plistFolders = folders.plistFolders.map { (path: $0.path, domain: $0.domain, bundlePath: String?.none) }
         for applications in folders.applicationFolders {
-            guard let stamp = FileStamp(path: applications) else { continue }
-            scan.stamps.insert(stamp)
-            for entry in contents(of: applications) where entry.hasSuffix(".app") {
-                let bundle = applications + "/" + entry
+            for bundle in appBundles(in: applications, depth: appFolderDepth, stamps: &scan.stamps) {
                 plistFolders.append((bundle + "/Contents/Library/LaunchAgents", .appBundleAgent(bundlePath: bundle), bundle))
             }
         }
@@ -122,6 +120,32 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
             }
         }
         return scan
+    }
+
+    /// How many folders deep below an application folder apps are looked for, so `/Applications/Utilities` and a
+    /// vendor's folder are covered without walking the whole disk. A bundle's own contents are not searched.
+    static let appFolderDepth = 2
+
+    /// The `.app` bundles in `folder` and, up to `depth` levels down, in its subfolders, stamping each folder read.
+    private static func appBundles(in folder: String, depth: Int, stamps: inout Set<FileStamp>) -> [String] {
+        guard let stamp = FileStamp(path: folder) else { return [] }
+        stamps.insert(stamp)
+        var bundles: [String] = []
+        for entry in contents(of: folder).sorted() where !entry.hasPrefix(".") {
+            let path = folder + "/" + entry
+            if entry.hasSuffix(".app") {
+                bundles.append(path)
+            } else if depth > 0, isFolder(path) {
+                bundles += appBundles(in: path, depth: depth - 1, stamps: &stamps)
+            }
+        }
+        return bundles
+    }
+
+    /// A real folder, not a symlink to one, so a link cannot lead the scan elsewhere on the disk.
+    private static func isFolder(_ path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
     }
 
     private static func contents(of folder: String) -> [String] {

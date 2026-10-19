@@ -21,7 +21,7 @@ final class CodeSignatureTests: XCTestCase {
         try Data("v1".utf8).write(to: executable)
         let fixtures = FixtureSignalReaders()
         fixtures.signatures = [10: signed("dev.example.tool"), 11: signed("dev.example.tool")]
-        let reader = CachedCodeSignatureReader(reader: fixtures, isCurrent: { _ in true })
+        let reader = cached(fixtures)
 
         XCTAssertEqual(reader.codeSignature(of: started(10), executablePath: executable.path), signed("dev.example.tool"))
         XCTAssertEqual(reader.codeSignature(of: started(11), executablePath: executable.path), signed("dev.example.tool"))
@@ -50,7 +50,7 @@ final class CodeSignatureTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: executable.path)
         let fixtures = FixtureSignalReaders()
         fixtures.signatures = [10: signed("dev.example.tool"), 11: signed("dev.example.tool.v2")]
-        let reader = CachedCodeSignatureReader(reader: fixtures, isCurrent: { _ in true })
+        let reader = cached(fixtures)
         _ = reader.codeSignature(of: started(10), executablePath: executable.path)
 
         // An installer that copies the new version over with the archive's modification time.
@@ -69,11 +69,34 @@ final class CodeSignatureTests: XCTestCase {
         let fixtures = FixtureSignalReaders()
         // pid 10 changed hands during its read: the signature may be another program's.
         fixtures.signatures = [10: signed("dev.example.other"), 11: signed("dev.example.tool")]
-        let reader = CachedCodeSignatureReader(reader: fixtures, isCurrent: { $0.pid != 10 })
+        fixtures.reusedPIDs = [10]
+        let reader = cached(fixtures)
 
         _ = reader.codeSignature(of: started(10), executablePath: executable.path)
         XCTAssertEqual(reader.codeSignature(of: started(11), executablePath: executable.path), signed("dev.example.tool"))
         XCTAssertEqual(fixtures.calls(.codeSignature, pid: 11), 1, "the rejected read left no entry")
+    }
+
+    func testAReadOfAProcessThatRanExecMeanwhileFillsNoEntryAndAnEntryIsNotUsedForOne() throws {
+        let executable = folder.appendingPathComponent("tool")
+        try Data("v1".utf8).write(to: executable)
+        let fixtures = FixtureSignalReaders()
+        // pid 10 was sampled running the tool but ran `exec /bin/sleep` before its signature was read, so keeping
+        // its PID and start time, it reads as sleep.
+        fixtures.execs[10] = "/bin/sleep"
+        fixtures.signatures = [10: signed("com.apple.sleep"), 11: signed("dev.example.tool"), 12: signed("com.apple.sleep")]
+        let reader = cached(fixtures)
+
+        _ = reader.codeSignature(of: started(10), executablePath: executable.path)
+        XCTAssertEqual(reader.codeSignature(of: started(11), executablePath: executable.path), signed("dev.example.tool"))
+        XCTAssertEqual(fixtures.calls(.codeSignature, pid: 11), 1, "the read of the other image left no entry")
+
+        // pid 12 no longer runs the tool, so the tool's entry does not answer for it.
+        fixtures.execs[12] = "/bin/sleep"
+        XCTAssertEqual(reader.codeSignature(of: started(12), executablePath: executable.path), signed("com.apple.sleep"))
+        XCTAssertEqual(fixtures.calls(.codeSignature, pid: 12), 1)
+        XCTAssertEqual(reader.codeSignature(of: started(13), executablePath: executable.path), signed("dev.example.tool"))
+        XCTAssertEqual(fixtures.calls(.codeSignature, pid: 13), 0, "the entry still serves processes running the tool")
     }
 
     func testAProcessStartedBeforeTheFileChangedNeitherFillsNorUsesTheEntry() throws {
@@ -83,7 +106,7 @@ final class CodeSignatureTests: XCTestCase {
         try Data("v2".utf8).write(to: executable)
         let fixtures = FixtureSignalReaders()
         fixtures.signatures = [10: signed("dev.example.tool.v1"), 11: signed("dev.example.tool.v2")]
-        let reader = CachedCodeSignatureReader(reader: fixtures, isCurrent: { _ in true })
+        let reader = cached(fixtures)
 
         XCTAssertEqual(reader.codeSignature(of: older, executablePath: executable.path), signed("dev.example.tool.v1"))
         XCTAssertEqual(reader.codeSignature(of: started(11), executablePath: executable.path), signed("dev.example.tool.v2"))
@@ -100,7 +123,7 @@ final class CodeSignatureTests: XCTestCase {
         let executable = folder.appendingPathComponent("tool")
         try Data("v1".utf8).write(to: executable)
         let fixtures = FixtureSignalReaders()
-        let reader = CachedCodeSignatureReader(reader: fixtures, isCurrent: { _ in true })
+        let reader = cached(fixtures)
 
         // pid 10 has no fixture, so it reads as exited; that says nothing about the file.
         XCTAssertEqual(reader.codeSignature(of: started(10), executablePath: executable.path), .unavailable(.processExited, source: .codeSigning))
@@ -112,6 +135,10 @@ final class CodeSignatureTests: XCTestCase {
         _ = reader.codeSignature(of: started(10), executablePath: deleted)
         _ = reader.codeSignature(of: started(10), executablePath: nil)
         XCTAssertEqual(fixtures.calls(.codeSignature, pid: 10), 5)
+    }
+
+    private func cached(_ fixtures: FixtureSignalReaders) -> CachedCodeSignatureReader {
+        CachedCodeSignatureReader(reader: fixtures, check: { fixtures.check($0, executablePath: $1) })
     }
 
     func testSigningInformationMapsToTeamIdentifierAndPlatformBinary() {
