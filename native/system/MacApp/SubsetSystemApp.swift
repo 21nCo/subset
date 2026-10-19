@@ -7,9 +7,12 @@ enum SubsetSystemApp {
     @MainActor
     static func main() {
         let app = NSApplication.shared
-        // NSApplication holds its delegate weakly; this local lives until run() returns at exit.
+        // NSApplication holds its delegate weakly, and Swift may release a local after its last use, so keep the
+        // delegate alive explicitly for as long as the run loop runs.
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.run()
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
     }
 }

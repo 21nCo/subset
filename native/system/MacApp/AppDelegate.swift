@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private var statusMenu: StatusMenuController?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func applicationDidFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the
         // policy here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
@@ -25,10 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenu = StatusMenuController(perform: perform)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
 
     /// Reopening the app from Finder or `open` while it runs shows the main window, since there is no Dock icon.
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { perform(.openSystem) }
         return true
     }

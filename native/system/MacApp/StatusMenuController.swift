@@ -37,7 +37,7 @@ final class CommandMenuItem: NSMenuItem {
         target = self
     }
 
-    required init(coder: NSCoder) { fatalError("not used") }
+    required init(coder _: NSCoder) { fatalError("not used") }
 
     @objc private func run() { perform(command) }
 }

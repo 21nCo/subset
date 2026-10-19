@@ -110,17 +110,49 @@ project.predictabilize_uuids
 # Target dependency proxies hash the targets' IDs, so a second pass settles them on the derived IDs.
 project.predictabilize_uuids
 
-# Write the project and its scheme to a temporary folder and replace the old project only after both saves succeed,
-# so a failure leaves it intact.
-Dir.mktmpdir("System-xcodeproj", __dir__) do |staging|
+# Write the project and its scheme to a staging folder, then install only those generated files into
+# System.xcodeproj. Everything else in the bundle (breakpoints and personal schemes in xcuserdata, project.xcworkspace)
+# belongs to the developer and stays. Each replaced file is backed up first and a failed install restores the backups,
+# so a failure leaves the previous project intact. Tests/project-generator.sh checks both.
+staging = Dir.mktmpdir("System-xcodeproj", __dir__)
+keep_staging = false
+begin
   staged_path = File.join(staging, File.basename(project_path))
+  backup_path = File.join(staging, "backup")
   project.save(staged_path)
   scheme = Xcodeproj::XCScheme.new
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, test_target, launch_target: true)
   scheme.save_as(staged_path, "SubsetSystem", true)
-  FileUtils.rm_rf(project_path)
-  FileUtils.mv(staged_path, project_path)
+
+  generated = Dir.glob("**/*", base: staged_path).select { |path| File.file?(File.join(staged_path, path)) }.sort
+  installed = []
+  begin
+    generated.each do |path|
+      target = File.join(project_path, path)
+      FileUtils.mkdir_p(File.dirname(target))
+      if File.exist?(target)
+        FileUtils.mkdir_p(File.dirname(File.join(backup_path, path)))
+        FileUtils.cp(target, File.join(backup_path, path), preserve: true)
+      end
+      # rename replaces the file atomically; the staging folder is on the same volume.
+      File.rename(File.join(staged_path, path), target)
+      installed << path
+    end
+  rescue StandardError
+    begin
+      installed.each do |path|
+        backup = File.join(backup_path, path)
+        File.exist?(backup) ? File.rename(backup, File.join(project_path, path)) : File.delete(File.join(project_path, path))
+      end
+    rescue StandardError => restore_error
+      keep_staging = true
+      warn "Could not restore #{project_path} (#{restore_error.message}); the previous files are in #{backup_path}"
+    end
+    raise
+  end
+ensure
+  FileUtils.rm_rf(staging) unless keep_staging
 end
 
 puts "Generated #{project_path}"

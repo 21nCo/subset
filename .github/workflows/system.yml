@@ -23,6 +23,7 @@ concurrency:
 jobs:
   native:
     runs-on: macos-26
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: native/system
@@ -48,6 +49,7 @@ jobs:
           ruby ProjectGenerator.rb
           git diff --exit-code -- System.xcodeproj
           test -z "$(git status --porcelain -- System.xcodeproj)"
+          sh Tests/project-generator.sh
 
       - name: Build and test the Xcode project (unsigned)
         run: |
