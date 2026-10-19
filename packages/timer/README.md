@@ -1,12 +1,12 @@
-# Timer capability (SET-74)
+# Timer capability (SET-74, SET-75)
 
-This private package owns Timer's domain: timer definitions and presets, a pure state machine computed from timestamps, explicit operations with JSON Schemas, and the versioned agent result with the registered view ID `subset.timer.board@1`. It has no process, file I/O, UI, or network code. The later hosts (the per-user daemon, the `subset-timer` CLI, the MCP server, the web view and the macOS app, SET-75 to SET-82) use this contract; none of them exists yet, and no Timer surface is available.
+This private package owns Timer's domain: timer definitions and presets, a pure state machine computed from timestamps, explicit operations with JSON Schemas, the versioned agent result with the registered view ID `subset.timer.board@1`, and that board view as a host-agnostic Svelte 5 component. It has no process, file I/O or network code. The later hosts (the per-user daemon, the `subset-timer` CLI, the MCP server, the local web host and the macOS app, SET-76 to SET-82) use this contract; none of them exists yet, and no Timer surface is available.
 
 ## Capability boundary
 
-- **Owns:** the model (schema version 1), the engine (`project`, `transitionsBetween`, `settle`), the operations, the built-in presets, the agent result and its text fallback, the JSON Schemas, and the contract fixtures.
+- **Owns:** the model (schema version 1), the engine (`project`, `transitionsBetween`, `settle`), the operations, the built-in presets, the agent result and its text fallback, the JSON Schemas, the contract fixtures, and the board view with its view-model helpers.
 - **Hosts own:** storage (the daemon is the single writer), id-addressed routing, authorization of write classes, alerts and sound, scheduling, and any transport. A host passes the store, the untrusted input and `now`; it persists the returned store.
-- **Excluded:** storage, the daemon, any CLI, views, MCP, alerts and Swift.
+- **Excluded:** storage, the daemon, any CLI, MCP, alerts, sound and Swift.
 
 Every time is wall-clock epoch milliseconds. A timer stores when its current running stretch began (`startedAt`), the running time before that (`accumulatedMs`) and the time skipped (`skippedMs`), so every surface computes the position as `accumulatedMs + skippedMs + (now - startedAt)` after sleep, wake or a restart. When the clock goes backward, the running stretch adds nothing instead of going negative.
 
@@ -82,16 +82,40 @@ Time left rounds up and elapsed time rounds down. A segment label that differs f
 
 `fixtures/contract-v1/` holds the shared test vectors, exported as `@subset/timer/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset/timer`; the tests fail when they drift.
 
+## Board view (SET-75)
+
+`@subset/timer/view` is `src/view/TimerBoard.svelte`, the view registered as `subset.timer.board@1`. It needs Svelte 5 (a peer dependency) and a bundler that compiles `.svelte` and TypeScript sources, such as Vite with `@sveltejs/vite-plugin-svelte`. It never fetches: the local web host (SET-78), the MCP App (SET-80) and later product embeds each pass their own transport through `actions`.
+
+| Prop | Type | Meaning |
+| --- | --- | --- |
+| `result` | `TimerBoardResult` | The agent result's `structuredContent` or a `list` result. The board validates it and shows an error instead of timers when it does not match. A new value replaces the board's timers. |
+| `actions` | `{ invoke(operation, input): Promise<result \| { error }> }` | Runs one operation. The view calls `start`, `pause`, `resume`, `lap`, `skip`, `reset`, `remove`, `create` and `presets.list`. A rejected promise counts as that operation failing. |
+| `now` | `() => number`, optional | Epoch milliseconds; defaults to `Date.now`. |
+| `capabilities` | `{ create: boolean; destructive: boolean }` | `create: false` hides the create form; `destructive: false` hides reset and remove. |
+| `density` | `compact \| full` | `compact` suits an inline chat card: smaller cards, a lap count instead of the lap list, and the create form starts closed. |
+
+`schemas.viewProps` is the JSON Schema of the serializable props (`result`, `capabilities`, `density`); `TimerBoardProps` in `@subset/timer/view-model` is the full type.
+
+- **Rendering.** Every 250 ms the board re-projects each timer from its timestamps with `project`; it never counts ticks. Interval cards show the phase colour and label, the round (for example `Round 3/8`), the time left in the step, a progress ring and the next step. Countdowns show the time left and a ring; stopwatches show the time elapsed and their latest laps. The header shows the result's `observedAt`. After a successful action the returned snapshot replaces its timer (or a removal drops it) until the host passes a new `result`. A failed action shows an inline error naming the operation, for example `Pause failed: …`, on its card or above the board.
+- **Controls.** `controlStates` enables each control by the timer's status at `now` with the operations' own rules: start when idle (an `until` countdown only while its time is 1 second to 24 hours away), pause when running, resume when paused, lap on running stopwatches and lap-enabled countdowns, skip on running or paused interval timers, reset unless idle, remove always. Lap and skip are hidden on kinds that cannot use them.
+- **Destructive actions.** Reset and remove run on a second press of the same control within 3 seconds; the first press changes its label to `Press again to reset`. There is no modal.
+- **Keyboard.** Every control is a button in Tab order and each card is focusable. On a focused card, Space starts, pauses or resumes, L takes a lap and S skips. Focus stays on the card after an action, and moves to the timer list when its card is removed.
+- **Announcements.** One polite live region announces a new interval step (`Tabata: Rest, round 3 of 8, 0:10.`), pause, resume, finish and failed actions. It never announces the passing seconds; the time readouts are `role="timer"`, which screen readers do not read out as they change.
+- **Motion and themes.** With `prefers-reduced-motion` the progress ring does not animate. Colour is never the only sign of the phase: its label is always shown. Light and dark themes follow `prefers-color-scheme`.
+- **Create.** A timer comes from a preset (built-ins at once, replaced by the host's `presets.list` result with any saved presets), a duration, a stopwatch, or a custom interval sequence of up to 100 segments with rounds, optional prep and cooldown, sound and final-3-second ticks. Durations accept seconds, `m:ss` or `h:mm:ss`. The form validates with the operations' own `timerSpec` validator and shows each error beside its field.
+
+`@subset/timer/view-model` (`src/view/view-model.ts`, compiled to `dist/view/`) holds the pure helpers: time formatting, the control table, keyboard mapping, the destructive second press, the create-form drafts and their validation, announcement selection, and reading action outcomes. Saving and removing presets, alerts, sound, persistence and an app shell are not part of the view.
+
 ## Superfunctions
 
 The reuse check for Timer (SET-73, 2026-10-19) found:
 
 - **Used by later Timer hosts:** `@mcpfn/core@0.0.5` (MCP tools, `ui://` App resources, stdio, and later a web-standard handler for Workers) and `@mcpfn/testing@0.0.5`. This package does not depend on them; its input schemas are plain JSON Schema objects that `@mcpfn/core` tool definitions accept.
 - **Gap:** mcpfn bundles `@modelcontextprotocol/sdk@1.29.0`, while 1.32.1 is current.
-- **Not needed for v1:** datafn (only matters once timers sync), uifn (0.0.x, unproven inside MCP App iframes) and observability (no telemetry).
+- **Not needed for v1:** datafn (only matters once timers sync), uifn (0.0.x, unproven inside MCP App iframes, so the board view uses plain Svelte and CSS custom properties) and observability (no telemetry).
 
-This package depends only on `zod` 4.6.5, already used by `@subset/mgraph-contracts`, for runtime validation and JSON Schema generation.
+This package depends only on `zod` 4.6.5, already used by `@subset/mgraph-contracts`, for runtime validation and JSON Schema generation, and on Svelte 5 as a peer dependency for the board view.
 
 ## Verification
 
-`npm test --workspace=@subset/timer` covers projections at segment edges, the last round, pause and resume across a segment edge, skip on the last segment, a clock going backward, every preset's total, transitions, each operation's error codes, the limits, schema validation of every fixture with Ajv, and the text for each state. Root `npm run check` runs it. Nothing here exercises a host, a real clock, sleep and wake, alerts, or an agent; those belong to SET-75 to SET-87.
+`npm test --workspace=@subset/timer` covers projections at segment edges, the last round, pause and resume across a segment edge, skip on the last segment, a clock going backward, every preset's total, transitions, each operation's error codes, the limits, schema validation of every fixture with Ajv, and the text for each state. For the view, `test/view-model.test.mjs` covers the formatting edges (0, 59.9 s, 1 h), the control table for every kind and state checked against the operations, the destructive second press, interval-editor validation against the schema fixtures, and announcement selection, including that re-projecting every 250 ms announces only step changes. `npm run check --workspace=@subset/timer` runs `tsc` and `svelte-check` (`check:view`) with warnings as errors. Root `npm run check` runs both. Nothing here renders the view in a browser or checks it with a screen reader (deferred to SET-85 and SET-86), or exercises a host, a real clock, sleep and wake, alerts, or an agent; those belong to SET-76 to SET-87.
