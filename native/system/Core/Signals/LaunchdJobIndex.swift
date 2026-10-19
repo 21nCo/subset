@@ -5,7 +5,9 @@ import Foundation
 public protocol LaunchdJobReading: Sendable {
     /// Rebuilds the index if a watched folder or plist changed since the last build. Called once per batch of reads.
     func refreshIfChanged()
-    func launchdJobs(forExecutable path: String?) -> Signal<[LaunchdJob]>
+    /// The jobs the readable plists give the executable, with the scan's failures; `unavailable(.incompleteScan)`
+    /// when no readable plist names it and the scan had failures.
+    func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs>
 }
 
 /// The folders a `LaunchdJobIndex` reads.
@@ -35,9 +37,9 @@ public struct LaunchdFolders: Sendable {
     }
 }
 
-/// Maps each job's program to the job's label and plist. The program is `Program`, else `BundleProgram` (relative
-/// to its app bundle, for agents embedded in one), else `ProgramArguments[0]`, which launchd resolves like
-/// `execvp`: a name without a slash is searched for in launchd's default `PATH`. Symlinks are resolved, since the
+/// Maps each job's program to the job's label and plist. The program is `Program`, which must be absolute, else
+/// `BundleProgram` (relative to its app bundle, for agents embedded in one), else `ProgramArguments[0]`, which
+/// launchd resolves like `execvp`: a name without a slash is searched for in launchd's default `PATH`. Symlinks are resolved, since the
 /// kernel reports a running process by its real path (Homebrew services, for one, name a symlink). A plist whose
 /// program does not exist is kept as `orphaned`.
 ///
@@ -45,12 +47,12 @@ public struct LaunchdFolders: Sendable {
 /// time, or status-change time (so a permission change counts), appears or disappears, or can or can no longer be
 /// read. The programs are resolved again on every refresh, since an executable can be
 /// created, deleted, or have its symlink retargeted (as `brew upgrade` does to `/opt/homebrew/opt`) while its plist
-/// stays the same. A plist without a label or program, that does not parse, or that is not a regular file (a
+/// stays the same. A plist without a label or program, with a relative `Program`, that does not parse, or that is not a regular file (a
 /// folder, FIFO, or device named `.plist`, which is opened without blocking) is listed in `unreadablePlists` and
 /// left out: launchd cannot load it either. A folder or plist that exists but cannot be read, such as one without
-/// read permission, is listed in `scanFailures`, and an executable no readable plist names is then `unavailable`
-/// rather than known to have no job, since launchd, running as root, may load a job from it. A missing folder is not
-/// a failure.
+/// read permission, is listed in `scanFailures`, since launchd, running as root, may load a job from it: the jobs
+/// found for an executable then carry the failures, and an executable no readable plist names is `unavailable` rather
+/// than known to have no job. A missing folder is not a failure.
 public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// launchd's default `PATH` for jobs.
     static let launchdPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -71,7 +73,8 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
 
     /// Every indexed job, orphaned ones included, ordered by plist path.
     public var jobs: [LaunchdJob] { lock.withLock { state.jobs } }
-    /// Plists that do not parse or lack a label or program; launchd cannot load them either.
+    /// Plists that do not parse, lack a label or program, or have a relative `Program`; launchd cannot load them
+    /// either.
     public var unreadablePlists: [String] { lock.withLock { state.unreadable } }
     /// Folders and plists that exist but could not be read, ordered by path.
     public var scanFailures: [LaunchdScanFailure] { lock.withLock { state.failures } }
@@ -81,16 +84,17 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         lock.withLock { refresh(scan) }
     }
 
-    public func launchdJobs(forExecutable path: String?) -> Signal<[LaunchdJob]> {
+    public func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs> {
         guard let path else { return .unavailable(.noExecutablePath, source: .launchdPlists) }
         let (byProgram, failures) = lock.withLock {
             if stamps == nil { refresh(Self.scan(folders)) }
             return (state.byProgram, state.failures)
         }
         let jobs = byProgram[path] ?? Self.realPath(path).flatMap { byProgram[$0] } ?? []
-        // A job that was found stands; the absence of one is known only when every plist was read.
+        // A job that was found stands, but is not known to be the only one, and the absence of one is known only
+        // when every plist was read.
         if jobs.isEmpty, !failures.isEmpty { return .unavailable(.incompleteScan(failures), source: .launchdPlists) }
-        return .value(jobs, source: .launchdPlists)
+        return .value(LaunchdJobs(jobs: jobs, scanFailures: failures), source: .launchdPlists)
     }
 
     /// Reads the plists again if the scan differs, then resolves every program. Call with the lock held.
@@ -256,8 +260,10 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
             else { return nil }
             let workingDirectory = plist["WorkingDirectory"] as? String
             if let value = plist["Program"] as? String, !value.isEmpty {
+                // launchd requires an absolute `Program`; only `ProgramArguments[0]` is looked up like `execvp`.
+                guard value.hasPrefix("/") else { return nil }
                 program = value
-                location = LaunchdJobIndex.location(of: value, workingDirectory: workingDirectory)
+                location = value
             } else if let bundlePath, let value = plist["BundleProgram"] as? String, !value.isEmpty {
                 program = value
                 location = bundlePath + "/" + value

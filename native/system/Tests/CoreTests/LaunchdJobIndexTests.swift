@@ -37,10 +37,10 @@ final class LaunchdJobIndexTests: XCTestCase {
         try plist(daemons, "dev.gone", ["Label": "dev.gone", "ProgramArguments": [root.path + "/bin/removed"]])
         let index = LaunchdJobIndex(folders: folders())
 
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: worker).value?.map(\.label), ["dev.worker"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: other).value?.map(\.label), ["dev.both"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: root.path + "/bin/unrelated"), .value([], source: .launchdPlists))
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: worker).value?.jobs.map(\.label), ["dev.worker"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: other).value?.jobs.map(\.label), ["dev.both"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: root.path + "/bin/unrelated"), .value(LaunchdJobs(jobs: []), source: .launchdPlists))
         XCTAssertEqual(index.launchdJobs(forExecutable: nil), .unavailable(.noExecutablePath, source: .launchdPlists))
 
         let server_ = try XCTUnwrap(index.jobs.first { $0.label == "dev.server" })
@@ -51,7 +51,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertTrue(gone.orphaned)
         XCTAssertEqual(gone.program, root.path + "/bin/removed")
         XCTAssertEqual(gone.domain, .globalDaemon)
-        XCTAssertEqual(index.launchdJobs(forExecutable: root.path + "/bin/removed"), .value([], source: .launchdPlists))
+        XCTAssertEqual(index.launchdJobs(forExecutable: root.path + "/bin/removed"), .value(LaunchdJobs(jobs: []), source: .launchdPlists))
     }
 
     func testABareProgramNameIsFoundOnLaunchdsPath() throws {
@@ -60,7 +60,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         let index = LaunchdJobIndex(folders: folders())
 
         let truePath = try XCTUnwrap(LaunchdJobIndex.realPath("/usr/bin/true"))
-        XCTAssertEqual(index.launchdJobs(forExecutable: truePath).value?.map(\.label), ["dev.true"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: truePath).value?.jobs.map(\.label), ["dev.true"])
         XCTAssertEqual(index.jobs.first { $0.label == "dev.missing" }?.orphaned, true)
     }
 
@@ -74,7 +74,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         try plist(bundleAgents, "dev.fixture.stale", ["Label": "dev.fixture.stale", "BundleProgram": "Contents/MacOS/Removed"])
         let index = LaunchdJobIndex(folders: folders())
 
-        let jobs = try XCTUnwrap(index.launchdJobs(forExecutable: helper).value)
+        let jobs = try XCTUnwrap(index.launchdJobs(forExecutable: helper).value?.jobs)
         XCTAssertEqual(jobs.map(\.label), ["dev.fixture.helper"])
         XCTAssertEqual(jobs.first?.domain, .appBundleAgent(bundlePath: bundle.path))
         XCTAssertEqual(jobs.first?.plistPath, bundleAgents.path + "/dev.fixture.helper.plist")
@@ -91,14 +91,14 @@ final class LaunchdJobIndexTests: XCTestCase {
         let index = LaunchdJobIndex(folders: folders())
         index.refreshIfChanged()
 
-        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.utility"]).value?.map(\.label), ["dev.utility"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.vendor"]).value?.map(\.label), ["dev.vendor"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.deep"]).value, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.utility"]).value?.jobs.map(\.label), ["dev.utility"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.vendor"]).value?.jobs.map(\.label), ["dev.vendor"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helpers["dev.deep"]).value, LaunchdJobs(jobs: []))
 
         // An app installed later into a subfolder is found without any change to the top-level folder.
         let later = try embeddedAgent("dev.later", in: "Utilities/Later.app")
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: later).value?.map(\.label), ["dev.later"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: later).value?.jobs.map(\.label), ["dev.later"])
     }
 
     func testPlistsWithoutALabelOrProgramOrThatDoNotParseAreListedAsUnreadable() throws {
@@ -113,7 +113,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.jobs, [])
         XCTAssertEqual(index.unreadablePlists, ["broken", "folder", "no-label", "no-program"].map { agents.path + "/\($0).plist" })
         XCTAssertEqual(index.scanFailures, [], "launchd cannot load these either, so the scan is still complete")
-        XCTAssertEqual(index.launchdJobs(forExecutable: "/usr/bin/true"), .value([], source: .launchdPlists))
+        XCTAssertEqual(index.launchdJobs(forExecutable: "/usr/bin/true"), .value(LaunchdJobs(jobs: []), source: .launchdPlists))
     }
 
     func testAFIFONamedLikeAPlistIsUnreadableAndDoesNotBlockTheScan() throws {
@@ -137,24 +137,24 @@ final class LaunchdJobIndexTests: XCTestCase {
 
         XCTAssertEqual(index.unreadablePlists, [fifo, link])
         XCTAssertEqual(index.scanFailures, [])
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
     }
 
     func testTheIndexIsRebuiltWhenAFolderOrPlistChanges() throws {
         let server = try executable("bin/server")
         let index = LaunchdJobIndex(folders: folders())
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, LaunchdJobs(jobs: []))
 
         try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, [], "a lookup alone does not rescan")
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, LaunchdJobs(jobs: []), "a lookup alone does not rescan")
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
 
         // An edit in place, which leaves the folder's own modification time alone.
         try plist(agents, "dev.server", ["Label": "dev.server.renamed", "Program": server])
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: agents.path + "/dev.server.plist")
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server.renamed"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server.renamed"])
 
         // An app installed later, with an embedded agent.
         let helper = try executable("Applications/Later.app/Contents/MacOS/Helper")
@@ -162,11 +162,11 @@ final class LaunchdJobIndexTests: XCTestCase {
         try FileManager.default.createDirectory(at: bundleAgents, withIntermediateDirectories: true)
         try plist(bundleAgents, "dev.later", ["Label": "dev.later", "BundleProgram": "Contents/MacOS/Helper"])
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: helper).value?.map(\.label), ["dev.later"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helper).value?.jobs.map(\.label), ["dev.later"])
 
         try FileManager.default.removeItem(atPath: agents.path + "/dev.server.plist")
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, LaunchdJobs(jobs: []))
     }
 
     func testAProgramDeletedOrCreatedWithItsPlistUnchangedIsResolvedAgain() throws {
@@ -184,7 +184,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         _ = try executable("bin/server")
         index.refreshIfChanged()
         XCTAssertEqual(index.jobs.first?.orphaned, false)
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
     }
 
     func testRetargetingOnlyTheProgramsSymlinkMovesTheJobToTheNewExecutable() throws {
@@ -196,14 +196,14 @@ final class LaunchdJobIndexTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: root.path + "/Cellar/postgres/1")
         try plist(agents, "dev.postgres", ["Label": "dev.postgres", "ProgramArguments": [link + "/bin/postgres", "-D", "/data"]])
         let index = LaunchdJobIndex(folders: folders())
-        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value?.map(\.label), ["dev.postgres"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value?.jobs.map(\.label), ["dev.postgres"])
 
         try FileManager.default.removeItem(atPath: link)
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: root.path + "/Cellar/postgres/2")
         index.refreshIfChanged()
 
-        XCTAssertEqual(index.launchdJobs(forExecutable: v2).value?.map(\.label), ["dev.postgres"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: v2).value?.jobs.map(\.label), ["dev.postgres"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value, LaunchdJobs(jobs: []))
         XCTAssertEqual(index.jobs.first?.resolvedProgram, LaunchdJobIndex.realPath(v2))
     }
 
@@ -228,7 +228,8 @@ final class LaunchdJobIndexTests: XCTestCase {
 
         let failures = [LaunchdScanFailure(path: secretPlist, code: EACCES), LaunchdScanFailure(path: daemons.path, code: EACCES)]
         XCTAssertEqual(index.scanFailures, failures, "a missing folder is not a failure")
-        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.scanFailures, failures)
         for executable in [hidden, secret, unrelated] {
             XCTAssertEqual(index.launchdJobs(forExecutable: executable), .unavailable(.incompleteScan(failures), source: .launchdPlists))
         }
@@ -240,9 +241,63 @@ final class LaunchdJobIndexTests: XCTestCase {
         index.refreshIfChanged()
 
         XCTAssertEqual(index.scanFailures, [])
-        XCTAssertEqual(index.launchdJobs(forExecutable: hidden).value?.map(\.label), ["dev.hidden"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: secret).value?.map(\.label), ["dev.secret"])
-        XCTAssertEqual(index.launchdJobs(forExecutable: unrelated), .value([], source: .launchdPlists))
+        XCTAssertEqual(index.launchdJobs(forExecutable: hidden).value?.jobs.map(\.label), ["dev.hidden"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: secret).value?.jobs.map(\.label), ["dev.secret"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: unrelated), .value(LaunchdJobs(jobs: []), source: .launchdPlists))
+    }
+
+    func testAJobFoundWhileAPlistCannotBeReadCarriesTheFailureAndIdentifiesNoProcess() throws {
+        try XCTSkipIf(getuid() == 0, "root reads a plist without permission")
+        let server = try executable("bin/server")
+        let other = try executable("bin/other")
+        try plist(agents, "dev.a", ["Label": "dev.a", "Program": server])
+        // An unreadable plist that names the same executable with another label.
+        try plist(agents, "dev.b", ["Label": "dev.b", "Program": server])
+        let hidden = agents.path + "/dev.b.plist"
+        try Self.setPermissions(0o000, hidden)
+        addTeardownBlock { try? Self.setPermissions(0o644, hidden) }
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+        let failures = [LaunchdScanFailure(path: hidden, code: EACCES)]
+        let signed = CodeSignature(signingID: "dev.server", teamID: "ABCDE12345", isPlatformBinary: false)
+        let platform = CodeSignature(signingID: "com.apple.server", teamID: nil, isPlatformBinary: true)
+
+        let found = try XCTUnwrap(index.launchdJobs(forExecutable: server).value)
+        XCTAssertEqual(found.jobs.map(\.label), ["dev.a"])
+        XCTAssertEqual(found.scanFailures, failures)
+        XCTAssertEqual(LaunchdMatch(jobs: found, ppid: 1, signature: signed), .executableOnly(.incompleteScan))
+        XCTAssertNil(facts(ppid: 1, signature: signed, launchdJobs: found).launchdLabel)
+        // The reasons that hold whatever the unread plist says still come first.
+        XCTAssertEqual(LaunchdMatch(jobs: found, ppid: 900, signature: signed), .executableOnly(.notStartedByLaunchd))
+        XCTAssertEqual(LaunchdMatch(jobs: found, ppid: 1, signature: platform), .executableOnly(.sharedExecutable))
+        XCTAssertEqual(index.launchdJobs(forExecutable: other), .unavailable(.incompleteScan(failures), source: .launchdPlists))
+
+        try Self.setPermissions(0o644, hidden)
+        index.refreshIfChanged()
+        let both = try XCTUnwrap(index.launchdJobs(forExecutable: server).value)
+        XCTAssertEqual(both, LaunchdJobs(jobs: index.jobs))
+        XCTAssertEqual(LaunchdMatch(jobs: both, ppid: 1, signature: signed), .executableOnly(.conflictingLabels))
+
+        try plist(agents, "dev.b", ["Label": "dev.b", "Program": other])
+        index.refreshIfChanged()
+        let one = try XCTUnwrap(index.launchdJobs(forExecutable: server).value)
+        XCTAssertEqual(one.jobs.map(\.label), ["dev.a"])
+        XCTAssertTrue(one.isComplete)
+        XCTAssertEqual(LaunchdMatch(jobs: one, ppid: 1, signature: signed), .job(label: "dev.a"))
+        XCTAssertEqual(facts(ppid: 1, signature: signed, launchdJobs: one).launchdLabel, "dev.a")
+    }
+
+    func testOnlyProgramArgumentsMayNameARelativeProgram() throws {
+        // launchd requires an absolute Program but looks ProgramArguments[0] up like execvp, from WorkingDirectory.
+        let server = try executable("bin/server")
+        try plist(agents, "dev.relative-program", ["Label": "dev.relative-program", "Program": "bin/server", "WorkingDirectory": root.path])
+        try plist(agents, "dev.relative-arguments", ["Label": "dev.relative-arguments", "ProgramArguments": ["bin/server"], "WorkingDirectory": root.path])
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.relative-arguments"])
+        XCTAssertEqual(index.unreadablePlists, [agents.path + "/dev.relative-program.plist"])
+        XCTAssertEqual(index.scanFailures, [])
     }
 
     func testAnApplicationSubfolderThatCannotBeListedIsRecorded() throws {
@@ -259,7 +314,7 @@ final class LaunchdJobIndexTests: XCTestCase {
 
         try Self.setPermissions(0o755, vendor)
         index.refreshIfChanged()
-        XCTAssertEqual(index.launchdJobs(forExecutable: helper).value?.map(\.label), ["dev.vendor"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helper).value?.jobs.map(\.label), ["dev.vendor"])
     }
 
     func testTheLiveFoldersAreReadWithoutFailing() {
@@ -273,6 +328,22 @@ final class LaunchdJobIndexTests: XCTestCase {
         } else {
             XCTAssertEqual(signal, .unavailable(.incompleteScan(index.scanFailures), source: .launchdPlists))
         }
+    }
+
+    /// A process with this parent and signature, its launchd jobs read as given.
+    private func facts(ppid: Int32, signature: CodeSignature, launchdJobs: LaunchdJobs) -> ProcessFacts {
+        let record = RawProcessRecord(identity: ProcessIdentity(pid: 100, startTime: 1), ppid: ppid, uid: 501,
+                                      executablePath: launchdJobs.jobs.first?.resolvedProgram, name: "server", usage: .unavailable)
+        var facts = ProcessFacts(record: record, timebase: MachTimebase(numer: 1, denom: 1))
+        facts.origin = OriginSignals(
+            responsibleProcess: .value(100, source: .responsibility),
+            coalition: .value(1, source: .coalitionInfo),
+            codeSignature: .value(signature, source: .codeSigning),
+            launchdJobs: .value(launchdJobs, source: .launchdPlists),
+            workingDirectory: .value("/", source: .vnodePathInfo),
+            terminal: .value(.none, source: .bsdInfo)
+        )
+        return facts
     }
 
     private func folders() -> LaunchdFolders {

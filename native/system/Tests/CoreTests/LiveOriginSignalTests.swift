@@ -136,7 +136,7 @@ final class LiveOriginSignalTests: XCTestCase {
         XCTAssertNotNil(origin.codeSignature.value)
         // No plist names the test runner; a Mac with a plist it cannot read cannot rule one out.
         if case .incompleteScan? = origin.launchdJobs.failure {} else {
-            XCTAssertEqual(origin.launchdJobs.value, [])
+            XCTAssertEqual(origin.launchdJobs.value, LaunchdJobs(jobs: []))
         }
     }
 }

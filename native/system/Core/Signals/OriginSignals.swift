@@ -150,14 +150,30 @@ public struct LaunchdScanFailure: Equatable, Hashable, Sendable {
     public var reason: String { "\(String(cString: strerror(code))), errno \(code)" }
 }
 
+/// The launchd jobs whose program is a process's executable. When some folders or plists could not be read, they
+/// are listed in `scanFailures` and `jobs` holds only the readable plists' jobs: an unread plist may name the
+/// executable too.
+public struct LaunchdJobs: Equatable, Sendable {
+    public let jobs: [LaunchdJob]
+    public let scanFailures: [LaunchdScanFailure]
+
+    public init(jobs: [LaunchdJob], scanFailures: [LaunchdScanFailure] = []) {
+        self.jobs = jobs
+        self.scanFailures = scanFailures
+    }
+
+    /// Every plist was read, so `jobs` is every job that names the executable.
+    public var isComplete: Bool { scanFailures.isEmpty }
+}
+
 /// Whether the launchd plists that name a process's executable identify the process's own job. A plist names a
 /// program, not a process, so a match on the executable alone holds only for a program that launchd started and
 /// that nothing else plausibly runs.
 public enum LaunchdMatch: Equatable, Sendable {
     /// No indexed plist names the executable.
     case none
-    /// launchd started the process (its parent is pid 1), its executable is not an Apple platform binary, and every
-    /// plist that names the executable has this label. A process whose parent exited is also reparented to launchd,
+    /// launchd started the process (its parent is pid 1), its executable is not an Apple platform binary, every
+    /// plist was read, and every plist that names the executable has this label. A process whose parent exited is also reparented to launchd,
     /// so this is the plists' claim, not launchd's.
     case job(label: String)
     /// Plists name the executable, but that alone does not make the process their job.
@@ -165,7 +181,8 @@ public enum LaunchdMatch: Equatable, Sendable {
 
     /// Classifies the plists that name a process's executable, for a process with parent `ppid` and this
     /// signature. When several reasons apply, the first in `LaunchdAmbiguity`'s declaration order is given.
-    public init(jobs: [LaunchdJob], ppid: Int32, signature: CodeSignature?) {
+    public init(jobs found: LaunchdJobs, ppid: Int32, signature: CodeSignature?) {
+        let jobs = found.jobs
         let labels = Set(jobs.map(\.label))
         if jobs.isEmpty {
             self = .none
@@ -175,6 +192,8 @@ public enum LaunchdMatch: Equatable, Sendable {
             self = .executableOnly(.notStartedByLaunchd)
         } else if labels.count > 1 {
             self = .executableOnly(.conflictingLabels)
+        } else if !found.isComplete {
+            self = .executableOnly(.incompleteScan)
         } else {
             self = .job(label: jobs[0].label)
         }
@@ -191,6 +210,9 @@ public enum LaunchdAmbiguity: Equatable, Sendable {
     case notStartedByLaunchd
     /// Plists with different labels name the executable.
     case conflictingLabels
+    /// The readable plists that name the executable agree on a label, but some folders or plists could not be read
+    /// (`LaunchdJobs.scanFailures`), and one of them may name it with another label.
+    case incompleteScan
 }
 
 /// A process's controlling terminal, from its `e_tdev`.
@@ -209,8 +231,10 @@ public struct OriginSignals: Equatable, Sendable {
     /// The resource coalition, which macOS shares between an app and the XPC services and helpers it launches.
     public var coalition: Signal<UInt64>
     public var codeSignature: Signal<CodeSignature>
-    /// The launchd jobs whose program is this process's executable; empty when no plist names it.
-    public var launchdJobs: Signal<[LaunchdJob]>
+    /// The launchd jobs whose program is this process's executable, empty when no plist names it, with the folders
+    /// and plists that could not be read. When none of the readable plists names it and some could not be read, it
+    /// is `unavailable` with an `incompleteScan` reason.
+    public var launchdJobs: Signal<LaunchdJobs>
     public var workingDirectory: Signal<String>
     public var terminal: Signal<ControllingTerminal>
 
@@ -218,7 +242,7 @@ public struct OriginSignals: Equatable, Sendable {
         responsibleProcess: Signal<Int32>,
         coalition: Signal<UInt64>,
         codeSignature: Signal<CodeSignature>,
-        launchdJobs: Signal<[LaunchdJob]>,
+        launchdJobs: Signal<LaunchdJobs>,
         workingDirectory: Signal<String>,
         terminal: Signal<ControllingTerminal>
     ) {

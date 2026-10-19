@@ -98,7 +98,7 @@ final class OriginSignalReaderTests: XCTestCase {
         for _ in 0..<2 {
             let facts = try XCTUnwrap(try sampler.sample().processes.first)
             XCTAssertEqual(facts.signingID, "node")
-            XCTAssertEqual(facts.origin?.launchdJobs.value?.map(\.label), ["dev.server"])
+            XCTAssertEqual(facts.origin?.launchdJobs.value?.jobs.map(\.label), ["dev.server"])
             XCTAssertEqual(facts.launchdLabel, "dev.server")
         }
         for kind: FixtureSignalReaders.Reader in [.responsible, .coalition, .codeSignature, .workingDirectory, .terminal] {
@@ -156,7 +156,7 @@ final class OriginSignalReaderTests: XCTestCase {
         XCTAssertEqual(processes[0].launchdMatch, .job(label: "dev.a"))
         XCTAssertNil(processes[1].launchdLabel)
         XCTAssertEqual(processes[1].launchdMatch, .executableOnly(.conflictingLabels))
-        XCTAssertEqual(processes[1].origin?.launchdJobs.value?.count, 2)
+        XCTAssertEqual(processes[1].origin?.launchdJobs.value?.jobs.count, 2)
     }
 
     func testACopyOfAJobsProgramThatLaunchdDidNotStartIsNotTheJob() throws {
@@ -175,7 +175,7 @@ final class OriginSignalReaderTests: XCTestCase {
         XCTAssertEqual(processes[0].launchdLabel, "dev.server")
         XCTAssertNil(processes[1].launchdLabel)
         XCTAssertEqual(processes[1].launchdMatch, .executableOnly(.notStartedByLaunchd))
-        XCTAssertEqual(processes[1].origin?.launchdJobs.value?.map(\.label), ["dev.server"], "the raw signal still lists the plist")
+        XCTAssertEqual(processes[1].origin?.launchdJobs.value?.jobs.map(\.label), ["dev.server"], "the raw signal still lists the plist")
     }
 
     func testAJobWhoseProgramIsAPlatformBinaryLabelsNoProcess() throws {
@@ -192,7 +192,30 @@ final class OriginSignalReaderTests: XCTestCase {
 
         XCTAssertEqual(processes.map(\.launchdMatch), Array(repeating: .executableOnly(.sharedExecutable), count: 2))
         XCTAssertEqual(processes.map(\.launchdLabel), [nil, nil])
-        XCTAssertEqual(processes[0].origin?.launchdJobs.value?.count, 1)
+        XCTAssertEqual(processes[0].origin?.launchdJobs.value?.jobs.count, 1)
+    }
+
+    func testAJobFoundInAnIncompleteScanLabelsNoProcessButTheOtherReasonsStillComeFirst() throws {
+        let fixtures = signedFixtures(pids: [90, 91, 93], platform: false)
+        fixtures.signatures[92] = .value(CodeSignature(signingID: "p92", teamID: nil, isPlatformBinary: true), source: .codeSigning)
+        let failures = [LaunchdScanFailure(path: "/Library/LaunchDaemons/root-only.plist", code: EACCES)]
+        fixtures.launchdScanFailures = failures
+        for pid: pid_t in [90, 91, 92] {
+            fixtures.launchdJobs["/usr/bin/p\(pid)"] = [job("dev.server", "/dev.server.plist")]
+        }
+        var sampler = Sampler(source: FixtureProcessSource([sample([
+            record(90, start: 1), record(91, start: 1, ppid: 900), record(92, start: 1), record(93, start: 1)
+        ])]), origin: fixtures.originReader())
+
+        let processes = try sampler.sample().processes
+
+        XCTAssertEqual(processes[0].launchdMatch, .executableOnly(.incompleteScan))
+        XCTAssertNil(processes[0].launchdLabel)
+        XCTAssertEqual(processes[0].origin?.launchdJobs.value, LaunchdJobs(jobs: [job("dev.server", "/dev.server.plist")], scanFailures: failures))
+        XCTAssertEqual(processes[1].launchdMatch, .executableOnly(.notStartedByLaunchd))
+        XCTAssertEqual(processes[2].launchdMatch, .executableOnly(.sharedExecutable))
+        XCTAssertEqual(processes[3].origin?.launchdJobs, .unavailable(.incompleteScan(failures), source: .launchdPlists))
+        XCTAssertNil(processes[3].launchdMatch)
     }
 
     func testNoPlistIsNoMatchAndAnUnreadProcessHasNone() throws {

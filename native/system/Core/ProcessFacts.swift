@@ -44,8 +44,9 @@ public struct ProcessFacts: Identifiable, Equatable, Sendable {
         guard let origin, let jobs = origin.launchdJobs.value else { return nil }
         return LaunchdMatch(jobs: jobs, ppid: ppid, signature: origin.codeSignature.value)
     }
-    /// The launchd job's label when `launchdMatch` identifies one. A plist that names a shared executable, or a
-    /// copy of the program a terminal started, leaves it `nil`; `origin.launchdJobs` still lists the plists.
+    /// The launchd job's label when `launchdMatch` identifies one. A plist that names a shared executable, a copy of
+    /// the program a terminal started, or a scan that could not read every plist leaves it `nil`;
+    /// `origin.launchdJobs` still lists the plists.
     public var launchdLabel: String? {
         guard case let .job(label) = launchdMatch else { return nil }
         return label

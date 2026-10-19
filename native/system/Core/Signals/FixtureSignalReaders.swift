@@ -15,6 +15,9 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
     @Locked public var signatures: [pid_t: Signal<CodeSignature>] = [:]
     /// Keyed by executable path.
     @Locked public var launchdJobs: [String: [LaunchdJob]] = [:]
+    /// Folders and plists the launchd scan could not read. As in `LaunchdJobIndex`, found jobs carry them, and an
+    /// executable with no job is then `unavailable(.incompleteScan)`.
+    @Locked public var launchdScanFailures: [LaunchdScanFailure] = []
     @Locked public var workingDirectories: [pid_t: Signal<String>] = [:]
     @Locked public var terminals: [pid_t: Signal<ControllingTerminal>] = [:]
     /// PIDs that have changed hands by the time the reader checks the identity again.
@@ -72,10 +75,13 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
         lock.withLock { refreshes += 1 }
     }
 
-    public func launchdJobs(forExecutable path: String?) -> Signal<[LaunchdJob]> {
+    public func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs> {
         guard let path else { return .unavailable(.noExecutablePath, source: .launchdPlists) }
         lock.withLock { launchdCalls[path, default: 0] += 1 }
-        return .value(launchdJobs[path] ?? [], source: .launchdPlists)
+        let jobs = launchdJobs[path] ?? []
+        let failures = launchdScanFailures
+        if jobs.isEmpty, !failures.isEmpty { return .unavailable(.incompleteScan(failures), source: .launchdPlists) }
+        return .value(LaunchdJobs(jobs: jobs, scanFailures: failures), source: .launchdPlists)
     }
 
     public func workingDirectory(of pid: pid_t) -> Signal<String> {
