@@ -1,3 +1,4 @@
+import AppKit
 import SystemCore
 import XCTest
 
@@ -33,6 +34,18 @@ final class StatusSummaryTests: XCTestCase {
 
         let recovered = StatusSummary(snapshot: last, memory: memory(level: 1))
         XCTAssertEqual(recovered.title, "75%")
+    }
+
+    func testEachPressureLevelHasItsOwnSymbolShapeNotJustAColor() {
+        let summaries = [StatusSummary(snapshot: nil, memory: nil)] + [1, 2, 4].map {
+            StatusSummary(snapshot: nil, memory: memory(level: $0))
+        }
+        let symbols = summaries.map(\.pressureSymbolName)
+
+        XCTAssertEqual(Set(symbols).count, 4, "unknown, normal, warning, and critical each use a different symbol")
+        for symbol in symbols {
+            XCTAssertNotNil(NSImage(systemSymbolName: symbol, accessibilityDescription: nil), "\(symbol) is an SF Symbol")
+        }
     }
 
     /// The second of two samples whose host ticks advanced by the given amounts.

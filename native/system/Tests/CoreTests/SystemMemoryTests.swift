@@ -52,6 +52,18 @@ final class SystemMemoryTests: XCTestCase {
         XCTAssertNil(SystemMemory(raw: raw).wired)
     }
 
+    func testMemoryUsedThatOverflowsIsUnavailableRatherThanATrap() throws {
+        var raw = recorded()
+        // Each figure fits in 64 bits on its own; their sum does not.
+        raw.pageSize = UInt64.max / 400_000
+        let memory = SystemMemory(raw: raw)
+
+        XCTAssertNotNil(memory.app)
+        XCTAssertNotNil(memory.wired)
+        XCTAssertNotNil(memory.compressed)
+        XCTAssertNil(memory.used)
+    }
+
     func testLiveReadReturnsThisMacsMemory() throws {
         let memory = SystemMemory(raw: LiveSystemMemorySource().read())
 

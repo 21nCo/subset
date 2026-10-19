@@ -26,7 +26,7 @@ final class StatusMenuController {
 
     func update(_ summary: StatusSummary, logicalCoreCount: Int?) {
         guard let button = item.button else { return }
-        button.image = Self.image(for: summary.pressure)
+        button.image = Self.image(for: summary)
         button.title = summary.title
         button.setAccessibilityLabel(summary.accessibilityLabel)
         button.toolTip = summary.accessibilityLabel
@@ -34,19 +34,18 @@ final class StatusMenuController {
         pressureRow.title = summary.pressureRow
     }
 
-    /// Normal (or unknown) pressure uses the template gauge; warning and critical use a colored memory chip so the
-    /// change shows without reading the menu.
-    private static func image(for pressure: MemoryPressure?) -> NSImage? {
-        let label = "Memory pressure \(pressure?.title.lowercased() ?? "unknown")"
-        switch pressure {
+    /// The pressure symbol's needle position tells the levels apart; warning and critical are also colored so the
+    /// change stands out without reading the menu.
+    private static func image(for summary: StatusSummary) -> NSImage? {
+        let label = "Memory pressure \(summary.pressureText.lowercased())"
+        let image = NSImage(systemSymbolName: summary.pressureSymbolName, accessibilityDescription: label)
+        switch summary.pressure {
         case .warning, .critical:
-            let color: NSColor = pressure == .critical ? .systemRed : .systemYellow
-            let image = NSImage(systemSymbolName: "memorychip.fill", accessibilityDescription: label)?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
-            image?.isTemplate = false
-            return image
+            let color: NSColor = summary.pressure == .critical ? .systemRed : .systemYellow
+            let tinted = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
+            tinted?.isTemplate = false
+            return tinted
         case .normal, nil:
-            let image = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: label)
             image?.isTemplate = true
             return image
         }

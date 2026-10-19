@@ -54,14 +54,42 @@ final class ProcessReadTests: XCTestCase {
         XCTAssertEqual(script.remaining, 0)
     }
 
+    func testAFailedPIDListThatLibprocReportsAsZeroThrows() {
+        // libproc turns a failed __proc_info into a count of 0, never -1.
+        let list = ScriptedPIDList([(3, 0), (0, EPERM)])
+
+        XCTAssertThrowsError(try LibprocProcessSource.listPIDs(with: list.call)) {
+            XCTAssertEqual($0 as? ProcessSourceError, .listFailed(EPERM))
+        }
+        XCTAssertThrowsError(try LibprocProcessSource.listPIDs(with: ScriptedPIDList([(0, EPERM)]).call)) {
+            XCTAssertEqual($0 as? ProcessSourceError, .listFailed(EPERM))
+        }
+    }
+
+    func testAFailedPIDListKeepsTheSamplersPreviousSample() throws {
+        // pid 50's CPU time grows every read; a failed list in between must not reset its baseline to an empty sample.
+        let list = ScriptedPIDList([(1, 0), (1, 0), (1, 0), (0, EAGAIN), (1, 0), (1, 0)])
+        let script = Script(
+            basics: Array(repeating: basics(start: 1, name: "p"), count: 4),
+            usage: [usage(footprint: 1, userTime: 0), usage(footprint: 1, userTime: 1_000_000)],
+            paths: ["/p", "/p"]
+        )
+        var sampler = Sampler(source: LibprocProcessSource(listAllPIDs: list.call, reads: script.reads), logicalCoreCount: 8)
+
+        XCTAssertNil(try sampler.sample().processes.first?.cpuPercent)
+        XCTAssertThrowsError(try sampler.sample()) { XCTAssertEqual($0 as? ProcessSourceError, .listFailed(EAGAIN)) }
+        let process = try XCTUnwrap(try sampler.sample().processes.first { $0.pid == 50 })
+        XCTAssertNotNil(process.cpuPercent, "the delta is taken against the sample before the failure")
+    }
+
     // MARK: - Fixtures
 
     private func basics(start: UInt64, name: String) -> Basics {
         Basics(identity: ProcessIdentity(pid: 50, startTime: start), ppid: 1, uid: 501, name: name)
     }
 
-    private func usage(footprint: UInt64) -> UsageReading {
-        .available(RawProcessUsage(physFootprint: footprint, userTime: 0, systemTime: 0, billedEnergy: 0))
+    private func usage(footprint: UInt64, userTime: UInt64 = 0) -> UsageReading {
+        .available(RawProcessUsage(physFootprint: footprint, userTime: userTime, systemTime: 0, billedEnergy: 0))
     }
 }
 
@@ -86,5 +114,25 @@ private final class Script: @unchecked Sendable {
             usage: { _ in self.lock.withLock { self.usage.isEmpty ? nil : self.usage.removeFirst() } },
             executablePath: { _ in self.lock.withLock { self.paths.isEmpty ? nil : self.paths.removeFirst() } }
         )
+    }
+}
+
+/// Answers each `proc_listallpids` call with a scripted count and `errno`, writing pid 50 into a buffered call.
+private final class ScriptedPIDList: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [(count: Int32, errno: Int32)]
+
+    init(_ results: [(count: Int32, errno: Int32)]) {
+        self.results = results
+    }
+
+    var call: LibprocProcessSource.ListAllPIDs {
+        { buffer, _ in
+            self.lock.withLock {
+                let result = self.results.isEmpty ? (count: 0, errno: ESRCH) : self.results.removeFirst()
+                if let buffer, result.count > 0 { buffer[0] = 50 }
+                return result
+            }
+        }
     }
 }

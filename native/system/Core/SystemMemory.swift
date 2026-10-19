@@ -37,10 +37,12 @@ public struct SystemMemory: Equatable, Sendable {
     /// Anonymous memory that is not purgeable (Activity Monitor's App Memory).
     public let app: UInt64?
 
-    /// App, wired, and compressed memory: Activity Monitor's Memory Used.
+    /// App, wired, and compressed memory: Activity Monitor's Memory Used, or `nil` if the sum does not fit.
     public var used: UInt64? {
         guard let app, let wired, let compressed else { return nil }
-        return app + wired + compressed
+        let (appAndWired, overflow) = app.addingReportingOverflow(wired)
+        let (total, totalOverflow) = appAndWired.addingReportingOverflow(compressed)
+        return overflow || totalOverflow ? nil : total
     }
 
     public init(raw: RawSystemMemory) {

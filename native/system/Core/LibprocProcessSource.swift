@@ -4,36 +4,52 @@ import Darwin
 /// (`EPERM`); those processes are kept as `restricted`. Processes that exit mid-read are left out.
 public struct LibprocProcessSource: ProcessSource {
     public let timebase: MachTimebase
+    private let listAllPIDs: ListAllPIDs
+    private let reads: Reads
 
     public init() {
+        self.init(listAllPIDs: Self.liveListAllPIDs, reads: .live)
+    }
+
+    init(listAllPIDs: @escaping ListAllPIDs, reads: Reads) {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
         timebase = MachTimebase(numer: info.numer, denom: info.denom)
+        self.listAllPIDs = listAllPIDs
+        self.reads = reads
     }
 
     public func sample() throws -> RawProcessSample {
-        let pids = try Self.listPIDs()
+        let pids = try Self.listPIDs(with: listAllPIDs)
         let timestamp = mach_absolute_time()
-        return RawProcessSample(timestamp: timestamp, timebase: timebase, processes: pids.compactMap { Self.read($0) })
+        return RawProcessSample(timestamp: timestamp, timebase: timebase, processes: pids.compactMap { Self.read($0, with: reads) })
     }
 
-    static func listPIDs() throws -> [pid_t] {
+    /// `proc_listallpids` with the `errno` it left, replaceable in tests.
+    typealias ListAllPIDs = @Sendable (_ buffer: UnsafeMutablePointer<pid_t>?, _ size: Int32) -> (count: Int32, errno: Int32)
+
+    static let liveListAllPIDs: ListAllPIDs = { buffer, size in
+        errno = 0
+        let count = proc_listallpids(buffer, size)
+        return (count, errno)
+    }
+
+    static func listPIDs(with listAllPIDs: ListAllPIDs = liveListAllPIDs) throws -> [pid_t] {
         // With no buffer, proc_listallpids returns the current count; the list can grow before the second call,
-        // so leave headroom and retry while the buffer comes back full.
-        var capacity = Int(proc_listallpids(nil, 0))
-        guard capacity > 0 else { throw ProcessSourceError.listFailed(errno) }
+        // so leave headroom and retry while the buffer comes back full. libproc reports a failed call as 0 rather
+        // than -1, and pids 0 and 1 always exist, so 0 is a failure, never an empty process list.
+        let (initial, initialFailure) = listAllPIDs(nil, 0)
+        guard initial > 0 else { throw ProcessSourceError.listFailed(initialFailure) }
+        var capacity = Int(initial)
         while true {
             capacity += 64
             var pids = [pid_t](repeating: 0, count: capacity)
-            var failure: Int32 = 0
-            let count = pids.withUnsafeMutableBufferPointer { buffer in
-                let count = proc_listallpids(buffer.baseAddress, Int32(buffer.count * MemoryLayout<pid_t>.stride))
-                failure = errno
-                return Int(count)
+            let (count, failure) = pids.withUnsafeMutableBufferPointer { buffer in
+                listAllPIDs(buffer.baseAddress, Int32(buffer.count * MemoryLayout<pid_t>.stride))
             }
-            guard count >= 0 else { throw ProcessSourceError.listFailed(failure) }
-            if count < capacity { return Array(pids.prefix(count)) }
-            capacity = count * 2
+            guard count > 0 else { throw ProcessSourceError.listFailed(failure) }
+            if Int(count) < capacity { return Array(pids.prefix(Int(count))) }
+            capacity = Int(count) * 2
         }
     }
 

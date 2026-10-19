@@ -31,6 +31,17 @@ public struct StatusSummary: Equatable, Sendable {
         return "CPU: \(cpuText)" + (logicalCoreCount.map { " of \($0) cores" } ?? "")
     }
 
+    /// The status item's SF Symbol for memory pressure. The gauge needle rises with the level, so warning and
+    /// critical differ by shape and not only by the color the menu bar adds.
+    public var pressureSymbolName: String {
+        switch pressure {
+        case .normal: "gauge.with.dots.needle.33percent"
+        case .warning: "gauge.with.dots.needle.67percent"
+        case .critical: "gauge.with.dots.needle.100percent"
+        case nil: "questionmark.circle"
+        }
+    }
+
     /// The status menu's memory pressure row.
     public var pressureRow: String { "Memory pressure: \(pressureText)" }
 
