@@ -2,7 +2,7 @@ import AppKit
 import SystemCore
 
 /// The menu bar item and its menu, built from `ShellCommand` so the menu and its tests share one list. The item
-/// shows total CPU as its title and memory pressure as its symbol; the menu repeats both as text.
+/// shows the machine's CPU use as its title and memory pressure as its symbol; the menu repeats both as text.
 @MainActor
 final class StatusMenuController {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

@@ -56,8 +56,6 @@ final class SamplerTests: XCTestCase {
 
         XCTAssertEqual(try cpu(of: 10, in: snapshot), 150, accuracy: 1e-9)
         XCTAssertEqual(try cpu(of: 11, in: snapshot), 25, accuracy: 1e-9)
-        XCTAssertEqual(try XCTUnwrap(snapshot.totalCPUPercent), 175, accuracy: 1e-9)
-        XCTAssertEqual(try XCTUnwrap(snapshot.machineCPUPercent), 175.0 / 8, accuracy: 1e-9)
         XCTAssertEqual(snapshot.logicalCoreCount, 8)
     }
 
@@ -119,7 +117,6 @@ final class SamplerTests: XCTestCase {
         let failed = try XCTUnwrap(snapshot.processes.first { $0.pid == 20 })
         XCTAssertFalse(failed.restricted, "only a denied read is restricted")
         XCTAssertNil(failed.physFootprint)
-        XCTAssertNil(snapshot.totalCPUPercent, "no measured process means no total, not 0%")
     }
 
     func testAFailedReadKeepsThePreviousSampleForTheNextDelta() throws {
@@ -135,20 +132,87 @@ final class SamplerTests: XCTestCase {
         XCTAssertEqual(try cpu(of: 10, in: try sampler.sample()), 50, accuracy: 1e-9)
     }
 
+    func testMachineCPUComesFromHostTicksAndCountsRestrictedProcesses() throws {
+        // Every process is restricted, so no per-process CPU exists, yet the host ticks still measure the machine.
+        var sampler = Sampler(
+            source: FixtureProcessSource([
+                sample(at: 0, [record(pid: 1, start: 1, usage: .restricted)]),
+                sample(at: ticksPerSecond, [record(pid: 1, start: 1, usage: .restricted)])
+            ]),
+            hostCPU: FixtureHostCPUSource([
+                ticks(user: 1_000, system: 500, idle: 8_000, nice: 0),
+                // 400 ticks passed: 220 user, 60 system, 20 nice, 100 idle, so 75% busy.
+                ticks(user: 1_220, system: 560, idle: 8_100, nice: 20)
+            ]),
+            logicalCoreCount: 4
+        )
+
+        XCTAssertNil(try sampler.sample().machineCPUPercent, "a first sample has no previous ticks")
+        let snapshot = try sampler.sample()
+        XCTAssertNil(snapshot.processes[0].cpuPercent)
+        XCTAssertEqual(try XCTUnwrap(snapshot.machineCPUPercent), 75, accuracy: 1e-9)
+    }
+
+    func testHostTickWrapResetOrStallIsUnavailableAndTheNextIntervalRecovers() throws {
+        let start = ticks(user: 100, system: 100, idle: 100, nice: 0)
+        XCTAssertEqual(try XCTUnwrap(HostCPUTicks.busyPercent(from: start, to: ticks(user: 150, system: 100, idle: 150, nice: 0))), 50)
+        XCTAssertEqual(HostCPUTicks.busyPercent(from: start, to: ticks(user: 100, system: 100, idle: 200, nice: 0)), 0)
+        XCTAssertNil(HostCPUTicks.busyPercent(from: start, to: start), "no tick passed")
+        let nearWrap = ticks(user: .max - 10, system: 100, idle: 100, nice: 0)
+        XCTAssertNil(HostCPUTicks.busyPercent(from: nearWrap, to: ticks(user: 5, system: 110, idle: 120, nice: 0)), "a wrapped counter")
+        XCTAssertNil(HostCPUTicks.busyPercent(from: start, to: ticks(user: 5, system: 5, idle: 5, nice: 0)), "a reset")
+
+        var sampler = Sampler(
+            source: FixtureProcessSource((0..<5).map { sample(at: UInt64($0) * ticksPerSecond, []) }),
+            hostCPU: FixtureHostCPUSource([
+                start,
+                ticks(user: 10, system: 10, idle: 10, nice: 0), // reset
+                nil, // failed read
+                ticks(user: 20, system: 10, idle: 20, nice: 0),
+                ticks(user: 30, system: 10, idle: 50, nice: 0)
+            ]),
+            logicalCoreCount: 8
+        )
+        let percents = try (0..<5).map { _ in try sampler.sample().machineCPUPercent }
+        XCTAssertEqual(percents, [nil, nil, nil, nil, 25])
+    }
+
     func testCadenceIsTwoSecondsWithTheWindowAndTenWithOnlyTheMenuBar() {
         XCTAssertEqual(SamplingCadence(mainWindowVisible: true).interval, .seconds(2))
         XCTAssertEqual(SamplingCadence(mainWindowVisible: false).interval, .seconds(10))
+
+        let now = ContinuousClock.now
+        var schedule = SamplingSchedule()
+        XCTAssertEqual(schedule.delay(for: .menuBarOnly, now: now), .zero, "the first sample starts at once")
+        XCTAssertTrue(schedule.begin(at: now))
+        schedule.finish()
         // Opening the window 5 s after a menu-bar sample samples now; 1 s after, it waits for the 2 s interval.
-        XCTAssertEqual(SamplingCadence.mainWindowVisible.delay(sinceLastSample: .seconds(5)), .zero)
-        XCTAssertEqual(SamplingCadence.mainWindowVisible.delay(sinceLastSample: .seconds(1)), .seconds(1))
-        XCTAssertEqual(SamplingCadence.menuBarOnly.delay(sinceLastSample: .seconds(2)), .seconds(8))
-        XCTAssertEqual(SamplingCadence.menuBarOnly.delay(sinceLastSample: nil), .zero)
+        XCTAssertEqual(schedule.delay(for: .mainWindowVisible, now: now + .seconds(5)), .zero)
+        XCTAssertEqual(schedule.delay(for: .mainWindowVisible, now: now + .seconds(1)), .seconds(1))
+        XCTAssertEqual(schedule.delay(for: .menuBarOnly, now: now + .seconds(2)), .seconds(8))
+    }
+
+    func testACadenceChangeDuringASampleNeitherOverlapsNorFollowsItAtOnce() {
+        let now = ContinuousClock.now
+        var schedule = SamplingSchedule()
+        XCTAssertTrue(schedule.begin(at: now))
+
+        // The window opens while that sample is still running: no second sample starts alongside or right behind it.
+        XCTAssertFalse(schedule.begin(at: now + .milliseconds(10)))
+        XCTAssertEqual(schedule.delay(for: .mainWindowVisible, now: now + .milliseconds(10)), .seconds(2))
+        schedule.finish()
+        XCTAssertEqual(schedule.delay(for: .mainWindowVisible, now: now + .milliseconds(50)), .milliseconds(1_950))
+        XCTAssertEqual(schedule.lastStart, now)
     }
 
     // MARK: - Fixtures
 
     private func sample(at ticks: UInt64, _ processes: [RawProcessRecord]) -> RawProcessSample {
         RawProcessSample(timestamp: ticks, timebase: appleSilicon, processes: processes)
+    }
+
+    private func ticks(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32) -> HostCPUTicks {
+        HostCPUTicks(user: user, system: system, idle: idle, nice: nice)
     }
 
     private func record(pid: Int32, start: UInt64, user: UInt64, system: UInt64) -> RawProcessRecord {

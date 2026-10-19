@@ -16,9 +16,9 @@ final class SystemMonitor {
     @ObservationIgnored private let worker = SamplingWorker()
     @ObservationIgnored private var cadence = SamplingCadence.menuBarOnly
     @ObservationIgnored private var loop: Task<Void, Never>?
-    @ObservationIgnored private var lastSample: ContinuousClock.Instant?
+    @ObservationIgnored private var schedule = SamplingSchedule()
 
-    var summary: StatusSummary { StatusSummary(snapshot: snapshot, memory: memory) }
+    var summary: StatusSummary { StatusSummary(snapshot: snapshot, memory: memory, samplingFailed: sampleError != nil) }
 
     func start() {
         guard loop == nil else { return }
@@ -32,28 +32,30 @@ final class SystemMonitor {
         if loop != nil { restart() }
     }
 
-    /// Restarts the loop so a cadence change applies now, without sampling sooner than the new interval allows.
+    /// Restarts the loop so a cadence change applies now. A sample already running finishes; the schedule keeps the
+    /// next one from starting sooner than the new interval after it started.
     private func restart() {
         loop?.cancel()
-        let elapsed = lastSample.map { ContinuousClock.now - $0 }
-        let firstDelay = cadence.delay(sinceLastSample: elapsed)
-        let interval = cadence.interval
         loop = Task { [weak self] in
-            var delay = firstDelay
             while !Task.isCancelled {
+                guard let delay = self?.nextDelay() else { return }
                 if delay > .zero {
                     do { try await Task.sleep(for: delay) } catch { return }
                 }
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 await sampleOnce()
-                delay = interval
             }
         }
     }
 
+    private func nextDelay() -> Duration {
+        schedule.delay(for: cadence, now: .now)
+    }
+
     private func sampleOnce() async {
+        guard schedule.begin(at: .now) else { return }
         let result = await worker.sample()
-        lastSample = .now
+        schedule.finish()
         switch result.processes {
         case let .success(snapshot):
             self.snapshot = snapshot
@@ -68,7 +70,7 @@ final class SystemMonitor {
 
 /// Owns the sampler off the main actor, so reading several hundred processes never blocks the UI.
 private actor SamplingWorker {
-    private var sampler = Sampler(source: LibprocProcessSource())
+    private var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource())
     private let memorySource = LiveSystemMemorySource()
 
     func sample() -> (processes: Result<ProcessSnapshot, any Error>, memory: SystemMemory) {

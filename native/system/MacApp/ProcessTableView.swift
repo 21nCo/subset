@@ -47,7 +47,7 @@ private struct MemorySummaryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(StatusSummary(snapshot: snapshot, memory: memory).pressureRow).font(.headline)
+            Text(summary.pressureRow).font(.headline)
             Text(memoryLine)
             Text(swapLine)
             Text(processLine).foregroundStyle(.secondary)
@@ -57,6 +57,10 @@ private struct MemorySummaryView: View {
         }
         .font(.callout)
         .textSelection(.enabled)
+    }
+
+    private var summary: StatusSummary {
+        StatusSummary(snapshot: snapshot, memory: memory, samplingFailed: error != nil)
     }
 
     private var memoryLine: String {
@@ -71,10 +75,9 @@ private struct MemorySummaryView: View {
 
     private var processLine: String {
         guard let snapshot else { return "Sampling…" }
-        let cpu = StatusSummary(snapshot: snapshot, memory: memory).cpuRow(logicalCoreCount: snapshot.logicalCoreCount)
+        let cpu = summary.cpuRow(logicalCoreCount: snapshot.logicalCoreCount)
         let restricted = snapshot.processes.filter(\.restricted).count
-        return "\(cpu) · "
-            + "\(snapshot.processes.count) processes, \(restricted) restricted by macOS (not counted in CPU)"
+        return "\(cpu) · \(snapshot.processes.count) processes, \(restricted) restricted by macOS"
     }
 }
 

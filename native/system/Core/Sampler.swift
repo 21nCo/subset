@@ -7,19 +7,9 @@ public struct ProcessSnapshot: Equatable, Sendable {
     public let processes: [ProcessFacts]
     /// Logical cores; 100% CPU per process is one of them, so the busiest possible total is `100 × cores`.
     public let logicalCoreCount: Int
-
-    /// Summed CPU of every process with a measured value, in Activity Monitor's per-core convention, or `nil` on
-    /// the first sample. Restricted processes are not included, so this is a lower bound.
-    public var totalCPUPercent: Double? {
-        let values = processes.compactMap(\.cpuPercent)
-        return values.isEmpty ? nil : values.reduce(0, +)
-    }
-
-    /// `totalCPUPercent` as a share of the whole machine (0–100), the figure the menu bar shows.
-    public var machineCPUPercent: Double? {
-        guard let totalCPUPercent, logicalCoreCount > 0 else { return nil }
-        return totalCPUPercent / Double(logicalCoreCount)
-    }
+    /// The whole machine's busy share (0–100) since the previous sample, from the host's CPU ticks, so it includes
+    /// processes whose own usage is restricted. `nil` on the first sample or when the ticks could not be read.
+    public let machineCPUPercent: Double?
 }
 
 /// Turns consecutive raw samples into snapshots. CPU percent for a process is its CPU time delta over the
@@ -27,17 +17,26 @@ public struct ProcessSnapshot: Equatable, Sendable {
 /// process that reused an earlier PID, has no CPU value until its second sample; a process that exited is dropped.
 public struct Sampler {
     private let source: any ProcessSource
+    private let hostCPU: (any HostCPUSource)?
     public let logicalCoreCount: Int
     private var previous: (uptime: UInt64, cpuTimes: [ProcessIdentity: UInt64])?
+    private var previousTicks: HostCPUTicks?
 
-    public init(source: any ProcessSource, logicalCoreCount: Int = ProcessInfo.processInfo.processorCount) {
+    /// Without `hostCPU`, snapshots have no machine CPU figure.
+    public init(
+        source: any ProcessSource,
+        hostCPU: (any HostCPUSource)? = nil,
+        logicalCoreCount: Int = ProcessInfo.processInfo.processorCount
+    ) {
         self.source = source
+        self.hostCPU = hostCPU
         self.logicalCoreCount = logicalCoreCount
     }
 
     /// Reads one sample. A failed read throws and leaves the previous sample in place for the next delta.
     public mutating func sample() throws -> ProcessSnapshot {
         let raw = try source.sample()
+        let ticks = hostCPU?.read()
         let uptime = raw.timebase.nanoseconds(raw.timestamp)
         var cpuTimes: [ProcessIdentity: UInt64] = [:]
         var seen = Set<ProcessIdentity>()
@@ -55,7 +54,17 @@ public struct Sampler {
             processes.append(facts)
         }
         previous = (uptime, cpuTimes)
-        return ProcessSnapshot(uptime: uptime, processes: processes, logicalCoreCount: logicalCoreCount)
+        var machineCPUPercent: Double?
+        if let before = previousTicks, let ticks {
+            machineCPUPercent = HostCPUTicks.busyPercent(from: before, to: ticks)
+        }
+        previousTicks = ticks
+        return ProcessSnapshot(
+            uptime: uptime,
+            processes: processes,
+            logicalCoreCount: logicalCoreCount,
+            machineCPUPercent: machineCPUPercent
+        )
     }
 
     /// `nil` when either counter went backwards or no time passed, which only a broken source produces.
@@ -81,11 +90,33 @@ public enum SamplingCadence: Equatable, Sendable {
         case .menuBarOnly: .seconds(10)
         }
     }
+}
 
-    /// How long to wait before the next sample when the previous one was `elapsed` ago, so a cadence change takes
-    /// effect at once without sampling more often than the new interval.
-    public func delay(sinceLastSample elapsed: Duration?) -> Duration {
-        guard let elapsed else { return .zero }
-        return max(.zero, interval - elapsed)
+/// When the app may start its next sample: never while one is running, and never sooner than the cadence's
+/// interval after the previous sample started, so a cadence change takes effect at once without sampling twice in
+/// a row.
+public struct SamplingSchedule: Sendable {
+    public private(set) var lastStart: ContinuousClock.Instant?
+    public private(set) var isSampling = false
+
+    public init() {}
+
+    /// How long to wait before trying to sample. While a sample runs, check again after a full interval.
+    public func delay(for cadence: SamplingCadence, now: ContinuousClock.Instant) -> Duration {
+        guard !isSampling else { return cadence.interval }
+        guard let lastStart else { return .zero }
+        return max(.zero, cadence.interval - (now - lastStart))
+    }
+
+    /// Marks a sample as started, or returns `false` when one is already running.
+    public mutating func begin(at now: ContinuousClock.Instant) -> Bool {
+        guard !isSampling else { return false }
+        isSampling = true
+        lastStart = now
+        return true
+    }
+
+    public mutating func finish() {
+        isSampling = false
     }
 }

@@ -1,17 +1,20 @@
-/// What the menu bar item shows: total CPU as a share of the whole machine, and memory pressure.
+/// What the menu bar item shows: the whole machine's CPU use, and memory pressure.
 public struct StatusSummary: Equatable, Sendable {
-    public let cpuText: String
+    /// The machine's CPU share (0–100), or `nil` when it is not measured yet or sampling is failing.
+    public let cpuPercent: Double?
     public let pressure: MemoryPressure?
+    /// The latest sample failed, so the previous CPU figure is not current.
+    public let samplingFailed: Bool
 
-    public init(snapshot: ProcessSnapshot?, memory: SystemMemory?) {
-        if let percent = snapshot?.machineCPUPercent {
-            // Processes are read one after another, so the sum can slightly exceed the machine's capacity.
-            cpuText = "\(Int(min(percent, 100).rounded()))%"
-        } else {
-            cpuText = "–"
-        }
+    /// Pass `samplingFailed` while the latest sample failed: the menu bar then shows CPU as unavailable instead of
+    /// the last successful sample's figure.
+    public init(snapshot: ProcessSnapshot?, memory: SystemMemory?, samplingFailed: Bool = false) {
+        cpuPercent = samplingFailed ? nil : snapshot?.machineCPUPercent
         pressure = memory?.pressure
+        self.samplingFailed = samplingFailed
     }
+
+    public var cpuText: String { cpuPercent.map { "\(Int($0.rounded()))%" } ?? "–" }
 
     public var pressureText: String { pressure?.title ?? "Unknown" }
 
@@ -19,14 +22,20 @@ public struct StatusSummary: Equatable, Sendable {
     public var title: String { cpuText }
 
     public var accessibilityLabel: String {
-        "\(SystemIdentity.appName): CPU \(cpuText == "–" ? "not measured yet" : cpuText), memory pressure \(pressureText.lowercased())"
+        "\(SystemIdentity.appName): CPU \(cpuDescription), memory pressure \(pressureText.lowercased())"
     }
 
     /// The status menu's CPU row, for example "CPU: 23% of 8 cores".
     public func cpuRow(logicalCoreCount: Int?) -> String {
-        "CPU: \(cpuText)" + (logicalCoreCount.map { " of \($0) cores" } ?? "")
+        guard cpuPercent != nil else { return "CPU: \(cpuDescription)" }
+        return "CPU: \(cpuText)" + (logicalCoreCount.map { " of \($0) cores" } ?? "")
     }
 
     /// The status menu's memory pressure row.
     public var pressureRow: String { "Memory pressure: \(pressureText)" }
+
+    private var cpuDescription: String {
+        if cpuPercent != nil { return cpuText }
+        return samplingFailed ? "unavailable, sampling failed" : "not measured yet"
+    }
 }

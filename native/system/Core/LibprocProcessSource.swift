@@ -14,7 +14,7 @@ public struct LibprocProcessSource: ProcessSource {
     public func sample() throws -> RawProcessSample {
         let pids = try Self.listPIDs()
         let timestamp = mach_absolute_time()
-        return RawProcessSample(timestamp: timestamp, timebase: timebase, processes: pids.compactMap(Self.read))
+        return RawProcessSample(timestamp: timestamp, timebase: timebase, processes: pids.compactMap { Self.read($0) })
     }
 
     static func listPIDs() throws -> [pid_t] {
@@ -37,21 +37,42 @@ public struct LibprocProcessSource: ProcessSource {
         }
     }
 
-    static func read(_ pid: pid_t) -> RawProcessRecord? {
-        guard let basics = basics(pid), let usage = usage(pid) else { return nil }
-        let path = executablePath(pid)
-        let name = basics.name.isEmpty ? path.map { String($0.split(separator: "/").last ?? "") } ?? "" : basics.name
-        return RawProcessRecord(
-            identity: basics.identity,
-            ppid: basics.ppid,
-            uid: basics.uid,
-            executablePath: path,
-            name: name,
-            usage: usage
+    /// The PID-keyed reads one record is built from, replaceable in tests.
+    struct Reads: Sendable {
+        var basics: @Sendable (pid_t) -> ProcessBasics?
+        var usage: @Sendable (pid_t) -> UsageReading?
+        var executablePath: @Sendable (pid_t) -> String?
+
+        static let live = Reads(
+            basics: LibprocProcessSource.basics,
+            usage: LibprocProcessSource.usage,
+            executablePath: LibprocProcessSource.executablePath
         )
     }
 
-    private struct Basics {
+    /// Reads one process, or `nil` when it exited. Each read is keyed by PID alone, so the identity is read again
+    /// afterwards: if the PID now belongs to a later process, the counters or path may be the new process's, and the
+    /// whole record is read once more. A PID that changes hands twice during one read is left for the next sample.
+    static func read(_ pid: pid_t, with reads: Reads = .live) -> RawProcessRecord? {
+        for _ in 0..<2 {
+            guard let basics = reads.basics(pid), let usage = reads.usage(pid) else { return nil }
+            let path = reads.executablePath(pid)
+            guard let current = reads.basics(pid) else { return nil }
+            guard current.identity == basics.identity else { continue }
+            let name = basics.name.isEmpty ? path.map { String($0.split(separator: "/").last ?? "") } ?? "" : basics.name
+            return RawProcessRecord(
+                identity: basics.identity,
+                ppid: basics.ppid,
+                uid: basics.uid,
+                executablePath: path,
+                name: name,
+                usage: usage
+            )
+        }
+        return nil
+    }
+
+    struct ProcessBasics: Sendable {
         let identity: ProcessIdentity
         let ppid: Int32
         let uid: UInt32
@@ -59,12 +80,12 @@ public struct LibprocProcessSource: ProcessSource {
     }
 
     /// Identity, parent, owner, and name, or `nil` when the process is gone.
-    private static func basics(_ pid: pid_t) -> Basics? {
+    private static func basics(_ pid: pid_t) -> ProcessBasics? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size {
             let name = cString(info.pbi_name)
-            return Basics(
+            return ProcessBasics(
                 identity: ProcessIdentity(pid: pid, startTime: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec),
                 ppid: Int32(bitPattern: info.pbi_ppid),
                 uid: info.pbi_uid,
@@ -80,7 +101,7 @@ public struct LibprocProcessSource: ProcessSource {
         guard sysctl(&mib, u_int(mib.count), &process, &length, nil, 0) == 0, length == MemoryLayout<kinfo_proc>.stride
         else { return nil }
         let start = process.kp_proc.p_un.__p_starttime
-        return Basics(
+        return ProcessBasics(
             identity: ProcessIdentity(
                 pid: pid,
                 startTime: UInt64(clamping: start.tv_sec) &* 1_000_000 &+ UInt64(clamping: start.tv_usec)

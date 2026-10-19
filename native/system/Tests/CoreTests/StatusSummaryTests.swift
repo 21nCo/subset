@@ -3,10 +3,9 @@ import XCTest
 
 final class StatusSummaryTests: XCTestCase {
     func testMenuBarShowsMachineCPUShareAndMemoryPressure() throws {
-        let snapshot = try snapshot(cpuSeconds: [3, 1], logicalCoreCount: 8)
-        let summary = StatusSummary(snapshot: snapshot, memory: memory(level: 4))
+        // Half the host's ticks were busy.
+        let summary = StatusSummary(snapshot: try snapshot(busyTicks: 400, idleTicks: 400), memory: memory(level: 4))
 
-        // 400% of eight cores is half the machine.
         XCTAssertEqual(summary.title, "50%")
         XCTAssertEqual(summary.pressure, .critical)
         XCTAssertEqual(summary.cpuRow(logicalCoreCount: 8), "CPU: 50% of 8 cores")
@@ -18,34 +17,38 @@ final class StatusSummaryTests: XCTestCase {
         let summary = StatusSummary(snapshot: nil, memory: nil)
 
         XCTAssertEqual(summary.title, "–")
+        XCTAssertEqual(summary.cpuRow(logicalCoreCount: nil), "CPU: not measured yet")
         XCTAssertEqual(summary.pressureRow, "Memory pressure: Unknown")
         XCTAssertEqual(summary.accessibilityLabel, "Subset System: CPU not measured yet, memory pressure unknown")
     }
 
-    func testSkewAboveTheMachinesCapacityIsShownAsOneHundredPercent() throws {
-        let summary = StatusSummary(snapshot: try snapshot(cpuSeconds: [1.1], logicalCoreCount: 1), memory: nil)
-        XCTAssertEqual(summary.title, "100%")
+    func testAFailingSampleHidesTheLastCPUFigureUntilASampleSucceeds() throws {
+        let last = try snapshot(busyTicks: 300, idleTicks: 100)
+
+        let failing = StatusSummary(snapshot: last, memory: memory(level: 1), samplingFailed: true)
+        XCTAssertNil(failing.cpuPercent)
+        XCTAssertEqual(failing.title, "–")
+        XCTAssertEqual(failing.cpuRow(logicalCoreCount: 8), "CPU: unavailable, sampling failed")
+        XCTAssertEqual(failing.accessibilityLabel, "Subset System: CPU unavailable, sampling failed, memory pressure normal")
+
+        let recovered = StatusSummary(snapshot: last, memory: memory(level: 1))
+        XCTAssertEqual(recovered.title, "75%")
     }
 
-    /// Two samples one second apart in which each process used the given CPU seconds.
-    private func snapshot(cpuSeconds: [Double], logicalCoreCount: Int) throws -> ProcessSnapshot {
+    /// The second of two samples whose host ticks advanced by the given amounts.
+    private func snapshot(busyTicks: UInt32, idleTicks: UInt32) throws -> ProcessSnapshot {
         let timebase = MachTimebase(numer: 1, denom: 1)
-        func records(_ seconds: [Double]) -> [RawProcessRecord] {
-            seconds.enumerated().map { index, value in
-                RawProcessRecord(
-                    identity: ProcessIdentity(pid: Int32(index + 100), startTime: 1),
-                    ppid: 1,
-                    uid: 501,
-                    executablePath: nil,
-                    name: "p",
-                    usage: .available(RawProcessUsage(physFootprint: 1, userTime: UInt64(value * 1e9), systemTime: 0, billedEnergy: 0))
-                )
-            }
-        }
-        var sampler = Sampler(source: FixtureProcessSource([
-            RawProcessSample(timestamp: 0, timebase: timebase, processes: records(cpuSeconds.map { _ in 0 })),
-            RawProcessSample(timestamp: 1_000_000_000, timebase: timebase, processes: records(cpuSeconds))
-        ]), logicalCoreCount: logicalCoreCount)
+        var sampler = Sampler(
+            source: FixtureProcessSource([
+                RawProcessSample(timestamp: 0, timebase: timebase, processes: []),
+                RawProcessSample(timestamp: 1_000_000_000, timebase: timebase, processes: [])
+            ]),
+            hostCPU: FixtureHostCPUSource([
+                HostCPUTicks(user: 0, system: 0, idle: 0, nice: 0),
+                HostCPUTicks(user: busyTicks, system: 0, idle: idleTicks, nice: 0)
+            ]),
+            logicalCoreCount: 8
+        )
         _ = try sampler.sample()
         return try sampler.sample()
     }

@@ -106,9 +106,6 @@ public protocol SystemMemorySource: Sendable {
 
 /// Reads this Mac's memory state.
 public struct LiveSystemMemorySource: SystemMemorySource {
-    // mach_host_self adds a send right on every call; take one and keep it for the life of the process.
-    private static let host = mach_host_self()
-
     public init() {}
 
     public func read() -> RawSystemMemory {
@@ -135,7 +132,7 @@ public struct LiveSystemMemorySource: SystemMemorySource {
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &stats) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(host, HOST_VM_INFO64, $0, &count)
+                host_statistics64(MachHost.port, HOST_VM_INFO64, $0, &count)
             }
         }
         return result == KERN_SUCCESS ? stats : nil
@@ -143,6 +140,6 @@ public struct LiveSystemMemorySource: SystemMemorySource {
 
     private static func pageSize() -> UInt64? {
         var size: vm_size_t = 0
-        return host_page_size(host, &size) == KERN_SUCCESS ? UInt64(size) : nil
+        return host_page_size(MachHost.port, &size) == KERN_SUCCESS ? UInt64(size) : nil
     }
 }

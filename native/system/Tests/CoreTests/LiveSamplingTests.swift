@@ -5,7 +5,7 @@ import XCTest
 /// Samples this Mac through libproc. Runs in CI on macOS.
 final class LiveSamplingTests: XCTestCase {
     func testSamplesItsOwnProcessTwiceWithAFootprintAndCPU() throws {
-        var sampler = Sampler(source: LibprocProcessSource())
+        var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource())
         let pid = getpid()
 
         let first = try sampler.sample()
@@ -18,6 +18,7 @@ final class LiveSamplingTests: XCTestCase {
                        Bundle.main.executableURL?.resolvingSymlinksInPath().path)
         XCTAssertFalse(mine.name.isEmpty)
         XCTAssertNil(mine.cpuPercent)
+        XCTAssertNil(first.machineCPUPercent)
 
         // Burn some CPU so the second sample has a measurable delta.
         let deadline = Date().addingTimeInterval(0.2)
@@ -32,6 +33,10 @@ final class LiveSamplingTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(again.cpuPercent), 0)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(again.totalCPUTime), try XCTUnwrap(mine.totalCPUTime))
         XCTAssertGreaterThan(second.logicalCoreCount, 0)
+        // The host's ticks saw this process spin, so the machine was measurably busy, and never more than all of it.
+        let machine = try XCTUnwrap(second.machineCPUPercent)
+        XCTAssertGreaterThan(machine, 0)
+        XCTAssertLessThanOrEqual(machine, 100)
 
         // launchd (pid 1) belongs to root: it must be listed with an identity even though its usage is denied.
         let launchd = try XCTUnwrap(second.processes.first { $0.pid == 1 })
