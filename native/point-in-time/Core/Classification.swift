@@ -109,8 +109,12 @@ public struct ClassificationRequest: Sendable {
                 return entry
             }
         ]
-        // Sorted keys keep a request byte-for-byte reproducible; slashes stay readable in paths.
+        // Sorted keys keep a request byte-for-byte reproducible; slashes stay readable in paths. `<` and `>` only occur
+        // inside JSON strings and are written as \u003c and \u003e, so captured text such as a title holding
+        // "</activity>" cannot close the data section the prompt describes.
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+        let activity = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
         prompt = """
             You label three-minute blocks of a person's computer activity as focus, neutral, or drift, judged against their \
             work profile below. focus: work the profile says matters. neutral: necessary but not core (email, admin, breaks \
@@ -125,7 +129,7 @@ public struct ClassificationRequest: Sendable {
             </work_profile>
 
             <activity>
-            \(String(decoding: data, as: UTF8.self))
+            \(activity)
             </activity>
             """
     }
