@@ -231,7 +231,7 @@ struct ClassificationView: View {
                         if model.settings.codexPath != nil { Button("Use Login Shell PATH") { model.useLoginShellCodex() } }
                         Button("Check Again") { model.checkProvider(refresh: true) }
                     }
-                    Text("pointInTime runs your codex binary in an empty private folder with its tools and web search turned off, discards any answer for which Codex went beyond the request, and never reads Codex’s credential files.")
+                    Text("pointInTime runs your codex binary in an empty private folder, inside a macOS sandbox in which it can read none of your files (your home folder, other users’ folders, external volumes, temporary folders) except its installation, its sign-in, and the request, and can start no other program. Its tools and web search are also turned off, any answer for which Codex went beyond the request is discarded, and pointInTime never reads Codex’s credential files.")
                         .font(.caption).foregroundStyle(.secondary)
                 case .openRouter:
                     Text(model.hasKey ? "A key is saved in the Keychain." : "No key is saved.")

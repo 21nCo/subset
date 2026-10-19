@@ -827,7 +827,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
 @Suite struct CodexTests {
     /// A stand-in `codex`: `login status` succeeds only when `signed-in` exists beside it; `exec` records its arguments,
     /// working folder, stdin, and PATH, prints `events` (or a finished turn), optionally sleeps, and writes `answer` to the
-    /// `-o` file.
+    /// `-o` file. Beside it, a stand-in `sandbox-exec` records its flag, profile, and program, and runs the rest unconfined.
     private func stub() throws -> URL {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -855,9 +855,18 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done
             cp "$dir/answer" "$out"
             """.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        try """
+            #!/bin/sh
+            dir="${0%/*}"
+            printf '%s' "$1" > "$dir/sandbox-flag"; printf '%s' "$2" > "$dir/profile"; printf '%s' "$3" > "$dir/sandboxed"
+            shift 2
+            exec "$@"
+            """.write(to: sandbox(script), atomically: true, encoding: .utf8)
+        for url in [script, sandbox(script)] { try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
         return script
     }
+
+    private func sandbox(_ codex: URL) -> URL { codex.deletingLastPathComponent().appendingPathComponent("sandbox-exec") }
 
     private func touch(_ codex: URL, _ name: String, _ text: String = "") throws {
         try text.write(to: codex.deletingLastPathComponent().appendingPathComponent(name), atomically: true, encoding: .utf8)
@@ -871,12 +880,13 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
     private let toolsOff = ["exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only",
                             "--json", "--disable", "shell_tool", "--disable", "view_image", "--disable", "apps", "--disable", "plugins",
                             "--disable", "browser_use", "--disable", "computer_use", "--disable", "multi_agent", "--disable", "goals",
-                            "--disable", "image_generation", "--disable", "hooks", "-c", "web_search=\"disabled\"", "--color", "never"]
+                            "--disable", "image_generation", "--disable", "hooks", "-c", "web_search=\"disabled\""]
 
     @Test func buildsTheExecArgumentsTheIssueRequires() {
         let arguments = CodexCLI.execArguments(workingDirectory: URL(fileURLWithPath: "/tmp/w"), schema: URL(fileURLWithPath: "/tmp/s.json"),
-                                               output: URL(fileURLWithPath: "/tmp/a.json"))
-        #expect(arguments == toolsOff + ["--cd", "/tmp/w", "--output-schema", "/tmp/s.json", "-o", "/tmp/a.json", "-"])
+                                               output: URL(fileURLWithPath: "/tmp/a.json"), state: URL(fileURLWithPath: #"/tmp/s"t"#))
+        #expect(arguments == toolsOff + ["-c", #"sqlite_home="/tmp/s\"t""#, "-c", #"log_dir="/tmp/s\"t""#, "--color", "never",
+                                         "--cd", "/tmp/w", "--output-schema", "/tmp/s.json", "-o", "/tmp/a.json", "-"])
     }
 
     @Test func runsExecInAnEmptyPrivateFolderWithThePromptOnStdin() async throws {
@@ -884,15 +894,25 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
         try touch(codex, "signed-in")
         try touch(codex, "answer", "{\"blocks\":[]}")
-        let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin")
+        let environment = ["HOME": "/Users/someone", "CODEX_HOME": "/Users/someone/codex", "CODEX_CA_CERTIFICATE": "/etc/ca.pem"]
+        let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin", environment: environment, sandbox: sandbox(codex))
         #expect(await cli.loginStatus() == .signedIn)
         #expect(try await cli.complete(prompt: "PROMPT TEXT", schema: ClassificationRequest.responseSchema) == "{\"blocks\":[]}")
         #expect(try recorded(codex, "stdin") == "PROMPT TEXT")
         #expect(try recorded(codex, "cwd-contents").isEmpty)
         let cwd = try recorded(codex, "cwd").trimmingCharacters(in: .newlines)
         let arguments = try recorded(codex, "args").split(separator: "\n").map(String.init)
-        #expect(Array(arguments.prefix(toolsOff.count)) == toolsOff)
-        #expect(arguments.last == "-")
+        let work = URL(fileURLWithPath: try #require(arguments.firstIndex(of: "--cd").map { arguments[$0 + 1] }))
+        let folder = work.deletingLastPathComponent()
+        #expect(cwd.hasSuffix(work.path))
+        #expect(arguments == CodexCLI.execArguments(workingDirectory: work, schema: folder.appendingPathComponent("schema.json"),
+                                                    output: folder.appendingPathComponent("answer.json"), state: folder.appendingPathComponent("state")))
+        // Codex runs in the sandbox made for this request folder.
+        #expect(try recorded(codex, "sandbox-flag") == "-p")
+        #expect(try recorded(codex, "sandboxed") == codex.path)
+        #expect(try recorded(codex, "profile") == CodexCLI.sandboxProfile(executable: codex, codexHome: URL(fileURLWithPath: "/Users/someone/codex"),
+                                                                           certificate: "/etc/ca.pem", folder: folder,
+                                                                           home: URL(fileURLWithPath: "/Users/someone")))
         // The folder is private while the run lasts and removed afterwards.
         #expect(cwd.contains("pointInTime-codex-"))
         #expect(!FileManager.default.fileExists(atPath: cwd))
@@ -903,7 +923,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
     @Test func refusesToRunWhenSignedOutOrWhenExecFails() async throws {
         let codex = try stub()
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
-        let cli = CodexCLI(executable: codex, searchPath: nil)
+        let cli = CodexCLI(executable: codex, searchPath: nil, sandbox: sandbox(codex))
         #expect(await cli.loginStatus() == .signedOut)
         await #expect(throws: ProviderError.notSignedIn) { try await cli.prepare() }
         #expect(!FileManager.default.fileExists(atPath: codex.deletingLastPathComponent().appendingPathComponent("args").path))
@@ -932,7 +952,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         let inherited = ["HOME": "/Users/someone", "LANG": "en_US.UTF-8", "CODEX_HOME": "/Users/someone/.codex",
                          "CODEX_CA_CERTIFICATE": "/etc/ca.pem", "CODEX_API_KEY": "sk-codex", "CODEX_ACCESS_TOKEN": "token",
                          "OPENAI_API_KEY": "sk-openai", "OPENAI_BASE_URL": "https://proxy.example", "AZURE_OPENAI_API_KEY": "az"]
-        let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin", environment: inherited)
+        let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin", environment: inherited, sandbox: sandbox(codex))
         try await cli.prepare()
         _ = try await cli.complete(prompt: "p", schema: "{}")
         for command in ["login", "exec"] {
@@ -951,7 +971,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
         try touch(codex, "signed-in")
         try touch(codex, "sleep", "30")
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 1)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 1, sandbox: sandbox(codex))
         let started = Date()
         await #expect(throws: ProviderError.timedOut(1)) { try await cli.complete(prompt: "p", schema: "{}") }
         // Well before the stub would have finished on its own.
@@ -964,7 +984,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         try touch(codex, "orphan")
         try touch(codex, "sleep", "30")
         // Long enough for the stub to start its child even on a busy machine.
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 10)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 10, sandbox: sandbox(codex))
         await #expect(throws: ProviderError.timedOut(10)) { try await cli.complete(prompt: "p", schema: "{}") }
         let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
         #expect(await exits(child))
@@ -975,7 +995,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
         try touch(codex, "orphan")
         try touch(codex, "answer", "{\"blocks\":[]}")
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 50)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 50, sandbox: sandbox(codex))
         let started = Date()
         #expect(try await cli.complete(prompt: "p", schema: "{}") == "{\"blocks\":[]}")
         #expect(Date().timeIntervalSince(started) < 30)
@@ -989,7 +1009,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         try touch(codex, "orphan")
         try touch(codex, "sleep", "60")
         let children = ChildProcesses()
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 120, children: children)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 120, children: children, sandbox: sandbox(codex))
         let run = Task { try await cli.complete(prompt: "p", schema: "{}") }
         // The stub writes its child's pid first and its working folder once it has read the prompt.
         let stdin = codex.deletingLastPathComponent().appendingPathComponent("stdin")
@@ -1027,7 +1047,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: folder) }
         try touch(codex, "signed-in")
         try touch(codex, "answer", answer([(String(Int(t0.timeIntervalSince1970)), "focus", "ok", 0.9)]))
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 50)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 50, sandbox: sandbox(codex))
         let command = #"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/secret"}}"#
         let refused = ProviderError.invalidResponse("Codex went beyond the request (command_execution), so its answer was discarded")
         // A command stops the run at once, with what the launcher started, though the run would go on.
@@ -1095,11 +1115,74 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         other.arguments = ["30"]
         try other.run()
         defer { other.terminate() }
-        children.signal(group: other.processIdentifier, SIGKILL)
+        children.signal(other, group: other.processIdentifier, SIGKILL)
         _ = try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/true"), [], stdin: Data(), directory: FileManager.default.temporaryDirectory,
                                         environment: [:], timeout: 5, children: children)
         children.stopAll(grace: 0.1)
         #expect(other.isRunning)
+    }
+
+    @Test func aSignalReachesOnlyTheLaunchThatScheduledIt() async throws {
+        let sent = Signals()
+        let children = ChildProcesses(signal: { sent.append($0, $1) })
+        let first = Launch(), second = Launch(), group: pid_t = 4242
+        // The first launch times out and exits before its delayed SIGKILL; a second launch is given the same ID.
+        children.track(first, group: group)
+        children.signal(first, group: group, SIGTERM)
+        children.exited(first, group: group)
+        children.track(second, group: group)
+        children.signal(first, group: group, SIGKILL)
+        children.exited(first, group: group)
+        #expect(sent.value == [Signals.Sent(group, SIGTERM), Signals.Sent(group, SIGKILL)])
+        children.signal(second, group: group, SIGTERM)
+        #expect(sent.value.last == Signals.Sent(group, SIGTERM) && sent.value.count == 3)
+        // Quitting: the first launch exits during the grace and the second takes its ID before the SIGKILL.
+        let quitting = Signals()
+        let stopping = ChildProcesses(signal: { quitting.append($0, $1) })
+        quitting.then = { group, signal in
+            if signal == SIGTERM { DispatchQueue.global().async { stopping.exited(first, group: group); stopping.track(second, group: group) } }
+        }
+        stopping.track(first, group: group)
+        stopping.stopAll(grace: 5)
+        #expect(quitting.value == [Signals.Sent(group, SIGTERM), Signals.Sent(group, SIGKILL)])
+        // Only the exit-time kill of the first launch's own group; then a stop covering the second signals it.
+        let rest = quitting.value.count
+        stopping.stopAll(grace: 0)
+        #expect(quitting.value.dropFirst(rest).map(\.signal) == [SIGTERM, SIGKILL])
+    }
+
+    @Test func theSandboxLetsCodexReadOnlyItsInstallationTheRequestAndItsSignIn() async throws {
+        let base = temporaryDirectory()
+        let request = base.appendingPathComponent("request"), codexHome = base.appendingPathComponent("codex")
+        for url in [request, codexHome] { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+        defer { try? FileManager.default.removeItem(at: base) }
+        try "PROMPT".write(to: request.appendingPathComponent("prompt"), atomically: true, encoding: .utf8)
+        try "SIGN-IN".write(to: codexHome.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
+        let secrets = [base.appendingPathComponent("secret"), codexHome.appendingPathComponent("history.jsonl")]
+        for url in secrets { try "SENTINEL".write(to: url, atomically: true, encoding: .utf8) }
+        // `/bin/cp` stands in for codex: it may read and write what Codex may, and is the only program in its installation.
+        let profile = CodexCLI.sandboxProfile(executable: URL(fileURLWithPath: "/bin/cp"), codexHome: codexHome, certificate: nil, folder: request,
+                                              home: FileManager.default.homeDirectoryForCurrentUser)
+        func copy(_ from: URL, _ to: URL, program: String = "/bin/cp") async throws -> Bool {
+            let result = try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/sandbox-exec"), ["-p", profile, program, from.path, to.path],
+                                                     stdin: Data(), directory: request, environment: [:], timeout: 30, children: ChildProcesses())
+            return result.status == 0 && !String(decoding: result.stdout + result.stderr, as: UTF8.self).contains("SENTINEL")
+        }
+        func contents(_ name: String) -> String? { try? String(contentsOf: request.appendingPathComponent(name), encoding: .utf8) }
+        // The prompt and the sign-in can be read and the answer written in the request folder.
+        #expect(try await copy(request.appendingPathComponent("prompt"), request.appendingPathComponent("answer")))
+        #expect(try await copy(codexHome.appendingPathComponent("auth.json"), request.appendingPathComponent("sign-in")))
+        #expect(contents("answer") == "PROMPT" && contents("sign-in") == "SIGN-IN")
+        // Nothing else of the user's, Codex's other files included, can be read, and nothing can be written outside the folder.
+        for (index, url) in secrets.enumerated() {
+            #expect(try await !copy(url, request.appendingPathComponent("leak-\(index)")), "\(url.lastPathComponent) was readable")
+            #expect(contents("leak-\(index)") == nil)
+        }
+        #expect(try await !copy(request.appendingPathComponent("prompt"), base.appendingPathComponent("copy")))
+        #expect(!FileManager.default.fileExists(atPath: base.appendingPathComponent("copy").path))
+        // No other program starts, not even one beside it.
+        #expect(try await !copy(request.appendingPathComponent("prompt"), request.appendingPathComponent("other"), program: "/bin/mv"))
+        #expect(contents("other") == nil && contents("prompt") == "PROMPT")
     }
 
     @Test func locatesCodexOnAPath() throws {
@@ -1108,6 +1191,28 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         #expect(CodexCLI.locate(in: "/nonexistent:\(codex.deletingLastPathComponent().path)")?.path == codex.path)
         #expect(CodexCLI.locate(in: "/nonexistent") == nil)
     }
+}
+
+/// Stands in for a started `Process` as the launch a group belongs to.
+private final class Launch: Sendable {}
+
+/// The signals a `ChildProcesses` would have sent.
+private final class Signals: @unchecked Sendable {
+    struct Sent: Equatable {
+        let group: pid_t, signal: Int32
+        init(_ group: pid_t, _ signal: Int32) { self.group = group; self.signal = signal }
+    }
+
+    private let lock = NSLock()
+    private var sent: [Sent] = []
+    /// Runs after each signal is recorded, while the `ChildProcesses` lock is held.
+    var then: (@Sendable (pid_t, Int32) -> Void)?
+
+    func append(_ group: pid_t, _ signal: Int32) {
+        lock.withLock { sent.append(Sent(group, signal)) }
+        then?(group, signal)
+    }
+    var value: [Sent] { lock.withLock { sent } }
 }
 
 /// Answers every request with one canned response and records the requests.

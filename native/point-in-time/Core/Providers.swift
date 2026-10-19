@@ -15,9 +15,10 @@ struct ProcessOutput: Sendable {
 /// `Process` makes the child the leader of its own process group, so the signals go to the group: whatever the child
 /// started (the native binary behind an npm launcher, say) is stopped with it. When the child exits, anything it left
 /// running in its group is killed at once, and its output is not waited on for more than a few seconds. A group is
-/// signaled only through `children`, which stops signaling it once its leader's exit is reported, so a group ID that has
-/// been reused is never signaled. Each output stream is capped at `outputLimit` bytes; a child that writes more is
-/// stopped and the run fails, as it does when `check` returns an error for a line of standard output.
+/// signaled only through `children`, on behalf of the launch that started it and only until its leader's exit is
+/// reported, so a group ID that has been reused, even by a later launch, is never signaled. Each output stream is capped
+/// at `outputLimit` bytes; a child that writes more is stopped and the run fails, as it does when `check` returns an
+/// error for a line of standard output.
 enum ProcessRunner {
     static let outputLimit = 2 << 20
 
@@ -44,7 +45,7 @@ enum ProcessRunner {
             group.enter()
             process.terminationHandler = { process in
                 let result: @Sendable () -> ProcessOutput = { ProcessOutput(status: process.terminationStatus, stdout: out.value, stderr: err.value) }
-                children.exited(group: process.processIdentifier)
+                children.exited(process, group: process.processIdentifier)
                 group.notify(queue: .global()) { finish.resume(.success(result())) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) { finish.resume(.success(result())) }
             }
@@ -57,7 +58,7 @@ enum ProcessRunner {
                 return
             }
             let pid = process.processIdentifier
-            let fail: @Sendable (ProviderError) -> Void = { error in if finish.resume(.failure(error)) { stopGroup(pid, children) } }
+            let fail: @Sendable (ProviderError) -> Void = { error in if finish.resume(.failure(error)) { stopGroup(process, pid, children) } }
             let streams: [(Pipe, DataBox, (@Sendable (Data) -> ProviderError?)?)] = [(output, out, check), (errors, err, nil)]
             // Read as data arrives rather than blocking a thread until the output closes.
             for (pipe, box, check) in streams {
@@ -82,10 +83,10 @@ enum ProcessRunner {
         }
     }
 
-    /// SIGTERM to the process group led by `pid`, then SIGKILL two seconds later unless its leader has exited by then.
-    private static func stopGroup(_ pid: pid_t, _ children: ChildProcesses) {
-        children.signal(group: pid, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { children.signal(group: pid, SIGKILL) }
+    /// SIGTERM to the process group `process` leads, then SIGKILL two seconds later unless its leader has exited by then.
+    private static func stopGroup(_ process: Process, _ pid: pid_t, _ children: ChildProcesses) {
+        children.signal(process, group: pid, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { children.signal(process, group: pid, SIGKILL) }
     }
 }
 
@@ -93,17 +94,23 @@ enum ProcessRunner {
 /// rather than leaving Codex running on the subscription, or its prompt and answer in the temporary folder.
 ///
 /// A group is signaled only while its leader's exit has not been reported: once the leader is reaped and the group is
-/// empty, the system may give its ID to someone else's group. While any member is left, the ID is not reused, so the
-/// group is killed at once when its leader's exit is reported.
+/// empty, the system may give its ID to someone else's group, or to a later launch. While any member is left, the ID is
+/// not reused, so the group is killed at once when its leader's exit is reported. A group ID is not an identity: each
+/// signal names the launch it is for (the `Process`, which whoever schedules the signal keeps alive), and is sent only
+/// while that launch is the one tracked for the ID.
 public final class ChildProcesses: @unchecked Sendable {
     public static let shared = ChildProcesses()
 
     private let lock = NSLock()
-    private var groups: Set<pid_t> = []
+    private var groups: [pid_t: AnyObject] = [:]
     private var folders: Set<URL> = []
     private var stopped = false
+    private let send: @Sendable (_ group: pid_t, _ signal: Int32) -> Void
 
-    public init() {}
+    public convenience init() { self.init(signal: { group, signal in _ = kill(-group, signal) }) }
+
+    /// `signal` sends a signal to a process group; tests replace it to record what would be sent.
+    init(signal: @escaping @Sendable (_ group: pid_t, _ signal: Int32) -> Void) { send = signal }
 
     /// Starts `process` and tracks its group, unless the app is quitting. The lock is held across the start, so even a
     /// child that exits at once has its exit reported after it is tracked.
@@ -111,18 +118,27 @@ public final class ChildProcesses: @unchecked Sendable {
         try lock.withLock {
             guard !stopped else { throw ProviderError.process("pointInTime is quitting") }
             try process.run()
-            groups.insert(process.processIdentifier)
+            groups[process.processIdentifier] = process
         }
     }
 
-    /// Signals the group led by `pid` if its leader's exit has not been reported; otherwise does nothing.
-    func signal(group pid: pid_t, _ signal: Int32) {
-        lock.withLock { if groups.contains(pid) { kill(-pid, signal) } }
+    /// Tracks `group` as started by `launch`, replacing whatever launch had the ID before.
+    func track(_ launch: AnyObject, group: pid_t) {
+        lock.withLock { groups[group] = launch }
     }
 
-    /// The leader of `pid`'s group exited: whatever it left running is killed now, and the group is not signaled again.
-    func exited(group pid: pid_t) {
-        lock.withLock { if groups.remove(pid) != nil { kill(-pid, SIGKILL) } }
+    /// Signals `group` if `launch` started it and its leader's exit has not been reported; otherwise does nothing.
+    func signal(_ launch: AnyObject, group: pid_t, _ signal: Int32) {
+        lock.withLock { if groups[group] === launch { send(group, signal) } }
+    }
+
+    /// The leader `launch` started exited: whatever it left running is killed now, and the group is not signaled again.
+    func exited(_ launch: AnyObject, group: pid_t) {
+        lock.withLock {
+            guard groups[group] === launch else { return }
+            groups[group] = nil
+            send(group, SIGKILL)
+        }
     }
 
     func add(folder url: URL) -> Bool { lock.withLock { stopped ? false : folders.insert(url).inserted } }
@@ -136,10 +152,10 @@ public final class ChildProcesses: @unchecked Sendable {
             defer { self.folders = [] }
             return (self.groups, self.folders)
         }
-        for pid in groups { signal(group: pid, SIGTERM) }
+        for (pid, launch) in groups { signal(launch, group: pid, SIGTERM) }
         let deadline = Date().addingTimeInterval(grace)
-        while Date() < deadline, lock.withLock({ !self.groups.isDisjoint(with: groups) }) { usleep(20_000) }
-        for pid in groups { signal(group: pid, SIGKILL) }
+        while Date() < deadline, lock.withLock({ groups.contains { self.groups[$0.key] === $0.value } }) { usleep(20_000) }
+        for (pid, launch) in groups { signal(launch, group: pid, SIGKILL) }
         for url in folders { try? FileManager.default.removeItem(at: url) }
     }
 }
@@ -222,10 +238,12 @@ public enum CodexLoginStatus: Equatable, Sendable {
 /// files or calls ChatGPT itself: it checks `codex login status` and runs `codex exec` in an empty private folder,
 /// without the user's Codex config or rules, with a read-only sandbox, the prompt on stdin, and a timeout.
 ///
-/// The prompt asks Codex not to use tools, but that is not what keeps it to the request: `exec` runs with every feature
-/// that gives the model a tool turned off, and with web search off. A codex that does not know one of them refuses to
-/// start, so nothing is sent. Its `--json` events are checked as they arrive: any item other than the answer, its
-/// reasoning, or a notice from Codex itself stops the run and the answer is discarded.
+/// The prompt asks Codex not to use tools, but that is not what keeps it to the request. `exec` runs inside a macOS
+/// sandbox (`sandboxProfile`) in which no file of the user's can be read and no other program started, whatever tools a
+/// codex version gives the model. It also runs with every feature that gives the model a tool turned off, and with web
+/// search off; a codex that does not know one of them refuses to start, so nothing is sent. Its `--json` events are
+/// checked as they arrive: any item other than the answer, its reasoning, or a notice from Codex itself stops the run
+/// and the answer is discarded.
 public struct CodexCLI: ClassificationProvider {
     public static let defaultTimeout: TimeInterval = 180
 
@@ -236,14 +254,18 @@ public struct CodexCLI: ClassificationProvider {
     public let searchPath: String
     public let timeout: TimeInterval
     let children: ChildProcesses
+    /// The program that confines `codex exec`; tests replace it to record what it is given.
+    let sandbox: URL
     private let baseEnvironment: [String: String]
 
     /// `searchPath` is the `PATH` the child gets. The binary's own folder is put first, so a launcher script finds the
     /// runtime installed beside it (for example `node` in the same version manager folder). `environment` is what the
     /// child inherits, less what could make Codex use something other than the ChatGPT sign-in.
     public init(executable: URL, searchPath: String?, timeout: TimeInterval = CodexCLI.defaultTimeout, children: ChildProcesses = .shared,
-                environment: [String: String] = ProcessInfo.processInfo.environment) {
+                environment: [String: String] = ProcessInfo.processInfo.environment,
+                sandbox: URL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")) {
         self.executable = executable
+        self.sandbox = sandbox
         baseEnvironment = environment
         let folder = executable.deletingLastPathComponent().path
         self.searchPath = ([folder] + (searchPath ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
@@ -259,11 +281,75 @@ public struct CodexCLI: ClassificationProvider {
     /// The `--json` items a classification may produce.
     static let allowedItems: Set<String> = ["agent_message", "reasoning", "error"]
 
-    public static func execArguments(workingDirectory: URL, schema: URL, output: URL) -> [String] {
+    /// Codex keeps its databases and logs in `state`, inside the request folder, rather than beside the user's sessions.
+    public static func execArguments(workingDirectory: URL, schema: URL, output: URL, state: URL) -> [String] {
         ["exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only", "--json"]
             + disabledFeatures.flatMap { ["--disable", $0] }
-            + ["-c", "web_search=\"disabled\"", "--color", "never", "--cd", workingDirectory.path, "--output-schema", schema.path,
-               "-o", output.path, "-"]
+            + ["-c", "web_search=\"disabled\"", "-c", "sqlite_home=\(quoted(state.path))", "-c", "log_dir=\(quoted(state.path))",
+               "--color", "never", "--cd", workingDirectory.path, "--output-schema", schema.path, "-o", output.path, "-"]
+    }
+
+    /// The files Codex reads and writes in its home: its sign-in, which it rewrites in place when it refreshes it, its
+    /// installation ID, and its list of models.
+    static let codexHomeFiles = ["auth.json", "installation_id", "models_cache.json"]
+
+    /// The macOS sandbox `codex exec` runs in. Reading or writing anything under the home folder, `/Users`, `/Volumes`, or
+    /// the temporary folders is denied, except the installation (`installation`), the request `folder`, the
+    /// `codexHomeFiles`, and a CA certificate Codex was given; starting any program but the installation's is denied.
+    /// A tool the model is given (a shell, a patch, an image viewer, another agent) therefore finds nothing of the user's
+    /// to read, nor anything to run. An installation folder that would open the home folder itself is left out, and then
+    /// Codex cannot start, so nothing is sent.
+    static func sandboxProfile(executable: URL, codexHome: URL, certificate: String?, folder: URL, home: URL) -> String {
+        let home = realPath(home.path), (folders, programs, package) = installation(executable)
+        let opensHome: (String) -> Bool = { $0 == "/" || $0 == home || home.hasPrefix($0 + "/") }
+        let installation = folders.filter { !opensHome($0) }, packages = package.map { [$0] }?.filter { !opensHome($0) } ?? []
+        let codexHome = realPath(codexHome.path), request = realPath(folder.path)
+        let files = codexHomeFiles.map { codexHome + "/" + $0 }, certificate = certificate.map(realPath)
+        let allowed = installation + [request] + files + (certificate.map { [$0] } ?? [])
+        // Reaching an allowed path takes looking up each folder above it.
+        let ancestors = Set(allowed.flatMap { path in
+            path.split(separator: "/").dropLast().reduce(into: ["/"]) { $0.append(($0.count == 1 ? "" : $0.last!) + "/" + $1) }
+        })
+        // A rule without a path would apply to every path, so none is written.
+        func rule(_ action: String, _ filter: String, _ paths: [String]) -> String {
+            paths.isEmpty ? "" : "(\(action) " + paths.map { "(\(filter) \(quoted($0)))" }.joined(separator: " ") + ")"
+        }
+        return ["(version 1)", "(allow default)",
+                rule("deny file-read* file-write*", "subpath", ["/Users", "/Volumes", "/private/tmp", "/private/var/folders", home]),
+                "(deny process-exec)",
+                rule("allow process-exec", "literal", programs) + rule("allow process-exec", "subpath", packages),
+                rule("allow file-read-metadata", "literal", ancestors.sorted()),
+                rule("allow file-read*", "subpath", installation) + rule("allow file-read*", "literal", certificate.map { [$0] } ?? []),
+                rule("allow file-read* file-write*", "subpath", [request]) + rule("allow file-read* file-write*", "literal", files)]
+            .joined(separator: "\n")
+    }
+
+    /// What a `codex` needs to start. `folders` are read: the folder it is in, where an npm launcher finds `node`, and the
+    /// npm package its real file belongs to, which holds the native binary (or the real file's folder outside a package).
+    /// `programs` may be started: `env`, which runs a launcher's `node`, the `codex` and its real file, and that `node`;
+    /// and so may anything in `package`.
+    static func installation(_ executable: URL) -> (folders: [String], programs: [String], package: String?) {
+        let bin = realPath(executable.deletingLastPathComponent().path), real = URL(fileURLWithPath: realPath(executable.path))
+        let folder = real.deletingLastPathComponent(), package = folder.deletingLastPathComponent()
+        let inPackage = FileManager.default.fileExists(atPath: package.appendingPathComponent("package.json").path)
+        let programs = ["/usr/bin/env", bin + "/" + executable.lastPathComponent, real.path, bin + "/node", realPath(bin + "/node")]
+        return ([bin, (inPackage ? package : folder).path], Array(Set(programs)).sorted(), inPackage ? package.path : nil)
+    }
+
+    /// `path` with every symbolic link resolved (`/var` is `/private/var`), as the sandbox sees it; for a path that does not
+    /// exist yet, its nearest existing folder is resolved.
+    static func realPath(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path).standardizedFileURL, parent = url.deletingLastPathComponent()
+        guard let resolved = realpath(url.path, nil) else {
+            return parent.path == url.path ? url.path : URL(fileURLWithPath: realPath(parent.path)).appendingPathComponent(url.lastPathComponent).path
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// `text` as a double-quoted string, which both Codex's TOML and the sandbox profile read.
+    static func quoted(_ text: String) -> String {
+        "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
     /// Nil when `line` is a `--json` event a classification may produce.
@@ -308,16 +394,25 @@ public struct CodexCLI: ClassificationProvider {
     public func complete(prompt: String, schema: String) async throws -> String {
         let folder = try PrivateDirectory(prefix: "pointInTime-codex", children: children)
         defer { folder.remove() }
-        // Codex works in `work`, which stays empty; the schema and answer sit beside it.
-        let work = folder.url.appendingPathComponent("work", isDirectory: true)
+        // Codex works in `work`, which stays empty, and keeps its databases and temporary files in `state`; the schema and
+        // answer sit beside them.
+        let work = folder.url.appendingPathComponent("work", isDirectory: true), state = folder.url.appendingPathComponent("state", isDirectory: true)
         let schemaFile = folder.url.appendingPathComponent("schema.json"), answerFile = folder.url.appendingPathComponent("answer.json")
-        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        for url in [work, state] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        }
         guard FileManager.default.createFile(atPath: schemaFile.path, contents: Data(schema.utf8), attributes: [.posixPermissions: 0o600]) else {
             throw ProviderError.process("Could not write the answer schema")
         }
-        let result = try await ProcessRunner.run(executable, Self.execArguments(workingDirectory: work, schema: schemaFile, output: answerFile),
-                                                 stdin: Data(prompt.utf8), directory: work, environment: environment, timeout: timeout,
-                                                 children: children, check: Self.refusedEvent)
+        var environment = environment
+        environment["TMPDIR"] = state.path + "/"
+        let home = URL(fileURLWithPath: environment["HOME"] ?? NSHomeDirectory())
+        let profile = Self.sandboxProfile(executable: executable, codexHome: environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+                                              ?? home.appendingPathComponent(".codex"),
+                                          certificate: environment["CODEX_CA_CERTIFICATE"], folder: folder.url, home: home)
+        let arguments = ["-p", profile, executable.path] + Self.execArguments(workingDirectory: work, schema: schemaFile, output: answerFile, state: state)
+        let result = try await ProcessRunner.run(sandbox, arguments, stdin: Data(prompt.utf8), directory: work, environment: environment,
+                                                 timeout: timeout, children: children, check: Self.refusedEvent)
         guard result.status == 0 else {
             if String(decoding: result.stderr, as: UTF8.self).contains("Unknown feature flag") {
                 throw ProviderError.process("This codex cannot turn its tools off, so nothing was sent. Update Codex.")
