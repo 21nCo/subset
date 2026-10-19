@@ -5,9 +5,10 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { emptyStore, operations, schemas, timerBoard } from '../dist/index.js';
 import {
-  CONFIRM_MS, applyResult, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyCountdownDraft, emptyIntervalDraft, failureText,
-  formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl, parseDurationText, pickAnnouncements,
-  pressDestructive, primaryControl, readBoardResult, readOutcome, readPresets, reproject, settleAction
+  CONFIRM_MS, applyResult, cancelsRepeat, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyCountdownDraft, emptyIntervalDraft,
+  failureText, focusDisplaced, formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl, newerBoard,
+  parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readOutcome, readPresets, readRefresh, reproject,
+  ringProgress, settleAction
 } from '../dist/view/view-model.js';
 
 const T0 = Date.UTC(2026, 9, 19, 8, 0, 0);
@@ -142,6 +143,39 @@ test('a held key acts once: auto-repeated keydowns run no control', () => {
     assert.notEqual(keyControl({ key, repeat: false }, running), null, key);
     assert.equal(keyControl({ key, repeat: true }, running), null, `${JSON.stringify(key)} repeated`);
   }
+});
+
+test('a held Enter acts once on every control, so reset and remove need two distinct presses', () => {
+  const enter = { key: 'Enter' };
+  const held = { key: 'Enter', repeat: true };
+  assert.equal(cancelsRepeat(enter), false, 'a first press activates as usual');
+  assert.equal(cancelsRepeat({ ...enter, repeat: false }), false);
+  assert.equal(cancelsRepeat(held), true);
+  // Other held keys keep their meaning: Space presses a button on release, and a held letter types in a field.
+  for (const key of [' ', 'l', 'a', 'Tab']) assert.equal(cancelsRepeat({ key, repeat: true }), false, JSON.stringify(key));
+  // The presses that reach a destructive control while Enter is held down, then pressed again.
+  for (const control of ['reset', 'remove']) {
+    const presses = (keys) => keys.filter((key) => !cancelsRepeat(key)).reduce(
+      (state, _key, index) => { const press = pressDestructive(state.armed, 't_1', control, T0 + index * 30); return { armed: press.armed, runs: state.runs + Number(press.run) }; },
+      { armed: null, runs: 0 }
+    );
+    assert.equal(presses([enter, held, held, held]).runs, 0, `${control} held`);
+    assert.equal(presses([enter, held, held, enter]).runs, 1, `${control} pressed twice`);
+  }
+});
+
+test('after an action focus moves only when the action took it away', () => {
+  const page = { isConnected: true };
+  const control = { isConnected: true, disabled: false };
+  const elsewhere = { isConnected: true, disabled: false };
+  assert.equal(focusDisplaced(control, control, page), false, 'still on its control');
+  assert.equal(focusDisplaced(control, elsewhere, page), false, 'the user moved to another control while the host replied');
+  assert.equal(focusDisplaced(null, page, page), false, 'the action did not start from the card');
+  assert.equal(focusDisplaced(control, page, page), true, 'lost to the page, as when its control disappears');
+  assert.equal(focusDisplaced(control, null, page), true);
+  assert.equal(focusDisplaced(control, { isConnected: false }, page), true, 'on an element that was removed');
+  const disabled = { isConnected: true, disabled: true };
+  assert.equal(focusDisplaced(disabled, disabled, page), true, 'left on a control the action disabled');
 });
 
 test('reset and remove run only on a second press of the same control within 3 s', () => {
@@ -369,6 +403,77 @@ test('a reply to an action that started before a newer host result never overwri
     const refused = { error: { code: 'not_found', message: 'gone' } };
     assert.equal(settleAction({ timers: [], basis: { id: 'host result 2' } }, action, refused).failure.message, 'gone');
   }
+});
+
+test('replies and host results settle in the order the host observed them, for every timer operation', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { store, id, input = { id } } = SCENARIOS[operation]();
+    const started = timerBoard(store, AT - 100);
+    const action = { operation, timerId: id, basis: started };
+    const reply = operations[operation](store, input, AT);
+    assert.ok(reply.ok, operation);
+    const afterReply = timerBoard(reply.store, AT + 20);
+
+    // The host passes a result observed before the action committed: the reply is not laid over it...
+    const early = timerBoard(store, AT - 50);
+    assert.equal(settleAction({ timers: early.timers, basis: early }, action, reply.result).timers, null, operation);
+    // ...and the board's own read after the reply shows the action anyway.
+    const read = readRefresh(operations.list(reply.store, {}, AT + 20).result);
+    assert.equal(read.ok, true, operation);
+    assert.deepEqual(newerBoard(early, read.result), afterReply, `${operation} shown after an earlier host result`);
+    // A host result observed before the read, even one arriving after it, does not hide the action.
+    assert.equal(newerBoard(timerBoard(store, AT - 10), read.result), read.result, `${operation} after a late, older host result`);
+    assert.equal(newerBoard({ ...early, observedAt: AT + 20 }, read.result), read.result, `${operation} on a tie`);
+
+    // Another surface changes the board after the action: it removes the timer acted on (or, after a
+    // removal, adds one), and its result wins over both the reply and the board's earlier read.
+    const later = id === null || operation === 'remove'
+      ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT + 50).store
+      : operations.remove(reply.store, { id }, AT + 50).store;
+    const newer = timerBoard(later, AT + 60);
+    assert.equal(newerBoard(newer, read.result), newer, `${operation} after a later change`);
+    assert.equal(settleAction({ timers: newer.timers, basis: newer }, action, reply.result).timers, null, `${operation} stale reply`);
+    if (id !== null && operation !== 'remove') assert.equal(newerBoard(newer, read.result).timers.some((timer) => timer.definition.id === id), false);
+  }
+});
+
+test('the read after a change shows only a list result the board can render, or a List failure', async () => {
+  const { result } = await fixture('view-props.json');
+  assert.deepEqual(readRefresh(result), { ok: true, result });
+  for (const outcome of [new Error('offline'), { error: { code: 'invalid_input', message: 'no' } }, {}, { ...result, observedAt: 8_640_000_000_000_001 }]) {
+    const read = readRefresh(outcome);
+    assert.equal(read.ok, false, JSON.stringify(outcome).slice(0, 60));
+    assert.equal(read.failure.operation, 'list');
+    assert.match(failureText(read.failure), /^List failed: .+/);
+  }
+});
+
+test('board results and replies whose timers break the stored timer rules are refused', () => {
+  for (const cooldownMs of [undefined, 10_000]) {
+    const spec = { kind: 'interval', name: 'Laps', rounds: 2, segments: [{ label: 'Work', phase: 'work', durationMs: 20_000 }], ...(cooldownMs && { cooldownMs }) };
+    const { store, id } = timerAfter({ timer: spec }, [['start', 0], ['pause', 5_000]]);
+    const board = timerBoard(store, AT);
+    assert.equal(readBoardResult(board).ok, true);
+    assert.equal(readOutcome('pause', id, { timer: board.timers[0] }).ok, true);
+    // Paused at its total, as no operation leaves a timer: re-projecting it would show a zero-length step.
+    const broken = structuredClone(board);
+    broken.timers[0].runtime.accumulatedMs = 40_000 + (cooldownMs ?? 0);
+    const read = readBoardResult(broken);
+    assert.equal(read.ok, false, `cooldown ${cooldownMs}`);
+    assert.match(read.message, /^timers\.0\.runtime\.accumulatedMs: /);
+    const reply = readOutcome('pause', id, { timer: broken.timers[0] });
+    assert.equal(reply.ok, false);
+    assert.match(failureText(reply.failure), /^Pause failed: The host's reply does not match the Timer contract \(timer\.runtime\.accumulatedMs: /);
+  }
+  // The ring stays finite whatever the projection holds.
+  const projection = { status: 'running', elapsedMs: 0, totalMs: null, remainingMs: null, finished: false, step: null, next: null };
+  assert.equal(ringProgress(projection), null, 'a stopwatch has no ring');
+  assert.equal(ringProgress({ ...projection, totalMs: 60_000, elapsedMs: 15_000 }), 0.25);
+  assert.equal(ringProgress({ ...projection, totalMs: 60_000, elapsedMs: 90_000 }), 1);
+  assert.equal(ringProgress({ ...projection, finished: true }), 1);
+  assert.equal(ringProgress({ ...projection, totalMs: 0 }), null);
+  assert.equal(ringProgress({ ...projection, step: { elapsedMs: 0, durationMs: 0 } }), 1, 'a zero-length step is full, not NaN');
+  assert.equal(ringProgress({ ...projection, step: { elapsedMs: 5_000, durationMs: 20_000 } }), 0.25);
 });
 
 test('the board shows only results it can render: observedAt within Date range, each id once', async () => {

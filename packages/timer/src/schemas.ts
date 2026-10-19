@@ -156,7 +156,8 @@ const projection = z.strictObject({
   step: intervalStep.extend({ elapsedMs: nonNegativeMs, remainingMs: nonNegativeMs }).nullable(),
   next: intervalStep.nullable()
 });
-const snapshot = z.strictObject({ definition: timerDefinition, runtime: timerRuntime, projection });
+// A snapshot's timer meets the stored timer's cross-field rules, so a view can re-project it.
+const snapshot = z.strictObject({ definition: timerDefinition, runtime: timerRuntime, projection }).superRefine(checkTimer);
 const boardResult = z.strictObject({ schemaVersion: z.literal(TIMER_SCHEMA_VERSION), observedAt: epochMs, timers: z.array(snapshot) });
 const timerError = z.strictObject({
   code: z.enum(['not_found', 'invalid_state', 'limit_reached', 'invalid_input']),

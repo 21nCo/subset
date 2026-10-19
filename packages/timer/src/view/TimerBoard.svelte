@@ -1,17 +1,19 @@
 <!--
   The Timer board, view ID `subset.timer.board@1`. It renders the timers in `result`, re-projects them
   from their timestamps every 250 ms and runs every change through `actions.invoke`. It never fetches:
-  each host supplies its own transport, and a new `result` from the host replaces the board's timers.
+  each host supplies its own transport. After each change it reads the board through `list`, and it
+  shows whichever board, the host's `result` or its own read, the host observed later.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import type { TimerSnapshot } from '../agent.js';
+  import type { TimerBoardResult, TimerSnapshot } from '../agent.js';
   import type { Preset } from '../model.js';
   import type { OperationName } from '../operations.js';
   import CreateTimer from './CreateTimer.svelte';
   import TimerCard from './TimerCard.svelte';
   import {
-    REFRESH_MS, failureText, formatClockTime, pickAnnouncements, pressDestructive, readBoardResult, readPresets, reproject, settleAction,
+    MUTATIONS, REFRESH_MS, cancelsRepeat, failureText, focusDisplaced, formatClockTime, newerBoard, pickAnnouncements, pressDestructive,
+    readBoardResult, readPresets, readRefresh, reproject, settleAction,
     type ActionFailure, type AnnouncedStates, type Armed, type ControlName, type TimerBoardProps
   } from './view-model.js';
 
@@ -20,8 +22,11 @@
   const titleId = `${uid}-title`;
 
   const read = $derived(readBoardResult(result));
-  // A successful action updates the board until the host passes its next `result`, which wins.
-  let timers = $derived<TimerSnapshot[]>(read.ok ? read.result.timers : []);
+  // The board's own latest `list` read, taken after one of its changes committed.
+  let own = $state.raw<TimerBoardResult | null>(null);
+  const board = $derived(read.ok ? newerBoard(read.result, own) : null);
+  // A successful action updates the board until it takes a newer board result, which wins.
+  let timers = $derived<TimerSnapshot[]>(board ? board.timers : []);
   let clock = $state(untrack(() => now()));
   const projected = $derived(timers.map((timer) => reproject(timer, clock)));
 
@@ -47,33 +52,51 @@
     if (messages.length) announce(messages.join(' '));
   });
 
+  /** What `invoke` gave back; a thrown or rejected call becomes its error. */
+  async function invoke(operation: OperationName, input: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await actions.invoke(operation, input);
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  function fail(next: ActionFailure) {
+    failure = next;
+    announce(failureText(next));
+  }
+
   /** Runs one operation; resolves to its result, or null when it failed, which shows inline and is announced. */
   async function run(operation: OperationName, input: Record<string, unknown>, timerId: string | null): Promise<Record<string, unknown> | null> {
     const key = timerId ?? operation;
     if (busy[key]) return null;
     busy[key] = true;
-    // The host result this action starts under; a newer one by the time it settles wins over its reply.
-    const basis = read;
-    let outcome: unknown;
-    try {
-      outcome = await actions.invoke(operation, input);
-    } catch (error) {
-      outcome = error instanceof Error ? error : new Error(String(error));
-    } finally {
-      busy[key] = false;
-    }
-    const settled = settleAction({ timers, basis: read }, { operation, timerId, basis }, outcome);
+    // The board result this action starts under; a newer one by the time it settles wins over its reply.
+    const basis = board;
+    const outcome = await invoke(operation, input);
+    busy[key] = false;
+    const settled = settleAction({ timers, basis: board }, { operation, timerId, basis }, outcome);
     if (!settled.ok) {
-      failure = settled.failure;
-      announce(failureText(settled.failure));
+      fail(settled.failure);
       return null;
     }
     if (failure && (failure.timerId === timerId || failure.timerId === null)) failure = null;
     if (settled.timers) timers = settled.timers;
+    if (MUTATIONS.has(operation)) void refresh();
     return settled.result;
   }
 
+  /** Reads the host's board after a change committed; it wins over any board observed before it. */
+  async function refresh(): Promise<void> {
+    const refreshed = readRefresh(await invoke('list', {}));
+    if (!refreshed.ok) return fail(refreshed.failure);
+    if (failure?.operation === 'list') failure = null;
+    own = newerBoard(refreshed.result, own);
+  }
+
   async function control(timerId: string, name: ControlName): Promise<void> {
+    // Where focus was when the action started, if on this timer's card.
+    const origin = listElement?.contains(document.activeElement) ? document.activeElement : null;
     if (name === 'reset' || name === 'remove') {
       const at = now();
       // The label follows `clock`; move it to the press so "Press again" shows at once.
@@ -86,9 +109,9 @@
     }
     const removed = (await run(name, { id: timerId }, timerId)) !== null && name === 'remove';
     if (removed) {
-      // The card is gone; keep focus inside the board.
+      // The card is gone; keep focus inside the board, unless the user has moved it elsewhere.
       await tick();
-      listElement?.focus();
+      if (focusDisplaced(origin, document.activeElement, document.body)) listElement?.focus();
     }
   }
 
@@ -100,11 +123,20 @@
   const boardFailure = $derived(failure && !projected.some((timer) => timer.definition.id === failure?.timerId) ? failure : null);
 </script>
 
-<section class="board" class:compact={density === 'compact'} aria-labelledby={titleId}>
+<!-- Cancels a held Enter's repeated clicks and submits on every control (`cancelsRepeat`). -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<section
+  class="board"
+  class:compact={density === 'compact'}
+  aria-labelledby={titleId}
+  onkeydown={(event) => {
+    if (cancelsRepeat(event)) event.preventDefault();
+  }}
+>
   <header class="board-header">
     <h2 id={titleId}>Timers</h2>
-    {#if read.ok}
-      <p class="observed">Observed <time datetime={new Date(read.result.observedAt).toISOString()}>{formatClockTime(read.result.observedAt)}</time></p>
+    {#if board}
+      <p class="observed">Observed <time datetime={new Date(board.observedAt).toISOString()}>{formatClockTime(board.observedAt)}</time></p>
     {/if}
   </header>
 

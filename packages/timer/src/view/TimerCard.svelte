@@ -1,12 +1,12 @@
 <!--
   One timer on the board. Focusable: Space starts, pauses or resumes it, L takes a lap and S skips,
-  and focus returns to the card after each action. Reset and remove run on a second press within 3 s.
+  and focus stays on the card after each action. Reset and remove run on a second press within 3 s.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
   import type { TimerSnapshot } from '../agent.js';
   import {
-    controlStates, formatElapsed, formatRemaining, isArmed, keyControl, primaryControl, stepTitle,
+    controlStates, focusDisplaced, formatElapsed, formatRemaining, isArmed, keyControl, primaryControl, ringProgress, stepTitle,
     type Armed, type ControlName, type TimerBoardCapabilities, type TimerBoardDensity
   } from './view-model.js';
 
@@ -42,9 +42,7 @@
   const time = $derived(
     step ? formatRemaining(step.remainingMs) : projection.remainingMs !== null ? formatRemaining(projection.remainingMs) : formatElapsed(projection.elapsedMs)
   );
-  const progress = $derived(
-    step ? step.elapsedMs / step.durationMs : projection.totalMs ? projection.elapsedMs / projection.totalMs : projection.finished ? 1 : null
-  );
+  const progress = $derived(ringProgress(projection));
   const phase = $derived(step?.phase ?? (projection.finished && definition.kind === 'interval' ? 'done' : null));
   const RADIUS = 44;
   const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -59,10 +57,12 @@
 
   async function act(control: ControlName) {
     if (busy || table[control] !== 'enabled') return;
+    const origin = card?.contains(document.activeElement) ? document.activeElement : null;
     await oncontrol(control);
-    // A control can disappear or become disabled after its action; keep focus on this card.
+    // A control can disappear or become disabled after its action; then focus moves to this card.
+    // Focus the user moved elsewhere while the host replied stays there.
     await tick();
-    if (card?.isConnected && !card.contains(document.activeElement)) card.focus();
+    if (card?.isConnected && focusDisplaced(origin, document.activeElement, document.body)) card.focus();
   }
 
   function onkeydown(event: KeyboardEvent) {
@@ -110,7 +110,7 @@
           cy="50"
           r={RADIUS}
           stroke-dasharray={CIRCUMFERENCE}
-          stroke-dashoffset={CIRCUMFERENCE * (1 - Math.min(1, Math.max(0, progress)))}
+          stroke-dashoffset={CIRCUMFERENCE * (1 - progress)}
         />
       </svg>
     {/if}

@@ -26,6 +26,17 @@ function stepMessage(timer: AnnounceInput): string | null {
   return `${timer.definition.name}: ${stepTitle(step)}${round}, ${formatRemaining(step.durationMs)}.`;
 }
 
+/** What a change of status says: finish, pause and resume; nothing for any other change. */
+function statusMessage(name: string, before: TimerStatus, status: TimerStatus): string | null {
+  if (status === before) return null;
+  if (status === 'finished') return `${name} finished.`;
+  if (status === 'paused' && before === 'running') return `${name} paused.`;
+  if (status === 'running' && before === 'paused') return `${name} resumed.`;
+  return null;
+}
+
+const underWay = (value: TimerStatus) => value === 'running' || value === 'paused';
+
 /**
  * Compares each timer with what was last announced and returns the messages to speak, in board
  * order, with the states to remember. Timers seen for the first time (including every timer when
@@ -40,17 +51,10 @@ export function pickAnnouncements(previous: AnnouncedStates | null, timers: read
     states[timer.definition.id] = current;
     const before = previous?.[timer.definition.id];
     if (!before) continue;
-    const name = timer.definition.name;
-    if (status !== before.status) {
-      if (status === 'finished') messages.push(`${name} finished.`);
-      else if (status === 'paused' && before.status === 'running') messages.push(`${name} paused.`);
-      else if (status === 'running' && before.status === 'paused') messages.push(`${name} resumed.`);
-    }
     // A step change while the timer is under way, for example the next segment or a skip. Starting
     // from idle is the user's own action and is not announced.
-    const underWay = (value: TimerStatus) => value === 'running' || value === 'paused';
-    if (underWay(status) && underWay(before.status) && current.stepIndex !== before.stepIndex) {
-      const message = stepMessage(timer);
+    const stepChanged = underWay(status) && underWay(before.status) && current.stepIndex !== before.stepIndex;
+    for (const message of [statusMessage(timer.definition.name, before.status, status), stepChanged ? stepMessage(timer) : null]) {
       if (message) messages.push(message);
     }
   }

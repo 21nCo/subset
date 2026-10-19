@@ -105,14 +105,40 @@ export function primaryControl(table: ControlTable): 'start' | 'pause' | 'resume
   return (['pause', 'resume', 'start'] as const).find((control) => table[control] === 'enabled') ?? null;
 }
 
+const SHORTCUTS = new Map<string, ControlName>([['l', 'lap'], ['s', 'skip']]);
+
 /**
  * A control keyed on a card: Space for the primary control, L for lap and S for skip. A key held
  * down repeats its keydown; only the first press acts, so holding L takes one lap.
  */
 export function keyControl({ key, repeat = false }: { key: string; repeat?: boolean }, table: ControlTable): ControlName | null {
   if (repeat) return null;
-  const control = key === ' ' ? primaryControl(table) : key === 'l' || key === 'L' ? 'lap' : key === 's' || key === 'S' ? 'skip' : null;
+  const control = key === ' ' ? primaryControl(table) : (SHORTCUTS.get(key.toLowerCase()) ?? null);
   return control && table[control] === 'enabled' ? control : null;
+}
+
+/**
+ * Whether the board cancels this keydown. A held Enter repeats its keydown and a browser clicks the
+ * focused button, or submits the form, on each one; cancelling the repeats makes a held Enter act
+ * once on every control, so it cannot also confirm reset or remove. A first press is never cancelled.
+ */
+export const cancelsRepeat = ({ key, repeat = false }: { key: string; repeat?: boolean }) => repeat && key === 'Enter';
+
+/** The parts of a DOM element `focusDisplaced` reads. */
+export interface FocusTarget {
+  isConnected: boolean;
+  disabled?: boolean;
+}
+
+/**
+ * Whether an action took focus away from where it started (`origin`), rather than the user moving
+ * it: focus fell back to the page (`active` is null or `page`), or stayed on a control the action
+ * removed or disabled. Focus the user moved to another control is left there.
+ */
+export function focusDisplaced(origin: FocusTarget | null, active: FocusTarget | null, page: FocusTarget | null): boolean {
+  if (!origin) return false;
+  if (!active || active === page || !active.isConnected) return true;
+  return active === origin && Boolean(origin.disabled);
 }
 
 /** The destructive control waiting for its second press, and since when. */
@@ -123,15 +149,13 @@ export type Armed = { timerId: string; control: 'reset' | 'remove'; at: number }
  * same timer within `CONFIRM_MS` runs it. Any other press, or a late one, arms afresh.
  */
 export function pressDestructive(armed: Armed, timerId: string, control: 'reset' | 'remove', now: number): { run: boolean; armed: Armed } {
-  if (armed && armed.timerId === timerId && armed.control === control && now - armed.at >= 0 && now - armed.at < CONFIRM_MS) {
-    return { run: true, armed: null };
-  }
+  if (isArmed(armed, timerId, control, now)) return { run: true, armed: null };
   return { run: false, armed: { timerId, control, at: now } };
 }
 
 /** Whether `armed` still waits for its second press at `now`. */
 export const isArmed = (armed: Armed, timerId: string, control: 'reset' | 'remove', now: number) =>
-  armed !== null && armed.timerId === timerId && armed.control === control && now - armed.at >= 0 && now - armed.at < CONFIRM_MS;
+  armed?.timerId === timerId && armed.control === control && now - armed.at >= 0 && now - armed.at < CONFIRM_MS;
 
 /** An operation that failed, named for the inline error. */
 export interface ActionFailure {
@@ -192,11 +216,12 @@ export function applyResult(timers: readonly TimerSnapshot[], result: Record<str
 }
 
 /**
- * Settles one action's reply against the board. `basis` is the host `result` the action started
- * under and `board.basis` the current one. A reply to an action that started before the host passed
- * a newer `result` is not applied: the newer result already holds or supersedes it, and applying it
- * could bring back a timer the host removed or undo a newer change. Its failure is still shown.
- * `timers` is null when the board's timers stay as they are.
+ * Settles one action's reply against the board. `basis` is the board result the action started
+ * under and `board.basis` the current one. A reply to an action that started before the board took
+ * a newer result is not applied: that result may already hold or supersede it, and applying it could
+ * bring back a timer the host removed or undo a newer change. Its failure is still shown. `timers` is
+ * null when the board's timers stay as they are; either way the board then reads the host's board
+ * (`readRefresh`), which shows the action unless a later change replaced it.
  */
 export function settleAction(
   board: { timers: readonly TimerSnapshot[]; basis: unknown },
@@ -206,6 +231,39 @@ export function settleAction(
   const read = readOutcome(action.operation, action.timerId, outcome);
   if (!read.ok) return read;
   return { ok: true, result: read.result, timers: action.basis === board.basis ? applyResult(board.timers, read.result) : null };
+}
+
+/** The operations that change timers. After each one succeeds, the board reads the host's board again. */
+export const MUTATIONS: ReadonlySet<OperationName> = new Set(['create', 'start', 'pause', 'resume', 'lap', 'skip', 'reset', 'remove']);
+
+/**
+ * Reads the `list` the board runs after a successful change. It was observed after that change
+ * committed, so with `newerBoard` it shows the change even when the host passed a result observed
+ * earlier, and a later change by anyone still wins.
+ */
+export function readRefresh(outcome: unknown): { ok: true; result: TimerBoardResult } | Outcome & { ok: false } {
+  const read = readOutcome('list', null, outcome);
+  if (!read.ok) return read;
+  const board = readBoardResult(read.result);
+  return board.ok ? board : { ok: false, failure: { operation: 'list', timerId: null, message: board.message } };
+}
+
+/**
+ * The board result to show: the host's `result` or the board's own latest read, whichever the host
+ * observed later. Both carry `observedAt` from the host's clock, so neither an older host result
+ * nor an older read can hide a newer one. On a tie the board's own read wins, as it followed a change.
+ */
+export const newerBoard = (host: TimerBoardResult, own: TimerBoardResult | null): TimerBoardResult =>
+  own && own.observedAt >= host.observedAt ? own : host;
+
+/** The share of a timer's ring that is filled, from 0 to 1, or null for a stopwatch, which has no end. */
+export function ringProgress(projection: TimerSnapshot['projection']): number | null {
+  const { step } = projection;
+  let share: number | null;
+  if (step) share = step.durationMs > 0 ? step.elapsedMs / step.durationMs : 1;
+  else if (projection.totalMs) share = projection.elapsedMs / projection.totalMs;
+  else share = projection.finished ? 1 : null;
+  return share === null ? null : Math.min(1, Math.max(0, share));
 }
 
 /** The presets in a `presets.list` result, or null when it does not match the contract. */
@@ -222,8 +280,8 @@ export const reproject = (snapshot: TimerSnapshot, now: number): TimerSnapshot =
 
 export interface SegmentDraft {
   label: string;
-  /** One of the phases; a string so that a value from elsewhere is reported rather than trusted. */
-  phase: Phase | string;
+  /** One of the phases (`Phase`); any string, so that a value from elsewhere is reported rather than trusted. */
+  phase: string;
   duration: string;
 }
 
@@ -251,8 +309,10 @@ export interface CountdownDraft {
 export type DraftErrors = Record<string, string>;
 export type DraftOutcome<Spec> = { ok: true; spec: Spec } | { ok: false; errors: DraftErrors };
 
+const PHASE_LABELS: Record<Phase, string> = { prep: 'Prep', work: 'Work', rest: 'Rest', cooldown: 'Cooldown' };
+
 export const emptySegment = (phase: Phase = 'work'): SegmentDraft =>
-  ({ label: phase === 'work' ? 'Work' : phase === 'rest' ? 'Rest' : phase === 'prep' ? 'Prep' : 'Cooldown', phase, duration: phase === 'rest' ? '0:10' : '0:20' });
+  ({ label: PHASE_LABELS[phase], phase, duration: phase === 'rest' ? '0:10' : '0:20' });
 
 export const emptyIntervalDraft = (): IntervalDraft =>
   ({ name: '', sound: true, countdownTicks: true, rounds: '8', prep: '', cooldown: '', segments: [emptySegment('work'), emptySegment('rest')] });
