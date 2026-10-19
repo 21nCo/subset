@@ -33,6 +33,8 @@ public enum SignalFailure: Equatable, Sendable {
     case noExecutablePath
     /// The call succeeded but its result cannot be used.
     case unexpectedResult(String)
+    /// No launchd plist names the executable, but these folders or plists could not be read, so one there may.
+    case incompleteScan([LaunchdScanFailure])
 
     /// Maps the `errno` a failed process read left.
     public init(errno code: Int32) {
@@ -52,6 +54,9 @@ public enum SignalFailure: Equatable, Sendable {
         case let .securityError(status): "Security framework error \(status)"
         case .noExecutablePath: "the process has no executable path"
         case let .unexpectedResult(detail): detail
+        case let .incompleteScan(failures):
+            "no readable plist names it, but the launchd plists were not all read: "
+                + failures.map { "\($0.path) (\($0.reason))" }.joined(separator: ", ")
         }
     }
 }
@@ -128,6 +133,21 @@ public struct LaunchdJob: Equatable, Hashable, Sendable {
 
     /// The program no longer exists, so launchd cannot start this job.
     public var orphaned: Bool { resolvedProgram == nil }
+}
+
+/// A plist folder, application folder, or plist that exists but could not be read, so the jobs it defines are
+/// missing from the launchd index.
+public struct LaunchdScanFailure: Equatable, Hashable, Sendable {
+    public let path: String
+    /// The `errno` from listing the folder or opening the plist, typically `EACCES`.
+    public let code: Int32
+
+    public init(path: String, code: Int32) {
+        self.path = path
+        self.code = code
+    }
+
+    public var reason: String { "\(String(cString: strerror(code))), errno \(code)" }
 }
 
 /// Whether the launchd plists that name a process's executable identify the process's own job. A plist names a

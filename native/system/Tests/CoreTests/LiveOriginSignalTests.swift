@@ -21,13 +21,19 @@ final class LiveOriginSignalTests: XCTestCase {
         let terminal = try XCTUnwrap(signal.value, "\(String(describing: signal.failure))")
         // /dev/tty opens only with a controlling terminal: a test run from Terminal has one, CI's does not.
         let fd = open("/dev/tty", O_RDONLY | O_NOCTTY)
-        if fd >= 0 {
-            defer { close(fd) }
-            let name = try XCTUnwrap(ttyname(fd).map { String(cString: $0) })
-            XCTAssertEqual(terminal, .device(String(name.dropFirst("/dev/".count))))
-        } else {
-            XCTAssertEqual(terminal, .none)
-        }
+        guard fd >= 0 else { return XCTAssertEqual(terminal, .none) }
+        close(fd)
+        // ttyname and fstat of /dev/tty name /dev/tty itself, and swift test's standard streams are pipes, so find
+        // the device by opening each pseudo-terminal: tcgetsid answers only for the caller's controlling terminal.
+        let session = getsid(0)
+        let devices = try FileManager.default.contentsOfDirectory(atPath: "/dev").filter { $0.hasPrefix("ttys") }
+        let name = try XCTUnwrap(devices.sorted().first { name in
+            let device = open("/dev/" + name, O_RDONLY | O_NOCTTY | O_NONBLOCK)
+            guard device >= 0 else { return false }
+            defer { close(device) }
+            return tcgetsid(device) == session
+        }, "no /dev/ttys device is the controlling terminal")
+        XCTAssertEqual(terminal, .device(name))
     }
 
     func testTerminalDevicesDecodeToNamesOrNumbers() {
@@ -128,6 +134,9 @@ final class LiveOriginSignalTests: XCTestCase {
         XCTAssertNotNil(origin.workingDirectory.value)
         XCTAssertNotNil(origin.terminal.value)
         XCTAssertNotNil(origin.codeSignature.value)
-        XCTAssertNotNil(origin.launchdJobs.value)
+        // No plist names the test runner; a Mac with a plist it cannot read cannot rule one out.
+        if case .incompleteScan? = origin.launchdJobs.failure {} else {
+            XCTAssertEqual(origin.launchdJobs.value, [])
+        }
     }
 }

@@ -106,11 +106,14 @@ final class LaunchdJobIndexTests: XCTestCase {
         try plist(agents, "no-label", ["Program": "/usr/bin/true"])
         try plist(agents, "no-program", ["Label": "dev.none"])
         try Data().write(to: agents.appendingPathComponent("README.txt"))
+        try FileManager.default.createDirectory(at: agents.appendingPathComponent("folder.plist"), withIntermediateDirectories: true)
         let index = LaunchdJobIndex(folders: folders())
         index.refreshIfChanged()
 
         XCTAssertEqual(index.jobs, [])
-        XCTAssertEqual(index.unreadablePlists, ["broken", "no-label", "no-program"].map { agents.path + "/\($0).plist" })
+        XCTAssertEqual(index.unreadablePlists, ["broken", "folder", "no-label", "no-program"].map { agents.path + "/\($0).plist" })
+        XCTAssertEqual(index.scanFailures, [], "launchd cannot load these either, so the scan is still complete")
+        XCTAssertEqual(index.launchdJobs(forExecutable: "/usr/bin/true"), .value([], source: .launchdPlists))
     }
 
     func testTheIndexIsRebuiltWhenAFolderOrPlistChanges() throws {
@@ -180,10 +183,72 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.jobs.first?.resolvedProgram, LaunchdJobIndex.realPath(v2))
     }
 
+    func testAFolderOrPlistThatCannotBeReadIsRecordedAndAnAbsentJobIsUnavailable() throws {
+        try XCTSkipIf(getuid() == 0, "root reads a folder without permission")
+        let server = try executable("bin/server")
+        let hidden = try executable("bin/hidden")
+        let secret = try executable("bin/secret")
+        let unrelated = try executable("bin/unrelated")
+        try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
+        try plist(agents, "dev.secret", ["Label": "dev.secret", "Program": secret])
+        try plist(daemons, "dev.hidden", ["Label": "dev.hidden", "Program": hidden])
+        let secretPlist = agents.path + "/dev.secret.plist"
+        try Self.setPermissions(0o000, daemons.path, secretPlist)
+        addTeardownBlock { [daemons] in try? Self.setPermissions(0o755, daemons.path, secretPlist) }
+        let missing = root.path + "/NoSuchLaunchAgents"
+        let index = LaunchdJobIndex(folders: LaunchdFolders(
+            plistFolders: [(agents.path, .userAgent), (daemons.path, .globalDaemon), (missing, .globalAgent)],
+            applicationFolders: [applications.path, root.path + "/NoSuchApplications"]
+        ))
+        index.refreshIfChanged()
+
+        let failures = [LaunchdScanFailure(path: secretPlist, code: EACCES), LaunchdScanFailure(path: daemons.path, code: EACCES)]
+        XCTAssertEqual(index.scanFailures, failures, "a missing folder is not a failure")
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+        for executable in [hidden, secret, unrelated] {
+            XCTAssertEqual(index.launchdJobs(forExecutable: executable), .unavailable(.incompleteScan(failures), source: .launchdPlists))
+        }
+        let reason = try XCTUnwrap(index.launchdJobs(forExecutable: unrelated).failure?.reason)
+        XCTAssertTrue(reason.contains(daemons.path) && reason.contains("errno \(EACCES)"), reason)
+
+        try Self.setPermissions(0o755, daemons.path)
+        try Self.setPermissions(0o644, secretPlist)
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.scanFailures, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: hidden).value?.map(\.label), ["dev.hidden"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: secret).value?.map(\.label), ["dev.secret"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: unrelated), .value([], source: .launchdPlists))
+    }
+
+    func testAnApplicationSubfolderThatCannotBeListedIsRecorded() throws {
+        try XCTSkipIf(getuid() == 0, "root reads a folder without permission")
+        let helper = try embeddedAgent("dev.vendor", in: "Vendor/Tool.app")
+        let vendor = applications.path + "/Vendor"
+        try Self.setPermissions(0o000, vendor)
+        addTeardownBlock { try? Self.setPermissions(0o755, vendor) }
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.scanFailures, [LaunchdScanFailure(path: vendor, code: EACCES)])
+        XCTAssertEqual(index.launchdJobs(forExecutable: helper).failure, .incompleteScan(index.scanFailures))
+
+        try Self.setPermissions(0o755, vendor)
+        index.refreshIfChanged()
+        XCTAssertEqual(index.launchdJobs(forExecutable: helper).value?.map(\.label), ["dev.vendor"])
+    }
+
     func testTheLiveFoldersAreReadWithoutFailing() {
         let index = LaunchdJobIndex()
         index.refreshIfChanged()
-        XCTAssertNotNil(index.launchdJobs(forExecutable: "/usr/bin/true").value)
+        // A Mac may have a root-only plist (this development Mac has a mode 700 one in /Library/LaunchDaemons);
+        // then an executable no plist names reads as an incomplete scan instead of no job.
+        let signal = index.launchdJobs(forExecutable: "/usr/bin/true")
+        if index.scanFailures.isEmpty {
+            XCTAssertNotNil(signal.value)
+        } else {
+            XCTAssertEqual(signal, .unavailable(.incompleteScan(index.scanFailures), source: .launchdPlists))
+        }
     }
 
     private func folders() -> LaunchdFolders {
@@ -191,6 +256,10 @@ final class LaunchdJobIndexTests: XCTestCase {
             plistFolders: [(agents.path, .userAgent), (daemons.path, .globalDaemon)],
             applicationFolders: [applications.path]
         )
+    }
+
+    private static func setPermissions(_ permissions: Int, _ paths: String...) throws {
+        for path in paths { try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: path) }
     }
 
     /// Creates an executable file and returns its path.

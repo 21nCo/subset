@@ -41,11 +41,15 @@ public struct LaunchdFolders: Sendable {
 /// kernel reports a running process by its real path (Homebrew services, for one, name a symlink). A plist whose
 /// program does not exist is kept as `orphaned`.
 ///
-/// The plists are read again when a plist, a plist folder, or an application folder changes size or modification
-/// time, or appears or disappears. The programs are resolved again on every refresh, since an executable can be
+/// The plists are read again when a plist, a plist folder, or an application folder changes size, modification
+/// time, or status-change time (so a permission change counts), appears or disappears, or can or can no longer be
+/// read. The programs are resolved again on every refresh, since an executable can be
 /// created, deleted, or have its symlink retargeted (as `brew upgrade` does to `/opt/homebrew/opt`) while its plist
 /// stays the same. A plist without a label or program, or that does not parse, is listed in `unreadablePlists` and
-/// left out.
+/// left out: launchd cannot load it either. A folder or plist that exists but cannot be read, such as one without
+/// read permission, is listed in `scanFailures`, and an executable no readable plist names is then `unavailable`
+/// rather than known to have no job, since launchd, running as root, may load a job from it. A missing folder is not
+/// a failure.
 public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// launchd's default `PATH` for jobs.
     static let launchdPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -53,8 +57,12 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     private let folders: LaunchdFolders
     private let lock = NSLock()
     private var stamps: Set<FileStamp>?
+    private var folderFailures: [LaunchdScanFailure] = []
     private var definitions: [Definition] = []
-    private var state = (jobs: [LaunchdJob](), unreadable: [String](), byProgram: [String: [LaunchdJob]]())
+    private var plistFailures: [LaunchdScanFailure] = []
+    private var state = (
+        jobs: [LaunchdJob](), unreadable: [String](), failures: [LaunchdScanFailure](), byProgram: [String: [LaunchdJob]]()
+    )
 
     public init(folders: LaunchdFolders = .live()) {
         self.folders = folders
@@ -62,8 +70,10 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
 
     /// Every indexed job, orphaned ones included, ordered by plist path.
     public var jobs: [LaunchdJob] { lock.withLock { state.jobs } }
-    /// Plists that could not be read or lack a label or program.
+    /// Plists that do not parse or lack a label or program; launchd cannot load them either.
     public var unreadablePlists: [String] { lock.withLock { state.unreadable } }
+    /// Folders and plists that exist but could not be read, ordered by path.
+    public var scanFailures: [LaunchdScanFailure] { lock.withLock { state.failures } }
 
     public func refreshIfChanged() {
         let scan = Self.scan(folders)
@@ -72,48 +82,52 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
 
     public func launchdJobs(forExecutable path: String?) -> Signal<[LaunchdJob]> {
         guard let path else { return .unavailable(.noExecutablePath, source: .launchdPlists) }
-        let byProgram = lock.withLock { () -> [String: [LaunchdJob]] in
+        let (byProgram, failures) = lock.withLock {
             if stamps == nil { refresh(Self.scan(folders)) }
-            return state.byProgram
+            return (state.byProgram, state.failures)
         }
         let jobs = byProgram[path] ?? Self.realPath(path).flatMap { byProgram[$0] } ?? []
+        // A job that was found stands; the absence of one is known only when every plist was read.
+        if jobs.isEmpty, !failures.isEmpty { return .unavailable(.incompleteScan(failures), source: .launchdPlists) }
         return .value(jobs, source: .launchdPlists)
     }
 
     /// Reads the plists again if the scan differs, then resolves every program. Call with the lock held.
     private func refresh(_ scan: Scan) {
         var unreadable = state.unreadable
-        if scan.stamps != stamps {
+        if scan.stamps != stamps || scan.failures != folderFailures {
             stamps = scan.stamps
-            (definitions, unreadable) = Self.read(scan.plists)
+            folderFailures = scan.failures
+            (definitions, unreadable, plistFailures) = Self.read(scan.plists)
         }
         let jobs = definitions.map { $0.job() }
-        guard jobs != state.jobs || unreadable != state.unreadable else { return }
+        let failures = (folderFailures + plistFailures).sorted { $0.path < $1.path }
+        guard jobs != state.jobs || unreadable != state.unreadable || failures != state.failures else { return }
         var byProgram: [String: [LaunchdJob]] = [:]
         for job in jobs {
             if let program = job.resolvedProgram { byProgram[program, default: []].append(job) }
         }
-        state = (jobs, unreadable, byProgram)
+        state = (jobs, unreadable, failures, byProgram)
     }
 
     private struct Scan {
         var stamps: Set<FileStamp> = []
         var plists: [(path: String, domain: LaunchdDomain, bundlePath: String?)] = []
+        var failures: [LaunchdScanFailure] = []
     }
 
-    /// Lists every plist and stamps every folder and plist it found, so any change shows as a different stamp set.
+    /// Lists every plist and stamps every folder and plist it found, so any change shows as a different stamp set,
+    /// and records each folder that exists but could not be listed.
     private static func scan(_ folders: LaunchdFolders) -> Scan {
         var scan = Scan()
         var plistFolders = folders.plistFolders.map { (path: $0.path, domain: $0.domain, bundlePath: String?.none) }
         for applications in folders.applicationFolders {
-            for bundle in appBundles(in: applications, depth: appFolderDepth, stamps: &scan.stamps) {
+            for bundle in appBundles(in: applications, depth: appFolderDepth, scan: &scan) {
                 plistFolders.append((bundle + "/Contents/Library/LaunchAgents", .appBundleAgent(bundlePath: bundle), bundle))
             }
         }
         for folder in plistFolders {
-            guard let stamp = FileStamp(path: folder.path) else { continue }
-            scan.stamps.insert(stamp)
-            for entry in contents(of: folder.path).sorted() where entry.hasSuffix(".plist") {
+            for entry in list(folder.path, into: &scan) where entry.hasSuffix(".plist") {
                 let path = folder.path + "/" + entry
                 if let stamp = FileStamp(path: path) { scan.stamps.insert(stamp) }
                 scan.plists.append((path, folder.domain, folder.bundlePath))
@@ -127,16 +141,14 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     static let appFolderDepth = 2
 
     /// The `.app` bundles in `folder` and, up to `depth` levels down, in its subfolders, stamping each folder read.
-    private static func appBundles(in folder: String, depth: Int, stamps: inout Set<FileStamp>) -> [String] {
-        guard let stamp = FileStamp(path: folder) else { return [] }
-        stamps.insert(stamp)
+    private static func appBundles(in folder: String, depth: Int, scan: inout Scan) -> [String] {
         var bundles: [String] = []
-        for entry in contents(of: folder).sorted() where !entry.hasPrefix(".") {
+        for entry in list(folder, into: &scan) where !entry.hasPrefix(".") {
             let path = folder + "/" + entry
             if entry.hasSuffix(".app") {
                 bundles.append(path)
             } else if depth > 0, isFolder(path) {
-                bundles += appBundles(in: path, depth: depth - 1, stamps: &stamps)
+                bundles += appBundles(in: path, depth: depth - 1, scan: &scan)
             }
         }
         return bundles
@@ -148,24 +160,81 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
     }
 
-    private static func contents(of folder: String) -> [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+    /// Stamps a folder and returns its entries, sorted. A missing folder has none; one that exists but cannot be
+    /// listed has none and is recorded in `scan.failures`.
+    private static func list(_ folder: String, into scan: inout Scan) -> [String] {
+        var info = stat()
+        guard stat(folder, &info) == 0 else {
+            let code = errno
+            if !isMissing(code) { scan.failures.append(LaunchdScanFailure(path: folder, code: code)) }
+            return []
+        }
+        scan.stamps.insert(FileStamp(path: folder, info: info))
+        guard let directory = opendir(folder) else {
+            let code = errno
+            if !isMissing(code) { scan.failures.append(LaunchdScanFailure(path: folder, code: code)) }
+            return []
+        }
+        defer { closedir(directory) }
+        var entries: [String] = []
+        while true {
+            errno = 0
+            guard let entry = readdir(directory) else {
+                if errno != 0 { scan.failures.append(LaunchdScanFailure(path: folder, code: errno)) }
+                break
+            }
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { String(decoding: $0.prefix(Int(entry.pointee.d_namlen)), as: UTF8.self) }
+            if name != ".", name != ".." { entries.append(name) }
+        }
+        return entries.sorted()
     }
 
-    /// Parses the plists, ordered by path, and lists the unreadable ones.
+    /// Nothing is there, as opposed to something that cannot be read.
+    private static func isMissing(_ code: Int32) -> Bool { code == ENOENT || code == ENOTDIR }
+
+    /// Parses the plists, ordered by path, and lists the ones that do not parse and the ones that cannot be read.
     private static func read(_ plists: [(path: String, domain: LaunchdDomain, bundlePath: String?)])
-        -> (definitions: [Definition], unreadable: [String]) {
+        -> (definitions: [Definition], unreadable: [String], failures: [LaunchdScanFailure]) {
         var definitions: [Definition] = []
         var unreadable: [String] = []
+        var failures: [LaunchdScanFailure] = []
         for plist in plists {
-            guard let definition = Definition(plistPath: plist.path, domain: plist.domain, bundlePath: plist.bundlePath) else {
+            let data: Data
+            switch contents(of: plist.path) {
+            case let .success(contents): data = contents
+            case let .failure(error):
+                // A plist removed since the folder was listed is simply gone.
+                if !isMissing(error.code) { failures.append(LaunchdScanFailure(path: plist.path, code: error.code)) }
+                continue
+            }
+            guard let definition = Definition(plistPath: plist.path, data: data, domain: plist.domain,
+                                              bundlePath: plist.bundlePath) else {
                 unreadable.append(plist.path)
                 continue
             }
             definitions.append(definition)
         }
         definitions.sort { $0.plistPath < $1.plistPath }
-        return (definitions, unreadable.sorted())
+        return (definitions, unreadable.sorted(), failures)
+    }
+
+    private struct ReadError: Error {
+        let code: Int32
+    }
+
+    private static func contents(of path: String) -> Result<Data, ReadError> {
+        let descriptor = open(path, O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else { return .failure(ReadError(code: errno)) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        // Something other than a file, such as a folder named `.plist`, is no plist: it is read as empty, which does
+        // not parse.
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .success(Data()) }
+        do {
+            return .success(try handle.readToEnd() ?? Data())
+        } catch {
+            return .failure(ReadError(code: EIO))
+        }
     }
 
     /// One parsed plist, with its program not yet resolved.
@@ -178,9 +247,8 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         /// Where launchd finds the program: this path, or, for a name without a slash, launchd's `PATH`.
         let location: String?
 
-        init?(plistPath: String, domain: LaunchdDomain, bundlePath: String?) {
-            guard let data = FileManager.default.contents(atPath: plistPath),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+        init?(plistPath: String, data: Data, domain: LaunchdDomain, bundlePath: String?) {
+            guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   let label = plist["Label"] as? String, !label.isEmpty
             else { return nil }
             let workingDirectory = plist["WorkingDirectory"] as? String

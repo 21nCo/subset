@@ -2,24 +2,25 @@ import Darwin
 import Foundation
 
 /// Fixture doubles for every origin reader, answering from per-PID tables (per-path for launchd) and counting
-/// calls. A PID missing from a table answers `unavailable(.processExited)`.
+/// calls. A PID missing from a table answers `unavailable(.processExited)`. Each table is read and written under a
+/// lock, so a test may change one while readers run on other threads.
 public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionReading, CodeSignatureReading,
     LaunchdJobReading, ProcessContextReading, @unchecked Sendable {
     public enum Reader: Hashable, Sendable {
         case responsible, coalition, codeSignature, launchd, workingDirectory, terminal
     }
 
-    public var responsible: [pid_t: Signal<Int32>] = [:]
-    public var coalitions: [pid_t: Signal<UInt64>] = [:]
-    public var signatures: [pid_t: Signal<CodeSignature>] = [:]
+    @Locked public var responsible: [pid_t: Signal<Int32>] = [:]
+    @Locked public var coalitions: [pid_t: Signal<UInt64>] = [:]
+    @Locked public var signatures: [pid_t: Signal<CodeSignature>] = [:]
     /// Keyed by executable path.
-    public var launchdJobs: [String: [LaunchdJob]] = [:]
-    public var workingDirectories: [pid_t: Signal<String>] = [:]
-    public var terminals: [pid_t: Signal<ControllingTerminal>] = [:]
+    @Locked public var launchdJobs: [String: [LaunchdJob]] = [:]
+    @Locked public var workingDirectories: [pid_t: Signal<String>] = [:]
+    @Locked public var terminals: [pid_t: Signal<ControllingTerminal>] = [:]
     /// PIDs that have changed hands by the time the reader checks the identity again.
-    public var reusedPIDs: Set<pid_t> = []
+    @Locked public var reusedPIDs: Set<pid_t> = []
     /// The executable a PID has run `exec` to by the time the reader checks it again.
-    public var execs: [pid_t: String] = [:]
+    @Locked public var execs: [pid_t: String] = [:]
     private let lock = NSLock()
     private var calls: [Reader: [pid_t: Int]] = [:]
     private var launchdCalls: [String: Int] = [:]
@@ -85,5 +86,26 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
     public func terminal(of pid: pid_t) -> Signal<ControllingTerminal> {
         record(.terminal, pid)
         return terminals[pid] ?? .unavailable(.processExited, source: .bsdInfo)
+    }
+}
+
+/// A value read and written under its own lock.
+@propertyWrapper
+public struct Locked<Value>: @unchecked Sendable {
+    private final class Box: @unchecked Sendable {
+        let lock = NSLock()
+        var value: Value
+        init(_ value: Value) { self.value = value }
+    }
+
+    private let box: Box
+
+    public init(wrappedValue: Value) {
+        box = Box(wrappedValue)
+    }
+
+    public var wrappedValue: Value {
+        get { box.lock.withLock { box.value } }
+        nonmutating set { box.lock.withLock { box.value = newValue } }
     }
 }

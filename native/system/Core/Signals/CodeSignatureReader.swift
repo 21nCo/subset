@@ -19,6 +19,10 @@ struct FileStamp: Hashable, Sendable {
     init?(path: String) {
         var info = stat()
         guard stat(path, &info) == 0 else { return nil }
+        self.init(path: path, info: info)
+    }
+
+    init(path: String, info: stat) {
         self.path = path
         size = info.st_size
         modified = info.st_mtimespec
