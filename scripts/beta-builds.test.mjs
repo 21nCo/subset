@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
-import { currentBeta, marketingVersion, nextBuildNumber, planTarget } from './beta-builds.mjs';
+import { fileURLToPath } from 'node:url';
+import { currentBeta, marketingVersion, nextBuildNumber, optedOut, planTarget } from './beta-builds.mjs';
 import { betaVerdict, isNewerBeta } from './npm-beta-guard.mjs';
 
 test('reads the one MARKETING_VERSION of a project', () => {
@@ -68,4 +70,29 @@ test('a named, unchanged target reuses only a published beta of its current vers
   assert.equal(currentBeta('macos/breaks/v0.1.1-dev.2', 'macos/breaks/v', '0.1.1'), undefined);
   assert.equal(currentBeta('macos/breaks/v0.1.0-beta.9', 'macos/breaks/v', '0.1.1'), undefined);
   assert.equal(currentBeta(undefined, 'usage-v', '0.2.0'), undefined);
+});
+
+// Runs the planner on this checkout. Without --skip-unchanged it reads only git and the repository, never the network.
+function plan(...args) {
+  const { GITHUB_OUTPUT: _output, ...env } = process.env;
+  const script = fileURLToPath(new URL('./beta-builds.mjs', import.meta.url));
+  return JSON.parse(execFileSync(process.execPath, [script, ...args], { encoding: 'utf8', env }));
+}
+
+test('keeps System out of beta builds until SET-59, and only System', () => {
+  assert.equal(optedOut('macos/system'), 'kept out of beta builds until SET-59');
+  for (const name of ['macos/breaks', 'macos/systems', 'system', 'npm/usage']) assert.equal(optedOut(name), undefined);
+
+  const optOut = { name: 'macos/system', reason: 'kept out of beta builds until SET-59' };
+  // Named, even with --skip-unchanged, it is skipped rather than rejected as unknown.
+  assert.deepEqual(plan('--only', 'macos/system'), { builds: [], skipped: [optOut] });
+  assert.deepEqual(plan('--only', 'macos/system', '--skip-unchanged'), { builds: [], skipped: [optOut] });
+  // Never tagged, so its inputs count as changed, yet a run for every changed target leaves it out.
+  const all = plan();
+  assert.equal(all.builds.some((build) => build.name === 'macos/system'), false);
+  assert.deepEqual(all.skipped.filter((entry) => entry.reason === optOut.reason), [optOut]);
+  // Other apps are planned as before: a named app gets a beta or its own reason, never the opt-out.
+  const breaks = plan('--only', 'macos/breaks');
+  assert.equal(breaks.builds.length + breaks.skipped.length, 1);
+  assert.equal(breaks.skipped.some((entry) => entry.reason === optOut.reason), false);
 });
