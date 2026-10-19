@@ -6,7 +6,8 @@ public enum BlockLabel: String, CaseIterable, Sendable, Codable {
 }
 
 /// Where a block is in classification. Every stored block starts `pending`; a model result moves it to `classified`,
-/// a user correction to `corrected`, and too many invalid responses to `failed`.
+/// a user correction to `corrected`, and too many invalid entries for it to `failed`. A change to its content makes a
+/// classified or failed block pending again.
 public enum LabelState: String, Sendable {
     case pending, classified, corrected, failed
 }
@@ -48,6 +49,8 @@ public struct LabelCorrection: Equatable, Sendable {
 /// One validated label for one block of a request.
 public struct BlockClassification: Equatable, Sendable {
     public var blockStart: Date
+    /// The block's revision when it was sent.
+    public var revision: Int
     public var label: BlockLabel
     public var reason: String
     public var confidence: Double
@@ -136,26 +139,26 @@ public struct ClassificationRequest: Sendable {
     /// names a block that was not asked about; nothing is applied then. Otherwise returns a label for each block with
     /// exactly one valid entry; the rest (missing, duplicated, invalid label, reason, or confidence) are returned as
     /// rejected and stay pending.
-    public func validate(_ text: String) throws -> (accepted: [BlockClassification], rejected: [Date]) {
+    public func validate(_ text: String) throws -> (accepted: [BlockClassification], rejected: [Block]) {
         guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
               let entries = object["blocks"] as? [Any] else {
             throw ProviderError.invalidResponse("The answer is not the expected JSON object")
         }
-        let byID = Dictionary(uniqueKeysWithValues: blocks.map { (Self.id(for: $0), $0.start) })
+        let byID = Dictionary(uniqueKeysWithValues: blocks.map { (Self.id(for: $0), $0) })
         var seen: [String: Int] = [:]
         var valid: [String: BlockClassification] = [:]
         for entry in entries {
             guard let entry = entry as? [String: Any], let id = entry["id"] as? String else {
                 throw ProviderError.invalidResponse("An entry has no block id")
             }
-            guard let start = byID[id] else { throw ProviderError.invalidResponse("The answer names a block that was not sent") }
+            guard let block = byID[id] else { throw ProviderError.invalidResponse("The answer names a block that was not sent") }
             seen[id, default: 0] += 1
-            if let classification = Self.classification(entry, start: start) { valid[id] = classification }
+            if let classification = Self.classification(entry, block: block) { valid[id] = classification }
         }
-        var accepted: [BlockClassification] = [], rejected: [Date] = []
+        var accepted: [BlockClassification] = [], rejected: [Block] = []
         for block in blocks {
             let id = Self.id(for: block)
-            if seen[id] == 1, let classification = valid[id] { accepted.append(classification) } else { rejected.append(block.start) }
+            if seen[id] == 1, let classification = valid[id] { accepted.append(classification) } else { rejected.append(block) }
         }
         return (accepted, rejected)
     }
@@ -185,7 +188,7 @@ public struct ClassificationRequest: Sendable {
         return entry
     }
 
-    private static func classification(_ entry: [String: Any], start: Date) -> BlockClassification? {
+    private static func classification(_ entry: [String: Any], block: Block) -> BlockClassification? {
         guard let label = (entry["label"] as? String).flatMap(BlockLabel.init(rawValue:)),
               let reason = (entry["reason"] as? String)?.trimmingCharacters(in: .whitespaces),
               !reason.isEmpty, reason.count <= maxReasonCharacters,
@@ -193,7 +196,7 @@ public struct ClassificationRequest: Sendable {
               let number = entry["confidence"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
         let confidence = number.doubleValue
         guard confidence.isFinite, (0...1).contains(confidence) else { return nil }
-        return BlockClassification(blockStart: start, label: label, reason: reason, confidence: confidence)
+        return BlockClassification(blockStart: block.start, revision: block.revision, label: label, reason: reason, confidence: confidence)
     }
 
     /// The longest prefix of whole characters within `bytes` bytes of UTF-8.
@@ -246,5 +249,12 @@ public protocol ClassificationProvider: Sendable {
     /// Recorded with every label: `chatgpt-codex` or `openrouter`.
     var name: String { get }
     var model: String { get }
+    /// Checks the provider can take a request (for Codex, its sign-in) without sending any activity. The request is
+    /// built after this returns, from the settings in force then.
+    func prepare() async throws
     func complete(prompt: String, schema: String) async throws -> String
+}
+
+extension ClassificationProvider {
+    public func prepare() async throws {}
 }

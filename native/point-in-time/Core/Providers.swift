@@ -77,17 +77,8 @@ private final class DataBox: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
 
-    func append(_ chunk: Data) {
-        lock.lock()
-        data.append(chunk)
-        lock.unlock()
-    }
-
-    var value: Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return data
-    }
+    func append(_ chunk: Data) { lock.withLock { data.append(chunk) } }
+    var value: Data { lock.withLock { data } }
 }
 
 /// Resumes a continuation once; later results are dropped.
@@ -96,10 +87,7 @@ private final class OneShot<T: Sendable>: @unchecked Sendable {
     var continuation: CheckedContinuation<T, Error>?
 
     func resume(_ result: Result<T, Error>) {
-        lock.lock()
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
+        let continuation = lock.withLock { defer { self.continuation = nil }; return self.continuation }
         continuation?.resume(with: result)
     }
 }
@@ -162,8 +150,12 @@ public struct CodexCLI: ClassificationProvider {
         do {
             let result = try await ProcessRunner.run(executable, ["login", "status"], stdin: Data(), directory: folder.url,
                                                      environment: environment, timeout: 30)
-            guard result.status == 0 else { return .signedOut }
             let text = String(decoding: result.stdout + result.stderr, as: UTF8.self)
+            guard result.status == 0 else {
+                // Only Codex's own answer means signed out; any other failure (a missing runtime, say) is reported as is.
+                return text.localizedCaseInsensitiveContains("not logged in")
+                    ? .signedOut : .unavailable("codex login status exited with status \(result.status)")
+            }
             let line = text.split(whereSeparator: \.isNewline).first.map { String($0.prefix(80)) } ?? "Signed in"
             return .signedIn(line.trimmingCharacters(in: .whitespaces))
         } catch {
@@ -171,12 +163,15 @@ public struct CodexCLI: ClassificationProvider {
         }
     }
 
-    public func complete(prompt: String, schema: String) async throws -> String {
+    public func prepare() async throws {
         switch await loginStatus() {
         case .signedIn: break
         case .signedOut: throw ProviderError.notSignedIn
         case .unavailable(let message): throw ProviderError.process(message)
         }
+    }
+
+    public func complete(prompt: String, schema: String) async throws -> String {
         let folder = try PrivateDirectory(prefix: "pointInTime-codex")
         defer { folder.remove() }
         // Codex works in `work`, which stays empty; the schema and answer sit beside it.
@@ -274,7 +269,9 @@ public struct OpenRouterClient: ClassificationProvider {
         let body: [String: Any] = [
             "model": model,
             "messages": [["role": "user", "content": prompt]],
-            "response_format": ["type": "json_schema", "json_schema": ["name": "block_labels", "strict": true, "schema": schemaObject]]
+            "response_format": ["type": "json_schema", "json_schema": ["name": "block_labels", "strict": true, "schema": schemaObject]],
+            // Route only to providers that honor the response format.
+            "provider": ["require_parameters": true]
         ]
         var request = authorized(Self.completionsURL)
         request.httpMethod = "POST"

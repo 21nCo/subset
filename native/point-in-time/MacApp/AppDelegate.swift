@@ -28,8 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                               showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() })
         capture.onStateChange = { statusMenu.refreshIcon() }
         // Excluded apps also decide what classification may send, so a change re-runs both.
-        settings.onChange = { capture.tick(); classification.resume() }
-        classification.settings.onChange = { classification.resume() }
+        settings.onChange = { capture.tick(); classification.settingsChanged() }
+        classification.settings.onChange = { classification.settingsChanged() }
         classification.onChange = { classificationWindow.model.refresh() }
         self.capture = capture
         self.welcome = welcome

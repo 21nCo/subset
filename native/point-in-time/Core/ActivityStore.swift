@@ -205,30 +205,42 @@ public final class ActivityStore: @unchecked Sendable {
     }
 
     /// Stores validated labels and counts a failed attempt for each rejected block, which becomes `failed` after
-    /// `maxAttempts`. Only blocks that are still pending change, so a correction made while the request ran is kept.
-    /// Nothing changes when a deletion ran since `deletions` read `deletionsSeen`: the request may describe deleted
-    /// activity, and a block captured again at the same start is different activity.
-    public func applyClassifications(_ accepted: [BlockClassification], rejected: [Date], provider: String, model: String,
-                                     at date: Date, deletionsSeen: Int, maxAttempts: Int = 5) throws {
+    /// `maxAttempts`, and returns how many labels were stored. Only a block that is still pending at the revision that
+    /// was sent changes, so a correction made while the request ran is kept and a label is never stored for content
+    /// capture changed since. Nothing changes when a deletion ran since `deletions` read `deletionsSeen`: the request may
+    /// describe deleted activity, and a block captured again at the same start is different activity.
+    @discardableResult
+    public func applyClassifications(_ accepted: [BlockClassification], rejected: [Block], provider: String, model: String,
+                                     at date: Date, deletionsSeen: Int, maxAttempts: Int = 5) throws -> Int {
         try locked {
-            guard deletionCount == deletionsSeen else { return }
-            try connection.transaction {
+            guard deletionCount == deletionsSeen else { return 0 }
+            return try connection.transaction {
+                var stored = 0
                 for result in accepted {
-                    try connection.query("""
+                    stored += try connection.query("""
                         UPDATE blocks SET label = ?, label_reason = ?, label_confidence = ?, label_source = ?, label_model = ?,
-                            classified_at = ?, label_state = 'classified' WHERE start = ? AND label_state = 'pending'
+                            classified_at = ?, label_state = 'classified' WHERE start = ? AND revision = ? AND label_state = 'pending'
+                        RETURNING start
                         """, [.text(result.label.rawValue), .text(result.reason), .real(result.confidence), .text(provider), .text(model),
-                              .real(date.timeIntervalSince1970), .real(result.blockStart.timeIntervalSince1970)])
+                              .real(date.timeIntervalSince1970), .real(result.blockStart.timeIntervalSince1970),
+                              .integer(Int64(result.revision))]).count
                 }
-                for start in rejected {
+                for block in rejected {
                     try connection.query("""
                         UPDATE blocks SET label_attempts = label_attempts + 1,
                             label_state = CASE WHEN label_attempts + 1 >= ? THEN 'failed' ELSE 'pending' END
-                        WHERE start = ? AND label_state = 'pending'
-                        """, [.integer(Int64(maxAttempts)), .real(start.timeIntervalSince1970)])
+                        WHERE start = ? AND revision = ? AND label_state = 'pending'
+                        """, [.integer(Int64(maxAttempts)), .real(block.start.timeIntervalSince1970), .integer(Int64(block.revision))])
                 }
+                return stored
             }
         }
+    }
+
+    /// Makes every failed block pending again with a fresh attempt count (Retry Failed, a new provider or model, or a
+    /// relaunch).
+    public func requeueFailed() throws {
+        try locked { _ = try connection.query("UPDATE blocks SET label_state = 'pending', label_attempts = 0 WHERE label_state = 'failed'") }
     }
 
     /// Records the user's label for a block and applies it at once. A later model result never replaces it.
@@ -238,7 +250,8 @@ public final class ActivityStore: @unchecked Sendable {
         let start = blockStart.timeIntervalSince1970
         try locked {
             try connection.transaction {
-                guard let row = try connection.query("SELECT label FROM blocks WHERE start = ?", [.real(start)]).first else {
+                guard let row = try connection.query("SELECT CASE WHEN label_state IN ('classified', 'corrected') THEN label END FROM blocks WHERE start = ?",
+                                                     [.real(start)]).first else {
                     throw StoreError.sqlite("That block is no longer stored")
                 }
                 try connection.query("INSERT INTO corrections (block_start, previous_label, new_label, note, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -270,19 +283,26 @@ public final class ActivityStore: @unchecked Sendable {
     private static func blockColumns(prefix: String = "") -> String {
         ["start", "active_seconds", "excluded_seconds", "apps_json", "dominant_bundle_id", "dominant_app_name", "dominant_title",
          "dominant_url_scheme", "dominant_url_host", "dominant_url_path", "label_state", "label", "label_reason", "label_confidence",
-         "label_source", "label_model", "classified_at"].map { prefix + $0 }.joined(separator: ", ")
+         "label_source", "label_model", "classified_at", "revision"].map { prefix + $0 }.joined(separator: ", ")
     }
+
+    private static let contentColumns = ["active_seconds", "excluded_seconds", "apps_json", "dominant_bundle_id", "dominant_app_name",
+                                         "dominant_title", "dominant_url_scheme", "dominant_url_host", "dominant_url_path"]
 
     private static func block(from row: [SQLValue]) -> Block {
         let apps = row[3].string.flatMap { try? JSONDecoder().decode([AppTime].self, from: Data($0.utf8)) } ?? []
         let url = row[7].string.flatMap { scheme in row[8].string.map { RedactedURL(scheme: scheme, host: $0, path: row[9].string ?? "/") } }
-        let labeling = BlockLabeling(state: row[10].string.flatMap(LabelState.init(rawValue:)) ?? .pending,
-                                     label: row[11].string.flatMap(BlockLabel.init(rawValue:)), reason: row[12].string,
-                                     confidence: row[13].double, provider: row[14].string, model: row[15].string,
-                                     at: row[16].double.map(Date.init(timeIntervalSince1970:)))
+        // A pending or failed block may keep the columns of a label it had before its content changed; they are not its label.
+        let state = row[10].string.flatMap(LabelState.init(rawValue:)) ?? .pending
+        let labeling = state == .classified || state == .corrected
+            ? BlockLabeling(state: state, label: row[11].string.flatMap(BlockLabel.init(rawValue:)), reason: row[12].string,
+                            confidence: row[13].double, provider: row[14].string, model: row[15].string,
+                            at: row[16].double.map(Date.init(timeIntervalSince1970:)))
+            : BlockLabeling(state: state)
         return Block(start: Date(timeIntervalSince1970: row[0].double ?? 0), activeSeconds: row[1].double ?? 0,
                      excludedSeconds: row[2].double ?? 0, apps: apps, dominantBundleID: row[4].string,
-                     dominantAppName: row[5].string, dominantTitle: row[6].string, dominantURL: url, labeling: labeling)
+                     dominantAppName: row[5].string, dominantTitle: row[6].string, dominantURL: url, labeling: labeling,
+                     revision: row[17].int ?? 0)
     }
 
     private static func pendingFilter(completedBy: Date, options: ClassificationOptions) -> (String, [SQLValue]) {
@@ -317,8 +337,9 @@ public final class ActivityStore: @unchecked Sendable {
 
     /// Recomputes every bucket touched by `[from, to)` from the stored segments. Only buckets that a stored segment or
     /// block row actually occupies are visited, so an unbounded range (Delete Today passes `.distantFuture`) costs no
-    /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted with their corrections;
-    /// the others have their capture columns replaced and keep their classification.
+    /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted with their corrections.
+    /// A row whose content changes gets a new revision and, unless the user corrected it, becomes pending again: its label
+    /// judged other content.
     private func rebuildBlocks(from: Date, to: Date) throws {
         let lower = Block.bucketStart(containing: from)
         let lastBucket = Block.bucketStart(containing: to)
@@ -351,7 +372,11 @@ public final class ActivityStore: @unchecked Sendable {
                 ON CONFLICT(start) DO UPDATE SET active_seconds = excluded.active_seconds, excluded_seconds = excluded.excluded_seconds,
                     apps_json = excluded.apps_json, dominant_bundle_id = excluded.dominant_bundle_id, dominant_app_name = excluded.dominant_app_name,
                     dominant_title = excluded.dominant_title, dominant_url_scheme = excluded.dominant_url_scheme,
-                    dominant_url_host = excluded.dominant_url_host, dominant_url_path = excluded.dominant_url_path
+                    dominant_url_host = excluded.dominant_url_host, dominant_url_path = excluded.dominant_url_path,
+                    revision = revision + 1, label_attempts = 0,
+                    label_state = CASE label_state WHEN 'corrected' THEN 'corrected' ELSE 'pending' END
+                WHERE (\(Self.contentColumns.map { "blocks." + $0 }.joined(separator: ", ")))
+                    IS NOT (\(Self.contentColumns.map { "excluded." + $0 }.joined(separator: ", ")))
                 """, [.real(bucket.timeIntervalSince1970), .real(block.activeSeconds), .real(block.excludedSeconds), .text(apps),
                       SQLValue(block.dominantBundleID), SQLValue(block.dominantAppName), SQLValue(block.dominantTitle),
                       SQLValue(block.dominantURL?.scheme), SQLValue(block.dominantURL?.host), SQLValue(block.dominantURL?.path)])
@@ -375,11 +400,12 @@ public final class ActivityStore: @unchecked Sendable {
             label TEXT, label_reason TEXT, label_confidence REAL, label_source TEXT, classified_at REAL
         );
         """,
-        // Classification state per block, and the user's corrections. Existing blocks start pending.
+        // Classification state and content revision per block, and the user's corrections. Existing blocks start pending.
         2: """
         ALTER TABLE blocks ADD COLUMN label_state TEXT NOT NULL DEFAULT 'pending';
         ALTER TABLE blocks ADD COLUMN label_model TEXT;
         ALTER TABLE blocks ADD COLUMN label_attempts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE blocks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
         CREATE INDEX blocks_label_state ON blocks (label_state, start);
         CREATE TABLE corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, block_start REAL NOT NULL, previous_label TEXT, new_label TEXT NOT NULL,

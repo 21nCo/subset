@@ -127,7 +127,7 @@ private func store(withBlocksAt indexes: [Int], in directory: URL, app: String =
         for (name, entries) in cases {
             let result = try request.validate(answer(entries))
             #expect(result.accepted.map(\.blockStart) == [block(0).start], "\(name)")
-            #expect(result.rejected == [block(1).start], "\(name)")
+            #expect(result.rejected.map(\.start) == [block(1).start], "\(name)")
         }
         // Exactly 140 characters is allowed; a Boolean is not a confidence.
         #expect(try request.validate(answer([("1800000000", "focus", String(repeating: "é", count: 140), 1), ("1800000180", "neutral", "ok", 0)])).rejected.isEmpty)
@@ -139,10 +139,19 @@ private func store(withBlocksAt indexes: [Int], in directory: URL, app: String =
 /// A provider that answers from a queue and can run a hook while "in flight".
 private final class StubProvider: ClassificationProvider, @unchecked Sendable {
     let name = "stub"
-    let model = "stub-model"
+    let model: String
     var answers: [Result<String, ProviderError>] = []
     var prompts: [String] = []
+    var whilePreparing: (@MainActor () async -> Void)?
+
+    init(model: String = "stub-model") {
+        self.model = model
+    }
     var whileInFlight: (@MainActor () async -> Void)?
+
+    func prepare() async throws {
+        if let hook = whilePreparing { await hook() }
+    }
 
     func complete(prompt: String, schema: String) async throws -> String {
         prompts.append(prompt)
@@ -223,15 +232,24 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         }
         #expect(expected == [30, 60, 120, 240, 480, 960, 1_800, 1_800])
         #expect(runner.status.lastError == "exit 1")
-        // A rate limit waits at least as long as the provider asks.
+        // A rate limit waits as long as the provider asks, past the usual cap.
         provider.answers = [.failure(.rateLimited(retryAfter: 2_000))]
         #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
-        #expect(runner.backoff.notBefore == clock.now.addingTimeInterval(1_800))
-        // A wake lets the next request go at once.
+        #expect(runner.backoff.notBefore == clock.now.addingTimeInterval(2_000))
+        // A wake lets the next request go at once, and a success clears the error.
         runner.resume()
         provider.answers = [.success(answer([(id(0), "focus", "ok", 0.9)]))]
         #expect(await runner.runOnce(provider: provider, options: noExclusions))
         #expect(runner.backoff == ClassificationBackoff())
+        #expect(runner.status.lastError == nil)
+    }
+
+    @Test func aFirstRateLimitWaitsAsLongAsTheProviderAsks() {
+        var backoff = ClassificationBackoff()
+        backoff.failed(at: t0, retryAfter: 120)
+        #expect(backoff.notBefore == t0.addingTimeInterval(120))
+        backoff.failed(at: t0, retryAfter: 10 * 24 * 3_600)
+        #expect(backoff.notBefore == t0.addingTimeInterval(ClassificationBackoff.maximumRetryAfter))
     }
 
     @Test func pendingBlocksSurviveFailuresAndARelaunch() async throws {
@@ -249,22 +267,44 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(try reopened.blocks(from: t0, to: t0.addingTimeInterval(1_000)).map(\.labeling.label) == [.focus, .drift])
     }
 
-    @Test func invalidAnswersCountAttemptsUntilTheBlockFails() async throws {
+    @Test func invalidEntriesCountAttemptsUntilTheBlockFailsAndANewModelRetriesIt() async throws {
         let (directory, store, clock, runner) = try setup([0, 1])
         defer { try? FileManager.default.removeItem(at: directory) }
         let provider = StubProvider()
-        // Block 1 is never answered; block 0 is answered once, then the answer is not JSON.
-        provider.answers = [.success(answer([(id(0), "focus", "ok", 0.9)]))] + Array(repeating: .success("nope"), count: 4)
-        for _ in 0..<5 {
-            await runner.runOnce(provider: provider, options: noExclusions)
+        // An unusable answer counts against the provider, not the blocks: nothing fails, however often it happens.
+        provider.answers = Array(repeating: .success("nope"), count: 6)
+        for _ in 0..<6 {
+            #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+            runner.resume()
+        }
+        #expect(runner.status.pending == 2 && runner.status.failed == 0)
+        // Block 1 is left out of five otherwise valid answers. A partly answered batch is not sent again at once.
+        provider.answers = [.success(answer([(id(0), "focus", "ok", 0.9)]))] + Array(repeating: .success(answer([])), count: 4)
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+        for _ in 0..<4 {
             runner.resume()
             clock.now = clock.now.addingTimeInterval(1)
+            await runner.runOnce(provider: provider, options: noExclusions)
         }
         let stored = try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))
         #expect(stored[0].labeling.state == .classified)
         #expect(stored[1].labeling.state == .failed)
         #expect(runner.status.failed == 1)
         #expect(runner.status.pending == 0)
+        // Another model gets a fresh set of attempts for the failed block.
+        let other = StubProvider(model: "other-model")
+        other.answers = [.success(answer([(id(1), "drift", "ok", 0.7)]))]
+        runner.resume()
+        #expect(await runner.runOnce(provider: other, options: noExclusions))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[1].labeling.state == .classified)
+        // Retry Failed does the same for the same provider.
+        try store.save(segment(block(2).start, 60, "com.example.editor"))
+        clock.now = clock.now.addingTimeInterval(Block.length * 2)
+        for _ in 0..<5 { try store.applyClassifications([], rejected: try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 1),
+                                                       provider: "stub", model: "other-model", at: clock.now, deletionsSeen: store.deletions) }
+        #expect(try store.classificationSummary(completedBy: clock.now, options: noExclusions).failed == 1)
+        try store.requeueFailed()
+        #expect(try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 10).map(\.start) == [block(2).start])
     }
 
     @Test func aCorrectionOutranksALaterModelLabelAndIsSentAsContext() async throws {
@@ -302,8 +342,56 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
             try? store.save(segment(t0, 60, "b"))
         }
         provider.answers = [.success(answer([(id(0), "focus", "About the deleted spec", 0.9)]))]
-        await runner.runOnce(provider: provider, options: noExclusions)
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
         #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(180)).map(\.labeling) == [.pending])
+        // A discarded answer is not a success.
+        #expect(runner.status.lastSuccess == nil)
+    }
+
+    @Test func settingsChangedWhileTheProviderPreparesAreHonored() async throws {
+        let (directory, _, _, runner) = try setup([0])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        final class Box: @unchecked Sendable { var options: ClassificationOptions? = noExclusions }
+        let box = Box(), provider = StubProvider()
+        // Titles turned off while Codex's sign-in is checked: the request is built without them.
+        provider.whilePreparing = { box.options = ClassificationOptions(includeWindowTitles: false, excludedBundleIDs: []) }
+        provider.answers = [.failure(.network("offline"))]
+        await runner.runOnce(provider: provider, options: box.options)
+        #expect(provider.prompts.count == 1)
+        #expect(!provider.prompts[0].contains("\"title\""))
+        // The app excluded meanwhile: nothing is sent.
+        runner.resume()
+        box.options = noExclusions
+        provider.whilePreparing = { box.options = ClassificationOptions(includeWindowTitles: true, excludedBundleIDs: ["com.example.editor"]) }
+        #expect(await runner.runOnce(provider: provider, options: box.options) == false)
+        // The provider turned off or changed meanwhile: nothing is sent, and the caller sets up the new one at once.
+        box.options = noExclusions
+        provider.whilePreparing = { box.options = nil }
+        #expect(await runner.runOnce(provider: provider, options: box.options))
+        #expect(provider.prompts.count == 1)
+    }
+
+    @Test func aLabelIsStoredOnlyForTheContentItJudged() async throws {
+        let (directory, store, _, runner) = try setup([0, 1])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = StubProvider()
+        // A delayed capture write changes block 0 while the request that carries it is in flight.
+        provider.whileInFlight = { try? store.save(segment(t0.addingTimeInterval(150), 20, "com.example.video")) }
+        provider.answers = [.success(answer([(id(0), "focus", "Spec work", 0.9), (id(1), "focus", "Spec work", 0.9)]))]
+        await runner.runOnce(provider: provider, options: noExclusions)
+        var stored = try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))
+        #expect(stored.map(\.labeling.state) == [.pending, .classified])
+        #expect(stored[0].revision == 1)
+        // A labeled block whose content changes afterwards is pending again; a corrected one keeps the user's label.
+        try store.correct(blockStart: block(0).start, to: .drift, note: nil, at: t0)
+        try store.save(segment(t0.addingTimeInterval(170), 5, "com.example.video"))
+        try store.save(segment(block(1).start.addingTimeInterval(150), 20, "com.example.video"))
+        stored = try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))
+        #expect(stored[0].labeling.state == .corrected && stored[0].labeling.label == .drift)
+        #expect(stored[1].labeling == .pending)
+        // Saving the same content again changes nothing.
+        try store.save(segment(block(1).start.addingTimeInterval(150), 20, "com.example.video"))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[1].revision == stored[1].revision)
     }
 }
 
@@ -444,6 +532,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             dir="$(dirname "$0")"
             if [ "$1" = "login" ]; then
               if [ -f "$dir/signed-in" ]; then echo "Logged in using ChatGPT"; exit 0; fi
+              if [ -f "$dir/broken" ]; then echo "env: node: No such file or directory" >&2; exit 127; fi
               echo "Not logged in" >&2; exit 1
             fi
             printf '%s\\n' "$@" > "$dir/args"
@@ -500,9 +589,13 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
         let cli = CodexCLI(executable: codex, searchPath: nil)
         #expect(await cli.loginStatus() == .signedOut)
-        await #expect(throws: ProviderError.notSignedIn) { try await cli.complete(prompt: "p", schema: "{}") }
+        await #expect(throws: ProviderError.notSignedIn) { try await cli.prepare() }
         #expect(!FileManager.default.fileExists(atPath: codex.deletingLastPathComponent().appendingPathComponent("args").path))
+        // A launcher that cannot start is not reported as signed out.
+        try touch(codex, "broken")
+        #expect(await cli.loginStatus() == .unavailable("codex login status exited with status 127"))
         try touch(codex, "signed-in")
+        try await cli.prepare()
         try touch(codex, "fail")
         await #expect(throws: ProviderError.process("codex exec exited with status 3")) { try await cli.complete(prompt: "p", schema: "{}") }
         let missing = CodexCLI(executable: URL(fileURLWithPath: "/nonexistent/codex"), searchPath: nil)
@@ -563,6 +656,7 @@ private final class TransportDouble: HTTPTransport, @unchecked Sendable {
         #expect(schema["strict"] as? Bool == true)
         #expect(schema["schema"] is [String: Any])
         #expect((body["messages"] as? [[String: String]])?.first?["content"] == "PROMPT")
+        #expect((body["provider"] as? [String: Any])?["require_parameters"] as? Bool == true)
     }
 
     @Test func mapsFailuresWithoutRevealingTheKey() async throws {

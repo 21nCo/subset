@@ -21,6 +21,7 @@ final class ClassificationWindowController {
             window.isReleasedWhenClosed = false
             self.window = window
         }
+        model.modelField = model.settings.openRouterModel
         model.refresh()
         model.checkProvider()
         NSApp.activate(ignoringOtherApps: true)
@@ -35,6 +36,8 @@ final class ClassificationModel: ObservableObject {
     @Published var recent: [Block] = []
     @Published var codexState = ""
     @Published var keyField = ""
+    /// The OpenRouter model being typed; it is used only once committed, so a partial ID is never sent.
+    @Published var modelField = ""
     @Published var keyMessage: String?
     @Published var hasKey = false
     @Published var storeError: String?
@@ -65,11 +68,11 @@ final class ClassificationModel: ObservableObject {
             .filter { $0.activeSeconds > 0 && $0.end <= now }.reversed().prefix(30).map { $0 }
     }
 
-    func checkProvider() {
+    func checkProvider(refresh: Bool = false) {
         guard settings.provider == .codex else { return }
         codexState = "Checking codex…"
         Task {
-            guard let codex = await controller.codex() else {
+            guard let codex = await controller.codex(refresh: refresh) else {
                 codexState = "codex was not found in the login shell’s PATH. Choose the binary below."
                 return
             }
@@ -95,7 +98,7 @@ final class ClassificationModel: ObservableObject {
     func useLoginShellCodex() {
         objectWillChange.send()
         settings.codexPath = nil
-        checkProvider()
+        checkProvider(refresh: true)
     }
 
     func saveKey() {
@@ -105,7 +108,7 @@ final class ClassificationModel: ObservableObject {
             try KeychainSecret.openRouterKey.save(key)
             keyField = ""
             keyMessage = "Saved in the Keychain."
-            controller.resume()
+            controller.settingsChanged()
         } catch {
             keyMessage = "Could not save the key: \(error)"
         }
@@ -116,6 +119,7 @@ final class ClassificationModel: ObservableObject {
         do {
             try KeychainSecret.openRouterKey.delete()
             keyMessage = "Removed from the Keychain."
+            controller.settingsChanged()
         } catch {
             keyMessage = "Could not remove the key: \(error)"
         }
@@ -139,6 +143,13 @@ final class ClassificationModel: ObservableObject {
                 keyMessage = String(describing: error)
             }
         }
+    }
+
+    func commitModel() {
+        let typed = modelField.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed != settings.openRouterModel else { return }
+        objectWillChange.send()
+        settings.openRouterModel = typed
     }
 
     func openMemory() {
@@ -179,6 +190,7 @@ extension BlockLabel {
 
 struct ClassificationView: View {
     @ObservedObject var model: ClassificationModel
+    @FocusState private var editingModel: Bool
 
     var body: some View {
         Form {
@@ -196,7 +208,7 @@ struct ClassificationView: View {
                     HStack {
                         Button("Choose codex Binary…") { model.chooseCodex() }
                         if model.settings.codexPath != nil { Button("Use Login Shell PATH") { model.useLoginShellCodex() } }
-                        Button("Check Again") { model.checkProvider() }
+                        Button("Check Again") { model.checkProvider(refresh: true) }
                     }
                     Text("pointInTime runs your codex binary in an empty private folder and never reads Codex’s credential files.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -209,7 +221,11 @@ struct ClassificationView: View {
                         if model.hasKey { Button("Remove Key") { model.removeKey() } }
                     }
                     if let message = model.keyMessage { Text(verbatim: message).font(.caption) }
-                    TextField("Model (default \(OpenRouterClient.defaultModel))", text: model.binding(\.openRouterModel))
+                    TextField("Model (default \(OpenRouterClient.defaultModel))", text: $model.modelField)
+                        .focused($editingModel)
+                        .onSubmit { model.commitModel() }
+                        .onChange(of: editingModel) { _, editing in if !editing { model.commitModel() } }
+                    Text("Press Return to use the model.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("What is sent") {
@@ -222,6 +238,7 @@ struct ClassificationView: View {
             }
             Section("Status") {
                 Text(verbatim: "Pending: \(model.status.pending)\(model.status.failed > 0 ? ", failed: \(model.status.failed)" : "")\(model.status.inFlight ? " (request in progress)" : "")")
+                if model.status.failed > 0 { Button("Retry Failed Blocks") { model.controller.retryFailed() } }
                 Text(verbatim: "Last success: \(model.status.lastSuccess?.formatted(date: .abbreviated, time: .shortened) ?? "never")")
                 if let error = model.status.lastError {
                     Text(verbatim: "Last error (\(model.status.lastErrorAt?.formatted(date: .omitted, time: .shortened) ?? "")): \(error)")

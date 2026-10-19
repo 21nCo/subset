@@ -47,10 +47,15 @@ final class ClassificationController {
     let settings: ClassificationSettings
     let memory: MemoryProfile?
     private let capture: CaptureSettings
+    private let store: ActivityStore?
     private let runner: ClassificationRunner?
     private var running = false
+    private var kickAgain = false
+    /// Changes with every classification setting, excluded app, or key change; a request is sent only under the
+    /// generation its provider was set up with.
+    private var generation = 0
     private var timer: Timer?
-    private var loginPATH: String??
+    private var loginPATH: String?
     private let pathMonitor = NWPathMonitor()
     private var wakeObserver: NSObjectProtocol?
     var onChange: (() -> Void)?
@@ -60,6 +65,7 @@ final class ClassificationController {
     init(settings: ClassificationSettings, capture: CaptureSettings, store: ActivityStore?) {
         self.settings = settings
         self.capture = capture
+        self.store = store
         let memory = (try? ActivityStore.defaultDirectory()).map(MemoryProfile.init(directory:))
         self.memory = memory
         runner = store.map { ClassificationRunner(store: $0, memory: { memory?.read() ?? "" }) }
@@ -72,7 +78,8 @@ final class ClassificationController {
     func start() {
         runner?.onChange = { [weak self] in self?.onChange?() }
         let timer = Timer(timeInterval: Self.interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.kick() }
+            // A tick during a run is dropped; only a wake, the network, or a settings change queues another run.
+            MainActor.assumeIsolated { if self?.running == false { self?.kick() } }
         }
         timer.tolerance = 10
         RunLoop.main.add(timer, forMode: .common)
@@ -94,16 +101,34 @@ final class ClassificationController {
         kick()
     }
 
-    /// Sends batches until none is left, a request fails, or the provider is turned off.
+    /// A setting, the excluded apps, or the key changed: a request being set up under the old ones is not sent.
+    func settingsChanged() {
+        generation += 1
+        resume()
+    }
+
+    func retryFailed() {
+        try? store?.requeueFailed()
+        resume()
+    }
+
+    /// Sends batches until none is left, a request fails, or the provider is turned off. A kick during a run starts
+    /// another run when it ends, so a settings change is never missed.
     func kick() {
-        guard let runner, !running else { return }
+        guard let runner else { return }
+        guard !running else { kickAgain = true; return }
         running = true
+        kickAgain = false
         Task {
-            defer { running = false; onChange?() }
             while true {
+                let generation = self.generation
                 let provider = await currentProvider()
-                guard await runner.runOnce(provider: provider, options: options), provider != nil else { break }
+                guard await runner.runOnce(provider: provider, options: generation == self.generation ? options : nil),
+                      provider != nil else { break }
             }
+            running = false
+            onChange?()
+            if kickAgain { kick() }
         }
     }
 
@@ -122,9 +147,10 @@ final class ClassificationController {
         }
     }
 
-    func codex() async -> CodexCLI? {
-        if loginPATH == nil { loginPATH = .some(await CodexCLI.loginShellPATH()) }
-        let path = loginPATH ?? nil
+    /// `refresh` probes the login shell's `PATH` again (Check Again); a failed probe is retried on the next call.
+    func codex(refresh: Bool = false) async -> CodexCLI? {
+        if loginPATH == nil || refresh { loginPATH = await CodexCLI.loginShellPATH() }
+        let path = loginPATH
         let executable = settings.codexPath.map { URL(fileURLWithPath: $0) } ?? path.flatMap(CodexCLI.locate(in:))
         return executable.map { CodexCLI(executable: $0, searchPath: path) }
     }
