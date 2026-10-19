@@ -91,7 +91,11 @@ public final class ClassificationRunner {
     private let memory: () -> String
     private let clock: () -> Date
     private let deletionPending: () -> Bool
+    /// The provider and model failed blocks were last made pending for; nil until that write succeeds, so a failed
+    /// write is tried again on the next run.
     private var lastProvider: String?
+    /// The error shown while failed blocks could not be made pending again.
+    private var requeueError: String?
     /// Changes with each change of provider, model, or key; a request's outcome sets the backoff only under the one it
     /// was sent with.
     private var configuration = 0
@@ -122,8 +126,7 @@ public final class ClassificationRunner {
         guard !status.inFlight, let initial = options() else { return false }
         if let provider, lastProvider != provider.name + "/" + provider.model {
             // Blocks that failed with another provider or model, or before a relaunch, get a fresh set of attempts.
-            lastProvider = provider.name + "/" + provider.model
-            try? store.requeueFailed()
+            if requeue() { lastProvider = provider.name + "/" + provider.model }
         }
         let now = clock()
         refreshCounts(initial, now: now)
@@ -180,6 +183,28 @@ public final class ClassificationRunner {
             record(String(describing: error), at: clock())
             return false
         }
+    }
+
+    /// Retry Failed Blocks: every failed block is pending again. When the store cannot be written, the error is shown
+    /// and the next run tries again.
+    public func retryFailed() {
+        if !requeue() { lastProvider = nil }
+        onChange?()
+    }
+
+    /// Makes failed blocks pending again; false, with the error shown, when the store could not be written.
+    private func requeue() -> Bool {
+        do {
+            try store.requeueFailed()
+        } catch {
+            let message = "Failed blocks could not be retried: \(error)"
+            requeueError = message
+            record(message, at: clock())
+            return false
+        }
+        if let requeueError, status.lastError == requeueError { status.lastError = nil }
+        requeueError = nil
+        return true
     }
 
     private func record(_ error: String, at date: Date) {

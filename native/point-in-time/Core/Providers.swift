@@ -309,7 +309,7 @@ public protocol HTTPTransport: Sendable {
 public struct URLSessionTransport: HTTPTransport {
     private let session: URLSession
 
-    public init(timeout: TimeInterval = 90) {
+    public init(timeout: TimeInterval = OpenRouterClient.timeout) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.urlCache = nil
@@ -331,6 +331,8 @@ public struct OpenRouterClient: ClassificationProvider {
     public static let defaultModel = "openai/gpt-4.1-mini"
     static let completionsURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
     static let keyURL = URL(string: "https://openrouter.ai/api/v1/key")!
+    /// How long a request may wait for data, set on each request as well as on the default session.
+    public static let timeout: TimeInterval = 90
 
     public let name = "openrouter"
     public let model: String
@@ -393,7 +395,7 @@ public struct OpenRouterClient: ClassificationProvider {
     }
 
     private func authorized(_ url: URL, key: String) -> URLRequest {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: Self.timeout)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         return request

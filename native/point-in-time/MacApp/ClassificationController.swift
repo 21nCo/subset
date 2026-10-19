@@ -125,7 +125,7 @@ final class ClassificationController {
     }
 
     func retryFailed() {
-        try? store?.requeueFailed()
+        runner?.retryFailed()
         resume()
     }
 

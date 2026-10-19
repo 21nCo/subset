@@ -379,6 +379,39 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 10).map(\.start) == [block(2).start])
     }
 
+    @Test func failedBlocksAreRequeuedOnALaterRunWhenTheStoreWasBusy() async throws {
+        let (directory, store, clock, runner) = try setup([0])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func failBlock() throws {
+            for _ in 0..<5 { try store.applyClassifications([], rejected: try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 1),
+                                                           provider: "stub", model: "stub-model", at: clock.now) }
+        }
+        try failBlock()
+        let provider = StubProvider()
+        provider.answers = [.success(answer([(id(0), "focus", "ok", 0.9)])), .success(answer([(id(0), "drift", "ok", 0.8)]))]
+        // Another connection holds the write lock past the busy wait, so the requeue after the relaunch fails and shows why.
+        let writer = try SQLiteConnection(path: store.databaseURL.path)
+        try writer.execute("BEGIN IMMEDIATE")
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+        #expect(runner.status.lastError?.hasPrefix("Failed blocks could not be retried") == true)
+        #expect(runner.status.failed == 1 && provider.prompts.isEmpty)
+        // With the lock released, the next run requeues and sends the block with no change of provider or model.
+        try writer.execute("COMMIT")
+        #expect(await runner.runOnce(provider: provider, options: noExclusions))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[0].labeling.label == .focus)
+        #expect(runner.status.lastError == nil && runner.status.failed == 0 && provider.prompts.count == 1)
+        // Retry Failed Blocks behaves the same way under the provider already in use.
+        try store.save(segment(t0.addingTimeInterval(10), 5, "com.example.video"))
+        try failBlock()
+        try writer.execute("BEGIN IMMEDIATE")
+        runner.retryFailed()
+        #expect(runner.status.lastError?.hasPrefix("Failed blocks could not be retried") == true)
+        try writer.execute("COMMIT")
+        #expect(await runner.runOnce(provider: provider, options: noExclusions))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[0].labeling.label == .drift)
+        #expect(runner.status.lastError == nil && provider.prompts.count == 2)
+    }
+
     @Test func aCorrectionOutranksALaterModelLabelAndIsSentAsContext() async throws {
         let (directory, store, _, runner) = try setup([0, 1])
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1003,6 +1036,14 @@ private final class TransportDouble: HTTPTransport, @unchecked Sendable {
             try await client.complete(prompt: "p", schema: "{}")
         }
         #expect(transport.requests.isEmpty)
+    }
+
+    @Test func aTimeoutReportsTheTimeTheRequestWasGiven() async throws {
+        let transport = TransportDouble()
+        transport.error = URLError(.timedOut)
+        let client = OpenRouterClient(key: "sk-or-secret", model: "m", transport: transport)
+        await #expect(throws: ProviderError.timedOut(OpenRouterClient.timeout)) { try await client.complete(prompt: "p", schema: "{}") }
+        #expect(transport.requests.map(\.timeoutInterval) == [OpenRouterClient.timeout])
     }
 
     @Test func testKeyChecksTheKeyEndpointOnly() async throws {
