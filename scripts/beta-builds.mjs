@@ -12,8 +12,9 @@
 // --only plans just the named targets, even if they did not change; with --skip-unchanged, a named target that is
 // unchanged since its last build is skipped when that build is a published beta of the current version, so it can be
 // tested again instead (the plan names it as `reuse`). A named target still gets no beta when it is ineligible: its
-// version is already released live, an npm package has never been released live, or its manifest is invalid. Prints the plan as JSON and, in CI, writes it
-// to the `plan` output. It creates no tags and starts nothing; beta-builds.yml does that.
+// version is already released live, an npm package has never been released live, its manifest is invalid, or it is
+// opted out (betaOptOuts). Prints the plan as JSON and, in CI, writes it to the `plan` output. It creates no tags and
+// starts nothing; beta-builds.yml does that.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -30,6 +31,17 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, String.raw`
 const npmDependencyFiles = ['package.json', 'package-lock.json'];
 // git from a fixed location, never from PATH.
 const gitPath = '/usr/bin/git';
+
+// Targets that get no beta, whether they changed or are named in --only, with the issue that removes each entry.
+// System (native/system) is an app shell with no features until its signed build is accepted in SET-59 (owner
+// decision on SET-39, 2026-10-19).
+export const betaOptOuts = new Map([['macos/system', 'SET-59']]);
+
+// Why the named target is opted out of beta builds, or undefined if it is not.
+export function optedOut(name) {
+  const issue = betaOptOuts.get(name);
+  return issue && `kept out of beta builds until ${issue}`;
+}
 
 // The one MARKETING_VERSION a project sets. Read from project.pbxproj because planning runs without Xcode;
 // release-macos.mjs checks the built app against it.
@@ -164,8 +176,9 @@ async function main() {
   const skipped = [];
   for (const target of targets) {
     if (only.length > 0 && !only.includes(target.name)) continue;
-    if (target.error || target.skip) {
-      skipped.push({ name: target.name, reason: target.error ?? target.skip });
+    const reason = optedOut(target.name) ?? target.error ?? target.skip;
+    if (reason) {
+      skipped.push({ name: target.name, reason });
       continue;
     }
     const tags = listTags(`${target.prefix}*`);

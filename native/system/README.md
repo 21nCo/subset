@@ -66,7 +66,7 @@ xcodebuild -project System.xcodeproj -scheme SubsetSystem -destination 'platform
 
 The app is `LSUIElement` (menu bar only, no Dock icon), runs with the hardened runtime, and has no App Sandbox. `MacApp/SubsetSystem.entitlements` is intentionally empty. There is no network access, privileged helper, or telemetry. `MARKETING_VERSION` is 0.1.0; there is no app icon yet.
 
-`.github/workflows/system.yml` runs on macOS 26 for changes here: package tests, the generated-project check, and an unsigned `xcodebuild build test`. `macos-release.json` opts the app into `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)); no release has been made.
+`.github/workflows/system.yml` runs on macOS 26 for changes here: package tests, the generated-project check, and an unsigned `xcodebuild build test`. `macos-release.json` describes the app for `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)), but System is kept out of beta builds until its signed build is accepted in [SET-59](https://linear.app/21n/issue/SET-59): `scripts/beta-builds.mjs` lists `macos/system` in `betaOptOuts`, so the **Beta builds** workflow never tags or builds it, even when it is named in `only`. SET-59 removes that entry.
 
 ## Superfunctions evaluated
 

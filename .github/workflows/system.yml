@@ -8,7 +8,7 @@ on:
       - 'native/system/**'
       - '.github/workflows/system.yml'
   push:
-    branches: [main]
+    branches: [dev, main]
     paths:
       - 'native/system/**'
       - '.github/workflows/system.yml'
