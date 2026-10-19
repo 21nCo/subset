@@ -116,6 +116,30 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.launchdJobs(forExecutable: "/usr/bin/true"), .value([], source: .launchdPlists))
     }
 
+    func testAFIFONamedLikeAPlistIsUnreadableAndDoesNotBlockTheScan() throws {
+        let server = try executable("bin/server")
+        try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
+        let fifo = agents.path + "/fifo.plist"
+        let link = agents.path + "/link.plist"
+        XCTAssertEqual(mkfifo(fifo, 0o644), 0, String(cString: strerror(errno)))
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: fifo)
+        // A blocking open of a FIFO never returns, so a regression fails on the timeout instead of hanging the run.
+        // The stuck scan holds the index lock, so the index is not touched after a timeout.
+        let index = LaunchdJobIndex(folders: folders())
+        let scanned = expectation(description: "scan finished")
+        DispatchQueue.global().async {
+            index.refreshIfChanged()
+            scanned.fulfill()
+        }
+        guard XCTWaiter.wait(for: [scanned], timeout: 5) == .completed else {
+            return XCTFail("the scan blocked on a FIFO named like a plist")
+        }
+
+        XCTAssertEqual(index.unreadablePlists, [fifo, link])
+        XCTAssertEqual(index.scanFailures, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+    }
+
     func testTheIndexIsRebuiltWhenAFolderOrPlistChanges() throws {
         let server = try executable("bin/server")
         let index = LaunchdJobIndex(folders: folders())

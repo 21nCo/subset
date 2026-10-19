@@ -45,7 +45,8 @@ public struct LaunchdFolders: Sendable {
 /// time, or status-change time (so a permission change counts), appears or disappears, or can or can no longer be
 /// read. The programs are resolved again on every refresh, since an executable can be
 /// created, deleted, or have its symlink retargeted (as `brew upgrade` does to `/opt/homebrew/opt`) while its plist
-/// stays the same. A plist without a label or program, or that does not parse, is listed in `unreadablePlists` and
+/// stays the same. A plist without a label or program, that does not parse, or that is not a regular file (a
+/// folder, FIFO, or device named `.plist`, which is opened without blocking) is listed in `unreadablePlists` and
 /// left out: launchd cannot load it either. A folder or plist that exists but cannot be read, such as one without
 /// read permission, is listed in `scanFailures`, and an executable no readable plist names is then `unavailable`
 /// rather than known to have no job, since launchd, running as root, may load a job from it. A missing folder is not
@@ -223,11 +224,13 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     }
 
     private static func contents(of path: String) -> Result<Data, ReadError> {
-        let descriptor = open(path, O_RDONLY | O_CLOEXEC)
+        // Opened without blocking, so a FIFO or device named `.plist` (the user's agents folder is writable) cannot
+        // stall the scan, and checked by its descriptor, so an entry replaced since it was listed is caught too.
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
         guard descriptor >= 0 else { return .failure(ReadError(code: errno)) }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        // Something other than a file, such as a folder named `.plist`, is no plist: it is read as empty, which does
-        // not parse.
+        // Something other than a file, such as a folder, FIFO, or device named `.plist`, or a symlink to one, is no
+        // plist: it is read as empty, which does not parse.
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .success(Data()) }
         do {
