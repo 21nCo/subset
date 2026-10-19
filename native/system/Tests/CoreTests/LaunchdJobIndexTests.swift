@@ -62,6 +62,7 @@ final class LaunchdJobIndexTests: XCTestCase {
         let truePath = try XCTUnwrap(LaunchdJobIndex.realPath("/usr/bin/true"))
         XCTAssertEqual(index.launchdJobs(forExecutable: truePath).value?.jobs.map(\.label), ["dev.true"])
         XCTAssertEqual(index.jobs.first { $0.label == "dev.missing" }?.orphaned, true)
+        XCTAssertEqual(index.scanFailures, [], "a name on no PATH entry is missing, not a failure")
     }
 
     func testAgentsEmbeddedInAnInstalledAppAreRead() throws {
@@ -285,6 +286,75 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertTrue(one.isComplete)
         XCTAssertEqual(LaunchdMatch(jobs: one, ppid: 1, signature: signed), .job(label: "dev.a"))
         XCTAssertEqual(facts(ppid: 1, signature: signed, launchdJobs: one).launchdLabel, "dev.a")
+    }
+
+    func testAProgramThatCannotBeCheckedIsNotOrphanedAndMakesTheScanIncomplete() throws {
+        try XCTSkipIf(getuid() == 0, "root searches a folder without permission")
+        // A root daemon whose program sits under a folder the user cannot search.
+        let locked = root.path + "/locked"
+        let server = try executable("locked/bin/server")
+        let other = try executable("bin/other")
+        let unrelated = try executable("bin/unrelated")
+        try plist(daemons, "dev.locked", ["Label": "dev.locked", "Program": server])
+        try plist(agents, "dev.a", ["Label": "dev.a", "Program": other])
+        // Programs that are not there: ENOENT, ENOTDIR (a file on the path), and ELOOP.
+        try FileManager.default.createSymbolicLink(atPath: root.path + "/bin/loop", withDestinationPath: root.path + "/bin/loop")
+        try plist(agents, "dev.gone", ["Label": "dev.gone", "ProgramArguments": [root.path + "/bin/removed"]])
+        try plist(agents, "dev.notdir", ["Label": "dev.notdir", "Program": other + "/server"])
+        try plist(agents, "dev.loop", ["Label": "dev.loop", "Program": root.path + "/bin/loop"])
+        try Self.setPermissions(0o000, locked)
+        addTeardownBlock { try? Self.setPermissions(0o755, locked) }
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+        let failures = [LaunchdScanFailure(path: server, code: EACCES)]
+        let signed = CodeSignature(signingID: "dev.a", teamID: "ABCDE12345", isPlatformBinary: false)
+
+        let lockedJob = try XCTUnwrap(index.jobs.first { $0.label == "dev.locked" })
+        XCTAssertFalse(lockedJob.orphaned)
+        XCTAssertEqual(lockedJob.resolution, .unchecked(failures[0]))
+        XCTAssertNil(lockedJob.resolvedProgram)
+        for label in ["dev.gone", "dev.notdir", "dev.loop"] {
+            XCTAssertEqual(index.jobs.first { $0.label == label }?.resolution, .missing, label)
+        }
+        XCTAssertEqual(index.scanFailures, failures, "only the unchecked program is a failure")
+        XCTAssertEqual(index.launchdJobs(forExecutable: unrelated), .unavailable(.incompleteScan(failures), source: .launchdPlists))
+        let found = try XCTUnwrap(index.launchdJobs(forExecutable: other).value)
+        XCTAssertEqual(found.jobs.map(\.label), ["dev.a"])
+        XCTAssertEqual(found.scanFailures, failures)
+        XCTAssertEqual(LaunchdMatch(jobs: found, ppid: 1, signature: signed), .executableOnly(.incompleteScan))
+
+        try Self.setPermissions(0o755, locked)
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.scanFailures, [])
+        XCTAssertEqual(index.jobs.first { $0.label == "dev.locked" }?.resolution, .resolved(try XCTUnwrap(LaunchdJobIndex.realPath(server))))
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.locked"])
+        let complete = try XCTUnwrap(index.launchdJobs(forExecutable: other).value)
+        XCTAssertTrue(complete.isComplete)
+        XCTAssertEqual(LaunchdMatch(jobs: complete, ppid: 1, signature: signed), .job(label: "dev.a"))
+        XCTAssertEqual(index.launchdJobs(forExecutable: unrelated), .value(LaunchdJobs(jobs: []), source: .launchdPlists))
+    }
+
+    func testABareNameIsUncheckedOnlyWhenNoPathEntryHasItAndOneCouldNotBeChecked() throws {
+        try XCTSkipIf(getuid() == 0, "root searches a folder without permission")
+        let locked = root.path + "/locked"
+        let empty = root.path + "/empty"
+        let tool = try executable("tools/tool")
+        _ = try executable("locked/tool")
+        try FileManager.default.createDirectory(atPath: empty, withIntermediateDirectories: true)
+        try Self.setPermissions(0o000, locked)
+        addTeardownBlock { try? Self.setPermissions(0o755, locked) }
+        let data = try PropertyListSerialization.data(fromPropertyList: ["Label": "dev.tool", "ProgramArguments": ["tool"]],
+                                                      format: .xml, options: 0)
+        let definition = try XCTUnwrap(LaunchdJobIndex.Definition(plistPath: "/dev.tool.plist", data: data,
+                                                                  domain: .userAgent, bundlePath: nil))
+
+        XCTAssertEqual(definition.job(searchPath: [locked, root.path + "/tools"]).resolution,
+                       .resolved(try XCTUnwrap(LaunchdJobIndex.realPath(tool))),
+                       "a later entry that has it wins, as with execvp")
+        XCTAssertEqual(definition.job(searchPath: [empty, locked]).resolution,
+                       .unchecked(LaunchdScanFailure(path: locked + "/tool", code: EACCES)))
+        XCTAssertEqual(definition.job(searchPath: [empty]).resolution, .missing)
     }
 
     func testOnlyProgramArgumentsMayNameARelativeProgram() throws {

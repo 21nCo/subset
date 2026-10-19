@@ -120,26 +120,46 @@ public struct LaunchdJob: Equatable, Hashable, Sendable {
     public let domain: LaunchdDomain
     /// `Program`, else (in an app bundle) `BundleProgram`, else `ProgramArguments[0]`, as the plist writes it.
     public let program: String
-    /// The program with symlinks resolved, the path the kernel reports for the running process; `nil` when orphaned.
-    public let resolvedProgram: String?
+    /// Where the program is, as the filesystem stood when the index was last refreshed.
+    public let resolution: LaunchdProgramResolution
 
-    public init(label: String, plistPath: String, domain: LaunchdDomain, program: String, resolvedProgram: String?) {
+    public init(label: String, plistPath: String, domain: LaunchdDomain, program: String,
+                resolution: LaunchdProgramResolution) {
         self.label = label
         self.plistPath = plistPath
         self.domain = domain
         self.program = program
-        self.resolvedProgram = resolvedProgram
+        self.resolution = resolution
     }
 
-    /// The program no longer exists, so launchd cannot start this job.
-    public var orphaned: Bool { resolvedProgram == nil }
+    /// The program with symlinks resolved, the path the kernel reports for the running process; `nil` when it is
+    /// missing or could not be checked.
+    public var resolvedProgram: String? {
+        if case let .resolved(path) = resolution { path } else { nil }
+    }
+
+    /// The program no longer exists, so launchd cannot start this job. A program that could not be checked is not
+    /// orphaned: it may be there.
+    public var orphaned: Bool { resolution == .missing }
+}
+
+/// Where a launchd job's program is.
+public enum LaunchdProgramResolution: Equatable, Hashable, Sendable {
+    /// A regular file, at this path with symlinks resolved.
+    case resolved(String)
+    /// Nothing is there (`ENOENT`, `ENOTDIR`, `ELOOP`), or something other than a regular file.
+    case missing
+    /// The path could not be checked, typically because a folder on it cannot be searched (`EACCES`); launchd,
+    /// running as root, may still find the program. The failure is also in the index's `scanFailures`.
+    case unchecked(LaunchdScanFailure)
 }
 
 /// A plist folder, application folder, or plist that exists but could not be read, so the jobs it defines are
-/// missing from the launchd index.
+/// missing from the launchd index, or a job's program whose path could not be checked, so the job's executable is
+/// not known.
 public struct LaunchdScanFailure: Equatable, Hashable, Sendable {
     public let path: String
-    /// The `errno` from listing the folder or opening the plist, typically `EACCES`.
+    /// The `errno` from listing the folder, opening the plist, or resolving the program, typically `EACCES`.
     public let code: Int32
 
     public init(path: String, code: Int32) {
@@ -150,9 +170,9 @@ public struct LaunchdScanFailure: Equatable, Hashable, Sendable {
     public var reason: String { "\(String(cString: strerror(code))), errno \(code)" }
 }
 
-/// The launchd jobs whose program is a process's executable. When some folders or plists could not be read, they
-/// are listed in `scanFailures` and `jobs` holds only the readable plists' jobs: an unread plist may name the
-/// executable too.
+/// The launchd jobs whose program is a process's executable. When some folders, plists, or programs could not be
+/// read, they are listed in `scanFailures` and `jobs` holds only the jobs known to name the executable: an unread
+/// plist or unchecked program may name it too.
 public struct LaunchdJobs: Equatable, Sendable {
     public let jobs: [LaunchdJob]
     public let scanFailures: [LaunchdScanFailure]
@@ -210,8 +230,8 @@ public enum LaunchdAmbiguity: Equatable, Sendable {
     case notStartedByLaunchd
     /// Plists with different labels name the executable.
     case conflictingLabels
-    /// The readable plists that name the executable agree on a label, but some folders or plists could not be read
-    /// (`LaunchdJobs.scanFailures`), and one of them may name it with another label.
+    /// The readable plists that name the executable agree on a label, but some folders, plists, or programs could
+    /// not be read (`LaunchdJobs.scanFailures`), and one of them may name it with another label.
     case incompleteScan
 }
 

@@ -98,7 +98,7 @@ private struct OriginSignalsView: View {
                 let jobs = found.jobs.isEmpty ? "None" : found.jobs.map { "\($0.label) (\($0.plistPath))" }.joined(separator: "\n")
                 guard !found.isComplete else { return jobs }
                 let failures = found.scanFailures.map { "\($0.path) (\($0.reason))" }.joined(separator: ", ")
-                return jobs + "\nNot every plist was read: " + failures
+                return jobs + "\nNot every plist or program could be read: " + failures
             },
             (label: "launchd match", value: process.launchdMatch.map(describe) ?? "–", source: ""),
             row("Working directory", origin.workingDirectory) { $0 },
@@ -118,7 +118,7 @@ private struct OriginSignalsView: View {
         case .executableOnly(.sharedExecutable): "Executable only: a shared or unverified executable"
         case .executableOnly(.notStartedByLaunchd): "Executable only: not started by launchd"
         case .executableOnly(.conflictingLabels): "Executable only: plists disagree on the label"
-        case .executableOnly(.incompleteScan): "Executable only: an unread plist may name it too"
+        case .executableOnly(.incompleteScan): "Executable only: an unread plist or program may name it too"
         }
     }
 

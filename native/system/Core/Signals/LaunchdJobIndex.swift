@@ -41,7 +41,8 @@ public struct LaunchdFolders: Sendable {
 /// `BundleProgram` (relative to its app bundle, for agents embedded in one), else `ProgramArguments[0]`, which
 /// launchd resolves like `execvp`: a name without a slash is searched for in launchd's default `PATH`. Symlinks are resolved, since the
 /// kernel reports a running process by its real path (Homebrew services, for one, name a symlink). A plist whose
-/// program does not exist is kept as `orphaned`.
+/// program does not exist is kept as `orphaned`; one whose path cannot be checked, such as a program in a folder
+/// without search permission, is `unchecked`, not orphaned.
 ///
 /// The plists are read again when a plist, a plist folder, or an application folder changes size, modification
 /// time, or status-change time (so a permission change counts), appears or disappears, or can or can no longer be
@@ -50,9 +51,10 @@ public struct LaunchdFolders: Sendable {
 /// stays the same. A plist without a label or program, with a relative `Program`, that does not parse, or that is not a regular file (a
 /// folder, FIFO, or device named `.plist`, which is opened without blocking) is listed in `unreadablePlists` and
 /// left out: launchd cannot load it either. A folder or plist that exists but cannot be read, such as one without
-/// read permission, is listed in `scanFailures`, since launchd, running as root, may load a job from it: the jobs
-/// found for an executable then carry the failures, and an executable no readable plist names is `unavailable` rather
-/// than known to have no job. A missing folder is not a failure.
+/// read permission, is listed in `scanFailures`, as is an unchecked program, since launchd, running as root, may
+/// load a job from it or find the program there: the jobs found for an executable then carry the failures, and an
+/// executable no readable plist names is `unavailable` rather than known to have no job. A missing folder is not a
+/// failure.
 public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// launchd's default `PATH` for jobs.
     static let launchdPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -76,7 +78,7 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// Plists that do not parse, lack a label or program, or have a relative `Program`; launchd cannot load them
     /// either.
     public var unreadablePlists: [String] { lock.withLock { state.unreadable } }
-    /// Folders and plists that exist but could not be read, ordered by path.
+    /// Folders and plists that exist but could not be read, and programs that could not be checked, ordered by path.
     public var scanFailures: [LaunchdScanFailure] { lock.withLock { state.failures } }
 
     public func refreshIfChanged() {
@@ -106,7 +108,10 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
             (definitions, unreadable, plistFailures) = Self.read(scan.plists)
         }
         let jobs = definitions.map { $0.job() }
-        let failures = (folderFailures + plistFailures).sorted { $0.path < $1.path }
+        let programFailures = jobs.compactMap { job in
+            if case let .unchecked(failure) = job.resolution { failure } else { nil }
+        }
+        let failures = Set(folderFailures + plistFailures + programFailures).sorted { ($0.path, $0.code) < ($1.path, $1.code) }
         guard jobs != state.jobs || unreadable != state.unreadable || failures != state.failures else { return }
         var byProgram: [String: [LaunchdJob]] = [:]
         for job in jobs {
@@ -278,14 +283,18 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
             self.domain = domain
         }
 
-        /// The job with its program resolved as the filesystem stands now.
-        func job() -> LaunchdJob {
-            let resolved = if let location {
-                LaunchdJobIndex.realPath(location)
+        /// The job with its program resolved as the filesystem stands now. Like `execvp`, a bare name is the first
+        /// entry of `launchdPath` that has it; it is unchecked only when none has it and one could not be checked.
+        func job(searchPath: [String] = LaunchdJobIndex.launchdPath) -> LaunchdJob {
+            let resolution: LaunchdProgramResolution
+            if let location {
+                resolution = LaunchdJobIndex.resolve(location)
             } else {
-                LaunchdJobIndex.launchdPath.lazy.compactMap { LaunchdJobIndex.realPath($0 + "/" + program) }.first
+                let candidates = searchPath.map { LaunchdJobIndex.resolve($0 + "/" + program) }
+                resolution = candidates.first { if case .resolved = $0 { true } else { false } }
+                    ?? candidates.first { $0 != .missing } ?? .missing
             }
-            return LaunchdJob(label: label, plistPath: plistPath, domain: domain, program: program, resolvedProgram: resolved)
+            return LaunchdJob(label: label, plistPath: plistPath, domain: domain, program: program, resolution: resolution)
         }
     }
 
@@ -297,12 +306,22 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         return nil
     }
 
-    /// The path with symlinks resolved, or `nil` when no regular file is there.
+    /// The path with symlinks resolved, or `nil` when no regular file is there or it could not be checked.
     static func realPath(_ path: String) -> String? {
-        guard let resolved = realpath(path, nil) else { return nil }
+        if case let .resolved(resolved) = resolve(path) { resolved } else { nil }
+    }
+
+    /// The regular file at the path, with symlinks resolved; `missing` when nothing, or something other than a
+    /// regular file, is there; `unchecked` with the `errno` when the path could not be followed for another reason,
+    /// such as a folder on it without search permission.
+    static func resolve(_ path: String) -> LaunchdProgramResolution {
+        func failed(_ code: Int32) -> LaunchdProgramResolution {
+            code == ENOENT || code == ENOTDIR || code == ELOOP ? .missing : .unchecked(LaunchdScanFailure(path: path, code: code))
+        }
+        guard let resolved = realpath(path, nil) else { return failed(errno) }
         defer { free(resolved) }
         var info = stat()
-        guard stat(resolved, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return nil }
-        return String(cString: resolved)
+        guard stat(resolved, &info) == 0 else { return failed(errno) }
+        return info.st_mode & S_IFMT == S_IFREG ? .resolved(String(cString: resolved)) : .missing
     }
 }

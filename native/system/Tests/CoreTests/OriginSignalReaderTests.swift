@@ -240,7 +240,7 @@ final class OriginSignalReaderTests: XCTestCase {
     }
 
     private func job(_ label: String, _ plist: String) -> LaunchdJob {
-        LaunchdJob(label: label, plistPath: plist, domain: .globalDaemon, program: "/usr/bin/x", resolvedProgram: "/usr/bin/x")
+        LaunchdJob(label: label, plistPath: plist, domain: .globalDaemon, program: "/usr/bin/x", resolution: .resolved("/usr/bin/x"))
     }
 
     private func sample(_ processes: [RawProcessRecord]) -> RawProcessSample {
