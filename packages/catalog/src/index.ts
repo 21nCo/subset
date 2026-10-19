@@ -128,5 +128,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['macos', 'agent-cli'],
     availableSurfaces: []
+  },
+  {
+    id: 'timer',
+    name: 'Timer',
+    summary: 'Run several countdowns, stopwatches, and interval workouts at once from the terminal, an AI agent, a local web board, or the Mac menu bar.',
+    state: 'building',
+    proposedSurfaces: ['web', 'macos', 'embed', 'agent-cli', 'agent-view'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];

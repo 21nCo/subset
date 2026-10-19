@@ -1,0 +1,961 @@
+{
+  "valid": [
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 1000
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 86400000,
+          "lapsEnabled": true,
+          "sound": false
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "until": "2026-10-19T17:30:00+02:00"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "preset": "hiit-40-20",
+        "name": "Morning HIIT"
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ],
+          "name": "Custom",
+          "countdownTicks": false,
+          "cooldownMs": 60000
+        }
+      }
+    },
+    {
+      "operation": "start",
+      "input": {
+        "id": "t_ab12cd34"
+      }
+    },
+    {
+      "operation": "start",
+      "input": {
+        "preset": "p_ab12cd34"
+      }
+    },
+    {
+      "operation": "start",
+      "input": {
+        "timer": {
+          "kind": "stopwatch"
+        },
+        "name": "Laps"
+      }
+    },
+    {
+      "operation": "presets.save",
+      "input": {
+        "name": "Tabata x2",
+        "timer": {
+          "kind": "interval",
+          "rounds": 16,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "presets.remove",
+      "input": {
+        "id": "p_ab12cd34"
+      }
+    },
+    {
+      "operation": "list",
+      "input": {}
+    }
+  ],
+  "invalid": [
+    {
+      "operation": "create",
+      "why": "needs a timer or a preset",
+      "input": {}
+    },
+    {
+      "operation": "create",
+      "why": "timer and preset together",
+      "input": {
+        "timer": {
+          "kind": "stopwatch"
+        },
+        "preset": "tabata"
+      }
+    },
+    {
+      "operation": "create",
+      "why": "unknown kind",
+      "input": {
+        "timer": {
+          "kind": "alarm"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "unknown property",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "colour": "red"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "countdown under 1 s",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 999
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "countdown over 24 h",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 86400001
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "fractional milliseconds",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 1000.5
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "countdown with both durationMs and until",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 60000,
+          "until": "2026-10-19T17:30:00Z"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "countdown with neither durationMs nor until",
+      "input": {
+        "timer": {
+          "kind": "countdown"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "until without a time zone",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "until": "2026-10-19T17:30:00"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name over 60 characters",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "empty name",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": ""
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "blank name",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "   "
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name on two lines",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "Run\nfast"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "no segments",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": []
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "101 segments",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 1,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "zero rounds",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 0,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "100 rounds",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 100,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "label over 40 characters",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "phase": "work",
+              "durationMs": 20000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "unknown phase",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Warm",
+              "phase": "warmup",
+              "durationMs": 20000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "prep under 1 s",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 500,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "start",
+      "why": "id and timer together",
+      "input": {
+        "id": "t_ab12cd34",
+        "timer": {
+          "kind": "stopwatch"
+        }
+      }
+    },
+    {
+      "operation": "start",
+      "why": "renaming an existing timer",
+      "input": {
+        "id": "t_ab12cd34",
+        "name": "Other"
+      }
+    },
+    {
+      "operation": "pause",
+      "why": "malformed id",
+      "input": {
+        "id": "T_AB12CD34"
+      }
+    },
+    {
+      "operation": "pause",
+      "why": "id with a letter outside Crockford base32",
+      "input": {
+        "id": "t_ab12cd3u"
+      }
+    },
+    {
+      "operation": "get",
+      "why": "missing id",
+      "input": {}
+    },
+    {
+      "operation": "list",
+      "why": "unknown property",
+      "input": {
+        "status": "running"
+      }
+    },
+    {
+      "operation": "presets.save",
+      "why": "a preset cannot name one moment",
+      "input": {
+        "name": "Standup",
+        "timer": {
+          "kind": "countdown",
+          "until": "2026-10-19T17:30:00Z"
+        }
+      }
+    },
+    {
+      "operation": "presets.remove",
+      "why": "not a preset id",
+      "input": {
+        "id": "Tabata"
+      }
+    }
+  ]
+}

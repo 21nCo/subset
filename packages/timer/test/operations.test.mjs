@@ -1,0 +1,197 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  OPERATION_NAMES, OPERATION_WRITE_CLASS, TIMER_ID_PATTERN, TIMER_LIMITS, emptyStore, operations, parseStore, runOperation
+} from '../dist/index.js';
+
+const T0 = Date.UTC(2026, 9, 19, 8, 0, 0);
+const MISSING = 't_zzzzzzzz';
+
+function ok(outcome) {
+  assert.equal(outcome.ok, true, JSON.stringify(outcome.error));
+  return outcome;
+}
+const code = (outcome) => (outcome.ok ? 'ok' : outcome.error.code);
+function storeWith(...inputs) {
+  let store = emptyStore();
+  const ids = inputs.map((input) => {
+    const outcome = ok(operations.create(store, input, T0));
+    store = outcome.store;
+    return outcome.result.timer.definition.id;
+  });
+  return { store, ids };
+}
+
+test('write classes match the product decision', () => {
+  assert.deepEqual(OPERATION_NAMES.filter((name) => OPERATION_WRITE_CLASS[name] === 'destructive'), ['reset', 'remove', 'presets.remove']);
+  assert.deepEqual(OPERATION_NAMES.filter((name) => OPERATION_WRITE_CLASS[name] === 'read'), ['list', 'get', 'presets.list']);
+  assert.deepEqual(OPERATION_NAMES.filter((name) => OPERATION_WRITE_CLASS[name] === 'write'), ['create', 'start', 'pause', 'resume', 'lap', 'skip', 'presets.save']);
+});
+
+test('create fills defaults per kind and gives each timer its own id', () => {
+  const { store, ids } = storeWith(
+    { timer: { kind: 'countdown', durationMs: 60_000 } },
+    { timer: { kind: 'stopwatch' } },
+    { preset: 'tabata' },
+    { preset: 'tabata', name: 'Evening' }
+  );
+  assert.equal(new Set(ids).size, 4);
+  for (const id of ids) assert.match(id, TIMER_ID_PATTERN);
+  const [countdown, stopwatch, tabata, renamed] = store.timers.map((timer) => timer.definition);
+  assert.deepEqual([countdown.name, countdown.sound, countdown.countdownTicks, countdown.lapsEnabled, countdown.createdAt], ['Countdown', true, false, false, T0]);
+  assert.equal(stopwatch.name, 'Stopwatch');
+  assert.deepEqual([tabata.name, tabata.countdownTicks, tabata.prepMs, tabata.rounds], ['Tabata', true, 10_000, 8]);
+  assert.equal(renamed.name, 'Evening');
+  assert.ok(store.timers.every((timer) => timer.runtime.status === 'idle'));
+  // Names need not be unique.
+  assert.equal(ok(operations.create(store, { preset: 'tabata' }, T0)).store.timers.filter((timer) => timer.definition.name === 'Tabata').length, 2);
+});
+
+test('operations never change the store they were given', () => {
+  const { store, ids } = storeWith({ preset: 'tabata' });
+  const frozen = structuredClone(store);
+  ok(operations.start(store, { id: ids[0] }, T0));
+  ok(operations.remove(store, { id: ids[0] }, T0));
+  ok(operations['presets.save'](store, { name: 'Mine', timer: { kind: 'stopwatch' } }, T0));
+  assert.deepEqual(store, frozen);
+});
+
+test('each operation returns its typed error codes', () => {
+  const { store, ids: [idle, stopwatch, interval, plain, finished] } = storeWith(
+    { timer: { kind: 'countdown', durationMs: 60_000, lapsEnabled: true } },
+    { timer: { kind: 'stopwatch' } },
+    { preset: 'tabata' },
+    { timer: { kind: 'countdown', durationMs: 60_000 } },
+    { timer: { kind: 'countdown', durationMs: 1_000 } }
+  );
+  let running = store;
+  for (const id of [stopwatch, interval, plain, finished]) running = ok(operations.start(running, { id }, T0)).store;
+  const at = T0 + 5_000; // `finished` is past its end, though still stored as running.
+  const table = [
+    ['create', { timer: { kind: 'countdown', durationMs: 10 } }, 'invalid_input'],
+    ['create', { preset: 'p_zzzzzzzz' }, 'not_found'],
+    ['create', { timer: { kind: 'countdown', until: new Date(at - 1_000).toISOString() } }, 'invalid_input'],
+    ['create', { timer: { kind: 'countdown', until: new Date(at + 86_400_001).toISOString() } }, 'invalid_input'],
+    ['create', { timer: { kind: 'countdown', until: new Date(at + 86_400_000).toISOString() } }, 'ok'],
+    ['start', { id: MISSING }, 'not_found'],
+    ['start', { id: stopwatch }, 'invalid_state'],
+    ['start', { id: finished }, 'invalid_state'],
+    ['start', { id: idle }, 'ok'],
+    ['start', { id: idle, name: 'x' }, 'invalid_input'],
+    ['pause', { id: MISSING }, 'not_found'],
+    ['pause', { id: idle }, 'invalid_state'],
+    ['pause', { id: finished }, 'invalid_state'],
+    ['pause', { id: interval }, 'ok'],
+    ['resume', { id: stopwatch }, 'invalid_state'],
+    ['resume', { id: MISSING }, 'not_found'],
+    ['lap', { id: interval }, 'invalid_state'],
+    ['lap', { id: plain }, 'invalid_state'],
+    ['lap', { id: idle }, 'invalid_state'],
+    ['lap', { id: stopwatch }, 'ok'],
+    ['lap', { id: MISSING }, 'not_found'],
+    ['skip', { id: stopwatch }, 'invalid_state'],
+    ['skip', { id: plain }, 'invalid_state'],
+    ['skip', { id: interval }, 'ok'],
+    ['skip', { id: MISSING }, 'not_found'],
+    ['reset', { id: finished }, 'ok'],
+    ['reset', { id: idle }, 'ok'],
+    ['reset', { id: MISSING }, 'not_found'],
+    ['remove', { id: MISSING }, 'not_found'],
+    ['remove', { id: 'Tabata' }, 'invalid_input'],
+    ['get', { id: MISSING }, 'not_found'],
+    ['get', {}, 'invalid_input'],
+    ['list', { all: true }, 'invalid_input'],
+    ['presets.list', { all: true }, 'invalid_input'],
+    ['presets.save', { name: 'x', timer: { kind: 'countdown', until: new Date(at + 60_000).toISOString() } }, 'invalid_input'],
+    ['presets.remove', { id: 'tabata' }, 'invalid_state'],
+    ['presets.remove', { id: 'p_zzzzzzzz' }, 'not_found']
+  ];
+  assert.deepEqual(
+    table.map(([operation, input]) => [operation, input, code(operations[operation](running, input, at))]),
+    table
+  );
+  // A skipped lap or pause after the finish leaves the stored state alone.
+  const paused = ok(operations.pause(running, { id: interval }, at)).store;
+  assert.equal(code(operations.lap(paused, { id: interval }, at)), 'invalid_state');
+  assert.equal(code(operations.resume(paused, { id: interval }, at)), 'ok');
+  assert.equal(code(runOperation('explode', running, {}, at)), 'invalid_input');
+  assert.equal(code(runOperation('toString', running, {}, at)), 'invalid_input');
+  assert.equal(code(runOperation('presets.list', running, undefined, at)), 'ok');
+});
+
+test('invalid input reports every failing field', () => {
+  const outcome = operations.create(emptyStore(), { timer: { kind: 'interval', rounds: 0, segments: [{ label: '', phase: 'warmup', durationMs: 1 }] } }, T0);
+  assert.equal(outcome.error.code, 'invalid_input');
+  assert.deepEqual(outcome.error.issues.map((issue) => issue.path).sort(), ['timer.rounds', 'timer.segments.0.durationMs', 'timer.segments.0.label', 'timer.segments.0.phase']);
+});
+
+test('at most 50 timers in any state; finished ones count until reset or removed', () => {
+  let store = emptyStore();
+  for (let index = 0; index < TIMER_LIMITS.timers; index++) {
+    store = ok(operations.start(store, { timer: { kind: 'countdown', durationMs: 1_000 } }, T0 + index)).store;
+  }
+  const later = T0 + 60_000;
+  assert.ok(ok(operations.list(store, {}, later)).result.timers.every((timer) => timer.projection.finished));
+  assert.equal(code(operations.create(store, { timer: { kind: 'stopwatch' } }, later)), 'limit_reached');
+  assert.equal(code(operations.start(store, { preset: 'emom' }, later)), 'limit_reached');
+  const id = store.timers[0].definition.id;
+  const reset = ok(operations.reset(store, { id }, later)).store;
+  assert.equal(code(operations.create(reset, { timer: { kind: 'stopwatch' } }, later)), 'limit_reached');
+  const removed = ok(operations.remove(store, { id }, later)).store;
+  assert.equal(code(operations.create(removed, { timer: { kind: 'stopwatch' } }, later)), 'ok');
+  assert.equal(new Set(store.timers.map((timer) => timer.definition.id)).size, TIMER_LIMITS.timers);
+});
+
+test('at most 999 laps per timer', () => {
+  let { store, ids: [id] } = storeWith({ timer: { kind: 'stopwatch' } });
+  store = ok(operations.start(store, { id }, T0)).store;
+  for (let index = 1; index <= TIMER_LIMITS.laps; index++) store = ok(operations.lap(store, { id }, T0 + index)).store;
+  assert.equal(code(operations.lap(store, { id }, T0 + 5_000)), 'limit_reached');
+  assert.deepEqual(store.timers[0].runtime.laps.at(-1), { elapsedMs: 999, at: T0 + 999 });
+});
+
+test('saved presets: up to 50, listed after the built-ins, and usable by id', () => {
+  let store = emptyStore();
+  const saved = [];
+  for (let index = 0; index < TIMER_LIMITS.userPresets; index++) {
+    const outcome = ok(operations['presets.save'](store, { name: `Mine ${index}`, timer: { kind: 'countdown', durationMs: 1_000 * (index + 1) } }, T0));
+    store = outcome.store;
+    saved.push(outcome.result.preset.id);
+  }
+  assert.equal(new Set(saved).size, TIMER_LIMITS.userPresets);
+  assert.equal(code(operations['presets.save'](store, { name: 'One more', timer: { kind: 'stopwatch' } }, T0)), 'limit_reached');
+  const listed = ok(operations['presets.list'](store, {}, T0)).result.presets;
+  assert.deepEqual(listed.slice(0, 5).map((preset) => preset.id), ['tabata', 'emom', 'hiit-40-20', 'pomodoro', 'amrap']);
+  assert.equal(listed.length, 5 + TIMER_LIMITS.userPresets);
+  const started = ok(operations.start(store, { preset: saved[2] }, T0)).result.timer;
+  assert.deepEqual([started.definition.name, started.definition.durationMs, started.runtime.status], ['Mine 2', 3_000, 'running']);
+  const removed = ok(operations['presets.remove'](store, { id: saved[2] }, T0));
+  assert.equal(removed.result.removedId, saved[2]);
+  assert.equal(code(operations.start(removed.store, { preset: saved[2] }, T0)), 'not_found');
+});
+
+test('reset returns any timer to idle and clears laps and skips', () => {
+  let { store, ids: [id] } = storeWith({ preset: 'amrap' });
+  store = ok(operations.start(store, { id }, T0)).store;
+  store = ok(operations.lap(store, { id }, T0 + 1_000)).store;
+  const outcome = ok(operations.reset(store, { id }, T0 + 2_000));
+  assert.deepEqual(outcome.store.timers[0].runtime, { status: 'idle', startedAt: null, accumulatedMs: 0, pausedAt: null, laps: [], skippedMs: 0 });
+  assert.equal(outcome.result.timer.projection.remainingMs, 20 * 60_000);
+});
+
+test('parseStore accepts a store built by the operations and rejects inconsistent ones', () => {
+  let { store, ids } = storeWith({ preset: 'tabata' }, { timer: { kind: 'stopwatch' } });
+  store = ok(operations.start(store, { id: ids[0] }, T0)).store;
+  store = ok(operations['presets.save'](store, { name: 'Mine', timer: { kind: 'stopwatch' } }, T0)).store;
+  assert.deepEqual(ok(parseStore(JSON.parse(JSON.stringify(store)))).store, store);
+  const broken = (change) => {
+    const copy = structuredClone(store);
+    change(copy);
+    return code(parseStore(copy));
+  };
+  assert.equal(broken((copy) => { copy.timers[0].runtime.startedAt = null; }), 'invalid_input');
+  assert.equal(broken((copy) => { copy.timers[1].definition.id = copy.timers[0].definition.id; }), 'invalid_input');
+  assert.equal(broken((copy) => { copy.schemaVersion = 2; }), 'invalid_input');
+  assert.equal(broken((copy) => { copy.presets[0].builtIn = true; }), 'invalid_input');
+  assert.equal(code(parseStore(null)), 'invalid_input');
+});

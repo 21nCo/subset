@@ -1,0 +1,323 @@
+{
+  "result": {
+    "schemaVersion": 1,
+    "observedAt": 1792400400000,
+    "timers": [
+      {
+        "definition": {
+          "kind": "interval",
+          "id": "t_9n40qczd",
+          "name": "Tabata",
+          "sound": true,
+          "countdownTicks": true,
+          "createdAt": 1792400322000,
+          "segments": [
+            {
+              "label": "Work",
+              "phase": "work",
+              "durationMs": 20000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 10000
+            }
+          ],
+          "rounds": 8,
+          "prepMs": 10000
+        },
+        "runtime": {
+          "status": "running",
+          "startedAt": 1792400322000,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "running",
+          "elapsedMs": 78000,
+          "totalMs": 250000,
+          "remainingMs": 172000,
+          "finished": false,
+          "step": {
+            "index": 5,
+            "segmentIndex": 0,
+            "round": 3,
+            "phase": "work",
+            "label": "Work",
+            "startMs": 70000,
+            "durationMs": 20000,
+            "elapsedMs": 8000,
+            "remainingMs": 12000
+          },
+          "next": {
+            "index": 6,
+            "segmentIndex": 1,
+            "round": 3,
+            "phase": "rest",
+            "label": "Rest",
+            "startMs": 90000,
+            "durationMs": 10000
+          }
+        }
+      },
+      {
+        "definition": {
+          "kind": "stopwatch",
+          "id": "t_r9tpy2bw",
+          "name": "Run",
+          "sound": true,
+          "countdownTicks": false,
+          "createdAt": 1792399800000
+        },
+        "runtime": {
+          "status": "running",
+          "startedAt": 1792399800000,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [
+            {
+              "elapsedMs": 180000,
+              "at": 1792399980000
+            },
+            {
+              "elapsedMs": 420000,
+              "at": 1792400220000
+            }
+          ],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "running",
+          "elapsedMs": 600000,
+          "totalMs": null,
+          "remainingMs": null,
+          "finished": false,
+          "step": null,
+          "next": null
+        }
+      },
+      {
+        "definition": {
+          "kind": "countdown",
+          "id": "t_dcq1vtjv",
+          "name": "Tea",
+          "sound": true,
+          "countdownTicks": false,
+          "createdAt": 1792400160000,
+          "durationMs": 180000,
+          "lapsEnabled": false
+        },
+        "runtime": {
+          "status": "paused",
+          "startedAt": null,
+          "accumulatedMs": 80000,
+          "pausedAt": 1792400240000,
+          "laps": [],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "paused",
+          "elapsedMs": 80000,
+          "totalMs": 180000,
+          "remainingMs": 100000,
+          "finished": false,
+          "step": null,
+          "next": null
+        }
+      },
+      {
+        "definition": {
+          "kind": "countdown",
+          "id": "t_v5kd0dn3",
+          "name": "AMRAP",
+          "sound": true,
+          "countdownTicks": false,
+          "createdAt": 1792399140000,
+          "durationMs": 1200000,
+          "lapsEnabled": true
+        },
+        "runtime": {
+          "status": "running",
+          "startedAt": 1792399140000,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [
+            {
+              "elapsedMs": 360000,
+              "at": 1792399500000
+            }
+          ],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "finished",
+          "elapsedMs": 1200000,
+          "totalMs": 1200000,
+          "remainingMs": 0,
+          "finished": true,
+          "step": null,
+          "next": null
+        }
+      },
+      {
+        "definition": {
+          "kind": "interval",
+          "id": "t_24agcxch",
+          "name": "Stretch",
+          "sound": true,
+          "countdownTicks": true,
+          "createdAt": 1792400380000,
+          "segments": [
+            {
+              "label": "Hold",
+              "phase": "work",
+              "durationMs": 30000
+            }
+          ],
+          "rounds": 1
+        },
+        "runtime": {
+          "status": "finished",
+          "startedAt": null,
+          "accumulatedMs": 10000,
+          "pausedAt": null,
+          "laps": [],
+          "skippedMs": 20000
+        },
+        "projection": {
+          "status": "finished",
+          "elapsedMs": 30000,
+          "totalMs": 30000,
+          "remainingMs": 0,
+          "finished": true,
+          "step": null,
+          "next": null
+        }
+      },
+      {
+        "definition": {
+          "kind": "interval",
+          "id": "t_dy1ktjyd",
+          "name": "Pomodoro",
+          "sound": true,
+          "countdownTicks": true,
+          "createdAt": 1792400280000,
+          "segments": [
+            {
+              "label": "Focus",
+              "phase": "work",
+              "durationMs": 1500000
+            },
+            {
+              "label": "Break",
+              "phase": "rest",
+              "durationMs": 300000
+            },
+            {
+              "label": "Focus",
+              "phase": "work",
+              "durationMs": 1500000
+            },
+            {
+              "label": "Break",
+              "phase": "rest",
+              "durationMs": 300000
+            },
+            {
+              "label": "Focus",
+              "phase": "work",
+              "durationMs": 1500000
+            },
+            {
+              "label": "Break",
+              "phase": "rest",
+              "durationMs": 300000
+            },
+            {
+              "label": "Focus",
+              "phase": "work",
+              "durationMs": 1500000
+            },
+            {
+              "label": "Long break",
+              "phase": "rest",
+              "durationMs": 900000
+            }
+          ],
+          "rounds": 1
+        },
+        "runtime": {
+          "status": "idle",
+          "startedAt": null,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "idle",
+          "elapsedMs": 0,
+          "totalMs": 7800000,
+          "remainingMs": 7800000,
+          "finished": false,
+          "step": {
+            "index": 0,
+            "segmentIndex": 0,
+            "round": 1,
+            "phase": "work",
+            "label": "Focus",
+            "startMs": 0,
+            "durationMs": 1500000,
+            "elapsedMs": 0,
+            "remainingMs": 1500000
+          },
+          "next": {
+            "index": 1,
+            "segmentIndex": 1,
+            "round": 1,
+            "phase": "rest",
+            "label": "Break",
+            "startMs": 1500000,
+            "durationMs": 300000
+          }
+        }
+      },
+      {
+        "definition": {
+          "kind": "countdown",
+          "id": "t_nw9j7shf",
+          "name": "Standup",
+          "sound": true,
+          "countdownTicks": false,
+          "createdAt": 1792400340000,
+          "until": "2026-10-19T09:30:00.000Z",
+          "lapsEnabled": false
+        },
+        "runtime": {
+          "status": "idle",
+          "startedAt": null,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "idle",
+          "elapsedMs": 0,
+          "totalMs": 1800000,
+          "remainingMs": 1800000,
+          "finished": false,
+          "step": null,
+          "next": null
+        }
+      }
+    ]
+  },
+  "capabilities": {
+    "create": true,
+    "destructive": false
+  },
+  "density": "compact"
+}
