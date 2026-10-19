@@ -110,8 +110,9 @@ project.predictabilize_uuids
 # Write the project and its scheme to a staging folder, then install only those generated files into
 # Hop.xcodeproj. Everything else in the bundle (breakpoints and personal schemes in xcuserdata, project.xcworkspace)
 # belongs to the developer and stays. Each replaced file is backed up first and a failed or interrupted install
-# (Ctrl-C, SIGTERM) restores the backups, so it leaves the previous project intact. Tests/project-generator.sh checks
-# both.
+# (Ctrl-C, SIGTERM) restores the backups and deletes files the project did not have, so it leaves the previous project
+# intact. If any of that fails, the generator names the files and keeps the staging folder with the backups.
+# Tests/project-generator.sh checks all of this.
 staging = Dir.mktmpdir("Hop-xcodeproj", __dir__)
 keep_staging = false
 begin
@@ -137,17 +138,26 @@ begin
     end
   # Exception, not StandardError: an interrupt (Interrupt, SignalException) must restore too, then re-raise.
   rescue Exception => install_error
-    begin
-      # A file has been installed exactly when it has left the staging folder, even if the interrupt came right after.
-      installed = generated.reject { |path| File.exist?(File.join(staged_path, path)) }
-      installed.each do |path|
-        backup = File.join(backup_path, path)
-        target = File.join(project_path, path)
-        File.exist?(backup) ? File.rename(backup, target) : FileUtils.rm_f(target)
+    # The backups stay until every file is restored, even if a second interrupt cuts the restore short.
+    keep_staging = true
+    # A file has been installed exactly when it has left the staging folder, even if the interrupt came right after.
+    installed = generated.reject { |path| File.exist?(File.join(staged_path, path)) }
+    # Try every file, so one that cannot be restored does not leave the others as the new generation.
+    unrestored = []
+    installed.each do |path|
+      backup = File.join(backup_path, path)
+      target = File.join(project_path, path)
+      begin
+        # A file new to the project is deleted without force, so a failed delete is reported like a failed restore.
+        File.exist?(backup) ? File.rename(backup, target) : File.delete(target)
+      rescue Exception => restore_error
+        unrestored << "#{target} (#{restore_error.message})"
       end
-    rescue Exception => restore_error
-      keep_staging = true
-      warn "Could not restore #{project_path} (#{restore_error.message}); the previous files are in #{backup_path}"
+    end
+    if unrestored.empty?
+      keep_staging = false
+    else
+      warn "Could not restore #{unrestored.join('; ')}; the backups are kept in #{backup_path}"
     end
     raise install_error
   end

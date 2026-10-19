@@ -66,6 +66,8 @@ class << File
     result = hop_test_rename(from, to)
     if !$hop_test_interrupted && to.end_with?("xcschemes/Hop.xcscheme")
       $hop_test_interrupted = true
+      # Folders the restore will not be able to change.
+      ENV.fetch("HOP_TEST_READ_ONLY", "").split(":").each { |folder| File.chmod(0o555, folder) }
       raise SignalException, ENV.fetch("HOP_TEST_SIGNAL")
     end
     result
@@ -88,5 +90,38 @@ for signal in INT:130 TERM:143; do
   assert_developer_state "SIG$signal regeneration"
   [ -z "$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')" ] || fail "SIG$signal regeneration left its staging folder"
 done
+
+# The same interrupt when the project had no shared scheme yet: the restore deletes the new scheme again.
+rm "$scheme"
+interrupt() {
+  status=0
+  { (cd "$work/hop" && HOP_TEST_SIGNAL=INT HOP_TEST_READ_ONLY="$1" \
+    exec ruby -r "$work/interrupt.rb" ProjectGenerator.rb 2> "$work/stderr" > /dev/null) || status=$?; } 2> /dev/null
+  chmod u+w "$project" "$project/xcshareddata/xcschemes"
+  [ "$status" -eq 130 ] || fail "$2 exited $status, expected 130"
+}
+interrupt "" "interrupted regeneration without a scheme"
+[ ! -e "$scheme" ] || fail "interrupted regeneration without a scheme left the new scheme"
+cmp -s "$pbxproj" "$work/previous.pbxproj" || fail "interrupted regeneration without a scheme did not restore project.pbxproj"
+assert_developer_state "interrupted regeneration without a scheme"
+[ -z "$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')" ] || fail "interrupted regeneration without a scheme left its staging folder"
+
+# A restore that cannot delete the new scheme must say so and keep the staging folder rather than pass silently.
+interrupt "$project/xcshareddata/xcschemes" "undeletable scheme"
+grep -q "Could not restore .*xcschemes/Hop.xcscheme" "$work/stderr" || fail "undeletable scheme was not reported: $(cat "$work/stderr")"
+staging="$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')"
+[ -d "$staging/backup" ] || fail "undeletable scheme did not keep the staging folder"
+cmp -s "$pbxproj" "$work/previous.pbxproj" || fail "undeletable scheme did not restore project.pbxproj"
+assert_developer_state "undeletable scheme"
+rm -rf "$scheme" "$staging"
+
+# A restore that fails for project.pbxproj (sorted first) must still delete the new scheme, name project.pbxproj and
+# keep its backup.
+interrupt "$project" "unrestorable project"
+grep -q "Could not restore .*Hop.xcodeproj/project.pbxproj" "$work/stderr" || fail "unrestorable project was not reported: $(cat "$work/stderr")"
+[ ! -e "$scheme" ] || fail "unrestorable project stopped the restore before the scheme"
+staging="$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')"
+cmp -s "$staging/backup/project.pbxproj" "$work/previous.pbxproj" || fail "unrestorable project did not keep its backup"
+assert_developer_state "unrestorable project"
 
 echo "ProjectGenerator.rb keeps developer state and restores the project on failure or interruption."
