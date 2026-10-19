@@ -38,27 +38,38 @@ final class LiveOriginSignalTests: XCTestCase {
 
     func testExecKeepsTheIdentityAndTheCheckSeesTheNewExecutable() throws {
         // A shell that runs `exec /bin/sleep` once it reads a line, as `exec node server.js` wrappers do.
+        // /bin/bash directly: /bin/sh is a shim that itself execs the selected shell, which would add a second exec.
         let shell = Process()
         let input = Pipe()
-        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.executableURL = URL(fileURLWithPath: "/bin/bash")
         shell.arguments = ["-c", "read line; exec /bin/sleep 30"]
         shell.standardInput = input
         try shell.run()
         defer { shell.terminate() }
         let pid = shell.processIdentifier
         let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: pid))
-        let before = try XCTUnwrap(LibprocProcessSource.executablePath(pid))
+        let before = try XCTUnwrap(Self.executablePath(of: pid, resolvingTo: "/bin/bash"), "the shell never ran")
         XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: before), .unchanged)
 
         input.fileHandleForWriting.write(Data("go\n".utf8))
-        let deadline = Date(timeIntervalSinceNow: 5)
-        while LibprocProcessSource.executablePath(pid) == before, Date() < deadline { usleep(10_000) }
-        let after = try XCTUnwrap(LibprocProcessSource.executablePath(pid))
+        let after = try XCTUnwrap(Self.executablePath(of: pid, resolvingTo: "/bin/sleep"), "the shell never ran exec")
 
-        XCTAssertEqual(URL(fileURLWithPath: after).resolvingSymlinksInPath().path, URL(fileURLWithPath: "/bin/sleep").resolvingSymlinksInPath().path)
         XCTAssertEqual(LibprocProcessSource.currentIdentity(of: pid), identity, "exec keeps the PID and start time")
         XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: before), .executableChanged)
         XCTAssertEqual(LibprocProcessSource.check(identity, executablePath: after), .unchanged)
+    }
+
+    /// Waits, up to a deadline, until `pid` runs `expected` (compared after resolving symlinks) and returns the path libproc reports.
+    private static func executablePath(of pid: pid_t, resolvingTo expected: String, timeout: TimeInterval = 10) -> String? {
+        let target = URL(fileURLWithPath: expected).resolvingSymlinksInPath().path
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        repeat {
+            if let path = LibprocProcessSource.executablePath(pid), URL(fileURLWithPath: path).resolvingSymlinksInPath().path == target {
+                return path
+            }
+            usleep(10_000)
+        } while Date() < deadline
+        return nil
     }
 
     func testItsOwnCodeSignatureIsRead() throws {
