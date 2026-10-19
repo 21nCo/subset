@@ -130,6 +130,14 @@ export const capabilities = [
     availableSurfaces: []
   },
   {
+    id: 'hop',
+    name: 'Hop',
+    summary: 'Switch between individual windows from the keyboard on the Mac, with app icons, titles, and optional live previews.',
+    state: 'planned',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
+  },
+  {
     id: 'timer',
     name: 'Timer',
     summary: 'Run several countdowns, stopwatches, and interval workouts at once from the terminal, an AI agent, a local web board, or the Mac menu bar.',

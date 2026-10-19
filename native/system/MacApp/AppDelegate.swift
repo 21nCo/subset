@@ -3,12 +3,19 @@ import SystemCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let mainWindow = PlaceholderWindowController(
-        title: "System",
-        autosaveName: "SystemMainWindow",
-        size: NSSize(width: 640, height: 420),
-        content: MainPlaceholderView()
-    )
+    private let monitor = SystemMonitor()
+    /// Created on first open: a table updated while its window has never been on screen trips AppKit's
+    /// table-reentrancy warning.
+    private lazy var mainWindow: PlaceholderWindowController = {
+        let controller = PlaceholderWindowController(
+            title: "System",
+            autosaveName: "SystemMainWindow",
+            size: NSSize(width: 820, height: 520),
+            content: ProcessTableView(monitor: monitor)
+        )
+        controller.onVisibilityChange = { [monitor] visible in monitor.setMainWindowVisible(visible) }
+        return controller
+    }()
     private let settingsWindow = PlaceholderWindowController(
         title: "Settings",
         autosaveName: "SystemSettingsWindow",
@@ -22,7 +29,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // policy here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = MainMenu.make(perform: perform)
-        statusMenu = StatusMenuController(perform: perform)
+        let statusMenu = StatusMenuController(perform: perform)
+        self.statusMenu = statusMenu
+        monitor.onUpdate = { [monitor] in
+            statusMenu.update(monitor.summary, logicalCoreCount: monitor.snapshot?.logicalCoreCount)
+        }
+        statusMenu.update(monitor.summary, logicalCoreCount: nil)
+        monitor.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
