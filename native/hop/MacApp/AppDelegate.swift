@@ -3,15 +3,43 @@ import HopCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set once the onboarding window has opened on its own, so it opens unasked only on the first launch.
+    private static let onboardingShownKey = "onboarding.shown"
+
     private let settingsWindow = SettingsWindowController()
     private var statusMenu: StatusMenuController?
+    private let switchShortcut = SwitchShortcutController()
+    private var accessibility = AccessibilityGate()
+    private lazy var onboarding = OnboardingWindowController(
+        shortcutPhrase: {
+            let shortcut = ShortcutStore().shortcut
+            return "\(shortcut.modifierSymbol) and press \(shortcut.keyName)"
+        },
+        onTick: { [unowned self] in refreshAccessibility() }
+    )
 
     func applicationDidFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the
         // policy here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = MainMenu.make(perform: perform)
-        statusMenu = StatusMenuController(perform: perform)
+        statusMenu = StatusMenuController(perform: perform, state: .needsPermission)
+        switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
+        refreshAccessibility()
+
+        let defaults = UserDefaults.standard
+        if AccessibilityGate.showsOnboardingAtLaunch(
+            trusted: accessibility.isTrusted == true,
+            onboardingShownBefore: defaults.bool(forKey: Self.onboardingShownKey)
+        ) {
+            defaults.set(true, forKey: Self.onboardingShownKey)
+            onboarding.show()
+        }
+    }
+
+    /// Trust is re-checked whenever Hop becomes active, for example when a window of its own comes to the front.
+    func applicationDidBecomeActive(_: Notification) {
+        refreshAccessibility()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
@@ -25,11 +53,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func perform(_ command: ShellCommand) {
         switch command {
+        case .grantAccessibility: onboarding.show()
         case .settings: settingsWindow.show()
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
         case .quit: NSApp.terminate(nil)
         }
+    }
+
+    /// Samples the Accessibility permission: installs the event tap when it is granted and removes it when it is
+    /// revoked. A tap the system refused while trusted is retried on the next sample. Any sample that finds trust held
+    /// closes the onboarding window, whether or not the tap could be installed.
+    private func refreshAccessibility() {
+        if accessibility.update(trusted: AccessibilityPermission.isTrusted) == .revoked {
+            switchShortcut.remove()
+        }
+        let trusted = accessibility.isTrusted == true
+        if trusted {
+            onboarding.close()
+            if !switchShortcut.isInstalled { switchShortcut.install() }
+        }
+        statusMenu?.update(state: !trusted ? .needsPermission : (switchShortcut.isInstalled ? .ready : .shortcutUnavailable))
     }
 }
