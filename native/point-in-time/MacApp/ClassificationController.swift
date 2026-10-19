@@ -72,7 +72,12 @@ final class ClassificationController {
         self.store = store
         let memory = (try? ActivityStore.defaultDirectory()).map(MemoryProfile.init(directory:))
         self.memory = memory
-        runner = store.map { ClassificationRunner(store: $0, memory: { memory?.read() ?? "" }, deletionPending: deletionPending) }
+        runner = store.map {
+            ClassificationRunner(store: $0, memory: {
+                guard let memory else { throw ProviderError.notConfigured("Memory.md has no support folder, so nothing was sent.") }
+                return try memory.read()
+            }, deletionPending: deletionPending)
+        }
     }
 
     var options: ClassificationOptions {
@@ -122,6 +127,11 @@ final class ClassificationController {
     func captureSettingsChanged() {
         guard options != lastOptions else { return }
         settingsChanged(providerChanged: false)
+    }
+
+    /// Recounts pending and failed blocks without sending anything, after a correction.
+    func refreshStatus() {
+        runner?.refreshStatus(options: options)
     }
 
     func retryFailed() {

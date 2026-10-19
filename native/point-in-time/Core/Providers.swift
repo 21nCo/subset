@@ -14,11 +14,16 @@ struct ProcessOutput: Sendable {
 ///
 /// `Process` makes the child the leader of its own process group, so the signals go to the group: whatever the child
 /// started (the native binary behind an npm launcher, say) is stopped with it. When the child exits, anything it left
-/// running in its group is stopped the same way, and its output is not waited on for more than a few seconds.
-/// Each group is tracked in `children` until it has been stopped, so quitting the app can stop it too.
+/// running in its group is killed at once, and its output is not waited on for more than a few seconds. A group is
+/// signaled only through `children`, which stops signaling it once its leader's exit is reported, so a group ID that has
+/// been reused is never signaled. Each output stream is capped at `outputLimit` bytes; a child that writes more is
+/// stopped and the run fails, as it does when `check` returns an error for a line of standard output.
 enum ProcessRunner {
+    static let outputLimit = 2 << 20
+
     static func run(_ executable: URL, _ arguments: [String], stdin: Data, directory: URL, environment: [String: String],
-                    timeout: TimeInterval, children: ChildProcesses = .shared) async throws -> ProcessOutput {
+                    timeout: TimeInterval, children: ChildProcesses = .shared, outputLimit: Int = outputLimit,
+                    check: (@Sendable (Data) -> ProviderError?)? = nil) async throws -> ProcessOutput {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -35,61 +40,61 @@ enum ProcessRunner {
             finish.continuation = continuation
             let group = DispatchGroup()
             let out = DataBox(), err = DataBox()
-            // Read as data arrives rather than blocking a thread until the output closes.
-            for (pipe, box) in [(output, out), (errors, err)] {
-                group.enter()
-                pipe.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    if chunk.isEmpty {
-                        handle.readabilityHandler = nil
-                        group.leave()
-                    } else {
-                        box.append(chunk)
-                    }
-                }
-            }
+            group.enter()
+            group.enter()
             process.terminationHandler = { process in
                 let result: @Sendable () -> ProcessOutput = { ProcessOutput(status: process.terminationStatus, stdout: out.value, stderr: err.value) }
-                stopGroup(process.processIdentifier, children)
+                children.exited(group: process.processIdentifier)
                 group.notify(queue: .global()) { finish.resume(.success(result())) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) { finish.resume(.success(result())) }
             }
             do {
-                guard !children.isStopped else { throw ProviderError.process("pointInTime is quitting") }
-                try process.run()
+                try children.launch(process)
             } catch {
-                for pipe in [output, errors] {
-                    pipe.fileHandleForReading.readabilityHandler = nil
-                    group.leave()
-                }
+                group.leave()
+                group.leave()
                 finish.resume(.failure(ProviderError.process("Could not start \(executable.lastPathComponent): \(error.localizedDescription)")))
                 return
             }
-            // Started while the app was stopping its children: stop this one too.
-            if !children.add(group: process.processIdentifier) { kill(-process.processIdentifier, SIGKILL) }
+            let pid = process.processIdentifier
+            let fail: @Sendable (ProviderError) -> Void = { error in if finish.resume(.failure(error)) { stopGroup(pid, children) } }
+            let streams: [(Pipe, DataBox, (@Sendable (Data) -> ProviderError?)?)] = [(output, out, check), (errors, err, nil)]
+            // Read as data arrives rather than blocking a thread until the output closes.
+            for (pipe, box, check) in streams {
+                pipe.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    guard !chunk.isEmpty else {
+                        handle.readabilityHandler = nil
+                        group.leave()
+                        return
+                    }
+                    guard box.append(chunk, limit: outputLimit) else {
+                        return fail(.process("\(executable.lastPathComponent) wrote more than \(outputLimit) bytes of output"))
+                    }
+                    if let check, let error = box.newLines().lazy.compactMap(check).first { fail(error) }
+                }
+            }
             DispatchQueue.global().async {
                 try? input.fileHandleForWriting.write(contentsOf: stdin)
                 try? input.fileHandleForWriting.close()
             }
-            let pid = process.processIdentifier
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if finish.resume(.failure(ProviderError.timedOut(timeout))) { stopGroup(pid, children) }
-            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { fail(.timedOut(timeout)) }
         }
     }
 
-    /// SIGTERM to the process group led by `pid`, then SIGKILL two seconds later; a group that is gone is not an error.
+    /// SIGTERM to the process group led by `pid`, then SIGKILL two seconds later unless its leader has exited by then.
     private static func stopGroup(_ pid: pid_t, _ children: ChildProcesses) {
-        kill(-pid, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            kill(-pid, SIGKILL)
-            children.remove(group: pid)
-        }
+        children.signal(group: pid, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { children.signal(group: pid, SIGKILL) }
     }
 }
 
 /// The process groups and request folders the providers have open, so that quitting the app stops and removes them
 /// rather than leaving Codex running on the subscription, or its prompt and answer in the temporary folder.
+///
+/// A group is signaled only while its leader's exit has not been reported: once the leader is reaped and the group is
+/// empty, the system may give its ID to someone else's group. While any member is left, the ID is not reused, so the
+/// group is killed at once when its leader's exit is reported.
 public final class ChildProcesses: @unchecked Sendable {
     public static let shared = ChildProcesses()
 
@@ -100,26 +105,41 @@ public final class ChildProcesses: @unchecked Sendable {
 
     public init() {}
 
-    var isStopped: Bool { lock.withLock { stopped } }
+    /// Starts `process` and tracks its group, unless the app is quitting. The lock is held across the start, so even a
+    /// child that exits at once has its exit reported after it is tracked.
+    func launch(_ process: Process) throws {
+        try lock.withLock {
+            guard !stopped else { throw ProviderError.process("pointInTime is quitting") }
+            try process.run()
+            groups.insert(process.processIdentifier)
+        }
+    }
 
-    /// False when the children have been stopped, so the caller stops this one itself.
-    func add(group pid: pid_t) -> Bool { lock.withLock { stopped ? false : groups.insert(pid).inserted } }
-    func remove(group pid: pid_t) { _ = lock.withLock { groups.remove(pid) } }
+    /// Signals the group led by `pid` if its leader's exit has not been reported; otherwise does nothing.
+    func signal(group pid: pid_t, _ signal: Int32) {
+        lock.withLock { if groups.contains(pid) { kill(-pid, signal) } }
+    }
+
+    /// The leader of `pid`'s group exited: whatever it left running is killed now, and the group is not signaled again.
+    func exited(group pid: pid_t) {
+        lock.withLock { if groups.remove(pid) != nil { kill(-pid, SIGKILL) } }
+    }
+
     func add(folder url: URL) -> Bool { lock.withLock { stopped ? false : folders.insert(url).inserted } }
     func remove(folder url: URL) { _ = lock.withLock { folders.remove(url) } }
 
-    /// For quitting: SIGTERM to every group, SIGKILL to what is left after `grace`, and every folder removed, before
-    /// returning. Nothing is started afterwards.
+    /// For quitting: SIGTERM to every group, SIGKILL to those whose leader is still running after `grace`, and every
+    /// folder removed, before returning. Nothing is started afterwards.
     public func stopAll(grace: TimeInterval = 1) {
         let (groups, folders) = lock.withLock {
             stopped = true
-            defer { self.groups = []; self.folders = [] }
+            defer { self.folders = [] }
             return (self.groups, self.folders)
         }
-        for pid in groups { kill(-pid, SIGTERM) }
+        for pid in groups { signal(group: pid, SIGTERM) }
         let deadline = Date().addingTimeInterval(grace)
-        while Date() < deadline, groups.contains(where: { kill(-$0, 0) == 0 }) { usleep(20_000) }
-        for pid in groups { kill(-pid, SIGKILL) }
+        while Date() < deadline, lock.withLock({ !self.groups.isDisjoint(with: groups) }) { usleep(20_000) }
+        for pid in groups { signal(group: pid, SIGKILL) }
         for url in folders { try? FileManager.default.removeItem(at: url) }
     }
 }
@@ -127,8 +147,26 @@ public final class ChildProcesses: @unchecked Sendable {
 private final class DataBox: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private var lineStart = 0
 
-    func append(_ chunk: Data) { lock.withLock { data.append(chunk) } }
+    /// Keeps `chunk`, or nothing and returns false when that would take the stream past `limit` bytes.
+    func append(_ chunk: Data, limit: Int) -> Bool {
+        lock.withLock {
+            guard data.count + chunk.count <= limit else { return false }
+            data.append(chunk)
+            return true
+        }
+    }
+
+    /// The lines completed since the last call, without their newlines.
+    func newLines() -> [Data] {
+        lock.withLock {
+            guard let end = data[lineStart...].lastIndex(of: 0x0A) else { return [] }
+            defer { lineStart = end + 1 }
+            return data[lineStart..<end].split(separator: 0x0A).map { Data($0) }
+        }
+    }
+
     var value: Data { lock.withLock { data } }
 }
 
@@ -183,6 +221,11 @@ public enum CodexLoginStatus: Equatable, Sendable {
 /// Classifies with the user's own `codex` binary and its ChatGPT sign-in. pointInTime never reads Codex's credential
 /// files or calls ChatGPT itself: it checks `codex login status` and runs `codex exec` in an empty private folder,
 /// without the user's Codex config or rules, with a read-only sandbox, the prompt on stdin, and a timeout.
+///
+/// The prompt asks Codex not to use tools, but that is not what keeps it to the request: `exec` runs with every feature
+/// that gives the model a tool turned off, and with web search off. A codex that does not know one of them refuses to
+/// start, so nothing is sent. Its `--json` events are checked as they arrive: any item other than the answer, its
+/// reasoning, or a notice from Codex itself stops the run and the answer is discarded.
 public struct CodexCLI: ClassificationProvider {
     public static let defaultTimeout: TimeInterval = 180
 
@@ -209,9 +252,28 @@ public struct CodexCLI: ClassificationProvider {
         self.children = children
     }
 
+    /// The features that give the model a tool: a shell, images, apps and plugins, a browser or the computer, other
+    /// agents, goals, image generation, and hooks.
+    static let disabledFeatures = ["shell_tool", "view_image", "apps", "plugins", "browser_use", "computer_use", "multi_agent", "goals",
+                                   "image_generation", "hooks"]
+    /// The `--json` items a classification may produce.
+    static let allowedItems: Set<String> = ["agent_message", "reasoning", "error"]
+
     public static func execArguments(workingDirectory: URL, schema: URL, output: URL) -> [String] {
-        ["exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only",
-         "--color", "never", "--cd", workingDirectory.path, "--output-schema", schema.path, "-o", output.path, "-"]
+        ["exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only", "--json"]
+            + disabledFeatures.flatMap { ["--disable", $0] }
+            + ["-c", "web_search=\"disabled\"", "--color", "never", "--cd", workingDirectory.path, "--output-schema", schema.path,
+               "-o", output.path, "-"]
+    }
+
+    /// Nil when `line` is a `--json` event a classification may produce.
+    static func refusedEvent(_ line: Data) -> ProviderError? {
+        guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any], event["type"] is String else {
+            return .invalidResponse("codex exec printed something other than its events")
+        }
+        guard let item = event["item"] else { return nil }
+        let type = (item as? [String: Any])?["type"] as? String ?? "unknown"
+        return allowedItems.contains(type) ? nil : .invalidResponse("Codex went beyond the request (\(type)), so its answer was discarded")
     }
 
     public func loginStatus() async -> CodexLoginStatus {
@@ -255,8 +317,19 @@ public struct CodexCLI: ClassificationProvider {
         }
         let result = try await ProcessRunner.run(executable, Self.execArguments(workingDirectory: work, schema: schemaFile, output: answerFile),
                                                  stdin: Data(prompt.utf8), directory: work, environment: environment, timeout: timeout,
-                                                 children: children)
-        guard result.status == 0 else { throw ProviderError.process("codex exec exited with status \(result.status)") }
+                                                 children: children, check: Self.refusedEvent)
+        guard result.status == 0 else {
+            if String(decoding: result.stderr, as: UTF8.self).contains("Unknown feature flag") {
+                throw ProviderError.process("This codex cannot turn its tools off, so nothing was sent. Update Codex.")
+            }
+            throw ProviderError.process("codex exec exited with status \(result.status)")
+        }
+        // The whole event stream, including what arrived after the run ended, and a finished turn.
+        let events = result.stdout.split(separator: 0x0A).map { Data($0) }
+        if let error = events.lazy.compactMap(Self.refusedEvent).first { throw error }
+        guard events.contains(where: { (try? JSONSerialization.jsonObject(with: $0) as? [String: Any])?["type"] as? String == "turn.completed" }) else {
+            throw ProviderError.invalidResponse("codex exec did not finish its turn")
+        }
         guard let answer = try? String(contentsOf: answerFile, encoding: .utf8), !answer.isEmpty else {
             throw ProviderError.invalidResponse("codex exec wrote no answer")
         }
@@ -394,6 +467,17 @@ public struct OpenRouterClient: ClassificationProvider {
         return stored
     }
 
+    /// The wait a Retry-After value asks for, in seconds or until an HTTP date, never negative; nil when it is neither.
+    static func retryAfter(_ value: String?, now: Date = Date()) -> TimeInterval? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
+        if let seconds = TimeInterval(value) { return seconds.isFinite ? max(0, seconds) : nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: value).map { max(0, $0.timeIntervalSince(now)) }
+    }
+
     private func authorized(_ url: URL, key: String) -> URLRequest {
         var request = URLRequest(url: url, timeoutInterval: Self.timeout)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -416,7 +500,7 @@ public struct OpenRouterClient: ClassificationProvider {
         case 200..<300: return data
         case 401, 403: throw ProviderError.unauthorized("OpenRouter rejected the key (HTTP \(response.statusCode))")
         case 402: throw ProviderError.unauthorized("OpenRouter reports the key has no credits left (HTTP 402)")
-        case 429: throw ProviderError.rateLimited(retryAfter: response.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
+        case 429: throw ProviderError.rateLimited(retryAfter: Self.retryAfter(response.value(forHTTPHeaderField: "Retry-After")))
         case 408, 500...: throw ProviderError.network("OpenRouter returned HTTP \(response.statusCode)")
         default: throw ProviderError.process("OpenRouter refused the request (HTTP \(response.statusCode))")
         }

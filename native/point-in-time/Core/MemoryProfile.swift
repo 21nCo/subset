@@ -43,12 +43,18 @@ public struct MemoryProfile: Sendable {
         return url
     }
 
-    /// The profile capped to `ClassificationRequest.maxMemoryBytes`, created first if needed; empty when unreadable.
-    public func read() -> String {
-        guard (try? ensureExists()) != nil, let handle = try? FileHandle(forReadingFrom: url) else { return "" }
-        defer { try? handle.close() }
-        // A few bytes past the cap, so a character cut at the read's end is dropped by the cap, not decoded half.
-        let data = (try? handle.read(upToCount: ClassificationRequest.maxMemoryBytes + 4)) ?? Data()
+    /// The profile capped to `ClassificationRequest.maxMemoryBytes`, created first if needed. Throws when it cannot be
+    /// created or read, so a request is never sent without the profile the user wrote.
+    public func read() throws -> String {
+        let data: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: try ensureExists())
+            defer { try? handle.close() }
+            // A few bytes past the cap, so a character cut at the read's end is dropped by the cap, not decoded half.
+            data = try handle.read(upToCount: ClassificationRequest.maxMemoryBytes + 4) ?? Data()
+        } catch {
+            throw ProviderError.notConfigured("Memory.md could not be read, so nothing was sent: \(error.localizedDescription)")
+        }
         return ClassificationRequest.cap(String(decoding: data, as: UTF8.self), bytes: ClassificationRequest.maxMemoryBytes)
     }
 }

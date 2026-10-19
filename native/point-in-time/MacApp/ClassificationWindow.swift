@@ -43,6 +43,8 @@ final class ClassificationModel: ObservableObject {
     @Published var hasKey = false
     @Published var storeError: String?
     let controller: ClassificationController
+    /// Changes with each provider check, so only the latest one sets the status it shows.
+    private var check = 0
     private let store: ActivityStore?
 
     init(controller: ClassificationController, store: ActivityStore?) {
@@ -63,10 +65,11 @@ final class ClassificationModel: ObservableObject {
     /// Runs every minute and after each request, whether or not the window is shown, so it does not touch the Keychain.
     func refresh() {
         status = controller.status
-        // Today's completed blocks with recorded time, newest first.
+        // Today's completed blocks, newest first, including those with only excluded time, which can be corrected but are
+        // never sent.
         let now = Date()
         recent = ((try? store?.blocks(from: Calendar.current.startOfDay(for: now), to: now)) ?? [])
-            .filter { $0.activeSeconds > 0 && $0.end <= now }.reversed().prefix(30).map { $0 }
+            .filter { $0.end <= now }.reversed().prefix(30).map { $0 }
     }
 
     /// Asks the Keychain whether a key is saved, without reading the key: when the window is shown and after a save or
@@ -76,14 +79,20 @@ final class ClassificationModel: ObservableObject {
     }
 
     func checkProvider(refresh: Bool = false) {
+        check += 1
         guard settings.provider == .codex else { return }
         codexState = "Checking codex…"
+        let check = check
         Task {
-            guard let codex = await controller.codex(refresh: refresh) else {
+            let codex = await controller.codex(refresh: refresh)
+            guard check == self.check else { return }
+            guard let codex else {
                 codexState = "codex was not found in the login shell’s PATH. Choose the binary below."
                 return
             }
-            switch await codex.loginStatus() {
+            let status = await codex.loginStatus()
+            guard check == self.check else { return }
+            switch status {
             case .signedIn:
                 codexState = "\(codex.executable.path): signed in with ChatGPT"
                 // Check Again after signing in retries the waiting blocks now rather than after the backoff.
@@ -191,6 +200,7 @@ final class ClassificationModel: ObservableObject {
         } catch {
             storeError = String(describing: error)
         }
+        controller.refreshStatus()
         refresh()
     }
 }
@@ -221,7 +231,7 @@ struct ClassificationView: View {
                         if model.settings.codexPath != nil { Button("Use Login Shell PATH") { model.useLoginShellCodex() } }
                         Button("Check Again") { model.checkProvider(refresh: true) }
                     }
-                    Text("pointInTime runs your codex binary in an empty private folder and never reads Codex’s credential files.")
+                    Text("pointInTime runs your codex binary in an empty private folder with its tools and web search turned off, discards any answer for which Codex went beyond the request, and never reads Codex’s credential files.")
                         .font(.caption).foregroundStyle(.secondary)
                 case .openRouter:
                     Text(model.hasKey ? "A key is saved in the Keychain." : "No key is saved.")
@@ -262,7 +272,7 @@ struct ClassificationView: View {
             Section("Today’s blocks") {
                 if model.recent.isEmpty { Text("No completed blocks today.").foregroundStyle(.secondary) }
                 ForEach(model.recent, id: \.start) { block in
-                    BlockRow(block: block) { model.correct(block, to: $0) }
+                    BlockRow(block: block, sendable: ClassificationRequest.isSendable(block, model.controller.options)) { model.correct(block, to: $0) }
                 }
             }
         }
@@ -285,6 +295,8 @@ struct ClassificationView: View {
 /// One block and its label. The reason is shown as plain text, never as markup.
 private struct BlockRow: View {
     let block: Block
+    /// False for a block whose app is excluded or that holds only excluded time: it stays pending but is never sent.
+    let sendable: Bool
     let correct: (BlockLabel) -> Void
 
     var body: some View {
@@ -304,7 +316,7 @@ private struct BlockRow: View {
     private var summary: String {
         let labeling = block.labeling
         switch labeling.state {
-        case .pending: return "Pending"
+        case .pending: return sendable ? "Pending" : "Not sent: excluded app or time"
         case .failed: return "Could not be classified"
         case .corrected: return "Corrected by you" + (labeling.reason.map { ": \($0)" } ?? "")
         case .classified:

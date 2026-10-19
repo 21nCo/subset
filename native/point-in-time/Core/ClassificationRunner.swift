@@ -25,7 +25,7 @@ public struct ClassificationBackoff: Equatable, Sendable {
         failures += 1
         retryAt = date.addingTimeInterval(min(Self.maximum, Self.base * pow(2, Double(min(failures - 1, 16)))))
         if let retryAfter {
-            providerRetryAt = date.addingTimeInterval(min(retryAfter, Self.maximumRetryAfter))
+            providerRetryAt = date.addingTimeInterval(min(max(0, retryAfter), Self.maximumRetryAfter))
         }
     }
 
@@ -88,7 +88,7 @@ public final class ClassificationRunner {
     public var onChange: (() -> Void)?
 
     private let store: ActivityStore
-    private let memory: () -> String
+    private let memory: () throws -> String
     private let clock: () -> Date
     private let deletionPending: () -> Bool
     /// The provider and model failed blocks were last made pending for; nil until that write succeeds, so a failed
@@ -101,8 +101,8 @@ public final class ClassificationRunner {
     private var configuration = 0
 
     /// `deletionPending` says whether a deletion or idle retraction is queued but not applied yet; nothing is sent then,
-    /// since the store still holds activity the user removed.
-    public init(store: ActivityStore, memory: @escaping () -> String, clock: @escaping () -> Date = Date.init,
+    /// since the store still holds activity the user removed. When `memory` throws, nothing is sent.
+    public init(store: ActivityStore, memory: @escaping () throws -> String, clock: @escaping () -> Date = Date.init,
                 deletionPending: @escaping () -> Bool = { false }) {
         self.store = store
         self.memory = memory
@@ -145,10 +145,10 @@ public final class ClassificationRunner {
             // asked for a deletion that has not been applied yet.
             guard let options = options() else { return true }
             guard !deletionPending() else { return false }
-            let blocks = try store.pendingBlocks(completedBy: clock().addingTimeInterval(-Self.settleDelay), options: options,
-                                                 limit: ClassificationRequest.maxBlocks)
-            let corrections = try store.recentCorrections(sendableUnder: options)
-            guard let request = ClassificationRequest(blocks: blocks, memory: memory(), corrections: corrections, options: options) else {
+            let settled = clock().addingTimeInterval(-Self.settleDelay)
+            let blocks = try store.pendingBlocks(completedBy: settled, options: options, limit: ClassificationRequest.maxBlocks)
+            let corrections = try store.recentCorrections(sendableUnder: options, completedBy: settled)
+            guard let request = ClassificationRequest(blocks: blocks, memory: try memory(), corrections: corrections, options: options) else {
                 return false
             }
             let text = try await provider.complete(prompt: request.prompt, schema: ClassificationRequest.responseSchema)
@@ -174,10 +174,11 @@ public final class ClassificationRunner {
         } catch {
             // A failure under a replaced provider, model, or key does not hold back the new one.
             guard configuration == self.configuration else { return true }
-            // A failed request or an unusable answer counts against the provider, not the blocks it carried.
+            // A failed request, an unusable answer, or anything else that kept the batch from being sent or stored counts
+            // against the provider, not the blocks it carried.
             if case .rateLimited(let retryAfter) = error as? ProviderError {
                 backoff.failed(at: clock(), retryAfter: retryAfter)
-            } else if error is ProviderError {
+            } else {
                 backoff.failed(at: clock())
             }
             record(String(describing: error), at: clock())
@@ -189,6 +190,12 @@ public final class ClassificationRunner {
     /// and the next run tries again.
     public func retryFailed() {
         if !requeue() { lastProvider = nil }
+        onChange?()
+    }
+
+    /// Recounts pending and failed blocks, after a correction for example.
+    public func refreshStatus(options: ClassificationOptions) {
+        refreshCounts(options, now: clock())
         onChange?()
     }
 

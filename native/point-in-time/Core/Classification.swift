@@ -111,10 +111,9 @@ public struct ClassificationRequest: Sendable {
         ]
         // Sorted keys keep a request byte-for-byte reproducible; slashes stay readable in paths. `<` and `>` only occur
         // inside JSON strings and are written as \u003c and \u003e, so captured text such as a title holding
-        // "</activity>" cannot close the data section the prompt describes.
+        // "</activity>" cannot close the data section the prompt describes. Memory.md is written the same way.
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
-        let activity = String(decoding: data, as: UTF8.self)
-            .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
+        let activity = Self.escapingTags(String(decoding: data, as: UTF8.self))
         prompt = """
             You label three-minute blocks of a person's computer activity as focus, neutral, or drift, judged against their \
             work profile below. focus: work the profile says matters. neutral: necessary but not core (email, admin, breaks \
@@ -125,7 +124,7 @@ public struct ClassificationRequest: Sendable {
             confidence between 0 and 1.
 
             <work_profile>
-            \(Self.cap(memory, bytes: Self.maxMemoryBytes))
+            \(Self.escapingTags(Self.cap(memory, bytes: Self.maxMemoryBytes)))
             </work_profile>
 
             <activity>
@@ -169,7 +168,12 @@ public struct ClassificationRequest: Sendable {
 
     // MARK: Internals
 
-    static func isSendable(_ block: Block, _ options: ClassificationOptions) -> Bool {
+    private static func escapingTags(_ text: String) -> String {
+        text.replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
+    }
+
+    /// Whether a request under `options` may send anything of `block`.
+    public static func isSendable(_ block: Block, _ options: ClassificationOptions) -> Bool {
         guard block.activeSeconds > 0, let bundleID = block.dominantBundleID else { return false }
         return !options.excludedBundleIDs.contains(bundleID)
     }
