@@ -58,6 +58,24 @@
       "operation": "create",
       "input": {
         "timer": {
+          "kind": "stopwatch",
+          "name": "👩‍💻 Desk"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "Café  break"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
+        "timer": {
           "kind": "interval",
           "rounds": 8,
           "prepMs": 10000,
@@ -221,6 +239,16 @@
     },
     {
       "operation": "create",
+      "why": "until without seconds",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "until": "2026-10-19T09:00Z"
+        }
+      }
+    },
+    {
+      "operation": "create",
       "why": "until without a time zone",
       "input": {
         "timer": {
@@ -276,6 +304,122 @@
         "timer": {
           "kind": "stopwatch",
           "name": "Run\nfast"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name with a line separator",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "Run fast"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name of only a zero-width space",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "​"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name of only word joiners and a no-break space",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "⁠ ⁠"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name of only a combining mark",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "́"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name of only a Hangul filler",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "ㅤ"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name with a right-to-left override",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "a‮b"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name with a right-to-left embedding",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "a‫b"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name with a first-strong isolate",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "a⁨b⁩"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "label of only a zero-width space",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "​",
+              "phase": "work",
+              "durationMs": 20000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "label with a left-to-right override",
+      "input": {
+        "timer": {
+          "kind": "interval",
+          "rounds": 8,
+          "prepMs": 10000,
+          "segments": [
+            {
+              "label": "Work‭",
+              "phase": "work",
+              "durationMs": 20000
+            }
+          ]
         }
       }
     },
@@ -930,6 +1074,36 @@
       "input": {
         "id": "t_ab12cd34",
         "name": "Other"
+      }
+    },
+    {
+      "operation": "start",
+      "why": "id, timer and name together",
+      "input": {
+        "id": "t_ab12cd34",
+        "timer": {
+          "kind": "stopwatch"
+        },
+        "name": "Other"
+      }
+    },
+    {
+      "operation": "start",
+      "why": "id, preset and name together",
+      "input": {
+        "id": "t_ab12cd34",
+        "preset": "tabata",
+        "name": "Other"
+      }
+    },
+    {
+      "operation": "presets.save",
+      "why": "preset name of only a zero-width space",
+      "input": {
+        "name": "​",
+        "timer": {
+          "kind": "stopwatch"
+        }
       }
     },
     {

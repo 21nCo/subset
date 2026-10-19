@@ -11,11 +11,17 @@ import { BUILT_IN_PRESET_IDS } from './presets.js';
 // with `.meta()` so both forms agree, except "until is within the next 24 hours", which depends on
 // `now` and is checked by the operations, and the store's position rule below.
 
-// One printable line: no control characters or line separators, and not only spaces.
-const LINE = /^[^\p{Cc}\p{Zl}\p{Zp}]*[^\p{Cc}\p{Zl}\p{Zp}\s][^\p{Cc}\p{Zl}\p{Zp}]*$/u;
+// One line of text: no control characters, line or paragraph separators, or bidi embeddings,
+// overrides or isolates (which could reorder the agent's text line), and at least one visible
+// character. Both checks are a single character class, so they take linear time, and an aborting
+// length check (a code point is at most two UTF-16 units) bounds the input before either runs.
+const ONE_LINE = /^[^\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]*$/u;
+const VISIBLE = /[^\s\p{Z}\p{Cc}\p{Cf}\p{Cs}\p{M}\p{Default_Ignorable_Code_Point}]/u;
 const line = (max: number) =>
   z.string()
-    .regex(LINE, 'must be one line of printable text')
+    .max(max * 2, { abort: true, message: `must be at most ${max} characters` })
+    .regex(ONE_LINE, 'must be one line without control or bidi formatting characters')
+    .regex(VISIBLE, 'must have a visible character')
     .refine((value) => textLength(value) <= max, `must be at most ${max} characters`)
     .meta({ minLength: 1, maxLength: max });
 
@@ -165,15 +171,19 @@ const viewProps = z.strictObject({
 });
 
 const exactlyOne = (keys: string[]) => (value: Record<string, unknown>) => keys.filter((key) => value[key] !== undefined).length === 1;
+// Each branch requires its own selector and excludes every other one, so exactly one branch can
+// match whatever else the input holds.
+const selector = (key: string, excluded: string[]) =>
+  ({ required: [key], not: { anyOf: excluded.map((other) => ({ required: [other] })) } });
 const idInput = z.strictObject({ id: timerId });
 const emptyInput = z.strictObject({});
 const createInput = z.strictObject({ timer: timerSpec.optional(), preset: presetId.optional(), name: name.optional() })
   .refine(exactlyOne(['timer', 'preset']), 'needs exactly one of timer and preset')
-  .meta({ oneOf: [{ required: ['timer'] }, { required: ['preset'] }] });
+  .meta({ oneOf: [selector('timer', ['preset']), selector('preset', ['timer'])] });
 const startInput = z.strictObject({ id: timerId.optional(), timer: timerSpec.optional(), preset: presetId.optional(), name: name.optional() })
   .refine(exactlyOne(['id', 'timer', 'preset']), 'needs exactly one of id, timer and preset')
   .refine((value) => value.id === undefined || value.name === undefined, 'name applies only when creating a timer')
-  .meta({ oneOf: [{ required: ['id'], not: { required: ['name'] } }, { required: ['timer'] }, { required: ['preset'] }] });
+  .meta({ oneOf: [selector('id', ['timer', 'preset', 'name']), selector('timer', ['id', 'preset']), selector('preset', ['id', 'timer'])] });
 const presetsSaveInput = z.strictObject({ name, timer: presetTimerSpec });
 const presetIdInput = z.strictObject({ id: presetId });
 

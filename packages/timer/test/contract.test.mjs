@@ -114,3 +114,30 @@ test('the store JSON Schema states the timer rules that need no arithmetic, and 
   for (const [why, value] of runtimeOnly) assert.equal(validate(value), true, `JSON Schema now states: ${why}; move it to the list above`);
   for (const [why, value] of [...expressible, ...runtimeOnly]) assert.equal(parseStore(value).ok, false, `parseStore accepted: ${why}`);
 });
+
+test('the create and start selector schemas agree with the runtime for every combination of fields', async () => {
+  const store = await readFixture('store.json');
+  const idleId = store.timers.find((timer) => timer.runtime.status === 'idle').definition.id;
+  const values = {
+    id: { valid: idleId, invalid: 'tea' },
+    timer: { valid: { kind: 'stopwatch' }, invalid: { kind: 'alarm' } },
+    preset: { valid: 'tabata', invalid: 'Tabata!' },
+    name: { valid: 'Mine', invalid: '' }
+  };
+  // Every field absent, valid or invalid: 3^4 inputs for start and 3^3 for create.
+  const inputs = (keys) => keys.reduce((partials, key) => partials.flatMap((partial) => [
+    partial, { ...partial, [key]: values[key].valid }, { ...partial, [key]: values[key].invalid }
+  ]), [{}]);
+  const cases = [['start', ['id', 'timer', 'preset', 'name']], ['create', ['timer', 'preset', 'name']]];
+  let checked = 0;
+  for (const [operation, keys] of cases) {
+    const validate = validator(schemas.inputs[operation]);
+    for (const input of inputs(keys)) {
+      const outcome = operations[operation](store, input, Date.UTC(2026, 9, 19, 9, 0, 0));
+      const runtime = !(outcome.ok === false && outcome.error.code === 'invalid_input');
+      assert.equal(validate(input), runtime, `${operation} ${JSON.stringify(input)}: JSON Schema ${runtime ? 'rejected' : 'accepted'} what the runtime ${runtime ? 'accepted' : 'rejected'}`);
+      checked += 1;
+    }
+  }
+  assert.equal(checked, 81 + 27);
+});

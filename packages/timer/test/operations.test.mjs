@@ -288,3 +288,26 @@ test('parseStore rejects runtimes that the definition cannot hold or that the en
   ];
   for (const [why, value] of rejected) assert.equal(code(parseStore(value)), 'invalid_input', why);
 });
+
+test('a huge malformed name or label is rejected quickly on every path', () => {
+  const huge = `${'a'.repeat(200_000)}\n`;
+  const interval = (label) => ({ kind: 'interval', rounds: 1, segments: [{ label, phase: 'work', durationMs: 1_000 }] });
+  const store = emptyStore();
+  const paths = [
+    ['create name', () => operations.create(store, { timer: { kind: 'stopwatch', name: huge } }, T0)],
+    ['create label', () => operations.create(store, { timer: interval(huge) }, T0)],
+    ['start name', () => operations.start(store, { preset: 'tabata', name: huge }, T0)],
+    ['start label', () => operations.start(store, { timer: interval(huge) }, T0)],
+    ['presets.save name', () => operations['presets.save'](store, { name: huge, timer: { kind: 'stopwatch' } }, T0)],
+    ['presets.save label', () => operations['presets.save'](store, { name: 'Huge', timer: interval(huge) }, T0)],
+    ['runOperation', () => runOperation('create', store, { timer: { kind: 'stopwatch', name: huge } }, T0)],
+    ['parseStore', () => parseStore({ ...store, presets: [{ id: 'p_ab12cd34', name: huge, builtIn: false, timer: interval(huge) }] })]
+  ];
+  for (const [path, run] of paths) {
+    const started = performance.now();
+    const outcome = run();
+    const elapsed = performance.now() - started;
+    assert.equal(code(outcome), 'invalid_input', path);
+    assert.ok(elapsed < 100, `${path} took ${elapsed.toFixed(1)} ms`);
+  }
+});
