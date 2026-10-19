@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsWindow = SettingsWindowController()
     private var statusMenu: StatusMenuController?
     private let switchShortcut = SwitchShortcutController()
+    private let windowList = WindowListController()
     private var accessibility = AccessibilityGate()
     private lazy var onboarding = OnboardingWindowController(
         shortcutPhrase: {
@@ -62,16 +63,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Samples the Accessibility permission: installs the event tap when it is granted and removes it when it is
-    /// revoked. A tap the system refused while trusted is retried on the next sample. Any sample that finds trust held
-    /// closes the onboarding window, whether or not the tap could be installed.
+    /// Samples the Accessibility permission: installs the event tap and starts following window focus when it is
+    /// granted, and removes the tap and stops following focus when it is revoked. A tap the system refused while
+    /// trusted is retried on the next sample. Any sample that finds trust held closes the onboarding window, whether or
+    /// not the tap could be installed.
     private func refreshAccessibility() {
         if accessibility.update(trusted: AccessibilityPermission.isTrusted) == .revoked {
             switchShortcut.remove()
+            windowList.stop()
         }
         let trusted = accessibility.isTrusted == true
         if trusted {
             onboarding.close()
+            windowList.start()
             if !switchShortcut.isInstalled { switchShortcut.install() }
         }
         statusMenu?.update(state: !trusted ? .needsPermission : (switchShortcut.isInstalled ? .ready : .shortcutUnavailable))
