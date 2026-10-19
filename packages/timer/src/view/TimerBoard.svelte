@@ -1,19 +1,19 @@
 <!--
   The Timer board, view ID `subset.timer.board@1`. It renders the timers in `result`, re-projects them
   from their timestamps every 250 ms and runs every change through `actions.invoke`. It never fetches:
-  each host supplies its own transport. After each change it reads the board through `list`, and it
-  shows whichever board, the host's `result` or its own read, the host observed later.
+  each host supplies its own transport. After each change it reads the board through `list`; the pure
+  reconciler in `view-model.ts` (`replySettled`, `readIssued`, `readSettled`, `boardView`) owns what
+  the replies, those reads and the host's `result` show.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import type { TimerBoardResult, TimerSnapshot } from '../agent.js';
   import type { Preset } from '../model.js';
   import type { OperationName } from '../operations.js';
   import CreateTimer from './CreateTimer.svelte';
   import TimerCard from './TimerCard.svelte';
   import {
-    MUTATIONS, REFRESH_MS, cancelsRepeat, failureText, focusDisplaced, formatClockTime, newerBoard, pickAnnouncements, pressDestructive,
-    readBoardResult, readPresets, readRefresh, reproject, settleAction,
+    MUTATIONS, REFRESH_MS, boardView, cancelsRepeat, emptyBoardState, failureText, focusDisplaced, formatClockTime, pickAnnouncements,
+    pressDestructive, readBoardResult, readIssued, readPresets, readSettled, replySettled, reproject,
     type ActionFailure, type AnnouncedStates, type Armed, type ControlName, type TimerBoardProps
   } from './view-model.js';
 
@@ -22,13 +22,11 @@
   const titleId = `${uid}-title`;
 
   const read = $derived(readBoardResult(result));
-  // The board's own latest `list` read, taken after one of its changes committed.
-  let own = $state.raw<TimerBoardResult | null>(null);
-  const board = $derived(read.ok ? newerBoard(read.result, own) : null);
-  // A successful action updates the board until it takes a newer board result, which wins.
-  let timers = $derived<TimerSnapshot[]>(board ? board.timers : []);
+  // The board's own reads and the changes they have not yet confirmed; see `boardView`.
+  let known = $state.raw(emptyBoardState());
+  const board = $derived(read.ok ? boardView(read.result, known) : null);
   let clock = $state(untrack(() => now()));
-  const projected = $derived(timers.map((timer) => reproject(timer, clock)));
+  const projected = $derived(board ? board.timers.map((timer) => reproject(timer, clock)) : []);
 
   let failure = $state<ActionFailure | null>(null);
   let busy = $state<Record<string, boolean>>({});
@@ -71,27 +69,30 @@
     const key = timerId ?? operation;
     if (busy[key]) return null;
     busy[key] = true;
-    // The board result this action starts under; a newer one by the time it settles wins over its reply.
-    const basis = board;
     const outcome = await invoke(operation, input);
     busy[key] = false;
-    const settled = settleAction({ timers, basis: board }, { operation, timerId, basis }, outcome);
-    if (!settled.ok) {
-      fail(settled.failure);
+    const settled = replySettled(known, operation, timerId, outcome);
+    known = settled.state;
+    if (!settled.outcome.ok) {
+      fail(settled.outcome.failure);
       return null;
     }
     if (failure && (failure.timerId === timerId || failure.timerId === null)) failure = null;
-    if (settled.timers) timers = settled.timers;
     if (MUTATIONS.has(operation)) void refresh();
-    return settled.result;
+    return settled.outcome.result;
   }
 
-  /** Reads the host's board after a change committed; it wins over any board observed before it. */
+  /** Reads the host's board after a change committed, which confirms that change. */
   async function refresh(): Promise<void> {
-    const refreshed = readRefresh(await invoke('list', {}));
-    if (!refreshed.ok) return fail(refreshed.failure);
-    if (failure?.operation === 'list') failure = null;
-    own = newerBoard(refreshed.result, own);
+    const issue = readIssued(known);
+    known = issue.state;
+    const outcome = await invoke('list', {});
+    const settled = readSettled(known, issue.issued, outcome);
+    // An ignored read (a later-issued one already succeeded) neither fails nor clears a List failure.
+    const taken = settled.state !== known;
+    known = settled.state;
+    if (settled.failure) return fail(settled.failure);
+    if (taken && failure?.operation === 'list') failure = null;
   }
 
   async function control(timerId: string, name: ControlName): Promise<void> {
