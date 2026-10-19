@@ -35,14 +35,17 @@ private func segment(_ start: Date, _ seconds: TimeInterval, _ bundleID: String?
     Segment(start: start, end: start.addingTimeInterval(seconds), excluded: excluded, bundleID: bundleID, appName: bundleID, windowTitle: nil, url: nil)
 }
 
+/// The segment `store(withBlocksAt:)` saves for a block index.
+private func specSegment(_ index: Int, app: String = "com.example.editor") -> Segment {
+    let start = t0.addingTimeInterval(Double(index) * Block.length)
+    return Segment(start: start, end: start.addingTimeInterval(150), excluded: false, bundleID: app, appName: "Editor", windowTitle: "Spec",
+                   url: RedactedURL("https://docs.example.com/spec?q=secret"))
+}
+
 /// Saves one segment per block index, so the store holds real blocks.
 private func store(withBlocksAt indexes: [Int], in directory: URL, app: String = "com.example.editor") throws -> ActivityStore {
     let store = try ActivityStore(directory: directory)
-    for index in indexes {
-        let start = t0.addingTimeInterval(Double(index) * Block.length)
-        try store.save(Segment(start: start, end: start.addingTimeInterval(150), excluded: false, bundleID: app, appName: "Editor", windowTitle: "Spec",
-                               url: RedactedURL("https://docs.example.com/spec?q=secret")))
-    }
+    for index in indexes { try store.save(specSegment(index, app: app)) }
     return store
 }
 
@@ -108,7 +111,7 @@ private func store(withBlocksAt indexes: [Int], in directory: URL, app: String =
     }
 
     @Test func badJSONAndUnknownIDsRejectTheWholeAnswer() {
-        for text in ["not json", "[]", "{\"blocks\": 3}", "<b>focus</b>", answer([("1800000000", "focus", "ok", 0.9), ("1799999820", "focus", "ok", 0.9)]),
+        for text in ["not json", "[]", "{\"blocks\": 3}", "<b>focus</b>", "{\"blocks\": [], \"note\": \"extra\"}", answer([("1800000000", "focus", "ok", 0.9), ("1799999820", "focus", "ok", 0.9)]),
                      "{\"blocks\": [{\"label\": \"focus\"}]}"] {
             #expect(throws: ProviderError.self, "\(text)") { try request.validate(text) }
         }
@@ -133,6 +136,9 @@ private func store(withBlocksAt indexes: [Int], in directory: URL, app: String =
         #expect(try request.validate(answer([("1800000000", "focus", String(repeating: "é", count: 140), 1), ("1800000180", "neutral", "ok", 0)])).rejected.isEmpty)
         let boolean = #"{"blocks":[{"id":"1800000000","label":"focus","reason":"ok","confidence":true}]}"#
         #expect(try request.validate(boolean).accepted.isEmpty)
+        // A property the schema does not allow leaves that block pending.
+        let extra = #"{"blocks":[{"id":"1800000000","label":"focus","reason":"ok","confidence":0.9,"html":"<b>x</b>"}]}"#
+        #expect(try request.validate(extra).rejected.map(\.start) == [block(0).start, block(1).start])
     }
 }
 
@@ -165,12 +171,13 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
 @Suite struct QueueTests {
     private final class Clock: @unchecked Sendable { var now = t0 }
 
-    private func setup(_ indexes: [Int]) throws -> (URL, ActivityStore, Clock, ClassificationRunner) {
+    private func setup(_ indexes: [Int], deletionPending: @escaping @MainActor () -> Bool = { false }) throws -> (URL, ActivityStore, Clock, ClassificationRunner) {
         let directory = temporaryDirectory()
         let store = try store(withBlocksAt: indexes, in: directory)
         let clock = Clock()
         clock.now = t0.addingTimeInterval(Double((indexes.max() ?? 0) + 1) * Block.length + ClassificationRunner.settleDelay)
-        return (directory, store, clock, ClassificationRunner(store: store, memory: { "I write specs." }, clock: { clock.now }))
+        return (directory, store, clock, ClassificationRunner(store: store, memory: { "I write specs." }, clock: { clock.now },
+                                                              deletionPending: deletionPending))
     }
 
     private func id(_ index: Int) -> String { String(Int(t0.timeIntervalSince1970) + index * Int(Block.length)) }
@@ -301,7 +308,7 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         try store.save(segment(block(2).start, 60, "com.example.editor"))
         clock.now = clock.now.addingTimeInterval(Block.length * 2)
         for _ in 0..<5 { try store.applyClassifications([], rejected: try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 1),
-                                                       provider: "stub", model: "other-model", at: clock.now, deletionsSeen: store.deletions) }
+                                                       provider: "stub", model: "other-model", at: clock.now) }
         #expect(try store.classificationSummary(completedBy: clock.now, options: noExclusions).failed == 1)
         try store.requeueFailed()
         #expect(try store.pendingBlocks(completedBy: clock.now, options: noExclusions, limit: 10).map(\.start) == [block(2).start])
@@ -333,19 +340,50 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(((try payload(request))["recentCorrections"] as? [[String: Any]])?.first?["newLabel"] as? String == "neutral")
     }
 
-    @Test func aDeletionWhileInFlightDiscardsTheAnswer() async throws {
-        let (directory, store, _, runner) = try setup([0])
+    @Test func aQueuedDeletionSendsNothing() async throws {
+        final class Box: @unchecked Sendable { var pending = true }
+        let box = Box()
+        let (directory, store, _, runner) = try setup([0], deletionPending: { box.pending })
         defer { try? FileManager.default.removeItem(at: directory) }
         let provider = StubProvider()
+        provider.answers = [.success(answer([(id(0), "focus", "Spec work", 0.9)]))]
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+        // A Delete Today asked for while the provider prepares, and not applied yet, stops the request too.
+        box.pending = false
+        provider.whilePreparing = { box.pending = true }
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+        #expect(provider.prompts.isEmpty)
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(180)).map(\.labeling) == [.pending])
+        // Once it has been applied, the request goes.
+        box.pending = false
+        provider.whilePreparing = nil
+        #expect(await runner.runOnce(provider: provider, options: noExclusions))
+        #expect(provider.prompts.count == 1)
+    }
+
+    @Test func aDeletionWhileInFlightDropsOnlyTheAnswersItAffects() async throws {
+        let (directory, store, _, runner) = try setup([0, 1])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = StubProvider()
+        // Delete All, then the same activity captured again at the same starts: an answer about the deleted blocks
+        // does not label the new ones, even though their content is identical.
         provider.whileInFlight = {
             try? store.deleteAll()
-            try? store.save(segment(t0, 60, "b"))
+            try? store.save(specSegment(0))
+            try? store.save(specSegment(1))
         }
-        provider.answers = [.success(answer([(id(0), "focus", "About the deleted spec", 0.9)]))]
+        provider.answers = [.success(answer([(id(0), "focus", "About the deleted spec", 0.9), (id(1), "focus", "ok", 0.9)]))]
         #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
-        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(180)).map(\.labeling) == [.pending])
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000)).map(\.labeling) == [.pending, .pending])
         // A discarded answer is not a success.
         #expect(runner.status.lastSuccess == nil)
+        // An idle retraction of later time leaves the blocks that were sent, and their answer, alone.
+        try store.save(segment(block(4).start, 60, "com.example.editor"))
+        provider.whileInFlight = { try? store.deleteData(from: block(4).start, to: block(5).start) }
+        provider.answers = [.success(answer([(id(0), "focus", "Spec work", 0.9), (id(1), "focus", "Spec work", 0.9)]))]
+        runner.resume()
+        #expect(await runner.runOnce(provider: provider, options: noExclusions))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000)).map(\.labeling.state) == [.classified, .classified])
     }
 
     @Test func settingsChangedWhileTheProviderPreparesAreHonored() async throws {
@@ -381,7 +419,7 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         await runner.runOnce(provider: provider, options: noExclusions)
         var stored = try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))
         #expect(stored.map(\.labeling.state) == [.pending, .classified])
-        #expect(stored[0].revision == 1)
+        #expect(stored[0].revision > stored[1].revision)
         // A labeled block whose content changes afterwards is pending again; a corrected one keeps the user's label.
         try store.correct(blockStart: block(0).start, to: .drift, note: nil, at: t0)
         try store.save(segment(t0.addingTimeInterval(170), 5, "com.example.video"))
@@ -441,41 +479,45 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
     }
 }
 
-/// Records every Security call and answers from a script.
+/// Records every Security call and answers from a script, with one item in each of the data protection and login
+/// keychains.
 private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
     var calls: [(String, [String: Any])] = []
-    var stored: Data?
+    /// Keyed by whether the query targets the data protection keychain.
+    var stored: [Bool: Data] = [:]
     var dataProtectionMissing = false
     var failure: OSStatus?
 
-    private func status(_ query: [String: Any], _ success: () -> OSStatus) -> OSStatus {
-        if dataProtectionMissing, query[kSecUseDataProtectionKeychain as String] as? Bool == true { return errSecMissingEntitlement }
-        return failure ?? success()
+    private func status(_ query: [String: Any], _ success: (Bool) -> OSStatus) -> OSStatus {
+        let dataProtection = query[kSecUseDataProtectionKeychain as String] as? Bool == true
+        if dataProtectionMissing, dataProtection { return errSecMissingEntitlement }
+        return failure ?? success(dataProtection)
     }
 
     func add(_ attributes: [String: Any]) -> OSStatus {
         calls.append(("add", attributes))
-        return status(attributes) { stored = attributes[kSecValueData as String] as? Data; return errSecSuccess }
+        return status(attributes) { stored[$0] = attributes[kSecValueData as String] as? Data; return errSecSuccess }
     }
 
     func copyMatching(_ query: [String: Any]) -> (OSStatus, AnyObject?) {
         calls.append(("copy", query))
-        let result = status(query) { stored == nil ? errSecItemNotFound : errSecSuccess }
-        return (result, result == errSecSuccess ? stored as AnyObject? : nil)
+        var value: Data?
+        let result = status(query) { value = stored[$0]; return value == nil ? errSecItemNotFound : errSecSuccess }
+        return (result, value as AnyObject?)
     }
 
     func update(_ query: [String: Any], _ attributes: [String: Any]) -> OSStatus {
         calls.append(("update", attributes))
         return status(query) {
-            guard stored != nil else { return errSecItemNotFound }
-            stored = attributes[kSecValueData as String] as? Data
+            guard stored[$0] != nil else { return errSecItemNotFound }
+            stored[$0] = attributes[kSecValueData as String] as? Data
             return errSecSuccess
         }
     }
 
     func delete(_ query: [String: Any]) -> OSStatus {
         calls.append(("delete", query))
-        return status(query) { defer { stored = nil }; return stored == nil ? errSecItemNotFound : errSecSuccess }
+        return status(query) { keychain in defer { stored[keychain] = nil }; return stored[keychain] == nil ? errSecItemNotFound : errSecSuccess }
     }
 }
 
@@ -509,6 +551,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         try secret.save("sk-or-1")
         // The update is tried in the data protection keychain first; the item is then added to the login keychain only.
         #expect(double.calls.map(\.0) == ["update", "update", "add"])
+        #expect(double.stored[false] != nil && double.stored[true] == nil)
         let adds = double.calls.filter { $0.0 == "add" }.map(\.1)
         #expect(adds.last?[kSecUseDataProtectionKeychain as String] == nil)
         #expect(adds.last?[kSecAttrAccessible as String] as? String == kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
@@ -517,6 +560,22 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.read() }
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.save("x") }
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.delete() }
+    }
+
+    @Test func aKeyAnUnentitledBuildLeftInTheLoginKeychainIsFoundReplacedAndRemoved() throws {
+        let double = KeychainDouble()
+        double.stored[false] = Data("sk-or-old".utf8)
+        let secret = KeychainSecret(service: "svc", account: "acct", api: double)
+        #expect(try secret.read() == "sk-or-old")
+        // Saving puts the key in the data protection keychain and removes the login-keychain copy.
+        try secret.save("sk-or-new")
+        #expect(double.stored == [true: Data("sk-or-new".utf8)])
+        #expect(try secret.read() == "sk-or-new")
+        // Remove Key clears both keychains.
+        double.stored[false] = Data("sk-or-old".utf8)
+        try secret.delete()
+        #expect(double.stored.isEmpty)
+        #expect(try secret.read() == nil)
     }
 }
 
@@ -532,6 +591,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             dir="$(dirname "$0")"
             if [ "$1" = "login" ]; then
               if [ -f "$dir/signed-in" ]; then echo "Logged in using ChatGPT"; exit 0; fi
+              if [ -f "$dir/api-key" ]; then echo "Logged in using an API key - sk-fake-***00000"; exit 0; fi
               if [ -f "$dir/broken" ]; then echo "env: node: No such file or directory" >&2; exit 127; fi
               echo "Not logged in" >&2; exit 1
             fi
@@ -569,7 +629,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         try touch(codex, "signed-in")
         try touch(codex, "answer", "{\"blocks\":[]}")
         let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin")
-        #expect(await cli.loginStatus() == .signedIn("Logged in using ChatGPT"))
+        #expect(await cli.loginStatus() == .signedIn)
         #expect(try await cli.complete(prompt: "PROMPT TEXT", schema: ClassificationRequest.responseSchema) == "{\"blocks\":[]}")
         #expect(try recorded(codex, "stdin") == "PROMPT TEXT")
         #expect(try recorded(codex, "cwd-contents").isEmpty)
@@ -594,6 +654,12 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         // A launcher that cannot start is not reported as signed out.
         try touch(codex, "broken")
         #expect(await cli.loginStatus() == .unavailable("codex login status exited with status 127"))
+        // An API-key sign-in is not the ChatGPT subscription: nothing is sent.
+        try touch(codex, "api-key")
+        #expect(await cli.loginStatus() == .notChatGPT)
+        await #expect(throws: ProviderError.notChatGPT) { try await cli.prepare() }
+        #expect(!ProviderError.notChatGPT.description.contains("sk-"))
+        #expect(!FileManager.default.fileExists(atPath: codex.deletingLastPathComponent().appendingPathComponent("args").path))
         try touch(codex, "signed-in")
         try await cli.prepare()
         try touch(codex, "fail")

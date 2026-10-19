@@ -22,7 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let capture = CaptureController(settings: settings, store: store, storeError: storeError)
         let welcome = WelcomeWindowController(settings: settings) { capture.tick() }
-        let classification = ClassificationController(settings: ClassificationSettings(), capture: settings, store: store)
+        let classification = ClassificationController(settings: ClassificationSettings(), capture: settings, store: store,
+                                                      deletionPending: { capture.hasPendingDeletion })
         let classificationWindow = ClassificationWindowController(controller: classification, store: store)
         let statusMenu = StatusMenuController(settings: settings, capture: capture, store: store, classification: classification,
                                               showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() })

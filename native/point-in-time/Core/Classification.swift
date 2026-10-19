@@ -135,13 +135,13 @@ public struct ClassificationRequest: Sendable {
         String(Int64(block.start.timeIntervalSince1970))
     }
 
-    /// Validates a provider's answer against this request. Throws when the answer is not the schema's JSON object, or
-    /// names a block that was not asked about; nothing is applied then. Otherwise returns a label for each block with
-    /// exactly one valid entry; the rest (missing, duplicated, invalid label, reason, or confidence) are returned as
-    /// rejected and stay pending.
+    /// Validates a provider's answer against this request. Throws when the answer is not the schema's JSON object (with no
+    /// other property), or names a block that was not asked about; nothing is applied then. Otherwise returns a label for
+    /// each block with exactly one valid entry; the rest (missing, duplicated, an invalid label, reason, or confidence, or a
+    /// property the schema does not allow) are returned as rejected and stay pending.
     public func validate(_ text: String) throws -> (accepted: [BlockClassification], rejected: [Block]) {
         guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-              let entries = object["blocks"] as? [Any] else {
+              object.count == 1, let entries = object["blocks"] as? [Any] else {
             throw ProviderError.invalidResponse("The answer is not the expected JSON object")
         }
         let byID = Dictionary(uniqueKeysWithValues: blocks.map { (Self.id(for: $0), $0) })
@@ -189,7 +189,8 @@ public struct ClassificationRequest: Sendable {
     }
 
     private static func classification(_ entry: [String: Any], block: Block) -> BlockClassification? {
-        guard let label = (entry["label"] as? String).flatMap(BlockLabel.init(rawValue:)),
+        guard Set(entry.keys) == ["id", "label", "reason", "confidence"],
+              let label = (entry["label"] as? String).flatMap(BlockLabel.init(rawValue:)),
               let reason = (entry["reason"] as? String)?.trimmingCharacters(in: .whitespaces),
               !reason.isEmpty, reason.count <= maxReasonCharacters,
               !reason.unicodeScalars.contains(where: { $0.properties.generalCategory == .control || $0.properties.generalCategory == .format }),
@@ -222,6 +223,7 @@ public struct ClassificationRequest: Sendable {
 public enum ProviderError: Error, Equatable, CustomStringConvertible {
     case notConfigured(String)
     case notSignedIn
+    case notChatGPT
     case unauthorized(String)
     case network(String)
     case rateLimited(retryAfter: TimeInterval?)
@@ -233,6 +235,7 @@ public enum ProviderError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .notConfigured(let message): message
         case .notSignedIn: "Codex is not signed in. Sign in with `codex login`."
+        case .notChatGPT: "Codex is not signed in with ChatGPT. Sign in with `codex login` using your ChatGPT account."
         case .unauthorized(let message): message
         case .network(let message): "Network error: \(message)"
         case .rateLimited: "The provider is rate limiting requests"

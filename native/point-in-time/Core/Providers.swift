@@ -109,8 +109,10 @@ struct PrivateDirectory {
 // MARK: ChatGPT subscription through the Codex CLI
 
 public enum CodexLoginStatus: Equatable, Sendable {
-    /// Signed in, with the first line `codex login status` printed.
-    case signedIn(String)
+    /// Signed in with a ChatGPT account, the only sign-in this provider uses.
+    case signedIn
+    /// Signed in some other way, such as an API key; nothing is sent then.
+    case notChatGPT
     case signedOut
     case unavailable(String)
 }
@@ -156,8 +158,8 @@ public struct CodexCLI: ClassificationProvider {
                 return text.localizedCaseInsensitiveContains("not logged in")
                     ? .signedOut : .unavailable("codex login status exited with status \(result.status)")
             }
-            let line = text.split(whereSeparator: \.isNewline).first.map { String($0.prefix(80)) } ?? "Signed in"
-            return .signedIn(line.trimmingCharacters(in: .whitespaces))
+            // An API-key sign-in also exits 0, and its status line shows part of the key, so the text is never shown.
+            return text.contains("Logged in using ChatGPT") ? .signedIn : .notChatGPT
         } catch {
             return .unavailable(String(describing: error))
         }
@@ -167,6 +169,7 @@ public struct CodexCLI: ClassificationProvider {
         switch await loginStatus() {
         case .signedIn: break
         case .signedOut: throw ProviderError.notSignedIn
+        case .notChatGPT: throw ProviderError.notChatGPT
         case .unavailable(let message): throw ProviderError.process(message)
         }
     }

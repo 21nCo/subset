@@ -13,7 +13,6 @@ public final class ActivityStore: @unchecked Sendable {
     public let databaseURL: URL
     private let connection: SQLiteConnection
     private let lock = NSLock()
-    private var deletionCount = 0
 
     /// `~/Library/Application Support/pointInTime`.
     public static func defaultDirectory() throws -> URL {
@@ -98,7 +97,6 @@ public final class ActivityStore: @unchecked Sendable {
         guard to > from else { return }
         let lower = from.timeIntervalSince1970, upper = to.timeIntervalSince1970
         try locked {
-            deletionCount += 1
             try connection.transaction {
                 // A segment spanning the whole range splits into its parts before and after it.
                 let spanning = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ?", [.real(lower), .real(upper)])
@@ -125,7 +123,6 @@ public final class ActivityStore: @unchecked Sendable {
     /// when a checkpoint could not complete (see `checkpoint`); running it again finishes the job.
     public func deleteAll() throws {
         try locked {
-            deletionCount += 1
             try connection.transaction {
                 try connection.execute("DELETE FROM segments; DELETE FROM blocks; DELETE FROM corrections;")
             }
@@ -175,13 +172,6 @@ public final class ActivityStore: @unchecked Sendable {
 
     // MARK: Classification
 
-    /// Changes with every Delete Today or Delete All, so a label computed from deleted activity is not stored.
-    public var deletions: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return deletionCount
-    }
-
     /// Pending blocks that ended at or before `completedBy` and have something to send under `options` (recorded time
     /// and a dominant app that is not excluded), newest first.
     public func pendingBlocks(completedBy: Date, options: ClassificationOptions, limit: Int) throws -> [Block] {
@@ -207,14 +197,13 @@ public final class ActivityStore: @unchecked Sendable {
     /// Stores validated labels and counts a failed attempt for each rejected block, which becomes `failed` after
     /// `maxAttempts`, and returns how many labels were stored. Only a block that is still pending at the revision that
     /// was sent changes, so a correction made while the request ran is kept and a label is never stored for content
-    /// capture changed since. Nothing changes when a deletion ran since `deletions` read `deletionsSeen`: the request may
-    /// describe deleted activity, and a block captured again at the same start is different activity.
+    /// capture changed since. Revisions are never reused, so a block that a deletion removed or changed, including one
+    /// captured again at the same start, is never labeled by an answer about what was deleted.
     @discardableResult
     public func applyClassifications(_ accepted: [BlockClassification], rejected: [Block], provider: String, model: String,
-                                     at date: Date, deletionsSeen: Int, maxAttempts: Int = 5) throws -> Int {
+                                     at date: Date, maxAttempts: Int = 5) throws -> Int {
         try locked {
-            guard deletionCount == deletionsSeen else { return 0 }
-            return try connection.transaction {
+            try connection.transaction {
                 var stored = 0
                 for result in accepted {
                     stored += try connection.query("""
@@ -338,8 +327,8 @@ public final class ActivityStore: @unchecked Sendable {
     /// Recomputes every bucket touched by `[from, to)` from the stored segments. Only buckets that a stored segment or
     /// block row actually occupies are visited, so an unbounded range (Delete Today passes `.distantFuture`) costs no
     /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted with their corrections.
-    /// A row whose content changes gets a new revision and, unless the user corrected it, becomes pending again: its label
-    /// judged other content.
+    /// A new row, or one whose content changes, takes the next store-wide revision, which no row had before, even one deleted
+    /// since; a changed row also becomes pending again unless the user corrected it: its label judged other content.
     private func rebuildBlocks(from: Date, to: Date) throws {
         let lower = Block.bucketStart(containing: from)
         let lastBucket = Block.bucketStart(containing: to)
@@ -364,24 +353,35 @@ public final class ActivityStore: @unchecked Sendable {
                 try connection.query("DELETE FROM corrections WHERE block_start = ?", [.real(bucket.timeIntervalSince1970)])
                 continue
             }
-            let apps = String(decoding: try JSONEncoder().encode(block.apps), as: UTF8.self)
+            let apps = String(decoding: try Self.appsEncoder.encode(block.apps), as: UTF8.self)
+            // Taken whether or not the row changes; a skipped number costs nothing.
+            guard let revision = try connection.query("UPDATE block_revision SET value = value + 1 RETURNING value").first?.first else {
+                throw StoreError.sqlite("The block revision counter is missing")
+            }
             try connection.query("""
                 INSERT INTO blocks (start, active_seconds, excluded_seconds, apps_json, dominant_bundle_id, dominant_app_name, dominant_title,
-                                    dominant_url_scheme, dominant_url_host, dominant_url_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    dominant_url_scheme, dominant_url_host, dominant_url_path, revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(start) DO UPDATE SET active_seconds = excluded.active_seconds, excluded_seconds = excluded.excluded_seconds,
                     apps_json = excluded.apps_json, dominant_bundle_id = excluded.dominant_bundle_id, dominant_app_name = excluded.dominant_app_name,
                     dominant_title = excluded.dominant_title, dominant_url_scheme = excluded.dominant_url_scheme,
                     dominant_url_host = excluded.dominant_url_host, dominant_url_path = excluded.dominant_url_path,
-                    revision = revision + 1, label_attempts = 0,
+                    revision = excluded.revision, label_attempts = 0,
                     label_state = CASE label_state WHEN 'corrected' THEN 'corrected' ELSE 'pending' END
                 WHERE (\(Self.contentColumns.map { "blocks." + $0 }.joined(separator: ", ")))
                     IS NOT (\(Self.contentColumns.map { "excluded." + $0 }.joined(separator: ", ")))
                 """, [.real(bucket.timeIntervalSince1970), .real(block.activeSeconds), .real(block.excludedSeconds), .text(apps),
                       SQLValue(block.dominantBundleID), SQLValue(block.dominantAppName), SQLValue(block.dominantTitle),
-                      SQLValue(block.dominantURL?.scheme), SQLValue(block.dominantURL?.host), SQLValue(block.dominantURL?.path)])
+                      SQLValue(block.dominantURL?.scheme), SQLValue(block.dominantURL?.host), SQLValue(block.dominantURL?.path), revision])
         }
     }
+
+    /// Sorted keys, so the same apps always encode to the same text and an unchanged block keeps its revision.
+    private static let appsEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }()
 
     /// Forward-only migrations, applied in order and recorded in `schema_version`.
     static let migrations: [Int: String] = [
@@ -400,13 +400,16 @@ public final class ActivityStore: @unchecked Sendable {
             label TEXT, label_reason TEXT, label_confidence REAL, label_source TEXT, classified_at REAL
         );
         """,
-        // Classification state and content revision per block, and the user's corrections. Existing blocks start pending.
+        // Classification state and content revision per block, the store-wide revision counter, and the user's corrections.
+        // Existing blocks start pending.
         2: """
         ALTER TABLE blocks ADD COLUMN label_state TEXT NOT NULL DEFAULT 'pending';
         ALTER TABLE blocks ADD COLUMN label_model TEXT;
         ALTER TABLE blocks ADD COLUMN label_attempts INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE blocks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
         CREATE INDEX blocks_label_state ON blocks (label_state, start);
+        CREATE TABLE block_revision (value INTEGER NOT NULL);
+        INSERT INTO block_revision (value) VALUES (0);
         CREATE TABLE corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, block_start REAL NOT NULL, previous_label TEXT, new_label TEXT NOT NULL,
             note TEXT, created_at REAL NOT NULL

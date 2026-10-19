@@ -62,13 +62,14 @@ final class ClassificationController {
 
     var status: ClassificationStatus { runner?.status ?? ClassificationStatus() }
 
-    init(settings: ClassificationSettings, capture: CaptureSettings, store: ActivityStore?) {
+    /// `deletionPending` reports a deletion or idle retraction capture has queued but not applied; nothing is sent meanwhile.
+    init(settings: ClassificationSettings, capture: CaptureSettings, store: ActivityStore?, deletionPending: @escaping @MainActor () -> Bool) {
         self.settings = settings
         self.capture = capture
         self.store = store
         let memory = (try? ActivityStore.defaultDirectory()).map(MemoryProfile.init(directory:))
         self.memory = memory
-        runner = store.map { ClassificationRunner(store: $0, memory: { memory?.read() ?? "" }) }
+        runner = store.map { ClassificationRunner(store: $0, memory: { memory?.read() ?? "" }, deletionPending: deletionPending) }
     }
 
     var options: ClassificationOptions {

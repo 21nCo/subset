@@ -33,7 +33,9 @@ public struct KeychainError: Error, Equatable, CustomStringConvertible {
 /// or the app's defaults.
 ///
 /// The item goes in the data protection keychain. A build without the entitlement that keychain needs (an ad hoc signed
-/// local build) gets `errSecMissingEntitlement` there and uses the login keychain instead, which stays on this Mac.
+/// local build) gets `errSecMissingEntitlement` there and uses the login keychain instead, which stays on this Mac. A read
+/// looks in the login keychain too, a save to the data protection keychain removes a login-keychain copy, and a delete
+/// removes both, so a key saved by either kind of build is found, replaced, and removed.
 public struct KeychainSecret: Sendable {
     public static let openRouterKey = KeychainSecret(service: "dev.subset.point-in-time.openrouter", account: "api-key")
 
@@ -48,40 +50,46 @@ public struct KeychainSecret: Sendable {
     }
 
     public func read() throws -> String? {
-        var result: AnyObject?
-        let status = attempt { query in
+        for query in [dataProtection, login] {
             let (status, value) = api.copyMatching(query.merging([kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]) { $1 })
-            result = value
-            return status
+            if status == errSecItemNotFound || status == errSecMissingEntitlement { continue }
+            guard status == errSecSuccess, let data = value as? Data else { throw KeychainError(status: status) }
+            return String(data: data, encoding: .utf8)
         }
-        guard status != errSecItemNotFound else { return nil }
-        guard status == errSecSuccess, let data = result as? Data else { throw KeychainError(status: status) }
-        return String(data: data, encoding: .utf8)
+        return nil
     }
 
     public func save(_ value: String) throws {
         let data = Data(value.utf8)
         let protection: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                                          kSecAttrSynchronizable as String: false]
-        let status = attempt { query in
+        func store(_ query: [String: Any]) -> OSStatus {
             let updated = api.update(query, protection.merging([kSecValueData as String: data]) { $1 })
             guard updated == errSecItemNotFound else { return updated }
             return api.add(query.merging(protection) { $1 }.merging([kSecValueData as String: data]) { $1 })
+        }
+        var status = store(dataProtection)
+        if status == errSecMissingEntitlement {
+            status = store(login)
+        } else if status == errSecSuccess {
+            // A copy an unentitled build left in the login keychain would otherwise outlive this one.
+            _ = api.delete(login)
         }
         guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
     public func delete() throws {
-        let status = attempt { api.delete($0) }
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
+        for (query, absent) in [(dataProtection, [errSecItemNotFound, errSecMissingEntitlement]), (login, [errSecItemNotFound])] {
+            let status = api.delete(query)
+            guard status == errSecSuccess || absent.contains(status) else { throw KeychainError(status: status) }
+        }
     }
 
-    /// Runs `body` against the data protection keychain, and against the login keychain when this build lacks the
-    /// entitlement for the former.
-    private func attempt(_ body: ([String: Any]) -> OSStatus) -> OSStatus {
-        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                   kSecAttrAccount as String: account]
-        let status = body(item.merging([kSecUseDataProtectionKeychain as String: true]) { $1 })
-        return status == errSecMissingEntitlement ? body(item) : status
+    private var login: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+
+    private var dataProtection: [String: Any] {
+        login.merging([kSecUseDataProtectionKeychain as String: true]) { $1 }
     }
 }

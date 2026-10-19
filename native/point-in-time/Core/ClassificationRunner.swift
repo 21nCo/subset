@@ -63,12 +63,17 @@ public final class ClassificationRunner {
     private let store: ActivityStore
     private let memory: () -> String
     private let clock: () -> Date
+    private let deletionPending: () -> Bool
     private var lastProvider: String?
 
-    public init(store: ActivityStore, memory: @escaping () -> String, clock: @escaping () -> Date = Date.init) {
+    /// `deletionPending` says whether a deletion or idle retraction is queued but not applied yet; nothing is sent then,
+    /// since the store still holds activity the user removed.
+    public init(store: ActivityStore, memory: @escaping () -> String, clock: @escaping () -> Date = Date.init,
+                deletionPending: @escaping () -> Bool = { false }) {
         self.store = store
         self.memory = memory
         self.clock = clock
+        self.deletionPending = deletionPending
     }
 
     /// Lets the next request go now (wake, network back, settings changed).
@@ -90,7 +95,7 @@ public final class ClassificationRunner {
         }
         let now = clock()
         refreshCounts(initial, now: now)
-        guard let provider, status.pending > 0, backoff.allows(now) else { return false }
+        guard let provider, status.pending > 0, backoff.allows(now), !deletionPending() else { return false }
         status.inFlight = true
         onChange?()
         defer {
@@ -100,9 +105,10 @@ public final class ClassificationRunner {
         }
         do {
             try await provider.prepare()
-            // The user may have turned the provider off, turned titles off, or excluded an app while it was prepared.
+            // The user may have turned the provider off, turned titles off, or excluded an app while it was prepared, or
+            // asked for a deletion that has not been applied yet.
             guard let options = options() else { return true }
-            let deletions = store.deletions
+            guard !deletionPending() else { return false }
             let blocks = try store.pendingBlocks(completedBy: clock().addingTimeInterval(-Self.settleDelay), options: options,
                                                  limit: ClassificationRequest.maxBlocks)
             guard let request = ClassificationRequest(blocks: blocks, memory: memory(), corrections: try store.recentCorrections(),
@@ -111,7 +117,7 @@ public final class ClassificationRunner {
             let (accepted, rejected) = try request.validate(text)
             let finished = clock()
             let stored = try store.applyClassifications(accepted, rejected: rejected, provider: provider.name, model: provider.model,
-                                                        at: finished, deletionsSeen: deletions)
+                                                        at: finished)
             if stored > 0 {
                 backoff.succeeded()
                 status.lastSuccess = finished
