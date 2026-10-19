@@ -5,6 +5,9 @@ import SwiftUI
 @MainActor
 final class PlaceholderWindowController {
     private let window: NSWindow
+    /// Called on the main actor whenever the window becomes visible on screen or stops being visible (closed,
+    /// minimized, fully covered, or on another space).
+    var onVisibilityChange: ((Bool) -> Void)?
 
     init(title: String, autosaveName: String, size: NSSize, content: some View) {
         window = NSWindow(
@@ -19,26 +22,22 @@ final class PlaceholderWindowController {
         window.setContentSize(size)
         window.center()
         window.setFrameAutosaveName(autosaveName)
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.onVisibilityChange?(self.window.occlusionState.contains(.visible))
+            }
+        }
     }
 
     func show() {
         // An accessory app is not active until asked; activate so the window comes to the front with focus.
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
-    }
-}
-
-/// The main window's placeholder; later issues replace it with the analysis view.
-struct MainPlaceholderView: View {
-    var body: some View {
-        VStack(spacing: 8) {
-            Text("System")
-                .font(.title2.bold())
-            Text("Nothing to show yet.")
-                .foregroundStyle(.secondary)
-        }
-        .padding(32)
-        .frame(minWidth: 480, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
     }
 }
 

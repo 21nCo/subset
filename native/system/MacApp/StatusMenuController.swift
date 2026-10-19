@@ -1,27 +1,55 @@
 import AppKit
 import SystemCore
 
-/// The menu bar item and its menu, built from `ShellCommand` so the menu and its tests share one list.
+/// The menu bar item and its menu, built from `ShellCommand` so the menu and its tests share one list. The item
+/// shows total CPU as its title and memory pressure as its symbol; the menu repeats both as text.
 @MainActor
 final class StatusMenuController {
-    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private let cpuRow = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let pressureRow = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     init(perform: @escaping (ShellCommand) -> Void) {
-        let label = SystemIdentity.appName
-        if let image = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: label) {
-            image.isTemplate = true
-            item.button?.image = image
-        } else {
-            item.button?.title = "System"
+        item.button?.imagePosition = .imageLeading
+        for row in [cpuRow, pressureRow] {
+            row.isEnabled = false
+            menu.addItem(row)
         }
-        item.button?.setAccessibilityLabel(label)
-        item.button?.toolTip = label
+        menu.addItem(.separator())
         for command in ShellCommand.allCases {
             if command.startsGroup { menu.addItem(.separator()) }
             menu.addItem(CommandMenuItem(command: command, perform: perform))
         }
         item.menu = menu
+    }
+
+    func update(_ summary: StatusSummary, logicalCoreCount: Int?) {
+        guard let button = item.button else { return }
+        button.image = Self.image(for: summary.pressure)
+        button.title = summary.title
+        button.setAccessibilityLabel(summary.accessibilityLabel)
+        button.toolTip = summary.accessibilityLabel
+        cpuRow.title = summary.cpuRow(logicalCoreCount: logicalCoreCount)
+        pressureRow.title = summary.pressureRow
+    }
+
+    /// Normal (or unknown) pressure uses the template gauge; warning and critical use a colored memory chip so the
+    /// change shows without reading the menu.
+    private static func image(for pressure: MemoryPressure?) -> NSImage? {
+        let label = "Memory pressure \(pressure?.title.lowercased() ?? "unknown")"
+        switch pressure {
+        case .warning, .critical:
+            let color: NSColor = pressure == .critical ? .systemRed : .systemYellow
+            let image = NSImage(systemSymbolName: "memorychip.fill", accessibilityDescription: label)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
+            image?.isTemplate = false
+            return image
+        case .normal, nil:
+            let image = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: label)
+            image?.isTemplate = true
+            return image
+        }
     }
 }
 
