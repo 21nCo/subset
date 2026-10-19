@@ -450,12 +450,15 @@ test('a change stays shown until a board observed after it committed, from the h
   assert.equal(readsAfter('list', {}), false);
 });
 
+// Changes to two timers, `a` and `b`, covering every timer operation.
+const STEPS = [
+  ['create', () => ({ preset: 'tabata' })], ['create', () => STOPWATCH], ['start', ([a]) => ({ id: a })], ['start', ([, b]) => ({ id: b })],
+  ['lap', ([, b]) => ({ id: b })], ['skip', ([a]) => ({ id: a })], ['pause', ([a]) => ({ id: a })], ['pause', ([, b]) => ({ id: b })],
+  ['resume', ([a]) => ({ id: a })], ['reset', ([, b]) => ({ id: b })], ['remove', ([, b]) => ({ id: b })]
+];
+
 test('overlapping changes to two timers and reads settling in any order, or failing, end at the host state', () => {
-  const steps = [
-    ['create', () => ({ preset: 'tabata' })], ['create', () => STOPWATCH], ['start', ([a]) => ({ id: a })], ['start', ([, b]) => ({ id: b })],
-    ['lap', ([, b]) => ({ id: b })], ['skip', ([a]) => ({ id: a })], ['pause', ([a]) => ({ id: a })], ['pause', ([, b]) => ({ id: b })],
-    ['resume', ([a]) => ({ id: a })], ['reset', ([, b]) => ({ id: b })], ['remove', ([, b]) => ({ id: b })]
-  ];
+  const steps = STEPS;
   let seed = 7;
   const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
   // `tick` ms pass between steps. With `back`, the reads issued so far settle every third step and the host
@@ -586,6 +589,112 @@ test('sequential actions on one timer end at the host state across a backward cl
         assert.deepEqual(shown(boardView(host, state)), held(two.store), name);
         if (reads.at(-1) === 'ok') assert.deepEqual(state.pending, [], name);
       }
+    }
+  }
+});
+
+test('a host result from before a change that arrives during its confirming read keeps it shown until a later read, for every timer operation', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { store, input, ...scene } = { input: undefined, ...SCENARIOS[operation]() };
+    const reply = operations[operation](store, input ?? { id: scene.id }, AT);
+    const change = held(reply.store);
+    for (const back of [1, 1_000, 3_600_000]) {
+      for (const first of ['ok', 'offline']) {
+        const name = `${operation}, clock ${back} ms back, confirming read ${first}`;
+        // A host result observed before the change is delivered late: after the confirming read is issued, and
+        // after the host clock stepped back, so the read is observed before it.
+        const stale = timerBoard(store, AT - 10);
+        let state = acted(hostArrived(emptyBoardState(), timerBoard(store, AT - 100)), operation, scene.id, reply.result);
+        const confirming = readIssued(state);
+        state = hostArrived(confirming.state, stale);
+        assert.deepEqual(shown(boardView(stale, state)), change, `${name}: during the read`);
+        state = readSettled(state, confirming.issued, first === 'ok' ? list(reply.store, AT - 10 - back) : new Error('offline')).state;
+        // The stale result is the base, and it does not come after the change, so the change stays shown and pending.
+        assert.deepEqual(shown(boardView(stale, state)), change, name);
+        assert.equal(state.pending.length, 1, name);
+        assert.equal(needsRead(stale, state), true, name);
+        // The board reads again; issued after the stale result arrived, that read comes after it and retires the change.
+        const again = readIssued(state);
+        state = readSettled(again.state, again.issued, list(reply.store, AT - 10 - back + 1)).state;
+        assert.deepEqual(shown(boardView(stale, state)), change, `${name}, then a later read`);
+        assert.deepEqual(state.pending, [], name);
+        assert.equal(needsRead(stale, state), false, name);
+      }
+    }
+    // A host result observed after the commit retires the change, so the host's next result, from a clock that
+    // stepped back after another surface's change, shows as passed.
+    const id = scene.id ?? reply.result.timer.definition.id;
+    const later = operation === 'remove'
+      ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT - 1_000).store
+      : operations.remove(reply.store, { id }, AT - 1_000).store;
+    let state = acted(hostArrived(emptyBoardState(), timerBoard(store, AT - 100)), operation, scene.id, reply.result);
+    state = hostArrived(state, timerBoard(reply.store, AT + 5));
+    assert.deepEqual(state.pending, [], operation);
+    const next = timerBoard(later, AT - 990);
+    assert.deepEqual(shown(boardView(next, hostArrived(state, next))), held(later), `${operation}: later host result below the commit`);
+  }
+});
+
+test('retiring a change never changes the board shown, with host results delivered late or during reads, and a final read ends at the host state', () => {
+  let seed = 11;
+  const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
+  const pick = (items) => items[Math.floor(random() * items.length)];
+  for (const back of [0, 1, 1_000, 3_600_000]) {
+    for (let trial = 0; trial < 40; trial++) {
+      const name = `back ${back}, trial ${trial}`;
+      let store = emptyStore();
+      let at = AT;
+      // Every board the host held so far; the host may pass any of them, late.
+      const captured = [timerBoard(store, at - 100)];
+      let host = captured[0];
+      let state = hostArrived(emptyBoardState(), host);
+      const ids = [];
+      let reads = [];
+      // Moves to `next` and checks that the changes it dropped were hidden already: keeping them shows the same board.
+      const move = (next) => {
+        const dropped = state.pending.filter((change) => !next.pending.some((each) => each.id === change.id));
+        state = next;
+        assert.deepEqual(boardView(host, { ...state, pending: [...state.pending, ...dropped] }), boardView(host, state), name);
+      };
+      const arrive = () => {
+        host = pick(captured);
+        move(hostArrived(state, host));
+      };
+      const settleOne = () => {
+        const read = reads.splice(Math.floor(random() * reads.length), 1)[0];
+        move(readSettled(state, read.issued, read.outcome).state);
+      };
+      for (const [operation, input] of STEPS) {
+        if (random() < 0.3) at -= back;
+        const reply = operations[operation](store, input(ids), at);
+        assert.ok(reply.ok, `${operation}: ${JSON.stringify(reply.error)}`);
+        store = reply.store;
+        if (operation === 'create') ids.push(reply.result.timer.definition.id);
+        const call = actionIssued(state);
+        state = call.state;
+        if (random() < 0.3) arrive();
+        move(replySettled(state, operation, operation === 'create' ? null : input(ids).id, reply.result, call.issued).state);
+        captured.push(timerBoard(store, at + 1));
+        const issued = readIssued(state);
+        state = issued.state;
+        reads.push({ issued: issued.issued, outcome: random() < 0.25 ? new Error('offline') : list(store, at + 2) });
+        while (random() < 0.5 && reads.length) {
+          if (random() < 0.5) arrive();
+          settleOne();
+        }
+        at += 10;
+      }
+      while (reads.length) {
+        if (random() < 0.5) arrive();
+        settleOne();
+      }
+      // The host passes its current board, and a read issued after everything settles it.
+      host = timerBoard(store, at);
+      move(hostArrived(state, host));
+      const last = readIssued(state);
+      move(readSettled(last.state, last.issued, list(store, at)).state);
+      assert.deepEqual(shown(boardView(host, state)), held(store), name);
+      assert.deepEqual(state.pending, [], name);
     }
   }
 });

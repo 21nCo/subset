@@ -314,8 +314,8 @@ export const readIssued = issue;
 /**
  * Settles the `list` read numbered `issued`. Reads count in the order the board issued them, so one
  * that settles after a later-issued read is ignored, whatever its `observedAt`. A taken read retires
- * the changes it supersedes. A failed read changes nothing but `readFailed`; its failure is shown
- * unless a later-issued read already succeeded.
+ * the changes the base then supersedes (see `retire`). A failed read changes nothing but `readFailed`;
+ * its failure is shown unless a later-issued read already succeeded.
  */
 export function readSettled(state: BoardState, issued: number, outcome: unknown): { state: BoardState; failure: ActionFailure | null } {
   if (state.read && issued < state.read.span.start) return { state, failure: null };
@@ -323,23 +323,42 @@ export function readSettled(state: BoardState, issued: number, outcome: unknown)
   if (!read.ok) return { state: { ...state, readFailed: true }, failure: read.failure };
   const seq = state.seq + 1;
   const own = { result: read.result, observedAt: read.result.observedAt, span: { start: issued, end: seq } };
-  const pending = state.pending.filter((change) => !supersedes(own, change));
-  return { state: { ...state, seq, read: own, pending, readFailed: false }, failure: null };
+  return { state: retire({ ...state, seq, read: own, readFailed: false }), failure: null };
 }
 
-/** Records that the host passed `result`, so the board's later events come after it. */
+/** Records that the host passed `result`, so the board's later events come after it, and retires what the base then supersedes. */
 export function hostArrived(state: BoardState, result: TimerBoardResult): BoardState {
   if (state.host?.result === result) return state;
-  return { ...state, seq: state.seq + 1, host: { result, arrived: state.seq + 1 } };
+  return retire({ ...state, seq: state.seq + 1, host: { result, arrived: state.seq + 1 } });
 }
 
-/** The base board, the host's `result` or the board's own latest read, and the changes shown over it. */
-function overlay(host: TimerBoardResult, state: BoardState) {
-  // A result not yet recorded by `hostArrived` overlaps every event of the board.
+/**
+ * The base the board shows: the host's `result` (by default the one recorded) or the board's own latest
+ * read, whichever comes after the other, the read winning a tie. A result not yet recorded by
+ * `hostArrived` overlaps every event of the board. Null only before either exists.
+ */
+function selectBase(state: BoardState, host = state.host?.result): (BoardEvent & { result: TimerBoardResult }) | null {
+  if (!host) return state.read;
   const end = state.host?.result === host ? state.host.arrived : Infinity;
   const hosted = { result: host, observedAt: host.observedAt, span: { start: -Infinity, end } };
-  const base = state.read && after(hosted, state.read, true) ? state.read : hosted;
-  return { base: base.result, changes: state.pending.filter((change) => !supersedes(base, change)) };
+  return state.read && after(hosted, state.read, true) ? state.read : hosted;
+}
+
+/**
+ * Drops the changes that the base the board shows supersedes, and only those: a read the board takes
+ * but does not show (a host result overlapping it is observed later) retires nothing, so a change is
+ * never dropped under a base that does not come after it.
+ */
+function retire(state: BoardState): BoardState {
+  const base = selectBase(state);
+  const pending = base ? state.pending.filter((change) => !supersedes(base, change)) : state.pending;
+  return pending.length === state.pending.length ? state : { ...state, pending };
+}
+
+/** The base board and the changes shown over it: those it does not supersede. */
+function overlay(host: TimerBoardResult, state: BoardState) {
+  const base = selectBase(state, host)!;
+  return { base, changes: state.pending.filter((change) => !supersedes(base, change)) };
 }
 
 /**
@@ -350,7 +369,7 @@ function overlay(host: TimerBoardResult, state: BoardState) {
  * so a late reply never undoes a newer change or brings back a timer that base lacks.
  */
 export function boardView(host: TimerBoardResult, state: BoardState): TimerBoardResult {
-  const { base, changes } = overlay(host, state);
+  const { base: { result: base }, changes } = overlay(host, state);
   if (!changes.length) return base;
   const timers = base.timers.flatMap((timer) => {
     const change = changes.find((each) => each.id === timer.definition.id);
@@ -363,11 +382,16 @@ export function boardView(host: TimerBoardResult, state: BoardState): TimerBoard
 }
 
 /**
- * Whether the board should read the host's board again: its last read failed and a change is still
- * laid over the base. The board asks when the host passes a new result, so a result that does not
- * retire the change (one that does not come after it) prompts a read that can.
+ * Whether the board should read the host's board again: a change is still laid over the base, and
+ * either its last read failed or the base is a host result rather than its own latest read. The board
+ * asks when the host passes a new result and after a read it takes; a read issued then comes after
+ * that host result, so it can retire the change, and only a newer host result arriving during it
+ * prompts another.
  */
-export const needsRead = (host: TimerBoardResult, state: BoardState) => state.readFailed && overlay(host, state).changes.length > 0;
+export function needsRead(host: TimerBoardResult, state: BoardState): boolean {
+  const { base, changes } = overlay(host, state);
+  return changes.length > 0 && (state.readFailed || base !== state.read);
+}
 
 /** The share of a timer's ring that is filled, from 0 to 1, or null for a stopwatch, which has no end. */
 export function ringProgress(projection: TimerSnapshot['projection']): number | null {

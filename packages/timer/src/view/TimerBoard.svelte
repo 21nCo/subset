@@ -86,8 +86,8 @@
 
   // `list` reads in flight.
   let reading = 0;
-  // Each new host result is recorded, so later actions and reads come after it. After a failed read,
-  // while a change is still shown over it, it prompts a read.
+  // Each new host result is recorded, so later actions and reads come after it. While a change is still
+  // shown over it or after a failed read, it prompts a read (see `needsRead`).
   $effect(() => {
     const host = read;
     untrack(() => {
@@ -97,7 +97,7 @@
     });
   });
 
-  /** Reads the host's board, which retires the changes it was observed after. */
+  /** Reads the host's board, which retires the changes the base then comes after. */
   async function refresh(): Promise<void> {
     const issue = readIssued(known);
     known = issue.state;
@@ -114,6 +114,9 @@
       return;
     }
     if (taken && failure?.operation === 'list') failure = null;
+    // A host result that arrived during the read and is shown over it may still predate a change; a read
+    // issued now comes after that result.
+    if (taken && reading === 0 && read.ok && needsRead(read.result, known)) void refresh();
   }
 
   async function control(timerId: string, name: ControlName): Promise<void> {
