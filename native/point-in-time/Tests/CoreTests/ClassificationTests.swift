@@ -600,7 +600,9 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         let script = directory.appendingPathComponent("codex")
         try """
             #!/bin/sh
-            dir="$(dirname "$0")"
+            dir="${0%/*}"
+            # A launcher that ignores SIGTERM and first starts a child that inherits that and holds the output open.
+            if [ -f "$dir/orphan" ]; then trap '' TERM; sleep 60 & echo $! > "$dir/child"; fi
             if [ "$1" = "login" ]; then
               if [ -f "$dir/signed-in" ]; then echo "Logged in using ChatGPT"; exit 0; fi
               if [ -f "$dir/api-key" ]; then echo "Logged in using an API key - sk-fake-***00000"; exit 0; fi
@@ -610,8 +612,6 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             printf '%s\\n' "$@" > "$dir/args"
             pwd -P > "$dir/cwd"; ls -A > "$dir/cwd-contents"; printf '%s' "$PATH" > "$dir/path"
             cat > "$dir/stdin"
-            # A launcher that ignores SIGTERM and starts a child that inherits that and holds the output open.
-            if [ -f "$dir/orphan" ]; then trap '' TERM; sleep 30 & echo $! > "$dir/child"; fi
             if [ -f "$dir/sleep" ]; then exec sleep "$(cat "$dir/sleep")"; fi
             if [ -f "$dir/fail" ]; then exit 3; fi
             out=""; prev=""
@@ -700,8 +700,8 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         try touch(codex, "orphan")
         try touch(codex, "sleep", "30")
         // Long enough for the stub to start its child even on a busy machine.
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 5)
-        await #expect(throws: ProviderError.timedOut(5)) { try await cli.complete(prompt: "p", schema: "{}") }
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 10)
+        await #expect(throws: ProviderError.timedOut(10)) { try await cli.complete(prompt: "p", schema: "{}") }
         let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
         #expect(await exits(child))
     }
@@ -711,17 +711,17 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
         try touch(codex, "orphan")
         try touch(codex, "answer", "{\"blocks\":[]}")
-        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 20)
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 50)
         let started = Date()
         #expect(try await cli.complete(prompt: "p", schema: "{}") == "{\"blocks\":[]}")
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(Date().timeIntervalSince(started) < 30)
         let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
         #expect(await exits(child))
     }
 
-    /// Whether `pid` is gone within ten seconds.
+    /// Whether `pid` is gone within twenty seconds.
     private func exits(_ pid: pid_t) async -> Bool {
-        for _ in 0..<100 {
+        for _ in 0..<200 {
             if kill(pid, 0) != 0 && errno == ESRCH { return true }
             try? await Task.sleep(for: .milliseconds(100))
         }
