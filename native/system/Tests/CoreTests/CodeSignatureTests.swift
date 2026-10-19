@@ -159,6 +159,15 @@ final class CodeSignatureTests: XCTestCase {
         XCTAssertFalse(unsigned.isPlatformBinary)
     }
 
+    func testTheTeamNameComesFromTheLeafCertificateOnlyWhenItNamesTheSignaturesTeam() {
+        XCTAssertEqual(SecCodeSignatureReader.teamName(subject: "Developer ID Application: Google LLC (EQHXZ8M8AV)", teamID: "EQHXZ8M8AV"), "Google LLC")
+        XCTAssertEqual(SecCodeSignatureReader.teamName(subject: "Apple Development: Jane Doe: Tools (ABCDE12345)", teamID: "ABCDE12345"), "Jane Doe: Tools")
+        XCTAssertNil(SecCodeSignatureReader.teamName(subject: "Developer ID Application: Other (ZZZZZ99999)", teamID: "ABCDE12345"))
+        XCTAssertNil(SecCodeSignatureReader.teamName(subject: "Apple Mac OS Application Signing", teamID: "ABCDE12345"))
+        XCTAssertNil(SecCodeSignatureReader.teamName(subject: "Software Signing", teamID: nil))
+        XCTAssertNil(SecCodeSignatureReader.teamName(subject: "Developer ID Application:  (ABCDE12345)", teamID: "ABCDE12345"))
+    }
+
     func testSecurityErrorsMapToReasons() {
         XCTAssertEqual(SecCodeSignatureReader.failure(100_000 + ESRCH), .processExited)
         XCTAssertEqual(SecCodeSignatureReader.failure(errSecCSNoSuchCode), .processExited)
