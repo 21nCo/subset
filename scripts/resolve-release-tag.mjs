@@ -84,7 +84,7 @@ if (packageJson.private !== false) {
   fail(`${target.name} at ${target.path} is not marked private: false, so it is not ready to publish`);
 }
 
-// A beta tag (<slug>-v<x.y.z>-beta.<n>, made by beta-builds.mjs on merges to dev) publishes the package.json version
+// A beta tag (<slug>-v<x.y.z>-beta.<n>, made by the Beta builds workflow) publishes the package.json version
 // x.y.z with that suffix, so a beta needs no version commit.
 const beta = /^\d+\.\d+\.\d+$/.test(packageJson.version) && /^(\d+\.\d+\.\d+)-beta\.[1-9]\d*$/.exec(version)?.[1] === packageJson.version;
 
