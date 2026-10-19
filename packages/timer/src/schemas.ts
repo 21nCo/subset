@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { totalDurationMs, type TimerProjection } from './engine.js';
 import {
-  PHASES, PRESET_ID_PATTERN, TIMER_ID_PATTERN, TIMER_LIMITS, TIMER_SCHEMA_VERSION, TIMER_STATUSES, TIMER_VIEW_ID,
-  textLength, type Preset, type Timer, type TimerSpec, type TimerStore
+  ID_SPACE, PHASES, PRESET_ID_PATTERN, TIMER_ID_PATTERN, TIMER_LIMITS, TIMER_SCHEMA_VERSION, TIMER_STATUSES, TIMER_VIEW_ID,
+  textLength, type Preset, type PresetTimerSpec, type Timer, type TimerSpec, type TimerStore
 } from './model.js';
 import { BUILT_IN_PRESET_IDS } from './presets.js';
 
@@ -132,7 +132,7 @@ const timer = z.strictObject({ definition: timerDefinition, runtime: timerRuntim
 const preset = z.strictObject({ id: presetId, name, builtIn: z.boolean(), timer: presetTimerSpec });
 const store = z.strictObject({
   schemaVersion: z.literal(TIMER_SCHEMA_VERSION),
-  idSequence: nonNegativeMs,
+  idSequence: z.number().int().min(0).max(ID_SPACE),
   timers: z.array(timer).max(TIMER_LIMITS.timers),
   presets: z.array(preset.extend({ id: z.string().regex(PRESET_ID_PATTERN), builtIn: z.literal(false) })).max(TIMER_LIMITS.userPresets)
 }).refine((value) => new Set(value.timers.map((item) => item.definition.id)).size === value.timers.length, 'timer ids must be unique')
@@ -248,4 +248,7 @@ type _StoreMatches = Assert<z.infer<typeof store> extends TimerStore ? true : fa
 type _TimerMatches = Assert<z.infer<typeof timer> extends Timer ? true : false>;
 type _SpecMatches = Assert<z.infer<typeof timerSpec> extends TimerSpec ? true : false>;
 type _PresetMatches = Assert<z.infer<typeof preset> extends Preset ? true : false>;
+type _PresetSpecMatches = Assert<z.infer<typeof presetTimerSpec> extends PresetTimerSpec ? true : false>;
+type _PresetSpecNeedsDuration = Assert<{ kind: 'countdown' } extends PresetTimerSpec ? false : true>;
+type _PresetSpecHasNoUntil = Assert<{ kind: 'countdown'; durationMs: number; until: string } extends PresetTimerSpec ? false : true>;
 type _ProjectionMatches = Assert<z.infer<typeof projection> extends TimerProjection ? true : false>;

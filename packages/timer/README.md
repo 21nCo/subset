@@ -18,9 +18,9 @@ Every time is wall-clock epoch milliseconds. A timer stores when its current run
 | `stopwatch` | Laps. No end. |
 | `interval` | `segments` (1 to 100) of `{ label (≤ 40), phase: prep \| work \| rest \| cooldown, durationMs (1 s to 24 h) }`, `rounds` (1 to 99), optional `prepMs` before the first round and `cooldownMs` after the last. |
 
-Common fields: `id` (`t_` plus 8 lowercase Crockford base32 characters), `name` (1 to 60 characters, default per kind), `sound` (default true), `countdownTicks` (default true for interval timers only) and `createdAt`. Names and labels are one line of text with at least one visible character, counted in Unicode code points: control characters, line and paragraph separators, and bidi embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069) are rejected, while joiner sequences such as emoji stay valid. Names need not be unique; operations address timers by id. Ids are derived deterministically from `now` and the store's `idSequence`, which only grows, so a removed id is not issued again; they are checked for uniqueness in the store and are not secrets.
+Common fields: `id` (`t_` plus 8 lowercase Crockford base32 characters), `name` (1 to 60 characters, default per kind), `sound` (default true), `countdownTicks` (default true for interval timers only) and `createdAt`. Names and labels are one line of text with at least one visible character, counted in Unicode code points: control characters, line and paragraph separators, and bidi embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069) are rejected, while joiner sequences such as emoji stay valid. Names need not be unique; operations address timers by id. Timers and presets draw ids from the store's `idSequence`, which only grows: `issuedId` maps each sequence to a distinct id, so a removed id is never issued again, whatever the clock. A store can issue `ID_SPACE` (2^40) ids, after which `create`, `start` and `presets.save` return `limit_reached`. Ids are not secrets.
 
-The runtime is `idle | running | paused | finished` with `startedAt`, `accumulatedMs`, `pausedAt`, `laps[]` (`{ elapsedMs, at }`, at most 999) and `skippedMs`. The store is `{ schemaVersion: 1, idSequence, timers[], presets[] }`, where `presets` holds only saved presets. Validate a persisted store with `parseStore`, which also checks that each runtime fits its definition:
+The runtime is `idle | running | paused | finished` with `startedAt`, `accumulatedMs`, `pausedAt`, `laps[]` (`{ elapsedMs, at }`, at most 999) and `skippedMs`. The store is `{ schemaVersion: 1, idSequence (0 to 2^40), timers[], presets[] }`, where `presets` holds only saved presets. Validate a persisted store with `parseStore`, which also checks that each runtime fits its definition:
 
 - an idle timer has no position, laps or skips;
 - a countdown that has started has a fixed `durationMs`;
@@ -33,7 +33,7 @@ The runtime is `idle | running | paused | finished` with `startedAt`, `accumulat
 ## Engine
 
 - `project(timer, now)` returns the status at `now` (a running timer past its end is `finished`), the elapsed, remaining and total time, the current interval step (index, segment index, round, phase, label, time elapsed and left in it), and the next step.
-- `transitionsBetween(timer, from, to)` lists, for a running timer, the interval step starts, final-3-second ticks (when `countdownTicks` is on) and the finish with `from < at <= to`, so a scheduler arms one timeout and asks again after each change.
+- `transitionsBetween(timer, from, to)` lists, for a running timer, the interval step starts, final-3-second ticks (when `countdownTicks` is on) and the finish with `from < at <= to`, in time order, so a scheduler arms one timeout and asks again after each change. A step of 3 seconds or less has a tick at its own start, listed after its segment event. Nothing at or before the position a running stretch began from is listed, so resuming at a step's start does not repeat that step's events.
 - `settle(timer, now)` records a running timer whose time is up as finished.
 
 ## Operations
@@ -56,7 +56,7 @@ Each is a pure function `(store, input, now)` that validates its input (an omitt
 | `presets.save` | write | `{ name, timer }` (no `until`) | `{ preset }` | `invalid_input`, `limit_reached` |
 | `presets.remove` | destructive | `{ id }` | `{ removedId }` | `not_found`, `invalid_state` (built-in) |
 
-A top-level `name` in `create` or `start` overrides the timer's or preset's own name. Every operation also returns `invalid_input` for malformed input. A `{ timer }` result is a snapshot: `{ definition, runtime, projection }`. `OPERATION_WRITE_CLASS` lists the classes; hosts must have the user's explicit request before running a destructive operation.
+A timer's name is the top-level `name` in `create` or `start` if given, else the `name` inside the timer or the preset's `timer`, else the preset's own name (a saved preset `Morning` whose `timer.name` is `Run` creates timers named `Run`), else a default per kind. Every operation also returns `invalid_input` for malformed input. A `{ timer }` result is a snapshot: `{ definition, runtime, projection }`. `OPERATION_WRITE_CLASS` lists the classes; hosts must have the user's explicit request before running a destructive operation.
 
 Product decisions: a paused timer keeps its place and `resume` continues the same segment; `skip` on the last segment of the last round finishes the timer, skipping any cooldown, and otherwise moves to the start of the next step (from the prep to the first round, from the cooldown to the finish), leaving a paused timer paused; `lap` works only on stopwatches and lap-enabled countdowns; a finished timer must be reset before it starts again.
 

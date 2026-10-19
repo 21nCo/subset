@@ -201,3 +201,28 @@ test('transitions follow pause and skip, and respect countdownTicks', () => {
   assert.deepEqual(transitionsBetween(ticking, T0, T0 + s(5)).map((item) => `${item.type}@${(item.at - T0) / 1_000}`), ['tick@1', 'finish@2']);
   assert.deepEqual(transitionsBetween(timerOf(started({ timer: { kind: 'stopwatch' } })), T0, T0 + s(100)), []);
 });
+
+test('a step of 3 seconds or less ticks at its own start, after its segment event', () => {
+  const describe = (transitions) => transitions.map((item) => `${item.type}${item.secondsLeft ?? ''}@${(item.at - T0) / 1_000}${item.step ? `:${item.step.phase}` : ''}`);
+  const expected = {
+    1: ['segment@10:rest', 'tick1@10', 'finish@11'],
+    2: ['segment@10:rest', 'tick2@10', 'tick1@11', 'finish@12'],
+    3: ['segment@10:rest', 'tick3@10', 'tick2@11', 'tick1@12', 'finish@13']
+  };
+  for (const rest of [1, 2, 3]) {
+    const state = started({ timer: { kind: 'interval', rounds: 1, segments: [{ label: 'Work', phase: 'work', durationMs: s(10) }, { label: 'Rest', phase: 'rest', durationMs: s(rest) }] } });
+    const timer = timerOf(state);
+    const whole = transitionsBetween(timer, T0, T0 + s(20));
+    assert.deepEqual(describe(whole), ['tick3@7', 'tick2@8', 'tick1@9', ...expected[rest]], `${rest} s rest`);
+    assert.deepEqual(describe(transitionsBetween(timer, T0 + s(10) - 1, T0 + s(10))), expected[rest].slice(0, 2), `${rest} s rest at its start`);
+    // Windows that split the run, including at the shared instant, report each transition exactly once.
+    const cuts = [0, 9.999, 10, 10.5, 11, 12, 20].map(s);
+    const pieces = cuts.slice(1).flatMap((at, index) => transitionsBetween(timer, T0 + cuts[index], T0 + at));
+    assert.deepEqual(pieces, whole, `${rest} s rest split`);
+    // Nothing is listed at or before the position a running stretch began from.
+    // Paused exactly at the rest's start, resumed at 30 s: that segment event and its first tick are past.
+    const resumed = apply(apply(state, 'pause', T0 + s(10)), 'resume', T0 + s(30));
+    const firstAfterResume = { 1: 'finish@31', 2: 'tick1@31', 3: 'tick2@31' }[rest];
+    assert.equal(describe(transitionsBetween(timerOf(resumed), T0 + s(29), T0 + s(40)))[0], firstAfterResume, `${rest} s rest resumed`);
+  }
+});

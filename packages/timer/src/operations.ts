@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import { timerBoard, timerSnapshot, type TimerBoardResult, type TimerSnapshot } from './agent.js';
 import { finishedRuntime, intervalStep, intervalStepIndexAt, project, settle, totalDurationMs } from './engine.js';
 import {
-  TIMER_LIMITS, deriveId, idleRuntime, type Preset, type Timer, type TimerDefinition, type TimerSpec, type TimerStore
+  ID_SPACE, TIMER_LIMITS, idleRuntime, issuedId, type Preset, type Timer, type TimerDefinition, type TimerSpec, type TimerStore
 } from './model.js';
 import { BUILT_IN_PRESETS } from './presets.js';
 import { validators } from './schemas.js';
@@ -67,13 +67,18 @@ function replaceTimer(store: TimerStore, index: number, timer: Timer, now: numbe
   return success({ ...store, timers }, { timer: timerSnapshot(timer, now) });
 }
 
-/** A new id and the store's next `idSequence`. The sequence only grows, so a removed id is not issued again. */
-function freshId(prefix: 't' | 'p', store: TimerStore, taken: Set<string>, now: number): { id: string; idSequence: number } {
-  for (let sequence = store.idSequence; ; sequence++) {
-    const id = deriveId(prefix, `${now}:${sequence}`);
+/**
+ * The next id and the store's following `idSequence`, or null once the store has issued every id.
+ * Each sequence gives a distinct id, so the live-id check only guards stores written another way.
+ */
+function freshId(prefix: 't' | 'p', store: TimerStore, taken: Set<string>): { id: string; idSequence: number } | null {
+  for (let sequence = store.idSequence; sequence < ID_SPACE; sequence++) {
+    const id = issuedId(prefix, sequence);
     if (!taken.has(id)) return { id, idSequence: sequence + 1 };
   }
+  return null;
 }
+const idsExhausted = () => failure('limit_reached', 'This store has issued every id it can.');
 
 const DEFAULT_NAMES = { countdown: 'Countdown', stopwatch: 'Stopwatch', interval: 'Intervals' } as const;
 
@@ -127,7 +132,9 @@ function addTimer(store: TimerStore, input: { timer?: TimerSpec; preset?: string
   if (store.timers.length >= TIMER_LIMITS.timers) {
     return failure('limit_reached', `A store holds at most ${TIMER_LIMITS.timers} timers. Remove one first.`);
   }
-  const { id, idSequence } = freshId('t', store, new Set(store.timers.map((timer) => timer.definition.id)), now);
+  const issued = freshId('t', store, new Set(store.timers.map((timer) => timer.definition.id)));
+  if (!issued) return idsExhausted();
+  const { id, idSequence } = issued;
   const timer: Timer = { definition: definitionFrom(spec, id, input.name, now), runtime: idleRuntime() };
   return { ok: true, store: { ...store, idSequence, timers: [...store.timers, timer] }, timer };
 }
@@ -264,13 +271,15 @@ function listPresets(store: TimerStore, input: unknown): OperationOutcome<{ pres
   return parsed.ok ? success(store, { presets: allPresets(store) }) : parsed;
 }
 
-function savePreset(store: TimerStore, input: unknown, now: number): OperationOutcome<{ preset: Preset }> {
+function savePreset(store: TimerStore, input: unknown): OperationOutcome<{ preset: Preset }> {
   const parsed = parse(validators.inputs['presets.save'], input);
   if (!parsed.ok) return parsed;
   if (store.presets.length >= TIMER_LIMITS.userPresets) {
     return failure('limit_reached', `At most ${TIMER_LIMITS.userPresets} presets can be saved. Remove one first.`);
   }
-  const { id, idSequence } = freshId('p', store, new Set(store.presets.map((preset) => preset.id)), now);
+  const issued = freshId('p', store, new Set(store.presets.map((preset) => preset.id)));
+  if (!issued) return idsExhausted();
+  const { id, idSequence } = issued;
   const preset: Preset = { id, name: parsed.value.name, builtIn: false, timer: parsed.value.timer };
   return success({ ...store, idSequence, presets: [...store.presets, preset] }, { preset });
 }

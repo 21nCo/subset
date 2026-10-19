@@ -71,16 +71,19 @@ test('every fixture validates against its schema', async () => {
 });
 
 test('the JSON Schemas and the runtime validators accept and reject the same inputs', async () => {
-  assert.deepEqual(await readFixture('inputs.json'), JSON.parse(JSON.stringify(inputVectors)));
-  const store = await readFixture('store.json');
-  for (const { operation, input } of inputVectors.valid) {
+  const vectors = await readFixture('inputs.json');
+  assert.deepEqual(vectors, JSON.parse(JSON.stringify(inputVectors)));
+  // Replay from the fixture alone: its recorded store and clock.
+  const store = await readFixture(vectors.store);
+  const now = vectors.now;
+  for (const { operation, input } of vectors.valid) {
     assertValid(schemas.inputs[operation], input, `${operation} ${JSON.stringify(input).slice(0, 80)}`);
-    const outcome = operations[operation](store, input, Date.UTC(2026, 9, 19, 9, 0, 0));
+    const outcome = operations[operation](store, input, now);
     assert.notEqual(outcome.ok ? 'ok' : outcome.error.code, 'invalid_input', `${operation} runtime rejected ${JSON.stringify(input).slice(0, 80)}`);
   }
-  for (const { operation, input, why } of inputVectors.invalid) {
+  for (const { operation, input, why } of vectors.invalid) {
     assert.equal(validator(schemas.inputs[operation])(input), false, `JSON Schema accepted: ${why}`);
-    const outcome = operations[operation](store, input, Date.UTC(2026, 9, 19, 9, 0, 0));
+    const outcome = operations[operation](store, input, now);
     assert.equal(outcome.ok ? 'ok' : outcome.error.code, 'invalid_input', `runtime accepted: ${why}`);
   }
 });

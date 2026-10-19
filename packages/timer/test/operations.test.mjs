@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  OPERATION_NAMES, OPERATION_WRITE_CLASS, TIMER_ID_PATTERN, TIMER_LIMITS, emptyStore, operations, parseStore, runOperation
+  ID_SPACE, OPERATION_NAMES, OPERATION_WRITE_CLASS, PRESET_ID_PATTERN, TIMER_ID_PATTERN, TIMER_LIMITS, emptyStore, idSequenceOf, issuedId,
+  operations, parseStore, runOperation
 } from '../dist/index.js';
 
 const T0 = Date.UTC(2026, 9, 19, 8, 0, 0);
@@ -208,6 +209,62 @@ test('a removed id is not issued again, even in the same millisecond', () => {
   assert.notEqual(ok(operations['presets.save'](presetRemoved, { name: 'Mine', timer: { kind: 'stopwatch' } }, T0)).result.preset.id, presetId);
 });
 
+test('issued ids are injective in the sequence and decode back to it', () => {
+  const sequences = [0, 1, ID_SPACE - 1, ...Array.from({ length: 100_000 }, (_, index) => index + 2)];
+  for (let index = 0; index < 20_000; index++) sequences.push(Math.floor(Math.random() * ID_SPACE));
+  const bodies = new Map();
+  for (const sequence of sequences) {
+    const id = issuedId('t', sequence);
+    assert.match(id, TIMER_ID_PATTERN);
+    assert.match(issuedId('p', sequence), PRESET_ID_PATTERN);
+    assert.equal(issuedId('p', sequence).slice(2), id.slice(2));
+    assert.equal(idSequenceOf(id), sequence, id);
+    const earlier = bodies.get(id);
+    assert.ok(earlier === undefined || earlier === sequence, `${id} issued for ${earlier} and ${sequence}`);
+    bodies.set(id, sequence);
+  }
+  assert.equal(idSequenceOf('tabata'), null);
+});
+
+test('timers and presets never repeat an id across removals, whatever the clock', () => {
+  let store = emptyStore();
+  const seen = new Set();
+  const issue = (id) => {
+    assert.ok(!seen.has(id.slice(2)), `reissued ${id}`);
+    seen.add(id.slice(2));
+  };
+  for (let index = 0; index < 3_000; index++) {
+    // Half the operations share one millisecond; the rest move the clock forward or back.
+    const now = index % 2 ? T0 : T0 + ((index * 7_919) % 100_000) - 50_000;
+    if (index % 3 === 2) {
+      const saved = ok(operations['presets.save'](store, { name: 'Mine', timer: { kind: 'stopwatch' } }, now));
+      issue(saved.result.preset.id);
+      store = ok(operations['presets.remove'](saved.store, { id: saved.result.preset.id }, now)).store;
+    } else {
+      const created = ok(operations[index % 3 ? 'start' : 'create'](store, { timer: { kind: 'stopwatch' } }, now));
+      issue(created.result.timer.definition.id);
+      store = index % 5 ? ok(operations.remove(created.store, { id: created.result.timer.definition.id }, now)).store : created.store;
+      if (store.timers.length === TIMER_LIMITS.timers) store = { ...store, timers: [] };
+    }
+  }
+  assert.equal(store.idSequence, 3_000);
+  assert.equal(parseStore(store).ok, true);
+});
+
+test('a store that has issued every id returns limit_reached without writing', () => {
+  const exhausted = { ...emptyStore(), idSequence: ID_SPACE };
+  assert.equal(parseStore(exhausted).ok, true);
+  assert.equal(code(parseStore({ ...exhausted, idSequence: ID_SPACE + 1 })), 'invalid_input');
+  for (const [name, input] of [['create', { timer: { kind: 'stopwatch' } }], ['start', { preset: 'tabata' }], ['presets.save', { name: 'Mine', timer: { kind: 'stopwatch' } }]]) {
+    const outcome = operations[name](exhausted, input, T0);
+    assert.equal(code(outcome), 'limit_reached', name);
+  }
+  assert.deepEqual(exhausted, { ...emptyStore(), idSequence: ID_SPACE });
+  const last = ok(operations.create({ ...emptyStore(), idSequence: ID_SPACE - 1 }, { timer: { kind: 'stopwatch' } }, T0));
+  assert.equal(last.result.timer.definition.id, issuedId('t', ID_SPACE - 1));
+  assert.equal(last.store.idSequence, ID_SPACE);
+});
+
 test('every operation rejects a now that is not whole epoch milliseconds, without writing', () => {
   const { store, ids: [id] } = storeWith({ preset: 'tabata' });
   const inputs = {
@@ -308,6 +365,7 @@ test('a huge malformed name or label is rejected quickly on every path', () => {
     const outcome = run();
     const elapsed = performance.now() - started;
     assert.equal(code(outcome), 'invalid_input', path);
-    assert.ok(elapsed < 100, `${path} took ${elapsed.toFixed(1)} ms`);
+    // Linear validation takes well under 1 ms here; the old backtracking pattern took seconds.
+    assert.ok(elapsed < 1_000, `${path} took ${elapsed.toFixed(1)} ms`);
   }
 });

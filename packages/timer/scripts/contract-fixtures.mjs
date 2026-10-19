@@ -14,7 +14,7 @@ function apply(store, operation, input, now) {
   return outcome;
 }
 
-/** A store with every kind in every state it can be in at `OBSERVED_AT`. */
+/** A store with every kind and every status at `OBSERVED_AT`, though not every pairing of the two. */
 export function fixtureStore() {
   let store = emptyStore();
   const run = (operation, input, now) => {
@@ -62,8 +62,13 @@ const longName = '⏱'.repeat(60);
 const astralName = '🏃'.repeat(60);
 const tabataSpec = { kind: 'interval', rounds: 8, prepMs: 10_000, segments: [{ label: 'Work', phase: 'work', durationMs: 20_000 }, { label: 'Rest', phase: 'rest', durationMs: 10_000 }] };
 
-/** Inputs the JSON Schemas and the runtime validators must both accept or both reject. */
+/**
+ * Inputs the JSON Schemas and the runtime validators must both accept or both reject. The operations
+ * accept the valid ones at `now` against store.json; an `until` input is only valid near that clock.
+ */
 export const inputVectors = {
+  now: OBSERVED_AT,
+  store: 'store.json',
   valid: [
     { operation: 'create', input: { timer: { kind: 'countdown', durationMs: 1_000 } } },
     { operation: 'create', input: { timer: { kind: 'countdown', durationMs: 86_400_000, lapsEnabled: true, sound: false } } },
@@ -188,10 +193,15 @@ export function contractFixtures() {
   };
 }
 
-export const fixtureText = (value) => `${JSON.stringify(value, null, 2)}\n`;
+// Invisible format characters and line separators, such as the bidi controls in the rejected name
+// vectors, are written as \u escapes so the files show them; JSON parsing restores the same strings.
+const INVISIBLE = /[\p{Cf}\p{Zl}\p{Zp}]/gu;
+const escapeUnits = (character) =>
+  Array.from({ length: character.length }, (_, index) => `\\u${character.charCodeAt(index).toString(16).toUpperCase().padStart(4, '0')}`).join('');
+export const fixtureText = (value) => `${JSON.stringify(value, null, 2).replace(INVISIBLE, escapeUnits)}\n`;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const directory = new URL('../fixtures/contract-v1/', import.meta.url);
   await mkdir(directory, { recursive: true });
-  for (const [file, value] of Object.entries(contractFixtures())) await writeFile(new URL(file, directory), fixtureText(value));
+  await Promise.all(Object.entries(contractFixtures()).map(([file, value]) => writeFile(new URL(file, directory), fixtureText(value))));
 }

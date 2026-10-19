@@ -1,4 +1,6 @@
 {
+  "now": 1792400400000,
+  "store": "store.json",
   "valid": [
     {
       "operation": "create",
@@ -59,7 +61,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "👩‍💻 Desk"
+          "name": "👩\u200D💻 Desk"
         }
       }
     },
@@ -313,7 +315,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "Run fast"
+          "name": "Run\u2028fast"
         }
       }
     },
@@ -323,7 +325,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "​"
+          "name": "\u200B"
         }
       }
     },
@@ -333,7 +335,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "⁠ ⁠"
+          "name": "\u2060 \u2060"
         }
       }
     },
@@ -363,7 +365,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "a‮b"
+          "name": "a\u202Eb"
         }
       }
     },
@@ -373,7 +375,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "a‫b"
+          "name": "a\u202Bb"
         }
       }
     },
@@ -383,7 +385,7 @@
       "input": {
         "timer": {
           "kind": "stopwatch",
-          "name": "a⁨b⁩"
+          "name": "a\u2068b\u2069"
         }
       }
     },
@@ -397,7 +399,7 @@
           "prepMs": 10000,
           "segments": [
             {
-              "label": "​",
+              "label": "\u200B",
               "phase": "work",
               "durationMs": 20000
             }
@@ -415,7 +417,7 @@
           "prepMs": 10000,
           "segments": [
             {
-              "label": "Work‭",
+              "label": "Work\u202D",
               "phase": "work",
               "durationMs": 20000
             }
@@ -1100,7 +1102,7 @@
       "operation": "presets.save",
       "why": "preset name of only a zero-width space",
       "input": {
-        "name": "​",
+        "name": "\u200B",
         "timer": {
           "kind": "stopwatch"
         }

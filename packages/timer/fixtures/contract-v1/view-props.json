@@ -6,7 +6,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_sy2cvhtz",
+          "id": "t_adygqpxx",
           "name": "Tabata",
           "sound": true,
           "countdownTicks": true,
@@ -65,7 +65,7 @@
       {
         "definition": {
           "kind": "stopwatch",
-          "id": "t_b0tgd4qp",
+          "id": "t_rcrt44q9",
           "name": "Run",
           "sound": true,
           "countdownTicks": false,
@@ -101,7 +101,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_z53agses",
+          "id": "t_dk1facen",
           "name": "Tea",
           "sound": true,
           "countdownTicks": false,
@@ -130,7 +130,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_febf6p1h",
+          "id": "t_nwkjbbkw",
           "name": "AMRAP",
           "sound": true,
           "countdownTicks": false,
@@ -164,7 +164,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_8d2zj0sk",
+          "id": "t_daesff02",
           "name": "Stretch",
           "sound": true,
           "countdownTicks": true,
@@ -199,7 +199,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_7mtgfqdz",
+          "id": "t_ac50bvkp",
           "name": "Pomodoro",
           "sound": true,
           "countdownTicks": true,
@@ -287,7 +287,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_fnkt1nmd",
+          "id": "t_v9pdg8p9",
           "name": "Standup",
           "sound": true,
           "countdownTicks": false,

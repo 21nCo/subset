@@ -147,12 +147,14 @@ export function finishedRuntime(runtime: TimerRuntime, totalMs: number): TimerRu
 
 /**
  * Transitions with `from < at <= to` while the timer keeps running as stored: interval step starts,
- * final-3-second ticks (when `countdownTicks` is on) and the finish. A paused, idle or finished
- * timer has none, nor does a stopwatch. The scheduler calls this again after every change.
+ * final-3-second ticks (when `countdownTicks` is on) and the finish, in time order. A step of 3
+ * seconds or less has a tick at its own start, listed after that step's segment event. Nothing at or
+ * before the position the running stretch began from is listed. A paused, idle or finished timer
+ * has none, nor does a stopwatch. The scheduler calls this again after every change.
  */
 export function transitionsBetween(timer: Timer, from: number, to: number): TimerTransition[] {
   const { definition, runtime } = timer;
-  if (runtime.status !== 'running' || runtime.startedAt === null || !(to > from)) return [];
+  if (runtime.status !== 'running' || runtime.startedAt === null || Number.isNaN(from) || Number.isNaN(to) || to <= from) return [];
   const totalMs = totalDurationMs(definition, runtime.startedAt);
   if (totalMs === null) return [];
   const base = runtime.accumulatedMs + runtime.skippedMs;
@@ -160,7 +162,7 @@ export function transitionsBetween(timer: Timer, from: number, to: number): Time
   // Positions passed during (from, to]. Anything at or before `base` happened before this running stretch.
   const low = Math.max(base, base + (from - startedAt));
   const high = Math.min(totalMs, base + (to - startedAt));
-  if (!(high > low)) return [];
+  if (Number.isNaN(low) || Number.isNaN(high) || high <= low) return [];
   const at = (position: number) => startedAt + (position - base);
   const inWindow = (position: number) => position > low && position <= high;
   const timerId = definition.id;
@@ -169,7 +171,7 @@ export function transitionsBetween(timer: Timer, from: number, to: number): Time
     if (!definition.countdownTicks) return;
     for (const secondsLeft of [3, 2, 1] as const) {
       const position = endMs - secondsLeft * 1_000;
-      if (position > startMs && inWindow(position)) transitions.push({ type: 'tick', timerId, at: at(position), secondsLeft, stepIndex });
+      if (position >= startMs && inWindow(position)) transitions.push({ type: 'tick', timerId, at: at(position), secondsLeft, stepIndex });
     }
   };
   if (definition.kind === 'interval') {

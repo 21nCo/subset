@@ -56,8 +56,10 @@ export interface IntervalSpec extends CommonSpec {
   /** After the last round. */
   cooldownMs?: number;
 }
-/** What a caller supplies to create a timer or save a preset. */
+/** What a caller supplies to create a timer. */
 export type TimerSpec = CountdownSpec | StopwatchSpec | IntervalSpec;
+/** What a preset holds: a countdown always has `durationMs`, because `until` names one moment. */
+export type PresetTimerSpec = (Omit<CountdownSpec, 'durationMs' | 'until'> & { durationMs: number; until?: never }) | StopwatchSpec | IntervalSpec;
 
 interface CommonDefinition {
   /** `t_` plus 8 lowercase Crockford base32 characters. */
@@ -118,14 +120,17 @@ export interface Preset {
   id: string;
   name: string;
   builtIn: boolean;
-  /** Presets never hold an `until` countdown, which names one moment. */
-  timer: TimerSpec;
+  /** Its `name`, when set, wins over the preset's own `name` for the timers it creates. */
+  timer: PresetTimerSpec;
 }
 
 /** Everything the single writer persists. Built-in presets live in code, not here. */
 export interface TimerStore {
   schemaVersion: typeof TIMER_SCHEMA_VERSION;
-  /** How many ids this store has issued. It seeds the next id, so removing a timer never frees its id for reuse. */
+  /**
+   * The sequence of the next id to issue, at most `ID_SPACE`. It only grows and timers and presets
+   * share it, so removing one never frees its id for reuse.
+   */
   idSequence: number;
   timers: Timer[];
   /** Saved (user) presets only. */
@@ -144,26 +149,46 @@ const CROCKFORD = '0123456789abcdefghjkmnpqrstvwxyz';
 export const TIMER_ID_PATTERN = /^t_[0-9a-hjkmnp-tv-z]{8}$/;
 export const PRESET_ID_PATTERN = /^p_[0-9a-hjkmnp-tv-z]{8}$/;
 
+/** How many ids a store can issue: one per `idSequence` value, shared by timers and presets. */
+export const ID_SPACE = 2 ** 40;
+
+const ID_MASK = (1n << 40n) - 1n;
+// Odd multipliers are invertible modulo 2^40, and x ^ (x >> 20) is its own inverse on 40 bits, so
+// `scramble` is a bijection on [0, 2^40). It only spreads consecutive sequences apart.
+const ID_OFFSET = 0x5a3c96e1d4n;
+const ID_MULTIPLIERS = [0x9e3779b97fn, 0xc2b2ae3d27n] as const;
+const inverseOf = (odd: bigint) => {
+  let inverse = odd;
+  for (let step = 0; step < 6; step++) inverse = (inverse * (2n - odd * inverse)) & ID_MASK;
+  return inverse;
+};
+const ID_INVERSES = [inverseOf(ID_MULTIPLIERS[0]), inverseOf(ID_MULTIPLIERS[1])] as const;
+const fold = (value: bigint) => value ^ (value >> 20n);
+const scramble = (value: bigint) =>
+  fold((fold((fold(value ^ ID_OFFSET) * ID_MULTIPLIERS[0]) & ID_MASK) * ID_MULTIPLIERS[1]) & ID_MASK);
+const unscramble = (value: bigint) =>
+  fold((fold((fold(value) * ID_INVERSES[1]) & ID_MASK) * ID_INVERSES[0]) & ID_MASK) ^ ID_OFFSET;
+
 /**
- * Derives an 8-character id from a seed with two 32-bit FNV-1a passes. Ids only need to be unique
- * within one store, which the caller checks; they are not secrets.
+ * The id issued for `sequence`, an integer in [0, ID_SPACE). Distinct sequences give distinct ids,
+ * so a store that never reuses a sequence never reissues an id. Ids are not secrets.
  */
-export function deriveId(prefix: 't' | 'p', seed: string): string {
-  let high = 0x811c9dc5;
-  let low = 0x01000193;
-  for (let index = 0; index < seed.length; index++) {
-    const code = seed.charCodeAt(index);
-    high = Math.imul(high ^ code, 0x01000193) >>> 0;
-    low = Math.imul(low ^ code, 0x5bd1e995) >>> 0;
-  }
-  // 40 bits: the low 8 bits of `high` and all of `low`, five bits per character.
-  let value = (high & 0xff) * 2 ** 32 + low;
+export function issuedId(prefix: 't' | 'p', sequence: number): string {
+  let value = scramble(BigInt(sequence));
   let id = '';
   for (let index = 0; index < 8; index++) {
-    id = CROCKFORD[value % 32] + id;
-    value = Math.floor(value / 32);
+    id = CROCKFORD[Number(value & 31n)] + id;
+    value >>= 5n;
   }
   return `${prefix}_${id}`;
+}
+
+/** The sequence `issuedId` turned into `id`, or null when `id` is not a timer or preset id. */
+export function idSequenceOf(id: string): number | null {
+  if (!TIMER_ID_PATTERN.test(id) && !PRESET_ID_PATTERN.test(id)) return null;
+  let value = 0n;
+  for (const character of id.slice(2)) value = (value << 5n) | BigInt(CROCKFORD.indexOf(character));
+  return Number(unscramble(value));
 }
 
 /** Characters as people count them closely enough for limits: Unicode code points. */
