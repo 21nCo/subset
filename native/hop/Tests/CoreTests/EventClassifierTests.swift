@@ -72,6 +72,19 @@ final class EventClassifierTests: XCTestCase {
         XCTAssertEqual(classify(down(KeyCode.leftArrow, .option), active), Classification(.swallow, .step(.backward)))
     }
 
+    func testExtraModifiersDoNotStepOrCancelWhileActive() {
+        // Only the holding modifier, optionally with ⇧, steps or cancels; these chords belong to other shortcuts.
+        for modifiers: ModifierMask in [[.option, .command], [.option, .control], [.option, .shift, .command]] {
+            XCTAssertEqual(classify(down(KeyCode.tab, modifiers), active), .pass, "Tab with \(modifiers)")
+        }
+        XCTAssertEqual(classify(down(KeyCode.rightArrow, [.option, .command]), active), .pass)
+        XCTAssertEqual(classify(down(KeyCode.leftArrow, [.option, .control]), active), .pass)
+        XCTAssertEqual(classify(down(KeyCode.escape, [.option, .command]), active), .pass)
+        // ⇧ with an arrow or Esc keeps their meaning.
+        XCTAssertEqual(classify(down(KeyCode.rightArrow, [.option, .shift]), active), Classification(.swallow, .step(.forward)))
+        XCTAssertEqual(classify(down(KeyCode.escape, [.option, .shift]), active), Classification(.swallow, .escape))
+    }
+
     func testOtherKeysPassWhileActive() {
         XCTAssertEqual(classify(down(0x00 /* A */, .option), active), .pass)
         XCTAssertEqual(classify(.key(KeyEvent(.keyUp, keyCode: KeyCode.tab, modifiers: .option)), active), .pass)
@@ -101,6 +114,10 @@ final class ShortcutRecognizerTests: XCTestCase {
         .key(KeyEvent(kind, keyCode: code, modifiers: modifiers))
     }
 
+    private func repeating(_ code: UInt16, _ modifiers: ModifierMask = []) -> TapInput {
+        .key(KeyEvent(.keyDown, keyCode: code, modifiers: modifiers, isRepeat: true))
+    }
+
     private let optionDown = TapInput.key(KeyEvent(.flagsChanged, keyCode: 0x3A, modifiers: .option))
     private let optionUp = TapInput.key(KeyEvent(.flagsChanged, keyCode: 0x3A, modifiers: []))
 
@@ -126,6 +143,63 @@ final class ShortcutRecognizerTests: XCTestCase {
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertTrue(recognizer.session.isActive)
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.rightArrow, .option)).disposition, .pass)
+    }
+
+    func testAnArrowHeldFromBeforeTheSwitchKeepsRepeatingInItsApp() {
+        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.rightArrow)).disposition, .pass)
+        _ = recognizer.handle(optionDown)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        // The → repeats now carry ⌥, but the app saw → go down, so they are its and step nothing.
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.rightArrow, .option)), .init(disposition: .pass, outcome: nil))
+        XCTAssertEqual(recognizer.session.state, .active(selection: 1))
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.rightArrow, .option)).disposition, .pass)
+        XCTAssertEqual(recognizer.handle(optionUp), .init(disposition: .pass, outcome: .commit(index: 1)))
+    }
+
+    func testEscapeHeldFromBeforeTheSwitchDoesNotCancelIt() {
+        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.escape)).disposition, .pass)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.escape, .option)), .init(disposition: .pass, outcome: nil))
+        XCTAssertTrue(recognizer.session.isActive)
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.escape, .option)).disposition, .pass)
+    }
+
+    func testTabHeldPastTheReleaseStaysSwallowedUntilItsKeyUp() {
+        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        // Holding Tab keeps stepping, as each repeat belongs to the switch.
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab, .option)).disposition, .swallow)
+        XCTAssertEqual(recognizer.session.state, .active(selection: 2))
+        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit(index: 2))
+        // The press began as the shortcut, so its later repeats and key-up never reach the app.
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab)), .init(disposition: .swallow, outcome: nil))
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab)).disposition, .swallow)
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab)).disposition, .pass)
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab)).disposition, .pass)
+    }
+
+    func testARepeatNeverStartsASwitch() {
+        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        _ = recognizer.handle(optionUp)
+        // ⌥ goes down again while the swallowed Tab still repeats: a new switch needs a new press.
+        _ = recognizer.handle(optionDown)
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab, .option)), .init(disposition: .swallow, outcome: nil))
+        XCTAssertFalse(recognizer.session.isActive)
+        // A repeat of a key pressed before the tap existed passes.
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.leftArrow)).disposition, .pass)
+    }
+
+    func testAnArrowHeldPastTheReleaseStaysSwallowed() {
+        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        _ = recognizer.handle(key(.keyUp, KeyCode.tab, .option))
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.rightArrow, .option)).disposition, .swallow)
+        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit(index: 2))
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.rightArrow)).disposition, .swallow)
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.rightArrow)).disposition, .swallow)
     }
 
     func testEscapeCancelsAndItsKeyUpIsSwallowed() {

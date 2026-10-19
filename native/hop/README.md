@@ -87,7 +87,7 @@ The default mode needs only Accessibility.
 
 ## Shortcut and permission
 
-**Permission.** The event tap is created only while `AXIsProcessTrusted()` is true. Hop samples trust at launch, whenever it becomes active, every 2 seconds while the onboarding window is open, and when the system disables the tap; it never polls otherwise. When trust is granted, Hop installs the tap and closes the onboarding window; when it is revoked, Hop removes the tap (cancelling any switch in progress) and the status item shows a warning symbol, "Hop: needs Accessibility access" as its label and tooltip, and an **Allow Accessibility Access…** item at the top of its menu. Revoking access while Hop is in the background is noticed at the next of those samples.
+**Permission.** The event tap is created only while `AXIsProcessTrusted()` is true. Hop samples trust at launch, whenever it becomes active, every 2 seconds while the onboarding window is open, and when the system disables the tap; it never polls otherwise. When trust is granted, Hop installs the tap and closes the onboarding window; when it is revoked, Hop removes the tap (cancelling any switch in progress) and the status item shows a warning symbol, "Hop: needs Accessibility access" as its label and tooltip, and an **Allow Accessibility Access…** item at the top of its menu. Any sample that finds trust held closes the onboarding window. If Hop is trusted but the system refuses the tap, the status item shows the warning symbol with "Hop: shortcut unavailable", offers no permission item, and retries at the next sample. Revoking access while Hop is in the background is noticed at the next of those samples.
 
 **Onboarding.** The onboarding window opens by itself only on the first launch without trust (the `onboarding.shown` user default records that it has), and otherwise from **Allow Accessibility Access…**. It says that Hop needs Accessibility to see and raise windows and to notice its shortcut, and that nothing leaves the Mac. **Open Privacy & Security** calls `AXIsProcessTrustedWithOptions` with the prompt option, the public way to add Hop to the Accessibility list (macOS may show its own permission alert as well), and opens `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`.
 
@@ -98,15 +98,15 @@ The default mode needs only Accessibility.
 | Input | Idle | Switch active |
 | --- | --- | --- |
 | The shortcut (⌥Tab), with at least one window | Swallowed; starts the switch on the previous window (index 1, or 0 with one window) | Swallowed; next window |
-| The shortcut with ⇧ (⌥⇧Tab) | Swallowed; starts the switch on the oldest window | Swallowed; previous window |
-| → / ← | Passes | Swallowed; next / previous window |
-| Esc | Passes | Swallowed; cancels |
+| The shortcut with ⇧ (⌥⇧Tab) | Swallowed; starts the switch on the previous window too (index 1, or 0) | Swallowed; previous window |
+| → / ← with the holding modifier, optionally plus ⇧ | Passes | Swallowed; next / previous window |
+| Esc with the holding modifier, optionally plus ⇧ | Passes | Swallowed; cancels |
 | Release of the holding modifier | Passes | Passes; commits the selection |
-| Any other key, or the shortcut with other modifiers (⌃Tab, ⌘⌥Tab) | Passes | Passes |
-| Key-up | Swallowed exactly when its key-down was, even after the switch ended | Same |
+| Any other key, or the shortcut, an arrow or Esc with other modifiers (⌃Tab, ⌘⌥Tab, ⌃⌥Tab, ⌘⌥→) | Passes | Passes; changes nothing |
+| Auto-repeat and key-up of a held key | Swallowed exactly when the press's first key-down was, even after the switch ended | Same; repeats of a swallowed Tab or arrow keep stepping, other repeats change nothing |
 | The tap disabled by the system (timeout or user input) | Re-enabled at once | Re-enabled at once; cancels |
 
-Modifier changes always pass, so no app sees a modifier stuck down. Selections wrap around; a window list that shrinks below the selection clamps it, and one that empties cancels the switch. A key event that arrives without the holding modifier while a switch is active means its release was missed, so the switch commits and the event passes. If the system disables the tap and trust is gone, the tap is removed instead of re-enabled.
+Modifier changes always pass, so no app sees a modifier stuck down. Each physical press is decided once, at its first key-down: an app receives all of a press (its key-down, repeats and key-up) or none of it, so a key held from before a switch keeps working in its app and never steps or cancels the switch, and a Tab held after ⌥ is released never reaches the app. A repeat never starts or cancels a switch. Selections wrap around; a window list that shrinks below the selection clamps it, and one that empties cancels the switch. A key event that arrives without the holding modifier while a switch is active means its release was missed, so the switch commits and the event passes. If the system disables the tap and trust is gone, the tap is removed instead of re-enabled.
 
 Until the window list arrives (SET-92), the session's window count is the number of running apps with a Dock presence (`WindowCountPlaceholder`), updated when an app launches or quits, so a switch can start and commit; with none, ⌥Tab passes through. Until the overlay and focusing arrive (SET-94), a committed switch only logs its index at debug level (`log stream --level debug --predicate 'subsystem == "dev.subset.hop"'`), and a cancelled one logs that it was cancelled. Nothing about a window, and never a title, is logged.
 

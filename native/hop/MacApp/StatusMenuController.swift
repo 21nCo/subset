@@ -5,32 +5,48 @@ import HopCore
 /// lacks the Accessibility permission, the item shows a warning symbol and the menu starts with a way to allow it.
 @MainActor
 final class StatusMenuController {
+    enum State: Equatable {
+        /// The shortcut is running.
+        case ready
+        /// Hop lacks the Accessibility permission.
+        case needsPermission
+        /// Hop has the permission but the system refused the event tap; the next sample retries it.
+        case shortcutUnavailable
+    }
+
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private let perform: (ShellCommand) -> Void
+    private var state: State?
 
-    init(perform: @escaping (ShellCommand) -> Void, ready: Bool) {
+    init(perform: @escaping (ShellCommand) -> Void, state: State) {
         self.perform = perform
         item.menu = menu
-        update(ready: ready)
+        update(state: state)
     }
 
-    /// Shows the normal state when the shortcut is running, or the needs-permission state when it is not.
-    func update(ready: Bool) {
-        let label = ready ? HopIdentity.appName : "\(HopIdentity.appName): needs Accessibility access"
-        let symbol = ready ? "macwindow.on.rectangle" : "exclamationmark.triangle"
+    /// Shows `state`. Does nothing when it is already shown, so a trust sample never rebuilds an open menu.
+    func update(state: State) {
+        guard state != self.state else { return }
+        self.state = state
+        let label = switch state {
+        case .ready: HopIdentity.appName
+        case .needsPermission: "\(HopIdentity.appName): needs Accessibility access"
+        case .shortcutUnavailable: "\(HopIdentity.appName): shortcut unavailable"
+        }
+        let symbol = state == .ready ? "macwindow.on.rectangle" : "exclamationmark.triangle"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
             image.isTemplate = true
             item.button?.image = image
             item.button?.title = ""
         } else {
             item.button?.image = nil
-            item.button?.title = ready ? HopIdentity.appName : "\(HopIdentity.appName) !"
+            item.button?.title = state == .ready ? HopIdentity.appName : "\(HopIdentity.appName) !"
         }
         item.button?.setAccessibilityLabel(label)
         item.button?.toolTip = label
         menu.removeAllItems()
-        for command in ShellCommand.statusMenu(trusted: ready) {
+        for command in ShellCommand.statusMenu(trusted: state != .needsPermission) {
             if command.startsGroup, menu.numberOfItems > 0 { menu.addItem(.separator()) }
             menu.addItem(CommandMenuItem(command: command, perform: perform))
         }

@@ -57,11 +57,10 @@ public struct SwitchSession: Sendable, Equatable {
     @discardableResult
     public mutating func handle(_ event: Event) -> Outcome? {
         switch (state, event) {
-        case let (.idle, .trigger(direction)):
+        case (.idle, .trigger):
             guard count > 0 else { return nil }
-            // Forward starts on the previous window, the usual target; backward starts on the oldest one. With a
-            // single window both select it.
-            state = .active(selection: count == 1 ? 0 : (direction == .forward ? 1 : count - 1))
+            // Either direction starts on the previous window, the usual target, or on the only window there is.
+            state = .active(selection: count == 1 ? 0 : 1)
             return nil
         case let (.active(selection), .trigger(direction)), let (.active(selection), .step(direction)):
             let offset = direction == .forward ? 1 : -1

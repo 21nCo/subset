@@ -18,8 +18,9 @@ final class SwitchSessionTests: XCTestCase {
         XCTAssertEqual(session(count: 1, trigger: .backward).state, .active(selection: 0))
     }
 
-    func testBackwardTriggerStartsOnTheOldestWindow() {
-        XCTAssertEqual(session(count: 5, trigger: .backward).state, .active(selection: 4))
+    func testBackwardTriggerAlsoStartsOnThePreviousWindow() {
+        XCTAssertEqual(session(count: 5, trigger: .backward).state, .active(selection: 1))
+        XCTAssertEqual(session(count: 2, trigger: .backward).state, .active(selection: 1))
     }
 
     func testTriggerWithNoWindowsStaysIdle() {
@@ -74,6 +75,9 @@ final class SwitchSessionTests: XCTestCase {
 
     func testListShrinkingBelowTheSelectionClampsIt() {
         var session = session(count: 5, trigger: .backward)
+        session.handle(.step(.backward))
+        session.handle(.step(.backward))
+        XCTAssertEqual(session.state, .active(selection: 4))
         XCTAssertNil(session.handle(.listChanged(count: 3)))
         XCTAssertEqual(session.state, .active(selection: 2))
         session.handle(.step(.forward))
@@ -97,7 +101,7 @@ final class SwitchSessionTests: XCTestCase {
         var session = SwitchSession(count: 0)
         session.handle(.listChanged(count: 3))
         session.handle(.trigger(.backward))
-        XCTAssertEqual(session.state, .active(selection: 2))
+        XCTAssertEqual(session.state, .active(selection: 1))
         var negative = SwitchSession(count: 3)
         negative.handle(.listChanged(count: -1))
         XCTAssertEqual(negative.count, 0)

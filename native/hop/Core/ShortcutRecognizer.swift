@@ -11,11 +11,14 @@ public struct KeyEvent: Sendable, Equatable {
     public var keyCode: UInt16
     /// The modifiers held when the event happened. Bits outside `ModifierMask.all` are ignored.
     public var modifiers: ModifierMask
+    /// Whether this key-down is the keyboard's auto-repeat of a key held down, not a new press.
+    public var isRepeat: Bool
 
-    public init(_ kind: Kind, keyCode: UInt16, modifiers: ModifierMask = []) {
+    public init(_ kind: Kind, keyCode: UInt16, modifiers: ModifierMask = [], isRepeat: Bool = false) {
         self.kind = kind
         self.keyCode = keyCode
         self.modifiers = modifiers.intersection(.all)
+        self.isRepeat = kind == .keyDown && isRepeat
     }
 }
 
@@ -52,6 +55,13 @@ public struct Classification: Sendable, Equatable {
 /// Decides, for one input and the current session, whether the tap swallows the event and what it means to the
 /// session. Only a press that starts a switch and key presses that belong to an active switch are swallowed; modifier
 /// changes and key-ups always pass here, so apps never see a modifier stuck down.
+///
+/// Modifiers match exactly: the shortcut starts or steps a switch only with the holding modifier alone (forward) or
+/// with ⇧ (backward), and while a switch is active ←, → and Esc count only with the holding modifier, optionally plus
+/// ⇧. Any other modifier set (⌥⌘Tab, ⌥⌃→) passes and changes nothing.
+///
+/// The classifier sees one event at a time. Which press a key-up or an auto-repeat belongs to is
+/// `ShortcutRecognizer`'s job.
 public enum EventClassifier {
     public static func classify(_ input: TapInput, session: SwitchSession, shortcut: Shortcut) -> Classification {
         guard case let .key(key) = input else {
@@ -73,20 +83,15 @@ public enum EventClassifier {
         // The holding modifier is gone: it was released, possibly without a flags event the tap saw. The release
         // ends the switch; the event itself is the user's next keystroke and goes through.
         guard key.modifiers.contains(shortcut.holdModifier) else { return Classification(.pass, .modifierReleased) }
-        switch key.kind {
-        case .flagsChanged, .keyUp:
-            // A key-up is swallowed exactly when its key-down was, which only ShortcutRecognizer knows: a key held
-            // since before the switch started must still reach its app on release.
-            return .pass
-        case .keyDown:
-            switch key.keyCode {
-            case shortcut.keyCode:
-                return Classification(.swallow, .step(key.modifiers.contains(.shift) ? .backward : .forward))
-            case KeyCode.leftArrow: return Classification(.swallow, .step(.backward))
-            case KeyCode.rightArrow: return Classification(.swallow, .step(.forward))
-            case KeyCode.escape: return Classification(.swallow, .escape)
-            default: return .pass
-            }
+        guard key.kind == .keyDown, key.modifiers == shortcut.forwardModifiers || key.modifiers == shortcut.backwardModifiers
+        else { return .pass }
+        switch key.keyCode {
+        case shortcut.keyCode:
+            return Classification(.swallow, .step(key.modifiers == shortcut.backwardModifiers ? .backward : .forward))
+        case KeyCode.leftArrow: return Classification(.swallow, .step(.backward))
+        case KeyCode.rightArrow: return Classification(.swallow, .step(.forward))
+        case KeyCode.escape: return Classification(.swallow, .escape)
+        default: return .pass
         }
     }
 }
@@ -94,9 +99,12 @@ public enum EventClassifier {
 /// The session plus the classifier, as the event tap drives them: classifies each input, applies the resulting
 /// event, and reports what to do with the input and how a session ended.
 ///
-/// It swallows the key-up of every key-down it swallowed, even after the session has ended (Tab released after ⌥,
-/// for example), and no other key-up, so an app never receives a key-up without its key-down or misses the release
-/// of a key it saw go down.
+/// It decides once per physical press. A new key-down is classified and its disposition is remembered until the key
+/// goes up; the press's auto-repeats and its key-up get the same disposition, even after the session has ended (Tab
+/// released after ⌥, for example). So an app sees all of a press or none of it: it never receives a key-up without
+/// its key-down, or misses the release of a key it saw go down. A swallowed press's repeats keep stepping an active
+/// switch (holding Tab moves on) but never start or cancel one; a press the app saw never steps or cancels a switch.
+/// Any key event without the holding modifier still ends an active switch, because it shows the modifier is up.
 public struct ShortcutRecognizer: Sendable {
     public struct Result: Sendable, Equatable {
         public var disposition: Disposition
@@ -111,7 +119,8 @@ public struct ShortcutRecognizer: Sendable {
 
     public private(set) var session: SwitchSession
     public var shortcut: Shortcut
-    private var swallowedKeyDowns: Set<UInt16> = []
+    /// The disposition of each key's current press, from its key-down until its key-up.
+    private var presses: [UInt16: Disposition] = [:]
 
     public init(shortcut: Shortcut, windowCount: Int = 0) {
         self.shortcut = shortcut
@@ -119,19 +128,32 @@ public struct ShortcutRecognizer: Sendable {
     }
 
     public mutating func handle(_ input: TapInput) -> Result {
-        if case let .key(key) = input, key.kind == .keyUp, swallowedKeyDowns.remove(key.keyCode) != nil {
-            return Result(disposition: .swallow, outcome: nil)
-        }
-        if case .tapDisabled = input {
-            // Key-ups may have been missed; forget them rather than swallow a later, unrelated key-up.
-            swallowedKeyDowns.removeAll()
-        }
         let classification = EventClassifier.classify(input, session: session, shortcut: shortcut)
-        if case let .key(key) = input, key.kind == .keyDown, classification.disposition == .swallow {
-            swallowedKeyDowns.insert(key.keyCode)
+        let disposition: Disposition
+        var event = classification.event
+        switch input {
+        case .tapDisabled:
+            // Key-ups may have been missed; forget the presses rather than swallow a later, unrelated key-up.
+            presses.removeAll()
+            disposition = classification.disposition
+        case let .key(key) where key.kind == .flagsChanged:
+            disposition = classification.disposition
+        case let .key(key) where key.kind == .keyUp:
+            disposition = presses.removeValue(forKey: key.keyCode) ?? .pass
+        case let .key(key) where key.isRepeat:
+            // A press that began before the tap saw it belongs to its app.
+            disposition = presses[key.keyCode] ?? .pass
+            switch event {
+            case .step where disposition == .swallow, .modifierReleased: break
+            default: event = nil
+            }
+        case let .key(key):
+            // A new press, even of a key whose key-up was never seen, which replaces that stale press.
+            disposition = classification.disposition
+            presses[key.keyCode] = disposition
         }
-        let outcome = classification.event.flatMap { session.handle($0) }
-        return Result(disposition: classification.disposition, outcome: outcome)
+        let outcome = event.flatMap { session.handle($0) }
+        return Result(disposition: disposition, outcome: outcome)
     }
 
     /// Reports a new window count to the session; returns `.cancel` if that ended an active session.
@@ -139,9 +161,9 @@ public struct ShortcutRecognizer: Sendable {
         session.handle(.listChanged(count: count))
     }
 
-    /// Ends any active session because the tap is going away, and forgets pending key-ups.
+    /// Ends any active session because the tap is going away, and forgets the presses in progress.
     public mutating func reset() -> SwitchSession.Outcome? {
-        swallowedKeyDowns.removeAll()
+        presses.removeAll()
         return session.handle(.interrupted)
     }
 }

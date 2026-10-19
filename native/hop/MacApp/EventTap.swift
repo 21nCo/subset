@@ -81,7 +81,9 @@ private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
     case .keyDown, .keyUp, .flagsChanged:
         let kind: KeyEvent.Kind = type == .keyDown ? .keyDown : (type == .keyUp ? .keyUp : .flagsChanged)
         let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
-        return .key(KeyEvent(kind, keyCode: keyCode, modifiers: ModifierMask(eventFlags: event.flags.rawValue)))
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
+        return .key(KeyEvent(kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat))
     default:
         return nil
     }

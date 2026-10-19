@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // policy here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = MainMenu.make(perform: perform)
-        statusMenu = StatusMenuController(perform: perform, ready: false)
+        statusMenu = StatusMenuController(perform: perform, state: .needsPermission)
         switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
         refreshAccessibility()
 
@@ -63,16 +63,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Samples the Accessibility permission: installs the event tap when it is granted and removes it when it is
-    /// revoked. A tap the system refused while trusted is retried on the next sample.
+    /// revoked. A tap the system refused while trusted is retried on the next sample. Any sample that finds trust held
+    /// closes the onboarding window, whether or not the tap could be installed.
     private func refreshAccessibility() {
-        switch accessibility.update(trusted: AccessibilityPermission.isTrusted) {
-        case .granted: onboarding.close()
-        case .revoked: switchShortcut.remove()
-        case nil: break
+        if accessibility.update(trusted: AccessibilityPermission.isTrusted) == .revoked {
+            switchShortcut.remove()
         }
-        if accessibility.isTrusted == true, !switchShortcut.isInstalled {
-            switchShortcut.install()
+        let trusted = accessibility.isTrusted == true
+        if trusted {
+            onboarding.close()
+            if !switchShortcut.isInstalled { switchShortcut.install() }
         }
-        statusMenu?.update(ready: switchShortcut.isInstalled)
+        statusMenu?.update(state: !trusted ? .needsPermission : (switchShortcut.isInstalled ? .ready : .shortcutUnavailable))
     }
 }
