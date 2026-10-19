@@ -10,7 +10,8 @@ source_dir="$(cd "$(dirname "$0")/.." && pwd)"
 check="$source_dir/scripts/check-private-symbols.sh"
 shell_listing="$source_dir/Tests/Fixtures/shell-undefined-symbols.txt"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Restore permissions first: the unreadable-input cases below remove them.
+trap 'chmod -R u+rwx "$work" 2> /dev/null; rm -rf "$work"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -39,10 +40,14 @@ void use(void) { CGShadingRelease(0); CGSessionCopyCurrentDictionary(); CGSizeMa
 object cgs 'void *CGSCopyWindowProperty(int, int, void *, void **); void use(void) { CGSCopyWindowProperty(0, 0, 0, 0); }'
 object sls 'int SLSMainConnectionID(void); void use(void) { SLSMainConnectionID(); }'
 object ax 'int _AXUIElementGetWindow(void *, unsigned *); void use(void) { _AXUIElementGetWindow(0, 0); }'
+# C names that already start with an underscore get a second one in nm: __CGSDefaultConnection.
+object cgs_underscore 'int _CGSDefaultConnection(void); void use(void) { _CGSDefaultConnection(); }'
+object sls_underscore 'int _SLSMainConnectionID(void); void use(void) { _SLSMainConnectionID(); }'
 
 nm -u "$work/public.o" | grep -q '^_CGShadingRelease$' || fail "the public fixture does not reference _CGShadingRelease"
 expect 0 "public CoreGraphics and Accessibility functions" "$work/public.o"
-for name in cgs sls ax; do
+nm -u "$work/cgs_underscore.o" | grep -q '^__CGSDefaultConnection$' || fail "nm does not list __CGSDefaultConnection"
+for name in cgs sls ax cgs_underscore sls_underscore; do
   expect 1 "$name fixture" "$work/$name.o"
 done
 expect 1 "public and private objects together" "$work/public.o" "$work/cgs.o"
@@ -67,6 +72,28 @@ expect 2 "missing file" "$work/missing"
 expect 2 "a file nm cannot read" "$app/Info.plist"
 expect 2 "a folder without Mach-O files" "$app/Resources"
 expect 2 "missing listing" --listing "$work/missing"
+
+# Input that exists but cannot be read is an error too. Root reads everything, so these cases need another user.
+if [ "$(id -u)" -ne 0 ]; then
+  echo '_CGSCopyWindowProperty' > "$work/unreadable.txt"
+  chmod 000 "$work/unreadable.txt"
+  expect 2 "unreadable listing" --listing "$work/unreadable.txt"
+
+  # A private binary in a subfolder that cannot be listed must not be skipped while the rest of the bundle passes.
+  hidden="$work/Hidden.app/Contents"
+  mkdir -p "$hidden/MacOS" "$hidden/Frameworks/Priv"
+  cp "$work/public.o" "$hidden/MacOS/Hop"
+  cp "$work/cgs.o" "$hidden/Frameworks/Priv/Priv"
+  chmod 000 "$hidden/Frameworks/Priv"
+  expect 2 "bundle with an unreadable subfolder" "$work/Hidden.app"
+  chmod 755 "$hidden/Frameworks/Priv"
+  chmod 000 "$hidden/Frameworks/Priv/Priv"
+  expect 2 "bundle with an unreadable file" "$work/Hidden.app"
+  chmod 644 "$hidden/Frameworks/Priv/Priv"
+  expect 1 "the same bundle once readable" "$work/Hidden.app"
+else
+  echo "skipped the unreadable-input cases: running as root"
+fi
 
 # The recorded listing of the shell passes; the same listing with one private symbol added fails.
 expect 0 "the shell's recorded listing" --listing "$shell_listing"

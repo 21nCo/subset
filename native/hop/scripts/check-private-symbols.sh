@@ -6,15 +6,16 @@
 #   sh scripts/check-private-symbols.sh --listing <recorded `nm -u` output>...
 #
 # For an app bundle, every Mach-O file inside it is checked, not just Contents/MacOS/Hop: a Debug build keeps the
-# app's code in Contents/MacOS/Hop.debug.dylib. Matching is on symbol names, so public CoreGraphics functions whose
-# names merely start with CGS (CGShading*, CGSession*, CGSize*, CGSetDisplay*) pass: a forbidden name continues with
-# an uppercase letter. A symbol resolved at run time with dlsym does not appear in `nm -u` and is not caught here.
+# app's code in Contents/MacOS/Hop.debug.dylib. Matching is on symbol names after any number of leading underscores
+# (a C function already named _CGSDefaultConnection is __CGSDefaultConnection in nm), so public CoreGraphics
+# functions whose names merely start with CGS (CGShading*, CGSession*, CGSize*, CGSetDisplay*) pass: a forbidden
+# name continues with an uppercase letter. A symbol resolved at run time with dlsym does not appear in `nm -u` and is not caught here.
 #
 # Exit status: 0 when nothing forbidden is linked, 1 when a forbidden symbol is found, 2 for a usage error or a
-# file that cannot be read.
+# file or folder that cannot be read completely.
 set -eu
 
-forbidden='^(_(CGS|SLS)[A-Z]|__?AXUIElementGetWindow$)'
+forbidden='^(_+(CGS|SLS)[A-Z]|_+AXUIElementGetWindow$)'
 
 usage() {
   echo "usage: $0 <Hop.app | binary | static library>... | --listing <nm -u output>..." >&2
@@ -35,13 +36,25 @@ check() {
   fi
 }
 
-# macho_files <folder>: the Mach-O files in a folder, one per line.
+# macho_files <folder>: the Mach-O files in a folder, one per line. Exits 2 when any part of the folder cannot be
+# listed or any file in it cannot be read, so a hidden binary is never skipped.
 macho_files() {
-  find "$1" -type f -print | sort | while IFS= read -r file; do
-    case "$(file -b "$file")" in
+  if ! files="$(find "$1" -type f -print)"; then
+    echo "could not list every file in $1" >&2
+    exit 2
+  fi
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if [ ! -r "$file" ] || ! kind="$(file -b "$file")"; then
+      echo "cannot read $file" >&2
+      exit 2
+    fi
+    case "$kind" in
       Mach-O*) printf '%s\n' "$file" ;;
     esac
-  done
+  done <<EOF
+$(printf '%s\n' "$files" | sort)
+EOF
 }
 
 # check_binary <Mach-O file or static library>
@@ -59,12 +72,16 @@ if [ "$1" = "--listing" ]; then
   [ $# -gt 0 ] || usage
   for file in "$@"; do
     [ -f "$file" ] || { echo "no such listing: $file" >&2; exit 2; }
-    check "$file" "$(cat "$file")"
+    if ! listing="$(cat "$file")"; then
+      echo "cannot read listing $file" >&2
+      exit 2
+    fi
+    check "$file" "$listing"
   done
 else
   for path in "$@"; do
     if [ -d "$path" ]; then
-      binaries="$(macho_files "$path")"
+      binaries="$(macho_files "$path")" || exit 2
       [ -n "$binaries" ] || { echo "no Mach-O files in $path" >&2; exit 2; }
       # A here-document keeps the loop in this shell, so check can record what it found.
       while IFS= read -r binary; do
