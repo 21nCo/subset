@@ -157,7 +157,9 @@ const projection = z.strictObject({
   next: intervalStep.nullable()
 });
 // A snapshot's timer meets the stored timer's cross-field rules, so a view can re-project it.
-const snapshot = z.strictObject({ definition: timerDefinition, runtime: timerRuntime, projection }).superRefine(checkTimer);
+const snapshot = z.strictObject({ definition: timerDefinition, runtime: timerRuntime, projection })
+  .superRefine(checkTimer)
+  .meta({ allOf: timerRules });
 const boardResult = z.strictObject({ schemaVersion: z.literal(TIMER_SCHEMA_VERSION), observedAt: epochMs, timers: z.array(snapshot) });
 const timerError = z.strictObject({
   code: z.enum(['not_found', 'invalid_state', 'limit_reached', 'invalid_input']),
@@ -188,8 +190,10 @@ const startInput = z.strictObject({ id: timerId.optional(), timer: timerSpec.opt
 const presetsSaveInput = z.strictObject({ name, timer: presetTimerSpec });
 const presetIdInput = z.strictObject({ id: presetId });
 
-const timerResult = z.strictObject({ timer: snapshot });
+// `observedAt` is when the host ran the operation, so a view can order the change against boards it reads.
+const timerResult = z.strictObject({ timer: snapshot, observedAt: epochMs });
 const removedResult = z.strictObject({ removedId: z.string() });
+const timerRemovedResult = removedResult.extend({ observedAt: epochMs });
 
 /** Runtime validators, used by the operations and by `parseStore`. */
 export const validators = {
@@ -218,7 +222,7 @@ export const validators = {
     lap: timerResult,
     skip: timerResult,
     reset: timerResult,
-    remove: removedResult,
+    remove: timerRemovedResult,
     list: boardResult,
     get: timerResult,
     'presets.list': z.strictObject({ presets: z.array(preset) }),

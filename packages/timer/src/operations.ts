@@ -18,9 +18,15 @@ export type OperationOutcome<Result> = { ok: true; store: TimerStore; result: Re
 
 export interface TimerResult {
   timer: TimerSnapshot;
+  /** The operation's `now`: when the host ran it, on the clock of `TimerBoardResult.observedAt`. */
+  observedAt: number;
 }
 export interface RemovedResult {
   removedId: string;
+}
+/** `remove`'s result; `observedAt` as in `TimerResult`. */
+export interface TimerRemovedResult extends RemovedResult {
+  observedAt: number;
 }
 
 export type WriteClass = 'read' | 'write' | 'destructive';
@@ -64,7 +70,7 @@ function withTimer(store: TimerStore, id: string, now: number): { ok: true; time
 function replaceTimer(store: TimerStore, index: number, timer: Timer, now: number): OperationOutcome<TimerResult> {
   const timers = store.timers.slice();
   timers[index] = timer;
-  return success({ ...store, timers }, { timer: timerSnapshot(timer, now) });
+  return success({ ...store, timers }, { timer: timerSnapshot(timer, now), observedAt: now });
 }
 
 /**
@@ -161,7 +167,7 @@ function create(store: TimerStore, input: unknown, now: number): OperationOutcom
   const parsed = parse(validators.inputs.create, input);
   if (!parsed.ok) return parsed;
   const added = addTimer(store, parsed.value, now);
-  return added.ok ? success(added.store, { timer: timerSnapshot(added.timer, now) }) : added;
+  return added.ok ? success(added.store, { timer: timerSnapshot(added.timer, now), observedAt: now }) : added;
 }
 
 function start(store: TimerStore, input: unknown, now: number): OperationOutcome<TimerResult> {
@@ -246,12 +252,12 @@ function reset(store: TimerStore, input: unknown, now: number): OperationOutcome
   return update(store, input, now, (timer) => ({ ok: true, timer: { ...timer, runtime: idleRuntime() } }));
 }
 
-function remove(store: TimerStore, input: unknown, now: number): OperationOutcome<RemovedResult> {
+function remove(store: TimerStore, input: unknown, now: number): OperationOutcome<TimerRemovedResult> {
   const parsed = parse(validators.inputs.remove, input);
   if (!parsed.ok) return parsed;
   const found = withTimer(store, parsed.value.id, now);
   if (!found.ok) return found;
-  return success({ ...store, timers: store.timers.filter((_, index) => index !== found.index) }, { removedId: parsed.value.id });
+  return success({ ...store, timers: store.timers.filter((_, index) => index !== found.index) }, { removedId: parsed.value.id, observedAt: now });
 }
 
 function list(store: TimerStore, input: unknown, now: number): OperationOutcome<TimerBoardResult> {
@@ -263,7 +269,7 @@ function get(store: TimerStore, input: unknown, now: number): OperationOutcome<T
   const parsed = parse(validators.inputs.get, input);
   if (!parsed.ok) return parsed;
   const found = withTimer(store, parsed.value.id, now);
-  return found.ok ? success(store, { timer: timerSnapshot(store.timers[found.index], now) }) : found;
+  return found.ok ? success(store, { timer: timerSnapshot(store.timers[found.index], now), observedAt: now }) : found;
 }
 
 function listPresets(store: TimerStore, input: unknown): OperationOutcome<{ presets: Preset[] }> {

@@ -7,8 +7,8 @@ import { emptyStore, operations, schemas, timerBoard } from '../dist/index.js';
 import {
   CONFIRM_MS, boardView, cancelsRepeat, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyBoardState, emptyCountdownDraft,
   emptyIntervalDraft, failureText, focusDisplaced, formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl,
-  parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets, readRefresh,
-  readSettled, replySettled, reproject, ringProgress
+  needsRead, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets,
+  readRefresh, readSettled, readsAfter, replySettled, reproject, ringProgress
 } from '../dist/view/view-model.js';
 
 const T0 = Date.UTC(2026, 9, 19, 8, 0, 0);
@@ -327,7 +327,7 @@ test('a failed action names its operation', () => {
   assert.equal(failureText(readOutcome('create', null, new Error('socket closed')).failure), 'Create failed: socket closed');
   assert.equal(readOutcome('reset', 't_1', undefined).ok, false);
   assert.equal(readOutcome('reset', 't_1', { error: {} }).ok, false);
-  assert.deepEqual(readOutcome('remove', 't_1', { removedId: 't_1' }), { ok: true, result: { removedId: 't_1' } });
+  assert.deepEqual(readOutcome('remove', 't_1', { removedId: 't_1', observedAt: T0 }), { ok: true, result: { removedId: 't_1', observedAt: T0 } });
 });
 
 // One store per timer operation in which it succeeds, with its input; create starts from an empty store.
@@ -355,14 +355,16 @@ test('a reply that does not match its operation’s result is a failure, never a
     const { id, reply } = scenario(operation);
     assert.deepEqual(readOutcome(operation, id, reply), { ok: true, result: reply }, operation);
     const broken = operation === 'remove'
-      ? [{}, { removedId: 7 }, { removedId: id, extra: true }]
+      ? [{}, { removedId: id }, { ...reply, removedId: 7 }, { ...reply, extra: true }]
       : [
           {},
-          { timer: 'x' },
+          // Without the time it committed, the board could not order the change.
+          { timer: reply.timer },
+          { ...reply, timer: 'x' },
           // Structurally broken snapshots that `project` could not render.
-          { timer: { ...reply.timer, definition: { ...reply.timer.definition, kind: 'interval', segments: [], rounds: 0 } } },
-          { timer: { ...reply.timer, runtime: { ...reply.timer.runtime, status: 'sleeping' } } },
-          { timer: { ...reply.timer, projection: undefined } }
+          { ...reply, timer: { ...reply.timer, definition: { ...reply.timer.definition, kind: 'interval', segments: [], rounds: 0 } } },
+          { ...reply, timer: { ...reply.timer, runtime: { ...reply.timer.runtime, status: 'sleeping' } } },
+          { ...reply, timer: { ...reply.timer, projection: undefined } }
         ];
     for (const value of broken) {
       const outcome = readOutcome(operation, id, value);
@@ -371,7 +373,7 @@ test('a reply that does not match its operation’s result is a failure, never a
     }
     // A reply for another timer than the one acted on.
     if (id !== null) {
-      const other = operation === 'remove' ? { removedId: 't_zzzzzzzz' } : { timer: { ...reply.timer, definition: { ...reply.timer.definition, id: 't_zzzzzzzz' } } };
+      const other = operation === 'remove' ? { ...reply, removedId: 't_zzzzzzzz' } : { ...reply, timer: { ...reply.timer, definition: { ...reply.timer.definition, id: 't_zzzzzzzz' } } };
       assert.equal(failureText(readOutcome(operation, id, other).failure), `${failureText({ operation, message: '' })}The host replied for timer t_zzzzzzzz instead of ${id}.`);
     }
   }
@@ -382,51 +384,64 @@ const shown = (board) => board.timers.map((timer) => [timer.definition.id, timer
 const held = (store) => store.timers.map((timer) => [timer.definition.id, timer.runtime]);
 const list = (store, at) => operations.list(store, {}, at).result;
 
-test('a successful change stays shown until a read issued after it confirms it, for every timer operation', () => {
+test('a change stays shown until a board observed after it committed, from the host or a read, for every timer operation', () => {
   for (const operation of Object.keys(SCENARIOS)) {
     const { store, input, ...scene } = { input: undefined, ...SCENARIOS[operation]() };
     const reply = operations[operation](store, input ?? { id: scene.id }, AT);
     assert.ok(reply.ok, operation);
+    assert.equal(reply.result.observedAt, AT, `${operation} reply carries the time it committed`);
     const id = scene.id ?? reply.result.timer.definition.id;
-    // The host's result was observed before the change committed.
-    const before = timerBoard(store, AT - 50);
+    const change = held(reply.store);
+    // Another surface then removes the timer acted on (after a removal, adds one).
+    const later = operation === 'remove'
+      ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT + 30).store
+      : operations.remove(reply.store, { id }, AT + 30).store;
+    const newer = timerBoard(later, AT + 40);
+
     // A read issued for an earlier change, then this change's reply, then the read it issues.
     let { state, issued: earlier } = readIssued(emptyBoardState());
     state = replySettled(state, operation, scene.id, reply.result).state;
     const own = readIssued(state);
     state = own.state;
-    assert.deepEqual(shown(boardView(before, state)), held(reply.store), `${operation} over an older host result`);
-
-    let confirmed;
-    for (const observedAt of [AT - 10, AT + 20]) {
-      // The earlier read, observed before the commit, settles late, at an older or the same observedAt.
-      const late = readSettled(state, earlier, list(store, observedAt)).state;
-      assert.deepEqual(shown(boardView(before, late)), held(reply.store), `${operation}: earlier read at ${observedAt - AT}`);
-      // Its own read fails: the change stays shown, and so does the failure.
-      const failed = readSettled(late, own.issued, new Error('offline'));
-      assert.equal(failureText(failed.failure), 'List failed: offline');
-      assert.deepEqual(shown(boardView(before, failed.state)), held(reply.store), `${operation} after a failed read`);
-      // Its own read, at the same observedAt as the earlier one, wins; that one settling after it changes nothing.
-      confirmed = readSettled(late, own.issued, list(reply.store, AT + 20)).state;
-      assert.deepEqual(confirmed.pending, [], operation);
-      assert.deepEqual(readSettled(confirmed, earlier, list(store, AT + 20)), { state: confirmed, failure: null });
-      assert.deepEqual(shown(boardView(before, confirmed)), held(reply.store), `${operation} confirmed`);
-      // A host result observed at the same time as the board's read loses the tie to it.
-      assert.deepEqual(shown(boardView(timerBoard(store, AT + 20), confirmed)), held(reply.store), `${operation} on a tie`);
+    // Host results observed before the commit, or in its millisecond, arriving after the reply do not hide it;
+    // a created timer shows although they predate it.
+    for (const before of [timerBoard(store, AT - 50), timerBoard(store, AT)]) {
+      assert.deepEqual(shown(boardView(before, state)), change, `${operation} over a host result at ${before.observedAt - AT}`);
     }
-
-    // Another surface then removes the timer acted on (after a removal, adds one).
-    const later = operation === 'remove'
-      ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT + 50).store
-      : operations.remove(reply.store, { id }, AT + 50).store;
-    const newer = timerBoard(later, AT + 60);
-    // A host result observed after the confirming read replaces it.
+    const before = timerBoard(store, AT - 50);
+    // The earlier read settles late. Observed before the commit, or in its millisecond, it does not hide the
+    // change; observed after it, it holds the change and retires it.
+    for (const late of [list(store, AT - 10), list(store, AT)]) {
+      assert.deepEqual(shown(boardView(before, readSettled(state, earlier, late).state)), change, `${operation}: earlier read at ${late.observedAt - AT}`);
+    }
+    assert.deepEqual(readSettled(state, earlier, list(reply.store, AT + 5)).state.pending, [], `${operation}: earlier read after the commit`);
+    // Its own read fails: the change stays shown, and the board asks to read again on the next host result.
+    const failed = readSettled(state, own.issued, new Error('offline'));
+    assert.equal(failureText(failed.failure), 'List failed: offline');
+    assert.deepEqual(shown(boardView(before, failed.state)), change, `${operation} after a failed read`);
+    assert.equal(needsRead(before, failed.state), true);
+    // Newer host results then win, so a failed read never leaves the change shown over them.
+    assert.deepEqual(shown(boardView(newer, failed.state)), held(later), `${operation}: newer host result after a failed read`);
+    assert.equal(needsRead(newer, failed.state), false);
+    // Its own read, in the commit's millisecond, confirms it; the earlier read settling after it changes nothing.
+    const confirmed = readSettled(state, own.issued, list(reply.store, AT)).state;
+    assert.deepEqual(confirmed.pending, [], operation);
+    assert.deepEqual(readSettled(confirmed, earlier, list(store, AT)), { state: confirmed, failure: null });
+    // A host result observed at the same time as the board's read loses the tie to it; a newer one wins.
+    assert.deepEqual(shown(boardView(timerBoard(store, AT), confirmed)), change, `${operation} on a tie`);
     assert.deepEqual(shown(boardView(newer, confirmed)), held(later), `${operation} after a later change`);
-    // Before any read confirms it, the change never brings back the timer that result removed; a
-    // created timer is kept, since a board may predate it.
-    const removed = boardView(newer, state).timers.some((timer) => timer.definition.id === id);
-    if (operation !== 'remove') assert.equal(removed, operation === 'create', `${operation} over a later removal`);
+
+    // The reply arrives only after the host passed that newer result, and every read fails: the late reply
+    // hides nothing and brings back no removed timer.
+    let delayed = replySettled(emptyBoardState(), operation, scene.id, reply.result).state;
+    delayed = readSettled(readIssued(delayed).state, delayed.seq + 1, new Error('offline')).state;
+    assert.deepEqual(shown(boardView(newer, delayed)), held(later), `${operation} reply after a newer host result`);
+    assert.equal(needsRead(newer, delayed), false);
+    // A refused change was still answered by the host, so the board reads again; a call that threw may not have.
+    assert.equal(readsAfter(operation, { error: { code: 'invalid_state', message: 'no' } }), true);
+    assert.equal(readsAfter(operation, new Error('offline')), false);
   }
+  assert.equal(readsAfter('list', {}), false);
 });
 
 test('overlapping changes to two timers and reads settling in any order, or failing, end at the host state', () => {
@@ -463,8 +478,8 @@ test('overlapping changes to two timers and reads settling in any order, or fail
     }
   }
 
-  // A read taken after a create, while a later start is pending, holds the timer, so the board no
-  // longer predates it: once a newer host result drops the timer, the start does not bring it back.
+  // A read observed after a create retires it while a later start stays shown; once a newer host
+  // result drops the timer, the start does not bring it back.
   const created = operations.create(emptyStore(), STOPWATCH, AT);
   const id = created.result.timer.definition.id;
   const started = operations.start(created.store, { id }, AT + 10);
@@ -474,6 +489,10 @@ test('overlapping changes to two timers and reads settling in any order, or fail
   state = readSettled(state, first.issued, list(created.store, AT + 5)).state;
   assert.deepEqual(shown(boardView(timerBoard(emptyStore(), AT - 100), state)), held(started.store));
   assert.deepEqual(shown(boardView(timerBoard(operations.remove(started.store, { id }, AT + 20).store, AT + 30), state)), []);
+  // Of two replies for one timer, the later commit stays whichever arrives last.
+  const paused = operations.pause(started.store, { id }, AT + 20);
+  const replies = replySettled(replySettled(emptyBoardState(), 'pause', id, paused.result).state, 'start', id, started.result).state;
+  assert.deepEqual(shown(boardView(timerBoard(emptyStore(), AT - 100), replies)), held(paused.store));
 });
 
 test('the read after a change shows only a list result the board can render, or a List failure', async () => {
@@ -493,14 +512,14 @@ test('board results and replies whose timers break the stored timer rules are re
     const { store, id } = timerAfter({ timer: spec }, [['start', 0], ['pause', 5_000]]);
     const board = timerBoard(store, AT);
     assert.equal(readBoardResult(board).ok, true);
-    assert.equal(readOutcome('pause', id, { timer: board.timers[0] }).ok, true);
+    assert.equal(readOutcome('pause', id, { timer: board.timers[0], observedAt: AT }).ok, true);
     // Paused at its total, as no operation leaves a timer: re-projecting it would show a zero-length step.
     const broken = structuredClone(board);
     broken.timers[0].runtime.accumulatedMs = 40_000 + (cooldownMs ?? 0);
     const read = readBoardResult(broken);
     assert.equal(read.ok, false, `cooldown ${cooldownMs}`);
     assert.match(read.message, /^timers\.0\.runtime\.accumulatedMs: /);
-    const reply = readOutcome('pause', id, { timer: broken.timers[0] });
+    const reply = readOutcome('pause', id, { timer: broken.timers[0], observedAt: AT });
     assert.equal(reply.ok, false);
     assert.match(failureText(reply.failure), /^Pause failed: The host's reply does not match the Timer contract \(timer\.runtime\.accumulatedMs: /);
   }

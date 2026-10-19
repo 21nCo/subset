@@ -200,8 +200,15 @@ export function readOutcome(operation: OperationName, timerId: string | null, ou
   return { ok: true, result };
 }
 
-/** The operations that change timers. After each one succeeds, the board reads the host's board again. */
+/** The operations that change timers. */
 export const MUTATIONS: ReadonlySet<OperationName> = new Set(['create', 'start', 'pause', 'resume', 'lap', 'skip', 'reset', 'remove']);
+
+/**
+ * Whether the board reads the host's board after `operation` gave back `outcome`: after every change
+ * the host answered, refused ones included, since a refusal says the board may be behind the host.
+ * A call that threw may never have reached the host.
+ */
+export const readsAfter = (operation: OperationName, outcome: unknown) => MUTATIONS.has(operation) && !(outcome instanceof Error);
 
 /**
  * Reads the `list` the board runs after a successful change: a list result the board can render, or
@@ -215,46 +222,58 @@ export function readRefresh(outcome: unknown): { ok: true; result: TimerBoardRes
 }
 
 /**
- * A successful change the board shows over the board it has read, until a read confirms it. `timer`
- * is null for a removal. `created` is the sequence of a create reply until a read issued after it is
- * taken: until then a board may predate the timer, so it is added even when that board lacks it.
+ * A successful change the board shows over the board it has read, until a board observed after it
+ * committed replaces it. `timer` is null for a removal.
  */
 export interface PendingChange {
   id: string;
   timer: TimerSnapshot | null;
+  /** When the host ran the change: its reply's `observedAt`. */
+  committed: number;
+  /** When the board received the reply, in its local sequence. */
   received: number;
-  created: number | null;
 }
 
 /**
  * What the board knows beyond the host's `result`, changed only by `replySettled`, `readIssued` and
  * `readSettled` and shown by `boardView`. Each settled reply and each issued read takes the next
- * number of a local sequence (`seq`), so the board orders reads among themselves and against replies
- * by when it issued or received them, never by a clock.
+ * number of a local sequence (`seq`), so the board orders its reads among themselves by when it
+ * issued them; it orders changes against boards by the host's `observedAt`, never by its own clock.
  */
 export interface BoardState {
   seq: number;
   /** The latest-issued `list` read that succeeded. */
   read: { result: TimerBoardResult; issued: number } | null;
-  /** At most one per timer, the latest reply for it. */
+  /** At most one per timer, the latest the host committed. */
   pending: readonly PendingChange[];
+  /** The latest settled read failed and no later-issued read has succeeded. */
+  readFailed: boolean;
 }
 
-export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, pending: [] });
+export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, pending: [], readFailed: false });
+
+/**
+ * Whether `board` shows `change` or a later state of its timer: the host observed it after the
+ * change committed. Within the same millisecond only a read the board issued after receiving the
+ * change can say so (`issued`, null for the host's result), so the change stays until one does.
+ */
+const supersedes = (board: TimerBoardResult, issued: number | null, change: PendingChange) =>
+  board.observedAt > change.committed || (board.observedAt === change.committed && issued !== null && issued > change.received);
 
 /**
  * Settles one action's reply (see `readOutcome`). A failure changes nothing. A successful change is
- * pending until a later read confirms it, so a host result or a read observed before it committed
- * cannot hide it, whenever they arrive.
+ * pending until the board takes a board observed after it committed; until then it shows over any
+ * board observed before, whenever that arrives. Of two changes to one timer the later commit stays.
  */
 export function replySettled(state: BoardState, operation: OperationName, timerId: string | null, outcome: unknown): { state: BoardState; outcome: Outcome } {
   const read = readOutcome(operation, timerId, outcome);
-  const reply = read.ok ? (read.result as { timer?: TimerSnapshot; removedId?: string }) : {};
+  const reply = read.ok ? (read.result as { timer?: TimerSnapshot; removedId?: string; observedAt?: number }) : {};
   const id = reply.timer?.definition.id ?? reply.removedId;
-  if (!MUTATIONS.has(operation) || id === undefined) return { state, outcome: read };
+  if (!MUTATIONS.has(operation) || id === undefined || reply.observedAt === undefined) return { state, outcome: read };
   const seq = state.seq + 1;
   const previous = state.pending.find((change) => change.id === id);
-  const change = { id, timer: reply.timer ?? null, received: seq, created: operation === 'create' ? seq : (previous?.created ?? null) };
+  if (previous && previous.committed > reply.observedAt) return { state: { ...state, seq }, outcome: read };
+  const change = { id, timer: reply.timer ?? null, committed: reply.observedAt, received: seq };
   const pending = previous ? state.pending.map((each) => (each === previous ? change : each)) : [...state.pending, change];
   return { state: { ...state, seq, pending }, outcome: read };
 }
@@ -267,40 +286,51 @@ export function readIssued(state: BoardState): { state: BoardState; issued: numb
 
 /**
  * Settles the `list` read numbered `issued`. Reads count in the order the board issued them, so one
- * that settles after a later-issued read is ignored, whatever its `observedAt`. A taken read was
- * observed after every reply received before it was issued: it holds those changes, or a later one
- * that replaced them, and they stop being pending. A failed read changes nothing; its failure is
- * shown unless a later-issued read already succeeded.
+ * that settles after a later-issued read is ignored, whatever its `observedAt`. A taken read retires
+ * the changes it supersedes. A failed read changes nothing but `readFailed`; its failure is shown
+ * unless a later-issued read already succeeded.
  */
 export function readSettled(state: BoardState, issued: number, outcome: unknown): { state: BoardState; failure: ActionFailure | null } {
   if (state.read && issued < state.read.issued) return { state, failure: null };
   const read = readRefresh(outcome);
-  if (!read.ok) return { state, failure: read.failure };
-  const pending = state.pending
-    .filter((change) => change.received > issued)
-    .map((change) => (change.created !== null && change.created < issued ? { ...change, created: null } : change));
-  return { state: { ...state, read: { result: read.result, issued }, pending }, failure: null };
+  if (!read.ok) return { state: { ...state, readFailed: true }, failure: read.failure };
+  const pending = state.pending.filter((change) => !supersedes(read.result, issued, change));
+  return { state: { ...state, read: { result: read.result, issued }, pending, readFailed: false }, failure: null };
+}
+
+/** The base board, the host's `result` or the board's own latest read, and the changes shown over it. */
+function overlay(host: TimerBoardResult, state: BoardState) {
+  const own = state.read && state.read.result.observedAt >= host.observedAt ? state.read : null;
+  const base = own?.result ?? host;
+  return { base, changes: state.pending.filter((change) => !supersedes(base, own?.issued ?? null, change)) };
 }
 
 /**
  * The board to show. Its base is the host's `result` or the board's own latest read, whichever the
- * host observed later; on a tie the read, which the board issued after a change. Every pending
- * change is laid over that base: a snapshot replaces its timer and a removal drops it. A pending
- * change never brings back a timer the base lacks, as that base shows it removed, except a timer the
- * base may predate (`created`).
+ * host observed later; on a tie the read, which the board issued after a change. Each change the base
+ * does not supersede is laid over it: a snapshot replaces or adds its timer and a removal drops it.
+ * A base observed after a change, from the host or a read, wins, so a late reply never undoes a newer
+ * change or brings back a timer that base lacks.
  */
 export function boardView(host: TimerBoardResult, state: BoardState): TimerBoardResult {
-  const base = state.read && state.read.result.observedAt >= host.observedAt ? state.read.result : host;
-  if (!state.pending.length) return base;
+  const { base, changes } = overlay(host, state);
+  if (!changes.length) return base;
   const timers = base.timers.flatMap((timer) => {
-    const change = state.pending.find((each) => each.id === timer.definition.id);
+    const change = changes.find((each) => each.id === timer.definition.id);
     if (!change) return [timer];
     return change.timer ? [change.timer] : [];
   });
   const has = new Set(base.timers.map((timer) => timer.definition.id));
-  for (const change of state.pending) if (change.timer && change.created !== null && !has.has(change.id)) timers.push(change.timer);
+  for (const change of changes) if (change.timer && !has.has(change.id)) timers.push(change.timer);
   return { ...base, timers };
 }
+
+/**
+ * Whether the board should read the host's board again: its last read failed and a change is still
+ * laid over the base. The board asks when the host passes a new result, so a result that does not
+ * retire the change (observed before it, or in its millisecond) prompts a read that can.
+ */
+export const needsRead = (host: TimerBoardResult, state: BoardState) => state.readFailed && overlay(host, state).changes.length > 0;
 
 /** The share of a timer's ring that is filled, from 0 to 1, or null for a stopwatch, which has no end. */
 export function ringProgress(projection: TimerSnapshot['projection']): number | null {
