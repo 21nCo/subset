@@ -74,6 +74,57 @@ final class WindowRefRegistryTests: XCTestCase {
         XCTAssertEqual(registry.refs(of: pid), [a, focused], "x and b are gone; the focus ref is kept")
     }
 
+    func testAWindowFocusedAfterANewerReadBeganKeepsTheRefAnOlderReadAssigned() {
+        var registry = WindowRefRegistry<String>()
+        let a = read(["a"], into: &registry)[0]
+        var older = registry.beginRead(of: pid)
+        var newer = registry.beginRead(of: pid)
+        XCTAssertEqual(registry.ref(for: "a", in: &newer), a)
+        // The older read lists x, which opened after the newer read listed the windows; then x is focused.
+        let x = registry.ref(for: "x", in: &older)
+        XCTAssertEqual(registry.ref(for: "x", pid: pid), x)
+        registry.commit(newer)
+        XCTAssertEqual(registry.refs(of: pid), [a, x], "the focus change confirmed x after the newer read began")
+        registry.commit(older)
+        XCTAssertEqual(read(["a", "x"], into: &registry), [a, x])
+    }
+
+    func testAKnownWindowFocusedAfterAReadBeganSurvivesThatReadsCommit() {
+        var registry = WindowRefRegistry<String>()
+        let refs = read(["a", "b"], into: &registry)
+        var pending = registry.beginRead(of: pid)
+        XCTAssertEqual(registry.ref(for: "a", in: &pending), refs[0])
+        // b is missing from the read's list but is focused after the read began: it is still open.
+        XCTAssertEqual(registry.ref(for: "b", pid: pid), refs[1])
+        registry.commit(pending)
+        XCTAssertEqual(registry.refs(of: pid), Set(refs))
+        XCTAssertEqual(read(["a", "b"], into: &registry), refs, "the next read finds b's ref")
+    }
+
+    func testAReadConfirmsWhatItSawOnlyAsOfItsStart() {
+        var registry = WindowRefRegistry<String>()
+        let refs = read(["a", "k"], into: &registry)
+        var slower = registry.beginRead(of: pid)
+        var newer = registry.beginRead(of: pid)
+        XCTAssertEqual(registry.ref(for: "a", in: &newer), refs[0])
+        // The slower read reaches k after the newer read found k closed: its sighting is older than the newer listing.
+        XCTAssertEqual(registry.ref(for: "k", in: &slower), refs[1])
+        registry.commit(newer)
+        XCTAssertEqual(registry.refs(of: pid), [refs[0]], "k closed")
+
+        let m = read(["a", "m"], into: &registry)[1]
+        var stale = registry.beginRead(of: pid)
+        _ = read(["a", "m"], into: &registry)
+        var current = registry.beginRead(of: pid)
+        // A stale read sights m after a current read began; it confirms nothing, so the current read still drops m.
+        XCTAssertEqual(registry.ref(for: "m", in: &stale), m)
+        XCTAssertEqual(registry.ref(for: "a", in: &current), refs[0])
+        registry.commit(current)
+        XCTAssertEqual(registry.refs(of: pid), [refs[0]], "m closed")
+        registry.commit(stale)
+        XCTAssertEqual(registry.refs(of: pid), [refs[0]])
+    }
+
     func testAReadOfAnAppForgottenAfterItBeganKeepsNothing() {
         var registry = WindowRefRegistry<String>()
         _ = read(["a"], into: &registry)
@@ -122,24 +173,53 @@ final class WindowRefRegistryTests: XCTestCase {
         XCTAssertEqual(list.windows.count, 2)
         XCTAssertEqual(list.windows.first?.ref, b, "b keeps its ref and stays most recent")
     }
+
+    /// Two refreshes give up on an app. The older read lists x, a window the newer read missed, and x is focused before
+    /// the newer read commits: x keeps its ref and is first on the next refresh.
+    func testAWindowFocusedBetweenTwoAbandonedReadsKeepsItsPlace() {
+        let source = RegistryWindowSource(app: WindowFixture.app(pid, "Editor"), windows: ["a"])
+        var lister = WindowLister(source: source, ownProcess: WindowFixture.ownProcess, appBudget: .milliseconds(20))
+        XCTAssertEqual(lister.refresh().windows.count, 1)
+
+        let olderGate = DispatchSemaphore(value: 0)
+        let olderDone = DispatchSemaphore(value: 0)
+        source.hold(until: olderGate, signalling: olderDone, beforeListing: true)
+        XCTAssertEqual(lister.refresh().skippedApps.map(\.pid), [pid], "the older read is abandoned before it lists")
+        let newerGate = DispatchSemaphore(value: 0)
+        let newerDone = DispatchSemaphore(value: 0)
+        source.hold(until: newerGate, signalling: newerDone)
+        XCTAssertEqual(lister.refresh().skippedApps.map(\.pid), [pid], "the newer read lists a and is abandoned")
+
+        source.open("x")
+        olderGate.signal()
+        XCTAssertEqual(olderDone.wait(timeout: .now() + 5), .success)
+        let x = source.focus("x")
+        lister.noteFocused(x, pid: pid)
+        newerGate.signal()
+        XCTAssertEqual(newerDone.wait(timeout: .now() + 5), .success)
+
+        let list = lister.refresh()
+        XCTAssertEqual(list.windows.count, 2)
+        XCTAssertEqual(list.windows.first?.ref, x, "x keeps its ref and stays most recent")
+    }
 }
 
 /// One app whose windows are named by strings, with refs from a `WindowRefRegistry` as `AXWindowSource` assigns
-/// them. A read can be held after it has listed the windows and before it commits.
+/// them. A read can be held before it lists the windows, or after it has listed them and before it commits.
 private final class RegistryWindowSource: WindowSource, @unchecked Sendable {
     private let lock = NSLock()
     private let app: SourceApp
     private var keys: [String]
     private var registry = WindowRefRegistry<String>()
-    private var held: (gate: DispatchSemaphore, committed: DispatchSemaphore)?
+    private var held: (gate: DispatchSemaphore, committed: DispatchSemaphore, beforeListing: Bool)?
 
     init(app: SourceApp, windows: [String]) {
         self.app = app
         keys = windows
     }
 
-    func hold(until gate: DispatchSemaphore, signalling committed: DispatchSemaphore) {
-        lock.withLock { held = (gate, committed) }
+    func hold(until gate: DispatchSemaphore, signalling committed: DispatchSemaphore, beforeListing: Bool = false) {
+        lock.withLock { held = (gate, committed, beforeListing) }
     }
 
     func open(_ key: String) {
@@ -155,8 +235,14 @@ private final class RegistryWindowSource: WindowSource, @unchecked Sendable {
     func displays() -> [SourceDisplay] { [WindowFixture.mainDisplay] }
 
     func windows(of app: SourceApp, until _: ContinuousClock.Instant) throws(WindowSourceError) -> [SourceWindow] {
-        let (windows, read, held) = lock.withLock {
-            var read = registry.beginRead(of: app.pid)
+        let (start, held) = lock.withLock {
+            let held = self.held
+            self.held = nil
+            return (registry.beginRead(of: app.pid), held)
+        }
+        if held?.beforeListing == true { held?.gate.wait() }
+        let (windows, read) = lock.withLock {
+            var read = start
             let windows = keys.map { key in
                 SourceWindow(
                     ref: registry.ref(for: key, in: &read),
@@ -167,11 +253,9 @@ private final class RegistryWindowSource: WindowSource, @unchecked Sendable {
                     frame: CGRect(x: 0, y: 0, width: 800, height: 600)
                 )
             }
-            let held = self.held
-            self.held = nil
-            return (windows, read, held)
+            return (windows, read)
         }
-        held?.gate.wait()
+        if held?.beforeListing == false { held?.gate.wait() }
         lock.withLock { registry.commit(read) }
         held?.committed.signal()
         return windows

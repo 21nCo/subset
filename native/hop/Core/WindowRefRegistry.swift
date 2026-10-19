@@ -4,15 +4,19 @@ import Foundation
 /// `CFEqual`): a window keeps its ref for as long as the source reports an equal key for it, whatever order reads and
 /// focus changes complete in.
 ///
-/// Every change carries a stamp from one counter. A read starts with `beginRead(of:)`, takes a ref for each window it
-/// sees with `ref(for:in:)`, and ends with `commit(_:)`, which drops only the app's refs that existed when the read
-/// began and that the read did not see: those windows closed. A ref a read assigns carries the read's start, so it
-/// counts as existing for every read that began later. So
-/// - a ref a focus change assigns while a read is under way (`ref(for:pid:)`) survives that read's commit;
-/// - a read that began before the app's last committed read neither stores refs nor commits, so a late read never
-///   restores older refs, and a ref an older read stored before a newer read committed is dropped by that commit;
-/// - a read that began before its app was forgotten (`forgetApp(pid:)`, `retainApps(_:)`) neither commits nor stores
-///   refs, so an app that quit is not brought back.
+/// Every change carries a stamp from one counter, and each ref records when its window was last confirmed present. A
+/// read starts with `beginRead(of:)`, takes a ref for each window it sees with `ref(for:in:)`, and ends with
+/// `commit(_:)`, which drops only the app's refs that were last confirmed before the read began and that the read did
+/// not see: those windows closed. A current read confirms what it sees as of its start; a focus change
+/// (`ref(for:pid:)`) confirms its window as of now, whether the window's ref is new or known. So
+/// - a window focused after a read began keeps its ref through that read's commit, whichever read assigned the ref;
+/// - a read that began before the app's last committed read is stale: it never stores or confirms a ref and does not
+///   commit, so a late read never restores older refs, and a ref an older read stored but no later read or focus change
+///   confirmed is dropped by a newer read's commit;
+/// - a read that began before its app was forgotten (`forgetApp(pid:)`, `retainApps(_:)`) is stale too, so an app that
+///   quit is not brought back.
+/// A window focused just before it closed can keep its ref until the next read that completes; it is never listed,
+/// because only a read lists windows.
 public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
     /// One read of an app's windows, from `beginRead(of:)` to `commit(_:)`.
     public struct Read: Sendable {
@@ -26,7 +30,8 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
         let since: UInt64
         /// When the app's last committed read began.
         var committed: UInt64 = 0
-        var refs: [Key: (ref: WindowRef, assigned: UInt64)] = [:]
+        /// Each window's ref and when the window was last confirmed present.
+        var refs: [Key: (ref: WindowRef, confirmed: UInt64)] = [:]
     }
 
     private var apps: [pid_t: App] = [:]
@@ -41,29 +46,29 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
         return Read(pid: pid, stamp: tick())
     }
 
-    /// The ref of a window the read saw, assigning one if the window has none. A read whose app was forgotten after
-    /// it began, or that began before the app's last committed read, gets a ref that is not kept for a window the
-    /// registry does not know.
+    /// The ref of a window the read saw, assigning one if the window has none. A current read confirms the window as
+    /// of the read's start. A stale read changes nothing: it returns a known ref, or a ref that is not kept for a window
+    /// the registry does not know.
     public mutating func ref(for key: Key, in read: inout Read) -> WindowRef {
         read.seen.insert(key)
-        if let known = apps[read.pid]?.refs[key] { return known.ref }
-        guard isCurrent(read), let app = apps[read.pid], read.stamp > app.committed else { return nextRef() }
-        return assign(key, pid: read.pid, at: read.stamp)
+        let known = apps[read.pid]?.refs[key]?.ref
+        guard isCurrent(read) else { return known ?? nextRef() }
+        return confirm(key, pid: read.pid, at: read.stamp)
     }
 
     /// The ref of a window outside a read, such as one that a focus change reported, assigning one if it has none.
+    /// The window is confirmed present now.
     public mutating func ref(for key: Key, pid: pid_t) -> WindowRef {
-        if let known = apps[pid]?.refs[key] { return known.ref }
         _ = app(pid)
-        return assign(key, pid: pid, at: tick())
+        return confirm(key, pid: pid, at: tick())
     }
 
-    /// Ends a read that completed: the app's refs that existed when it began and that it did not see are dropped. A
-    /// read older than the app's last committed one, or than the app's forgetting, changes nothing.
+    /// Ends a read that completed: the app's refs last confirmed before it began and that it did not see are dropped.
+    /// A stale read changes nothing.
     public mutating func commit(_ read: Read) {
-        guard isCurrent(read), var app = apps[read.pid], read.stamp > app.committed else { return }
+        guard isCurrent(read), var app = apps[read.pid] else { return }
         app.committed = read.stamp
-        app.refs = app.refs.filter { key, value in value.assigned > read.stamp || read.seen.contains(key) }
+        app.refs = app.refs.filter { key, value in value.confirmed > read.stamp || read.seen.contains(key) }
         apps[read.pid] = app
     }
 
@@ -82,11 +87,17 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
         Set(apps[pid]?.refs.values.map(\.ref) ?? [])
     }
 
+    /// Whether the read began after its app's refs were first kept and after the app's last committed read began.
     private func isCurrent(_ read: Read) -> Bool {
-        apps[read.pid].map { $0.since < read.stamp } ?? false
+        apps[read.pid].map { $0.since < read.stamp && $0.committed < read.stamp } ?? false
     }
 
-    private mutating func assign(_ key: Key, pid: pid_t, at stamp: UInt64) -> WindowRef {
+    /// The window's ref, assigning one if it has none, confirmed present at `stamp` unless it was confirmed later.
+    private mutating func confirm(_ key: Key, pid: pid_t, at stamp: UInt64) -> WindowRef {
+        if let known = apps[pid]?.refs[key] {
+            apps[pid]?.refs[key]?.confirmed = max(known.confirmed, stamp)
+            return known.ref
+        }
         let ref = nextRef()
         apps[pid]?.refs[key] = (ref, stamp)
         return ref
