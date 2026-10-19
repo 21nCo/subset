@@ -108,9 +108,10 @@ public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked S
 /// `SecCodeCopySigningInformation`. Any user may read any process's signature this way.
 ///
 /// The signing information comes from the file on disk, which may have been replaced since the process started (an
-/// app updated while it runs), so it is published only once `SecCodeCheckValidity`, without network access, finds
-/// that the running code matches the file. Unsigned code, which has nothing to compare, is still published as
-/// unsigned.
+/// app updated while it runs), so it is published only when two views of the code agree: `SecCodeCheckValidity`,
+/// without network access, over the file, and the kernel's status of the running code (`kSecCodeInfoStatus`). A signed
+/// file must pass the check, which compares it with the running code, and the running code must be signed. An unsigned
+/// file has nothing to compare, so it is published as unsigned only when the running code is unsigned too.
 public struct SecCodeSignatureReader: CodeSignatureReading {
     public init() {}
 
@@ -122,19 +123,38 @@ public struct SecCodeSignatureReader: CodeSignatureReading {
         guard let code else { return .unavailable(.unexpectedResult("returned no code object"), source: .codeSigning) }
         var information: CFDictionary?
         // A SecCode is a SecStaticCode for this call, as Security's own headers document.
+        // The dynamic information adds the kernel's status of the running code to the file's signing information.
         let infoStatus = SecCodeCopySigningInformation(
             unsafeBitCast(code, to: SecStaticCode.self),
-            SecCSFlags(rawValue: kSecCSSigningInformation),
+            SecCSFlags(rawValue: kSecCSSigningInformation | kSecCSDynamicInformation),
             &information
         )
         guard infoStatus == errSecSuccess, let information = information as? [String: Any] else {
             return .unavailable(Self.failure(infoStatus), source: .codeSigning)
         }
         let validity = SecCodeCheckValidity(code, .noNetworkAccess, nil)
-        guard validity == errSecSuccess || validity == errSecCSUnsigned else {
-            return .unavailable(Self.failure(validity), source: .codeSigning)
+        let kernelStatus = (information[kSecCodeInfoStatus as String] as? NSNumber)?.uint32Value
+        if let failure = Self.runningImageFailure(validity: validity, kernelStatus: kernelStatus) {
+            return .unavailable(failure, source: .codeSigning)
         }
         return .value(Self.signature(from: information), source: .codeSigning)
+    }
+
+    /// `CS_SIGNED` in the kernel's code-signing status (`<kern/cs_blobs.h>`): the running code has a signature.
+    static let kernelSigned: UInt32 = 0x2000_0000
+
+    /// Why the file's signing information cannot be published for the running code, or `nil` when it can: the file
+    /// passed `SecCodeCheckValidity` and the running code is signed, or both are unsigned. `errSecCSUnsigned` comes from
+    /// checking the file before it is compared with the running code, so on its own it says nothing about the process.
+    static func runningImageFailure(validity: OSStatus, kernelStatus: UInt32?) -> SignalFailure? {
+        guard validity == errSecSuccess || validity == errSecCSUnsigned else { return failure(validity) }
+        guard let kernelStatus else { return .unexpectedResult("the kernel did not report the running code's status") }
+        let runningSigned = kernelStatus & kernelSigned != 0
+        switch (validity == errSecSuccess, runningSigned) {
+        case (true, true), (false, false): return nil
+        case (false, true): return .unexpectedResult("the process runs signed code but the executable on disk is unsigned")
+        case (true, false): return .unexpectedResult("the process runs unsigned code but the executable on disk is signed")
+        }
     }
 
     /// Unsigned code yields a dictionary without an identifier, which is a valid answer.

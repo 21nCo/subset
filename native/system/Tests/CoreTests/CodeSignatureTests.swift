@@ -168,6 +168,30 @@ final class CodeSignatureTests: XCTestCase {
                        .unexpectedResult("the executable on disk is not the one the process runs"))
     }
 
+    func testSigningInformationIsPublishedOnlyWhenTheFileAndTheRunningCodeAgree() {
+        let signed = SecCodeSignatureReader.kernelSigned | 0x1
+        let unsigned: UInt32 = 0
+        // A signed file that matches the running code, and unsigned code from an unsigned file.
+        XCTAssertNil(SecCodeSignatureReader.runningImageFailure(validity: errSecSuccess, kernelStatus: signed))
+        XCTAssertNil(SecCodeSignatureReader.runningImageFailure(validity: errSecCSUnsigned, kernelStatus: unsigned))
+        // An unsigned file renamed over signed running code, and the converse.
+        XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: errSecCSUnsigned, kernelStatus: signed),
+                       .unexpectedResult("the process runs signed code but the executable on disk is unsigned"))
+        XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: errSecSuccess, kernelStatus: unsigned),
+                       .unexpectedResult("the process runs unsigned code but the executable on disk is signed"))
+        // Without the kernel's status, neither answer is shown to describe the running code.
+        for validity in [errSecSuccess, errSecCSUnsigned] {
+            XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: validity, kernelStatus: nil),
+                           .unexpectedResult("the kernel did not report the running code's status"))
+        }
+        // A file replaced by another signed one, or any other failed check, keeps its own reason.
+        XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: errSecCSStaticCodeChanged, kernelStatus: signed),
+                       .unexpectedResult("the executable on disk is not the one the process runs"))
+        XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: errSecCSGuestInvalid, kernelStatus: unsigned),
+                       .securityError(errSecCSGuestInvalid))
+        XCTAssertEqual(SecCodeSignatureReader.runningImageFailure(validity: 100_000 + ESRCH, kernelStatus: nil), .processExited)
+    }
+
     func testAnExitedProcessHasNoSignature() throws {
         // A PID above the kernel's maximum never exists.
         let signal = SecCodeSignatureReader().codeSignature(of: ProcessIdentity(pid: 99_999_999, startTime: 0), executablePath: nil)

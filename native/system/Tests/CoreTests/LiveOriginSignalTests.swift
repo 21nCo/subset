@@ -91,29 +91,59 @@ final class LiveOriginSignalTests: XCTestCase {
     }
 
     func testAProcessWhoseExecutableWasReplacedIsNotGivenTheReplacementsSignature() throws {
+        try Self.withReplacedExecutable(stripReplacement: false) { identity, path in
+            let replaced = Signal<CodeSignature>.unavailable(
+                .unexpectedResult("the executable on disk is not the one the process runs"), source: .codeSigning
+            )
+            XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+            XCTAssertEqual(CachedCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+        }
+    }
+
+    func testASignedProcessWhoseExecutableWasReplacedByAnUnsignedFileIsNotReadAsUnsigned() throws {
+        try Self.withReplacedExecutable(stripReplacement: true) { identity, path in
+            // The file is unsigned, so Security stops before comparing it with the running code; the kernel still
+            // reports the running code as signed.
+            let replaced = Signal<CodeSignature>.unavailable(
+                .unexpectedResult("the process runs signed code but the executable on disk is unsigned"), source: .codeSigning
+            )
+            XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+            XCTAssertEqual(CachedCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+        }
+    }
+
+    /// Runs a signed program, renames a replacement over its file while it runs, as an app update does, and calls
+    /// `body` with the process still running the original. The replacement is unsigned when `stripReplacement` is set.
+    private static func withReplacedExecutable(
+        stripReplacement: Bool, _ body: (ProcessIdentity, String) throws -> Void
+    ) throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ReplacedExecutable-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         // The linker signs each program ad hoc, with its file name as the signing identifier.
-        let original = try Self.compile("int main(void) { pause(); return 0; }", to: folder.appendingPathComponent("original").path)
-        let replacement = try Self.compile("int main(void) { pause(); return 1; }", to: folder.appendingPathComponent("replacement").path)
+        let original = try compile("int main(void) { pause(); return 0; }", to: folder.appendingPathComponent("original").path)
+        let replacement = try compile("int main(void) { pause(); return 1; }", to: folder.appendingPathComponent("replacement").path)
+        if stripReplacement { try run("/usr/bin/codesign", ["--remove-signature", replacement]) }
         let running = Process()
         running.executableURL = URL(fileURLWithPath: original)
         try running.run()
         defer { running.terminate() }
         let pid = running.processIdentifier
-        let path = try XCTUnwrap(Self.executablePath(of: pid, resolvingTo: original), "the program never ran")
+        let path = try XCTUnwrap(executablePath(of: pid, resolvingTo: original), "the program never ran")
         let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: pid))
         XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path).value?.signingID, "original")
 
-        // As an app update does: the new file is renamed over the old one while the old process keeps running it.
         XCTAssertEqual(rename(replacement, original), 0, String(cString: strerror(errno)))
+        try body(identity, path)
+    }
 
-        let replaced = Signal<CodeSignature>.unavailable(
-            .unexpectedResult("the executable on disk is not the one the process runs"), source: .codeSigning
-        )
-        XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
-        XCTAssertEqual(CachedCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+    private static func run(_ tool: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "\(tool) \(arguments) failed")
     }
 
     /// Builds a C program with the selected developer tools and returns its path.
