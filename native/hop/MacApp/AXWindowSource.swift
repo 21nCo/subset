@@ -9,9 +9,10 @@ import HopCore
 /// with many slow windows costs the budget, not a timeout per window. An app that runs out of time or fails is
 /// reported as such and `WindowLister` leaves it out of that refresh.
 ///
-/// Window refs (`HopCore.WindowRef`; Carbon has a type of the same name) are assigned here: a window keeps its ref
-/// for as long as Accessibility reports an equal element for it. Refs are kept per app and replaced with each successful read of that app, so a closed window's ref is dropped
-/// the next time its app is read, and all of an app's refs when it quits.
+/// Window refs (`HopCore.WindowRef`; Carbon has a type of the same name) are kept in a `WindowRefRegistry` keyed by
+/// window element: a window keeps its ref for as long as Accessibility reports an equal element for it, even when a
+/// focus change or a read that overran its refresh completes in between. A closed window's ref is dropped by the next
+/// completed read of its app, and all of an app's refs when it quits.
 ///
 /// Every method may run on any thread: `apps()` reads `NSWorkspace.runningApplications` and `NSRunningApplication`,
 /// which return their values atomically on any thread, and `windows(of:until:)` sends only Accessibility requests.
@@ -25,16 +26,14 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
     ]
 
     private let lock = NSLock()
-    /// Each app's windows and their refs, from its last successful read or a later focus change.
-    private var refs: [pid_t: [ElementKey: HopCore.WindowRef]] = [:]
-    private var lastRef: UInt64 = 0
+    private var registry = WindowRefRegistry<ElementKey>()
 
     func apps() -> [SourceApp] {
         let running = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && !$0.isTerminated
         }
         let live = Set(running.map(\.processIdentifier))
-        lock.withLock { refs = refs.filter { live.contains($0.key) } }
+        lock.withLock { registry.retainApps(live) }
         return running.map { app in
             SourceApp(
                 pid: app.processIdentifier,
@@ -55,13 +54,16 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
     }
 
     func windows(of app: SourceApp, until deadline: ContinuousClock.Instant) throws(WindowSourceError) -> [SourceWindow] {
+        var read = lock.withLock { registry.beginRead(of: app.pid) }
         let element = AXUIElementCreateApplication(app.pid)
         try Self.limit(element, to: deadline)
         var value: CFTypeRef?
         switch AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) {
         case .success: break
         // An app with no windows may report no value rather than an empty list.
-        case .noValue: return replaceRefs(of: app.pid, with: [:], returning: [])
+        case .noValue:
+            lock.withLock { registry.commit(read) }
+            return []
         case .cannotComplete: throw .timedOut
         default: throw .failed
         }
@@ -69,7 +71,6 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
 
         let attributes = Self.windowAttributes as CFArray
         var windows: [SourceWindow] = []
-        var appRefs: [ElementKey: HopCore.WindowRef] = [:]
         for window in elements {
             try Self.limit(window, to: deadline)
             var values: CFArray?
@@ -79,25 +80,24 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
             // The window closed between the two requests, or cannot be read; the app's other windows still can.
             default: continue
             }
-            guard let read = values as? [CFTypeRef], read.count == Self.windowAttributes.count else { continue }
-            let key = ElementKey(window)
-            let ref = appRefs[key] ?? self.ref(for: key, pid: app.pid)
-            appRefs[key] = ref
+            guard let fields = values as? [CFTypeRef], fields.count == Self.windowAttributes.count else { continue }
+            let ref = lock.withLock { registry.ref(for: ElementKey(window), in: &read) }
             windows.append(SourceWindow(
                 ref: ref,
-                title: read[0] as? String ?? "",
-                subrole: read[1] as? String,
-                isMinimized: read[2] as? Bool ?? false,
-                isFullscreen: read[5] as? Bool ?? false,
-                frame: Self.frame(position: read[3], size: read[4])
+                title: fields[0] as? String ?? "",
+                subrole: fields[1] as? String,
+                isMinimized: fields[2] as? Bool ?? false,
+                isFullscreen: fields[5] as? Bool ?? false,
+                frame: Self.frame(position: fields[3], size: fields[4])
             ))
         }
-        return replaceRefs(of: app.pid, with: appRefs, returning: windows)
+        lock.withLock { registry.commit(read) }
+        return windows
     }
 
     /// The ref for a window element that a focus change reported, assigning a new one if it was never read.
     func ref(for window: AXUIElement, pid: pid_t) -> HopCore.WindowRef {
-        ref(for: ElementKey(window), pid: pid)
+        lock.withLock { registry.ref(for: ElementKey(window), pid: pid) }
     }
 
     /// The app's focused window, or nil if it has none or did not answer in time.
@@ -111,7 +111,7 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
 
     /// Forgets the refs of an app that quit.
     func forgetApp(pid: pid_t) {
-        lock.withLock { _ = refs.removeValue(forKey: pid) }
+        lock.withLock { registry.forgetApp(pid: pid) }
     }
 
     /// An app's Accessibility element, with the per-app messaging timeout.
@@ -119,25 +119,6 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
         return element
-    }
-
-    private func ref(for key: ElementKey, pid: pid_t) -> HopCore.WindowRef {
-        lock.withLock {
-            if let ref = refs[pid]?[key] { return ref }
-            lastRef += 1
-            let ref = HopCore.WindowRef(rawValue: lastRef)
-            refs[pid, default: [:]][key] = ref
-            return ref
-        }
-    }
-
-    private func replaceRefs(
-        of pid: pid_t,
-        with appRefs: [ElementKey: HopCore.WindowRef],
-        returning windows: [SourceWindow]
-    ) -> [SourceWindow] {
-        lock.withLock { refs[pid] = appRefs }
-        return windows
     }
 
     /// Gives the element's next request the time left until `deadline`, or throws `.timedOut` when none is left.
