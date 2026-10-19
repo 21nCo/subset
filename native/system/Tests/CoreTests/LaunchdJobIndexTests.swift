@@ -141,6 +141,82 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.jobs.map(\.label), ["dev.server"])
     }
 
+    func testAPlistLargerThanAnyJobIsNotReadAndMakesTheScanIncomplete() throws {
+        let server = try executable("bin/server")
+        let hidden = try executable("bin/hidden")
+        try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
+        // Sparse, so the test writes nothing; a symlink to an oversized file outside the folders counts as well.
+        let huge = agents.path + "/huge.plist"
+        let target = root.path + "/huge-target"
+        let link = daemons.path + "/link.plist"
+        for path in [huge, target] {
+            XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: nil))
+            XCTAssertEqual(truncate(path, off_t(LaunchdJobIndex.maximumPlistSize + 1)), 0)
+        }
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+
+        let failures = [LaunchdScanFailure(path: huge, code: EFBIG), LaunchdScanFailure(path: link, code: EFBIG)]
+        XCTAssertEqual(index.scanFailures, failures)
+        XCTAssertEqual(index.unreadablePlists, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value, LaunchdJobs(jobs: index.jobs, scanFailures: failures))
+        XCTAssertEqual(index.launchdJobs(forExecutable: hidden), .unavailable(.incompleteScan(failures), source: .launchdPlists))
+
+        try FileManager.default.removeItem(atPath: huge)
+        try plist(agents, "huge", ["Label": "dev.hidden", "Program": hidden])
+        try FileManager.default.removeItem(atPath: link)
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.scanFailures, [])
+        XCTAssertEqual(index.launchdJobs(forExecutable: hidden).value?.jobs.map(\.label), ["dev.hidden"])
+    }
+
+    func testAChangedIndexReachesProcessesAlreadyReadWithoutNewOnes() throws {
+        try XCTSkipIf(getuid() == 0, "root reads a plist without permission")
+        let server = try executable("bin/server")
+        let other = try executable("bin/other")
+        try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
+        let fixtures = FixtureSignalReaders()
+        fixtures.signatures[100] = .value(CodeSignature(signingID: "server", teamID: "ABCDE12345", isPlatformBinary: false), source: .codeSigning)
+        let reader = OriginSignalReader(
+            responsible: fixtures, coalition: fixtures, codeSignature: fixtures,
+            launchd: LaunchdJobIndex(folders: folders()), context: fixtures, check: { _, _ in .unchanged }
+        )
+        // The same process, started by launchd, in every sample.
+        func annotated() -> ProcessFacts {
+            let record = RawProcessRecord(identity: ProcessIdentity(pid: 100, startTime: 1), ppid: 1, uid: 501,
+                                          executablePath: server, name: "server", usage: .unavailable)
+            var processes = [ProcessFacts(record: record, timebase: MachTimebase(numer: 1, denom: 1))]
+            reader.annotate(&processes)
+            return processes[0]
+        }
+
+        XCTAssertEqual(annotated().launchdLabel, "dev.server")
+
+        try plist(daemons, "dev.copy", ["Label": "dev.copy", "Program": server])
+        XCTAssertEqual(annotated().launchdMatch, .executableOnly(.conflictingLabels))
+
+        try FileManager.default.removeItem(atPath: daemons.path + "/dev.copy.plist")
+        let locked = agents.path + "/dev.other.plist"
+        try plist(agents, "dev.other", ["Label": "dev.other", "Program": other])
+        try Self.setPermissions(0o000, locked)
+        addTeardownBlock { try? Self.setPermissions(0o644, locked) }
+        let incomplete = annotated()
+        XCTAssertEqual(incomplete.launchdMatch, .executableOnly(.incompleteScan))
+        XCTAssertNil(incomplete.launchdLabel)
+        XCTAssertEqual(incomplete.origin?.launchdJobs.value?.scanFailures, [LaunchdScanFailure(path: locked, code: EACCES)])
+
+        try Self.setPermissions(0o644, locked)
+        XCTAssertEqual(annotated().launchdLabel, "dev.server")
+
+        try FileManager.default.removeItem(atPath: agents.path + "/dev.server.plist")
+        let removed = annotated()
+        XCTAssertEqual(removed.launchdMatch, LaunchdMatch.none)
+        XCTAssertNil(removed.launchdLabel)
+        XCTAssertEqual(fixtures.calls(.codeSignature, pid: 100), 1, "only the launchd lookup is repeated")
+    }
+
     func testTheIndexIsRebuiltWhenAFolderOrPlistChanges() throws {
         let server = try executable("bin/server")
         let index = LaunchdJobIndex(folders: folders())

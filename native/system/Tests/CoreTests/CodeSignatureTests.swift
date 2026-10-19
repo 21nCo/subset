@@ -164,6 +164,8 @@ final class CodeSignatureTests: XCTestCase {
         XCTAssertEqual(SecCodeSignatureReader.failure(errSecCSNoSuchCode), .processExited)
         XCTAssertEqual(SecCodeSignatureReader.failure(100_000 + EPERM), .denied)
         XCTAssertEqual(SecCodeSignatureReader.failure(errSecCSUnsigned), .securityError(errSecCSUnsigned))
+        XCTAssertEqual(SecCodeSignatureReader.failure(errSecCSStaticCodeChanged),
+                       .unexpectedResult("the executable on disk is not the one the process runs"))
     }
 
     func testAnExitedProcessHasNoSignature() throws {

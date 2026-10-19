@@ -90,6 +90,47 @@ final class LiveOriginSignalTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(signature.signingID).isEmpty)
     }
 
+    func testAProcessWhoseExecutableWasReplacedIsNotGivenTheReplacementsSignature() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ReplacedExecutable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        // The linker signs each program ad hoc, with its file name as the signing identifier.
+        let original = try Self.compile("int main(void) { pause(); return 0; }", to: folder.appendingPathComponent("original").path)
+        let replacement = try Self.compile("int main(void) { pause(); return 1; }", to: folder.appendingPathComponent("replacement").path)
+        let running = Process()
+        running.executableURL = URL(fileURLWithPath: original)
+        try running.run()
+        defer { running.terminate() }
+        let pid = running.processIdentifier
+        let path = try XCTUnwrap(Self.executablePath(of: pid, resolvingTo: original), "the program never ran")
+        let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: pid))
+        XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path).value?.signingID, "original")
+
+        // As an app update does: the new file is renamed over the old one while the old process keeps running it.
+        XCTAssertEqual(rename(replacement, original), 0, String(cString: strerror(errno)))
+
+        let replaced = Signal<CodeSignature>.unavailable(
+            .unexpectedResult("the executable on disk is not the one the process runs"), source: .codeSigning
+        )
+        XCTAssertEqual(SecCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+        XCTAssertEqual(CachedCodeSignatureReader().codeSignature(of: identity, executablePath: path), replaced)
+    }
+
+    /// Builds a C program with the selected developer tools and returns its path.
+    private static func compile(_ source: String, to path: String) throws -> String {
+        let compiler = Process()
+        let input = Pipe()
+        compiler.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        compiler.arguments = ["-x", "c", "-include", "unistd.h", "-", "-o", path]
+        compiler.standardInput = input
+        try compiler.run()
+        input.fileHandleForWriting.write(Data(source.utf8))
+        try input.fileHandleForWriting.close()
+        compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0, "cc failed for \(path)")
+        return path
+    }
+
     func testLaunchdIsAnAppleSignedPlatformBinaryAndKeepsItsPublicSignals() throws {
         // pid 1 belongs to root: without root, macOS denies its responsibility and working-directory reads.
         let signature = try XCTUnwrap(SecCodeSignatureReader().codeSignature(of: ProcessIdentity(pid: 1, startTime: 0), executablePath: nil).value)

@@ -5,6 +5,10 @@ import Foundation
 /// stores it in the process's `ProcessFacts.origin`. Each reader is independent: one that fails records its reason
 /// and the others still answer, so a restricted process keeps the signals macOS allows.
 ///
+/// The launchd jobs come from an index of the plists rather than from the process, so the index is checked on every
+/// call, and when it changed every kept identity looks its executable up again: a plist added, edited, removed, or
+/// made unreadable reaches processes that are already running.
+///
 /// `exec` replaces a process's executable but keeps its PID and start time, so the signals are kept per identity and
 /// executable path: an identity that reappears running another executable is read again.
 ///
@@ -61,13 +65,15 @@ public final class OriginSignalReader: @unchecked Sendable {
     /// Fills `origin` for every process already read with its current executable, reads the others, oldest first,
     /// until `budget` is spent (always at least one), and forgets identities no longer listed.
     public func annotate(_ processes: inout [ProcessFacts], budget: Duration = .seconds(1)) {
+        let launchdChanged = launchd.refreshIfChanged()
         let known = lock.withLock { cache }
         var next: [ProcessIdentity: (executablePath: String?, signals: OriginSignals)] = [:]
         next.reserveCapacity(processes.count)
         var unread: [Int] = []
         for index in processes.indices {
             let identity = processes[index].identity
-            if let entry = known[identity], entry.executablePath == processes[index].executablePath {
+            if var entry = known[identity], entry.executablePath == processes[index].executablePath {
+                if launchdChanged { entry.signals.launchdJobs = launchd.launchdJobs(forExecutable: entry.executablePath) }
                 next[identity] = entry
                 processes[index].origin = entry.signals
             } else {
@@ -75,7 +81,6 @@ public final class OriginSignalReader: @unchecked Sendable {
             }
         }
         if !unread.isEmpty {
-            launchd.refreshIfChanged()
             let start = now()
             let limit = UInt64(max(0, budget / .nanoseconds(1)))
             // Oldest first, so a process that keeps running is read before short-lived ones that may exit anyway.

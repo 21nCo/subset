@@ -28,6 +28,8 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
     private var calls: [Reader: [pid_t: Int]] = [:]
     private var launchdCalls: [String: Int] = [:]
     public private(set) var refreshes = 0
+    /// The launchd tables as of the last refresh, which reports a change when they differ.
+    private var indexed: (jobs: [String: [LaunchdJob]], failures: [LaunchdScanFailure])?
 
     public init() {}
 
@@ -71,8 +73,14 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
         return signatures[identity.pid] ?? .unavailable(.processExited, source: .codeSigning)
     }
 
-    public func refreshIfChanged() {
-        lock.withLock { refreshes += 1 }
+    @discardableResult public func refreshIfChanged() -> Bool {
+        let current = (jobs: launchdJobs, failures: launchdScanFailures)
+        return lock.withLock {
+            refreshes += 1
+            defer { indexed = current }
+            guard let indexed else { return true }
+            return indexed.jobs != current.jobs || indexed.failures != current.failures
+        }
     }
 
     public func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs> {

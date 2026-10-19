@@ -3,8 +3,9 @@ import Foundation
 
 /// The launchd jobs that run an executable.
 public protocol LaunchdJobReading: Sendable {
-    /// Rebuilds the index if a watched folder or plist changed since the last build. Called once per batch of reads.
-    func refreshIfChanged()
+    /// Rebuilds the index if a watched folder or plist changed since the last build. Called once per sample.
+    /// Returns whether the jobs, unreadable plists, or scan failures changed, so answers given before may be stale.
+    @discardableResult func refreshIfChanged() -> Bool
     /// The jobs the readable plists give the executable, with the scan's failures; `unavailable(.incompleteScan)`
     /// when no readable plist names it and the scan had failures.
     func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs>
@@ -51,10 +52,10 @@ public struct LaunchdFolders: Sendable {
 /// stays the same. A plist without a label or program, with a relative `Program`, that does not parse, or that is not a regular file (a
 /// folder, FIFO, or device named `.plist`, which is opened without blocking) is listed in `unreadablePlists` and
 /// left out: launchd cannot load it either. A folder or plist that exists but cannot be read, such as one without
-/// read permission, is listed in `scanFailures`, as is an unchecked program, since launchd, running as root, may
-/// load a job from it or find the program there: the jobs found for an executable then carry the failures, and an
-/// executable no readable plist names is `unavailable` rather than known to have no job. A missing folder is not a
-/// failure.
+/// read permission or a plist larger than `maximumPlistSize`, is listed in `scanFailures`, as is an unchecked
+/// program, since launchd, running as root, may load a job from it or find the program there: the jobs found for an
+/// executable then carry the failures, and an executable no readable plist names is `unavailable` rather than known
+/// to have no job. A missing folder is not a failure.
 public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// launchd's default `PATH` for jobs.
     static let launchdPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -81,15 +82,15 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// Folders and plists that exist but could not be read, and programs that could not be checked, ordered by path.
     public var scanFailures: [LaunchdScanFailure] { lock.withLock { state.failures } }
 
-    public func refreshIfChanged() {
+    @discardableResult public func refreshIfChanged() -> Bool {
         let scan = Self.scan(folders)
-        lock.withLock { refresh(scan) }
+        return lock.withLock { refresh(scan) }
     }
 
     public func launchdJobs(forExecutable path: String?) -> Signal<LaunchdJobs> {
         guard let path else { return .unavailable(.noExecutablePath, source: .launchdPlists) }
         let (byProgram, failures) = lock.withLock {
-            if stamps == nil { refresh(Self.scan(folders)) }
+            if stamps == nil { _ = refresh(Self.scan(folders)) }
             return (state.byProgram, state.failures)
         }
         let jobs = byProgram[path] ?? Self.realPath(path).flatMap { byProgram[$0] } ?? []
@@ -99,8 +100,9 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         return .value(LaunchdJobs(jobs: jobs, scanFailures: failures), source: .launchdPlists)
     }
 
-    /// Reads the plists again if the scan differs, then resolves every program. Call with the lock held.
-    private func refresh(_ scan: Scan) {
+    /// Reads the plists again if the scan differs, then resolves every program, and tells whether the index
+    /// changed. Call with the lock held.
+    private func refresh(_ scan: Scan) -> Bool {
         var unreadable = state.unreadable
         if scan.stamps != stamps || scan.failures != folderFailures {
             stamps = scan.stamps
@@ -112,12 +114,13 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
             if case let .unchecked(failure) = job.resolution { failure } else { nil }
         }
         let failures = Set(folderFailures + plistFailures + programFailures).sorted { ($0.path, $0.code) < ($1.path, $1.code) }
-        guard jobs != state.jobs || unreadable != state.unreadable || failures != state.failures else { return }
+        guard jobs != state.jobs || unreadable != state.unreadable || failures != state.failures else { return false }
         var byProgram: [String: [LaunchdJob]] = [:]
         for job in jobs {
             if let program = job.resolvedProgram { byProgram[program, default: []].append(job) }
         }
         state = (jobs, unreadable, failures, byProgram)
+        return true
     }
 
     private struct Scan {
@@ -242,12 +245,19 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         // plist: it is read as empty, which does not parse.
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .success(Data()) }
+        // A plist larger than any job definition (the user's agents folder is writable) is not read into memory,
+        // even if it grows while it is read; launchd may still load it, so it is a failure, not an unreadable plist.
+        guard info.st_size <= maximumPlistSize else { return .failure(ReadError(code: EFBIG)) }
         do {
-            return .success(try handle.readToEnd() ?? Data())
+            let data = try handle.read(upToCount: maximumPlistSize + 1) ?? Data()
+            return data.count > maximumPlistSize ? .failure(ReadError(code: EFBIG)) : .success(data)
         } catch {
             return .failure(ReadError(code: EIO))
         }
     }
+
+    /// The largest plist read, in bytes; job definitions are a few kilobytes.
+    static let maximumPlistSize = 1 << 20
 
     /// One parsed plist, with its program not yet resolved.
     struct Definition: Sendable {

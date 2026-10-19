@@ -106,6 +106,11 @@ public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked S
 
 /// Reads a running process's signature with `SecCodeCopyGuestWithAttributes` (by PID) and
 /// `SecCodeCopySigningInformation`. Any user may read any process's signature this way.
+///
+/// The signing information comes from the file on disk, which may have been replaced since the process started (an
+/// app updated while it runs), so it is published only once `SecCodeCheckValidity`, without network access, finds
+/// that the running code matches the file. Unsigned code, which has nothing to compare, is still published as
+/// unsigned.
 public struct SecCodeSignatureReader: CodeSignatureReading {
     public init() {}
 
@@ -125,6 +130,10 @@ public struct SecCodeSignatureReader: CodeSignatureReading {
         guard infoStatus == errSecSuccess, let information = information as? [String: Any] else {
             return .unavailable(Self.failure(infoStatus), source: .codeSigning)
         }
+        let validity = SecCodeCheckValidity(code, .noNetworkAccess, nil)
+        guard validity == errSecSuccess || validity == errSecCSUnsigned else {
+            return .unavailable(Self.failure(validity), source: .codeSigning)
+        }
         return .value(Self.signature(from: information), source: .codeSigning)
     }
 
@@ -143,6 +152,7 @@ public struct SecCodeSignatureReader: CodeSignatureReading {
         switch status {
         case 100_000 + ESRCH, errSecCSNoSuchCode: .processExited
         case 100_000 + EPERM: .denied
+        case errSecCSStaticCodeChanged: .unexpectedResult("the executable on disk is not the one the process runs")
         default: .securityError(status)
         }
     }

@@ -27,12 +27,13 @@ final class OriginSignalReaderTests: XCTestCase {
             }
             XCTAssertEqual(fixtures.launchdCalls(executable: "/usr/bin/p\(pid)"), 1)
         }
-        XCTAssertEqual(fixtures.refreshes, 1, "the launchd index is checked only when there is something new to read")
+        XCTAssertEqual(fixtures.refreshes, 2, "the launchd index is checked on every sample")
 
         _ = try sampler.sample()
         XCTAssertEqual(fixtures.calls(.coalition, pid: 10), 1)
         XCTAssertEqual(fixtures.calls(.coalition, pid: 11), 2, "a new identity on a reused PID is read again")
-        XCTAssertEqual(fixtures.refreshes, 2)
+        XCTAssertEqual(fixtures.refreshes, 3)
+        XCTAssertEqual(fixtures.launchdCalls(executable: "/usr/bin/p10"), 1, "an unchanged index is not asked again")
     }
 
     func testARestrictedProcessKeepsTheSignalsItsReadersGotAndEachFailureNamesItsReason() throws {
