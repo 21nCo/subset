@@ -128,5 +128,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['macos', 'agent-cli'],
     availableSurfaces: []
+  },
+  {
+    id: 'hop',
+    name: 'Hop',
+    summary: 'Switch between individual windows from the keyboard on the Mac, with app icons, titles, and optional live previews.',
+    state: 'planned',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
