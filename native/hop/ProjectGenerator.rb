@@ -109,8 +109,9 @@ project.predictabilize_uuids
 
 # Write the project and its scheme to a staging folder, then install only those generated files into
 # Hop.xcodeproj. Everything else in the bundle (breakpoints and personal schemes in xcuserdata, project.xcworkspace)
-# belongs to the developer and stays. Each replaced file is backed up first and a failed install restores the backups,
-# so a failure leaves the previous project intact. Tests/project-generator.sh checks both.
+# belongs to the developer and stays. Each replaced file is backed up first and a failed or interrupted install
+# (Ctrl-C, SIGTERM) restores the backups, so it leaves the previous project intact. Tests/project-generator.sh checks
+# both.
 staging = Dir.mktmpdir("Hop-xcodeproj", __dir__)
 keep_staging = false
 begin
@@ -123,7 +124,6 @@ begin
   scheme.save_as(staged_path, "Hop", true)
 
   generated = Dir.glob("**/*", base: staged_path).select { |path| File.file?(File.join(staged_path, path)) }.sort
-  installed = []
   begin
     generated.each do |path|
       target = File.join(project_path, path)
@@ -134,19 +134,22 @@ begin
       end
       # rename replaces the file atomically; the staging folder is on the same volume.
       File.rename(File.join(staged_path, path), target)
-      installed << path
     end
-  rescue StandardError
+  # Exception, not StandardError: an interrupt (Interrupt, SignalException) must restore too, then re-raise.
+  rescue Exception => install_error
     begin
+      # A file has been installed exactly when it has left the staging folder, even if the interrupt came right after.
+      installed = generated.reject { |path| File.exist?(File.join(staged_path, path)) }
       installed.each do |path|
         backup = File.join(backup_path, path)
-        File.exist?(backup) ? File.rename(backup, File.join(project_path, path)) : File.delete(File.join(project_path, path))
+        target = File.join(project_path, path)
+        File.exist?(backup) ? File.rename(backup, target) : FileUtils.rm_f(target)
       end
-    rescue StandardError => restore_error
+    rescue Exception => restore_error
       keep_staging = true
       warn "Could not restore #{project_path} (#{restore_error.message}); the previous files are in #{backup_path}"
     end
-    raise
+    raise install_error
   end
 ensure
   FileUtils.rm_rf(staging) unless keep_staging

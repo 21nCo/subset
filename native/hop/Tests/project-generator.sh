@@ -1,6 +1,7 @@
 #!/bin/sh
 # Checks that ProjectGenerator.rb only replaces the files it generates: developer state inside Hop.xcodeproj
-# survives regeneration, and a regeneration that fails while installing leaves the previous project intact.
+# survives regeneration, and a regeneration that fails or is interrupted while installing leaves the previous project
+# intact.
 # Runs on a copy of native/hop, so the checkout is never touched. Needs the xcodeproj 1.27.0 gem.
 set -eu
 
@@ -45,13 +46,47 @@ cmp -s "$scheme" "$work/expected.xcscheme" || fail "regeneration changed the sha
 echo "// previous project" >> "$pbxproj"
 cp "$pbxproj" "$work/previous.pbxproj"
 chmod a-w "$project/xcshareddata/xcschemes"
-if (cd "$work/hop" && ruby ProjectGenerator.rb > /dev/null 2>&1); then
+if err="$(cd "$work/hop" && ruby ProjectGenerator.rb 2>&1 > /dev/null)"; then
   fail "regeneration succeeded although the scheme could not be installed"
 fi
 chmod u+w "$project/xcshareddata/xcschemes"
+# Any other failure (a crash before the install) would leave the project untouched and pass the checks below.
+case "$err" in *"Permission denied"*) ;; *) fail "regeneration failed for another reason: $err" ;; esac
 cmp -s "$pbxproj" "$work/previous.pbxproj" || fail "failed regeneration did not restore project.pbxproj"
 cmp -s "$scheme" "$work/expected.xcscheme" || fail "failed regeneration changed the shared scheme"
 assert_developer_state "failed regeneration"
 [ -z "$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')" ] || fail "failed regeneration left its staging folder"
 
-echo "ProjectGenerator.rb keeps developer state and restores the project on failure."
+# Interrupt the install (Ctrl-C, then SIGTERM) right after the scheme has been replaced, the last file installed: the
+# generator must put both previous files back before exiting.
+cat > "$work/interrupt.rb" <<'RUBY'
+class << File
+  alias_method :hop_test_rename, :rename
+  def rename(from, to)
+    result = hop_test_rename(from, to)
+    if !$hop_test_interrupted && to.end_with?("xcschemes/Hop.xcscheme")
+      $hop_test_interrupted = true
+      raise SignalException, ENV.fetch("HOP_TEST_SIGNAL")
+    end
+    result
+  end
+end
+RUBY
+echo "<!-- previous scheme -->" >> "$scheme"
+cp "$scheme" "$work/previous.xcscheme"
+for signal in INT:130 TERM:143; do
+  want="${signal#*:}"
+  signal="${signal%:*}"
+  # Ruby re-raises an unhandled signal, so the generator dies of that signal (status 128 + its number). The outer
+  # redirection also hides the shell's own "Terminated" report.
+  status=0
+  { (cd "$work/hop" && HOP_TEST_SIGNAL="$signal" exec ruby -r "$work/interrupt.rb" ProjectGenerator.rb > /dev/null) \
+    || status=$?; } 2> /dev/null
+  [ "$status" -eq "$want" ] || fail "SIG$signal regeneration exited $status, expected $want"
+  cmp -s "$pbxproj" "$work/previous.pbxproj" || fail "SIG$signal regeneration did not restore project.pbxproj"
+  cmp -s "$scheme" "$work/previous.xcscheme" || fail "SIG$signal regeneration did not restore the shared scheme"
+  assert_developer_state "SIG$signal regeneration"
+  [ -z "$(find "$work/hop" -maxdepth 1 -name 'Hop-xcodeproj*')" ] || fail "SIG$signal regeneration left its staging folder"
+done
+
+echo "ProjectGenerator.rb keeps developer state and restores the project on failure or interruption."

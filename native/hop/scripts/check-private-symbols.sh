@@ -11,8 +11,8 @@
 # functions whose names merely start with CGS (CGShading*, CGSession*, CGSize*, CGSetDisplay*) pass: a forbidden
 # name continues with an uppercase letter. A symbol resolved at run time with dlsym does not appear in `nm -u` and is not caught here.
 #
-# Exit status: 0 when nothing forbidden is linked, 1 when a forbidden symbol is found, 2 for a usage error or a
-# file or folder that cannot be read completely.
+# Exit status: 0 when nothing forbidden is linked, 1 when a forbidden symbol is found, 2 for a usage error, a
+# file or folder that cannot be read completely, or a bundle path containing a newline.
 set -eu
 
 forbidden='^(_+(CGS|SLS)[A-Z]|_+AXUIElementGetWindow$)'
@@ -36,9 +36,22 @@ check() {
   fi
 }
 
+newline='
+'
+
 # macho_files <folder>: the Mach-O files in a folder, one per line. Exits 2 when any part of the folder cannot be
-# listed or any file in it cannot be read, so a hidden binary is never skipped.
+# listed or any file in it cannot be read, so a hidden binary is never skipped. Paths travel one per line, so a name
+# containing a newline (which would split into fragments that hide the binary) is an error too.
 macho_files() {
+  case "$1" in *"$newline"*) echo "cannot check $1: its path contains a newline" >&2; exit 2 ;; esac
+  if ! named="$(find "$1" -name "*$newline*" -print)"; then
+    echo "could not list every file in $1" >&2
+    exit 2
+  fi
+  if [ -n "$named" ]; then
+    echo "cannot check $1: a name inside it contains a newline" >&2
+    exit 2
+  fi
   if ! files="$(find "$1" -type f -print)"; then
     echo "could not list every file in $1" >&2
     exit 2

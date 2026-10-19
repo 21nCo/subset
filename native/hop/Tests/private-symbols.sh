@@ -1,9 +1,9 @@
 #!/bin/sh
 # Checks scripts/check-private-symbols.sh against binaries with known undefined symbols: it must fail on each
 # forbidden private API, pass on public CoreGraphics names that only look similar, check every Mach-O inside an app
-# bundle, and report unreadable input as an error rather than a pass. Also checks the recorded `nm -u` listing of
-# the shell (Tests/Fixtures/shell-undefined-symbols.txt, from an unsigned Debug build of Hop.app and libHopCore.a)
-# passes, and fails once _CGSCopyWindowProperty is added to it. Needs only the C compiler from Command Line Tools.
+# bundle, and report unreadable input or a path it cannot represent as an error rather than a pass. Also checks the
+# recorded `nm -u` listing of the shell (Tests/Fixtures/shell-undefined-symbols.txt, from an unsigned Debug build of
+# Hop.app and libHopCore.a) passes, and fails once _CGSCopyWindowProperty is added to it. Needs only the C compiler from Command Line Tools.
 set -eu
 
 source_dir="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,6 +65,26 @@ echo '<plist/>' > "$app/Info.plist"
 expect 0 "bundle with only public symbols" "$work/Fixture.app"
 cp "$work/ax.o" "$app/MacOS/Hop.debug.dylib"
 expect 1 "bundle whose second binary links _AXUIElementGetWindow" "$work/Fixture.app"
+
+# Bundle paths travel one per line, so a name containing a newline is an error: a binary named "Info.plist<newline>"
+# next to a real Info.plist would otherwise split into readable fragments and never be checked.
+newline='
+'
+plain="$work/Plain.app/Contents"
+mkdir -p "$plain/MacOS"
+cp "$work/public.o" "$plain/MacOS/Hop"
+echo '<plist/>' > "$plain/Info.plist"
+cp "$work/cgs.o" "$plain/Info.plist$newline"
+expect 2 "bundle with a newline in a file name" "$work/Plain.app"
+rm "$plain/Info.plist$newline"
+mkdir "$plain/Frameworks$newline"
+cp "$work/cgs.o" "$plain/Frameworks$newline/Priv"
+expect 2 "bundle with a newline in a folder name" "$work/Plain.app"
+rm -r "$plain/Frameworks$newline"
+expect 0 "the same bundle without them" "$work/Plain.app"
+mkdir "$work/New${newline}line.app"
+cp -R "$plain" "$work/New${newline}line.app/"
+expect 2 "bundle whose own path contains a newline" "$work/New${newline}line.app"
 
 # Missing or unreadable input is an error, never a pass.
 expect 2 "no arguments"
