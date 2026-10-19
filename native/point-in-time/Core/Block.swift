@@ -30,6 +30,8 @@ public struct Block: Equatable, Sendable {
     public var dominantAppName: String?
     public var dominantTitle: String?
     public var dominantURL: RedactedURL?
+    /// The block's classification, kept when capture rebuilds the block.
+    public var labeling: BlockLabeling = .pending
 
     public var end: Date { start.addingTimeInterval(Block.length) }
 

@@ -8,11 +8,12 @@ import Foundation
 /// that failed stays queued in `PendingWrites`, with its error shown, and is retried on the next sample.
 public final class ActivityStore: @unchecked Sendable {
     /// The newest schema this build can read and write. Opening a newer database fails instead of guessing.
-    public static let supportedSchemaVersion = 1
+    public static let supportedSchemaVersion = 2
 
     public let databaseURL: URL
     private let connection: SQLiteConnection
     private let lock = NSLock()
+    private var deletionCount = 0
 
     /// `~/Library/Application Support/pointInTime`.
     public static func defaultDirectory() throws -> URL {
@@ -97,6 +98,7 @@ public final class ActivityStore: @unchecked Sendable {
         guard to > from else { return }
         let lower = from.timeIntervalSince1970, upper = to.timeIntervalSince1970
         try locked {
+            deletionCount += 1
             try connection.transaction {
                 // A segment spanning the whole range splits into its parts before and after it.
                 let spanning = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ?", [.real(lower), .real(upper)])
@@ -123,8 +125,9 @@ public final class ActivityStore: @unchecked Sendable {
     /// when a checkpoint could not complete (see `checkpoint`); running it again finishes the job.
     public func deleteAll() throws {
         try locked {
+            deletionCount += 1
             try connection.transaction {
-                try connection.execute("DELETE FROM segments; DELETE FROM blocks;")
+                try connection.execute("DELETE FROM segments; DELETE FROM blocks; DELETE FROM corrections;")
             }
             try connection.checkpointTruncatingWAL()
             try connection.execute("VACUUM;")
@@ -153,17 +156,9 @@ public final class ActivityStore: @unchecked Sendable {
     public func blocks(from: Date, to: Date) throws -> [Block] {
         guard to > from else { return [] }
         return try locked {
-            try connection.query("""
-                SELECT start, active_seconds, excluded_seconds, apps_json, dominant_bundle_id, dominant_app_name, dominant_title,
-                       dominant_url_scheme, dominant_url_host, dominant_url_path
-                FROM blocks WHERE start >= ? AND start < ? ORDER BY start
-                """, [.real(Block.bucketStart(containing: from).timeIntervalSince1970), .real(to.timeIntervalSince1970)]).map { row in
-                let apps = row[3].string.flatMap { try? JSONDecoder().decode([AppTime].self, from: Data($0.utf8)) } ?? []
-                let url = row[7].string.flatMap { scheme in row[8].string.map { RedactedURL(scheme: scheme, host: $0, path: row[9].string ?? "/") } }
-                return Block(start: Date(timeIntervalSince1970: row[0].double ?? 0), activeSeconds: row[1].double ?? 0,
-                             excludedSeconds: row[2].double ?? 0, apps: apps, dominantBundleID: row[4].string,
-                             dominantAppName: row[5].string, dominantTitle: row[6].string, dominantURL: url)
-            }
+            try connection.query("SELECT \(Self.blockColumns()) FROM blocks WHERE start >= ? AND start < ? ORDER BY start",
+                                 [.real(Block.bucketStart(containing: from).timeIntervalSince1970), .real(to.timeIntervalSince1970)])
+                .map { Self.block(from: $0) }
         }
     }
 
@@ -178,7 +173,125 @@ public final class ActivityStore: @unchecked Sendable {
         try locked { try connection.query("SELECT COUNT(*) FROM segments").first?.first?.int ?? 0 }
     }
 
+    // MARK: Classification
+
+    /// Changes with every Delete Today or Delete All, so a label computed from deleted activity is not stored.
+    public var deletions: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return deletionCount
+    }
+
+    /// Pending blocks that ended at or before `completedBy` and have something to send under `options` (recorded time
+    /// and a dominant app that is not excluded), newest first.
+    public func pendingBlocks(completedBy: Date, options: ClassificationOptions, limit: Int) throws -> [Block] {
+        let (filter, bindings) = Self.pendingFilter(completedBy: completedBy, options: options)
+        return try locked {
+            try connection.query("SELECT \(Self.blockColumns()) FROM blocks WHERE \(filter) ORDER BY start DESC LIMIT ?",
+                                 bindings + [.integer(Int64(limit))]).map { Self.block(from: $0) }
+        }
+    }
+
+    /// The pending blocks `pendingBlocks` would send, the blocks that failed, and when a model last labeled a block.
+    public func classificationSummary(completedBy: Date, options: ClassificationOptions) throws -> (pending: Int, failed: Int, lastClassified: Date?) {
+        let (filter, bindings) = Self.pendingFilter(completedBy: completedBy, options: options)
+        return try locked {
+            let pending = try connection.query("SELECT COUNT(*) FROM blocks WHERE \(filter)", bindings).first?.first?.int ?? 0
+            let row = try connection.query("""
+                SELECT SUM(label_state = 'failed'), MAX(CASE WHEN label_state = 'classified' THEN classified_at END) FROM blocks
+                """).first
+            return (pending, row?[0].int ?? 0, row?[1].double.map(Date.init(timeIntervalSince1970:)))
+        }
+    }
+
+    /// Stores validated labels and counts a failed attempt for each rejected block, which becomes `failed` after
+    /// `maxAttempts`. Only blocks that are still pending change, so a correction made while the request ran is kept.
+    /// Nothing changes when a deletion ran since `deletions` read `deletionsSeen`: the request may describe deleted
+    /// activity, and a block captured again at the same start is different activity.
+    public func applyClassifications(_ accepted: [BlockClassification], rejected: [Date], provider: String, model: String,
+                                     at date: Date, deletionsSeen: Int, maxAttempts: Int = 5) throws {
+        try locked {
+            guard deletionCount == deletionsSeen else { return }
+            try connection.transaction {
+                for result in accepted {
+                    try connection.query("""
+                        UPDATE blocks SET label = ?, label_reason = ?, label_confidence = ?, label_source = ?, label_model = ?,
+                            classified_at = ?, label_state = 'classified' WHERE start = ? AND label_state = 'pending'
+                        """, [.text(result.label.rawValue), .text(result.reason), .real(result.confidence), .text(provider), .text(model),
+                              .real(date.timeIntervalSince1970), .real(result.blockStart.timeIntervalSince1970)])
+                }
+                for start in rejected {
+                    try connection.query("""
+                        UPDATE blocks SET label_attempts = label_attempts + 1,
+                            label_state = CASE WHEN label_attempts + 1 >= ? THEN 'failed' ELSE 'pending' END
+                        WHERE start = ? AND label_state = 'pending'
+                        """, [.integer(Int64(maxAttempts)), .real(start.timeIntervalSince1970)])
+                }
+            }
+        }
+    }
+
+    /// Records the user's label for a block and applies it at once. A later model result never replaces it.
+    public func correct(blockStart: Date, to label: BlockLabel, note: String?, at date: Date) throws {
+        let note = note.map { ClassificationRequest.cap($0.trimmingCharacters(in: .whitespacesAndNewlines), characters: ClassificationRequest.maxNoteCharacters) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let start = blockStart.timeIntervalSince1970
+        try locked {
+            try connection.transaction {
+                guard let row = try connection.query("SELECT label FROM blocks WHERE start = ?", [.real(start)]).first else {
+                    throw StoreError.sqlite("That block is no longer stored")
+                }
+                try connection.query("INSERT INTO corrections (block_start, previous_label, new_label, note, created_at) VALUES (?, ?, ?, ?, ?)",
+                                     [.real(start), row[0], .text(label.rawValue), SQLValue(note), .real(date.timeIntervalSince1970)])
+                try connection.query("""
+                    UPDATE blocks SET label = ?, label_reason = ?, label_confidence = NULL, label_source = 'user', label_model = NULL,
+                        classified_at = ?, label_state = 'corrected' WHERE start = ?
+                    """, [.text(label.rawValue), SQLValue(note), .real(date.timeIntervalSince1970), .real(start)])
+            }
+        }
+    }
+
+    /// The most recent corrections whose block is still stored, newest first, each with the block's current content.
+    public func recentCorrections(limit: Int = ClassificationRequest.maxCorrections) throws -> [LabelCorrection] {
+        try locked {
+            try connection.query("""
+                SELECT c.previous_label, c.new_label, c.note, c.created_at, \(Self.blockColumns(prefix: "b."))
+                FROM corrections c JOIN blocks b ON b.start = c.block_start ORDER BY c.created_at DESC, c.id DESC LIMIT ?
+                """, [.integer(Int64(limit))]).compactMap { row in
+                guard let new = row[1].string.flatMap(BlockLabel.init(rawValue:)) else { return nil }
+                return LabelCorrection(block: Self.block(from: Array(row[4...])), previous: row[0].string.flatMap(BlockLabel.init(rawValue:)),
+                                       new: new, note: row[2].string, at: Date(timeIntervalSince1970: row[3].double ?? 0))
+            }
+        }
+    }
+
     // MARK: Internals
+
+    private static func blockColumns(prefix: String = "") -> String {
+        ["start", "active_seconds", "excluded_seconds", "apps_json", "dominant_bundle_id", "dominant_app_name", "dominant_title",
+         "dominant_url_scheme", "dominant_url_host", "dominant_url_path", "label_state", "label", "label_reason", "label_confidence",
+         "label_source", "label_model", "classified_at"].map { prefix + $0 }.joined(separator: ", ")
+    }
+
+    private static func block(from row: [SQLValue]) -> Block {
+        let apps = row[3].string.flatMap { try? JSONDecoder().decode([AppTime].self, from: Data($0.utf8)) } ?? []
+        let url = row[7].string.flatMap { scheme in row[8].string.map { RedactedURL(scheme: scheme, host: $0, path: row[9].string ?? "/") } }
+        let labeling = BlockLabeling(state: row[10].string.flatMap(LabelState.init(rawValue:)) ?? .pending,
+                                     label: row[11].string.flatMap(BlockLabel.init(rawValue:)), reason: row[12].string,
+                                     confidence: row[13].double, provider: row[14].string, model: row[15].string,
+                                     at: row[16].double.map(Date.init(timeIntervalSince1970:)))
+        return Block(start: Date(timeIntervalSince1970: row[0].double ?? 0), activeSeconds: row[1].double ?? 0,
+                     excludedSeconds: row[2].double ?? 0, apps: apps, dominantBundleID: row[4].string,
+                     dominantAppName: row[5].string, dominantTitle: row[6].string, dominantURL: url, labeling: labeling)
+    }
+
+    private static func pendingFilter(completedBy: Date, options: ClassificationOptions) -> (String, [SQLValue]) {
+        let excluded = options.excludedBundleIDs.sorted()
+        let placeholders = excluded.map { _ in "?" }.joined(separator: ", ")
+        let filter = "label_state = 'pending' AND active_seconds > 0 AND dominant_bundle_id IS NOT NULL AND start + ? <= ?"
+            + (excluded.isEmpty ? "" : " AND dominant_bundle_id NOT IN (\(placeholders))")
+        return (filter, [.real(Block.length), .real(completedBy.timeIntervalSince1970)] + excluded.map { .text($0) })
+    }
 
     private static let segmentColumns = "start, end, excluded, bundle_id, app_name, window_title, url_scheme, url_host, url_path"
 
@@ -204,8 +317,8 @@ public final class ActivityStore: @unchecked Sendable {
 
     /// Recomputes every bucket touched by `[from, to)` from the stored segments. Only buckets that a stored segment or
     /// block row actually occupies are visited, so an unbounded range (Delete Today passes `.distantFuture`) costs no
-    /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted; the others have their
-    /// capture columns replaced and keep the reserved classification columns.
+    /// more than the data it touches. Rows whose bucket no longer holds any segment are deleted with their corrections;
+    /// the others have their capture columns replaced and keep their classification.
     private func rebuildBlocks(from: Date, to: Date) throws {
         let lower = Block.bucketStart(containing: from)
         let lastBucket = Block.bucketStart(containing: to)
@@ -221,11 +334,13 @@ public final class ActivityStore: @unchecked Sendable {
                                           [.real(lower.timeIntervalSince1970), .real(upper.timeIntervalSince1970)])
         for row in stored where !buckets.contains(Date(timeIntervalSince1970: row[0].double ?? 0)) {
             try connection.query("DELETE FROM blocks WHERE start = ?", [row[0]])
+            try connection.query("DELETE FROM corrections WHERE block_start = ?", [row[0]])
         }
         for bucket in buckets.sorted() {
             let segments = overlapping.filter { $0.start < bucket.addingTimeInterval(Block.length) && $0.end > bucket }
             guard let block = Block.rollUp(start: bucket, segments: segments) else {
                 try connection.query("DELETE FROM blocks WHERE start = ?", [.real(bucket.timeIntervalSince1970)])
+                try connection.query("DELETE FROM corrections WHERE block_start = ?", [.real(bucket.timeIntervalSince1970)])
                 continue
             }
             let apps = String(decoding: try JSONEncoder().encode(block.apps), as: UTF8.self)
@@ -244,7 +359,7 @@ public final class ActivityStore: @unchecked Sendable {
     }
 
     /// Forward-only migrations, applied in order and recorded in `schema_version`.
-    private static let migrations: [Int: String] = [
+    static let migrations: [Int: String] = [
         1: """
         CREATE TABLE segments (
             start REAL PRIMARY KEY, end REAL NOT NULL, excluded INTEGER NOT NULL DEFAULT 0,
@@ -259,6 +374,18 @@ public final class ActivityStore: @unchecked Sendable {
             -- Reserved for classification; capture never writes these.
             label TEXT, label_reason TEXT, label_confidence REAL, label_source TEXT, classified_at REAL
         );
+        """,
+        // Classification state per block, and the user's corrections. Existing blocks start pending.
+        2: """
+        ALTER TABLE blocks ADD COLUMN label_state TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE blocks ADD COLUMN label_model TEXT;
+        ALTER TABLE blocks ADD COLUMN label_attempts INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX blocks_label_state ON blocks (label_state, start);
+        CREATE TABLE corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, block_start REAL NOT NULL, previous_label TEXT, new_label TEXT NOT NULL,
+            note TEXT, created_at REAL NOT NULL
+        );
+        CREATE INDEX corrections_block ON corrections (block_start);
         """
     ]
 

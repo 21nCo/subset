@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var capture: CaptureController?
     private var statusMenu: StatusMenuController?
     private var welcome: WelcomeWindowController?
+    private var classification: ClassificationController?
+    private var classificationWindow: ClassificationWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -20,13 +22,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let capture = CaptureController(settings: settings, store: store, storeError: storeError)
         let welcome = WelcomeWindowController(settings: settings) { capture.tick() }
-        let statusMenu = StatusMenuController(settings: settings, capture: capture, store: store) { welcome.show() }
+        let classification = ClassificationController(settings: ClassificationSettings(), capture: settings, store: store)
+        let classificationWindow = ClassificationWindowController(controller: classification, store: store)
+        let statusMenu = StatusMenuController(settings: settings, capture: capture, store: store, classification: classification,
+                                              showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() })
         capture.onStateChange = { statusMenu.refreshIcon() }
-        settings.onChange = { capture.tick() }
+        // Excluded apps also decide what classification may send, so a change re-runs both.
+        settings.onChange = { capture.tick(); classification.resume() }
+        classification.settings.onChange = { classification.resume() }
+        classification.onChange = { classificationWindow.model.refresh() }
         self.capture = capture
         self.welcome = welcome
         self.statusMenu = statusMenu
+        self.classification = classification
+        self.classificationWindow = classificationWindow
         capture.start()
+        classification.start()
         if !settings.onboardingCompleted { welcome.show() }
     }
 
