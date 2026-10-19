@@ -25,7 +25,8 @@ final class SamplerTests: XCTestCase {
         XCTAssertEqual(facts.userCPUTime, 3_000_000_000)
         XCTAssertEqual(facts.systemCPUTime, 500_000_000)
         XCTAssertEqual(facts.physFootprint, 64 << 20)
-        XCTAssertEqual(facts.billedEnergy, 7_000_000_000)
+        XCTAssertEqual(facts.energy, 7_000_000_000, "the process's own energy comes from ri_energy_nj")
+        XCTAssertEqual(facts.billedEnergy, 3_000_000, "energy billed for others' work stays a separate figure")
         XCTAssertEqual(facts.executablePath, "/usr/bin/p10")
         XCTAssertEqual(facts.ppid, 1)
         XCTAssertEqual(facts.uid, 501)
@@ -111,6 +112,7 @@ final class SamplerTests: XCTestCase {
         XCTAssertNil(restricted.physFootprint)
         XCTAssertNil(restricted.userCPUTime)
         XCTAssertNil(restricted.systemCPUTime)
+        XCTAssertNil(restricted.energy)
         XCTAssertNil(restricted.billedEnergy)
         XCTAssertNil(restricted.cpuPercent)
 
@@ -220,7 +222,8 @@ final class SamplerTests: XCTestCase {
             physFootprint: 64 << 20,
             userTime: user,
             systemTime: system,
-            billedEnergy: 7_000_000_000
+            energy: 7_000_000_000,
+            billedEnergy: 3_000_000
         )))
     }
 

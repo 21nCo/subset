@@ -23,7 +23,7 @@ struct ProcessTableView: View {
                     Text(process.totalCPUTime.map { String(format: "%.2f s", Double($0) / 1e9) } ?? unavailable(process))
                 }
                 TableColumn("Energy Used", value: \.energySortKey) { process in
-                    Text(process.billedEnergy.map { String(format: "%.1f J", Double($0) / 1e9) } ?? unavailable(process))
+                    Text(process.energy.map { String(format: "%.1f J", Double($0) / 1e9) } ?? unavailable(process))
                 }
                 TableColumn("UID", value: \.uid) { Text(String($0.uid)) }
             }
@@ -96,5 +96,5 @@ private extension ProcessFacts {
     var cpuSortKey: Double { cpuPercent ?? -1 }
     var memorySortKey: Int64 { physFootprint.map { Int64(clamping: $0) } ?? -1 }
     var cpuTimeSortKey: Int64 { totalCPUTime.map { Int64(clamping: $0) } ?? -1 }
-    var energySortKey: Int64 { billedEnergy.map { Int64(clamping: $0) } ?? -1 }
+    var energySortKey: Int64 { energy.map { Int64(clamping: $0) } ?? -1 }
 }

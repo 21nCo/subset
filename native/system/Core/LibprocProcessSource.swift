@@ -153,6 +153,7 @@ public struct LibprocProcessSource: ProcessSource {
                 physFootprint: info.ri_phys_footprint,
                 userTime: info.ri_user_time,
                 systemTime: info.ri_system_time,
+                energy: info.ri_energy_nj,
                 billedEnergy: info.ri_billed_energy
             ))
         }

@@ -130,7 +130,7 @@ final class ProcessReadTests: XCTestCase {
     }
 
     private func usage(footprint: UInt64, userTime: UInt64 = 0) -> UsageReading {
-        .available(RawProcessUsage(physFootprint: footprint, userTime: userTime, systemTime: 0, billedEnergy: 0))
+        .available(RawProcessUsage(physFootprint: footprint, userTime: userTime, systemTime: 0, energy: 0, billedEnergy: 0))
     }
 }
 

@@ -19,7 +19,10 @@ public struct ProcessFacts: Identifiable, Equatable, Sendable {
     public let userCPUTime: UInt64?
     /// Total kernel-mode CPU time in nanoseconds.
     public let systemCPUTime: UInt64?
-    /// `ri_billed_energy` in nanojoules since the process started.
+    /// `ri_energy_nj`: nanojoules the process's own work has used since it started. This is the process's energy.
+    public let energy: UInt64?
+    /// `ri_billed_energy`: nanojoules billed to this process since it started for work other processes did on its
+    /// behalf (voucher accounting). It is not the process's own energy and is usually far below `energy`.
     public let billedEnergy: UInt64?
     /// CPU use since the previous sample, where 100 is one fully used logical core (Activity Monitor's
     /// convention). `nil` on a process's first sample or when its usage is unavailable.
@@ -50,12 +53,14 @@ public struct ProcessFacts: Identifiable, Equatable, Sendable {
             physFootprint = usage.physFootprint
             userCPUTime = timebase.nanoseconds(usage.userTime)
             systemCPUTime = timebase.nanoseconds(usage.systemTime)
+            energy = usage.energy
             billedEnergy = usage.billedEnergy
         case .restricted, .unavailable:
             restricted = record.usage == .restricted
             physFootprint = nil
             userCPUTime = nil
             systemCPUTime = nil
+            energy = nil
             billedEnergy = nil
         }
         self.cpuPercent = cpuPercent
@@ -89,12 +94,16 @@ public struct RawProcessUsage: Equatable, Sendable {
     public let physFootprint: UInt64
     public let userTime: UInt64
     public let systemTime: UInt64
+    /// `ri_energy_nj`, the process's own energy in nanojoules.
+    public let energy: UInt64
+    /// `ri_billed_energy`, nanojoules billed to the process for other processes' work on its behalf.
     public let billedEnergy: UInt64
 
-    public init(physFootprint: UInt64, userTime: UInt64, systemTime: UInt64, billedEnergy: UInt64) {
+    public init(physFootprint: UInt64, userTime: UInt64, systemTime: UInt64, energy: UInt64, billedEnergy: UInt64) {
         self.physFootprint = physFootprint
         self.userTime = userTime
         self.systemTime = systemTime
+        self.energy = energy
         self.billedEnergy = billedEnergy
     }
 }

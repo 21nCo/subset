@@ -36,6 +36,10 @@ final class LiveSamplingTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(again.physFootprint), 0)
         XCTAssertGreaterThan(try XCTUnwrap(again.cpuPercent), 0)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(again.totalCPUTime), try XCTUnwrap(mine.totalCPUTime))
+        #if arch(arm64)
+        // The spin is this process's own work, so its own energy rises (Intel Macs may report zero).
+        XCTAssertGreaterThan(try XCTUnwrap(again.energy), try XCTUnwrap(mine.energy))
+        #endif
         XCTAssertGreaterThan(second.logicalCoreCount, 0)
         // The host's ticks saw this process spin, so the machine was measurably busy, and never more than all of it.
         let machine = try XCTUnwrap(second.machineCPUPercent)
