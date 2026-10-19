@@ -368,7 +368,8 @@ public final class ActivityStore: @unchecked Sendable {
                     dominant_title = excluded.dominant_title, dominant_url_scheme = excluded.dominant_url_scheme,
                     dominant_url_host = excluded.dominant_url_host, dominant_url_path = excluded.dominant_url_path,
                     revision = excluded.revision, label_attempts = 0,
-                    label_state = CASE label_state WHEN 'corrected' THEN 'corrected' ELSE 'pending' END
+                    label_state = CASE label_state WHEN 'corrected' THEN 'corrected' ELSE 'pending' END,
+                    \(Self.labelColumns.map { "\($0) = CASE label_state WHEN 'corrected' THEN \($0) END" }.joined(separator: ", "))
                 WHERE (\(Self.contentColumns.map { "blocks." + $0 }.joined(separator: ", ")))
                     IS NOT (\(Self.contentColumns.map { "excluded." + $0 }.joined(separator: ", ")))
                 """, [.real(bucket.timeIntervalSince1970), .real(block.activeSeconds), .real(block.excludedSeconds), .text(apps),
@@ -376,6 +377,9 @@ public final class ActivityStore: @unchecked Sendable {
                       SQLValue(block.dominantURL?.scheme), SQLValue(block.dominantURL?.host), SQLValue(block.dominantURL?.path), revision])
         }
     }
+
+    /// A model's label for content that has since changed is cleared with it; the user's correction is kept.
+    private static let labelColumns = ["label", "label_reason", "label_confidence", "label_source", "label_model", "classified_at"]
 
     /// Sorted keys, so the same apps always encode to the same text and an unchanged block keeps its revision.
     private static let appsEncoder: JSONEncoder = {

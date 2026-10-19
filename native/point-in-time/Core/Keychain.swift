@@ -35,9 +35,9 @@ public struct KeychainError: Error, Equatable, CustomStringConvertible {
 /// The item goes in the data protection keychain when the build has the entitlement that keychain needs, which takes a
 /// provisioning profile. Current builds, Developer ID releases included, do not have it: they get
 /// `errSecMissingEntitlement` there and use the login keychain, which does not enforce this-device-only, so the item
-/// moves with Migration Assistant and keychain backups. A read looks in the login keychain too, a save to the data
-/// protection keychain removes a login-keychain copy, and a delete removes both, so a key saved by either kind of build
-/// is found, replaced, and removed.
+/// moves with Migration Assistant and keychain backups (accepted for SET-20; enforced this-device-only storage is
+/// SET-118). A read looks in the login keychain too, a save to the data protection keychain removes a login-keychain
+/// copy, and a delete removes both, so a key saved by either kind of build is found, replaced, and removed.
 public struct KeychainSecret: Sendable {
     public static let openRouterKey = KeychainSecret(service: "dev.subset.point-in-time.openrouter", account: "api-key")
 

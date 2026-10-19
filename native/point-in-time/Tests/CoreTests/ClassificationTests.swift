@@ -439,6 +439,11 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         stored = try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))
         #expect(stored[0].labeling.state == .corrected && stored[0].labeling.label == .drift)
         #expect(stored[1].labeling == .pending)
+        // The model's label for the old content is cleared in the database, not only hidden; the correction is kept.
+        let rows = try SQLiteConnection(path: store.databaseURL.path).query(
+            "SELECT label, label_reason, label_confidence, label_source, label_model, classified_at FROM blocks ORDER BY start")
+        #expect(rows[0][0] == .text("drift") && rows[0][3] == .text("user"))
+        #expect(rows[1].allSatisfy { $0 == .null })
         // Saving the same content again changes nothing.
         try store.save(segment(block(1).start.addingTimeInterval(150), 20, "com.example.video"))
         #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[1].revision == stored[1].revision)
@@ -572,6 +577,32 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.read() }
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.save("x") }
         #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.delete() }
+    }
+
+    /// Current builds have no data protection entitlement, so this is the item they keep (owner amendment; enforced
+    /// this-device-only storage is SET-118).
+    @Test func theLoginKeychainItemCurrentBuildsUseIsANeverSynchronizedThisDeviceOnlyGenericPassword() throws {
+        let double = KeychainDouble()
+        double.dataProtectionMissing = true
+        let shipped = KeychainSecret.openRouterKey
+        let secret = KeychainSecret(service: shipped.service, account: shipped.account, api: double)
+        try secret.save("sk-or-1")
+        try secret.save("sk-or-2")
+        let add = try #require(double.calls.first { $0.0 == "add" }?.1)
+        #expect(add.count == 6)
+        #expect(add[kSecClass as String] as? String == kSecClassGenericPassword as String)
+        #expect(add[kSecAttrService as String] as? String == "dev.subset.point-in-time.openrouter")
+        #expect(add[kSecAttrAccount as String] as? String == "api-key")
+        #expect(add[kSecUseDataProtectionKeychain as String] == nil)
+        #expect(add[kSecValueData as String] as? Data == Data("sk-or-1".utf8))
+        // The second save updates the login-keychain item and keeps both protections on it.
+        let update = try #require(double.calls.last { $0.0 == "update" }?.1)
+        #expect(double.calls.filter { $0.0 == "add" }.count == 1)
+        for attributes in [add, update] {
+            #expect(attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+            #expect(attributes[kSecAttrSynchronizable as String] as? Bool == false)
+        }
+        #expect(double.stored == [false: Data("sk-or-2".utf8)])
     }
 
     @Test func aKeyAnUnentitledBuildLeftInTheLoginKeychainIsFoundReplacedAndRemoved() throws {

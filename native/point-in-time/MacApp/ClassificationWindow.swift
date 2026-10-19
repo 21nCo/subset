@@ -225,7 +225,7 @@ struct ClassificationView: View {
                         if model.hasKey { Button("Remove Key") { model.removeKey() } }
                     }
                     if let message = model.keyMessage { Text(verbatim: message).font(.caption) }
-                    Text("The key is kept in your login keychain, never synchronized to iCloud, and never written to a file, a log, or the database. Like other login-keychain items, it moves with Migration Assistant and keychain backups.")
+                    Text("The key is kept in this Mac’s login keychain, never synchronized to iCloud, and never written to a file, a log, or the database. Like other login-keychain items, it moves with Migration Assistant and keychain backups; enforced this-device-only storage arrives with SET-118.")
                         .font(.caption).foregroundStyle(.secondary)
                     TextField("Model (default \(OpenRouterClient.defaultModel))", text: $model.modelField)
                         .focused($editingModel)
