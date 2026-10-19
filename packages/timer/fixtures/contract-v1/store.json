@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "idSequence": 8,
+  "timers": [
+    {
+      "definition": {
+        "kind": "interval",
+        "id": "t_adygqpxx",
+        "name": "Tabata",
+        "sound": true,
+        "countdownTicks": true,
+        "createdAt": 1792400322000,
+        "segments": [
+          {
+            "label": "Work",
+            "phase": "work",
+            "durationMs": 20000
+          },
+          {
+            "label": "Rest",
+            "phase": "rest",
+            "durationMs": 10000
+          }
+        ],
+        "rounds": 8,
+        "prepMs": 10000
+      },
+      "runtime": {
+        "status": "running",
+        "startedAt": 1792400322000,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "stopwatch",
+        "id": "t_rcrt44q9",
+        "name": "Run",
+        "sound": true,
+        "countdownTicks": false,
+        "createdAt": 1792399800000
+      },
+      "runtime": {
+        "status": "running",
+        "startedAt": 1792399800000,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [
+          {
+            "elapsedMs": 180000,
+            "at": 1792399980000
+          },
+          {
+            "elapsedMs": 420000,
+            "at": 1792400220000
+          }
+        ],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "countdown",
+        "id": "t_dk1facen",
+        "name": "Tea",
+        "sound": true,
+        "countdownTicks": false,
+        "createdAt": 1792400160000,
+        "durationMs": 180000,
+        "lapsEnabled": false
+      },
+      "runtime": {
+        "status": "paused",
+        "startedAt": null,
+        "accumulatedMs": 80000,
+        "pausedAt": 1792400240000,
+        "laps": [],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "countdown",
+        "id": "t_nwkjbbkw",
+        "name": "AMRAP",
+        "sound": true,
+        "countdownTicks": false,
+        "createdAt": 1792399140000,
+        "durationMs": 1200000,
+        "lapsEnabled": true
+      },
+      "runtime": {
+        "status": "running",
+        "startedAt": 1792399140000,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [
+          {
+            "elapsedMs": 360000,
+            "at": 1792399500000
+          }
+        ],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "interval",
+        "id": "t_daesff02",
+        "name": "Stretch",
+        "sound": true,
+        "countdownTicks": true,
+        "createdAt": 1792400380000,
+        "segments": [
+          {
+            "label": "Hold",
+            "phase": "work",
+            "durationMs": 30000
+          }
+        ],
+        "rounds": 1
+      },
+      "runtime": {
+        "status": "finished",
+        "startedAt": null,
+        "accumulatedMs": 10000,
+        "pausedAt": null,
+        "laps": [],
+        "skippedMs": 20000
+      }
+    },
+    {
+      "definition": {
+        "kind": "interval",
+        "id": "t_ac50bvkp",
+        "name": "Pomodoro",
+        "sound": true,
+        "countdownTicks": true,
+        "createdAt": 1792400280000,
+        "segments": [
+          {
+            "label": "Focus",
+            "phase": "work",
+            "durationMs": 1500000
+          },
+          {
+            "label": "Break",
+            "phase": "rest",
+            "durationMs": 300000
+          },
+          {
+            "label": "Focus",
+            "phase": "work",
+            "durationMs": 1500000
+          },
+          {
+            "label": "Break",
+            "phase": "rest",
+            "durationMs": 300000
+          },
+          {
+            "label": "Focus",
+            "phase": "work",
+            "durationMs": 1500000
+          },
+          {
+            "label": "Break",
+            "phase": "rest",
+            "durationMs": 300000
+          },
+          {
+            "label": "Focus",
+            "phase": "work",
+            "durationMs": 1500000
+          },
+          {
+            "label": "Long break",
+            "phase": "rest",
+            "durationMs": 900000
+          }
+        ],
+        "rounds": 1
+      },
+      "runtime": {
+        "status": "idle",
+        "startedAt": null,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "countdown",
+        "id": "t_v9pdg8p9",
+        "name": "Standup",
+        "sound": true,
+        "countdownTicks": false,
+        "createdAt": 1792400340000,
+        "until": "2026-10-19T09:30:00.000Z",
+        "lapsEnabled": false
+      },
+      "runtime": {
+        "status": "idle",
+        "startedAt": null,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [],
+        "skippedMs": 0
+      }
+    }
+  ],
+  "presets": [
+    {
+      "id": "p_xja3zjdj",
+      "name": "Ladder",
+      "builtIn": false,
+      "timer": {
+        "kind": "interval",
+        "segments": [
+          {
+            "label": "Squats",
+            "phase": "work",
+            "durationMs": 45000
+          },
+          {
+            "label": "Rest",
+            "phase": "rest",
+            "durationMs": 15000
+          },
+          {
+            "label": "Lunges",
+            "phase": "work",
+            "durationMs": 45000
+          },
+          {
+            "label": "Rest",
+            "phase": "rest",
+            "durationMs": 15000
+          }
+        ],
+        "rounds": 3,
+        "cooldownMs": 120000
+      }
+    }
+  ]
+}

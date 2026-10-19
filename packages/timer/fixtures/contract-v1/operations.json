@@ -1,0 +1,1381 @@
+{
+  "store": "store.json",
+  "cases": [
+    {
+      "name": "create a countdown",
+      "operation": "create",
+      "writeClass": "write",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "name": "Eggs",
+          "durationMs": 360000
+        }
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "countdown",
+            "id": "t_4tvjx8bj",
+            "name": "Eggs",
+            "sound": true,
+            "countdownTicks": false,
+            "createdAt": 1792400400000,
+            "durationMs": 360000,
+            "lapsEnabled": false
+          },
+          "runtime": {
+            "status": "idle",
+            "startedAt": null,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "idle",
+            "elapsedMs": 0,
+            "totalMs": 360000,
+            "remainingMs": 360000,
+            "finished": false,
+            "step": null,
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "create from a saved preset",
+      "operation": "create",
+      "writeClass": "write",
+      "input": {
+        "preset": "p_xja3zjdj",
+        "name": "Leg ladder"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_4tvjx8bj",
+            "name": "Leg ladder",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400400000,
+            "segments": [
+              {
+                "label": "Squats",
+                "phase": "work",
+                "durationMs": 45000
+              },
+              {
+                "label": "Rest",
+                "phase": "rest",
+                "durationMs": 15000
+              },
+              {
+                "label": "Lunges",
+                "phase": "work",
+                "durationMs": 45000
+              },
+              {
+                "label": "Rest",
+                "phase": "rest",
+                "durationMs": 15000
+              }
+            ],
+            "rounds": 3,
+            "cooldownMs": 120000
+          },
+          "runtime": {
+            "status": "idle",
+            "startedAt": null,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "idle",
+            "elapsedMs": 0,
+            "totalMs": 480000,
+            "remainingMs": 480000,
+            "finished": false,
+            "step": {
+              "index": 0,
+              "segmentIndex": 0,
+              "round": 1,
+              "phase": "work",
+              "label": "Squats",
+              "startMs": 0,
+              "durationMs": 45000,
+              "elapsedMs": 0,
+              "remainingMs": 45000
+            },
+            "next": {
+              "index": 1,
+              "segmentIndex": 1,
+              "round": 1,
+              "phase": "rest",
+              "label": "Rest",
+              "startMs": 45000,
+              "durationMs": 15000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "create rejects an until time more than 24 hours away",
+      "operation": "create",
+      "writeClass": "write",
+      "input": {
+        "timer": {
+          "kind": "countdown",
+          "until": "2026-10-20T10:00:00.000Z"
+        }
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_input",
+        "message": "timer.until: must be between 1 second and 24 hours from now",
+        "issues": [
+          {
+            "path": "timer.until",
+            "message": "must be between 1 second and 24 hours from now"
+          }
+        ]
+      }
+    },
+    {
+      "name": "create names an unknown preset",
+      "operation": "create",
+      "writeClass": "write",
+      "input": {
+        "preset": "p_zzzzzzzz"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "not_found",
+        "message": "No preset p_zzzzzzzz."
+      }
+    },
+    {
+      "name": "start an idle timer",
+      "operation": "start",
+      "writeClass": "write",
+      "input": {
+        "id": "t_ac50bvkp"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_ac50bvkp",
+            "name": "Pomodoro",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400280000,
+            "segments": [
+              {
+                "label": "Focus",
+                "phase": "work",
+                "durationMs": 1500000
+              },
+              {
+                "label": "Break",
+                "phase": "rest",
+                "durationMs": 300000
+              },
+              {
+                "label": "Focus",
+                "phase": "work",
+                "durationMs": 1500000
+              },
+              {
+                "label": "Break",
+                "phase": "rest",
+                "durationMs": 300000
+              },
+              {
+                "label": "Focus",
+                "phase": "work",
+                "durationMs": 1500000
+              },
+              {
+                "label": "Break",
+                "phase": "rest",
+                "durationMs": 300000
+              },
+              {
+                "label": "Focus",
+                "phase": "work",
+                "durationMs": 1500000
+              },
+              {
+                "label": "Long break",
+                "phase": "rest",
+                "durationMs": 900000
+              }
+            ],
+            "rounds": 1
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792400400000,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 0,
+            "totalMs": 7800000,
+            "remainingMs": 7800000,
+            "finished": false,
+            "step": {
+              "index": 0,
+              "segmentIndex": 0,
+              "round": 1,
+              "phase": "work",
+              "label": "Focus",
+              "startMs": 0,
+              "durationMs": 1500000,
+              "elapsedMs": 0,
+              "remainingMs": 1500000
+            },
+            "next": {
+              "index": 1,
+              "segmentIndex": 1,
+              "round": 1,
+              "phase": "rest",
+              "label": "Break",
+              "startMs": 1500000,
+              "durationMs": 300000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "start fixes an until countdown to a duration",
+      "operation": "start",
+      "writeClass": "write",
+      "input": {
+        "id": "t_v9pdg8p9"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "countdown",
+            "id": "t_v9pdg8p9",
+            "name": "Standup",
+            "sound": true,
+            "countdownTicks": false,
+            "createdAt": 1792400340000,
+            "until": "2026-10-19T09:30:00.000Z",
+            "lapsEnabled": false,
+            "durationMs": 1800000
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792400400000,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 0,
+            "totalMs": 1800000,
+            "remainingMs": 1800000,
+            "finished": false,
+            "step": null,
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "start a preset in one step",
+      "operation": "start",
+      "writeClass": "write",
+      "input": {
+        "preset": "emom"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_4tvjx8bj",
+            "name": "EMOM",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400400000,
+            "segments": [
+              {
+                "label": "Work",
+                "phase": "work",
+                "durationMs": 60000
+              }
+            ],
+            "rounds": 10
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792400400000,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 0,
+            "totalMs": 600000,
+            "remainingMs": 600000,
+            "finished": false,
+            "step": {
+              "index": 0,
+              "segmentIndex": 0,
+              "round": 1,
+              "phase": "work",
+              "label": "Work",
+              "startMs": 0,
+              "durationMs": 60000,
+              "elapsedMs": 0,
+              "remainingMs": 60000
+            },
+            "next": {
+              "index": 1,
+              "segmentIndex": 0,
+              "round": 2,
+              "phase": "work",
+              "label": "Work",
+              "startMs": 60000,
+              "durationMs": 60000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "start a running timer",
+      "operation": "start",
+      "writeClass": "write",
+      "input": {
+        "id": "t_adygqpxx"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_adygqpxx is running; only an idle timer can start."
+      }
+    },
+    {
+      "name": "start a finished timer",
+      "operation": "start",
+      "writeClass": "write",
+      "input": {
+        "id": "t_daesff02"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_daesff02 is finished; only an idle timer can start (reset it first)."
+      }
+    },
+    {
+      "name": "pause a running interval",
+      "operation": "pause",
+      "writeClass": "write",
+      "input": {
+        "id": "t_adygqpxx"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_adygqpxx",
+            "name": "Tabata",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400322000,
+            "segments": [
+              {
+                "label": "Work",
+                "phase": "work",
+                "durationMs": 20000
+              },
+              {
+                "label": "Rest",
+                "phase": "rest",
+                "durationMs": 10000
+              }
+            ],
+            "rounds": 8,
+            "prepMs": 10000
+          },
+          "runtime": {
+            "status": "paused",
+            "startedAt": null,
+            "accumulatedMs": 78000,
+            "pausedAt": 1792400400000,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "paused",
+            "elapsedMs": 78000,
+            "totalMs": 250000,
+            "remainingMs": 172000,
+            "finished": false,
+            "step": {
+              "index": 5,
+              "segmentIndex": 0,
+              "round": 3,
+              "phase": "work",
+              "label": "Work",
+              "startMs": 70000,
+              "durationMs": 20000,
+              "elapsedMs": 8000,
+              "remainingMs": 12000
+            },
+            "next": {
+              "index": 6,
+              "segmentIndex": 1,
+              "round": 3,
+              "phase": "rest",
+              "label": "Rest",
+              "startMs": 90000,
+              "durationMs": 10000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "pause a timer whose time is up",
+      "operation": "pause",
+      "writeClass": "write",
+      "input": {
+        "id": "t_nwkjbbkw"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_nwkjbbkw is finished; only a running timer can pause."
+      }
+    },
+    {
+      "name": "pause an unknown timer",
+      "operation": "pause",
+      "writeClass": "write",
+      "input": {
+        "id": "t_zzzzzzzz"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "not_found",
+        "message": "No timer t_zzzzzzzz."
+      }
+    },
+    {
+      "name": "resume a paused countdown",
+      "operation": "resume",
+      "writeClass": "write",
+      "input": {
+        "id": "t_dk1facen"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "countdown",
+            "id": "t_dk1facen",
+            "name": "Tea",
+            "sound": true,
+            "countdownTicks": false,
+            "createdAt": 1792400160000,
+            "durationMs": 180000,
+            "lapsEnabled": false
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792400400000,
+            "accumulatedMs": 80000,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 80000,
+            "totalMs": 180000,
+            "remainingMs": 100000,
+            "finished": false,
+            "step": null,
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "resume a running timer",
+      "operation": "resume",
+      "writeClass": "write",
+      "input": {
+        "id": "t_rcrt44q9"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_rcrt44q9 is running; only a paused timer can resume."
+      }
+    },
+    {
+      "name": "lap a stopwatch",
+      "operation": "lap",
+      "writeClass": "write",
+      "input": {
+        "id": "t_rcrt44q9"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "stopwatch",
+            "id": "t_rcrt44q9",
+            "name": "Run",
+            "sound": true,
+            "countdownTicks": false,
+            "createdAt": 1792399800000
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792399800000,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [
+              {
+                "elapsedMs": 180000,
+                "at": 1792399980000
+              },
+              {
+                "elapsedMs": 420000,
+                "at": 1792400220000
+              },
+              {
+                "elapsedMs": 600000,
+                "at": 1792400400000
+              }
+            ],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 600000,
+            "totalMs": null,
+            "remainingMs": null,
+            "finished": false,
+            "step": null,
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "lap an interval timer",
+      "operation": "lap",
+      "writeClass": "write",
+      "input": {
+        "id": "t_adygqpxx"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_adygqpxx does not take laps; only stopwatches and countdowns with laps enabled do."
+      }
+    },
+    {
+      "name": "skip to the next segment",
+      "operation": "skip",
+      "writeClass": "write",
+      "input": {
+        "id": "t_adygqpxx"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_adygqpxx",
+            "name": "Tabata",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400322000,
+            "segments": [
+              {
+                "label": "Work",
+                "phase": "work",
+                "durationMs": 20000
+              },
+              {
+                "label": "Rest",
+                "phase": "rest",
+                "durationMs": 10000
+              }
+            ],
+            "rounds": 8,
+            "prepMs": 10000
+          },
+          "runtime": {
+            "status": "running",
+            "startedAt": 1792400322000,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 12000
+          },
+          "projection": {
+            "status": "running",
+            "elapsedMs": 90000,
+            "totalMs": 250000,
+            "remainingMs": 160000,
+            "finished": false,
+            "step": {
+              "index": 6,
+              "segmentIndex": 1,
+              "round": 3,
+              "phase": "rest",
+              "label": "Rest",
+              "startMs": 90000,
+              "durationMs": 10000,
+              "elapsedMs": 0,
+              "remainingMs": 10000
+            },
+            "next": {
+              "index": 7,
+              "segmentIndex": 0,
+              "round": 4,
+              "phase": "work",
+              "label": "Work",
+              "startMs": 100000,
+              "durationMs": 20000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "skip a stopwatch",
+      "operation": "skip",
+      "writeClass": "write",
+      "input": {
+        "id": "t_rcrt44q9"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Timer t_rcrt44q9 is a stopwatch; only interval timers skip."
+      }
+    },
+    {
+      "name": "reset a finished timer",
+      "operation": "reset",
+      "writeClass": "destructive",
+      "input": {
+        "id": "t_daesff02"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "interval",
+            "id": "t_daesff02",
+            "name": "Stretch",
+            "sound": true,
+            "countdownTicks": true,
+            "createdAt": 1792400380000,
+            "segments": [
+              {
+                "label": "Hold",
+                "phase": "work",
+                "durationMs": 30000
+              }
+            ],
+            "rounds": 1
+          },
+          "runtime": {
+            "status": "idle",
+            "startedAt": null,
+            "accumulatedMs": 0,
+            "pausedAt": null,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "idle",
+            "elapsedMs": 0,
+            "totalMs": 30000,
+            "remainingMs": 30000,
+            "finished": false,
+            "step": {
+              "index": 0,
+              "segmentIndex": 0,
+              "round": 1,
+              "phase": "work",
+              "label": "Hold",
+              "startMs": 0,
+              "durationMs": 30000,
+              "elapsedMs": 0,
+              "remainingMs": 30000
+            },
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "remove a timer",
+      "operation": "remove",
+      "writeClass": "destructive",
+      "input": {
+        "id": "t_rcrt44q9"
+      },
+      "now": 1792400400000,
+      "result": {
+        "removedId": "t_rcrt44q9"
+      }
+    },
+    {
+      "name": "remove an unknown timer",
+      "operation": "remove",
+      "writeClass": "destructive",
+      "input": {
+        "id": "t_zzzzzzzz"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "not_found",
+        "message": "No timer t_zzzzzzzz."
+      }
+    },
+    {
+      "name": "list every timer",
+      "operation": "list",
+      "writeClass": "read",
+      "input": {},
+      "now": 1792400400000,
+      "result": {
+        "schemaVersion": 1,
+        "observedAt": 1792400400000,
+        "timers": [
+          {
+            "definition": {
+              "kind": "interval",
+              "id": "t_adygqpxx",
+              "name": "Tabata",
+              "sound": true,
+              "countdownTicks": true,
+              "createdAt": 1792400322000,
+              "segments": [
+                {
+                  "label": "Work",
+                  "phase": "work",
+                  "durationMs": 20000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 10000
+                }
+              ],
+              "rounds": 8,
+              "prepMs": 10000
+            },
+            "runtime": {
+              "status": "running",
+              "startedAt": 1792400322000,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "running",
+              "elapsedMs": 78000,
+              "totalMs": 250000,
+              "remainingMs": 172000,
+              "finished": false,
+              "step": {
+                "index": 5,
+                "segmentIndex": 0,
+                "round": 3,
+                "phase": "work",
+                "label": "Work",
+                "startMs": 70000,
+                "durationMs": 20000,
+                "elapsedMs": 8000,
+                "remainingMs": 12000
+              },
+              "next": {
+                "index": 6,
+                "segmentIndex": 1,
+                "round": 3,
+                "phase": "rest",
+                "label": "Rest",
+                "startMs": 90000,
+                "durationMs": 10000
+              }
+            }
+          },
+          {
+            "definition": {
+              "kind": "stopwatch",
+              "id": "t_rcrt44q9",
+              "name": "Run",
+              "sound": true,
+              "countdownTicks": false,
+              "createdAt": 1792399800000
+            },
+            "runtime": {
+              "status": "running",
+              "startedAt": 1792399800000,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [
+                {
+                  "elapsedMs": 180000,
+                  "at": 1792399980000
+                },
+                {
+                  "elapsedMs": 420000,
+                  "at": 1792400220000
+                }
+              ],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "running",
+              "elapsedMs": 600000,
+              "totalMs": null,
+              "remainingMs": null,
+              "finished": false,
+              "step": null,
+              "next": null
+            }
+          },
+          {
+            "definition": {
+              "kind": "countdown",
+              "id": "t_dk1facen",
+              "name": "Tea",
+              "sound": true,
+              "countdownTicks": false,
+              "createdAt": 1792400160000,
+              "durationMs": 180000,
+              "lapsEnabled": false
+            },
+            "runtime": {
+              "status": "paused",
+              "startedAt": null,
+              "accumulatedMs": 80000,
+              "pausedAt": 1792400240000,
+              "laps": [],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "paused",
+              "elapsedMs": 80000,
+              "totalMs": 180000,
+              "remainingMs": 100000,
+              "finished": false,
+              "step": null,
+              "next": null
+            }
+          },
+          {
+            "definition": {
+              "kind": "countdown",
+              "id": "t_nwkjbbkw",
+              "name": "AMRAP",
+              "sound": true,
+              "countdownTicks": false,
+              "createdAt": 1792399140000,
+              "durationMs": 1200000,
+              "lapsEnabled": true
+            },
+            "runtime": {
+              "status": "running",
+              "startedAt": 1792399140000,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [
+                {
+                  "elapsedMs": 360000,
+                  "at": 1792399500000
+                }
+              ],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "finished",
+              "elapsedMs": 1200000,
+              "totalMs": 1200000,
+              "remainingMs": 0,
+              "finished": true,
+              "step": null,
+              "next": null
+            }
+          },
+          {
+            "definition": {
+              "kind": "interval",
+              "id": "t_daesff02",
+              "name": "Stretch",
+              "sound": true,
+              "countdownTicks": true,
+              "createdAt": 1792400380000,
+              "segments": [
+                {
+                  "label": "Hold",
+                  "phase": "work",
+                  "durationMs": 30000
+                }
+              ],
+              "rounds": 1
+            },
+            "runtime": {
+              "status": "finished",
+              "startedAt": null,
+              "accumulatedMs": 10000,
+              "pausedAt": null,
+              "laps": [],
+              "skippedMs": 20000
+            },
+            "projection": {
+              "status": "finished",
+              "elapsedMs": 30000,
+              "totalMs": 30000,
+              "remainingMs": 0,
+              "finished": true,
+              "step": null,
+              "next": null
+            }
+          },
+          {
+            "definition": {
+              "kind": "interval",
+              "id": "t_ac50bvkp",
+              "name": "Pomodoro",
+              "sound": true,
+              "countdownTicks": true,
+              "createdAt": 1792400280000,
+              "segments": [
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Long break",
+                  "phase": "rest",
+                  "durationMs": 900000
+                }
+              ],
+              "rounds": 1
+            },
+            "runtime": {
+              "status": "idle",
+              "startedAt": null,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "idle",
+              "elapsedMs": 0,
+              "totalMs": 7800000,
+              "remainingMs": 7800000,
+              "finished": false,
+              "step": {
+                "index": 0,
+                "segmentIndex": 0,
+                "round": 1,
+                "phase": "work",
+                "label": "Focus",
+                "startMs": 0,
+                "durationMs": 1500000,
+                "elapsedMs": 0,
+                "remainingMs": 1500000
+              },
+              "next": {
+                "index": 1,
+                "segmentIndex": 1,
+                "round": 1,
+                "phase": "rest",
+                "label": "Break",
+                "startMs": 1500000,
+                "durationMs": 300000
+              }
+            }
+          },
+          {
+            "definition": {
+              "kind": "countdown",
+              "id": "t_v9pdg8p9",
+              "name": "Standup",
+              "sound": true,
+              "countdownTicks": false,
+              "createdAt": 1792400340000,
+              "until": "2026-10-19T09:30:00.000Z",
+              "lapsEnabled": false
+            },
+            "runtime": {
+              "status": "idle",
+              "startedAt": null,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "idle",
+              "elapsedMs": 0,
+              "totalMs": 1800000,
+              "remainingMs": 1800000,
+              "finished": false,
+              "step": null,
+              "next": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "get one timer",
+      "operation": "get",
+      "writeClass": "read",
+      "input": {
+        "id": "t_dk1facen"
+      },
+      "now": 1792400400000,
+      "result": {
+        "timer": {
+          "definition": {
+            "kind": "countdown",
+            "id": "t_dk1facen",
+            "name": "Tea",
+            "sound": true,
+            "countdownTicks": false,
+            "createdAt": 1792400160000,
+            "durationMs": 180000,
+            "lapsEnabled": false
+          },
+          "runtime": {
+            "status": "paused",
+            "startedAt": null,
+            "accumulatedMs": 80000,
+            "pausedAt": 1792400240000,
+            "laps": [],
+            "skippedMs": 0
+          },
+          "projection": {
+            "status": "paused",
+            "elapsedMs": 80000,
+            "totalMs": 180000,
+            "remainingMs": 100000,
+            "finished": false,
+            "step": null,
+            "next": null
+          }
+        }
+      }
+    },
+    {
+      "name": "get with a malformed id",
+      "operation": "get",
+      "writeClass": "read",
+      "input": {
+        "id": "tea"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_input",
+        "message": "id: must be a timer id such as t_ab12cd34",
+        "issues": [
+          {
+            "path": "id",
+            "message": "must be a timer id such as t_ab12cd34"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list presets",
+      "operation": "presets.list",
+      "writeClass": "read",
+      "input": {},
+      "now": 1792400400000,
+      "result": {
+        "presets": [
+          {
+            "id": "tabata",
+            "name": "Tabata",
+            "builtIn": true,
+            "timer": {
+              "kind": "interval",
+              "prepMs": 10000,
+              "rounds": 8,
+              "segments": [
+                {
+                  "label": "Work",
+                  "phase": "work",
+                  "durationMs": 20000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 10000
+                }
+              ]
+            }
+          },
+          {
+            "id": "emom",
+            "name": "EMOM",
+            "builtIn": true,
+            "timer": {
+              "kind": "interval",
+              "rounds": 10,
+              "segments": [
+                {
+                  "label": "Work",
+                  "phase": "work",
+                  "durationMs": 60000
+                }
+              ]
+            }
+          },
+          {
+            "id": "hiit-40-20",
+            "name": "HIIT 40/20",
+            "builtIn": true,
+            "timer": {
+              "kind": "interval",
+              "rounds": 10,
+              "segments": [
+                {
+                  "label": "Work",
+                  "phase": "work",
+                  "durationMs": 40000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 20000
+                }
+              ]
+            }
+          },
+          {
+            "id": "pomodoro",
+            "name": "Pomodoro",
+            "builtIn": true,
+            "timer": {
+              "kind": "interval",
+              "rounds": 1,
+              "segments": [
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Break",
+                  "phase": "rest",
+                  "durationMs": 300000
+                },
+                {
+                  "label": "Focus",
+                  "phase": "work",
+                  "durationMs": 1500000
+                },
+                {
+                  "label": "Long break",
+                  "phase": "rest",
+                  "durationMs": 900000
+                }
+              ]
+            }
+          },
+          {
+            "id": "amrap",
+            "name": "AMRAP",
+            "builtIn": true,
+            "timer": {
+              "kind": "countdown",
+              "durationMs": 1200000,
+              "lapsEnabled": true
+            }
+          },
+          {
+            "id": "p_xja3zjdj",
+            "name": "Ladder",
+            "builtIn": false,
+            "timer": {
+              "kind": "interval",
+              "segments": [
+                {
+                  "label": "Squats",
+                  "phase": "work",
+                  "durationMs": 45000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 15000
+                },
+                {
+                  "label": "Lunges",
+                  "phase": "work",
+                  "durationMs": 45000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 15000
+                }
+              ],
+              "rounds": 3,
+              "cooldownMs": 120000
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "save a preset",
+      "operation": "presets.save",
+      "writeClass": "write",
+      "input": {
+        "name": "Plank",
+        "timer": {
+          "kind": "countdown",
+          "durationMs": 90000,
+          "countdownTicks": true
+        }
+      },
+      "now": 1792400400000,
+      "result": {
+        "preset": {
+          "id": "p_4tvjx8bj",
+          "name": "Plank",
+          "builtIn": false,
+          "timer": {
+            "kind": "countdown",
+            "countdownTicks": true,
+            "durationMs": 90000
+          }
+        }
+      }
+    },
+    {
+      "name": "remove a saved preset",
+      "operation": "presets.remove",
+      "writeClass": "destructive",
+      "input": {
+        "id": "p_xja3zjdj"
+      },
+      "now": 1792400400000,
+      "result": {
+        "removedId": "p_xja3zjdj"
+      }
+    },
+    {
+      "name": "remove a built-in preset",
+      "operation": "presets.remove",
+      "writeClass": "destructive",
+      "input": {
+        "id": "tabata"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "invalid_state",
+        "message": "Preset tabata is built in and read-only."
+      }
+    },
+    {
+      "name": "remove an unknown preset",
+      "operation": "presets.remove",
+      "writeClass": "destructive",
+      "input": {
+        "id": "p_zzzzzzzz"
+      },
+      "now": 1792400400000,
+      "error": {
+        "code": "not_found",
+        "message": "No preset p_zzzzzzzz."
+      }
+    }
+  ]
+}
