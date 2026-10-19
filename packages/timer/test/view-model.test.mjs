@@ -5,9 +5,9 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { emptyStore, operations, schemas, timerBoard } from '../dist/index.js';
 import {
-  CONFIRM_MS, boardView, cancelsRepeat, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyBoardState, emptyCountdownDraft,
+  CONFIRM_MS, actionIssued, boardView, cancelsRepeat, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyBoardState, emptyCountdownDraft,
   emptyIntervalDraft, failureText, focusDisplaced, formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl,
-  needsRead, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets,
+  hostArrived, needsRead, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets,
   readRefresh, readSettled, readsAfter, replySettled, reproject, ringProgress
 } from '../dist/view/view-model.js';
 
@@ -383,6 +383,11 @@ test('a reply that does not match its operation’s result is a failure, never a
 const shown = (board) => board.timers.map((timer) => [timer.definition.id, timer.runtime]);
 const held = (store) => store.timers.map((timer) => [timer.definition.id, timer.runtime]);
 const list = (store, at) => operations.list(store, {}, at).result;
+/** The board calls an action and settles its reply before it does anything else. */
+function acted(state, operation, id, reply) {
+  const call = actionIssued(state);
+  return replySettled(call.state, operation, id, reply, call.issued).state;
+}
 
 test('a change stays shown until a board observed after it committed, from the host or a read, for every timer operation', () => {
   for (const operation of Object.keys(SCENARIOS)) {
@@ -398,9 +403,10 @@ test('a change stays shown until a board observed after it committed, from the h
       : operations.remove(reply.store, { id }, AT + 30).store;
     const newer = timerBoard(later, AT + 40);
 
-    // A read issued for an earlier change, then this change's reply, then the read it issues.
-    let { state, issued: earlier } = readIssued(emptyBoardState());
-    state = replySettled(state, operation, scene.id, reply.result).state;
+    // The action is called, then a read for an earlier change, then the action's reply and the read it issues.
+    const call = actionIssued(emptyBoardState());
+    let { state, issued: earlier } = readIssued(call.state);
+    state = replySettled(state, operation, scene.id, reply.result, call.issued).state;
     const own = readIssued(state);
     state = own.state;
     // Host results observed before the commit, or in its millisecond, arriving after the reply do not hide it;
@@ -433,7 +439,7 @@ test('a change stays shown until a board observed after it committed, from the h
 
     // The reply arrives only after the host passed that newer result, and every read fails: the late reply
     // hides nothing and brings back no removed timer.
-    let delayed = replySettled(emptyBoardState(), operation, scene.id, reply.result).state;
+    let delayed = acted(emptyBoardState(), operation, scene.id, reply.result);
     delayed = readSettled(readIssued(delayed).state, delayed.seq + 1, new Error('offline')).state;
     assert.deepEqual(shown(boardView(newer, delayed)), held(later), `${operation} reply after a newer host result`);
     assert.equal(needsRead(newer, delayed), false);
@@ -452,28 +458,39 @@ test('overlapping changes to two timers and reads settling in any order, or fail
   ];
   let seed = 7;
   const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
-  for (const tick of [10, 0]) {
+  // `tick` ms pass between steps. With `back`, the reads issued so far settle every third step and the host
+  // clock then steps back `back` ms.
+  for (const [tick, back] of [[10, 0], [0, 0], [10, 3_600_000], [0, 1]]) {
     for (let trial = 0; trial < 40; trial++) {
       let store = emptyStore();
-      let state = emptyBoardState();
+      const host = timerBoard(store, AT - 100);
+      let state = hostArrived(emptyBoardState(), host);
       const ids = [];
-      const reads = [];
+      let reads = [];
+      let at = AT;
+      const deliver = () => {
+        for (const read of reads.sort(() => random() - 0.5)) {
+          state = readSettled(state, read.issued, read.outcome).state;
+          assert.deepEqual(shown(boardView(host, state)), held(store), `tick ${tick}, back ${back}, trial ${trial}`);
+        }
+        reads = [];
+      };
       steps.forEach(([operation, input], index) => {
-        const at = AT + index * tick;
+        if (back && index % 3 === 0) {
+          deliver();
+          at -= back;
+        }
         const reply = operations[operation](store, input(ids), at);
         assert.ok(reply.ok, `${operation}: ${JSON.stringify(reply.error)}`);
         store = reply.store;
         if (operation === 'create') ids.push(reply.result.timer.definition.id);
-        state = replySettled(state, operation, operation === 'create' ? null : input(ids).id, reply.result).state;
+        state = acted(state, operation, operation === 'create' ? null : input(ids).id, reply.result);
         const issued = readIssued(state);
         state = issued.state;
         reads.push({ issued: issued.issued, outcome: random() < 0.25 ? new Error('offline') : list(store, at) });
+        at += tick;
       });
-      const host = timerBoard(emptyStore(), AT - 100);
-      for (const read of reads.sort(() => random() - 0.5)) {
-        state = readSettled(state, read.issued, read.outcome).state;
-        assert.deepEqual(shown(boardView(host, state)), held(store), `tick ${tick}, trial ${trial}`);
-      }
+      deliver();
       assert.deepEqual(shown(boardView(timerBoard(store, AT + 1_000), state)), held(store));
     }
   }
@@ -483,16 +500,94 @@ test('overlapping changes to two timers and reads settling in any order, or fail
   const created = operations.create(emptyStore(), STOPWATCH, AT);
   const id = created.result.timer.definition.id;
   const started = operations.start(created.store, { id }, AT + 10);
-  let state = replySettled(emptyBoardState(), 'create', null, created.result).state;
+  let state = acted(emptyBoardState(), 'create', null, created.result);
   const first = readIssued(state);
-  state = replySettled(first.state, 'start', id, started.result).state;
+  state = acted(first.state, 'start', id, started.result);
   state = readSettled(state, first.issued, list(created.store, AT + 5)).state;
   assert.deepEqual(shown(boardView(timerBoard(emptyStore(), AT - 100), state)), held(started.store));
   assert.deepEqual(shown(boardView(timerBoard(operations.remove(started.store, { id }, AT + 20).store, AT + 30), state)), []);
-  // Of two replies for one timer, the later commit stays whichever arrives last.
+  // Of two overlapping calls on one timer, the later commit stays whichever reply arrives last.
   const paused = operations.pause(started.store, { id }, AT + 20);
-  const replies = replySettled(replySettled(emptyBoardState(), 'pause', id, paused.result).state, 'start', id, started.result).state;
+  const pausing = actionIssued(emptyBoardState());
+  const starting = actionIssued(pausing.state);
+  const replies = replySettled(replySettled(starting.state, 'pause', id, paused.result, pausing.issued).state, 'start', id, started.result, starting.issued).state;
   assert.deepEqual(shown(boardView(timerBoard(emptyStore(), AT - 100), replies)), held(paused.store));
+});
+
+test('what the board saw orders a change before a host clock that steps back, for every timer operation', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { store, input, ...scene } = { input: undefined, ...SCENARIOS[operation]() };
+    const reply = operations[operation](store, input ?? { id: scene.id }, AT);
+    const id = scene.id ?? reply.result.timer.definition.id;
+    const change = held(reply.store);
+    const later = operation === 'remove'
+      ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT + 30).store
+      : operations.remove(reply.store, { id }, AT + 30).store;
+    // A host result that arrived before the call never retires its change, though observed an hour after
+    // it by a clock that then stepped back, and every read fails.
+    const early = timerBoard(store, AT + 3_600_000);
+    let state = acted(hostArrived(emptyBoardState(), early), operation, scene.id, reply.result);
+    const lost = readIssued(state);
+    state = readSettled(lost.state, lost.issued, new Error('offline')).state;
+    assert.deepEqual(shown(boardView(early, state)), change, `${operation} over a host result that arrived before the call`);
+    assert.equal(needsRead(early, state), true);
+    // One that arrives after the reply may have been observed before or after the commit: its observedAt
+    // decides, and the change keeps its own millisecond.
+    for (const [host, expected] of [[timerBoard(store, AT - 50), change], [timerBoard(store, AT), change], [timerBoard(later, AT + 40), held(later)]]) {
+      assert.deepEqual(shown(boardView(host, hostArrived(state, host))), expected, `${operation}: host result at ${host.observedAt - AT} after the reply`);
+    }
+    // A read issued after the reply retires the change and wins over the host result that arrived before it,
+    // both though observed earlier.
+    const own = readIssued(state);
+    const confirmed = readSettled(own.state, own.issued, list(reply.store, AT - 1_000)).state;
+    assert.deepEqual(confirmed.pending, [], operation);
+    assert.deepEqual(shown(boardView(early, confirmed)), change, `${operation}: later-issued read over an earlier host result`);
+    // A read already in flight when the call is made overlaps it; observed after the commit, it retires the
+    // change and shows another surface's later change.
+    const reading = readIssued(emptyBoardState());
+    const calling = actionIssued(reading.state);
+    const overlapped = replySettled(calling.state, operation, scene.id, reply.result, calling.issued).state;
+    const after = readSettled(overlapped, reading.issued, list(later, AT + 40)).state;
+    assert.deepEqual(shown(boardView(timerBoard(store, AT - 100), after)), held(later), `${operation}: read in flight observed after the commit`);
+    // A call made after that read settled is not retired by it.
+    const next = operation === 'remove' ? null : operations.reset(reply.store, { id }, AT - 2_000);
+    if (next) {
+      assert.deepEqual(shown(boardView(early, acted(confirmed, 'reset', id, next.result))), held(next.store), `${operation} then reset`);
+    }
+  }
+});
+
+test('sequential actions on one timer end at the host state across a backward clock step, whatever their reads do', () => {
+  const pairs = [
+    ['start', 'pause', () => timerAfter(STOPWATCH)],
+    ['start', 'remove', () => timerAfter(STOPWATCH)],
+    ['create', 'start', () => ({ store: emptyStore(), id: null })],
+    ['pause', 'reset', () => timerAfter(STOPWATCH, [['start', 0]])]
+  ];
+  for (const [first, second, setup] of pairs) {
+    for (const back of [1, 1_000, 3_600_000]) {
+      for (const reads of [['ok'], ['offline'], ['offline', 'ok']]) {
+        const name = `${first} then ${second}, clock ${back} ms back, reads ${reads.join(' then ')}`;
+        let { store, id } = setup();
+        const host = timerBoard(store, AT - 100);
+        const one = operations[first](store, id ? { id } : STOPWATCH, AT);
+        let state = acted(hostArrived(emptyBoardState(), host), first, id, one.result);
+        id ??= one.result.timer.definition.id;
+        // The first change's read fails, then the clock steps back before the second.
+        const lost = readIssued(state);
+        state = readSettled(lost.state, lost.issued, new Error('offline')).state;
+        const two = operations[second](one.store, { id }, AT - back);
+        assert.ok(two.ok, name);
+        state = acted(state, second, id, two.result);
+        for (const outcome of reads) {
+          const read = readIssued(state);
+          state = readSettled(read.state, read.issued, outcome === 'ok' ? list(two.store, AT - back + 1) : new Error(outcome)).state;
+        }
+        assert.deepEqual(shown(boardView(host, state)), held(two.store), name);
+        if (reads.at(-1) === 'ok') assert.deepEqual(state.pending, [], name);
+      }
+    }
+  }
 });
 
 test('the read after a change shows only a list result the board can render, or a List failure', async () => {

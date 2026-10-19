@@ -2,8 +2,8 @@
   The Timer board, view ID `subset.timer.board@1`. It renders the timers in `result`, re-projects them
   from their timestamps every 250 ms and runs every change through `actions.invoke`. It never fetches:
   each host supplies its own transport. After each change it reads the board through `list`; the pure
-  reconciler in `view-model.ts` (`replySettled`, `readIssued`, `readSettled`, `boardView`, `needsRead`)
-  owns what the replies, those reads and the host's `result` show.
+  reconciler in `view-model.ts` (`actionIssued`, `replySettled`, `readIssued`, `readSettled`,
+  `hostArrived`, `boardView`, `needsRead`) owns what the replies, those reads and the host's `result` show.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
@@ -12,8 +12,8 @@
   import CreateTimer from './CreateTimer.svelte';
   import TimerCard from './TimerCard.svelte';
   import {
-    REFRESH_MS, boardView, cancelsRepeat, emptyBoardState, failureText, focusDisplaced, formatClockTime, needsRead, pickAnnouncements,
-    pressDestructive, readBoardResult, readIssued, readPresets, readSettled, readsAfter, replySettled, reproject,
+    REFRESH_MS, actionIssued, boardView, cancelsRepeat, emptyBoardState, failureText, focusDisplaced, formatClockTime, hostArrived,
+    needsRead, pickAnnouncements, pressDestructive, readBoardResult, readIssued, readPresets, readSettled, readsAfter, replySettled, reproject,
     type ActionFailure, type AnnouncedStates, type Armed, type ControlName, type TimerBoardProps
   } from './view-model.js';
 
@@ -69,9 +69,11 @@
     const key = timerId ?? operation;
     if (busy[key]) return null;
     busy[key] = true;
+    const issue = actionIssued(known);
+    known = issue.state;
     const outcome = await invoke(operation, input);
     busy[key] = false;
-    const settled = replySettled(known, operation, timerId, outcome);
+    const settled = replySettled(known, operation, timerId, outcome, issue.issued);
     known = settled.state;
     if (readsAfter(operation, outcome)) void refresh();
     if (!settled.outcome.ok) {
@@ -84,11 +86,14 @@
 
   // `list` reads in flight.
   let reading = 0;
-  // A new host result after a failed read, while a change is still shown over it: read again.
+  // Each new host result is recorded, so later actions and reads come after it. After a failed read,
+  // while a change is still shown over it, it prompts a read.
   $effect(() => {
     const host = read;
     untrack(() => {
-      if (host.ok && reading === 0 && needsRead(host.result, known)) void refresh();
+      if (!host.ok) return;
+      known = hostArrived(known, host.result);
+      if (reading === 0 && needsRead(host.result, known)) void refresh();
     });
   });
 

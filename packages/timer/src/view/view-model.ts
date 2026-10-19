@@ -222,67 +222,94 @@ export function readRefresh(outcome: unknown): { ok: true; result: TimerBoardRes
 }
 
 /**
- * A successful change the board shows over the board it has read, until a board observed after it
- * committed replaces it. `timer` is null for a removal.
+ * When an event began and ended on the board's local sequence (`BoardState.seq`): an action from its
+ * call to its reply, a read from its call to its result, a host result only at its arrival, since when
+ * the host observed it is unknown (it begins at -Infinity).
  */
-export interface PendingChange {
-  id: string;
-  timer: TimerSnapshot | null;
-  /** When the host ran the change: its reply's `observedAt`. */
-  committed: number;
-  /** When the board received the reply, in its local sequence. */
-  received: number;
+export interface Span {
+  start: number;
+  end: number;
+}
+
+/** An event the board orders: its span and the host's `observedAt` for it. */
+interface BoardEvent {
+  span: Span;
+  observedAt: number;
 }
 
 /**
- * What the board knows beyond the host's `result`, changed only by `replySettled`, `readIssued` and
- * `readSettled` and shown by `boardView`. Each settled reply and each issued read takes the next
- * number of a local sequence (`seq`), so the board orders its reads among themselves by when it
- * issued them; it orders changes against boards by the host's `observedAt`, never by its own clock.
+ * A successful change the board shows over the board it has read, until a board that comes after it
+ * replaces it. `timer` is null for a removal; `observedAt` is when the host ran it (its reply's).
+ */
+export interface PendingChange extends BoardEvent {
+  id: string;
+  timer: TimerSnapshot | null;
+}
+
+/**
+ * What the board knows beyond the host's `result`, changed only by `actionIssued`, `replySettled`,
+ * `readIssued`, `readSettled` and `hostArrived` and shown by `boardView`. Each takes the next number
+ * of a local sequence (`seq`), so the board knows which of its events ended before another began.
  */
 export interface BoardState {
   seq: number;
   /** The latest-issued `list` read that succeeded. */
-  read: { result: TimerBoardResult; issued: number } | null;
-  /** At most one per timer, the latest the host committed. */
+  read: (BoardEvent & { result: TimerBoardResult }) | null;
+  /** The host's latest `result` and when it arrived. */
+  host: { result: TimerBoardResult; arrived: number } | null;
+  /** At most one per timer, the latest. */
   pending: readonly PendingChange[];
   /** The latest settled read failed and no later-issued read has succeeded. */
   readFailed: boolean;
 }
 
-export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, pending: [], readFailed: false });
+export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, host: null, pending: [], readFailed: false });
+
+/** Whether `a` ended before `b` began, so `b` saw the host after `a` changed or read it. */
+const before = (a: Span, b: Span) => a.end < b.start;
 
 /**
- * Whether `board` shows `change` or a later state of its timer: the host observed it after the
- * change committed. Within the same millisecond only a read the board issued after receiving the
- * change can say so (`issued`, null for the host's result), so the change stays until one does.
+ * Whether `b` comes after `a`. What the board saw decides: the host runs one operation at a time, so
+ * an event that ended before another began comes first even when the host clock went back between
+ * them. Only events that overlap are ordered by `observedAt`, and `tie` decides the same millisecond.
  */
-const supersedes = (board: TimerBoardResult, issued: number | null, change: PendingChange) =>
-  board.observedAt > change.committed || (board.observedAt === change.committed && issued !== null && issued > change.received);
+function after(a: BoardEvent, b: BoardEvent, tie: boolean): boolean {
+  if (before(a.span, b.span)) return true;
+  if (before(b.span, a.span)) return false;
+  return a.observedAt === b.observedAt ? tie : b.observedAt > a.observedAt;
+}
 
 /**
- * Settles one action's reply (see `readOutcome`). A failure changes nothing. A successful change is
- * pending until the board takes a board observed after it committed; until then it shows over any
- * board observed before, whenever that arrives. Of two changes to one timer the later commit stays.
+ * Whether `board` shows `change` or a later state of its timer: it comes after the change. In the
+ * change's millisecond the order is unknown unless the board saw it, so the change stays.
  */
-export function replySettled(state: BoardState, operation: OperationName, timerId: string | null, outcome: unknown): { state: BoardState; outcome: Outcome } {
+const supersedes = (board: BoardEvent, change: PendingChange) => after(change, board, false);
+
+const issue = (state: BoardState) => ({ state: { ...state, seq: state.seq + 1 }, issued: state.seq + 1 });
+
+/** Numbers an action the board is about to call; pass `issued` to `replySettled` with its reply. */
+export const actionIssued = issue;
+
+/**
+ * Settles the reply to the action numbered `issued` (see `readOutcome`). A failure changes nothing. A
+ * successful change is pending until the board takes a board that comes after it; until then it shows
+ * over any board that does not, whenever that arrives. Of two changes to one timer the later stays.
+ */
+export function replySettled(state: BoardState, operation: OperationName, timerId: string | null, outcome: unknown, issued: number): { state: BoardState; outcome: Outcome } {
   const read = readOutcome(operation, timerId, outcome);
   const reply = read.ok ? (read.result as { timer?: TimerSnapshot; removedId?: string; observedAt?: number }) : {};
   const id = reply.timer?.definition.id ?? reply.removedId;
   if (!MUTATIONS.has(operation) || id === undefined || reply.observedAt === undefined) return { state, outcome: read };
   const seq = state.seq + 1;
-  const previous = state.pending.find((change) => change.id === id);
-  if (previous && previous.committed > reply.observedAt) return { state: { ...state, seq }, outcome: read };
-  const change = { id, timer: reply.timer ?? null, committed: reply.observedAt, received: seq };
+  const change = { id, timer: reply.timer ?? null, observedAt: reply.observedAt, span: { start: issued, end: seq } };
+  const previous = state.pending.find((each) => each.id === id);
+  if (previous && !after(previous, change, true)) return { state: { ...state, seq }, outcome: read };
   const pending = previous ? state.pending.map((each) => (each === previous ? change : each)) : [...state.pending, change];
   return { state: { ...state, seq, pending }, outcome: read };
 }
 
 /** Numbers a `list` read the board is about to issue. */
-export function readIssued(state: BoardState): { state: BoardState; issued: number } {
-  const issued = state.seq + 1;
-  return { state: { ...state, seq: issued }, issued };
-}
+export const readIssued = issue;
 
 /**
  * Settles the `list` read numbered `issued`. Reads count in the order the board issued them, so one
@@ -291,26 +318,36 @@ export function readIssued(state: BoardState): { state: BoardState; issued: numb
  * unless a later-issued read already succeeded.
  */
 export function readSettled(state: BoardState, issued: number, outcome: unknown): { state: BoardState; failure: ActionFailure | null } {
-  if (state.read && issued < state.read.issued) return { state, failure: null };
+  if (state.read && issued < state.read.span.start) return { state, failure: null };
   const read = readRefresh(outcome);
   if (!read.ok) return { state: { ...state, readFailed: true }, failure: read.failure };
-  const pending = state.pending.filter((change) => !supersedes(read.result, issued, change));
-  return { state: { ...state, read: { result: read.result, issued }, pending, readFailed: false }, failure: null };
+  const seq = state.seq + 1;
+  const own = { result: read.result, observedAt: read.result.observedAt, span: { start: issued, end: seq } };
+  const pending = state.pending.filter((change) => !supersedes(own, change));
+  return { state: { ...state, seq, read: own, pending, readFailed: false }, failure: null };
+}
+
+/** Records that the host passed `result`, so the board's later events come after it. */
+export function hostArrived(state: BoardState, result: TimerBoardResult): BoardState {
+  if (state.host?.result === result) return state;
+  return { ...state, seq: state.seq + 1, host: { result, arrived: state.seq + 1 } };
 }
 
 /** The base board, the host's `result` or the board's own latest read, and the changes shown over it. */
 function overlay(host: TimerBoardResult, state: BoardState) {
-  const own = state.read && state.read.result.observedAt >= host.observedAt ? state.read : null;
-  const base = own?.result ?? host;
-  return { base, changes: state.pending.filter((change) => !supersedes(base, own?.issued ?? null, change)) };
+  // A result not yet recorded by `hostArrived` overlaps every event of the board.
+  const end = state.host?.result === host ? state.host.arrived : Infinity;
+  const hosted = { result: host, observedAt: host.observedAt, span: { start: -Infinity, end } };
+  const base = state.read && after(hosted, state.read, true) ? state.read : hosted;
+  return { base: base.result, changes: state.pending.filter((change) => !supersedes(base, change)) };
 }
 
 /**
- * The board to show. Its base is the host's `result` or the board's own latest read, whichever the
- * host observed later; on a tie the read, which the board issued after a change. Each change the base
- * does not supersede is laid over it: a snapshot replaces or adds its timer and a removal drops it.
- * A base observed after a change, from the host or a read, wins, so a late reply never undoes a newer
- * change or brings back a timer that base lacks.
+ * The board to show. Its base is the host's `result` or the board's own latest read, whichever comes
+ * after the other: a read issued after the result arrived, else the later `observedAt`, the read
+ * winning a tie. Each change the base does not supersede is laid over it: a snapshot replaces or adds
+ * its timer and a removal drops it. A base that comes after a change, from the host or a read, wins,
+ * so a late reply never undoes a newer change or brings back a timer that base lacks.
  */
 export function boardView(host: TimerBoardResult, state: BoardState): TimerBoardResult {
   const { base, changes } = overlay(host, state);
@@ -328,7 +365,7 @@ export function boardView(host: TimerBoardResult, state: BoardState): TimerBoard
 /**
  * Whether the board should read the host's board again: its last read failed and a change is still
  * laid over the base. The board asks when the host passes a new result, so a result that does not
- * retire the change (observed before it, or in its millisecond) prompts a read that can.
+ * retire the change (one that does not come after it) prompts a read that can.
  */
 export const needsRead = (host: TimerBoardResult, state: BoardState) => state.readFailed && overlay(host, state).changes.length > 0;
 
