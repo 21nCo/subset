@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import { timerBoard, timerSnapshot, type TimerBoardResult, type TimerSnapshot } from './agent.js';
-import { finishedRuntime, intervalStep, intervalStepIndexAt, project, settle } from './engine.js';
+import { finishedRuntime, intervalStep, intervalStepIndexAt, project, settle, totalDurationMs } from './engine.js';
 import {
   TIMER_LIMITS, deriveId, idleRuntime, type Preset, type Timer, type TimerDefinition, type TimerSpec, type TimerStore
 } from './model.js';
@@ -48,7 +48,8 @@ const failure = (code: TimerErrorCode, message: string, issues?: TimerError['iss
 const success = <Result>(store: TimerStore, result: Result): OperationOutcome<Result> => ({ ok: true, store, result });
 
 function parse<Schema extends z.ZodType>(schema: Schema, input: unknown): { ok: true; value: z.infer<Schema> } | { ok: false; error: TimerError } {
-  const parsed = schema.safeParse(input ?? {});
+  // An omitted input means `{}`; `null` is malformed, as the JSON Schemas say.
+  const parsed = schema.safeParse(input === undefined ? {} : input);
   if (parsed.success) return { ok: true, value: parsed.data };
   const issues = parsed.error.issues.map((issue) => ({ path: issue.path.map(String).join('.'), message: issue.message }));
   return failure('invalid_input', issues.map((issue) => (issue.path ? `${issue.path}: ${issue.message}` : issue.message)).join('; '), issues);
@@ -66,10 +67,11 @@ function replaceTimer(store: TimerStore, index: number, timer: Timer, now: numbe
   return success({ ...store, timers }, { timer: timerSnapshot(timer, now) });
 }
 
-function freshId(prefix: 't' | 'p', taken: Set<string>, now: number): string {
-  for (let attempt = 0; ; attempt++) {
-    const id = deriveId(prefix, `${now}:${taken.size}:${attempt}`);
-    if (!taken.has(id)) return id;
+/** A new id and the store's next `idSequence`. The sequence only grows, so a removed id is not issued again. */
+function freshId(prefix: 't' | 'p', store: TimerStore, taken: Set<string>, now: number): { id: string; idSequence: number } {
+  for (let sequence = store.idSequence; ; sequence++) {
+    const id = deriveId(prefix, `${now}:${sequence}`);
+    if (!taken.has(id)) return { id, idSequence: sequence + 1 };
   }
 }
 
@@ -125,9 +127,9 @@ function addTimer(store: TimerStore, input: { timer?: TimerSpec; preset?: string
   if (store.timers.length >= TIMER_LIMITS.timers) {
     return failure('limit_reached', `A store holds at most ${TIMER_LIMITS.timers} timers. Remove one first.`);
   }
-  const id = freshId('t', new Set(store.timers.map((timer) => timer.definition.id)), now);
+  const { id, idSequence } = freshId('t', store, new Set(store.timers.map((timer) => timer.definition.id)), now);
   const timer: Timer = { definition: definitionFrom(spec, id, input.name, now), runtime: idleRuntime() };
-  return { ok: true, store: { ...store, timers: [...store.timers, timer] }, timer };
+  return { ok: true, store: { ...store, idSequence, timers: [...store.timers, timer] }, timer };
 }
 
 /** Starts an idle timer. An `until` countdown fixes its duration now. */
@@ -213,16 +215,23 @@ function lap(store: TimerStore, input: unknown, now: number): OperationOutcome<T
   });
 }
 
-/** Jumps to the start of the next interval step; on the last step it finishes the timer. A paused timer stays paused. */
+/**
+ * Jumps to the start of the next interval step. On the last segment of the last round, or in the
+ * cooldown, it finishes the timer and skips any cooldown too. A paused timer otherwise stays paused.
+ */
 function skip(store: TimerStore, input: unknown, now: number): OperationOutcome<TimerResult> {
   return update(store, input, now, (timer) => {
     const { definition, runtime } = timer;
     if (definition.kind !== 'interval') return failure('invalid_state', `Timer ${definition.id} is a ${definition.kind}; only interval timers skip.`);
     if (runtime.status !== 'running' && runtime.status !== 'paused') return notStatus(timer, 'only a running or paused timer can skip');
-    const { elapsedMs, totalMs } = project(timer, now);
+    const { elapsedMs } = project(timer, now);
+    const totalMs = totalDurationMs(definition, now) ?? 0;
     const step = intervalStep(definition, intervalStepIndexAt(definition, elapsedMs));
-    const skipped = { ...runtime, skippedMs: runtime.skippedMs + (step.startMs + step.durationMs - elapsedMs) };
-    return { ok: true, timer: { ...timer, runtime: step.startMs + step.durationMs >= (totalMs ?? 0) ? finishedRuntime(skipped, totalMs ?? 0) : skipped } };
+    const lastSegment = step.round === definition.rounds && step.segmentIndex === definition.segments.length - 1;
+    const finishing = lastSegment || (step.phase === 'cooldown' && step.segmentIndex === null);
+    const target = finishing ? totalMs : step.startMs + step.durationMs;
+    const skipped = { ...runtime, skippedMs: runtime.skippedMs + (target - elapsedMs) };
+    return { ok: true, timer: { ...timer, runtime: finishing ? finishedRuntime(skipped, totalMs) : skipped } };
   });
 }
 
@@ -261,9 +270,9 @@ function savePreset(store: TimerStore, input: unknown, now: number): OperationOu
   if (store.presets.length >= TIMER_LIMITS.userPresets) {
     return failure('limit_reached', `At most ${TIMER_LIMITS.userPresets} presets can be saved. Remove one first.`);
   }
-  const id = freshId('p', new Set(store.presets.map((preset) => preset.id)), now);
+  const { id, idSequence } = freshId('p', store, new Set(store.presets.map((preset) => preset.id)), now);
   const preset: Preset = { id, name: parsed.value.name, builtIn: false, timer: parsed.value.timer };
-  return success({ ...store, presets: [...store.presets, preset] }, { preset });
+  return success({ ...store, idSequence, presets: [...store.presets, preset] }, { preset });
 }
 
 function removePreset(store: TimerStore, input: unknown): OperationOutcome<RemovedResult> {
@@ -275,24 +284,33 @@ function removePreset(store: TimerStore, input: unknown): OperationOutcome<Remov
   return success({ ...store, presets: store.presets.filter((preset) => preset.id !== id) }, { removedId: id });
 }
 
+type Operation<Result> = (store: TimerStore, input: unknown, now: number) => OperationOutcome<Result>;
+
+/** Rejects a `now` that is not whole epoch milliseconds, which would write a store `parseStore` cannot read back. */
+function atValidNow<Result>(operation: Operation<Result>): Operation<Result> {
+  return (store, input, now) => (Number.isSafeInteger(now) && now >= 0
+    ? operation(store, input, now)
+    : failure('invalid_input', 'now: must be whole epoch milliseconds', [{ path: 'now', message: 'must be whole epoch milliseconds' }]));
+}
+
 /**
- * Every operation as a pure function `(store, input, now)`. Each validates its own input, so a host
- * can pass untrusted JSON, and never mutates the store it was given.
+ * Every operation as a pure function `(store, input, now)`. Each validates its own input and `now`,
+ * so a host can pass untrusted JSON, and never mutates the store it was given.
  */
 export const operations = {
-  create,
-  start,
-  pause,
-  resume,
-  lap,
-  skip,
-  reset,
-  remove,
-  list,
-  get,
-  'presets.list': listPresets,
-  'presets.save': savePreset,
-  'presets.remove': removePreset
+  create: atValidNow(create),
+  start: atValidNow(start),
+  pause: atValidNow(pause),
+  resume: atValidNow(resume),
+  lap: atValidNow(lap),
+  skip: atValidNow(skip),
+  reset: atValidNow(reset),
+  remove: atValidNow(remove),
+  list: atValidNow(list),
+  get: atValidNow(get),
+  'presets.list': atValidNow(listPresets),
+  'presets.save': atValidNow(savePreset),
+  'presets.remove': atValidNow(removePreset)
 } satisfies Record<OperationName, (store: TimerStore, input: unknown, now: number) => OperationOutcome<unknown>>;
 
 /** Runs an operation by name, as a socket or MCP host receives it. An unknown name is `invalid_input`. */

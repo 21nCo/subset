@@ -6,7 +6,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_9n40qczd",
+          "id": "t_sy2cvhtz",
           "name": "Tabata",
           "sound": true,
           "countdownTicks": true,
@@ -65,7 +65,7 @@
       {
         "definition": {
           "kind": "stopwatch",
-          "id": "t_r9tpy2bw",
+          "id": "t_b0tgd4qp",
           "name": "Run",
           "sound": true,
           "countdownTicks": false,
@@ -101,7 +101,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_dcq1vtjv",
+          "id": "t_z53agses",
           "name": "Tea",
           "sound": true,
           "countdownTicks": false,
@@ -130,7 +130,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_v5kd0dn3",
+          "id": "t_febf6p1h",
           "name": "AMRAP",
           "sound": true,
           "countdownTicks": false,
@@ -164,7 +164,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_24agcxch",
+          "id": "t_8d2zj0sk",
           "name": "Stretch",
           "sound": true,
           "countdownTicks": true,
@@ -199,7 +199,7 @@
       {
         "definition": {
           "kind": "interval",
-          "id": "t_dy1ktjyd",
+          "id": "t_7mtgfqdz",
           "name": "Pomodoro",
           "sound": true,
           "countdownTicks": true,
@@ -287,7 +287,7 @@
       {
         "definition": {
           "kind": "countdown",
-          "id": "t_nw9j7shf",
+          "id": "t_fnkt1nmd",
           "name": "Standup",
           "sound": true,
           "countdownTicks": false,
@@ -315,6 +315,6 @@
       }
     ]
   },
-  "text": "Tabata (t_9n40qczd): running · round 3/8 · work · 0:12 left · next rest 0:10\nRun (t_r9tpy2bw): running · 10:00 elapsed · 2 laps\nTea (t_dcq1vtjv): paused · 1:40 left\nAMRAP (t_v5kd0dn3): finished · 20:00 total · 1 lap\nStretch (t_24agcxch): finished · 0:30 total\nPomodoro (t_dy1ktjyd): idle · 2:10:00 total\nStandup (t_nw9j7shf): idle · 30:00 total",
+  "text": "Tabata (t_sy2cvhtz): running · round 3/8 · work · 0:12 left · next rest 0:10\nRun (t_b0tgd4qp): running · 10:00 elapsed · 2 laps\nTea (t_z53agses): paused · 1:40 left\nAMRAP (t_febf6p1h): finished · 20:00 total · 1 lap\nStretch (t_8d2zj0sk): finished · 0:30 total\nPomodoro (t_7mtgfqdz): idle · 2:10:00 total\nStandup (t_fnkt1nmd): idle · 30:00 total",
   "viewId": "subset.timer.board@1"
 }

@@ -195,3 +195,96 @@ test('parseStore accepts a store built by the operations and rejects inconsisten
   assert.equal(broken((copy) => { copy.presets[0].builtIn = true; }), 'invalid_input');
   assert.equal(code(parseStore(null)), 'invalid_input');
 });
+
+test('a removed id is not issued again, even in the same millisecond', () => {
+  const first = ok(operations.create(emptyStore(), { timer: { kind: 'stopwatch' } }, T0));
+  const id = first.result.timer.definition.id;
+  const removed = ok(operations.remove(first.store, { id }, T0)).store;
+  assert.equal(removed.timers.length, 0);
+  assert.notEqual(ok(operations.create(removed, { timer: { kind: 'stopwatch' } }, T0)).result.timer.definition.id, id);
+  const preset = ok(operations['presets.save'](removed, { name: 'Mine', timer: { kind: 'stopwatch' } }, T0));
+  const presetId = preset.result.preset.id;
+  const presetRemoved = ok(operations['presets.remove'](preset.store, { id: presetId }, T0)).store;
+  assert.notEqual(ok(operations['presets.save'](presetRemoved, { name: 'Mine', timer: { kind: 'stopwatch' } }, T0)).result.preset.id, presetId);
+});
+
+test('every operation rejects a now that is not whole epoch milliseconds, without writing', () => {
+  const { store, ids: [id] } = storeWith({ preset: 'tabata' });
+  const inputs = {
+    create: { timer: { kind: 'stopwatch' } }, start: { id }, pause: { id }, resume: { id }, lap: { id }, skip: { id }, reset: { id },
+    remove: { id }, list: {}, get: { id }, 'presets.list': {}, 'presets.save': { name: 'Mine', timer: { kind: 'stopwatch' } }, 'presets.remove': { id: 'tabata' }
+  };
+  assert.deepEqual(Object.keys(inputs), OPERATION_NAMES);
+  for (const now of [Number.NaN, Number.POSITIVE_INFINITY, T0 + 0.5, -1, `${T0}`]) {
+    for (const name of OPERATION_NAMES) {
+      const outcome = operations[name](store, inputs[name], now);
+      assert.deepEqual([name, now, outcome.ok, outcome.error?.issues], [name, now, false, [{ path: 'now', message: 'must be whole epoch milliseconds' }]]);
+    }
+  }
+});
+
+test('every store the operations write parses back', () => {
+  let store = emptyStore();
+  const accept = (outcome) => {
+    store = ok(outcome).store;
+    assert.deepEqual(ok(parseStore(JSON.parse(JSON.stringify(store)))).store, store);
+    return outcome.result.timer?.definition.id;
+  };
+  const spec = { kind: 'interval', rounds: 2, prepMs: 5_000, cooldownMs: 10_000, segments: [{ label: 'Go', phase: 'work', durationMs: 10_000 }] };
+  const interval = accept(operations.start(store, { timer: spec }, T0));
+  const until = accept(operations.create(store, { timer: { kind: 'countdown', until: new Date(T0 + 60_000).toISOString(), lapsEnabled: true } }, T0));
+  const stopwatch = accept(operations.start(store, { timer: { kind: 'stopwatch' } }, T0));
+  const sequence = [
+    ['skip', interval, 1_000], ['pause', interval, 2_000], ['skip', interval, 3_000], ['resume', interval, 4_000], ['skip', interval, 5_000],
+    ['start', until, 1_000], ['lap', until, 2_000], ['pause', until, 3_000], ['resume', until, 4_000], ['pause', until, 90_000],
+    ['lap', stopwatch, 1_000], ['pause', stopwatch, 2_000], ['reset', stopwatch, 3_000], ['reset', until, 91_000], ['start', until, 92_000]
+  ];
+  for (const [operation, id, offset] of sequence) {
+    const outcome = operations[operation](store, { id }, T0 + offset);
+    // `pause` after the until countdown's end finds it finished, and records nothing.
+    if (operation === 'pause' && offset === 90_000) assert.equal(code(outcome), 'invalid_state');
+    else accept(outcome);
+  }
+  assert.deepEqual(store.timers.map((timer) => timer.runtime.status), ['finished', 'running', 'idle']);
+});
+
+test('parseStore rejects runtimes that the definition cannot hold or that the engine would project inconsistently', () => {
+  const { store } = storeWith(
+    { timer: { kind: 'countdown', durationMs: 60_000 } },
+    { timer: { kind: 'countdown', until: new Date(T0 + 60_000).toISOString(), lapsEnabled: true } },
+    { timer: { kind: 'stopwatch' } },
+    { preset: 'tabata' }
+  );
+  const lapEntry = { elapsedMs: 1_000, at: T0 + 1_000 };
+  const running = { status: 'running', startedAt: T0, pausedAt: null };
+  const paused = { status: 'paused', startedAt: null, pausedAt: T0 };
+  const finished = { status: 'finished', startedAt: null, pausedAt: null };
+  const withRuntime = (index, runtime) => {
+    const copy = structuredClone(store);
+    Object.assign(copy.timers[index].runtime, runtime);
+    return copy;
+  };
+  const accepted = [
+    withRuntime(0, { ...paused, accumulatedMs: 59_999 }),
+    withRuntime(0, { ...finished, accumulatedMs: 60_000 }),
+    withRuntime(2, { ...paused, accumulatedMs: 86_400_000 * 3, laps: [lapEntry] }),
+    withRuntime(3, { ...running, accumulatedMs: 1_000, skippedMs: 9_000 }),
+    withRuntime(3, { ...finished, accumulatedMs: 200_000, skippedMs: 50_000 })
+  ];
+  for (const value of accepted) ok(parseStore(value));
+  const rejected = [
+    ['idle with a position', withRuntime(0, { accumulatedMs: 1_000 })],
+    ['idle with laps', withRuntime(2, { laps: [lapEntry] })],
+    ['idle with skips', withRuntime(3, { skippedMs: 1_000 })],
+    ['an until countdown started without a fixed duration', withRuntime(1, { ...running, accumulatedMs: 0 })],
+    ['paused at its end', withRuntime(0, { ...paused, accumulatedMs: 60_000 })],
+    ['running from past its end', withRuntime(3, { ...running, accumulatedMs: 240_000, skippedMs: 10_000 })],
+    ['finished before its end', withRuntime(0, { ...finished, accumulatedMs: 30_000 })],
+    ['a finished stopwatch', withRuntime(2, { ...finished, accumulatedMs: 1_000 })],
+    ['laps on a countdown without laps', withRuntime(0, { ...running, laps: [lapEntry] })],
+    ['laps on an interval timer', withRuntime(3, { ...running, laps: [lapEntry] })],
+    ['skips on a countdown', withRuntime(0, { ...running, skippedMs: 1_000 })],
+    ['skips on a stopwatch', withRuntime(2, { ...running, skippedMs: 1_000 })]
+  ];
+  for (const [why, value] of rejected) assert.equal(code(parseStore(value)), 'invalid_input', why);
+});

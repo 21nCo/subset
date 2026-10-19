@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { TimerProjection } from './engine.js';
+import { totalDurationMs, type TimerProjection } from './engine.js';
 import {
   PHASES, PRESET_ID_PATTERN, TIMER_ID_PATTERN, TIMER_LIMITS, TIMER_SCHEMA_VERSION, TIMER_STATUSES, TIMER_VIEW_ID,
   textLength, type Preset, type Timer, type TimerSpec, type TimerStore
@@ -9,7 +9,7 @@ import { BUILT_IN_PRESET_IDS } from './presets.js';
 // The zod schemas validate untrusted input at runtime; `schemas` is their JSON Schema (draft 2020-12)
 // for hosts, MCP tool definitions and the Swift client. A rule JSON Schema cannot state is added
 // with `.meta()` so both forms agree, except "until is within the next 24 hours", which depends on
-// `now` and is checked by the operations.
+// `now` and is checked by the operations, and the store's position rule below.
 
 // One printable line: no control characters or line separators, and not only spaces.
 const LINE = /^[^\p{Cc}\p{Zl}\p{Zp}]*[^\p{Cc}\p{Zl}\p{Zp}\s][^\p{Cc}\p{Zl}\p{Zp}]*$/u;
@@ -70,15 +70,63 @@ const timerDefinition = z.discriminatedUnion('kind', [
 const lap = z.strictObject({ elapsedMs: nonNegativeMs, at: epochMs });
 const runtimeBody = { accumulatedMs: nonNegativeMs, laps: z.array(lap).max(TIMER_LIMITS.laps), skippedMs: nonNegativeMs };
 const timerRuntime = z.discriminatedUnion('status', [
-  z.strictObject({ status: z.literal('idle'), startedAt: z.null(), pausedAt: z.null(), ...runtimeBody }),
+  // An idle timer has not moved: no position, laps or skips.
+  z.strictObject({ status: z.literal('idle'), startedAt: z.null(), pausedAt: z.null(), accumulatedMs: z.literal(0), laps: z.array(lap).max(0), skippedMs: z.literal(0) }),
   z.strictObject({ status: z.literal('running'), startedAt: epochMs, pausedAt: z.null(), ...runtimeBody }),
   z.strictObject({ status: z.literal('paused'), startedAt: z.null(), pausedAt: epochMs, ...runtimeBody }),
   z.strictObject({ status: z.literal('finished'), startedAt: z.null(), pausedAt: z.null(), ...runtimeBody })
 ]);
-const timer = z.strictObject({ definition: timerDefinition, runtime: timerRuntime });
+
+// Rules across a timer's definition and runtime, so that every timer `parseStore` accepts projects
+// and schedules consistently. The JSON Schema states the ones that do not need arithmetic; the
+// position rules ("running or paused before the end, finished exactly at it") are runtime only.
+const objectWith = (properties: Record<string, unknown>, required: string[] = Object.keys(properties)) =>
+  ({ type: 'object', properties, required });
+const definitionIs = (properties: Record<string, unknown>) => objectWith({ definition: objectWith(properties) });
+const runtimeMust = (properties: Record<string, unknown>) => objectWith({ runtime: objectWith(properties, []) }, ['runtime']);
+const noLaps = { laps: { type: 'array', maxItems: 0 } };
+const noSkips = { skippedMs: { const: 0 } };
+const timerRules = [
+  { if: definitionIs({ kind: { const: 'stopwatch' } }), then: runtimeMust({ status: { not: { const: 'finished' } }, ...noSkips }) },
+  { if: definitionIs({ kind: { const: 'countdown' } }), then: runtimeMust(noSkips) },
+  { if: definitionIs({ kind: { const: 'countdown' }, lapsEnabled: { const: false } }), then: runtimeMust(noLaps) },
+  { if: definitionIs({ kind: { const: 'interval' } }), then: runtimeMust(noLaps) },
+  {
+    if: objectWith({ definition: objectWith({ kind: { const: 'countdown' } }), runtime: objectWith({ status: { not: { const: 'idle' } } }) }),
+    then: objectWith({ definition: objectWith({}, ['durationMs']) }, ['definition'])
+  }
+];
+
+function checkTimer(value: { definition: Timer['definition']; runtime: Timer['runtime'] }, context: z.RefinementCtx) {
+  const { definition, runtime } = value;
+  const issue = (path: string[], message: string) => context.addIssue({ code: 'custom', path, message });
+  const lapCapable = definition.kind === 'stopwatch' || (definition.kind === 'countdown' && definition.lapsEnabled);
+  if (!lapCapable && runtime.laps.length > 0) issue(['runtime', 'laps'], 'only stopwatches and countdowns with laps enabled take laps');
+  if (definition.kind !== 'interval' && runtime.skippedMs !== 0) issue(['runtime', 'skippedMs'], 'only interval timers skip');
+  if (runtime.status === 'idle') return;
+  if (definition.kind === 'countdown' && definition.durationMs === undefined) {
+    issue(['definition', 'durationMs'], 'a countdown that has started has a fixed durationMs');
+    return;
+  }
+  // Fixed once started, so `now` does not matter.
+  const totalMs = totalDurationMs(definition, 0);
+  const position = runtime.accumulatedMs + runtime.skippedMs;
+  if (totalMs === null) {
+    if (runtime.status === 'finished') issue(['runtime', 'status'], 'a stopwatch never finishes');
+  } else if (runtime.status === 'finished' ? position !== totalMs : position >= totalMs) {
+    issue(['runtime', 'accumulatedMs'], runtime.status === 'finished'
+      ? 'a finished timer has accumulatedMs + skippedMs equal to its total'
+      : `a ${runtime.status} timer has accumulatedMs + skippedMs below its total`);
+  }
+}
+
+const timer = z.strictObject({ definition: timerDefinition, runtime: timerRuntime })
+  .superRefine(checkTimer)
+  .meta({ allOf: timerRules });
 const preset = z.strictObject({ id: presetId, name, builtIn: z.boolean(), timer: presetTimerSpec });
 const store = z.strictObject({
   schemaVersion: z.literal(TIMER_SCHEMA_VERSION),
+  idSequence: nonNegativeMs,
   timers: z.array(timer).max(TIMER_LIMITS.timers),
   presets: z.array(preset.extend({ id: z.string().regex(PRESET_ID_PATTERN), builtIn: z.literal(false) })).max(TIMER_LIMITS.userPresets)
 }).refine((value) => new Set(value.timers.map((item) => item.definition.id)).size === value.timers.length, 'timer ids must be unique')

@@ -18,9 +18,17 @@ Every time is wall-clock epoch milliseconds. A timer stores when its current run
 | `stopwatch` | Laps. No end. |
 | `interval` | `segments` (1 to 100) of `{ label (≤ 40), phase: prep \| work \| rest \| cooldown, durationMs (1 s to 24 h) }`, `rounds` (1 to 99), optional `prepMs` before the first round and `cooldownMs` after the last. |
 
-Common fields: `id` (`t_` plus 8 lowercase Crockford base32 characters), `name` (1 to 60 characters, default per kind), `sound` (default true), `countdownTicks` (default true for interval timers only) and `createdAt`. Names and labels are one line of printable text, counted in Unicode code points. Names need not be unique; operations address timers by id. Ids are derived deterministically from `now` and checked for uniqueness in the store; they are not secrets.
+Common fields: `id` (`t_` plus 8 lowercase Crockford base32 characters), `name` (1 to 60 characters, default per kind), `sound` (default true), `countdownTicks` (default true for interval timers only) and `createdAt`. Names and labels are one line of printable text, counted in Unicode code points. Names need not be unique; operations address timers by id. Ids are derived deterministically from `now` and the store's `idSequence`, which only grows, so a removed id is not issued again; they are checked for uniqueness in the store and are not secrets.
 
-The runtime is `idle | running | paused | finished` with `startedAt`, `accumulatedMs`, `pausedAt`, `laps[]` (`{ elapsedMs, at }`, at most 999) and `skippedMs`. The store is `{ schemaVersion: 1, timers[], presets[] }`, where `presets` holds only saved presets. Validate a persisted store with `parseStore`.
+The runtime is `idle | running | paused | finished` with `startedAt`, `accumulatedMs`, `pausedAt`, `laps[]` (`{ elapsedMs, at }`, at most 999) and `skippedMs`. The store is `{ schemaVersion: 1, idSequence, timers[], presets[] }`, where `presets` holds only saved presets. Validate a persisted store with `parseStore`, which also checks that each runtime fits its definition:
+
+- an idle timer has no position, laps or skips;
+- a countdown that has started has a fixed `durationMs`;
+- only stopwatches and lap-enabled countdowns hold laps, and only interval timers hold `skippedMs`;
+- a stopwatch never finishes;
+- a running or paused timer's `accumulatedMs + skippedMs` is below its total, and a finished one's equals it.
+
+`schemas.store` states every rule but the last, which needs arithmetic.
 
 ## Engine
 
@@ -30,7 +38,7 @@ The runtime is `idle | running | paused | finished` with `startedAt`, `accumulat
 
 ## Operations
 
-Each is a pure function `(store, input, now)` that validates its input and returns `{ ok: true, store, result }` or `{ ok: false, error: { code, message, issues? } }`. It never mutates the store it was given. `runOperation(name, …)` dispatches by name.
+Each is a pure function `(store, input, now)` that validates its input (an omitted input means `{}`; `null` is malformed) and `now` (whole, non-negative epoch milliseconds, else `invalid_input` on the path `now`), and returns `{ ok: true, store, result }` or `{ ok: false, error: { code, message, issues? } }`. It never mutates the store it was given. `runOperation(name, …)` dispatches by name.
 
 | Operation | Class | Input | Result | Errors |
 | --- | --- | --- | --- | --- |
@@ -50,7 +58,7 @@ Each is a pure function `(store, input, now)` that validates its input and retur
 
 A top-level `name` in `create` or `start` overrides the timer's or preset's own name. Every operation also returns `invalid_input` for malformed input. A `{ timer }` result is a snapshot: `{ definition, runtime, projection }`. `OPERATION_WRITE_CLASS` lists the classes; hosts must have the user's explicit request before running a destructive operation.
 
-Product decisions: a paused timer keeps its place and `resume` continues the same segment; `skip` on the last segment of the last round finishes the timer, and otherwise leaves a paused timer paused at the start of the next segment; `lap` works only on stopwatches and lap-enabled countdowns; a finished timer must be reset before it starts again.
+Product decisions: a paused timer keeps its place and `resume` continues the same segment; `skip` on the last segment of the last round finishes the timer, skipping any cooldown, and otherwise moves to the start of the next step (from the prep to the first round, from the cooldown to the finish), leaving a paused timer paused; `lap` works only on stopwatches and lap-enabled countdowns; a finished timer must be reset before it starts again.
 
 ## Presets and limits
 
@@ -70,7 +78,7 @@ Time left rounds up and elapsed time rounds down. A segment label that differs f
 
 ## JSON Schemas and fixtures
 
-`schemas` holds draft 2020-12 JSON Schemas generated from the runtime validators: `inputs` and `outputs` for every operation (each input has an object root, as MCP tool definitions need), `store`, `result` (the `structuredContent`), `error` and `viewProps`. `viewProps` covers the serializable board props `{ result, capabilities: { create, destructive }, density: compact | full }`; the host also passes `actions` and an optional `now` clock, which are functions. The one rule the schemas cannot state is that `until` lies within 24 hours of `now`; the operations check it.
+`schemas` holds draft 2020-12 JSON Schemas generated from the runtime validators: `inputs` and `outputs` for every operation (each input has an object root, as MCP tool definitions need), `store`, `result` (the `structuredContent`), `error` and `viewProps`. `viewProps` covers the serializable board props `{ result, capabilities: { create, destructive }, density: compact | full }`; the host also passes `actions` and an optional `now` clock, which are functions. The rules the schemas cannot state are that `until` lies within 24 hours of `now`, which the operations check, and the store's position rule, which `parseStore` checks.
 
 `fixtures/contract-v1/` holds the shared test vectors, exported as `@subset/timer/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset/timer`; the tests fail when they drift.
 

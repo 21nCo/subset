@@ -87,6 +87,29 @@ test('skip jumps to the next segment, and on the last segment of the last round 
   assert.equal(end.elapsedMs, s(250));
 });
 
+test('with prep and cooldown, skip moves past the prep but finishes from the last segment, running or paused', () => {
+  const spec = { timer: { kind: 'interval', rounds: 2, prepMs: s(5), cooldownMs: s(10), segments: [{ label: 'Go', phase: 'work', durationMs: s(10) }] } };
+  // Prep skips to the first round.
+  let running = apply(started(spec), 'skip', T0 + s(1));
+  assert.deepEqual(stepOf(view(running, T0 + s(1))), { round: 1, phase: 'work', remainingMs: s(10) });
+  // Round 1 skips to round 2; the last segment of round 2 skips past the cooldown to the finish.
+  running = apply(running, 'skip', T0 + s(2));
+  assert.deepEqual(stepOf(view(running, T0 + s(2))), { round: 2, phase: 'work', remainingMs: s(10) });
+  running = apply(running, 'skip', T0 + s(3));
+  assert.deepEqual([timerOf(running).runtime.status, timerOf(running).runtime.pausedAt], ['finished', null]);
+  assert.deepEqual([view(running, T0 + s(3)).elapsedMs, view(running, T0 + s(3)).remainingMs], [s(35), 0]);
+
+  let paused = apply(apply(started(spec), 'skip', T0 + s(1)), 'skip', T0 + s(2));
+  paused = apply(paused, 'pause', T0 + s(4));
+  paused = apply(paused, 'skip', T0 + s(9));
+  assert.deepEqual([timerOf(paused).runtime.status, timerOf(paused).runtime.pausedAt, view(paused, T0 + s(9)).finished], ['finished', null, true]);
+
+  // A timer that reaches its cooldown can still skip it.
+  const cooling = apply(started(spec), 'skip', T0 + s(26));
+  assert.equal(timerOf(cooling).runtime.status, 'finished');
+  assert.deepEqual(transitionsBetween(timerOf(cooling), T0 + s(26), T0 + s(60)), []);
+});
+
 test('a clock that goes backward clamps elapsed time instead of going negative', () => {
   const countdown = started({ timer: { kind: 'countdown', durationMs: s(60) } });
   const before = view(countdown, T0 - s(30));

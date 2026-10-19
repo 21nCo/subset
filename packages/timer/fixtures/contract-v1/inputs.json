@@ -41,6 +41,15 @@
     {
       "operation": "create",
       "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "input": {
         "preset": "hiit-40-20",
         "name": "Morning HIIT"
       }
@@ -227,6 +236,16 @@
         "timer": {
           "kind": "stopwatch",
           "name": "⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱⏱"
+        }
+      }
+    },
+    {
+      "operation": "create",
+      "why": "name over 60 characters outside the BMP",
+      "input": {
+        "timer": {
+          "kind": "stopwatch",
+          "name": "🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃🏃"
         }
       }
     },
@@ -938,6 +957,21 @@
       "input": {
         "status": "running"
       }
+    },
+    {
+      "operation": "list",
+      "why": "null instead of an object",
+      "input": null
+    },
+    {
+      "operation": "presets.list",
+      "why": "null instead of an object",
+      "input": null
+    },
+    {
+      "operation": "pause",
+      "why": "null instead of an object",
+      "input": null
     },
     {
       "operation": "presets.save",

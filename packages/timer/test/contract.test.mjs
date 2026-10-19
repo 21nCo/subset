@@ -84,3 +84,33 @@ test('the JSON Schemas and the runtime validators accept and reject the same inp
     assert.equal(outcome.ok ? 'ok' : outcome.error.code, 'invalid_input', `runtime accepted: ${why}`);
   }
 });
+
+test('the store JSON Schema states the timer rules that need no arithmetic, and parseStore checks every rule', async () => {
+  const store = await readFixture('store.json');
+  const index = Object.fromEntries(store.timers.map((timer, position) => [timer.definition.name, position]));
+  const changed = (name, change) => {
+    const copy = structuredClone(store);
+    change(copy.timers[index[name]]);
+    return copy;
+  };
+  const expressible = [
+    ['idle with laps', changed('Pomodoro', (timer) => { timer.runtime.laps = [{ elapsedMs: 0, at: 0 }]; })],
+    ['idle with skips', changed('Pomodoro', (timer) => { timer.runtime.skippedMs = 1_000; })],
+    ['idle with a position', changed('Pomodoro', (timer) => { timer.runtime.accumulatedMs = 1_000; })],
+    ['a finished stopwatch', changed('Run', (timer) => { Object.assign(timer.runtime, { status: 'finished', startedAt: null }); })],
+    ['skips on a stopwatch', changed('Run', (timer) => { timer.runtime.skippedMs = 1_000; })],
+    ['skips on a countdown', changed('Tea', (timer) => { timer.runtime.skippedMs = 1_000; })],
+    ['laps on a countdown without laps', changed('Tea', (timer) => { timer.runtime.laps = [{ elapsedMs: 0, at: 0 }]; })],
+    ['laps on an interval timer', changed('Tabata', (timer) => { timer.runtime.laps = [{ elapsedMs: 0, at: 0 }]; })],
+    ['an until countdown started without a fixed duration', changed('Standup', (timer) => { Object.assign(timer.runtime, { status: 'running', startedAt: 0 }); })]
+  ];
+  const runtimeOnly = [
+    ['paused at its end', changed('Tea', (timer) => { timer.runtime.accumulatedMs = timer.definition.durationMs; })],
+    ['finished before its end', changed('Stretch', (timer) => { timer.runtime.accumulatedMs -= 1; })]
+  ];
+  const validate = validator(schemas.store);
+  assert.equal(validate(store), true);
+  for (const [why, value] of expressible) assert.equal(validate(value), false, `JSON Schema accepted: ${why}`);
+  for (const [why, value] of runtimeOnly) assert.equal(validate(value), true, `JSON Schema now states: ${why}; move it to the list above`);
+  for (const [why, value] of [...expressible, ...runtimeOnly]) assert.equal(parseStore(value).ok, false, `parseStore accepted: ${why}`);
+});

@@ -58,6 +58,8 @@ export function fixtureStore() {
 }
 
 const longName = '⏱'.repeat(60);
+// Outside the Basic Multilingual Plane: two UTF-16 units, one character.
+const astralName = '🏃'.repeat(60);
 const tabataSpec = { kind: 'interval', rounds: 8, prepMs: 10_000, segments: [{ label: 'Work', phase: 'work', durationMs: 20_000 }, { label: 'Rest', phase: 'rest', durationMs: 10_000 }] };
 
 /** Inputs the JSON Schemas and the runtime validators must both accept or both reject. */
@@ -67,6 +69,7 @@ export const inputVectors = {
     { operation: 'create', input: { timer: { kind: 'countdown', durationMs: 86_400_000, lapsEnabled: true, sound: false } } },
     { operation: 'create', input: { timer: { kind: 'countdown', until: '2026-10-19T17:30:00+02:00' } } },
     { operation: 'create', input: { timer: { kind: 'stopwatch', name: longName } } },
+    { operation: 'create', input: { timer: { kind: 'stopwatch', name: astralName } } },
     { operation: 'create', input: { preset: 'hiit-40-20', name: 'Morning HIIT' } },
     { operation: 'create', input: { timer: { ...tabataSpec, name: 'Custom', countdownTicks: false, cooldownMs: 60_000 } } },
     { operation: 'start', input: { id: 't_ab12cd34' } },
@@ -88,6 +91,7 @@ export const inputVectors = {
     { operation: 'create', why: 'countdown with neither durationMs nor until', input: { timer: { kind: 'countdown' } } },
     { operation: 'create', why: 'until without a time zone', input: { timer: { kind: 'countdown', until: '2026-10-19T17:30:00' } } },
     { operation: 'create', why: 'name over 60 characters', input: { timer: { kind: 'stopwatch', name: `${longName}⏱` } } },
+    { operation: 'create', why: 'name over 60 characters outside the BMP', input: { timer: { kind: 'stopwatch', name: `${astralName}🏃` } } },
     { operation: 'create', why: 'empty name', input: { timer: { kind: 'stopwatch', name: '' } } },
     { operation: 'create', why: 'blank name', input: { timer: { kind: 'stopwatch', name: '   ' } } },
     { operation: 'create', why: 'name on two lines', input: { timer: { kind: 'stopwatch', name: 'Run\nfast' } } },
@@ -104,6 +108,9 @@ export const inputVectors = {
     { operation: 'pause', why: 'id with a letter outside Crockford base32', input: { id: 't_ab12cd3u' } },
     { operation: 'get', why: 'missing id', input: {} },
     { operation: 'list', why: 'unknown property', input: { status: 'running' } },
+    { operation: 'list', why: 'null instead of an object', input: null },
+    { operation: 'presets.list', why: 'null instead of an object', input: null },
+    { operation: 'pause', why: 'null instead of an object', input: null },
     { operation: 'presets.save', why: 'a preset cannot name one moment', input: { name: 'Standup', timer: { kind: 'countdown', until: '2026-10-19T17:30:00Z' } } },
     { operation: 'presets.remove', why: 'not a preset id', input: { id: 'Tabata' } }
   ]

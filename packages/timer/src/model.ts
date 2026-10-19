@@ -125,13 +125,15 @@ export interface Preset {
 /** Everything the single writer persists. Built-in presets live in code, not here. */
 export interface TimerStore {
   schemaVersion: typeof TIMER_SCHEMA_VERSION;
+  /** How many ids this store has issued. It seeds the next id, so removing a timer never frees its id for reuse. */
+  idSequence: number;
   timers: Timer[];
   /** Saved (user) presets only. */
   presets: Preset[];
 }
 
 export function emptyStore(): TimerStore {
-  return { schemaVersion: TIMER_SCHEMA_VERSION, timers: [], presets: [] };
+  return { schemaVersion: TIMER_SCHEMA_VERSION, idSequence: 0, timers: [], presets: [] };
 }
 
 export function idleRuntime(): TimerRuntime {
