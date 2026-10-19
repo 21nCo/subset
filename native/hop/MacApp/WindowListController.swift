@@ -13,8 +13,8 @@ import os
 /// observed per app). Only counts are logged, never a title.
 ///
 /// The keyboard tap runs on the main thread, so no Accessibility request to another app is made here except by
-/// `refresh()`: seeding, observer registration and removal, and the reads that notifications trigger run on
-/// `FocusTracker`'s own thread.
+/// `refresh()`: seeding and the reads that notifications trigger run on `FocusTracker`'s own thread, and subscribing
+/// to and removing the notifications on a worker queue.
 @MainActor
 final class WindowListController {
     private let tracker = FocusTracker()
@@ -71,28 +71,29 @@ struct RunningApp: Sendable {
     }
 }
 
-/// The recency order and the Accessibility observers that update it. Everything except `refresh()` and the lister
-/// runs on `thread`, which also delivers the observers' callbacks, so the observer state needs no lock; the lister is
-/// shared with `refresh()` behind `listerLock`, which serializes recency updates with refreshes.
+/// The recency order and the Accessibility observers that update it. Everything except `refresh()`, the lister and
+/// the subscription requests runs on `thread`, which also delivers the observers' callbacks, so the observer state
+/// needs no lock; the lister is shared with `refresh()` behind `listerLock`, which serializes recency updates with
+/// refreshes. Adding and removing notifications are requests to the app, which may not answer for the messaging
+/// timeout, so they run on `registrar`, each app's at once, and `observers` decides on `thread` what their results
+/// still mean.
 final class FocusTracker: @unchecked Sendable {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "windows")
     private static let focusNotifications = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification]
 
-    private struct AppObserver {
-        let observer: AXObserver
-        var subscription = FocusSubscription(FocusTracker.focusNotifications)
-        /// Whether the observer's run loop source is on `thread`'s run loop.
-        var isScheduled = false
-    }
-
     private let thread = AccessibilityThread(name: "\(HopIdentity.bundleIdentifier).accessibility")
+    private let registrar = DispatchQueue(
+        label: "\(HopIdentity.bundleIdentifier).accessibility.subscriptions",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private let source = AXWindowSource()
     private let ownProcess = ProcessInfo.processInfo.processIdentifier
     private let listerLock = NSLock()
     private var lister: WindowLister
 
     // Owned by `thread`.
-    private var observers: [pid_t: AppObserver] = [:]
+    private var observers = FocusObservers<AXObserver>(FocusTracker.focusNotifications)
     private var frontmost: pid_t?
     /// The retained reference the Accessibility callbacks receive while started; released by `stop()`, so a callback
     /// can never see a deallocated tracker.
@@ -107,16 +108,18 @@ final class FocusTracker: @unchecked Sendable {
             guard context == nil else { return }
             context = Unmanaged.passRetained(self)
             self.frontmost = frontmost
+            // Subscribing first narrows the time a focus change goes unreported; the frontmost app's focus is read
+            // again once its observer is scheduled, after the seed (see `subscribed(_:)`).
+            apps.forEach(observe)
             let onScreen = Self.onScreenOrder()
             report(listerLock.withLock { lister.seed(frontToBack: onScreen) }, seeded: true)
-            apps.forEach(observe)
         }
     }
 
     func stop() {
         thread.perform { [self] in
             guard let context else { return }
-            for pid in Array(observers.keys) { unobserve(pid) }
+            observers.removeAll().forEach(release)
             context.release()
             self.context = nil
         }
@@ -176,44 +179,68 @@ final class FocusTracker: @unchecked Sendable {
 
     // MARK: - Accessibility observers
 
-    /// Subscribes to the app's focus notifications that it has not accepted yet.
+    /// Subscribes, on `registrar`, to the app's focus notifications that it has not accepted yet.
     private func observe(_ app: RunningApp) {
         let pid = app.pid
-        guard let context, app.isRegular, pid != ownProcess else { return }
-        var entry: AppObserver
-        if let existing = observers[pid] {
-            entry = existing
-        } else {
+        guard context != nil, app.isRegular, pid != ownProcess else { return }
+        let round = observers.begin(pid: pid) {
             var created: AXObserver?
-            guard AXObserverCreate(pid, accessibilityCallback, &created) == .success, let created else { return }
-            entry = AppObserver(observer: created)
+            return AXObserverCreate(pid, accessibilityCallback, &created) == .success ? created : nil
         }
-        guard !entry.subscription.isComplete else { return }
-        let observer = entry.observer
-        let element = AXWindowSource.appElement(pid)
-        entry.subscription.register { notification in
-            switch AXObserverAddNotification(observer, element, notification as CFString, context.toOpaque()) {
-            case .success, .notificationAlreadyRegistered: .registered
-            case .notificationUnsupported: .unsupported
-            default: .unanswered
+        guard let round else { return }
+        let pending = Unchecked(round)
+        registrar.async { [self] in
+            var round = pending.value
+            let element = AXWindowSource.appElement(pid)
+            // The callbacks' refcon: the reference `start()` retained, released only after `stop()` has removed every
+            // scheduled source, and a discarded round's source is never scheduled.
+            let refcon = Unmanaged.passUnretained(self).toOpaque()
+            round.subscription.register { notification in
+                switch AXObserverAddNotification(round.observer, element, notification as CFString, refcon) {
+                case .success, .notificationAlreadyRegistered: .registered
+                case .notificationUnsupported: .unsupported
+                default: .unanswered
+                }
+            }
+            let finished = Unchecked(round)
+            thread.perform { [self] in subscribed(finished.value) }
+        }
+    }
+
+    /// An app answered a round of subscriptions, or ran out of time.
+    private func subscribed(_ round: FocusObservers<AXObserver>.Registration) {
+        switch observers.finish(round) {
+        case let .discarded(removed):
+            release(removed)
+        case .kept(firstScheduled: false):
+            break
+        case .kept(firstScheduled: true):
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(round.observer), .defaultMode)
+            // The focus may have changed before the observer could report it, such as during the launch seed.
+            if round.pid == frontmost, let window = source.focusedWindow(of: round.pid) {
+                listerLock.withLock { lister.noteFocused(source.ref(for: window, pid: round.pid), pid: round.pid) }
             }
         }
-        if !entry.isScheduled, !entry.subscription.registered.isEmpty {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
-            entry.isScheduled = true
-        }
-        observers[pid] = entry
     }
 
     private func unobserve(_ pid: pid_t) {
-        guard let entry = observers.removeValue(forKey: pid) else { return }
-        // Removing a notification is a local call once the app has quit; for a running app it is one more request.
-        let element = AXWindowSource.appElement(pid)
-        for notification in entry.subscription.registered {
-            AXObserverRemoveNotification(entry.observer, element, notification as CFString)
+        guard let removed = observers.remove(pid: pid) else { return }
+        release(removed)
+    }
+
+    /// Takes the observer's source off `thread`'s run loop now, and removes its notifications on `registrar`.
+    /// Removing a notification is a local call once the app has quit; for a running app it is one more request.
+    private func release(_ removed: FocusObservers<AXObserver>.Removed) {
+        if removed.isScheduled {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(removed.observer), .defaultMode)
         }
-        if entry.isScheduled {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(entry.observer), .defaultMode)
+        guard !removed.notifications.isEmpty else { return }
+        let pending = Unchecked(removed)
+        registrar.async {
+            let element = AXWindowSource.appElement(pending.value.pid)
+            for notification in pending.value.notifications {
+                AXObserverRemoveNotification(pending.value.observer, element, notification as CFString)
+            }
         }
     }
 
@@ -245,6 +272,15 @@ private func accessibilityCallback(
 ) {
     guard let refcon else { return }
     Unmanaged<FocusTracker>.fromOpaque(refcon).takeUnretainedValue().windowFocused(element)
+}
+
+/// A value handed between `FocusTracker`'s thread and its worker queue, which never use it at the same time.
+private struct Unchecked<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
 }
 
 /// A thread that runs its own run loop and performs the blocks it is given, in order. It lives as long as the app.

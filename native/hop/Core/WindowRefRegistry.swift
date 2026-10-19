@@ -6,9 +6,11 @@ import Foundation
 ///
 /// Every change carries a stamp from one counter. A read starts with `beginRead(of:)`, takes a ref for each window it
 /// sees with `ref(for:in:)`, and ends with `commit(_:)`, which drops only the app's refs that existed when the read
-/// began and that the read did not see: those windows closed. So
+/// began and that the read did not see: those windows closed. A ref a read assigns carries the read's start, so it
+/// counts as existing for every read that began later. So
 /// - a ref a focus change assigns while a read is under way (`ref(for:pid:)`) survives that read's commit;
-/// - a read that began before the app's last committed read commits nothing, so a late read never restores older refs;
+/// - a read that began before the app's last committed read neither stores refs nor commits, so a late read never
+///   restores older refs, and a ref an older read stored before a newer read committed is dropped by that commit;
 /// - a read that began before its app was forgotten (`forgetApp(pid:)`, `retainApps(_:)`) neither commits nor stores
 ///   refs, so an app that quit is not brought back.
 public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
@@ -40,21 +42,20 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
     }
 
     /// The ref of a window the read saw, assigning one if the window has none. A read whose app was forgotten after
-    /// it began gets a ref that is not kept.
+    /// it began, or that began before the app's last committed read, gets a ref that is not kept for a window the
+    /// registry does not know.
     public mutating func ref(for key: Key, in read: inout Read) -> WindowRef {
         read.seen.insert(key)
-        guard isCurrent(read) else { return nextRef() }
-        return ref(for: key, pid: read.pid)
+        if let known = apps[read.pid]?.refs[key] { return known.ref }
+        guard isCurrent(read), let app = apps[read.pid], read.stamp > app.committed else { return nextRef() }
+        return assign(key, pid: read.pid, at: read.stamp)
     }
 
     /// The ref of a window outside a read, such as one that a focus change reported, assigning one if it has none.
     public mutating func ref(for key: Key, pid: pid_t) -> WindowRef {
         if let known = apps[pid]?.refs[key] { return known.ref }
         _ = app(pid)
-        let ref = nextRef()
-        let assigned = tick()
-        apps[pid]?.refs[key] = (ref, assigned)
-        return ref
+        return assign(key, pid: pid, at: tick())
     }
 
     /// Ends a read that completed: the app's refs that existed when it began and that it did not see are dropped. A
@@ -83,6 +84,12 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
 
     private func isCurrent(_ read: Read) -> Bool {
         apps[read.pid].map { $0.since < read.stamp } ?? false
+    }
+
+    private mutating func assign(_ key: Key, pid: pid_t, at stamp: UInt64) -> WindowRef {
+        let ref = nextRef()
+        apps[pid]?.refs[key] = (ref, stamp)
+        return ref
     }
 
     private mutating func app(_ pid: pid_t) -> App {

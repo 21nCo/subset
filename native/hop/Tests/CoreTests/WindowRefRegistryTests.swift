@@ -47,6 +47,33 @@ final class WindowRefRegistryTests: XCTestCase {
         XCTAssertEqual(registry.refs(of: pid), [a, newer[1], focused], "b is not restored, and c and d are kept")
     }
 
+    func testALateReadStoresNoRefForAWindowANewerReadFoundClosed() {
+        var registry = WindowRefRegistry<String>()
+        let a = read(["a", "b"], into: &registry)[0]
+        var late = registry.beginRead(of: pid)
+        XCTAssertEqual(registry.ref(for: "a", in: &late), a)
+        // A newer read finds b closed and commits; then the late read reaches b, which it listed before b closed.
+        _ = read(["a"], into: &registry)
+        let focused = registry.ref(for: "c", pid: pid)
+        _ = registry.ref(for: "b", in: &late)
+        XCTAssertEqual(registry.refs(of: pid), [a, focused], "the late read does not bring b back")
+        registry.commit(late)
+        XCTAssertEqual(registry.refs(of: pid), [a, focused])
+    }
+
+    func testARefALateReadStoredBeforeANewerReadCommittedIsDroppedByThatCommit() {
+        var registry = WindowRefRegistry<String>()
+        let a = read(["a", "b"], into: &registry)[0]
+        var late = registry.beginRead(of: pid)
+        var newer = registry.beginRead(of: pid)
+        XCTAssertEqual(registry.ref(for: "a", in: &newer), a)
+        // The late read listed x, which closed before the newer read listed the windows.
+        _ = registry.ref(for: "x", in: &late)
+        let focused = registry.ref(for: "c", pid: pid)
+        registry.commit(newer)
+        XCTAssertEqual(registry.refs(of: pid), [a, focused], "x and b are gone; the focus ref is kept")
+    }
+
     func testAReadOfAnAppForgottenAfterItBeganKeepsNothing() {
         var registry = WindowRefRegistry<String>()
         _ = read(["a"], into: &registry)
