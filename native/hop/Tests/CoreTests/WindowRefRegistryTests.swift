@@ -22,6 +22,18 @@ final class WindowRefRegistryTests: XCTestCase {
         XCTAssertNotEqual(read(["b"], into: &registry), [first[1]], "a window seen again after closing is a new window")
     }
 
+    func testAnOperationReachesAWindowByItsRefUntilAReadFindsItClosed() {
+        var registry = WindowRefRegistry<String>()
+        let refs = read(["a", "b"], into: &registry)
+        XCTAssertEqual(registry.key(for: refs[1], pid: pid), "b")
+        XCTAssertNil(registry.key(for: refs[1], pid: pid + 1), "a ref names a window of its own app only")
+        _ = read(["a"], into: &registry)
+        XCTAssertNil(registry.key(for: refs[1], pid: pid), "b closed")
+        XCTAssertEqual(registry.key(for: refs[0], pid: pid), "a")
+        registry.forgetApp(pid: pid)
+        XCTAssertNil(registry.key(for: refs[0], pid: pid), "the app quit")
+    }
+
     func testARefAFocusChangeAssignsDuringAReadSurvivesItsCommit() {
         var registry = WindowRefRegistry<String>()
         let a = read(["a"], into: &registry)[0]

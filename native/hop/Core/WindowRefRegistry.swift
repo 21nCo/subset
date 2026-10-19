@@ -82,6 +82,12 @@ public struct WindowRefRegistry<Key: Hashable & Sendable>: Sendable {
         apps = apps.filter { live.contains($0.key) }
     }
 
+    /// The key of a window the registry keeps a ref for, so an operation can reach the window; nil when the ref is
+    /// not one of the app's, for example because a read found the window closed or the app quit.
+    public func key(for ref: WindowRef, pid: pid_t) -> Key? {
+        apps[pid]?.refs.first { $0.value.ref == ref }?.key
+    }
+
     /// The refs the registry keeps for an app, for tests.
     public func refs(of pid: pid_t) -> Set<WindowRef> {
         Set(apps[pid]?.refs.values.map(\.ref) ?? [])

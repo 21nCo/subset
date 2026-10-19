@@ -2,7 +2,7 @@
 
 Hop is a menu-bar app for switching between individual windows from the keyboard: hold a shortcut to see the open windows with their app icons and titles, optionally with live previews, and release to bring one to the front. It is a Subset capability in the `planned` state.
 
-This folder holds the app shell ([SET-90](https://linear.app/21n/issue/SET-90)) of the Hop outcome ([SET-89](https://linear.app/21n/issue/SET-89)): a menu-bar app with a status menu and an empty Settings window, a testable `HopCore` package, a generated Xcode project, macOS CI, and a check that fails the build if Hop links a private macOS API. [SET-91](https://linear.app/21n/issue/SET-91) adds the Accessibility onboarding and the hold-to-switch shortcut (see [Shortcut and permission](#shortcut-and-permission)). [SET-92](https://linear.app/21n/issue/SET-92) adds the window list: Accessibility enumeration, the closed inclusion rules, and the recency order (see [Window list](#window-list)). Hop does not yet show a switcher, focus a window, or capture the screen; those are SET-93 through SET-97.
+This folder holds the app shell ([SET-90](https://linear.app/21n/issue/SET-90)) of the Hop outcome ([SET-89](https://linear.app/21n/issue/SET-89)): a menu-bar app with a status menu and an empty Settings window, a testable `HopCore` package, a generated Xcode project, macOS CI, and a check that fails the build if Hop links a private macOS API. [SET-91](https://linear.app/21n/issue/SET-91) adds the Accessibility onboarding and the hold-to-switch shortcut (see [Shortcut and permission](#shortcut-and-permission)). [SET-92](https://linear.app/21n/issue/SET-92) adds the window list: Accessibility enumeration, the closed inclusion rules, and the recency order (see [Window list](#window-list)). [SET-93](https://linear.app/21n/issue/SET-93) adds the operations on a listed window: focus, minimize, close, hide its app, and quit its app (see [Window operations](#window-operations)). Hop does not yet show a switcher or capture the screen, and nothing calls the operations yet; those are SET-94 through SET-97.
 
 ## Capability boundary
 
@@ -27,7 +27,7 @@ Hop uses public macOS APIs only: no private CoreGraphics or SkyLight functions (
 | Settings…, About Hop, Quit Hop | App shell | Implemented here |
 | Ask for Accessibility and install the hold-to-switch shortcut | Permission | Implemented (SET-91); a committed switch only logs its index until SET-94 |
 | List switchable windows in recency order | Read | Implemented (SET-92); the switcher calls it from SET-94 |
-| Focus, minimize, close, or hide a window, or quit its app | Mutation of another app's window | Planned (SET-93) |
+| Focus, minimize, or close a window, or hide or quit its app | Mutation of another app's window | Implemented (SET-93); the switcher's keys call them from SET-94 |
 | Show the switcher while the shortcut is held and switch on release | Read, then focus | Planned (SET-94) |
 | Change the shortcut, shown windows, excluded apps, and launch at login | Settings | Planned (SET-95) |
 | Type to filter; switch between one app's windows with ⌥` | Read, then focus | Planned (SET-96) |
@@ -35,8 +35,8 @@ Hop uses public macOS APIs only: no private CoreGraphics or SkyLight functions (
 
 | Owner | Responsibility |
 | --- | --- |
-| `Core/` (`HopCore`) | Domain logic in pure Swift: no AppKit, SwiftUI, or ApplicationServices imports (`CoreBoundaryTests` checks this). It holds the app identity, the status menu's command list, the switch session state machine (`SwitchSession`), the shortcut and its store (`Shortcut`, `ShortcutStore`), the event classifier (`EventClassifier`, `ShortcutRecognizer`), the permission state (`AccessibilityGate`), and the window list: its model (`WindowEntry`, `AppEntry`, `WindowRef`), the `WindowSource` protocol and `FixtureWindowSource`, the inclusion rules (`WindowFilter`), the recency order (`RecencyTracker`), the list builder (`WindowLister`), and the focus subscription retry state and observer ownership (`FocusSubscription`, `FocusObservers`). Geometry uses CoreGraphics value types only. |
-| `MacApp/` | The menu-bar host: the status item, the Settings window, the About panel, the onboarding window, the Accessibility check, the keyboard event tap (`EventTap`, driven by `SwitchShortcutController`), and the live window source (`AXWindowSource`) with its focus observers (`WindowListController`). SET-97 puts the ScreenCaptureKit bridge here. |
+| `Core/` (`HopCore`) | Domain logic in pure Swift: no AppKit, SwiftUI, or ApplicationServices imports (`CoreBoundaryTests` checks this). It holds the app identity, the status menu's command list, the switch session state machine (`SwitchSession`), the shortcut and its store (`Shortcut`, `ShortcutStore`), the event classifier (`EventClassifier`, `ShortcutRecognizer`), the permission state (`AccessibilityGate`), and the window list: its model (`WindowEntry`, `AppEntry`, `WindowRef`), the `WindowSource` protocol and `FixtureWindowSource`, the inclusion rules (`WindowFilter`), the recency order (`RecencyTracker`), the list builder (`WindowLister`), the focus subscription retry state and observer ownership (`FocusSubscription`, `FocusObservers`), and the window operations: their API (`WindowOperation`, `OperationResult`, `WindowOperator`, `RecordingWindowOperator`) and their sequencing over Accessibility and app adapters (`AccessibilityWindowOperator`, `WindowAccessibility`, `AppControl`). Geometry uses CoreGraphics value types only. |
+| `MacApp/` | The menu-bar host: the status item, the Settings window, the About panel, the onboarding window, the Accessibility check, the keyboard event tap (`EventTap`, driven by `SwitchShortcutController`), the live window source (`AXWindowSource`) with its focus observers (`WindowListController`), and the live window operator (`AXWindowOperator`). SET-97 puts the ScreenCaptureKit bridge here. |
 
 No other app, package, or product imports this code.
 
@@ -139,6 +139,24 @@ Anything outside these rules is out of scope here and belongs to SET-102.
 **Spaces.** Hop lists what the public Accessibility API reports. Windows on other Spaces may be missing, and full-screen windows in their own Space may be too. Hop does no Space switching beyond what activating an app does.
 
 **Not verified here.** The live source needs a trusted process and real apps, so enumeration, timeouts, focus notifications and seeding against real third-party apps, displays and Spaces are checked in SET-98. Unit tests cover the rules, the list builder with a fixture source (including apps that time out or overrun their deadline, more slow apps than CPU cores costing one budget, a seed that reads each app once, and a 200-window list, which must build in under 50 ms and logs its time), the recency order, and the retry of a focus subscription an app did not answer.
+
+## Window operations
+
+`WindowOperator.perform(_:on:)` acts on a `WindowEntry` and returns an `OperationResult`, so the switcher can show a failure instead of silently doing nothing: `.done`, `.windowGone` (the window no longer exists; its app runs), `.appGone` (the app exited, or another app now has its pid), `.refused(reason)` (a short reason that never contains a window title), or `.notPermitted` (Hop is not trusted). `AccessibilityWindowOperator` (in `HopCore`) sequences each operation over two adapters, `WindowAccessibility` and `AppControl`; the host's `AXWindowOperator` gives it the live ones, which reach a window through the element `AXWindowSource` keeps for its ref, so a ref whose window a read found closed is `.windowGone`. `RecordingWindowOperator` stands in for it in tests of the switcher (SET-94).
+
+| Operation | What Hop does | Done when |
+| --- | --- | --- |
+| focus | Unhides the app if it is hidden; sets `kAXMinimized` false if the window is minimized; `AXRaise`; sets `kAXMain` true; `NSRunningApplication.activate(options: [])`; sets the app's `kAXFrontmost` true. A step the window does not support is skipped. | The app's `kAXFocusedWindow` reads back as the window within 0.5 s (read every 25 ms); otherwise `.refused("did not come to front")` |
+| minimize | Sets `kAXMinimized` true | The request succeeds; otherwise `.refused("can't be minimized")` |
+| close | Presses the window's `kAXCloseButton` | The press succeeds. If the app then asks to save, Hop does not answer: the result is `.done` and the prompt stays. No close button is `.refused("can't be closed")` |
+| hideApp | `NSRunningApplication.hide()` | The request is delivered; otherwise `.refused("did not hide")` |
+| quitApp | `NSRunningApplication.terminate()`, a normal quit the app may answer with a prompt. Hop never force-quits, and Finder is never quit: `.refused("Finder can't be quit")` | The request is delivered; otherwise `.refused("did not quit")` |
+
+Every operation first checks `AXIsProcessTrusted()` (`.notPermitted` with no request made otherwise) and that the app still runs with the entry's bundle ID (`.appGone` otherwise). The app's hidden and the window's minimized state are read when the operation runs, not taken from the list, which may be older. A failed request is `.windowGone` if the window's element is invalid or Hop no longer knows its ref while the app runs, `.appGone` if the app has exited, `.notPermitted` if trust was lost meanwhile, and `.refused("not responding")` if the app did not answer in time; an app that does not answer ends the operation at that request.
+
+**Threads.** `perform` is `async`: operations run in order on one serial queue of their own, never on the main thread, so the switcher is not blocked while an app answers. Every Accessibility request has the 0.25 s messaging timeout. Nothing about a window, and never a title, is logged.
+
+**Not verified here.** Acting on real third-party apps' windows needs a trusted process, so focus, minimize, close, hide and quit against real apps, displays and Spaces (including whether activation from a background Hop is honored, and how apps with save prompts behave) are checked in SET-98. Unit tests with fake Accessibility and app adapters cover the exact request order for focus on a normal, minimized, and hidden-app window, the read-back and its refusal, a window that closed, an app that exited before or during an operation, missing or lost trust (no request made), each operation's request and refusal, Finder's refusal, the absence of any force-quit, and that operations run off the main thread without blocking it.
 
 ## Superfunctions evaluated
 
