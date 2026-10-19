@@ -37,6 +37,7 @@ final class SamplerTests: XCTestCase {
             facts.launchdLabel, facts.workingDirectory, facts.tty
         ]
         XCTAssertTrue(origin.allSatisfy { $0 == nil })
+        XCTAssertNil(facts.origin, "a sampler without an origin reader reads no signals")
     }
 
     func testCPUPercentIsTheCPUTimeDeltaOverTheWallDeltaWithOneCoreAtOneHundred() throws {

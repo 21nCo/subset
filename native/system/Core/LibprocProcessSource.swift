@@ -97,6 +97,11 @@ public struct LibprocProcessSource: ProcessSource {
         return isTruncated ? fileName : kernelName
     }
 
+    /// The identity the PID belongs to now, or `nil` when no process has it.
+    static func currentIdentity(of pid: pid_t) -> ProcessIdentity? {
+        basics(pid)?.identity
+    }
+
     struct ProcessBasics: Sendable {
         let identity: ProcessIdentity
         let ppid: Int32

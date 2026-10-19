@@ -28,15 +28,28 @@ public struct ProcessFacts: Identifiable, Equatable, Sendable {
     /// convention). `nil` on a process's first sample or when its usage is unavailable.
     public internal(set) var cpuPercent: Double?
 
-    // Origin signals, filled by SET-41. Always nil here.
-    public var responsiblePID: Int32?
-    public var coalitionID: UInt64?
-    public var teamID: String?
-    public var signingID: String?
-    public var isPlatformBinary: Bool?
-    public var launchdLabel: String?
-    public var workingDirectory: String?
-    public var tty: String?
+    /// The origin signals with the reader behind each value and the reason for each missing one. `nil` until an
+    /// `OriginSignalReader` has read this identity.
+    public var origin: OriginSignals?
+
+    // The origin values alone, `nil` when the signal is unavailable or not read yet.
+    public var responsiblePID: Int32? { origin?.responsibleProcess.value }
+    public var coalitionID: UInt64? { origin?.coalition.value }
+    public var teamID: String? { origin?.codeSignature.value?.teamID }
+    public var signingID: String? { origin?.codeSignature.value?.signingID }
+    public var isPlatformBinary: Bool? { origin?.codeSignature.value?.isPlatformBinary }
+    /// The label of the launchd jobs that run this executable, when they agree on one. Two plists with different
+    /// labels for one program leave it `nil`; `origin.launchdJobs` lists both.
+    public var launchdLabel: String? {
+        guard let labels = origin?.launchdJobs.value.map({ Set($0.map(\.label)) }), labels.count == 1 else { return nil }
+        return labels.first
+    }
+    public var workingDirectory: String? { origin?.workingDirectory.value }
+    /// The controlling terminal's device name, `nil` when there is none or it is unavailable.
+    public var tty: String? {
+        guard case let .device(name) = origin?.terminal.value else { return nil }
+        return name
+    }
 
     public var id: ProcessIdentity { identity }
     public var pid: Int32 { identity.pid }

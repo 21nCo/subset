@@ -20,18 +20,21 @@ public struct ProcessSnapshot: Equatable, Sendable {
 public struct Sampler {
     private let source: any ProcessSource
     private let hostCPU: (any HostCPUSource)?
+    private let origin: OriginSignalReader?
     public let logicalCoreCount: Int
     private var previous: (uptime: UInt64, cpuTimes: [ProcessIdentity: UInt64])?
     private var previousTicks: HostCPUTicks?
 
-    /// Without `hostCPU`, snapshots have no machine CPU figure.
+    /// Without `hostCPU`, snapshots have no machine CPU figure; without `origin`, processes have no origin signals.
     public init(
         source: any ProcessSource,
         hostCPU: (any HostCPUSource)? = nil,
+        origin: OriginSignalReader? = nil,
         logicalCoreCount: Int = ProcessInfo.processInfo.processorCount
     ) {
         self.source = source
         self.hostCPU = hostCPU
+        self.origin = origin
         self.logicalCoreCount = logicalCoreCount
     }
 
@@ -56,6 +59,7 @@ public struct Sampler {
             }
             processes.append(facts)
         }
+        origin?.annotate(&processes)
         previous = (uptime, cpuTimes)
         var machineCPUPercent: Double?
         if let before = previousTicks, let ticks {

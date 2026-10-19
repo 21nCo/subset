@@ -2,7 +2,7 @@
 
 System is a menu-bar app that will show where a Mac's CPU, memory, and disk space go, grouped by **origin** rather than as a flat process list: the app a helper belongs to, what launched it, the project a dev server runs in, and the containers inside a Docker-compatible VM. It is a Subset capability in the `planned` state.
 
-This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) of the System outcome ([SET-38](https://linear.app/21n/issue/SET-38)) and its process sampling ([SET-40](https://linear.app/21n/issue/SET-40)): a menu-bar app that shows total CPU and memory pressure, a temporary process table in the main window, an empty Settings window, a testable `SystemCore` package, a generated Xcode project, and macOS CI. It does not attribute processes to an origin, scan disks, run cleanups, call AI providers, or ship the agent helper; those are SET-41 through SET-52.
+This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) of the System outcome ([SET-38](https://linear.app/21n/issue/SET-38)) its process sampling ([SET-40](https://linear.app/21n/issue/SET-40)), and the origin signals read for each process ([SET-41](https://linear.app/21n/issue/SET-41)): a menu-bar app that shows total CPU and memory pressure, a temporary process table in the main window with each process's raw origin signals, an empty Settings window, a testable `SystemCore` package, a generated Xcode project, and macOS CI. It does not group processes by origin, scan disks, run cleanups, call AI providers, or ship the agent helper; those are SET-42 through SET-52.
 
 ## Capability boundary
 
@@ -13,7 +13,8 @@ This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) 
 | Data | Source | Issue |
 | --- | --- | --- |
 | Processes, CPU, memory | Darwin process APIs on this Mac, sampled in memory (implemented) | SET-40 |
-| Origin (app, launcher, project) | Bundle, code-signing, launchd, and process-tree signals | SET-41, SET-42 |
+| Origin signals per process | Responsibility, coalition, code signature, launchd plists, working directory, terminal (implemented) | SET-41 |
+| Origin (app, launcher, project) | Grouping rules over those signals, the bundle path, and the parent chain | SET-42 |
 | Containers | The local Docker-compatible CLI | SET-43 |
 | Disk usage | The file system, under the user's Full Disk Access choice | SET-45, SET-46 |
 
@@ -25,6 +26,7 @@ Samples and scan results stay in memory; there is no persisted history. All meas
 | --- | --- | --- |
 | Open System, Settings…, About Subset System, Quit | App shell | Implemented (SET-39) |
 | View total CPU and memory pressure in the menu bar; view a plain process table | Read | Implemented (SET-40); the table is temporary |
+| View a selected process's raw origin signals and their sources | Read | Implemented (SET-41), in the temporary table's detail pane |
 | View CPU and memory by origin | Read | Planned (SET-44) |
 | View disk usage by origin and reclaimable space | Read | Planned (SET-46, SET-47) |
 | Move to Trash or run an allowlisted tool command, after confirmation | Mutation | Planned (SET-48) |
@@ -33,7 +35,7 @@ Samples and scan results stay in memory; there is no persisted history. All meas
 
 | Owner | Responsibility |
 | --- | --- |
-| `Core/` (`SystemCore`) | Domain logic, pure Swift plus Darwin; no AppKit or SwiftUI. It holds the app identity, the status menu's command list, the `ProcessFacts` contract and its sources, the `Sampler`, `SystemMemory`, and the menu-bar summary. |
+| `Core/` (`SystemCore`) | Domain logic, pure Swift plus Darwin; no AppKit or SwiftUI. It holds the app identity, the status menu's command list, the `ProcessFacts` contract and its sources, the `Sampler`, `SystemMemory`, the menu-bar summary, and the origin signal readers in `Core/Signals/`. |
 | `MacApp/` | The menu-bar host: the status item, the sampling loop (`SystemMonitor`), the main and Settings windows, and the About panel. |
 
 No other app, package, or product imports this code.
@@ -50,7 +52,29 @@ No other app, package, or product imports this code.
 - **System memory** (`SystemMemory`): pressure level from `kern.memorystatus_vm_pressure_level` (normal, warning, critical), swap used and total from `vm.swapusage`, physical memory from `hw.memsize`, and app (anonymous minus purgeable), wired, and compressed memory from `host_statistics64(HOST_VM_INFO64)`. A missing or malformed value is `nil`.
 - **Cadence.** Every 2 seconds while the main window is visible on screen, every 10 seconds otherwise. A change applies at once, but a sample never starts while another runs or sooner than the new interval after the previous one started. Samples stay in memory; there is no history.
 
-The `ProcessFacts` origin fields (`responsiblePID`, `coalitionID`, `teamID`, `signingID`, `isPlatformBinary`, `launchdLabel`, `workingDirectory`, `tty`) are `nil` until SET-41 fills them. Agreement with Activity Monitor on a real workload is checked in SET-53, not here.
+Agreement with Activity Monitor on a real workload is checked in SET-53, not here.
+
+## Origin signals
+
+`OriginSignalReader` (`Core/Signals/`) reads the signals macOS gives a non-root user about where a process came from, once per process identity, and stores them in `ProcessFacts.origin`. SET-42 groups processes from them. Each signal is a value or an `unavailable` reason, and names the interface (`SignalSource`) that supplied it either way. The convenience fields `responsiblePID`, `coalitionID`, `teamID`, `signingID`, `isPlatformBinary`, `launchdLabel`, `workingDirectory`, and `tty` are the bare values, `nil` when unavailable or not read yet.
+
+| Signal | Reader and source | Without root |
+| --- | --- | --- |
+| Responsible process | The private `responsibility_get_pid_responsible_for_pid`, resolved with `dlsym` | Own processes only; others are `denied` |
+| Coalition ID | The private `PROC_PIDCOALITIONINFO` flavor (20) of `proc_pidinfo`, resolved with `dlsym`; the resource coalition | Every process |
+| Code signature: signing identifier, Team ID, Apple platform binary | `SecCodeCopyGuestWithAttributes` by PID, then `SecCodeCopySigningInformation` | Every process |
+| launchd jobs: label, plist, domain, `orphaned` | An index of `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`, and `Contents/Library/LaunchAgents` in each app in `/Applications` and `~/Applications` | Every readable plist |
+| Working directory | `PROC_PIDVNODEPATHINFO` | Own processes only |
+| Controlling terminal | `e_tdev` from `PROC_PIDTBSDINFO`, else from the process table (`sysctl` `KERN_PROC_PID`) | Every process |
+
+- **Private interfaces.** The owner approved the two private interfaces. Each adapter reports `symbolMissing` when its symbol is absent and the call's `errno` (`denied`, `processExited`, or the code) when it fails, so grouping can fall back to the bundle path and parent chain. Neither is linked directly, so a macOS without them still launches.
+- **Partial results.** Each reader is independent: a restricted process keeps the signals that succeed (on the development Mac, other users' processes kept their coalition, terminal, and, where the kernel reports an executable path, signature) and records a reason for each that does not.
+- **Once per identity.** Results are cached by `(pid, startTime)` and dropped when the process exits. The reads are keyed by PID, so the identity is checked afterwards; if the PID changed hands meanwhile, the signals are discarded and recorded as `processExited`. Reading all of a Mac's processes the first time takes seconds (about 6.7 s for 733 processes on the development Mac, mostly in the Security framework), so one sample reads new identities, oldest first, for at most one second; the rest stay `nil` ("not read yet") until a later sample.
+- **Signature cache.** Signatures are cached by executable path, file size, and modification time, so the many processes running one executable cost one read, and a rebuilt or updated file is read again. Failures are not cached. The cache starts over past 4,096 paths.
+- **launchd index.** A job's program is `Program`, else `BundleProgram` (relative to its app bundle), else `ProgramArguments[0]`, which launchd resolves like `execvp` against `/usr/bin:/bin:/usr/sbin:/sbin`. Symlinks are resolved, because the kernel reports a process by its real path (Homebrew services name a symlink). A plist whose program does not exist is kept as `orphaned`; one without a label or program, or that does not parse, is listed as unreadable. Before reading new identities, the index is rebuilt if any plist, plist folder, or application folder appeared, disappeared, or changed size or modification time. A process's jobs are matched once, when it is first read. `launchdLabel` is set only when every matching job has the same label. Apple's `/System/Library` jobs are not indexed; their programs are platform binaries.
+- **Not read:** command-line arguments (they can hold secrets) and root-only sources such as `launchctl procinfo`.
+
+The live tests read the test process's own working directory, terminal state, and code signature, launchd's (pid 1) signature and restricted reads, and record whatever the two private interfaces return. Whether the signals are right for real apps, agents, and dev servers is checked on a working Mac in SET-53.
 
 ## Surfaces
 

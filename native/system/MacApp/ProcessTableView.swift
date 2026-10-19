@@ -5,30 +5,36 @@ import SystemCore
 struct ProcessTableView: View {
     let monitor: SystemMonitor
     @State private var sortOrder = [KeyPathComparator(\ProcessFacts.cpuSortKey, order: .reverse)]
+    @State private var selection: ProcessIdentity?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             MemorySummaryView(snapshot: monitor.snapshot, memory: monitor.memory, error: monitor.sampleError)
                 .padding(12)
-            Table(rows, sortOrder: $sortOrder) {
-                TableColumn("Process", value: \.name)
-                TableColumn("PID", value: \.pid) { Text(String($0.pid)) }
-                TableColumn("% CPU", value: \.cpuSortKey) { process in
-                    Text(process.cpuPercent.map { String(format: "%.1f", $0) } ?? unavailable(process))
+            VSplitView {
+                Table(rows, selection: $selection, sortOrder: $sortOrder) {
+                    TableColumn("Process", value: \.name)
+                    TableColumn("PID", value: \.pid) { Text(String($0.pid)) }
+                    TableColumn("% CPU", value: \.cpuSortKey) { process in
+                        Text(process.cpuPercent.map { String(format: "%.1f", $0) } ?? unavailable(process))
+                    }
+                    TableColumn("Memory", value: \.memorySortKey) { process in
+                        Text(process.physFootprint.map(Format.bytes) ?? unavailable(process))
+                    }
+                    TableColumn("CPU Time", value: \.cpuTimeSortKey) { process in
+                        Text(process.totalCPUTime.map { String(format: "%.2f s", Double($0) / 1e9) } ?? unavailable(process))
+                    }
+                    TableColumn("Energy Used", value: \.energySortKey) { process in
+                        Text(process.energy.map { String(format: "%.1f J", Double($0) / 1e9) } ?? unavailable(process))
+                    }
+                    TableColumn("UID", value: \.uid) { Text(String($0.uid)) }
                 }
-                TableColumn("Memory", value: \.memorySortKey) { process in
-                    Text(process.physFootprint.map(Format.bytes) ?? unavailable(process))
-                }
-                TableColumn("CPU Time", value: \.cpuTimeSortKey) { process in
-                    Text(process.totalCPUTime.map { String(format: "%.2f s", Double($0) / 1e9) } ?? unavailable(process))
-                }
-                TableColumn("Energy Used", value: \.energySortKey) { process in
-                    Text(process.energy.map { String(format: "%.1f J", Double($0) / 1e9) } ?? unavailable(process))
-                }
-                TableColumn("UID", value: \.uid) { Text(String($0.uid)) }
+                .frame(minHeight: 200)
+                OriginSignalsView(process: monitor.snapshot?.processes.first { $0.identity == selection })
+                    .frame(minHeight: 120, idealHeight: 180)
             }
         }
-        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
+        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)
     }
 
     /// Rows without a value in the sorted column come last in either direction.
@@ -40,6 +46,73 @@ struct ProcessTableView: View {
 
     private func unavailable(_ process: ProcessFacts) -> String {
         process.restricted ? "Restricted" : "–"
+    }
+}
+
+/// The selected process's raw origin signals, each with the interface that supplied it or the reason it is missing.
+/// SET-42 turns them into origins; this view only shows them.
+private struct OriginSignalsView: View {
+    let process: ProcessFacts?
+
+    var body: some View {
+        ScrollView {
+            if let process {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("\(process.name) (\(String(process.pid)))").font(.headline).gridCellColumns(3)
+                    }
+                    GridRow {
+                        Text("Executable").foregroundStyle(.secondary)
+                        Text(process.executablePath ?? "–").gridCellColumns(2)
+                    }
+                    ForEach(rows(process.origin), id: \.label) { row in
+                        GridRow {
+                            Text(row.label).foregroundStyle(.secondary)
+                            Text(row.value)
+                            Text(row.source).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("Select a process to see its origin signals.").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .font(.callout)
+        .textSelection(.enabled)
+        .padding(12)
+    }
+
+    private func rows(_ origin: OriginSignals?) -> [(label: String, value: String, source: String)] {
+        guard let origin else { return [("Origin signals", "Not read yet", "")] }
+        return [
+            row("Responsible process", origin.responsibleProcess) { String($0) },
+            row("Coalition", origin.coalition) { String($0) },
+            row("Code signature", origin.codeSignature) { signature in
+                guard let signingID = signature.signingID else { return "Unsigned" }
+                let team = signature.teamID.map { "team \($0)" } ?? "no team"
+                return "\(signingID), \(team)\(signature.isPlatformBinary ? ", Apple platform binary" : "")"
+            },
+            row("launchd jobs", origin.launchdJobs) { jobs in
+                jobs.isEmpty ? "None" : jobs.map { "\($0.label) (\($0.plistPath))" }.joined(separator: "\n")
+            },
+            row("Working directory", origin.workingDirectory) { $0 },
+            row("Terminal", origin.terminal) { terminal in
+                switch terminal {
+                case .none: "None"
+                case let .device(name): name
+                }
+            }
+        ]
+    }
+
+    private func row<Value>(_ label: String, _ signal: Signal<Value>, _ format: (Value) -> String)
+        -> (label: String, value: String, source: String) {
+        switch signal {
+        case let .value(value, source): (label, format(value), source.rawValue)
+        case let .unavailable(failure, source): (label, "Unavailable: \(failure.reason)", source.rawValue)
+        }
     }
 }
 
