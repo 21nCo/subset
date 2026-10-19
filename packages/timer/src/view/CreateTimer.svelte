@@ -8,8 +8,8 @@
   import { BUILT_IN_PRESETS } from '../presets.js';
   import IntervalEditor from './IntervalEditor.svelte';
   import {
-    countdownSpecFrom, emptyCountdownDraft, emptyIntervalDraft, intervalSpecFrom, presetSummary,
-    type DraftErrors, type TimerBoardDensity
+    createInputFrom, emptyCountdownDraft, emptyIntervalDraft, presetSummary,
+    type CreateMode, type DraftErrors, type TimerBoardDensity
   } from './view-model.js';
 
   interface Props {
@@ -24,17 +24,16 @@
   let { density, busy, loadPresets, oncreate }: Props = $props();
   const uid = $props.id();
 
-  const MODES = [
+  const MODES: { id: CreateMode; label: string }[] = [
     { id: 'preset', label: 'Preset' },
     { id: 'countdown', label: 'Duration' },
     { id: 'stopwatch', label: 'Stopwatch' },
     { id: 'interval', label: 'Intervals' }
-  ] as const;
-  type Mode = (typeof MODES)[number]['id'];
+  ];
 
   // Compact boards, such as an inline chat card, start with the form closed.
   let open = $state(untrack(() => density === 'full'));
-  let mode = $state<Mode>('preset');
+  let mode = $state<CreateMode>('preset');
   let name = $state('');
   // The built-ins show at once; the host's list, with any saved presets, replaces them once it loads.
   let presets = $state<Preset[]>([...BUILT_IN_PRESETS]);
@@ -61,21 +60,8 @@
   });
 
   function validate(): { input: Record<string, unknown> | null; errors: DraftErrors } {
-    const named = name.trim() ? { name: name.trim() } : {};
-    switch (mode) {
-      case 'preset':
-        return presetId ? { input: { preset: presetId, ...named }, errors: {} } : { input: null, errors: { preset: 'Choose a preset.' } };
-      case 'stopwatch':
-        return { input: { timer: { kind: 'stopwatch', ...named } }, errors: {} };
-      case 'countdown': {
-        const outcome = countdownSpecFrom({ ...countdown, name: name });
-        return outcome.ok ? { input: { timer: outcome.spec }, errors: {} } : { input: null, errors: outcome.errors };
-      }
-      case 'interval': {
-        const outcome = intervalSpecFrom({ ...interval, name: name });
-        return outcome.ok ? { input: { timer: outcome.spec }, errors: {} } : { input: null, errors: outcome.errors };
-      }
-    }
+    const outcome = createInputFrom({ mode, name, presetId, countdown, interval });
+    return outcome.ok ? { input: outcome.spec, errors: {} } : { input: null, errors: outcome.errors };
   }
 
   async function submit(event: SubmitEvent) {

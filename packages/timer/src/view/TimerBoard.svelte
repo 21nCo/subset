@@ -11,7 +11,7 @@
   import CreateTimer from './CreateTimer.svelte';
   import TimerCard from './TimerCard.svelte';
   import {
-    REFRESH_MS, applyResult, failureText, formatClockTime, pickAnnouncements, pressDestructive, readBoardResult, readOutcome, readPresets, reproject,
+    REFRESH_MS, failureText, formatClockTime, pickAnnouncements, pressDestructive, readBoardResult, readPresets, reproject, settleAction,
     type ActionFailure, type AnnouncedStates, type Armed, type ControlName, type TimerBoardProps
   } from './view-model.js';
 
@@ -52,6 +52,8 @@
     const key = timerId ?? operation;
     if (busy[key]) return null;
     busy[key] = true;
+    // The host result this action starts under; a newer one by the time it settles wins over its reply.
+    const basis = read;
     let outcome: unknown;
     try {
       outcome = await actions.invoke(operation, input);
@@ -60,20 +62,23 @@
     } finally {
       busy[key] = false;
     }
-    const readBack = readOutcome(operation, timerId, outcome);
-    if (!readBack.ok) {
-      failure = readBack.failure;
-      announce(failureText(readBack.failure));
+    const settled = settleAction({ timers, basis: read }, { operation, timerId, basis }, outcome);
+    if (!settled.ok) {
+      failure = settled.failure;
+      announce(failureText(settled.failure));
       return null;
     }
     if (failure && (failure.timerId === timerId || failure.timerId === null)) failure = null;
-    timers = applyResult(timers, readBack.result);
-    return readBack.result;
+    if (settled.timers) timers = settled.timers;
+    return settled.result;
   }
 
   async function control(timerId: string, name: ControlName): Promise<void> {
     if (name === 'reset' || name === 'remove') {
-      const press = pressDestructive(armed, timerId, name, now());
+      const at = now();
+      // The label follows `clock`; move it to the press so "Press again" shows at once.
+      clock = at;
+      const press = pressDestructive(armed, timerId, name, at);
       armed = press.armed;
       if (!press.run) return;
     } else {

@@ -3,11 +3,11 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { emptyStore, operations, schemas } from '../dist/index.js';
+import { emptyStore, operations, schemas, timerBoard } from '../dist/index.js';
 import {
-  CONFIRM_MS, applyResult, controlStates, countdownSpecFrom, durationText, emptyIntervalDraft, failureText, formatElapsed, formatRemaining,
-  intervalDraftFrom, intervalSpecFrom, keyControl, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult,
-  readOutcome, readPresets, reproject
+  CONFIRM_MS, applyResult, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyCountdownDraft, emptyIntervalDraft, failureText,
+  formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl, parseDurationText, pickAnnouncements,
+  pressDestructive, primaryControl, readBoardResult, readOutcome, readPresets, reproject, settleAction
 } from '../dist/view/view-model.js';
 
 const T0 = Date.UTC(2026, 9, 19, 8, 0, 0);
@@ -124,15 +124,24 @@ test('an until countdown can start only while its time is 1 s to 24 h away', () 
 
 test('Space runs the enabled primary control, L laps and S skips, and nothing else', () => {
   const running = row(D, E, D, E, H, E, E);
+  const key = (value) => ({ key: value });
   assert.equal(primaryControl(running), 'pause');
-  assert.equal(keyControl(' ', running), 'pause');
-  assert.equal(keyControl('l', running), 'lap');
-  assert.equal(keyControl('L', running), 'lap');
-  assert.equal(keyControl('s', running), null, 'skip is hidden');
-  assert.equal(keyControl('r', running), null);
-  assert.equal(keyControl(' ', row(D, D, D, H, H, E, E)), null);
-  assert.equal(keyControl('S', row(D, D, E, H, E, E, E)), 'skip');
-  assert.equal(keyControl(' ', row(E, D, D, H, D, D, E)), 'start');
+  assert.equal(keyControl(key(' '), running), 'pause');
+  assert.equal(keyControl(key('l'), running), 'lap');
+  assert.equal(keyControl(key('L'), running), 'lap');
+  assert.equal(keyControl(key('s'), running), null, 'skip is hidden');
+  assert.equal(keyControl(key('r'), running), null);
+  assert.equal(keyControl(key(' '), row(D, D, D, H, H, E, E)), null);
+  assert.equal(keyControl(key('S'), row(D, D, E, H, E, E, E)), 'skip');
+  assert.equal(keyControl(key(' '), row(E, D, D, H, D, D, E)), 'start');
+});
+
+test('a held key acts once: auto-repeated keydowns run no control', () => {
+  const running = row(D, E, D, E, E, E, E);
+  for (const key of [' ', 'l', 'L', 's', 'S']) {
+    assert.notEqual(keyControl({ key, repeat: false }, running), null, key);
+    assert.equal(keyControl({ key, repeat: true }, running), null, `${JSON.stringify(key)} repeated`);
+  }
 });
 
 test('reset and remove run only on a second press of the same control within 3 s', () => {
@@ -291,4 +300,102 @@ test('a failed action names its operation', () => {
   assert.equal(readOutcome('reset', 't_1', undefined).ok, false);
   assert.equal(readOutcome('reset', 't_1', { error: {} }).ok, false);
   assert.deepEqual(readOutcome('remove', 't_1', { removedId: 't_1' }), { ok: true, result: { removedId: 't_1' } });
+});
+
+// One store per timer operation in which it succeeds, with its input; create starts from an empty store.
+const STOPWATCH = { timer: { kind: 'stopwatch', name: 'Tea' } };
+const SCENARIOS = {
+  create: () => ({ store: emptyStore(), id: null, input: STOPWATCH }),
+  start: () => timerAfter(STOPWATCH),
+  pause: () => timerAfter(STOPWATCH, [['start', 0]]),
+  resume: () => timerAfter(STOPWATCH, [['start', 0], ['pause', 5_000]]),
+  lap: () => timerAfter(STOPWATCH, [['start', 0]]),
+  skip: () => timerAfter({ preset: 'tabata' }, [['start', 0]]),
+  reset: () => timerAfter(STOPWATCH, [['start', 0]]),
+  remove: () => timerAfter(STOPWATCH)
+};
+const AT = T0 + 10_000;
+function scenario(operation) {
+  const { store, id, input = { id } } = SCENARIOS[operation]();
+  const reply = operations[operation](store, input, AT);
+  assert.ok(reply.ok, `${operation}: ${JSON.stringify(reply.error)}`);
+  return { id, timers: timerBoard(store, AT).timers, reply: reply.result, after: reply.store };
+}
+
+test('a reply that does not match its operation’s result is a failure, never applied', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { id, reply } = scenario(operation);
+    assert.deepEqual(readOutcome(operation, id, reply), { ok: true, result: reply }, operation);
+    const broken = operation === 'remove'
+      ? [{}, { removedId: 7 }, { removedId: id, extra: true }]
+      : [
+          {},
+          { timer: 'x' },
+          // Structurally broken snapshots that `project` could not render.
+          { timer: { ...reply.timer, definition: { ...reply.timer.definition, kind: 'interval', segments: [], rounds: 0 } } },
+          { timer: { ...reply.timer, runtime: { ...reply.timer.runtime, status: 'sleeping' } } },
+          { timer: { ...reply.timer, projection: undefined } }
+        ];
+    for (const value of broken) {
+      const outcome = readOutcome(operation, id, value);
+      assert.equal(outcome.ok, false, `${operation} ${JSON.stringify(value).slice(0, 80)}`);
+      assert.match(failureText(outcome.failure), /^\w+ failed: The host's reply does not match the Timer contract \(.+\)\.$/);
+    }
+    // A reply for another timer than the one acted on.
+    if (id !== null) {
+      const other = operation === 'remove' ? { removedId: 't_zzzzzzzz' } : { timer: { ...reply.timer, definition: { ...reply.timer.definition, id: 't_zzzzzzzz' } } };
+      assert.equal(failureText(readOutcome(operation, id, other).failure), `${failureText({ operation, message: '' })}The host replied for timer t_zzzzzzzz instead of ${id}.`);
+    }
+  }
+});
+
+test('a reply to an action that started before a newer host result never overwrites it', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { id, timers, reply, after } = scenario(operation);
+    const started = { id: 'host result 1' };
+    const action = { operation, timerId: id, basis: started };
+    const expected = timerBoard(after, AT).timers.map((timer) => timer.definition.id);
+    // No newer result: the reply updates the board.
+    const current = settleAction({ timers, basis: started }, action, reply);
+    assert.deepEqual(current.timers.map((timer) => timer.definition.id), expected, `${operation} applied`);
+    if (reply.timer) assert.deepEqual(current.timers.find((timer) => timer.definition.id === reply.timer.definition.id), reply.timer);
+
+    // Another surface removed the timer, or changed it, and the host passed that result first.
+    const removedByHost = settleAction({ timers: [], basis: { id: 'host result 2' } }, action, reply);
+    assert.deepEqual(removedByHost, { ok: true, result: reply, timers: null }, `${operation} after a removal`);
+    const newer = timers.map((timer) => ({ ...timer, definition: { ...timer.definition, name: 'Renamed elsewhere' } }));
+    assert.equal(settleAction({ timers: newer, basis: { id: 'host result 2' } }, action, reply).timers, null, `${operation} after a newer state`);
+    // A failure still shows, whenever it arrives.
+    const refused = { error: { code: 'not_found', message: 'gone' } };
+    assert.equal(settleAction({ timers: [], basis: { id: 'host result 2' } }, action, refused).failure.message, 'gone');
+  }
+});
+
+test('the board shows only results it can render: observedAt within Date range, each id once', async () => {
+  const { result } = await fixture('view-props.json');
+  const last = 8_640_000_000_000_000;
+  assert.equal(readBoardResult({ ...result, observedAt: last }).ok, true);
+  assert.equal(typeof formatClockTime(last), 'string');
+  assert.equal(new Date(last).toISOString(), '+275760-09-13T00:00:00.000Z');
+  assert.deepEqual(readBoardResult({ ...result, observedAt: last + 1 }), { ok: false, message: 'observedAt: must be a time a Date can show' });
+  assert.deepEqual(readBoardResult({ ...result, timers: [result.timers[0], result.timers[0]] }), { ok: false, message: 'timers: each timer id must appear once' });
+});
+
+test('the create form checks the name and its fields in every mode with the create schema', () => {
+  const form = (mode, change = {}) => ({ mode, name: '', presetId: 'tabata', countdown: emptyCountdownDraft(), interval: emptyIntervalDraft(), ...change });
+  for (const mode of ['preset', 'countdown', 'stopwatch', 'interval']) {
+    const plain = createInputFrom(form(mode));
+    assert.equal(plain.ok, true, `${mode}: ${JSON.stringify(plain.errors)}`);
+    assert.equal(createInputValid(plain.spec), true, mode);
+    const named = createInputFrom(form(mode, { name: ' Morning ' }));
+    assert.equal(createInputValid(named.spec), true, mode);
+    assert.equal(named.spec.name ?? named.spec.timer.name, 'Morning', mode);
+    for (const name of ['Line\nbreak', 'x'.repeat(61), '\u202Eevil']) {
+      const outcome = createInputFrom(form(mode, { name }));
+      assert.deepEqual(Object.keys(outcome.errors ?? {}), ['name'], `${mode} ${JSON.stringify(name)}`);
+      assert.equal(createInputValid({ ...(mode === 'preset' ? { preset: 'tabata' } : { timer: { kind: 'stopwatch' } }), name }), false);
+    }
+  }
+  assert.deepEqual(createInputFrom(form('preset', { presetId: '' })).errors, { preset: 'Choose a preset.' });
+  assert.deepEqual(Object.keys(createInputFrom(form('preset', { presetId: 'nope' })).errors), ['preset']);
 });

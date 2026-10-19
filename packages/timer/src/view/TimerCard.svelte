@@ -67,9 +67,10 @@
 
   function onkeydown(event: KeyboardEvent) {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    // Space on a focused button presses that button.
+    // Space on a focused button presses that button. A held key acts once (`keyControl` ignores
+    // repeats), but a held Space on the card still must not scroll the page.
     if (event.key === ' ' && event.target !== card) return;
-    const control = keyControl(event.key, table);
+    const control = keyControl(event, table);
     if (event.key === ' ' && event.target === card) event.preventDefault();
     if (!control) return;
     event.preventDefault();

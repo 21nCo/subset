@@ -50,12 +50,26 @@ export const REFRESH_MS = 250;
 /** How long a pressed reset or remove waits for its confirming second press. */
 export const CONFIRM_MS = 3_000;
 
-/** Checks a `result` from the host against the contract before the board renders it. */
+/** The latest epoch millisecond a `Date` can hold, so the board can always show `observedAt`. */
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+const firstIssue = (error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }, root: string) => {
+  const issue = error.issues[0];
+  return `${issue.path.map(String).join('.') || root}: ${issue.message}`;
+};
+
+/**
+ * Checks a `result` from the host against the contract before the board renders it, and that the
+ * board can render it: `observedAt` is a time a `Date` can show and each timer id appears once.
+ */
 export function readBoardResult(value: unknown): { ok: true; result: TimerBoardResult } | { ok: false; message: string } {
   const parsed = validators.outputs.list.safeParse(value);
-  if (parsed.success) return { ok: true, result: parsed.data as TimerBoardResult };
-  const issue = parsed.error.issues[0];
-  return { ok: false, message: `${issue.path.map(String).join('.') || 'result'}: ${issue.message}` };
+  if (!parsed.success) return { ok: false, message: firstIssue(parsed.error, 'result') };
+  const result = parsed.data as TimerBoardResult;
+  if (result.observedAt > MAX_DATE_MS) return { ok: false, message: 'observedAt: must be a time a Date can show' };
+  const ids = new Set(result.timers.map((timer) => timer.definition.id));
+  if (ids.size !== result.timers.length) return { ok: false, message: 'timers: each timer id must appear once' };
+  return { ok: true, result };
 }
 
 export const CONTROLS = ['start', 'pause', 'resume', 'lap', 'skip', 'reset', 'remove'] as const;
@@ -91,8 +105,12 @@ export function primaryControl(table: ControlTable): 'start' | 'pause' | 'resume
   return (['pause', 'resume', 'start'] as const).find((control) => table[control] === 'enabled') ?? null;
 }
 
-/** A control keyed on a card: Space for the primary control, L for lap and S for skip. */
-export function keyControl(key: string, table: ControlTable): ControlName | null {
+/**
+ * A control keyed on a card: Space for the primary control, L for lap and S for skip. A key held
+ * down repeats its keydown; only the first press acts, so holding L takes one lap.
+ */
+export function keyControl({ key, repeat = false }: { key: string; repeat?: boolean }, table: ControlTable): ControlName | null {
+  if (repeat) return null;
   const control = key === ' ' ? primaryControl(table) : key === 'l' || key === 'L' ? 'lap' : key === 's' || key === 'S' ? 'skip' : null;
   return control && table[control] === 'enabled' ? control : null;
 }
@@ -132,8 +150,14 @@ export function failureText(failure: Pick<ActionFailure, 'operation' | 'message'
   return `${OPERATION_LABELS[failure.operation]} failed: ${failure.message}`;
 }
 
-/** Reads what `invoke` gave back: the result, or the failure to show. A thrown or rejected call is a failure too. */
-export function readOutcome(operation: OperationName, timerId: string | null, outcome: unknown): { ok: true; result: Record<string, unknown> } | { ok: false; failure: ActionFailure } {
+type Outcome = { ok: true; result: Record<string, unknown> } | { ok: false; failure: ActionFailure };
+
+/**
+ * Reads what `invoke` gave back: the result, or the failure to show. A thrown or rejected call is a
+ * failure, and so is a reply that does not match the operation's result schema or names another
+ * timer than the one acted on, so a broken host reply never reaches the board.
+ */
+export function readOutcome(operation: OperationName, timerId: string | null, outcome: unknown): Outcome {
   const fail = (message: string) => ({ ok: false as const, failure: { operation, timerId, message } });
   if (outcome instanceof Error) return fail(outcome.message || 'The host could not run it.');
   if (!outcome || typeof outcome !== 'object') return fail('The host returned no result.');
@@ -142,22 +166,46 @@ export function readOutcome(operation: OperationName, timerId: string | null, ou
     const message = error && typeof error === 'object' && typeof (error as TimerError).message === 'string' ? (error as TimerError).message : '';
     return fail(message || 'The host reported an error.');
   }
-  return { ok: true, result: outcome as Record<string, unknown> };
+  const parsed = validators.outputs[operation].safeParse(outcome);
+  if (!parsed.success) return fail(`The host's reply does not match the Timer contract (${firstIssue(parsed.error, 'reply')}).`);
+  const result = parsed.data as Record<string, unknown>;
+  if (timerId !== null) {
+    const replyId = (result as { timer?: TimerSnapshot }).timer?.definition.id ?? (result as { removedId?: string }).removedId;
+    if (replyId !== undefined && replyId !== timerId) return fail(`The host replied for timer ${replyId} instead of ${timerId}.`);
+  }
+  return { ok: true, result };
 }
 
 /**
  * The board's timers after a successful action, until the host passes a new `result`: a returned
- * snapshot replaces (or adds) its timer and a removal drops it.
+ * snapshot replaces (or adds) its timer and a removal drops it. `result` has passed `readOutcome`.
  */
 export function applyResult(timers: readonly TimerSnapshot[], result: Record<string, unknown>): TimerSnapshot[] {
   const snapshot = (result as { timer?: TimerSnapshot }).timer;
-  if (snapshot && typeof snapshot === 'object' && snapshot.definition && snapshot.runtime) {
+  if (snapshot) {
     const index = timers.findIndex((timer) => timer.definition.id === snapshot.definition.id);
     return index < 0 ? [...timers, snapshot] : timers.map((timer, at) => (at === index ? snapshot : timer));
   }
   const removedId = (result as { removedId?: unknown }).removedId;
   if (typeof removedId === 'string') return timers.filter((timer) => timer.definition.id !== removedId);
   return timers.slice();
+}
+
+/**
+ * Settles one action's reply against the board. `basis` is the host `result` the action started
+ * under and `board.basis` the current one. A reply to an action that started before the host passed
+ * a newer `result` is not applied: the newer result already holds or supersedes it, and applying it
+ * could bring back a timer the host removed or undo a newer change. Its failure is still shown.
+ * `timers` is null when the board's timers stay as they are.
+ */
+export function settleAction(
+  board: { timers: readonly TimerSnapshot[]; basis: unknown },
+  action: { operation: OperationName; timerId: string | null; basis: unknown },
+  outcome: unknown
+): (Outcome & { ok: false }) | { ok: true; result: Record<string, unknown>; timers: TimerSnapshot[] | null } {
+  const read = readOutcome(action.operation, action.timerId, outcome);
+  if (!read.ok) return read;
+  return { ok: true, result: read.result, timers: action.basis === board.basis ? applyResult(board.timers, read.result) : null };
 }
 
 /** The presets in a `presets.list` result, or null when it does not match the contract. */
@@ -276,6 +324,41 @@ export function countdownSpecFrom(draft: CountdownDraft): DraftOutcome<Extract<T
   const errors: DraftErrors = {};
   const durationMs = readDuration(draft.duration, 'duration', errors, true);
   return checkSpec({ kind: 'countdown', ...optionalName(draft.name), ...unlessDefault('sound', draft.sound, true), durationMs: durationMs ?? 0, ...(draft.lapsEnabled && { lapsEnabled: true }) }, errors);
+}
+
+export type CreateMode = 'preset' | 'countdown' | 'stopwatch' | 'interval';
+
+/** The create form: a mode, the name shared by every mode, and each mode's own fields. */
+export interface CreateForm {
+  mode: CreateMode;
+  name: string;
+  presetId: string;
+  countdown: CountdownDraft;
+  interval: IntervalDraft;
+}
+
+export type CreateInput = { preset: string; name?: string } | { timer: TimerSpec };
+
+/** The `create` input the form describes, checked with the operation's own validators in every mode, or each error by field. */
+export function createInputFrom(form: CreateForm): DraftOutcome<CreateInput> {
+  const wrap = (outcome: DraftOutcome<TimerSpec>): DraftOutcome<CreateInput> => (outcome.ok ? { ok: true, spec: { timer: outcome.spec } } : outcome);
+  switch (form.mode) {
+    case 'preset': {
+      if (!form.presetId) return { ok: false, errors: { preset: 'Choose a preset.' } };
+      const input = { preset: form.presetId, ...optionalName(form.name) };
+      const parsed = validators.inputs.create.safeParse(input);
+      if (parsed.success) return { ok: true, spec: input };
+      const errors: DraftErrors = {};
+      for (const issue of parsed.error.issues) errors[draftPath(issue.path) || 'preset'] ??= issue.message;
+      return { ok: false, errors };
+    }
+    case 'stopwatch':
+      return wrap(checkSpec({ kind: 'stopwatch', ...optionalName(form.name) }, {}));
+    case 'countdown':
+      return wrap(countdownSpecFrom({ ...form.countdown, name: form.name }));
+    case 'interval':
+      return wrap(intervalSpecFrom({ ...form.interval, name: form.name }));
+  }
 }
 
 /** A preset's length and shape in a few words, for the preset picker. */
