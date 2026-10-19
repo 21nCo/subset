@@ -92,6 +92,9 @@ public final class ClassificationRunner {
     private let clock: () -> Date
     private let deletionPending: () -> Bool
     private var lastProvider: String?
+    /// Changes with each change of provider, model, or key; a request's outcome sets the backoff only under the one it
+    /// was sent with.
+    private var configuration = 0
 
     /// `deletionPending` says whether a deletion or idle retraction is queued but not applied yet; nothing is sent then,
     /// since the store still holds activity the user removed.
@@ -106,6 +109,7 @@ public final class ClassificationRunner {
     /// Lets the next request go now (wake, network back, settings changed), within a provider's Retry-After unless
     /// `providerChanged`.
     public func resume(providerChanged: Bool = false) {
+        if providerChanged { configuration += 1 }
         backoff.resume(providerChanged: providerChanged)
     }
 
@@ -124,6 +128,7 @@ public final class ClassificationRunner {
         let now = clock()
         refreshCounts(initial, now: now)
         guard let provider, status.pending > 0, backoff.allows(now), !deletionPending() else { return false }
+        let configuration = self.configuration
         status.inFlight = true
         onChange?()
         defer {
@@ -146,6 +151,8 @@ public final class ClassificationRunner {
             let finished = clock()
             let stored = try store.applyClassifications(accepted, rejected: rejected, provider: provider.name, model: provider.model,
                                                         at: finished)
+            // The labels are kept, but an answer from a replaced provider, model, or key says nothing about the new one.
+            guard configuration == self.configuration else { return true }
             if stored > 0 {
                 backoff.succeeded()
                 status.lastSuccess = finished
@@ -160,6 +167,8 @@ public final class ClassificationRunner {
             }
             return stored > 0
         } catch {
+            // A failure under a replaced provider, model, or key does not hold back the new one.
+            guard configuration == self.configuration else { return true }
             // A failed request or an unusable answer counts against the provider, not the blocks it carried.
             if case .rateLimited(let retryAfter) = error as? ProviderError {
                 backoff.failed(at: clock(), retryAfter: retryAfter)

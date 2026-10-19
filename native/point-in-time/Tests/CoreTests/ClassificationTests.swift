@@ -264,6 +264,39 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(backoff.notBefore == t0.addingTimeInterval(ClassificationBackoff.maximumRetryAfter))
     }
 
+    @Test func aRequestUnderAReplacedProviderLeavesNoWaitBehind() async throws {
+        let (directory, store, clock, runner) = try setup([0, 1])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // The model changes while the old request is in flight, and that request is then rate limited for a day.
+        let old = StubProvider(model: "old")
+        old.whileInFlight = { runner.resume(providerChanged: true) }
+        old.answers = [.failure(.rateLimited(retryAfter: 86_400))]
+        #expect(await runner.runOnce(provider: old, options: noExclusions))
+        #expect(runner.backoff == ClassificationBackoff())
+        // The new model is asked at once.
+        let new = StubProvider(model: "new")
+        new.answers = [.failure(.network("offline"))]
+        #expect(await runner.runOnce(provider: new, options: noExclusions) == false)
+        #expect(new.prompts.count == 1)
+        #expect(runner.backoff.failures == 1)
+        // An answer that arrives after another change keeps its labels but does not reset the new one's failure count.
+        clock.now = try #require(runner.backoff.notBefore)
+        let newer = StubProvider(model: "newer")
+        newer.whileInFlight = { runner.resume(providerChanged: true) }
+        newer.answers = [.success(answer([(id(0), "focus", "ok", 0.9)]))]
+        #expect(await runner.runOnce(provider: newer, options: noExclusions))
+        #expect(try store.blocks(from: t0, to: t0.addingTimeInterval(1_000))[0].labeling.state == .classified)
+        #expect(runner.backoff.failures == 1)
+        // Without a change, the same ordering keeps the provider's Retry-After.
+        let same = StubProvider(model: "same")
+        same.whileInFlight = { runner.resume() }
+        same.answers = [.failure(.rateLimited(retryAfter: 86_400))]
+        #expect(await runner.runOnce(provider: same, options: noExclusions) == false)
+        #expect(runner.backoff.notBefore == clock.now.addingTimeInterval(86_400))
+        #expect(await runner.runOnce(provider: same, options: noExclusions) == false)
+        #expect(same.prompts.count == 1)
+    }
+
     @Test func onlyTheNetworkReturningCountsAsAReturn() {
         var tracker = ConnectivityTracker()
         // The first report, and changes while connected (a new interface, a VPN), are not a return.
@@ -634,6 +667,7 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             dir="${0%/*}"
             # A launcher that ignores SIGTERM and first starts a child that inherits that and holds the output open.
             if [ -f "$dir/orphan" ]; then trap '' TERM; sleep 60 & echo $! > "$dir/child"; fi
+            env > "$dir/env-$1"
             if [ "$1" = "login" ]; then
               if [ -f "$dir/signed-in" ]; then echo "Logged in using ChatGPT"; exit 0; fi
               if [ -f "$dir/api-key" ]; then echo "Logged in using an API key - sk-fake-***00000"; exit 0; fi
@@ -711,6 +745,28 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         await #expect(throws: ProviderError.process("codex exec exited with status 3")) { try await cli.complete(prompt: "p", schema: "{}") }
         let missing = CodexCLI(executable: URL(fileURLWithPath: "/nonexistent/codex"), searchPath: nil)
         guard case .unavailable = await missing.loginStatus() else { Issue.record("A missing binary was not reported"); return }
+    }
+
+    @Test func codexGetsNoAPIKeyOrEndpointFromTheAppsEnvironment() async throws {
+        let codex = try stub()
+        defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
+        try touch(codex, "signed-in")
+        try touch(codex, "answer", "{\"blocks\":[]}")
+        let inherited = ["HOME": "/Users/someone", "LANG": "en_US.UTF-8", "CODEX_HOME": "/Users/someone/.codex",
+                         "CODEX_CA_CERTIFICATE": "/etc/ca.pem", "CODEX_API_KEY": "sk-codex", "CODEX_ACCESS_TOKEN": "token",
+                         "OPENAI_API_KEY": "sk-openai", "OPENAI_BASE_URL": "https://proxy.example", "AZURE_OPENAI_API_KEY": "az"]
+        let cli = CodexCLI(executable: codex, searchPath: "/usr/bin:/bin", environment: inherited)
+        try await cli.prepare()
+        _ = try await cli.complete(prompt: "p", schema: "{}")
+        for command in ["login", "exec"] {
+            let environment = try recorded(codex, "env-\(command)")
+            for kept in ["HOME=/Users/someone", "LANG=en_US.UTF-8", "CODEX_HOME=/Users/someone/.codex", "CODEX_CA_CERTIFICATE=/etc/ca.pem"] {
+                #expect(environment.contains(kept), "\(command) lost \(kept)")
+            }
+            for removed in ["CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY", "sk-", "proxy.example"] {
+                #expect(!environment.contains(removed), "\(command) got \(removed)")
+            }
+        }
     }
 
     @Test func stopsAnExecThatOutlivesItsTimeout() async throws {

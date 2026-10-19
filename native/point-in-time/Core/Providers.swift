@@ -193,11 +193,15 @@ public struct CodexCLI: ClassificationProvider {
     public let searchPath: String
     public let timeout: TimeInterval
     let children: ChildProcesses
+    private let baseEnvironment: [String: String]
 
     /// `searchPath` is the `PATH` the child gets. The binary's own folder is put first, so a launcher script finds the
-    /// runtime installed beside it (for example `node` in the same version manager folder).
-    public init(executable: URL, searchPath: String?, timeout: TimeInterval = CodexCLI.defaultTimeout, children: ChildProcesses = .shared) {
+    /// runtime installed beside it (for example `node` in the same version manager folder). `environment` is what the
+    /// child inherits, less what could make Codex use something other than the ChatGPT sign-in.
+    public init(executable: URL, searchPath: String?, timeout: TimeInterval = CodexCLI.defaultTimeout, children: ChildProcesses = .shared,
+                environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.executable = executable
+        baseEnvironment = environment
         let folder = executable.deletingLastPathComponent().path
         self.searchPath = ([folder] + (searchPath ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
             .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ":")
@@ -259,8 +263,15 @@ public struct CodexCLI: ClassificationProvider {
         return answer
     }
 
+    /// `CODEX_` and `OPENAI_` variables can choose an API key, another account, or another endpoint (`login status`
+    /// ignores `CODEX_API_KEY` while `exec` uses it), so the child gets none of them except these two.
+    static let keptCodexVariables: Set<String> = ["CODEX_HOME", "CODEX_CA_CERTIFICATE"]
+
     private var environment: [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+        var environment = baseEnvironment.filter { name, _ in
+            let upper = name.uppercased()
+            return Self.keptCodexVariables.contains(upper) || !(upper.hasPrefix("CODEX_") || upper.contains("OPENAI_"))
+        }
         environment["PATH"] = searchPath
         environment["NO_COLOR"] = "1"
         return environment
