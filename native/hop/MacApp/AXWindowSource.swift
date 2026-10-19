@@ -4,18 +4,20 @@ import HopCore
 
 /// Reads windows through the public Accessibility API: for each running app with the `.regular` activation policy,
 /// its `kAXWindowsAttribute`, then each window's title, subrole, minimized state, position, size and `AXFullScreen` in
-/// one request. Every request to an app gives up after `messagingTimeout`; an app that times out or fails is reported
-/// as such and `WindowLister` leaves it out of that refresh.
+/// one request. Each app's read has one deadline, `WindowLister.appBudget` (0.25 s) from the start of the refresh:
+/// before every request the messaging timeout (`AXUIElementSetMessagingTimeout`) is set to the time left, so an app
+/// with many slow windows costs the budget, not a timeout per window. An app that runs out of time or fails is
+/// reported as such and `WindowLister` leaves it out of that refresh.
 ///
 /// Window refs (`HopCore.WindowRef`; Carbon has a type of the same name) are assigned here: a window keeps its ref
 /// for as long as Accessibility reports an equal element for it. Refs are kept per app and replaced with each successful read of that app, so a closed window's ref is dropped
 /// the next time its app is read, and all of an app's refs when it quits.
 ///
-/// `apps()` and `displays()` read AppKit and CoreGraphics and run on the main thread; `windows(of:)` sends only
-/// Accessibility requests and may run on any thread.
+/// Every method may run on any thread: `apps()` reads `NSWorkspace.runningApplications` and `NSRunningApplication`,
+/// which return their values atomically on any thread, and `windows(of:until:)` sends only Accessibility requests.
 final class AXWindowSource: WindowSource, @unchecked Sendable {
-    /// Seconds an app may take to answer one request before it is skipped.
-    static let messagingTimeout: Float = 0.25
+    /// Seconds an app may take to answer a request outside a refresh, such as reading its focused window.
+    static let messagingTimeout = Float(WindowLister.defaultAppBudget / .seconds(1))
 
     private static let windowAttributes = [
         kAXTitleAttribute, kAXSubroleAttribute, kAXMinimizedAttribute, kAXPositionAttribute, kAXSizeAttribute,
@@ -28,21 +30,19 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
     private var lastRef: UInt64 = 0
 
     func apps() -> [SourceApp] {
-        MainActor.assumeIsolated {
-            let running = NSWorkspace.shared.runningApplications.filter {
-                $0.activationPolicy == .regular && !$0.isTerminated
-            }
-            let live = Set(running.map(\.processIdentifier))
-            lock.withLock { refs = refs.filter { live.contains($0.key) } }
-            return running.map { app in
-                SourceApp(
-                    pid: app.processIdentifier,
-                    bundleIdentifier: app.bundleIdentifier,
-                    name: app.localizedName ?? app.bundleIdentifier ?? "",
-                    activationPolicy: .regular,
-                    isHidden: app.isHidden
-                )
-            }
+        let running = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && !$0.isTerminated
+        }
+        let live = Set(running.map(\.processIdentifier))
+        lock.withLock { refs = refs.filter { live.contains($0.key) } }
+        return running.map { app in
+            SourceApp(
+                pid: app.processIdentifier,
+                bundleIdentifier: app.bundleIdentifier,
+                name: app.localizedName ?? app.bundleIdentifier ?? "",
+                activationPolicy: .regular,
+                isHidden: app.isHidden
+            )
         }
     }
 
@@ -54,8 +54,9 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
         return ids.prefix(Int(count)).map { SourceDisplay(id: $0, bounds: CGDisplayBounds($0)) }
     }
 
-    func windows(of app: SourceApp) throws(WindowSourceError) -> [SourceWindow] {
-        let element = Self.appElement(app.pid)
+    func windows(of app: SourceApp, until deadline: ContinuousClock.Instant) throws(WindowSourceError) -> [SourceWindow] {
+        let element = AXUIElementCreateApplication(app.pid)
+        try Self.limit(element, to: deadline)
         var value: CFTypeRef?
         switch AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) {
         case .success: break
@@ -70,7 +71,7 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
         var windows: [SourceWindow] = []
         var appRefs: [ElementKey: HopCore.WindowRef] = [:]
         for window in elements {
-            AXUIElementSetMessagingTimeout(window, Self.messagingTimeout)
+            try Self.limit(window, to: deadline)
             var values: CFArray?
             switch AXUIElementCopyMultipleAttributeValues(window, attributes, AXCopyMultipleAttributeOptions(), &values) {
             case .success: break
@@ -137,6 +138,14 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
     ) -> [SourceWindow] {
         lock.withLock { refs[pid] = appRefs }
         return windows
+    }
+
+    /// Gives the element's next request the time left until `deadline`, or throws `.timedOut` when none is left.
+    private static func limit(_ element: AXUIElement, to deadline: ContinuousClock.Instant) throws(WindowSourceError) {
+        let left = deadline - .now
+        // A timeout of zero would restore the system default, so an exhausted budget never reaches the call.
+        guard left > .zero else { throw .timedOut }
+        AXUIElementSetMessagingTimeout(element, Float(left / .seconds(1)))
     }
 
     private static func frame(position: CFTypeRef, size: CFTypeRef) -> CGRect? {

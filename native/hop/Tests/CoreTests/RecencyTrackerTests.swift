@@ -53,6 +53,21 @@ final class RecencyTrackerTests: XCTestCase {
         XCTAssertEqual(refs(list), [3, 1, 2], "the first on-screen match takes the first window in source order")
     }
 
+    func testWindowsThatCannotBeOnScreenAreNotSeeded() {
+        var (lister, _) = F.lister([
+            .init(F.app(10, "Terminal"), windows: [F.window(1, frame: centered, minimized: true), F.window(2, frame: centered)]),
+            .init(F.app(20, "Notes", hidden: true), windows: [F.window(3, frame: left)]),
+            .init(F.app(30, "Browser"), windows: [F.window(4, frame: right)]),
+        ])
+        let list = lister.seed(frontToBack: [
+            OnScreenWindow(pid: 20, frame: left),
+            OnScreenWindow(pid: 10, frame: centered),
+            OnScreenWindow(pid: 30, frame: right),
+        ])
+        XCTAssertEqual(refs(list), [2, 4, 1, 3], "the visible window takes the seeded place, not the minimized one before it")
+        XCTAssertEqual(lister.recency.order, [WindowRef(rawValue: 2), WindowRef(rawValue: 4)])
+    }
+
     func testTwoSameSizedWindowsAtDifferentPositionsSeedByPosition() {
         var (lister, _) = F.lister([
             .init(F.app(10, "Editor"), windows: [F.window(1, frame: left), F.window(2, frame: right)]),

@@ -48,9 +48,10 @@ public struct RecencyTracker: Sendable {
     /// Puts the listed windows that appear on screen first, in the on-screen front-to-back order; windows known
     /// before follow in their previous order. Each on-screen window matches the first listed window, in source order,
     /// of the same process whose frame is within `frameTolerance` and that no earlier on-screen window matched, so two
-    /// windows with the same frame keep their source order.
+    /// windows with the same frame keep their source order. Minimized windows and windows of hidden apps are not on
+    /// screen, so they never match.
     public mutating func seed(_ entries: [WindowEntry], frontToBack onScreen: [OnScreenWindow]) {
-        var unmatched = entries
+        var unmatched = entries.filter { !$0.isMinimized && !$0.isAppHidden }
         var seeded: [WindowRef] = []
         for window in onScreen {
             guard let index = unmatched.firstIndex(where: { $0.pid == window.pid && Self.matches($0.frame, window.frame) })

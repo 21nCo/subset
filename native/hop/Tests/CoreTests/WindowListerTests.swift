@@ -30,9 +30,12 @@ enum WindowFixture {
         )
     }
 
-    static func lister(_ apps: [FixtureWindowSource.App]) -> (WindowLister, FixtureWindowSource) {
+    static func lister(
+        _ apps: [FixtureWindowSource.App],
+        appBudget: Duration = WindowLister.defaultAppBudget
+    ) -> (WindowLister, FixtureWindowSource) {
         let source = FixtureWindowSource(apps, displays: [mainDisplay, sideDisplay])
-        return (WindowLister(source: source, ownProcess: ownProcess), source)
+        return (WindowLister(source: source, ownProcess: ownProcess, appBudget: appBudget), source)
     }
 }
 
@@ -109,6 +112,63 @@ final class WindowListerTests: XCTestCase {
         XCTAssertEqual(lister.skippedAppCount, 2)
         _ = lister.refresh()
         XCTAssertEqual(lister.skippedAppCount, 4, "the debug counter accumulates across refreshes")
+    }
+
+    func testSlowAppsCostOneBudgetTogetherAndTheOthersAreListed() {
+        // More slow apps than a CPU-wide pool could read at once: read in batches, they would cost four budgets.
+        let budget = Duration.milliseconds(100)
+        let slowCount = 4 * ProcessInfo.processInfo.activeProcessorCount
+        let slow: [FixtureWindowSource.App] = (0 ..< slowCount).map { index in
+            .init(F.app(pid_t(100 + index), "Slow\(index)"), windows: [F.window(UInt64(100 + index))], delay: .seconds(2))
+        }
+        var (lister, _) = F.lister(
+            [.init(F.app(10, "Editor"), windows: [F.window(1)])] + slow + [.init(F.app(30, "Browser"), windows: [F.window(3)])],
+            appBudget: budget
+        )
+
+        var list = WindowList()
+        let elapsed = ContinuousClock().measure { list = lister.refresh() }
+        XCTAssertEqual(refs(list), [1, 3], "the apps that answer are listed, however many are slow")
+        XCTAssertEqual(list.skippedApps.map(\.pid), slow.map(\.app.pid))
+        XCTAssertTrue(list.skippedApps.allSatisfy { $0.reason == .timedOut })
+        XCTAssertGreaterThanOrEqual(elapsed, budget)
+        XCTAssertLessThan(elapsed, budget * 3, "\(slowCount) slow apps cost about one budget, not one each or per batch")
+    }
+
+    func testAnAppThatAnswersWithinItsBudgetIsListed() {
+        var (lister, _) = F.lister([
+            .init(F.app(10, "Busy"), windows: [F.window(1)], delay: .milliseconds(20)),
+            .init(F.app(20, "Editor"), windows: [F.window(2)]),
+        ], appBudget: .seconds(1))
+        let list = lister.refresh()
+        XCTAssertEqual(refs(list), [1, 2])
+        XCTAssertEqual(list.skippedApps, [])
+    }
+
+    func testAnAppThatOverrunsItsDeadlineIsSkippedAtTheCutoff() {
+        let budget = Duration.milliseconds(100)
+        var (lister, _) = F.lister([
+            .init(F.app(10, "Editor"), windows: [F.window(1)]),
+            .init(F.app(20, "Hung"), windows: [F.window(2)], delay: .seconds(1), honorsDeadline: false),
+        ], appBudget: budget)
+
+        var list = WindowList()
+        let elapsed = ContinuousClock().measure { list = lister.refresh() }
+        XCTAssertEqual(refs(list), [1])
+        XCTAssertEqual(list.skippedApps, [SkippedApp(pid: 20, reason: .timedOut)])
+        XCTAssertLessThan(elapsed, budget + WindowLister.budgetGrace + .milliseconds(150), "the refresh does not wait for it")
+    }
+
+    func testSeedingReadsEachAppOnce() {
+        var (lister, source) = F.lister([
+            .init(F.app(10, "Editor"), windows: [F.window(1)]),
+            .init(F.app(20, "Stuck"), failure: .timedOut),
+        ])
+        let list = lister.seed(frontToBack: [OnScreenWindow(pid: 10, frame: CGRect(x: 100, y: 100, width: 800, height: 600))])
+        XCTAssertEqual(refs(list), [1])
+        XCTAssertEqual(list.skippedApps, [SkippedApp(pid: 20, reason: .timedOut)])
+        XCTAssertEqual(source.queryCount, 2, "one read per app")
+        XCTAssertEqual(lister.skippedAppCount, 1, "a skipped app counts once per seed")
     }
 
     func testAppsWithoutSwitchableWindowsAreWindowlessApps() {
