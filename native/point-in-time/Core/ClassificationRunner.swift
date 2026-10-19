@@ -1,6 +1,8 @@
 import Foundation
 
-/// Exponential backoff after a failed provider request (network, rate limit, process, or an unusable answer).
+/// Exponential backoff after a failed provider request (network, rate limit, process, or an unusable answer), and the
+/// wait a provider asked for with Retry-After, which is kept apart so that only a change of provider, model, or key ends
+/// it early.
 public struct ClassificationBackoff: Equatable, Sendable {
     public static let base: TimeInterval = 30
     public static let maximum: TimeInterval = 30 * 60
@@ -8,30 +10,55 @@ public struct ClassificationBackoff: Equatable, Sendable {
     public static let maximumRetryAfter: TimeInterval = 24 * 60 * 60
 
     public private(set) var failures = 0
-    public private(set) var notBefore: Date?
+    public private(set) var retryAt: Date?
+    public private(set) var providerRetryAt: Date?
 
     public init() {}
+
+    /// The next request may go at this time, nil when it may go now.
+    public var notBefore: Date? {
+        [retryAt, providerRetryAt].compactMap { $0 }.max()
+    }
 
     /// Waits 30 s after the first failure, doubling up to 30 minutes, or as long as the provider asked (up to a day).
     public mutating func failed(at date: Date, retryAfter: TimeInterval? = nil) {
         failures += 1
-        let delay = min(Self.maximum, Self.base * pow(2, Double(min(failures - 1, 16))))
-        notBefore = date.addingTimeInterval(max(delay, min(retryAfter ?? 0, Self.maximumRetryAfter)))
+        retryAt = date.addingTimeInterval(min(Self.maximum, Self.base * pow(2, Double(min(failures - 1, 16)))))
+        if let retryAfter {
+            providerRetryAt = date.addingTimeInterval(min(retryAfter, Self.maximumRetryAfter))
+        }
     }
 
     public mutating func succeeded() {
         failures = 0
-        notBefore = nil
+        retryAt = nil
+        providerRetryAt = nil
     }
 
-    /// After a wake, the network returning, or a settings change: the next request may go now. The failure count is
-    /// kept, so another failure still waits longer than the last.
-    public mutating func resume() {
-        notBefore = nil
+    /// After a wake, the network returning, or a change to what is sent: the next request may go now, unless the provider
+    /// asked for a longer wait. With `providerChanged` (another provider, model, or key) that wait ends too. The failure
+    /// count is kept, so another failure still waits longer than the last.
+    public mutating func resume(providerChanged: Bool = false) {
+        retryAt = nil
+        if providerChanged { providerRetryAt = nil }
     }
 
     public func allows(_ date: Date) -> Bool {
         notBefore.map { date >= $0 } ?? true
+    }
+}
+
+/// Tells when the network comes back: only a change from unavailable to available counts, not the first report or a
+/// new interface or VPN while connected.
+public struct ConnectivityTracker: Sendable {
+    private var available: Bool?
+
+    public init() {}
+
+    /// Records the latest path state; true when it means the network has just returned.
+    public mutating func update(available: Bool) -> Bool {
+        defer { self.available = available }
+        return available && self.available == false
     }
 }
 
@@ -76,9 +103,10 @@ public final class ClassificationRunner {
         self.deletionPending = deletionPending
     }
 
-    /// Lets the next request go now (wake, network back, settings changed).
-    public func resume() {
-        backoff.resume()
+    /// Lets the next request go now (wake, network back, settings changed), within a provider's Retry-After unless
+    /// `providerChanged`.
+    public func resume(providerChanged: Bool = false) {
+        backoff.resume(providerChanged: providerChanged)
     }
 
     /// Sends at most one batch unless a request is in flight, nothing is pending, or the backoff has not elapsed.

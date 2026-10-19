@@ -28,14 +28,16 @@ public struct KeychainError: Error, Equatable, CustomStringConvertible {
     public var description: String { "Keychain error \(status)" }
 }
 
-/// One generic-password item that only this Mac can read (`WhenUnlockedThisDeviceOnly`, never synchronized). The value
-/// lives only in the Keychain and in memory while a request is built; it is never written to a file, a log, the database,
-/// or the app's defaults.
+/// One generic-password item, never synchronized and asked for as `WhenUnlockedThisDeviceOnly`. The value lives only in
+/// the Keychain and in memory while a request is built; it is never written to a file, a log, the database, or the app's
+/// defaults.
 ///
-/// The item goes in the data protection keychain. A build without the entitlement that keychain needs (an ad hoc signed
-/// local build) gets `errSecMissingEntitlement` there and uses the login keychain instead, which stays on this Mac. A read
-/// looks in the login keychain too, a save to the data protection keychain removes a login-keychain copy, and a delete
-/// removes both, so a key saved by either kind of build is found, replaced, and removed.
+/// The item goes in the data protection keychain when the build has the entitlement that keychain needs, which takes a
+/// provisioning profile. Current builds, Developer ID releases included, do not have it: they get
+/// `errSecMissingEntitlement` there and use the login keychain, which does not enforce this-device-only, so the item
+/// moves with Migration Assistant and keychain backups. A read looks in the login keychain too, a save to the data
+/// protection keychain removes a login-keychain copy, and a delete removes both, so a key saved by either kind of build
+/// is found, replaced, and removed.
 public struct KeychainSecret: Sendable {
     public static let openRouterKey = KeychainSecret(service: "dev.subset.point-in-time.openrouter", account: "api-key")
 

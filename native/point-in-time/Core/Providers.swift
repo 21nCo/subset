@@ -11,6 +11,10 @@ struct ProcessOutput: Sendable {
 
 /// Runs a child process with its input on stdin, and stops it at a deadline: SIGTERM first, SIGKILL two seconds later.
 /// A timed-out run throws at the deadline without waiting for the child's output to close.
+///
+/// `Process` makes the child the leader of its own process group, so the signals go to the group: whatever the child
+/// started (the native binary behind an npm launcher, say) is stopped with it. When the child exits, anything it left
+/// running in its group is stopped the same way, and its output is not waited on for more than a few seconds.
 enum ProcessRunner {
     static func run(_ executable: URL, _ arguments: [String], stdin: Data, directory: URL, environment: [String: String],
                     timeout: TimeInterval) async throws -> ProcessOutput {
@@ -44,9 +48,10 @@ enum ProcessRunner {
                 }
             }
             process.terminationHandler = { process in
-                group.notify(queue: .global()) {
-                    finish.resume(.success(ProcessOutput(status: process.terminationStatus, stdout: out.value, stderr: err.value)))
-                }
+                let result: @Sendable () -> ProcessOutput = { ProcessOutput(status: process.terminationStatus, stdout: out.value, stderr: err.value) }
+                stopGroup(process.processIdentifier)
+                group.notify(queue: .global()) { finish.resume(.success(result())) }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { finish.resume(.success(result())) }
             }
             do {
                 try process.run()
@@ -61,15 +66,15 @@ enum ProcessRunner {
             }
             let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                // Also ends the wait when the child exited but something it started still holds its output open.
-                finish.resume(.failure(ProviderError.timedOut(timeout)))
-                guard process.isRunning else { return }
-                process.terminate()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                    if process.isRunning { kill(pid, SIGKILL) }
-                }
+                if finish.resume(.failure(ProviderError.timedOut(timeout))) { stopGroup(pid) }
             }
         }
+    }
+
+    /// SIGTERM to the process group led by `pid`, then SIGKILL two seconds later; a group that is gone is not an error.
+    private static func stopGroup(_ pid: pid_t) {
+        kill(-pid, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { kill(-pid, SIGKILL) }
     }
 }
 
@@ -86,9 +91,12 @@ private final class OneShot<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     var continuation: CheckedContinuation<T, Error>?
 
-    func resume(_ result: Result<T, Error>) {
+    /// True when this call resumed the continuation.
+    @discardableResult
+    func resume(_ result: Result<T, Error>) -> Bool {
         let continuation = lock.withLock { defer { self.continuation = nil }; return self.continuation }
         continuation?.resume(with: result)
+        return continuation != nil
     }
 }
 

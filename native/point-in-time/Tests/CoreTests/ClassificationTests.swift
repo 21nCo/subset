@@ -243,8 +243,13 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         provider.answers = [.failure(.rateLimited(retryAfter: 2_000))]
         #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
         #expect(runner.backoff.notBefore == clock.now.addingTimeInterval(2_000))
-        // A wake lets the next request go at once, and a success clears the error.
+        // A wake, the network returning, or a change to what is sent does not end the provider's wait.
         runner.resume()
+        #expect(runner.backoff.notBefore == clock.now.addingTimeInterval(2_000))
+        #expect(await runner.runOnce(provider: provider, options: noExclusions) == false)
+        #expect(provider.prompts.count == 9)
+        // Another provider, model, or key lets the next request go at once, and a success clears the error.
+        runner.resume(providerChanged: true)
         provider.answers = [.success(answer([(id(0), "focus", "ok", 0.9)]))]
         #expect(await runner.runOnce(provider: provider, options: noExclusions))
         #expect(runner.backoff == ClassificationBackoff())
@@ -257,6 +262,13 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(backoff.notBefore == t0.addingTimeInterval(120))
         backoff.failed(at: t0, retryAfter: 10 * 24 * 3_600)
         #expect(backoff.notBefore == t0.addingTimeInterval(ClassificationBackoff.maximumRetryAfter))
+    }
+
+    @Test func onlyTheNetworkReturningCountsAsAReturn() {
+        var tracker = ConnectivityTracker()
+        // The first report, and changes while connected (a new interface, a VPN), are not a return.
+        let returns = [true, true, false, false, true, true].map { tracker.update(available: $0) }
+        #expect(returns == [false, false, false, false, true, false])
     }
 
     @Test func pendingBlocksSurviveFailuresAndARelaunch() async throws {
@@ -598,6 +610,8 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             printf '%s\\n' "$@" > "$dir/args"
             pwd -P > "$dir/cwd"; ls -A > "$dir/cwd-contents"; printf '%s' "$PATH" > "$dir/path"
             cat > "$dir/stdin"
+            # A launcher that ignores SIGTERM and starts a child that inherits that and holds the output open.
+            if [ -f "$dir/orphan" ]; then trap '' TERM; sleep 30 & echo $! > "$dir/child"; fi
             if [ -f "$dir/sleep" ]; then exec sleep "$(cat "$dir/sleep")"; fi
             if [ -f "$dir/fail" ]; then exit 3; fi
             out=""; prev=""
@@ -678,6 +692,40 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         await #expect(throws: ProviderError.timedOut(1)) { try await cli.complete(prompt: "p", schema: "{}") }
         // Well before the stub would have finished on its own.
         #expect(Date().timeIntervalSince(started) < 15)
+    }
+
+    @Test func aTimeoutStopsEverythingTheLauncherStarted() async throws {
+        let codex = try stub()
+        defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
+        try touch(codex, "orphan")
+        try touch(codex, "sleep", "30")
+        // Long enough for the stub to start its child even on a busy machine.
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 5)
+        await #expect(throws: ProviderError.timedOut(5)) { try await cli.complete(prompt: "p", schema: "{}") }
+        let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(await exits(child))
+    }
+
+    @Test func aLauncherThatExitsIsNotWaitedOnForWhatItLeftRunning() async throws {
+        let codex = try stub()
+        defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
+        try touch(codex, "orphan")
+        try touch(codex, "answer", "{\"blocks\":[]}")
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 20)
+        let started = Date()
+        #expect(try await cli.complete(prompt: "p", schema: "{}") == "{\"blocks\":[]}")
+        #expect(Date().timeIntervalSince(started) < 10)
+        let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(await exits(child))
+    }
+
+    /// Whether `pid` is gone within ten seconds.
+    private func exits(_ pid: pid_t) async -> Bool {
+        for _ in 0..<100 {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
     }
 
     @Test func locatesCodexOnAPath() throws {

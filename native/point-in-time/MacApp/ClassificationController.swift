@@ -11,7 +11,8 @@ enum ProviderChoice: String, CaseIterable {
 @MainActor
 final class ClassificationSettings {
     private let defaults: UserDefaults
-    var onChange: (() -> Void)?
+    /// Called with true when the change is to who sends (provider, codex binary, or model), false for what is sent.
+    var onChange: ((_ providerChanged: Bool) -> Void)?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -19,23 +20,23 @@ final class ClassificationSettings {
 
     var provider: ProviderChoice {
         get { defaults.string(forKey: "classificationProvider").flatMap(ProviderChoice.init) ?? .off }
-        set { defaults.set(newValue.rawValue, forKey: "classificationProvider"); onChange?() }
+        set { defaults.set(newValue.rawValue, forKey: "classificationProvider"); onChange?(true) }
     }
 
     var sendWindowTitles: Bool {
         get { defaults.bool(forKey: "sendWindowTitles") }
-        set { defaults.set(newValue, forKey: "sendWindowTitles"); onChange?() }
+        set { defaults.set(newValue, forKey: "sendWindowTitles"); onChange?(false) }
     }
 
     /// A `codex` binary the user chose; nil means the one found through the login shell's `PATH`.
     var codexPath: String? {
         get { defaults.string(forKey: "codexPath") }
-        set { defaults.set(newValue, forKey: "codexPath"); onChange?() }
+        set { defaults.set(newValue, forKey: "codexPath"); onChange?(true) }
     }
 
     var openRouterModel: String {
         get { defaults.string(forKey: "openRouterModel") ?? OpenRouterClient.defaultModel }
-        set { defaults.set(newValue, forKey: "openRouterModel"); onChange?() }
+        set { defaults.set(newValue, forKey: "openRouterModel"); onChange?(true) }
     }
 }
 
@@ -57,6 +58,8 @@ final class ClassificationController {
     private var timer: Timer?
     private var loginPATH: String?
     private let pathMonitor = NWPathMonitor()
+    private var connectivity = ConnectivityTracker()
+    private var lastOptions: ClassificationOptions?
     private var wakeObserver: NSObjectProtocol?
     var onChange: (() -> Void)?
 
@@ -88,24 +91,37 @@ final class ClassificationController {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.resume() }
         }
+        // Only the network returning resumes early; an interface, VPN, or roaming change while connected does not.
         pathMonitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
-            Task { @MainActor in self?.resume() }
+            let available = path.status == .satisfied
+            Task { @MainActor in
+                guard let self, self.connectivity.update(available: available) else { return }
+                self.resume()
+            }
         }
         pathMonitor.start(queue: .main)
+        lastOptions = options
         kick()
     }
 
-    /// Retries now instead of waiting out the backoff.
-    func resume() {
-        runner?.resume()
+    /// Retries now instead of waiting out the backoff, but not a provider's Retry-After unless `providerChanged`.
+    func resume(providerChanged: Bool = false) {
+        runner?.resume(providerChanged: providerChanged)
         kick()
     }
 
-    /// A setting, the excluded apps, or the key changed: a request being set up under the old ones is not sent.
-    func settingsChanged() {
+    /// A classification setting or the key changed: a request being set up under the old ones is not sent.
+    /// `providerChanged` is true for a change of provider, codex binary, model, or key.
+    func settingsChanged(providerChanged: Bool) {
         generation += 1
-        resume()
+        lastOptions = options
+        resume(providerChanged: providerChanged)
+    }
+
+    /// A capture setting changed. Only a change to the excluded apps affects classification; pausing, say, does not.
+    func captureSettingsChanged() {
+        guard options != lastOptions else { return }
+        settingsChanged(providerChanged: false)
     }
 
     func retryFailed() {

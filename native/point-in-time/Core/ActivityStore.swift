@@ -333,7 +333,8 @@ public final class ActivityStore: @unchecked Sendable {
         let lower = Block.bucketStart(containing: from)
         let lastBucket = Block.bucketStart(containing: to)
         let upper = lastBucket < to ? lastBucket.addingTimeInterval(Block.length) : max(lastBucket, lower.addingTimeInterval(Block.length))
-        let overlapping = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ?",
+        // In start order, so the sums and the dominant segment come out the same however the rows are found.
+        let overlapping = try connection.query("SELECT \(Self.segmentColumns) FROM segments WHERE start < ? AND end > ? ORDER BY start",
                                                [.real(upper.timeIntervalSince1970), .real(lower.timeIntervalSince1970)]).map(Self.segment(from:))
         var buckets = Set<Date>()
         for segment in overlapping {

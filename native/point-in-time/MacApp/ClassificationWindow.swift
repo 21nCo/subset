@@ -109,7 +109,7 @@ final class ClassificationModel: ObservableObject {
             try KeychainSecret.openRouterKey.save(key)
             keyField = ""
             keyMessage = "Saved in the Keychain."
-            controller.settingsChanged()
+            controller.settingsChanged(providerChanged: true)
         } catch {
             keyMessage = "Could not save the key: \(error)"
         }
@@ -120,7 +120,7 @@ final class ClassificationModel: ObservableObject {
         do {
             try KeychainSecret.openRouterKey.delete()
             keyMessage = "Removed from the Keychain."
-            controller.settingsChanged()
+            controller.settingsChanged(providerChanged: true)
         } catch {
             keyMessage = "Could not remove the key: \(error)"
         }
@@ -222,6 +222,8 @@ struct ClassificationView: View {
                         if model.hasKey { Button("Remove Key") { model.removeKey() } }
                     }
                     if let message = model.keyMessage { Text(verbatim: message).font(.caption) }
+                    Text("The key is kept in your login keychain, never synchronized to iCloud, and never written to a file, a log, or the database. Like other login-keychain items, it moves with Migration Assistant and keychain backups.")
+                        .font(.caption).foregroundStyle(.secondary)
                     TextField("Model (default \(OpenRouterClient.defaultModel))", text: $model.modelField)
                         .focused($editingModel)
                         .onSubmit { model.commitModel() }
