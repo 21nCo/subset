@@ -65,7 +65,7 @@ private struct OriginSignalsView: View {
                         Text("Executable").foregroundStyle(.secondary)
                         Text(process.executablePath ?? "–").gridCellColumns(2)
                     }
-                    ForEach(rows(process.origin), id: \.label) { row in
+                    ForEach(rows(process), id: \.label) { row in
                         GridRow {
                             Text(row.label).foregroundStyle(.secondary)
                             Text(row.value)
@@ -84,8 +84,8 @@ private struct OriginSignalsView: View {
         .padding(12)
     }
 
-    private func rows(_ origin: OriginSignals?) -> [(label: String, value: String, source: String)] {
-        guard let origin else { return [("Origin signals", "Not read yet", "")] }
+    private func rows(_ process: ProcessFacts) -> [(label: String, value: String, source: String)] {
+        guard let origin = process.origin else { return [("Origin signals", "Not read yet", "")] }
         return [
             row("Responsible process", origin.responsibleProcess) { String($0) },
             row("Coalition", origin.coalition) { String($0) },
@@ -97,6 +97,7 @@ private struct OriginSignalsView: View {
             row("launchd jobs", origin.launchdJobs) { jobs in
                 jobs.isEmpty ? "None" : jobs.map { "\($0.label) (\($0.plistPath))" }.joined(separator: "\n")
             },
+            (label: "launchd match", value: process.launchdMatch.map(describe) ?? "–", source: ""),
             row("Working directory", origin.workingDirectory) { $0 },
             row("Terminal", origin.terminal) { terminal in
                 switch terminal {
@@ -105,6 +106,16 @@ private struct OriginSignalsView: View {
                 }
             }
         ]
+    }
+
+    private func describe(_ match: LaunchdMatch) -> String {
+        switch match {
+        case .none: "None"
+        case let .job(label): label
+        case .executableOnly(.sharedExecutable): "Executable only: a shared or unverified executable"
+        case .executableOnly(.notStartedByLaunchd): "Executable only: not started by launchd"
+        case .executableOnly(.conflictingLabels): "Executable only: plists disagree on the label"
+        }
     }
 
     private func row<Value>(_ label: String, _ signal: Signal<Value>, _ format: (Value) -> String)

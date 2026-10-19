@@ -113,7 +113,7 @@ public struct LaunchdJob: Equatable, Hashable, Sendable {
     public let label: String
     public let plistPath: String
     public let domain: LaunchdDomain
-    /// `Program`, else `ProgramArguments[0]`, else (in an app bundle) `BundleProgram`, as the plist writes it.
+    /// `Program`, else (in an app bundle) `BundleProgram`, else `ProgramArguments[0]`, as the plist writes it.
     public let program: String
     /// The program with symlinks resolved, the path the kernel reports for the running process; `nil` when orphaned.
     public let resolvedProgram: String?
@@ -128,6 +128,49 @@ public struct LaunchdJob: Equatable, Hashable, Sendable {
 
     /// The program no longer exists, so launchd cannot start this job.
     public var orphaned: Bool { resolvedProgram == nil }
+}
+
+/// Whether the launchd plists that name a process's executable identify the process's own job. A plist names a
+/// program, not a process, so a match on the executable alone holds only for a program that launchd started and
+/// that nothing else plausibly runs.
+public enum LaunchdMatch: Equatable, Sendable {
+    /// No indexed plist names the executable.
+    case none
+    /// launchd started the process (its parent is pid 1), its executable is not an Apple platform binary, and every
+    /// plist that names the executable has this label. A process whose parent exited is also reparented to launchd,
+    /// so this is the plists' claim, not launchd's.
+    case job(label: String)
+    /// Plists name the executable, but that alone does not make the process their job.
+    case executableOnly(LaunchdAmbiguity)
+
+    /// Classifies the plists that name a process's executable, for a process with parent `ppid` and this
+    /// signature. When several reasons apply, the first in `LaunchdAmbiguity`'s declaration order is given.
+    public init(jobs: [LaunchdJob], ppid: Int32, signature: CodeSignature?) {
+        let labels = Set(jobs.map(\.label))
+        if jobs.isEmpty {
+            self = .none
+        } else if signature?.isPlatformBinary != false {
+            self = .executableOnly(.sharedExecutable)
+        } else if ppid != 1 {
+            self = .executableOnly(.notStartedByLaunchd)
+        } else if labels.count > 1 {
+            self = .executableOnly(.conflictingLabels)
+        } else {
+            self = .job(label: jobs[0].label)
+        }
+    }
+}
+
+/// Why the launchd plists that name a process's executable do not identify its job.
+public enum LaunchdAmbiguity: Equatable, Sendable {
+    /// The executable is an Apple platform binary, such as `/bin/sh`, `/usr/bin/env`, or `/usr/bin/osascript`, or
+    /// its signature is unavailable so it may be one. Any job, Apple's unindexed ones included, and any user may run
+    /// it.
+    case sharedExecutable
+    /// The parent is not launchd: a terminal, app, or other process started this copy.
+    case notStartedByLaunchd
+    /// Plists with different labels name the executable.
+    case conflictingLabels
 }
 
 /// A process's controlling terminal, from its `e_tdev`.

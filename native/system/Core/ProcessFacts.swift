@@ -38,11 +38,17 @@ public struct ProcessFacts: Identifiable, Equatable, Sendable {
     public var teamID: String? { origin?.codeSignature.value?.teamID }
     public var signingID: String? { origin?.codeSignature.value?.signingID }
     public var isPlatformBinary: Bool? { origin?.codeSignature.value?.isPlatformBinary }
-    /// The label of the launchd jobs that run this executable, when they agree on one. Two plists with different
-    /// labels for one program leave it `nil`; `origin.launchdJobs` lists both.
+    /// Whether the plists in `origin.launchdJobs` identify this process's job; `nil` when that signal is
+    /// unavailable or not read yet.
+    public var launchdMatch: LaunchdMatch? {
+        guard let origin, let jobs = origin.launchdJobs.value else { return nil }
+        return LaunchdMatch(jobs: jobs, ppid: ppid, signature: origin.codeSignature.value)
+    }
+    /// The launchd job's label when `launchdMatch` identifies one. A plist that names a shared executable, or a
+    /// copy of the program a terminal started, leaves it `nil`; `origin.launchdJobs` still lists the plists.
     public var launchdLabel: String? {
-        guard let labels = origin?.launchdJobs.value.map({ Set($0.map(\.label)) }), labels.count == 1 else { return nil }
-        return labels.first
+        guard case let .job(label) = launchdMatch else { return nil }
+        return label
     }
     public var workingDirectory: String? { origin?.workingDirectory.value }
     /// The controlling terminal's device name, `nil` when there is none or it is unavailable.

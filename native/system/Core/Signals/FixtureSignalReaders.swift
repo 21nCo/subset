@@ -51,9 +51,9 @@ public final class FixtureSignalReaders: ResponsibleProcessReading, CoalitionRea
         return coalitions[pid] ?? .unavailable(.processExited, source: .coalitionInfo)
     }
 
-    public func codeSignature(of pid: pid_t, executablePath: String?) -> Signal<CodeSignature> {
-        record(.codeSignature, pid)
-        return signatures[pid] ?? .unavailable(.processExited, source: .codeSigning)
+    public func codeSignature(of identity: ProcessIdentity, executablePath: String?) -> Signal<CodeSignature> {
+        record(.codeSignature, identity.pid)
+        return signatures[identity.pid] ?? .unavailable(.processExited, source: .codeSigning)
     }
 
     public func refreshIfChanged() {

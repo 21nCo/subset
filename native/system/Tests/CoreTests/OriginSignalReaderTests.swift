@@ -98,7 +98,7 @@ final class OriginSignalReaderTests: XCTestCase {
     }
 
     func testTheLaunchdLabelIsSetOnlyWhenTheMatchingJobsAgree() throws {
-        let fixtures = signedFixtures(pids: [50, 51])
+        let fixtures = signedFixtures(pids: [50, 51], platform: false)
         fixtures.launchdJobs["/usr/bin/p50"] = [job("dev.a", "/a.plist"), job("dev.a", "/b.plist")]
         fixtures.launchdJobs["/usr/bin/p51"] = [job("dev.a", "/a.plist"), job("dev.b", "/c.plist")]
         var sampler = Sampler(source: FixtureProcessSource([sample([record(50, start: 1), record(51, start: 1)])]), origin: fixtures.originReader())
@@ -106,16 +106,63 @@ final class OriginSignalReaderTests: XCTestCase {
         let processes = try sampler.sample().processes
 
         XCTAssertEqual(processes[0].launchdLabel, "dev.a")
+        XCTAssertEqual(processes[0].launchdMatch, .job(label: "dev.a"))
         XCTAssertNil(processes[1].launchdLabel)
+        XCTAssertEqual(processes[1].launchdMatch, .executableOnly(.conflictingLabels))
         XCTAssertEqual(processes[1].origin?.launchdJobs.value?.count, 2)
     }
 
-    private func signedFixtures(pids: [pid_t]) -> FixtureSignalReaders {
+    func testACopyOfAJobsProgramThatLaunchdDidNotStartIsNotTheJob() throws {
+        let fixtures = signedFixtures(pids: [60, 61], platform: false)
+        for pid: pid_t in [60, 61] {
+            fixtures.launchdJobs["/usr/bin/p\(pid)"] = [job("dev.server", "/dev.server.plist")]
+        }
+        // pid 60 runs under launchd; pid 61 runs the same program from a terminal's shell.
+        var sampler = Sampler(
+            source: FixtureProcessSource([sample([record(60, start: 1, ppid: 1), record(61, start: 1, ppid: 900)])]),
+            origin: fixtures.originReader()
+        )
+
+        let processes = try sampler.sample().processes
+
+        XCTAssertEqual(processes[0].launchdLabel, "dev.server")
+        XCTAssertNil(processes[1].launchdLabel)
+        XCTAssertEqual(processes[1].launchdMatch, .executableOnly(.notStartedByLaunchd))
+        XCTAssertEqual(processes[1].origin?.launchdJobs.value?.map(\.label), ["dev.server"], "the raw signal still lists the plist")
+    }
+
+    func testAJobWhoseProgramIsAPlatformBinaryLabelsNoProcess() throws {
+        // A plist that runs /usr/bin/osascript says nothing about which osascript process is its job, even one
+        // launchd started: Apple's own unindexed jobs run platform binaries too.
+        let fixtures = signedFixtures(pids: [70, 71])
+        fixtures.signatures[71] = .unavailable(.processExited, source: .codeSigning)
+        for pid: pid_t in [70, 71] {
+            fixtures.launchdJobs["/usr/bin/p\(pid)"] = [job("dev.script", "/dev.script.plist")]
+        }
+        var sampler = Sampler(source: FixtureProcessSource([sample([record(70, start: 1), record(71, start: 1)])]), origin: fixtures.originReader())
+
+        let processes = try sampler.sample().processes
+
+        XCTAssertEqual(processes.map(\.launchdMatch), Array(repeating: .executableOnly(.sharedExecutable), count: 2))
+        XCTAssertEqual(processes.map(\.launchdLabel), [nil, nil])
+        XCTAssertEqual(processes[0].origin?.launchdJobs.value?.count, 1)
+    }
+
+    func testNoPlistIsNoMatchAndAnUnreadProcessHasNone() throws {
+        let fixtures = signedFixtures(pids: [80], platform: false)
+        var read = Sampler(source: FixtureProcessSource([sample([record(80, start: 1)])]), origin: fixtures.originReader())
+        var unread = Sampler(source: FixtureProcessSource([sample([record(80, start: 1)])]))
+
+        XCTAssertEqual(try read.sample().processes.first?.launchdMatch, LaunchdMatch.none)
+        XCTAssertNil(try XCTUnwrap(try unread.sample().processes.first).launchdMatch)
+    }
+
+    private func signedFixtures(pids: [pid_t], platform: Bool = true) -> FixtureSignalReaders {
         let fixtures = FixtureSignalReaders()
         for pid in pids {
             fixtures.responsible[pid] = .value(pid, source: .responsibility)
             fixtures.coalitions[pid] = .value(UInt64(pid) + 1000, source: .coalitionInfo)
-            fixtures.signatures[pid] = .value(CodeSignature(signingID: "p\(pid)", teamID: nil, isPlatformBinary: true), source: .codeSigning)
+            fixtures.signatures[pid] = .value(CodeSignature(signingID: "p\(pid)", teamID: platform ? nil : "ABCDE12345", isPlatformBinary: platform), source: .codeSigning)
             fixtures.workingDirectories[pid] = .value("/", source: .vnodePathInfo)
             fixtures.terminals[pid] = .value(.device("ttys00\(pid % 10)"), source: .bsdInfo)
         }
@@ -130,10 +177,10 @@ final class OriginSignalReaderTests: XCTestCase {
         RawProcessSample(timestamp: 0, timebase: timebase, processes: processes)
     }
 
-    private func record(_ pid: pid_t, start: UInt64, usage: UsageReading = .unavailable) -> RawProcessRecord {
+    private func record(_ pid: pid_t, start: UInt64, ppid: Int32 = 1, usage: UsageReading = .unavailable) -> RawProcessRecord {
         RawProcessRecord(
             identity: ProcessIdentity(pid: pid, startTime: start),
-            ppid: 1,
+            ppid: ppid,
             uid: 501,
             executablePath: "/usr/bin/p\(pid)",
             name: "p\(pid)",

@@ -40,9 +40,11 @@ public struct LaunchdFolders: Sendable {
 /// kernel reports a running process by its real path (Homebrew services, for one, name a symlink). A plist whose
 /// program does not exist is kept as `orphaned`.
 ///
-/// The index is rebuilt when a plist, a plist folder, or an application folder changes size or modification time,
-/// or appears or disappears. A plist without a label or program, or that does not parse, is listed in
-/// `unreadablePlists` and left out.
+/// The plists are read again when a plist, a plist folder, or an application folder changes size or modification
+/// time, or appears or disappears. The programs are resolved again on every refresh, since an executable can be
+/// created, deleted, or have its symlink retargeted (as `brew upgrade` does to `/opt/homebrew/opt`) while its plist
+/// stays the same. A plist without a label or program, or that does not parse, is listed in `unreadablePlists` and
+/// left out.
 public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     /// launchd's default `PATH` for jobs.
     static let launchdPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -50,6 +52,7 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
     private let folders: LaunchdFolders
     private let lock = NSLock()
     private var stamps: Set<FileStamp>?
+    private var definitions: [Definition] = []
     private var state = (jobs: [LaunchdJob](), unreadable: [String](), byProgram: [String: [LaunchdJob]]())
 
     public init(folders: LaunchdFolders = .live()) {
@@ -63,25 +66,33 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
 
     public func refreshIfChanged() {
         let scan = Self.scan(folders)
-        lock.withLock {
-            guard scan.stamps != stamps else { return }
-            stamps = scan.stamps
-            state = Self.build(scan.plists)
-        }
+        lock.withLock { refresh(scan) }
     }
 
     public func launchdJobs(forExecutable path: String?) -> Signal<[LaunchdJob]> {
         guard let path else { return .unavailable(.noExecutablePath, source: .launchdPlists) }
         let byProgram = lock.withLock { () -> [String: [LaunchdJob]] in
-            if stamps == nil {
-                let scan = Self.scan(folders)
-                stamps = scan.stamps
-                state = Self.build(scan.plists)
-            }
+            if stamps == nil { refresh(Self.scan(folders)) }
             return state.byProgram
         }
         let jobs = byProgram[path] ?? Self.realPath(path).flatMap { byProgram[$0] } ?? []
         return .value(jobs, source: .launchdPlists)
+    }
+
+    /// Reads the plists again if the scan differs, then resolves every program. Call with the lock held.
+    private func refresh(_ scan: Scan) {
+        var unreadable = state.unreadable
+        if scan.stamps != stamps {
+            stamps = scan.stamps
+            (definitions, unreadable) = Self.read(scan.plists)
+        }
+        let jobs = definitions.map { $0.job() }
+        guard jobs != state.jobs || unreadable != state.unreadable else { return }
+        var byProgram: [String: [LaunchdJob]] = [:]
+        for job in jobs {
+            if let program = job.resolvedProgram { byProgram[program, default: []].append(job) }
+        }
+        state = (jobs, unreadable, byProgram)
     }
 
     private struct Scan {
@@ -117,52 +128,72 @@ public final class LaunchdJobIndex: LaunchdJobReading, @unchecked Sendable {
         (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
     }
 
-    private static func build(_ plists: [(path: String, domain: LaunchdDomain, bundlePath: String?)])
-        -> (jobs: [LaunchdJob], unreadable: [String], byProgram: [String: [LaunchdJob]]) {
-        var jobs: [LaunchdJob] = []
+    /// Parses the plists, ordered by path, and lists the unreadable ones.
+    private static func read(_ plists: [(path: String, domain: LaunchdDomain, bundlePath: String?)])
+        -> (definitions: [Definition], unreadable: [String]) {
+        var definitions: [Definition] = []
         var unreadable: [String] = []
         for plist in plists {
-            guard let job = job(at: plist.path, domain: plist.domain, bundlePath: plist.bundlePath) else {
+            guard let definition = Definition(plistPath: plist.path, domain: plist.domain, bundlePath: plist.bundlePath) else {
                 unreadable.append(plist.path)
                 continue
             }
-            jobs.append(job)
+            definitions.append(definition)
         }
-        jobs.sort { $0.plistPath < $1.plistPath }
-        var byProgram: [String: [LaunchdJob]] = [:]
-        for job in jobs {
-            if let program = job.resolvedProgram { byProgram[program, default: []].append(job) }
-        }
-        return (jobs, unreadable.sorted(), byProgram)
+        definitions.sort { $0.plistPath < $1.plistPath }
+        return (definitions, unreadable.sorted())
     }
 
-    static func job(at plistPath: String, domain: LaunchdDomain, bundlePath: String?) -> LaunchdJob? {
-        guard let data = FileManager.default.contents(atPath: plistPath),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let label = plist["Label"] as? String, !label.isEmpty
-        else { return nil }
-        let resolved: String?
+    /// One parsed plist, with its program not yet resolved.
+    struct Definition: Sendable {
+        let label: String
+        let plistPath: String
+        let domain: LaunchdDomain
+        /// As the plist writes it.
         let program: String
-        if let value = plist["Program"] as? String, !value.isEmpty {
-            program = value
-            resolved = resolve(value, workingDirectory: plist["WorkingDirectory"] as? String)
-        } else if let bundlePath, let value = plist["BundleProgram"] as? String, !value.isEmpty {
-            program = value
-            resolved = realPath(bundlePath + "/" + value)
-        } else if let value = (plist["ProgramArguments"] as? [Any])?.first as? String, !value.isEmpty {
-            program = value
-            resolved = resolve(value, workingDirectory: plist["WorkingDirectory"] as? String)
-        } else {
-            return nil
+        /// Where launchd finds the program: this path, or, for a name without a slash, launchd's `PATH`.
+        let location: String?
+
+        init?(plistPath: String, domain: LaunchdDomain, bundlePath: String?) {
+            guard let data = FileManager.default.contents(atPath: plistPath),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let label = plist["Label"] as? String, !label.isEmpty
+            else { return nil }
+            let workingDirectory = plist["WorkingDirectory"] as? String
+            if let value = plist["Program"] as? String, !value.isEmpty {
+                program = value
+                location = LaunchdJobIndex.location(of: value, workingDirectory: workingDirectory)
+            } else if let bundlePath, let value = plist["BundleProgram"] as? String, !value.isEmpty {
+                program = value
+                location = bundlePath + "/" + value
+            } else if let value = (plist["ProgramArguments"] as? [Any])?.first as? String, !value.isEmpty {
+                program = value
+                location = LaunchdJobIndex.location(of: value, workingDirectory: workingDirectory)
+            } else {
+                return nil
+            }
+            self.label = label
+            self.plistPath = plistPath
+            self.domain = domain
         }
-        return LaunchdJob(label: label, plistPath: plistPath, domain: domain, program: program, resolvedProgram: resolved)
+
+        /// The job with its program resolved as the filesystem stands now.
+        func job() -> LaunchdJob {
+            let resolved = if let location {
+                LaunchdJobIndex.realPath(location)
+            } else {
+                LaunchdJobIndex.launchdPath.lazy.compactMap { LaunchdJobIndex.realPath($0 + "/" + program) }.first
+            }
+            return LaunchdJob(label: label, plistPath: plistPath, domain: domain, program: program, resolvedProgram: resolved)
+        }
     }
 
-    /// Resolves a program as `execvp` would for launchd, which starts jobs in `WorkingDirectory` or `/`.
-    static func resolve(_ program: String, workingDirectory: String?) -> String? {
-        if program.hasPrefix("/") { return realPath(program) }
-        if program.contains("/") { return realPath((workingDirectory ?? "") + "/" + program) }
-        return launchdPath.lazy.compactMap { realPath($0 + "/" + program) }.first
+    /// Where `execvp` looks for a program for launchd, which starts jobs in `WorkingDirectory` or `/`: the path
+    /// itself, or `nil` for a bare name, which is searched for in `launchdPath`.
+    static func location(of program: String, workingDirectory: String?) -> String? {
+        if program.hasPrefix("/") { return program }
+        if program.contains("/") { return (workingDirectory ?? "") + "/" + program }
+        return nil
     }
 
     /// The path with symlinks resolved, or `nil` when no regular file is there.

@@ -122,6 +122,44 @@ final class LaunchdJobIndexTests: XCTestCase {
         XCTAssertEqual(index.launchdJobs(forExecutable: server).value, [])
     }
 
+    func testAProgramDeletedOrCreatedWithItsPlistUnchangedIsResolvedAgain() throws {
+        // The program lives outside every watched folder, so only the program changes.
+        let server = try executable("bin/server")
+        try plist(agents, "dev.server", ["Label": "dev.server", "Program": server])
+        let index = LaunchdJobIndex(folders: folders())
+        index.refreshIfChanged()
+        XCTAssertEqual(index.jobs.first?.orphaned, false)
+
+        try FileManager.default.removeItem(atPath: server)
+        index.refreshIfChanged()
+        XCTAssertEqual(index.jobs.first?.orphaned, true)
+
+        _ = try executable("bin/server")
+        index.refreshIfChanged()
+        XCTAssertEqual(index.jobs.first?.orphaned, false)
+        XCTAssertEqual(index.launchdJobs(forExecutable: server).value?.map(\.label), ["dev.server"])
+    }
+
+    func testRetargetingOnlyTheProgramsSymlinkMovesTheJobToTheNewExecutable() throws {
+        // Homebrew-style: `brew upgrade` points opt/postgres at a new versioned folder and leaves the plist alone.
+        let v1 = try executable("Cellar/postgres/1/bin/postgres")
+        let v2 = try executable("Cellar/postgres/2/bin/postgres")
+        let link = root.path + "/opt/postgres"
+        try FileManager.default.createDirectory(atPath: root.path + "/opt", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: root.path + "/Cellar/postgres/1")
+        try plist(agents, "dev.postgres", ["Label": "dev.postgres", "ProgramArguments": [link + "/bin/postgres", "-D", "/data"]])
+        let index = LaunchdJobIndex(folders: folders())
+        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value?.map(\.label), ["dev.postgres"])
+
+        try FileManager.default.removeItem(atPath: link)
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: root.path + "/Cellar/postgres/2")
+        index.refreshIfChanged()
+
+        XCTAssertEqual(index.launchdJobs(forExecutable: v2).value?.map(\.label), ["dev.postgres"])
+        XCTAssertEqual(index.launchdJobs(forExecutable: v1).value, [])
+        XCTAssertEqual(index.jobs.first?.resolvedProgram, LaunchdJobIndex.realPath(v2))
+    }
+
     func testTheLiveFoldersAreReadWithoutFailing() {
         let index = LaunchdJobIndex()
         index.refreshIfChanged()

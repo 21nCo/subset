@@ -98,7 +98,7 @@ public final class OriginSignalReader: @unchecked Sendable {
         let signals = OriginSignals(
             responsibleProcess: responsible.responsibleProcess(of: pid),
             coalition: coalition.coalition(of: pid),
-            codeSignature: codeSignature.codeSignature(of: pid, executablePath: executablePath),
+            codeSignature: codeSignature.codeSignature(of: identity, executablePath: executablePath),
             launchdJobs: launchd.launchdJobs(forExecutable: executablePath),
             workingDirectory: context.workingDirectory(of: pid),
             terminal: context.terminal(of: pid)

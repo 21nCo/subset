@@ -38,7 +38,8 @@ final class LiveOriginSignalTests: XCTestCase {
 
     func testItsOwnCodeSignatureIsRead() throws {
         let path = Bundle.main.executablePath
-        let signal = CachedCodeSignatureReader().codeSignature(of: getpid(), executablePath: path)
+        let identity = try XCTUnwrap(LibprocProcessSource.currentIdentity(of: getpid()))
+        let signal = CachedCodeSignatureReader().codeSignature(of: identity, executablePath: path)
 
         XCTAssertEqual(signal.source, .codeSigning)
         let signature = try XCTUnwrap(signal.value, "\(String(describing: signal.failure))")
@@ -49,7 +50,7 @@ final class LiveOriginSignalTests: XCTestCase {
 
     func testLaunchdIsAnAppleSignedPlatformBinaryAndKeepsItsPublicSignals() throws {
         // pid 1 belongs to root: without root, macOS denies its responsibility and working-directory reads.
-        let signature = try XCTUnwrap(SecCodeSignatureReader().codeSignature(of: 1, executablePath: nil).value)
+        let signature = try XCTUnwrap(SecCodeSignatureReader().codeSignature(of: ProcessIdentity(pid: 1, startTime: 0), executablePath: nil).value)
         XCTAssertEqual(signature.signingID, "com.apple.xpc.launchd")
         XCTAssertTrue(signature.isPlatformBinary)
         XCTAssertNil(signature.teamID)
