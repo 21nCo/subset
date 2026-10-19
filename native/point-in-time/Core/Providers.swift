@@ -15,9 +15,10 @@ struct ProcessOutput: Sendable {
 /// `Process` makes the child the leader of its own process group, so the signals go to the group: whatever the child
 /// started (the native binary behind an npm launcher, say) is stopped with it. When the child exits, anything it left
 /// running in its group is stopped the same way, and its output is not waited on for more than a few seconds.
+/// Each group is tracked in `children` until it has been stopped, so quitting the app can stop it too.
 enum ProcessRunner {
     static func run(_ executable: URL, _ arguments: [String], stdin: Data, directory: URL, environment: [String: String],
-                    timeout: TimeInterval) async throws -> ProcessOutput {
+                    timeout: TimeInterval, children: ChildProcesses = .shared) async throws -> ProcessOutput {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -49,32 +50,77 @@ enum ProcessRunner {
             }
             process.terminationHandler = { process in
                 let result: @Sendable () -> ProcessOutput = { ProcessOutput(status: process.terminationStatus, stdout: out.value, stderr: err.value) }
-                stopGroup(process.processIdentifier)
+                stopGroup(process.processIdentifier, children)
                 group.notify(queue: .global()) { finish.resume(.success(result())) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) { finish.resume(.success(result())) }
             }
             do {
+                guard !children.isStopped else { throw ProviderError.process("pointInTime is quitting") }
                 try process.run()
             } catch {
-                for pipe in [output, errors] { pipe.fileHandleForReading.readabilityHandler = nil }
+                for pipe in [output, errors] {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    group.leave()
+                }
                 finish.resume(.failure(ProviderError.process("Could not start \(executable.lastPathComponent): \(error.localizedDescription)")))
                 return
             }
+            // Started while the app was stopping its children: stop this one too.
+            if !children.add(group: process.processIdentifier) { kill(-process.processIdentifier, SIGKILL) }
             DispatchQueue.global().async {
                 try? input.fileHandleForWriting.write(contentsOf: stdin)
                 try? input.fileHandleForWriting.close()
             }
             let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if finish.resume(.failure(ProviderError.timedOut(timeout))) { stopGroup(pid) }
+                if finish.resume(.failure(ProviderError.timedOut(timeout))) { stopGroup(pid, children) }
             }
         }
     }
 
     /// SIGTERM to the process group led by `pid`, then SIGKILL two seconds later; a group that is gone is not an error.
-    private static func stopGroup(_ pid: pid_t) {
+    private static func stopGroup(_ pid: pid_t, _ children: ChildProcesses) {
         kill(-pid, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { kill(-pid, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            kill(-pid, SIGKILL)
+            children.remove(group: pid)
+        }
+    }
+}
+
+/// The process groups and request folders the providers have open, so that quitting the app stops and removes them
+/// rather than leaving Codex running on the subscription, or its prompt and answer in the temporary folder.
+public final class ChildProcesses: @unchecked Sendable {
+    public static let shared = ChildProcesses()
+
+    private let lock = NSLock()
+    private var groups: Set<pid_t> = []
+    private var folders: Set<URL> = []
+    private var stopped = false
+
+    public init() {}
+
+    var isStopped: Bool { lock.withLock { stopped } }
+
+    /// False when the children have been stopped, so the caller stops this one itself.
+    func add(group pid: pid_t) -> Bool { lock.withLock { stopped ? false : groups.insert(pid).inserted } }
+    func remove(group pid: pid_t) { _ = lock.withLock { groups.remove(pid) } }
+    func add(folder url: URL) -> Bool { lock.withLock { stopped ? false : folders.insert(url).inserted } }
+    func remove(folder url: URL) { _ = lock.withLock { folders.remove(url) } }
+
+    /// For quitting: SIGTERM to every group, SIGKILL to what is left after `grace`, and every folder removed, before
+    /// returning. Nothing is started afterwards.
+    public func stopAll(grace: TimeInterval = 1) {
+        let (groups, folders) = lock.withLock {
+            stopped = true
+            defer { self.groups = []; self.folders = [] }
+            return (self.groups, self.folders)
+        }
+        for pid in groups { kill(-pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(grace)
+        while Date() < deadline, groups.contains(where: { kill(-$0, 0) == 0 }) { usleep(20_000) }
+        for pid in groups { kill(-pid, SIGKILL) }
+        for url in folders { try? FileManager.default.removeItem(at: url) }
     }
 }
 
@@ -100,17 +146,26 @@ private final class OneShot<T: Sendable>: @unchecked Sendable {
     }
 }
 
-/// A new folder only this user can read, removed by `remove()`.
+/// A new folder only this user can read, removed by `remove()` or when the app quits.
 struct PrivateDirectory {
     let url: URL
+    private let children: ChildProcesses
 
-    init(prefix: String) throws {
+    init(prefix: String, children: ChildProcesses) throws {
         url = FileManager.default.temporaryDirectory.appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        self.children = children
+        guard children.add(folder: url) else { throw ProviderError.process("pointInTime is quitting") }
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        } catch {
+            children.remove(folder: url)
+            throw error
+        }
     }
 
     func remove() {
         try? FileManager.default.removeItem(at: url)
+        children.remove(folder: url)
     }
 }
 
@@ -137,15 +192,17 @@ public struct CodexCLI: ClassificationProvider {
     public let executable: URL
     public let searchPath: String
     public let timeout: TimeInterval
+    let children: ChildProcesses
 
     /// `searchPath` is the `PATH` the child gets. The binary's own folder is put first, so a launcher script finds the
     /// runtime installed beside it (for example `node` in the same version manager folder).
-    public init(executable: URL, searchPath: String?, timeout: TimeInterval = CodexCLI.defaultTimeout) {
+    public init(executable: URL, searchPath: String?, timeout: TimeInterval = CodexCLI.defaultTimeout, children: ChildProcesses = .shared) {
         self.executable = executable
         let folder = executable.deletingLastPathComponent().path
         self.searchPath = ([folder] + (searchPath ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init))
             .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ":")
         self.timeout = timeout
+        self.children = children
     }
 
     public static func execArguments(workingDirectory: URL, schema: URL, output: URL) -> [String] {
@@ -155,11 +212,11 @@ public struct CodexCLI: ClassificationProvider {
 
     public func loginStatus() async -> CodexLoginStatus {
         let folder: PrivateDirectory
-        do { folder = try PrivateDirectory(prefix: "pointInTime-codex") } catch { return .unavailable(error.localizedDescription) }
+        do { folder = try PrivateDirectory(prefix: "pointInTime-codex", children: children) } catch { return .unavailable(error.localizedDescription) }
         defer { folder.remove() }
         do {
             let result = try await ProcessRunner.run(executable, ["login", "status"], stdin: Data(), directory: folder.url,
-                                                     environment: environment, timeout: 30)
+                                                     environment: environment, timeout: 30, children: children)
             let text = String(decoding: result.stdout + result.stderr, as: UTF8.self)
             guard result.status == 0 else {
                 // Only Codex's own answer means signed out; any other failure (a missing runtime, say) is reported as is.
@@ -183,7 +240,7 @@ public struct CodexCLI: ClassificationProvider {
     }
 
     public func complete(prompt: String, schema: String) async throws -> String {
-        let folder = try PrivateDirectory(prefix: "pointInTime-codex")
+        let folder = try PrivateDirectory(prefix: "pointInTime-codex", children: children)
         defer { folder.remove() }
         // Codex works in `work`, which stays empty; the schema and answer sit beside it.
         let work = folder.url.appendingPathComponent("work", isDirectory: true)
@@ -193,7 +250,8 @@ public struct CodexCLI: ClassificationProvider {
             throw ProviderError.process("Could not write the answer schema")
         }
         let result = try await ProcessRunner.run(executable, Self.execArguments(workingDirectory: work, schema: schemaFile, output: answerFile),
-                                                 stdin: Data(prompt.utf8), directory: work, environment: environment, timeout: timeout)
+                                                 stdin: Data(prompt.utf8), directory: work, environment: environment, timeout: timeout,
+                                                 children: children)
         guard result.status == 0 else { throw ProviderError.process("codex exec exited with status \(result.status)") }
         guard let answer = try? String(contentsOf: answerFile, encoding: .utf8), !answer.isEmpty else {
             throw ProviderError.invalidResponse("codex exec wrote no answer")

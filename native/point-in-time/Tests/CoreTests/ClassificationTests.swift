@@ -719,6 +719,34 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
         #expect(await exits(child))
     }
 
+    @Test func quittingStopsARunningExecAndRemovesItsFolder() async throws {
+        let codex = try stub()
+        defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
+        try touch(codex, "orphan")
+        try touch(codex, "sleep", "60")
+        let children = ChildProcesses()
+        let cli = CodexCLI(executable: codex, searchPath: nil, timeout: 120, children: children)
+        let run = Task { try await cli.complete(prompt: "p", schema: "{}") }
+        // The stub writes its child's pid first and its working folder once it has read the prompt.
+        let stdin = codex.deletingLastPathComponent().appendingPathComponent("stdin")
+        for _ in 0..<400 where !FileManager.default.fileExists(atPath: stdin.path) { try await Task.sleep(for: .milliseconds(50)) }
+        let child = try #require(pid_t(try recorded(codex, "child").trimmingCharacters(in: .whitespacesAndNewlines)))
+        let folder = URL(fileURLWithPath: try recorded(codex, "cwd").trimmingCharacters(in: .newlines)).deletingLastPathComponent()
+        #expect(FileManager.default.fileExists(atPath: folder.path))
+        // Both the launcher and its child ignore SIGTERM, so only the SIGKILL after the grace stops them.
+        let started = Date()
+        children.stopAll(grace: 0.5)
+        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(await exits(child))
+        await #expect(throws: ProviderError.self) { try await run.value }
+        // Nothing starts once the app is quitting.
+        try FileManager.default.removeItem(at: codex.deletingLastPathComponent().appendingPathComponent("args"))
+        await #expect(throws: ProviderError.self) { try await cli.complete(prompt: "p", schema: "{}") }
+        #expect(!FileManager.default.fileExists(atPath: codex.deletingLastPathComponent().appendingPathComponent("args").path))
+        guard case .unavailable = await cli.loginStatus() else { Issue.record("A sign-in check ran while quitting"); return }
+    }
+
     /// Whether `pid` is gone within twenty seconds.
     private func exits(_ pid: pid_t) async -> Bool {
         for _ in 0..<200 {

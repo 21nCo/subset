@@ -77,7 +77,10 @@ final class ClassificationModel: ObservableObject {
                 return
             }
             switch await codex.loginStatus() {
-            case .signedIn: codexState = "\(codex.executable.path): signed in with ChatGPT"
+            case .signedIn:
+                codexState = "\(codex.executable.path): signed in with ChatGPT"
+                // Check Again after signing in retries the waiting blocks now rather than after the backoff.
+                if refresh { controller.resume() }
             case .notChatGPT: codexState = "Codex is not signed in with ChatGPT (an API key is not used). Sign in with `codex login` using ChatGPT in Terminal, then check again."
             case .signedOut: codexState = "Sign in with `codex login` in Terminal, then check again."
             case .unavailable(let message): codexState = "\(codex.executable.path) could not run: \(message)"

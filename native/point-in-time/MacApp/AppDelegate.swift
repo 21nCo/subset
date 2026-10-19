@@ -43,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A Codex run still going would keep using the subscription after the app is gone and leave its request folder.
+        ChildProcesses.shared.stopAll()
         capture?.finishWrites()
     }
 }
