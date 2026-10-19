@@ -75,6 +75,8 @@ private final class FakeApps: AppControl, @unchecked Sendable {
     private let lock = NSLock()
     private var state: RunningAppState?
     var delivers = true
+    /// A request during which the app exits.
+    var exitsDuring: Call?
 
     init(log: CallLog, state: RunningAppState?) {
         self.log = log
@@ -98,6 +100,7 @@ private final class FakeApps: AppControl, @unchecked Sendable {
 
     private func request(_ call: Call) -> Bool {
         log.record(call)
+        if call == exitsDuring { exit() }
         return delivers && lock.withLock { state != nil }
     }
 }
@@ -160,10 +163,27 @@ final class WindowOperatorTests: XCTestCase {
     func testFocusIsRefusedWhenTheWindowDoesNotReadBackInTime() async {
         accessibility.focusedFromRead = nil
         let start = ContinuousClock.now
+        let result = await perform(.focus, readBackTimeout: .milliseconds(300))
+        XCTAssertEqual(result, .refused("did not come to front"))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - start, .milliseconds(300))
+        XCTAssertGreaterThan(log.calls.filter { $0 == .isFocused }.count, 1, "the focused window is read until the deadline")
+    }
+
+    func testAConfirmationThatArrivesAfterTheDeadlineDoesNotCount() async {
+        // The window is focused, but the app only says so after the read-back has run out.
+        accessibility.during = [.isFocused: { Thread.sleep(forTimeInterval: 0.15) }]
         let result = await perform(.focus, readBackTimeout: .milliseconds(100))
         XCTAssertEqual(result, .refused("did not come to front"))
-        XCTAssertGreaterThanOrEqual(ContinuousClock.now - start, .milliseconds(100))
-        XCTAssertGreaterThan(log.calls.filter { $0 == .isFocused }.count, 1, "the focused window is read until the deadline")
+        XCTAssertEqual(log.calls.filter { $0 == .isFocused }.count, 1)
+    }
+
+    func testNoReadStartsAfterTheDeadline() async {
+        // Each read takes most of the read-back: by the time the first has answered and Hop has waited, none is left.
+        accessibility.focusedFromRead = 2
+        accessibility.during = [.isFocused: { Thread.sleep(forTimeInterval: 0.08) }]
+        let result = await perform(.focus, readBackTimeout: .milliseconds(100))
+        XCTAssertEqual(result, .refused("did not come to front"))
+        XCTAssertEqual(log.calls.filter { $0 == .isFocused }.count, 1)
     }
 
     func testTheReadBackWaitsHalfASecondByDefault() {
@@ -175,6 +195,20 @@ final class WindowOperatorTests: XCTestCase {
         let result = await perform(.focus)
         XCTAssertEqual(result, .done)
         XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused])
+    }
+
+    func testAWindowWhoseMinimizedStateCannotBeReadIsFocusedAsNotMinimized() async {
+        // A dialog may have no kAXMinimized at all; the rest of focus still runs.
+        for failure in [AccessibilityFailure.unsupported, .failed] {
+            let log = CallLog()
+            let accessibility = FakeAccessibility(log: log)
+            accessibility.failures = [.isMinimized: failure]
+            let apps = FakeApps(log: log, state: RunningAppState(bundleIdentifier: "com.example.editor", isHidden: false))
+            let windowOperator = AccessibilityWindowOperator(accessibility: accessibility, apps: apps)
+            let result = await windowOperator.perform(.focus, on: entry())
+            XCTAssertEqual(result, .done, "\(failure)")
+            XCTAssertEqual(log.calls, [.lookUpApp, .isMinimized, .raise, .makeMain, .activate, .makeFrontmost, .isFocused], "\(failure)")
+        }
     }
 
     func testAnAppThatDoesNotAnswerEndsTheFocusAtOnce() async {
@@ -207,12 +241,25 @@ final class WindowOperatorTests: XCTestCase {
 
     func testAnAppThatExitsDuringTheOperationIsAppGone() async {
         // An app that has just quit answers like one that timed out, or its window like a closed one.
-        accessibility.failures = [.raise: .timedOut, .setMinimized(true): .invalidElement]
-        accessibility.during = [.raise: apps.exit, .setMinimized(true): apps.exit]
-        let focused = await perform(.focus)
-        XCTAssertEqual(focused, .appGone)
-        let minimized = await perform(.minimize)
-        XCTAssertEqual(minimized, .appGone)
+        let cases: [(WindowOperation, Call, AccessibilityFailure?)] = [
+            (.focus, .raise, .timedOut),
+            (.minimize, .setMinimized(true), .invalidElement),
+            (.close, .pressCloseButton, .invalidElement),
+            (.hideApp, .hide, nil),
+            (.quitApp, .terminate, nil),
+        ]
+        for (operation, request, failure) in cases {
+            let log = CallLog()
+            let accessibility = FakeAccessibility(log: log)
+            let apps = FakeApps(log: log, state: RunningAppState(bundleIdentifier: "com.example.editor", isHidden: false))
+            accessibility.failures = failure.map { [request: $0] } ?? [:]
+            accessibility.during = [request: apps.exit]
+            apps.exitsDuring = request
+            let windowOperator = AccessibilityWindowOperator(accessibility: accessibility, apps: apps)
+            let result = await windowOperator.perform(operation, on: entry())
+            XCTAssertEqual(result, .appGone, "\(operation)")
+            XCTAssertEqual(log.calls.suffix(2), [request, .lookUpApp], "\(operation) sent its request before the app exited")
+        }
     }
 
     func testAnotherAppThatReusedThePidIsAppGone() async {
@@ -270,6 +317,13 @@ final class WindowOperatorTests: XCTestCase {
         let result = await perform(.hideApp)
         XCTAssertEqual(result, .done)
         XCTAssertEqual(log.calls, [.lookUpApp, .hide])
+    }
+
+    func testHidingAnAppThatIsAlreadyHiddenIsDone() async {
+        apps = FakeApps(log: log, state: RunningAppState(bundleIdentifier: "com.example.editor", isHidden: true))
+        apps.delivers = false
+        let result = await perform(.hideApp)
+        XCTAssertEqual(result, .done)
     }
 
     func testAnAppThatDoesNotTakeTheHideRequestIsRefused() async {
