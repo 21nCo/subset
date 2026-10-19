@@ -157,10 +157,8 @@ final class ClassificationController {
         case .codex:
             return await codex() ?? Unavailable(reason: "No codex binary was found in the login shell’s PATH. Choose one in Classification settings.")
         case .openRouter:
-            guard let key = try? KeychainSecret.openRouterKey.read(), !key.isEmpty else {
-                return Unavailable(reason: "No OpenRouter key is saved in the Keychain.")
-            }
-            return OpenRouterClient(key: key, model: settings.openRouterModel)
+            // The key is read only when a batch is sent, not on every tick.
+            return OpenRouterClient(keychain: .openRouterKey, model: settings.openRouterModel)
         }
     }
 

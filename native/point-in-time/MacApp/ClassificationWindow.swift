@@ -22,6 +22,7 @@ final class ClassificationWindowController {
             self.window = window
         }
         model.modelField = model.settings.openRouterModel
+        model.refreshKey()
         model.refresh()
         model.checkProvider()
         NSApp.activate(ignoringOtherApps: true)
@@ -59,13 +60,19 @@ final class ClassificationModel: ObservableObject {
         })
     }
 
+    /// Runs every minute and after each request, whether or not the window is shown, so it does not touch the Keychain.
     func refresh() {
         status = controller.status
-        hasKey = ((try? KeychainSecret.openRouterKey.read()) ?? nil) != nil
         // Today's completed blocks with recorded time, newest first.
         let now = Date()
         recent = ((try? store?.blocks(from: Calendar.current.startOfDay(for: now), to: now)) ?? [])
             .filter { $0.activeSeconds > 0 && $0.end <= now }.reversed().prefix(30).map { $0 }
+    }
+
+    /// Asks the Keychain whether a key is saved, without reading the key: when the window is shown and after a save or
+    /// a removal.
+    func refreshKey() {
+        hasKey = (try? KeychainSecret.openRouterKey.exists()) ?? false
     }
 
     func checkProvider(refresh: Bool = false) {
@@ -116,7 +123,7 @@ final class ClassificationModel: ObservableObject {
         } catch {
             keyMessage = "Could not save the key: \(error)"
         }
-        refresh()
+        refreshKey()
     }
 
     func removeKey() {
@@ -127,7 +134,7 @@ final class ClassificationModel: ObservableObject {
         } catch {
             keyMessage = "Could not remove the key: \(error)"
         }
-        refresh()
+        refreshKey()
     }
 
     /// Tests the typed key, or the saved one when the field is empty. Sends no activity.

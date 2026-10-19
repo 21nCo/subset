@@ -334,10 +334,19 @@ public struct OpenRouterClient: ClassificationProvider {
 
     public let name = "openrouter"
     public let model: String
-    private let key: String
+    private let key: @Sendable () throws -> String?
     private let transport: any HTTPTransport
 
     public init(key: String, model: String, transport: any HTTPTransport = URLSessionTransport()) {
+        self.init(model: model, transport: transport) { key }
+    }
+
+    /// Reads the key from `keychain` only when a request is about to go, not when the client is set up.
+    public init(keychain: KeychainSecret, model: String, transport: any HTTPTransport = URLSessionTransport()) {
+        self.init(model: model, transport: transport) { try keychain.read() }
+    }
+
+    private init(model: String, transport: any HTTPTransport, key: @escaping @Sendable () throws -> String?) {
         self.key = key
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model.isEmpty ? Self.defaultModel : model
@@ -345,6 +354,7 @@ public struct OpenRouterClient: ClassificationProvider {
     }
 
     public func complete(prompt: String, schema: String) async throws -> String {
+        let key = try readKey()
         let schemaObject = try JSONSerialization.jsonObject(with: Data(schema.utf8))
         let body: [String: Any] = [
             "model": model,
@@ -353,7 +363,7 @@ public struct OpenRouterClient: ClassificationProvider {
             // Route only to providers that honor the response format.
             "provider": ["require_parameters": true]
         ]
-        var request = authorized(Self.completionsURL)
+        var request = authorized(Self.completionsURL, key: key)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -368,10 +378,21 @@ public struct OpenRouterClient: ClassificationProvider {
 
     /// Checks the key against OpenRouter's key endpoint without sending any activity.
     public func testKey() async throws {
-        _ = try await send(authorized(Self.keyURL))
+        _ = try await send(authorized(Self.keyURL, key: try readKey()))
     }
 
-    private func authorized(_ url: URL) -> URLRequest {
+    private func readKey() throws -> String {
+        let stored: String?
+        do {
+            stored = try key()
+        } catch {
+            throw ProviderError.notConfigured("The OpenRouter key could not be read from the Keychain (\(error)).")
+        }
+        guard let stored, !stored.isEmpty else { throw ProviderError.notConfigured("No OpenRouter key is saved in the Keychain.") }
+        return stored
+    }
+
+    private func authorized(_ url: URL, key: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData

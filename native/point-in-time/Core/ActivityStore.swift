@@ -253,13 +253,21 @@ public final class ActivityStore: @unchecked Sendable {
         }
     }
 
-    /// The most recent corrections whose block is still stored, newest first, each with the block's current content.
-    public func recentCorrections(limit: Int = ClassificationRequest.maxCorrections) throws -> [LabelCorrection] {
-        try locked {
+    /// The most recent corrections whose block is still stored, newest first, each with the block's current content. Only
+    /// a block's latest correction is returned, so a block corrected twice is not sent as two contradicting examples. With
+    /// `options`, only corrections of blocks a request under them may send count toward `limit`.
+    public func recentCorrections(sendableUnder options: ClassificationOptions? = nil,
+                                  limit: Int = ClassificationRequest.maxCorrections) throws -> [LabelCorrection] {
+        let excluded = options?.excludedBundleIDs.sorted() ?? []
+        let sendable = options == nil ? "" : " AND b.active_seconds > 0 AND b.dominant_bundle_id IS NOT NULL"
+            + (excluded.isEmpty ? "" : " AND b.dominant_bundle_id NOT IN (\(excluded.map { _ in "?" }.joined(separator: ", ")))")
+        return try locked {
             try connection.query("""
                 SELECT c.previous_label, c.new_label, c.note, c.created_at, \(Self.blockColumns(prefix: "b."))
-                FROM corrections c JOIN blocks b ON b.start = c.block_start ORDER BY c.created_at DESC, c.id DESC LIMIT ?
-                """, [.integer(Int64(limit))]).compactMap { row in
+                FROM corrections c JOIN blocks b ON b.start = c.block_start
+                WHERE c.id = (SELECT d.id FROM corrections d WHERE d.block_start = c.block_start ORDER BY d.created_at DESC, d.id DESC LIMIT 1)\(sendable)
+                ORDER BY c.created_at DESC, c.id DESC LIMIT ?
+                """, excluded.map { .text($0) } + [.integer(Int64(limit))]).compactMap { row in
                 guard let new = row[1].string.flatMap(BlockLabel.init(rawValue:)) else { return nil }
                 return LabelCorrection(block: Self.block(from: Array(row[4...])), previous: row[0].string.flatMap(BlockLabel.init(rawValue:)),
                                        new: new, note: row[2].string, at: Date(timeIntervalSince1970: row[3].double ?? 0))

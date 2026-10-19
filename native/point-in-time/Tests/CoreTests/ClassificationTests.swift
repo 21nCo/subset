@@ -405,6 +405,50 @@ private final class StubProvider: ClassificationProvider, @unchecked Sendable {
         #expect(((try payload(request))["recentCorrections"] as? [[String: Any]])?.first?["newLabel"] as? String == "neutral")
     }
 
+    @Test func theTwentyMostRecentSendableCorrectionsAreSentOncePerBlock() async throws {
+        let (directory, store, _, runner) = try setup(Array(0..<22) + [27])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 22..<27 { try store.save(specSegment(index, app: "com.example.secret")) }
+        for index in 0..<22 { try store.correct(blockStart: block(index).start, to: .focus, note: "first \(index)", at: t0.addingTimeInterval(Double(index))) }
+        // Block 21 is corrected again, then the newest corrections are of blocks in an app excluded since.
+        try store.correct(blockStart: block(21).start, to: .drift, note: "second 21", at: t0.addingTimeInterval(100))
+        for index in 22..<27 { try store.correct(blockStart: block(index).start, to: .neutral, note: nil, at: t0.addingTimeInterval(Double(100 + index))) }
+        let provider = StubProvider()
+        provider.answers = [.success(answer([(id(27), "focus", "ok", 0.9)]))]
+        let options = ClassificationOptions(includeWindowTitles: true, excludedBundleIDs: ["com.example.secret"])
+        #expect(await runner.runOnce(provider: provider, options: options))
+        let prompt = try #require(provider.prompts.first)
+        let start = try #require(prompt.range(of: "<activity>\n")), end = try #require(prompt.range(of: "\n</activity>"))
+        let sent = try #require(JSONSerialization.jsonObject(with: Data(prompt[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        let corrections = try #require(sent["recentCorrections"] as? [[String: Any]])
+        let ids = corrections.compactMap { ($0["block"] as? [String: Any])?["id"] as? String }
+        #expect(ids == (2...21).reversed().map(id))
+        #expect(corrections.first?["newLabel"] as? String == "drift")
+        #expect(corrections.first?["note"] as? String == "second 21")
+        #expect(!prompt.contains("com.example.secret"))
+        #expect(!prompt.contains("first 21"))
+    }
+
+    @Test func anOpenRouterKeyIsReadOnlyWhenABatchIsSent() async throws {
+        let (directory, _, clock, runner) = try setup([0])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keychain = KeychainDouble()
+        keychain.stored[true] = Data("sk-or-secret".utf8)
+        let transport = TransportDouble()
+        let content = answer([(id(0), "focus", "Spec work", 0.8)])
+        transport.body = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]])
+        let client = OpenRouterClient(keychain: KeychainSecret(service: "svc", account: "acct", api: keychain), model: "m", transport: transport)
+        // Block 0 has not settled yet: the queue runs with nothing to send and the key is not read.
+        clock.now = clock.now.addingTimeInterval(-60)
+        #expect(await runner.runOnce(provider: client, options: noExclusions) == false)
+        #expect(keychain.calls.isEmpty)
+        #expect(transport.requests.isEmpty)
+        clock.now = clock.now.addingTimeInterval(60)
+        #expect(await runner.runOnce(provider: client, options: noExclusions))
+        #expect(keychain.calls.filter { $0.1[kSecReturnData as String] as? Bool == true }.count == 1)
+        #expect(transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer sk-or-secret")
+    }
+
     @Test func aQueuedDeletionSendsNothing() async throws {
         final class Box: @unchecked Sendable { var pending = true }
         let box = Box()
@@ -656,6 +700,20 @@ private final class KeychainDouble: KeychainAPI, @unchecked Sendable {
             #expect(attributes[kSecAttrSynchronizable as String] as? Bool == false)
         }
         #expect(double.stored == [false: Data("sk-or-2".utf8)])
+    }
+
+    @Test func askingWhetherAKeyIsSavedNeverReadsIt() throws {
+        let double = KeychainDouble()
+        double.dataProtectionMissing = true
+        let secret = KeychainSecret(service: "svc", account: "acct", api: double)
+        #expect(try secret.exists() == false)
+        double.stored[false] = Data("sk-or-1".utf8)
+        #expect(try secret.exists())
+        let copies = double.calls.filter { $0.0 == "copy" }.map(\.1)
+        #expect(copies.count == 4)
+        #expect(copies.allSatisfy { $0[kSecReturnData as String] == nil && $0[kSecReturnAttributes as String] == nil })
+        double.failure = errSecAuthFailed
+        #expect(throws: KeychainError(status: errSecAuthFailed)) { try secret.exists() }
     }
 
     @Test func aKeyAnUnentitledBuildLeftInTheLoginKeychainIsFoundReplacedAndRemoved() throws {
@@ -931,6 +989,20 @@ private final class TransportDouble: HTTPTransport, @unchecked Sendable {
             guard case .network = error else { Issue.record("Expected a network error, got \(error)"); return }
             #expect(!String(describing: error).contains("sk-or-secret"))
         }
+    }
+
+    @Test func aMissingOrUnreadableKeySendsNothing() async throws {
+        let transport = TransportDouble()
+        let keychain = KeychainDouble()
+        let client = OpenRouterClient(keychain: KeychainSecret(service: "svc", account: "acct", api: keychain), model: "m", transport: transport)
+        await #expect(throws: ProviderError.notConfigured("No OpenRouter key is saved in the Keychain.")) {
+            try await client.complete(prompt: "p", schema: "{}")
+        }
+        keychain.failure = errSecAuthFailed
+        await #expect(throws: ProviderError.notConfigured("The OpenRouter key could not be read from the Keychain (Keychain error \(errSecAuthFailed)).")) {
+            try await client.complete(prompt: "p", schema: "{}")
+        }
+        #expect(transport.requests.isEmpty)
     }
 
     @Test func testKeyChecksTheKeyEndpointOnly() async throws {

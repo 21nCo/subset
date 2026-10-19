@@ -61,6 +61,17 @@ public struct KeychainSecret: Sendable {
         return nil
     }
 
+    /// Whether an item is stored, asked for without its data, so that it is never decrypted and never prompts.
+    public func exists() throws -> Bool {
+        for query in [dataProtection, login] {
+            let (status, _) = api.copyMatching(query.merging([kSecMatchLimit as String: kSecMatchLimitOne]) { $1 })
+            if status == errSecItemNotFound || status == errSecMissingEntitlement { continue }
+            guard status == errSecSuccess else { throw KeychainError(status: status) }
+            return true
+        }
+        return false
+    }
+
     public func save(_ value: String) throws {
         let data = Data(value.utf8)
         let protection: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,

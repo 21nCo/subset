@@ -144,8 +144,10 @@ public final class ClassificationRunner {
             guard !deletionPending() else { return false }
             let blocks = try store.pendingBlocks(completedBy: clock().addingTimeInterval(-Self.settleDelay), options: options,
                                                  limit: ClassificationRequest.maxBlocks)
-            guard let request = ClassificationRequest(blocks: blocks, memory: memory(), corrections: try store.recentCorrections(),
-                                                      options: options) else { return false }
+            let corrections = try store.recentCorrections(sendableUnder: options)
+            guard let request = ClassificationRequest(blocks: blocks, memory: memory(), corrections: corrections, options: options) else {
+                return false
+            }
             let text = try await provider.complete(prompt: request.prompt, schema: ClassificationRequest.responseSchema)
             let (accepted, rejected) = try request.validate(text)
             let finished = clock()
