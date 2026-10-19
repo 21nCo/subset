@@ -7,94 +7,146 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0E437A27CE247AB6504F0ADAD6557F6B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87EFAFFB2B3CC7D6F393D9FB239155B8 /* AppDelegate.swift */; };
-		1E4F67DF50085B03EE703D58BDE187E4 /* HopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26DE63D715C2D4E58A5EA7688E6F818F /* HopApp.swift */; };
-		3FCC998ADBC85A7A2706AB1B77F9EC33 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91DB628F5A546FC37AE0AE25C32E6A74 /* ShellCommand.swift */; };
-		4A1F179D4C6FCD081CCCAA8921E4164E /* CoreBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07BCF33CEDB0775E69D1DD36FA761C82 /* CoreBoundaryTests.swift */; };
-		4A2B0DB2D81B20BD4F8D518306810FB1 /* ShellCommandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579929BDB1602D7745CAC6BEE1695840 /* ShellCommandTests.swift */; };
-		55E9B122CBDA5B72E9808A5F6B1E4DF2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 855B9C95528BF5C633510CFE2441F213 /* SwiftUI.framework */; };
-		B0646BADDA8C0A371FDFBD2D8F6AE0EA /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6319178FAC47E27E14F080841303323D /* AppKit.framework */; };
-		E1644378E08FCF41060F7EEB8E46D3C7 /* StatusMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FA644F5F14EE649972C7DFAA46E9A1 /* StatusMenuController.swift */; };
-		FB1ED87C7D9C963EBCD8AB81E7533ADE /* libHopCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */; };
-		FDD87A859BAE767DFEDAE4D0E93D8C4C /* libHopCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */; };
-		FF78DBF5CE91363C7BDA21CD892EAF10 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 046968F174CCCE5D1BA10C79A5DF3B6B /* SettingsWindow.swift */; };
+		040E8EB015AD54B67084D949CA7BED58 /* SwitchSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB68DDC8B1A3E762CC0F2AA811014AF7 /* SwitchSession.swift */; };
+		075D807FF4F9C7F45A4452B7D5AAE2AD /* CoreBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23D4D87CAD7AE7498CAE8A37852DAA32 /* CoreBoundaryTests.swift */; };
+		1B048B4F1360269819AE630129963034 /* ShortcutRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9220F6E9B8336E336AEA9D46ACCCA5E6 /* ShortcutRecognizer.swift */; };
+		30DAFF8A091BF85510D733EAE1AA5ADB /* libHopCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */; };
+		39256FB1BD03FD58273BCC7326185BD4 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 855B9C95528BF5C633510CFE2441F213 /* SwiftUI.framework */; };
+		4419426CAAA555E3A666F300B0F41BAE /* EventClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C2FDDEF07E3C32E6C24A608160B06F1 /* EventClassifierTests.swift */; };
+		4DB153E31BC9A6CCD3C2851C09EC32E5 /* ShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 554F3C762EDFB924A49616227445FFD7 /* ShortcutTests.swift */; };
+		5CE9A050339CE2D0D26375CA9834C4F8 /* Shortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2A4C125FCA3E4E4E3C196FF477E59D0 /* Shortcut.swift */; };
+		630FBFC1C2387E6F91FA2955A80F4BF0 /* EventTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1D595EF82AB4A81985BDDEAC6105E9 /* EventTap.swift */; };
+		6BCDD2A41C223FE2166A87A3645533AD /* libHopCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */; };
+		84362CBD627D4BC8661F09BE8ADE8C7B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB622CB370B534FAB6A448ED8FAFFF9 /* AppDelegate.swift */; };
+		893EA832D0E44A0528C98B968B6B41FF /* AccessibilityGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68D1B8B9B9A394D3C663DB2B69A79A47 /* AccessibilityGateTests.swift */; };
+		99B5A931F23F5DF3DA2B323FBEFA43D0 /* HopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98E7EF63C0F1F9533EEF4723105C1A4C /* HopApp.swift */; };
+		AC47F42952FD63678BEF3A5ACBE1F70E /* StatusMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E59EEFD40EEFBE75DEDF253FC5395D51 /* StatusMenuController.swift */; };
+		B088E6463EA2028682B634700C432770 /* AccessibilityGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C520E85124CEA67D0DA823782F54075B /* AccessibilityGate.swift */; };
+		C29C2AC35E608B1930866F3A10D8D419 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2DD69E1C301C9AD7AB70C482F4A869D /* SettingsWindow.swift */; };
+		C3EF70DB4E8A4D4B74E6861B080EB885 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CDAB1ECA1D344A24379EDF0C5B5F740 /* ShellCommand.swift */; };
+		C52D9A89F25AD24E8F9FADCBB0DBB140 /* OnboardingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10BE23C46994C964E9DB2BA19775E06 /* OnboardingWindow.swift */; };
+		E438BF956306A3F2AB025AAFD7CC44FD /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6319178FAC47E27E14F080841303323D /* AppKit.framework */; };
+		E83055C65E9239888BD5483E89D11190 /* SwitchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B21D9528FB818ABCF550CAF811A3004 /* SwitchShortcut.swift */; };
+		EE4B0DD9EA1BE759CCD743E28829EDFC /* ShellCommandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B837E429CF4F3FF56ED80493EC665648 /* ShellCommandTests.swift */; };
+		EF20C30F312B273A226709B6F784DBE3 /* SwitchSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BC71B2C7F8CBB35E2A4FDF3F8646FBA /* SwitchSessionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		A5E7B071D4B1A008710C94A7F65EC415 /* PBXContainerItemProxy */ = {
+		A4AD6E47CB6E6497A24C83573066B957 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 6D894A1DAAED5BBF59E4E6EF48C7E30C /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = B7077EF46DCF8BAA09F76F3D67CB4291;
+			remoteGlobalIDString = 98328D79E460ADAD6480BD3CB0027DB7;
 			remoteInfo = HopCore;
 		};
-		ACE38008FE998A5968928C8275D9377E /* PBXContainerItemProxy */ = {
+		E5A7253EF52006947CEEDE35CA86074E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 6D894A1DAAED5BBF59E4E6EF48C7E30C /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = B7077EF46DCF8BAA09F76F3D67CB4291;
+			remoteGlobalIDString = 98328D79E460ADAD6480BD3CB0027DB7;
 			remoteInfo = HopCore;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		046968F174CCCE5D1BA10C79A5DF3B6B /* SettingsWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
-		07BCF33CEDB0775E69D1DD36FA761C82 /* CoreBoundaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CoreBoundaryTests.swift; sourceTree = "<group>"; };
-		26DE63D715C2D4E58A5EA7688E6F818F /* HopApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HopApp.swift; sourceTree = "<group>"; };
-		26FA644F5F14EE649972C7DFAA46E9A1 /* StatusMenuController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusMenuController.swift; sourceTree = "<group>"; };
+		23D4D87CAD7AE7498CAE8A37852DAA32 /* CoreBoundaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CoreBoundaryTests.swift; sourceTree = "<group>"; };
 		2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libHopCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		579929BDB1602D7745CAC6BEE1695840 /* ShellCommandTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommandTests.swift; sourceTree = "<group>"; };
+		2FB622CB370B534FAB6A448ED8FAFFF9 /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		3E06E6D6017D3DAC39CF8D09EB0E3575 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		554F3C762EDFB924A49616227445FFD7 /* ShortcutTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShortcutTests.swift; sourceTree = "<group>"; };
 		6319178FAC47E27E14F080841303323D /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
-		77E6D45CE0121EC7EE3DEF3462EFBDE3 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		68D1B8B9B9A394D3C663DB2B69A79A47 /* AccessibilityGateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AccessibilityGateTests.swift; sourceTree = "<group>"; };
+		6C2FDDEF07E3C32E6C24A608160B06F1 /* EventClassifierTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EventClassifierTests.swift; sourceTree = "<group>"; };
+		6CDAB1ECA1D344A24379EDF0C5B5F740 /* ShellCommand.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
 		855B9C95528BF5C633510CFE2441F213 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
-		87EFAFFB2B3CC7D6F393D9FB239155B8 /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		91DB628F5A546FC37AE0AE25C32E6A74 /* ShellCommand.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
+		8B21D9528FB818ABCF550CAF811A3004 /* SwitchShortcut.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SwitchShortcut.swift; sourceTree = "<group>"; };
+		8BC71B2C7F8CBB35E2A4FDF3F8646FBA /* SwitchSessionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SwitchSessionTests.swift; sourceTree = "<group>"; };
+		9220F6E9B8336E336AEA9D46ACCCA5E6 /* ShortcutRecognizer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShortcutRecognizer.swift; sourceTree = "<group>"; };
+		98E7EF63C0F1F9533EEF4723105C1A4C /* HopApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HopApp.swift; sourceTree = "<group>"; };
 		99D78E2F593142335A7277EE7AF191C7 /* HopCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HopCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B3B83B1EF8C5E9F3928BD5C6AA5F6D29 /* Hop.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = Hop.entitlements; sourceTree = "<group>"; };
+		AA1D595EF82AB4A81985BDDEAC6105E9 /* EventTap.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EventTap.swift; sourceTree = "<group>"; };
+		B10BE23C46994C964E9DB2BA19775E06 /* OnboardingWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OnboardingWindow.swift; sourceTree = "<group>"; };
+		B837E429CF4F3FF56ED80493EC665648 /* ShellCommandTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommandTests.swift; sourceTree = "<group>"; };
+		C520E85124CEA67D0DA823782F54075B /* AccessibilityGate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AccessibilityGate.swift; sourceTree = "<group>"; };
+		C8324248A1ADA6160104E2436A65E5D7 /* Hop.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = Hop.entitlements; sourceTree = "<group>"; };
+		D2A4C125FCA3E4E4E3C196FF477E59D0 /* Shortcut.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Shortcut.swift; sourceTree = "<group>"; };
+		D2DD69E1C301C9AD7AB70C482F4A869D /* SettingsWindow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		E59EEFD40EEFBE75DEDF253FC5395D51 /* StatusMenuController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusMenuController.swift; sourceTree = "<group>"; };
 		EC5F1F402F5FAF5032D84F0B8E552CEE /* Hop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Hop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FB68DDC8B1A3E762CC0F2AA811014AF7 /* SwitchSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SwitchSession.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		11D1D3D7FD1B3C1E4911D3FAC52193B6 /* Frameworks */ = {
+		5793254EF00003368248067E5FD2B3BE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FDD87A859BAE767DFEDAE4D0E93D8C4C /* libHopCore.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		1F9E72DF54E9BA70BB8E8DADB1B628B0 /* Frameworks */ = {
+		8C7B592128E60CA24017E426CCC4C57A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FB1ED87C7D9C963EBCD8AB81E7533ADE /* libHopCore.a in Frameworks */,
-				B0646BADDA8C0A371FDFBD2D8F6AE0EA /* AppKit.framework in Frameworks */,
-				55E9B122CBDA5B72E9808A5F6B1E4DF2 /* SwiftUI.framework in Frameworks */,
+				30DAFF8A091BF85510D733EAE1AA5ADB /* libHopCore.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		558FDB6DD27C2975BC92019E09F2AA2A /* Frameworks */ = {
+		AD3B532EC7FEB46D8564A5BDA5FF6282 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6BCDD2A41C223FE2166A87A3645533AD /* libHopCore.a in Frameworks */,
+				E438BF956306A3F2AB025AAFD7CC44FD /* AppKit.framework in Frameworks */,
+				39256FB1BD03FD58273BCC7326185BD4 /* SwiftUI.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		319C9CD6A1F4889C98B8416080F03A55 /* MacApp */ = {
+		03CEFA714D048FB5625BAD6E70329112 /* Core */ = {
 			isa = PBXGroup;
 			children = (
-				87EFAFFB2B3CC7D6F393D9FB239155B8 /* AppDelegate.swift */,
-				26DE63D715C2D4E58A5EA7688E6F818F /* HopApp.swift */,
-				046968F174CCCE5D1BA10C79A5DF3B6B /* SettingsWindow.swift */,
-				26FA644F5F14EE649972C7DFAA46E9A1 /* StatusMenuController.swift */,
-				77E6D45CE0121EC7EE3DEF3462EFBDE3 /* Info.plist */,
-				B3B83B1EF8C5E9F3928BD5C6AA5F6D29 /* Hop.entitlements */,
+				C520E85124CEA67D0DA823782F54075B /* AccessibilityGate.swift */,
+				6CDAB1ECA1D344A24379EDF0C5B5F740 /* ShellCommand.swift */,
+				D2A4C125FCA3E4E4E3C196FF477E59D0 /* Shortcut.swift */,
+				9220F6E9B8336E336AEA9D46ACCCA5E6 /* ShortcutRecognizer.swift */,
+				FB68DDC8B1A3E762CC0F2AA811014AF7 /* SwitchSession.swift */,
+			);
+			name = Core;
+			path = Core;
+			sourceTree = "<group>";
+		};
+		2B42F8761C95DAE9F68C325F2B8DD502 /* MacApp */ = {
+			isa = PBXGroup;
+			children = (
+				2FB622CB370B534FAB6A448ED8FAFFF9 /* AppDelegate.swift */,
+				AA1D595EF82AB4A81985BDDEAC6105E9 /* EventTap.swift */,
+				98E7EF63C0F1F9533EEF4723105C1A4C /* HopApp.swift */,
+				B10BE23C46994C964E9DB2BA19775E06 /* OnboardingWindow.swift */,
+				D2DD69E1C301C9AD7AB70C482F4A869D /* SettingsWindow.swift */,
+				E59EEFD40EEFBE75DEDF253FC5395D51 /* StatusMenuController.swift */,
+				8B21D9528FB818ABCF550CAF811A3004 /* SwitchShortcut.swift */,
+				3E06E6D6017D3DAC39CF8D09EB0E3575 /* Info.plist */,
+				C8324248A1ADA6160104E2436A65E5D7 /* Hop.entitlements */,
 			);
 			name = MacApp;
 			path = MacApp;
+			sourceTree = "<group>";
+		};
+		3061459F39D6B7D4B02EE6ACC8B6FCF6 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				68D1B8B9B9A394D3C663DB2B69A79A47 /* AccessibilityGateTests.swift */,
+				23D4D87CAD7AE7498CAE8A37852DAA32 /* CoreBoundaryTests.swift */,
+				6C2FDDEF07E3C32E6C24A608160B06F1 /* EventClassifierTests.swift */,
+				B837E429CF4F3FF56ED80493EC665648 /* ShellCommandTests.swift */,
+				554F3C762EDFB924A49616227445FFD7 /* ShortcutTests.swift */,
+				8BC71B2C7F8CBB35E2A4FDF3F8646FBA /* SwitchSessionTests.swift */,
+			);
+			name = Tests;
+			path = Tests/CoreTests;
 			sourceTree = "<group>";
 		};
 		36A3A7837E1DB9A3AABD5268307A9ABA /* Products */ = {
@@ -116,40 +168,21 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		68793B57FACC8A4167A9B8EEF6394C4B /* Tests */ = {
-			isa = PBXGroup;
-			children = (
-				07BCF33CEDB0775E69D1DD36FA761C82 /* CoreBoundaryTests.swift */,
-				579929BDB1602D7745CAC6BEE1695840 /* ShellCommandTests.swift */,
-			);
-			name = Tests;
-			path = Tests/CoreTests;
-			sourceTree = "<group>";
-		};
-		8AA05B872EEC742FC6456F886273C9BC /* Core */ = {
-			isa = PBXGroup;
-			children = (
-				91DB628F5A546FC37AE0AE25C32E6A74 /* ShellCommand.swift */,
-			);
-			name = Core;
-			path = Core;
-			sourceTree = "<group>";
-		};
 		CF51B51E46EE1085C1AA62B1596CB1BF = {
 			isa = PBXGroup;
 			children = (
 				36A3A7837E1DB9A3AABD5268307A9ABA /* Products */,
 				481E4EEDE9D9DB7D4995E1CF1D5C0D13 /* Frameworks */,
-				8AA05B872EEC742FC6456F886273C9BC /* Core */,
-				319C9CD6A1F4889C98B8416080F03A55 /* MacApp */,
-				68793B57FACC8A4167A9B8EEF6394C4B /* Tests */,
+				03CEFA714D048FB5625BAD6E70329112 /* Core */,
+				2B42F8761C95DAE9F68C325F2B8DD502 /* MacApp */,
+				3061459F39D6B7D4B02EE6ACC8B6FCF6 /* Tests */,
 			);
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXHeadersBuildPhase section */
-		B38003935872A9E216060E73AACD71CB /* Headers */ = {
+		292449590E55DF1640E470E25AA55EF2 /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -159,31 +192,49 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
-		57E515CA77DE5E269FA15C530336EB3C /* Hop */ = {
+		20E20D264EA912B7FDB8B6B793E69AE5 /* Hop */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = DCAC97812FA88513C7BACC8D3FD1C9E5 /* Build configuration list for PBXNativeTarget "Hop" */;
+			buildConfigurationList = 12747650979AEC6FCDB0027B2DE9652E /* Build configuration list for PBXNativeTarget "Hop" */;
 			buildPhases = (
-				D2BDE8195BD8D16AC0CB6E2D7292A4EF /* Sources */,
-				1F9E72DF54E9BA70BB8E8DADB1B628B0 /* Frameworks */,
-				C427E9867482477396126BBA2E44BB0C /* Resources */,
+				C3B01E7343AFF25FFAFE65A741E0AD2D /* Sources */,
+				AD3B532EC7FEB46D8564A5BDA5FF6282 /* Frameworks */,
+				664042249370A84A5203C6FCCBB048F5 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				BC00A827AF1722117A6697D7337A7FB4 /* PBXTargetDependency */,
+				5EFC413E3752B0FBD07CE8D3F573F236 /* PBXTargetDependency */,
 			);
 			name = Hop;
 			productName = Hop;
 			productReference = EC5F1F402F5FAF5032D84F0B8E552CEE /* Hop.app */;
 			productType = "com.apple.product-type.application";
 		};
-		B7077EF46DCF8BAA09F76F3D67CB4291 /* HopCore */ = {
+		21C7089A469CA1CA1FF8F3E39442C654 /* HopCoreTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 81437261DD960844F6B253D8B309C0CB /* Build configuration list for PBXNativeTarget "HopCore" */;
+			buildConfigurationList = 78D1FEB28D73D29279F35C341FFE8792 /* Build configuration list for PBXNativeTarget "HopCoreTests" */;
 			buildPhases = (
-				B38003935872A9E216060E73AACD71CB /* Headers */,
-				275927C5ECC8EFE5AE589D94DA030349 /* Sources */,
-				558FDB6DD27C2975BC92019E09F2AA2A /* Frameworks */,
+				E0736F28DB7C5646429B17EF02A2EFDA /* Sources */,
+				8C7B592128E60CA24017E426CCC4C57A /* Frameworks */,
+				5C7DBA29170A3C04A6AC7C7875696E06 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B81AEF333F1AFF0DF82B9A0E36D1D8FE /* PBXTargetDependency */,
+			);
+			name = HopCoreTests;
+			productName = HopCoreTests;
+			productReference = 99D78E2F593142335A7277EE7AF191C7 /* HopCoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		98328D79E460ADAD6480BD3CB0027DB7 /* HopCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 32F2A1D6A819E4E6CF8514FF56AD868A /* Build configuration list for PBXNativeTarget "HopCore" */;
+			buildPhases = (
+				292449590E55DF1640E470E25AA55EF2 /* Headers */,
+				3FA1B7C49651BD74D615846E66461298 /* Sources */,
+				5793254EF00003368248067E5FD2B3BE /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -194,24 +245,6 @@
 			productReference = 2D9239CC45CC89304A7CF87285D90B88 /* libHopCore.a */;
 			productType = "com.apple.product-type.library.static";
 		};
-		DF838F39F206630278C4C146A78A1C76 /* HopCoreTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = F7167559C7E4779EEFF7DBC405C77683 /* Build configuration list for PBXNativeTarget "HopCoreTests" */;
-			buildPhases = (
-				EC8FD750712C2ABCD6EE4A1E6A0AC36A /* Sources */,
-				11D1D3D7FD1B3C1E4911D3FAC52193B6 /* Frameworks */,
-				C7F0F49F33D283F2AEE509FBBF6500D4 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				505B6163F1C3D7C4E4EFDC76202D8E5C /* PBXTargetDependency */,
-			);
-			name = HopCoreTests;
-			productName = HopCoreTests;
-			productReference = 99D78E2F593142335A7277EE7AF191C7 /* HopCoreTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -221,10 +254,10 @@
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
-					57E515CA77DE5E269FA15C530336EB3C = {
+					20E20D264EA912B7FDB8B6B793E69AE5 = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					DF838F39F206630278C4C146A78A1C76 = {
+					21C7089A469CA1CA1FF8F3E39442C654 = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
@@ -244,22 +277,22 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				B7077EF46DCF8BAA09F76F3D67CB4291 /* HopCore */,
-				57E515CA77DE5E269FA15C530336EB3C /* Hop */,
-				DF838F39F206630278C4C146A78A1C76 /* HopCoreTests */,
+				98328D79E460ADAD6480BD3CB0027DB7 /* HopCore */,
+				20E20D264EA912B7FDB8B6B793E69AE5 /* Hop */,
+				21C7089A469CA1CA1FF8F3E39442C654 /* HopCoreTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		C427E9867482477396126BBA2E44BB0C /* Resources */ = {
+		5C7DBA29170A3C04A6AC7C7875696E06 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C7F0F49F33D283F2AEE509FBBF6500D4 /* Resources */ = {
+		664042249370A84A5203C6FCCBB048F5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -269,53 +302,64 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		275927C5ECC8EFE5AE589D94DA030349 /* Sources */ = {
+		3FA1B7C49651BD74D615846E66461298 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				3FCC998ADBC85A7A2706AB1B77F9EC33 /* ShellCommand.swift in Sources */,
+				B088E6463EA2028682B634700C432770 /* AccessibilityGate.swift in Sources */,
+				C3EF70DB4E8A4D4B74E6861B080EB885 /* ShellCommand.swift in Sources */,
+				5CE9A050339CE2D0D26375CA9834C4F8 /* Shortcut.swift in Sources */,
+				1B048B4F1360269819AE630129963034 /* ShortcutRecognizer.swift in Sources */,
+				040E8EB015AD54B67084D949CA7BED58 /* SwitchSession.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		D2BDE8195BD8D16AC0CB6E2D7292A4EF /* Sources */ = {
+		C3B01E7343AFF25FFAFE65A741E0AD2D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0E437A27CE247AB6504F0ADAD6557F6B /* AppDelegate.swift in Sources */,
-				1E4F67DF50085B03EE703D58BDE187E4 /* HopApp.swift in Sources */,
-				FF78DBF5CE91363C7BDA21CD892EAF10 /* SettingsWindow.swift in Sources */,
-				E1644378E08FCF41060F7EEB8E46D3C7 /* StatusMenuController.swift in Sources */,
+				84362CBD627D4BC8661F09BE8ADE8C7B /* AppDelegate.swift in Sources */,
+				630FBFC1C2387E6F91FA2955A80F4BF0 /* EventTap.swift in Sources */,
+				99B5A931F23F5DF3DA2B323FBEFA43D0 /* HopApp.swift in Sources */,
+				C52D9A89F25AD24E8F9FADCBB0DBB140 /* OnboardingWindow.swift in Sources */,
+				C29C2AC35E608B1930866F3A10D8D419 /* SettingsWindow.swift in Sources */,
+				AC47F42952FD63678BEF3A5ACBE1F70E /* StatusMenuController.swift in Sources */,
+				E83055C65E9239888BD5483E89D11190 /* SwitchShortcut.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		EC8FD750712C2ABCD6EE4A1E6A0AC36A /* Sources */ = {
+		E0736F28DB7C5646429B17EF02A2EFDA /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4A1F179D4C6FCD081CCCAA8921E4164E /* CoreBoundaryTests.swift in Sources */,
-				4A2B0DB2D81B20BD4F8D518306810FB1 /* ShellCommandTests.swift in Sources */,
+				893EA832D0E44A0528C98B968B6B41FF /* AccessibilityGateTests.swift in Sources */,
+				075D807FF4F9C7F45A4452B7D5AAE2AD /* CoreBoundaryTests.swift in Sources */,
+				4419426CAAA555E3A666F300B0F41BAE /* EventClassifierTests.swift in Sources */,
+				EE4B0DD9EA1BE759CCD743E28829EDFC /* ShellCommandTests.swift in Sources */,
+				4DB153E31BC9A6CCD3C2851C09EC32E5 /* ShortcutTests.swift in Sources */,
+				EF20C30F312B273A226709B6F784DBE3 /* SwitchSessionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		505B6163F1C3D7C4E4EFDC76202D8E5C /* PBXTargetDependency */ = {
+		5EFC413E3752B0FBD07CE8D3F573F236 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = HopCore;
-			target = B7077EF46DCF8BAA09F76F3D67CB4291 /* HopCore */;
-			targetProxy = A5E7B071D4B1A008710C94A7F65EC415 /* PBXContainerItemProxy */;
+			target = 98328D79E460ADAD6480BD3CB0027DB7 /* HopCore */;
+			targetProxy = E5A7253EF52006947CEEDE35CA86074E /* PBXContainerItemProxy */;
 		};
-		BC00A827AF1722117A6697D7337A7FB4 /* PBXTargetDependency */ = {
+		B81AEF333F1AFF0DF82B9A0E36D1D8FE /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = HopCore;
-			target = B7077EF46DCF8BAA09F76F3D67CB4291 /* HopCore */;
-			targetProxy = ACE38008FE998A5968928C8275D9377E /* PBXContainerItemProxy */;
+			target = 98328D79E460ADAD6480BD3CB0027DB7 /* HopCore */;
+			targetProxy = A4AD6E47CB6E6497A24C83573066B957 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		49BDB831C394EF462240FFEE01515A8A /* Release */ = {
+		510091832CA50EF041BFC2E294904E3A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -342,24 +386,7 @@
 			};
 			name = Release;
 		};
-		5F167537A77D2C2F0A5ECB05CCE1D3FD /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.hop.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Release;
-		};
-		69ECA7E72391EE38C8C48D91267390B6 /* Debug */ = {
+		B54671AA6E05A3B2EB4F86D126E2D7A3 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -378,7 +405,7 @@
 			};
 			name = Debug;
 		};
-		7134C7F0FD08EC2BCA02341A194F27BD /* Debug */ = {
+		BF79002D724258586DC31AC83C0B08C2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -393,9 +420,28 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 			};
-			name = Debug;
+			name = Release;
 		};
-		AA52F261AA87EF35A3D9E7F25C5DEAC3 /* Debug */ = {
+		C18EE5654EF0C14DD1E56DBA57B14D8D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_PREFIX = lib;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_MODULE_NAME = HopCore;
+				PRODUCT_NAME = HopCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		C5180EFEB2B6909429A4A19C0BE1BBFD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -415,6 +461,23 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.hop;
 				PRODUCT_MODULE_NAME = Hop;
 				PRODUCT_NAME = Hop;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		D9C610D6FB6E76D999E26DE57CF4971D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.hop.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -473,25 +536,6 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
-			};
-			name = Release;
-		};
-		E294E0C2F649ED9FAD19684565DB40F5 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_PREFIX = lib;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_MODULE_NAME = HopCore;
-				PRODUCT_NAME = HopCore;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -559,6 +603,24 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		12747650979AEC6FCDB0027B2DE9652E /* Build configuration list for PBXNativeTarget "Hop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				510091832CA50EF041BFC2E294904E3A /* Release */,
+				C5180EFEB2B6909429A4A19C0BE1BBFD /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		32F2A1D6A819E4E6CF8514FF56AD868A /* Build configuration list for PBXNativeTarget "HopCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C18EE5654EF0C14DD1E56DBA57B14D8D /* Release */,
+				B54671AA6E05A3B2EB4F86D126E2D7A3 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		3DB990BEECA968EC1F2524374FC16710 /* Build configuration list for PBXProject "Hop" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -568,29 +630,11 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		81437261DD960844F6B253D8B309C0CB /* Build configuration list for PBXNativeTarget "HopCore" */ = {
+		78D1FEB28D73D29279F35C341FFE8792 /* Build configuration list for PBXNativeTarget "HopCoreTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E294E0C2F649ED9FAD19684565DB40F5 /* Release */,
-				69ECA7E72391EE38C8C48D91267390B6 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		DCAC97812FA88513C7BACC8D3FD1C9E5 /* Build configuration list for PBXNativeTarget "Hop" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				49BDB831C394EF462240FFEE01515A8A /* Release */,
-				AA52F261AA87EF35A3D9E7F25C5DEAC3 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		F7167559C7E4779EEFF7DBC405C77683 /* Build configuration list for PBXNativeTarget "HopCoreTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				5F167537A77D2C2F0A5ECB05CCE1D3FD /* Release */,
-				7134C7F0FD08EC2BCA02341A194F27BD /* Debug */,
+				BF79002D724258586DC31AC83C0B08C2 /* Release */,
+				D9C610D6FB6E76D999E26DE57CF4971D /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

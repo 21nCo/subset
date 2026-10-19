@@ -3,7 +3,14 @@ import XCTest
 
 final class ShellCommandTests: XCTestCase {
     func testStatusMenuOffersSettingsAboutAndQuitInOrder() {
-        XCTAssertEqual(ShellCommand.allCases.map(\.title), ["Settings…", "About Hop", "Quit Hop"])
+        XCTAssertEqual(ShellCommand.statusMenu(trusted: true).map(\.title), ["Settings…", "About Hop", "Quit Hop"])
+    }
+
+    func testStatusMenuLeadsWithAccessibilityWhileUntrusted() {
+        XCTAssertEqual(
+            ShellCommand.statusMenu(trusted: false).map(\.title),
+            ["Allow Accessibility Access…", "Settings…", "About Hop", "Quit Hop"]
+        )
     }
 
     func testSettingsAndQuitUseTheStandardKeyEquivalents() {
@@ -12,8 +19,9 @@ final class ShellCommandTests: XCTestCase {
         XCTAssertEqual(ShellCommand.about.keyEquivalent, "")
     }
 
-    func testAboutAndQuitAreSeparatedFromSettings() {
-        XCTAssertEqual(ShellCommand.allCases.filter(\.startsGroup), [.about, .quit])
+    func testGroupsAreSeparated() {
+        XCTAssertEqual(ShellCommand.allCases.filter(\.startsGroup), [.settings, .about, .quit])
+        XCTAssertEqual(ShellCommand.grantAccessibility.keyEquivalent, "")
     }
 
     func testIdentityMatchesTheSharedDecisions() {

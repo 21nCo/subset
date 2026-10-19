@@ -1,27 +1,39 @@
 import AppKit
 import HopCore
 
-/// The menu bar item and its menu, built from `ShellCommand` so the menu and its tests share one list.
+/// The menu bar item and its menu, built from `ShellCommand` so the menu and its tests share one list. While Hop
+/// lacks the Accessibility permission, the item shows a warning symbol and the menu starts with a way to allow it.
 @MainActor
 final class StatusMenuController {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
+    private let perform: (ShellCommand) -> Void
 
-    init(perform: @escaping (ShellCommand) -> Void) {
-        let label = HopIdentity.appName
-        if let image = NSImage(systemSymbolName: "macwindow.on.rectangle", accessibilityDescription: label) {
+    init(perform: @escaping (ShellCommand) -> Void, ready: Bool) {
+        self.perform = perform
+        item.menu = menu
+        update(ready: ready)
+    }
+
+    /// Shows the normal state when the shortcut is running, or the needs-permission state when it is not.
+    func update(ready: Bool) {
+        let label = ready ? HopIdentity.appName : "\(HopIdentity.appName): needs Accessibility access"
+        let symbol = ready ? "macwindow.on.rectangle" : "exclamationmark.triangle"
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
             image.isTemplate = true
             item.button?.image = image
+            item.button?.title = ""
         } else {
-            item.button?.title = label
+            item.button?.image = nil
+            item.button?.title = ready ? HopIdentity.appName : "\(HopIdentity.appName) !"
         }
         item.button?.setAccessibilityLabel(label)
         item.button?.toolTip = label
-        for command in ShellCommand.allCases {
-            if command.startsGroup { menu.addItem(.separator()) }
+        menu.removeAllItems()
+        for command in ShellCommand.statusMenu(trusted: ready) {
+            if command.startsGroup, menu.numberOfItems > 0 { menu.addItem(.separator()) }
             menu.addItem(CommandMenuItem(command: command, perform: perform))
         }
-        item.menu = menu
     }
 }
 

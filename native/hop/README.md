@@ -2,19 +2,19 @@
 
 Hop is a menu-bar app for switching between individual windows from the keyboard: hold a shortcut to see the open windows with their app icons and titles, optionally with live previews, and release to bring one to the front. It is a Subset capability in the `planned` state.
 
-This folder holds the app shell ([SET-90](https://linear.app/21n/issue/SET-90)) of the Hop outcome ([SET-89](https://linear.app/21n/issue/SET-89)): a menu-bar app with a status menu and an empty Settings window, a testable `HopCore` package, a generated Xcode project, macOS CI, and a check that fails the build if Hop links a private macOS API. It does not read windows, install a shortcut, show a switcher, or capture the screen; those are SET-91 through SET-97.
+This folder holds the app shell ([SET-90](https://linear.app/21n/issue/SET-90)) of the Hop outcome ([SET-89](https://linear.app/21n/issue/SET-89)): a menu-bar app with a status menu and an empty Settings window, a testable `HopCore` package, a generated Xcode project, macOS CI, and a check that fails the build if Hop links a private macOS API. [SET-91](https://linear.app/21n/issue/SET-91) adds the Accessibility onboarding and the hold-to-switch shortcut (see [Shortcut and permission](#shortcut-and-permission)). Hop does not yet read windows, show a switcher, focus a window, or capture the screen; those are SET-92 through SET-97.
 
 ## Capability boundary
 
 **User outcome:** move to any open window, not just any app, from the keyboard.
 
-**Sources of truth** (planned; none is read by this shell):
+**Sources of truth** (only the shortcut is read so far):
 
 | Data | Source | Issue |
 | --- | --- | --- |
 | Windows, titles, and their apps | The Accessibility API (`AXUIElement`) of each running app, under the user's Accessibility permission | SET-92 |
 | Recency order | Focus changes Hop observes while it runs, kept in memory | SET-92 |
-| The hold-to-switch shortcut | A keyboard event tap, under the Accessibility permission | SET-91 |
+| The hold-to-switch shortcut | A keyboard event tap, under the Accessibility permission; the shortcut itself from user defaults | SET-91 (implemented) |
 | Live previews (opt-in) | ScreenCaptureKit, under the user's Screen Recording permission | SET-97 |
 | Settings | The app's user defaults | SET-95 |
 
@@ -25,7 +25,7 @@ Hop uses public macOS APIs only: no private CoreGraphics or SkyLight functions (
 | Operation | Kind | State |
 | --- | --- | --- |
 | Settings…, About Hop, Quit Hop | App shell | Implemented here |
-| Ask for Accessibility and install the hold-to-switch shortcut | Permission | Planned (SET-91) |
+| Ask for Accessibility and install the hold-to-switch shortcut | Permission | Implemented (SET-91); a committed switch only logs its index until SET-94 |
 | List switchable windows in recency order | Read | Planned (SET-92) |
 | Focus, minimize, close, or hide a window, or quit its app | Mutation of another app's window | Planned (SET-93) |
 | Show the switcher while the shortcut is held and switch on release | Read, then focus | Planned (SET-94) |
@@ -35,8 +35,8 @@ Hop uses public macOS APIs only: no private CoreGraphics or SkyLight functions (
 
 | Owner | Responsibility |
 | --- | --- |
-| `Core/` (`HopCore`) | Domain logic in pure Swift: no AppKit, SwiftUI, or ApplicationServices imports (`CoreBoundaryTests` checks this). Today it holds the app identity and the status menu's command list. |
-| `MacApp/` | The menu-bar host: the status item, the Settings window, and the About panel. Later issues put the Accessibility, event tap, and ScreenCaptureKit bridges here. |
+| `Core/` (`HopCore`) | Domain logic in pure Swift: no AppKit, SwiftUI, or ApplicationServices imports (`CoreBoundaryTests` checks this). It holds the app identity, the status menu's command list, the switch session state machine (`SwitchSession`), the shortcut and its store (`Shortcut`, `ShortcutStore`), the event classifier (`EventClassifier`, `ShortcutRecognizer`), and the permission state (`AccessibilityGate`). |
+| `MacApp/` | The menu-bar host: the status item, the Settings window, the About panel, the onboarding window, the Accessibility check, and the keyboard event tap (`EventTap`, driven by `SwitchShortcutController`). Later issues put the window list and ScreenCaptureKit bridges here. |
 
 No other app, package, or product imports this code.
 
@@ -76,7 +76,7 @@ The app is `LSUIElement` (menu bar only, no Dock icon), runs with the hardened r
 
 ## Permissions
 
-The shell asks for none. Later issues need:
+Hop asks for Accessibility (see [Shortcut and permission](#shortcut-and-permission)). The permissions Hop needs:
 
 | Permission | Why | Issue |
 | --- | --- | --- |
@@ -84,6 +84,33 @@ The shell asks for none. Later issues need:
 | Screen Recording | Live window previews, only after the user turns them on | SET-97 |
 
 The default mode needs only Accessibility.
+
+## Shortcut and permission
+
+**Permission.** The event tap is created only while `AXIsProcessTrusted()` is true. Hop samples trust at launch, whenever it becomes active, every 2 seconds while the onboarding window is open, and when the system disables the tap; it never polls otherwise. When trust is granted, Hop installs the tap and closes the onboarding window; when it is revoked, Hop removes the tap (cancelling any switch in progress) and the status item shows a warning symbol, "Hop: needs Accessibility access" as its label and tooltip, and an **Allow Accessibility Access…** item at the top of its menu. Revoking access while Hop is in the background is noticed at the next of those samples.
+
+**Onboarding.** The onboarding window opens by itself only on the first launch without trust (the `onboarding.shown` user default records that it has), and otherwise from **Allow Accessibility Access…**. It says that Hop needs Accessibility to see and raise windows and to notice its shortcut, and that nothing leaves the Mac. **Open Privacy & Security** calls `AXIsProcessTrustedWithOptions` with the prompt option, the public way to add Hop to the Accessibility list (macOS may show its own permission alert as well), and opens `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`.
+
+**Shortcut.** Hold ⌥ and press Tab to start a switch forward, or ⌥⇧Tab to start it backward. `ShortcutStore` reads the shortcut from the `shortcut.holdModifier` and `shortcut.keyCode` user defaults, which the Settings window will write (SET-95); a missing, malformed or disallowed value reads as the default. Only ⌥ or ⌃ can be held, with ⇧ for the backward direction; ⌘ is refused, because taking over ⌘Tab needs a private API. Esc and the modifier keys cannot be the shortcut key.
+
+**Event tap.** `CGEvent.tapCreate` at `.cgSessionEventTap`, inserted at the head, for key-down, key-up and flags-changed events, on the main run loop in the common modes. Every event goes through `ShortcutRecognizer`, which is pure and unit-tested, and the tap does only what it returns:
+
+| Input | Idle | Switch active |
+| --- | --- | --- |
+| The shortcut (⌥Tab), with at least one window | Swallowed; starts the switch on the previous window (index 1, or 0 with one window) | Swallowed; next window |
+| The shortcut with ⇧ (⌥⇧Tab) | Swallowed; starts the switch on the oldest window | Swallowed; previous window |
+| → / ← | Passes | Swallowed; next / previous window |
+| Esc | Passes | Swallowed; cancels |
+| Release of the holding modifier | Passes | Passes; commits the selection |
+| Any other key, or the shortcut with other modifiers (⌃Tab, ⌘⌥Tab) | Passes | Passes |
+| Key-up | Swallowed exactly when its key-down was, even after the switch ended | Same |
+| The tap disabled by the system (timeout or user input) | Re-enabled at once | Re-enabled at once; cancels |
+
+Modifier changes always pass, so no app sees a modifier stuck down. Selections wrap around; a window list that shrinks below the selection clamps it, and one that empties cancels the switch. A key event that arrives without the holding modifier while a switch is active means its release was missed, so the switch commits and the event passes. If the system disables the tap and trust is gone, the tap is removed instead of re-enabled.
+
+Until the window list arrives (SET-92), the session's window count is the number of running apps with a Dock presence (`WindowCountPlaceholder`), updated when an app launches or quits, so a switch can start and commit; with none, ⌥Tab passes through. Until the overlay and focusing arrive (SET-94), a committed switch only logs its index at debug level (`log stream --level debug --predicate 'subsystem == "dev.subset.hop"'`), and a cancelled one logs that it was cancelled. Nothing about a window, and never a title, is logged.
+
+**Not verified here.** Creating the tap needs a trusted process, so the tap itself, the permission prompt and System Settings link, revocation while running, and behavior with real apps, displays and Spaces are checked in SET-98; VoiceOver and keyboard-only use of the onboarding window in SET-99. Unit tests cover the state machine, the classifier, the shortcut store and the permission state.
 
 ## Superfunctions evaluated
 
