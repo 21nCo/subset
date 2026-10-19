@@ -1,10 +1,12 @@
 /// What the menu bar item shows: the whole machine's CPU use, and memory pressure.
 public struct StatusSummary: Equatable, Sendable {
-    /// The machine's CPU share (0–100), or `nil` when it is not measured yet or sampling is failing.
+    /// The machine's CPU share (0–100), or `nil` when it is not measured yet, unavailable, or sampling is failing.
     public let cpuPercent: Double?
     public let pressure: MemoryPressure?
     /// The latest sample failed, so the previous CPU figure is not current.
     public let samplingFailed: Bool
+    /// Fewer than two samples have succeeded, so a missing CPU figure is still to come rather than unavailable.
+    public let cpuNotMeasuredYet: Bool
 
     /// Pass `samplingFailed` while the latest sample failed: the menu bar then shows CPU as unavailable instead of
     /// the last successful sample's figure.
@@ -12,6 +14,7 @@ public struct StatusSummary: Equatable, Sendable {
         cpuPercent = samplingFailed ? nil : snapshot?.machineCPUPercent
         pressure = memory?.pressure
         self.samplingFailed = samplingFailed
+        cpuNotMeasuredYet = snapshot?.isFirstSample ?? true
     }
 
     public var cpuText: String { cpuPercent.map { "\(Int($0.rounded()))%" } ?? "–" }
@@ -47,6 +50,7 @@ public struct StatusSummary: Equatable, Sendable {
 
     private var cpuDescription: String {
         if cpuPercent != nil { return cpuText }
-        return samplingFailed ? "unavailable, sampling failed" : "not measured yet"
+        if samplingFailed { return "unavailable, sampling failed" }
+        return cpuNotMeasuredYet ? "not measured yet" : "unavailable"
     }
 }

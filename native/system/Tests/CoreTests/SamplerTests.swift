@@ -149,8 +149,11 @@ final class SamplerTests: XCTestCase {
             logicalCoreCount: 4
         )
 
-        XCTAssertNil(try sampler.sample().machineCPUPercent, "a first sample has no previous ticks")
+        let first = try sampler.sample()
+        XCTAssertNil(first.machineCPUPercent, "a first sample has no previous ticks")
+        XCTAssertTrue(first.isFirstSample)
         let snapshot = try sampler.sample()
+        XCTAssertFalse(snapshot.isFirstSample)
         XCTAssertNil(snapshot.processes[0].cpuPercent)
         XCTAssertEqual(try XCTUnwrap(snapshot.machineCPUPercent), 75, accuracy: 1e-9)
     }

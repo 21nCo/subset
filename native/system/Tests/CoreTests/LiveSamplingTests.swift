@@ -21,13 +21,15 @@ final class LiveSamplingTests: XCTestCase {
         XCTAssertNil(first.machineCPUPercent)
 
         // Burn some CPU so the second sample has a measurable delta. The kernel folds ticks into the host counters
-        // lazily (gaps near a second are normal on an idle Mac), so keep spinning until they have moved.
+        // lazily (gaps near a second are normal on an idle Mac), so keep spinning until a reading shows they have
+        // moved. A failed reading shows nothing, so it does not end the wait.
         let hostCPU = LiveHostCPUSource()
         let firstTicks = try XCTUnwrap(hostCPU.read())
         let minimum = Date().addingTimeInterval(0.2)
         let deadline = Date().addingTimeInterval(5)
+        func ticksMoved() -> Bool { hostCPU.read().map { $0 != firstTicks } ?? false }
         var spin = 0
-        while Date() < minimum || (hostCPU.read() == firstTicks && Date() < deadline) { spin &+= 1 }
+        while Date() < minimum || (!ticksMoved() && Date() < deadline) { spin &+= 1 }
         XCTAssertNotEqual(spin, 0)
 
         let second = try sampler.sample()
@@ -37,8 +39,14 @@ final class LiveSamplingTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(again.cpuPercent), 0)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(again.totalCPUTime), try XCTUnwrap(mine.totalCPUTime))
         #if arch(arm64)
-        // The spin is this process's own work, so its own energy rises (Intel Macs may report zero).
-        XCTAssertGreaterThan(try XCTUnwrap(again.energy), try XCTUnwrap(mine.energy))
+        // The spin is this process's own work, so its own energy rises wherever the host reports energy (Intel Macs
+        // may report zero). A virtual machine, such as GitHub's macos-26 runner, reports zero in both samples: no
+        // energy reading, so nothing to compare.
+        let energyBefore = try XCTUnwrap(mine.energy)
+        let energyAfter = try XCTUnwrap(again.energy)
+        if energyBefore != 0 || energyAfter != 0 {
+            XCTAssertGreaterThan(energyAfter, energyBefore)
+        }
         #endif
         XCTAssertGreaterThan(second.logicalCoreCount, 0)
         // The host's ticks saw this process spin, so the machine was measurably busy, and never more than all of it.

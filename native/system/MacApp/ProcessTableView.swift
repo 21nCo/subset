@@ -31,8 +31,11 @@ struct ProcessTableView: View {
         .frame(minWidth: 640, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
     }
 
+    /// Rows without a value in the sorted column come last in either direction.
     private var rows: [ProcessFacts] {
-        (monitor.snapshot?.processes ?? []).sorted(using: sortOrder)
+        let sorted = (monitor.snapshot?.processes ?? []).sorted(using: sortOrder)
+        guard let key = sortOrder.first?.keyPath else { return sorted }
+        return sorted.filter { $0.hasValue(for: key) } + sorted.filter { !$0.hasValue(for: key) }
     }
 
     private func unavailable(_ process: ProcessFacts) -> String {
@@ -91,10 +94,20 @@ private enum Format {
     }
 }
 
-/// Non-optional sort keys: unavailable values sort below every measured one.
+/// Non-optional sort keys: unavailable values sort below every measured one, and `rows` moves them last.
 private extension ProcessFacts {
     var cpuSortKey: Double { cpuPercent ?? -1 }
     var memorySortKey: Int64 { physFootprint.map { Int64(clamping: $0) } ?? -1 }
     var cpuTimeSortKey: Int64 { totalCPUTime.map { Int64(clamping: $0) } ?? -1 }
     var energySortKey: Int64 { energy.map { Int64(clamping: $0) } ?? -1 }
+
+    func hasValue(for sortKey: PartialKeyPath<ProcessFacts>) -> Bool {
+        switch sortKey {
+        case \ProcessFacts.cpuSortKey: cpuPercent != nil
+        case \ProcessFacts.memorySortKey: physFootprint != nil
+        case \ProcessFacts.cpuTimeSortKey: totalCPUTime != nil
+        case \ProcessFacts.energySortKey: energy != nil
+        default: true
+        }
+    }
 }

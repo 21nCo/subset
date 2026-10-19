@@ -10,6 +10,8 @@ public struct ProcessSnapshot: Equatable, Sendable {
     /// The whole machine's busy share (0–100) since the previous sample, from the host's CPU ticks, so it includes
     /// processes whose own usage is restricted. `nil` on the first sample or when the ticks could not be read.
     public let machineCPUPercent: Double?
+    /// No earlier sample succeeded, so no CPU figure exists yet; on a later sample a `nil` CPU is unavailable.
+    public let isFirstSample: Bool
 }
 
 /// Turns consecutive raw samples into snapshots. CPU percent for a process is its CPU time delta over the
@@ -38,6 +40,7 @@ public struct Sampler {
         let raw = try source.sample()
         let ticks = hostCPU?.read()
         let uptime = raw.timebase.nanoseconds(raw.timestamp)
+        let isFirstSample = previous == nil
         var cpuTimes: [ProcessIdentity: UInt64] = [:]
         var seen = Set<ProcessIdentity>()
         var processes: [ProcessFacts] = []
@@ -63,7 +66,8 @@ public struct Sampler {
             uptime: uptime,
             processes: processes,
             logicalCoreCount: logicalCoreCount,
-            machineCPUPercent: machineCPUPercent
+            machineCPUPercent: machineCPUPercent,
+            isFirstSample: isFirstSample
         )
     }
 
