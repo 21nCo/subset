@@ -8,32 +8,34 @@ public struct GroupTotals: Equatable, Sendable {
     public let memory: MetricTotal<UInt64>
     /// CPU percent, where 100 is one fully used logical core.
     public let cpuPercent: MetricTotal<Double>
-    /// The members' own energy (`ri_energy_nj`) in nanojoules since each started.
+    /// The group's energy: nanojoules billed to the members (`ri_billed_energy`), the sum SET-42 specifies. It
+    /// covers work other processes did on the members' behalf, so it is not the members' own energy use.
     public let energy: MetricTotal<UInt64>
-    /// Nanojoules billed to the members for other processes' work on their behalf (`ri_billed_energy`). SET-42 asked
-    /// for this sum as the group's energy; SET-40 found it is not a process's own energy, so `energy` carries that.
-    public let billedEnergy: MetricTotal<UInt64>
+    /// The members' own energy (`ri_energy_nj`) in nanojoules since each started, the figure the process table
+    /// shows as Energy Used.
+    public let ownEnergy: MetricTotal<UInt64>
 
     init<Members: Sequence>(_ members: Members) where Members.Element == ProcessFacts {
-        var count = 0, restricted = 0
+        var count = 0
+        var restricted = 0
         var memory = MetricTotal<UInt64>.Builder(isApproximate: true)
         var cpu = MetricTotal<Double>.Builder()
-        var energy = MetricTotal<UInt64>.Builder()
         var billed = MetricTotal<UInt64>.Builder()
+        var own = MetricTotal<UInt64>.Builder()
         for process in members {
             count += 1
             if process.restricted { restricted += 1 }
             memory.add(process.physFootprint) { $0.addingSaturating($1) }
             cpu.add(process.cpuPercent) { $0 + $1 }
-            energy.add(process.energy) { $0.addingSaturating($1) }
             billed.add(process.billedEnergy) { $0.addingSaturating($1) }
+            own.add(process.energy) { $0.addingSaturating($1) }
         }
         processCount = count
         restrictedCount = restricted
         self.memory = memory.total
         cpuPercent = cpu.total
-        self.energy = energy.total
-        billedEnergy = billed.total
+        energy = billed.total
+        ownEnergy = own.total
     }
 }
 

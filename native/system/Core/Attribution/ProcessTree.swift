@@ -88,6 +88,51 @@ public struct FileSystemProjectMarkers: ProjectMarkerLookup {
     }
 }
 
+/// A mounted volume: where it is mounted, and whether it is on a local disk (`MNT_LOCAL`).
+public struct MountPoint: Equatable, Sendable {
+    public let path: String
+    public let isLocal: Bool
+
+    public init(path: String, isLocal: Bool) {
+        self.path = path
+        self.isLocal = isLocal
+    }
+}
+
+/// Lists the mounted volumes. `Attribution` reads the table once per call and looks for project markers only on
+/// local volumes, since a hung network or FUSE volume can block `lstat` indefinitely.
+public protocol MountTableReading: Sendable {
+    func mounts() -> [MountPoint]
+}
+
+/// Reads the mount table with `getmntinfo(MNT_NOWAIT)`, which returns the kernel's cached figures without asking
+/// any file system, so a hung volume cannot block it.
+public struct SystemMountTable: MountTableReading {
+    public init() {}
+
+    public func mounts() -> [MountPoint] {
+        var buffer: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&buffer, MNT_NOWAIT)
+        guard count > 0, let buffer else { return [] }
+        return UnsafeBufferPointer(start: buffer, count: Int(count)).map { volume in
+            var name = volume.f_mntonname
+            let path = withUnsafeBytes(of: &name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            return MountPoint(path: path, isLocal: volume.f_flags & UInt32(MNT_LOCAL) != 0)
+        }
+    }
+}
+
+/// A fixed mount table for tests.
+public struct FixtureMountTable: MountTableReading {
+    public let points: [MountPoint]
+
+    public init(_ points: [MountPoint] = [MountPoint(path: "/", isLocal: true)]) {
+        self.points = points
+    }
+
+    public func mounts() -> [MountPoint] { points }
+}
+
 /// Fixture markers: folders mapped to the marker names they hold, counting lookups.
 public final class FixtureProjectMarkers: ProjectMarkerLookup, @unchecked Sendable {
     @Locked public var folders: [String: Set<String>]

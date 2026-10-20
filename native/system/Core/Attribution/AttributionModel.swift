@@ -85,9 +85,9 @@ public enum LaunchSourceRule: Equatable, Sendable {
 public enum ProjectRule: Equatable, Sendable {
     /// The nearest folder at or above the working directory holding a project marker.
     case marker
-    /// No folder holds a marker, so the working directory itself.
+    /// No folder holds a marker, or the walk stopped at a volume that is not local, so the working directory itself.
     case workingDirectory
-    /// The working directory is unavailable, not read yet, or `/`.
+    /// The working directory is unavailable, not read yet, or not an absolute path.
     case none
 
     public var confidence: AttributionConfidence {
@@ -242,6 +242,8 @@ public enum AttributionEvidence: Equatable, Sendable {
     case workingDirectoryUnavailable(SignalFailure?)
     /// The project marker found, and the folder holding it.
     case projectMarker(directory: String, marker: String)
+    /// Project markers were not looked for on the volume mounted here, or above it, because it is not a local disk.
+    case projectMarkersSkipped(volume: String)
 }
 
 /// A later App rule that also matched and points at another group. Recorded so the UI can show the disagreement;

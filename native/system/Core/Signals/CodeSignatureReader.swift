@@ -115,7 +115,8 @@ public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked S
 public struct SecCodeSignatureReader: CodeSignatureReading {
     public init() {}
 
-    public func codeSignature(of identity: ProcessIdentity, executablePath: String?) -> Signal<CodeSignature> {
+    /// Reads the running code by PID; the executable path is not needed.
+    public func codeSignature(of identity: ProcessIdentity, executablePath _: String?) -> Signal<CodeSignature> {
         var code: SecCode?
         let attributes = [kSecGuestAttributePid: NSNumber(value: identity.pid)] as CFDictionary
         let guestStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)

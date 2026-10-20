@@ -1,14 +1,17 @@
 /// Places every process of one sample in exactly one group per layer (App, Vendor, Launch source, Project), with the
 /// rule, evidence, and confidence behind each placement, and sums each group's usage from its members. Deterministic:
-/// the same processes, launchd jobs, and project markers always give the same groups. Ancestor questions are answered
-/// for the whole sample at once from a parent index, so a sample costs linear time.
+/// the same processes, launchd jobs, project markers, and mount table always give the same groups. Ancestor questions
+/// are answered for the whole sample at once from a parent index, so a sample costs linear time.
 public struct Attribution: Sendable {
     public let projectMarkers: any ProjectMarkerLookup
+    public let mountTable: any MountTableReading
     public let containerVM: (any ContainerVMRecognizing)?
 
     public init(projectMarkers: any ProjectMarkerLookup = FileSystemProjectMarkers(),
+                mountTable: any MountTableReading = SystemMountTable(),
                 containerVM: (any ContainerVMRecognizing)? = nil) {
         self.projectMarkers = projectMarkers
+        self.mountTable = mountTable
         self.containerVM = containerVM
     }
 
@@ -18,7 +21,8 @@ public struct Attribution: Sendable {
     public func attribute(_ processes: [ProcessFacts], launchdJobs: [LaunchdJob] = []) -> AttributionResult {
         var seen = Set<ProcessIdentity>()
         let unique = processes.filter { seen.insert($0.identity).inserted }
-        let pass = AttributionPass(unique, launchdJobs: launchdJobs, markers: projectMarkers, containerVM: containerVM)
+        let pass = AttributionPass(unique, launchdJobs: launchdJobs, markers: projectMarkers, mounts: mountTable.mounts(),
+                                   containerVM: containerVM)
         let attributions = pass.run()
         return AttributionResult(
             processes: unique,
@@ -88,6 +92,14 @@ private struct ProjectFinding {
     }
 }
 
+/// The result of looking for a project marker at and above a folder.
+private struct MarkerSearch {
+    /// The nearest folder holding a marker, and the marker.
+    let hit: (directory: String, marker: String)?
+    /// Where the non-local volume the walk stopped at is mounted, when it stopped before finding a marker or `/`.
+    let skippedVolume: String?
+}
+
 /// A launch source a process has on its own, before inheritance.
 private struct LaunchFinding {
     let origin: Origin
@@ -100,7 +112,8 @@ private final class AttributionPass {
     private let markers: any ProjectMarkerLookup
     private let containerVM: (any ContainerVMRecognizing)?
     private let orphanedByLabel: [String: [LaunchdJob]]
-    private var markerCache: [String: (directory: String, marker: String)?] = [:]
+    private let mounts: [MountPoint]
+    private var markerCache: [String: MarkerSearch] = [:]
 
     /// Each process's outermost app bundle.
     private let bundles: [String?]
@@ -113,17 +126,16 @@ private final class AttributionPass {
     /// Each coalition's earliest-started member.
     private var coalitionLeaders: [UInt64: Int] = [:]
 
-    init(_ processes: [ProcessFacts], launchdJobs: [LaunchdJob], markers: any ProjectMarkerLookup,
+    init(_ processes: [ProcessFacts], launchdJobs: [LaunchdJob], markers: any ProjectMarkerLookup, mounts: [MountPoint],
          containerVM: (any ContainerVMRecognizing)?) {
         tree = ProcessTree(processes)
         self.markers = markers
+        self.mounts = mounts
         self.containerVM = containerVM
         orphanedByLabel = Dictionary(grouping: launchdJobs.filter(\.orphaned), by: \.label)
         bundles = processes.map { $0.executablePath.flatMap(Self.outermostAppBundle) }
         agentNames = processes.map(Self.agentName)
-        terminalApps = bundles.map { bundle in
-            bundle.flatMap { path in AttributionNames.terminals.first { $0.bundleName == Self.lastComponent(path) } }
-        }
+        terminalApps = bundles.map { $0.flatMap(Self.knownTerminal(bundlePath:)) }
     }
 
     func run() -> [ProcessAttribution] {
@@ -162,13 +174,29 @@ private final class AttributionPass {
             origin: .unattributed(executable: process.executablePath ?? process.name),
             evidence: [.executable(path: process.executablePath, name: process.name), signatureEvidence(process)]
         )
-        // Only the signals that name an app or a job can disagree with the winner; a Team ID or Homebrew path that
-        // follows an app bundle describes the same code, not another origin.
         let conflicts = candidates.dropFirst()
-            .filter { [.responsibleProcess, .launchdJob].contains($0.rule) && $0.origin != winner.origin }
+            .filter { Self.disagrees($0, with: winner) }
             .map { AttributionConflict(rule: $0.rule, group: OriginGroupID($0.origin, subgroup: $0.subgroup), evidence: $0.evidence) }
         return Placement(winner.origin, subgroup: winner.subgroup, rule: winner.rule, confidence: winner.rule.confidence,
                          evidence: winner.evidence, conflicts: Array(conflicts))
+    }
+
+    /// Whether a later candidate names another origin than the winner, and so is recorded as a conflict. The
+    /// responsible process, the coalition leader, and a launchd job's owning app name an app, which disagrees with
+    /// any other group. A Team ID (rule 9, or rule 7 for a job outside an app bundle) names who signed the code: it
+    /// disagrees with a winner that names no signer (macOS, a container VM, an agent, a terminal, Homebrew), not
+    /// with an app bundle, which is that signed code, or with an app found through a signal. A Homebrew path only
+    /// restates the executable's location and never disagrees.
+    private static func disagrees(_ candidate: Candidate, with winner: Candidate) -> Bool {
+        guard candidate.origin != winner.origin else { return false }
+        switch (candidate.rule, candidate.origin) {
+        case (.responsibleProcess, _), (.launchdJob, .app):
+            return true
+        case (.launchdJob, .team), (.signingTeam, _):
+            return [.macOS, .containerVM, .codingAgent, .terminalSession, .homebrew].contains(winner.rule)
+        default:
+            return false
+        }
     }
 
     /// Every App rule from 1 to 9 that matches, in precedence order. Rule 6 may give two: the responsible process,
@@ -335,31 +363,42 @@ private final class AttributionPass {
         }
         var directory = cwd
         while directory.count > 1, directory.hasSuffix("/") { directory.removeLast() }
-        // `/` is where launchd starts every job and app; it is no project.
-        guard directory.hasPrefix("/"), directory != "/" else {
+        guard directory.hasPrefix("/") else {
             return ProjectFinding(origin: .noProject, rule: .none, evidence: [.workingDirectory(cwd)])
         }
-        if let hit = marker(atOrAbove: directory) {
+        let search = markerSearch(atOrAbove: directory)
+        if let hit = search.hit {
             return ProjectFinding(origin: .project(path: hit.directory), rule: .marker,
                                   evidence: [.workingDirectory(cwd), .projectMarker(directory: hit.directory, marker: hit.marker)])
         }
-        return ProjectFinding(origin: .project(path: directory), rule: .workingDirectory, evidence: [.workingDirectory(cwd)])
+        let skipped = search.skippedVolume.map { [AttributionEvidence.projectMarkersSkipped(volume: $0)] } ?? []
+        return ProjectFinding(origin: .project(path: directory), rule: .workingDirectory, evidence: [.workingDirectory(cwd)] + skipped)
     }
 
-    /// The nearest folder at or above `directory`, below `/`, holding a project marker. Each folder is looked in
-    /// at most once per pass.
-    private func marker(atOrAbove directory: String) -> (directory: String, marker: String)? {
+    /// The nearest folder at or above `directory`, `/` included, holding a project marker. Only local volumes are
+    /// looked in: the walk stops at the first folder on another volume, since a hung network or FUSE volume can
+    /// block `lstat` indefinitely. Each folder is looked in at most once per pass.
+    private func markerSearch(atOrAbove directory: String) -> MarkerSearch {
         var visited: [String] = []
-        var current = directory
-        var hit: (directory: String, marker: String)?
-        while current != "/" {
-            if let cached = markerCache[current] { hit = cached; break }
-            visited.append(current)
-            if let marker = markers.marker(in: current) { hit = (current, marker); break }
-            current = Self.parentFolder(current)
+        var current: String? = directory
+        var search = MarkerSearch(hit: nil, skippedVolume: nil)
+        while let folder = current {
+            if let cached = markerCache[folder] { search = cached; break }
+            visited.append(folder)
+            if let volume = remoteVolume(containing: folder) { search = MarkerSearch(hit: nil, skippedVolume: volume); break }
+            if let marker = markers.marker(in: folder) { search = MarkerSearch(hit: (folder, marker), skippedVolume: nil); break }
+            current = folder == "/" ? nil : Self.parentFolder(folder)
         }
-        for folder in visited { markerCache[folder] = .some(hit) }
-        return hit
+        for folder in visited { markerCache[folder] = search }
+        return search
+    }
+
+    /// Where the volume holding `folder` is mounted, when that volume is not local. The deepest mount containing the
+    /// folder holds it; an empty mount table treats every folder as local.
+    private func remoteVolume(containing folder: String) -> String? {
+        let containing = mounts.filter { Self.isInside(folder, $0.path) }
+        let depth = containing.map(\.path.count).max()
+        return containing.first { $0.path.count == depth && !$0.isLocal }?.path
     }
 
     // MARK: Paths and names
@@ -408,6 +447,16 @@ private final class AttributionPass {
         if parts.starts(with: ["usr", "local", "Cellar"]), parts.count > 4 { return parts[3] }
         if parts.starts(with: ["opt", "homebrew"]), parts.count > 4, ["Cellar", "opt", "Caskroom"].contains(parts[2]) { return parts[3] }
         return nil
+    }
+
+    static func knownTerminal(bundlePath: String) -> KnownTerminal? {
+        let bundleName = lastComponent(bundlePath)
+        return AttributionNames.terminals.first { $0.bundleName == bundleName }
+    }
+
+    /// Whether `path` is `folder` or inside it, by whole path components.
+    static func isInside(_ path: String, _ folder: String) -> Bool {
+        folder == "/" || path == folder || path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
     }
 
     static func appBundleAgentPath(_ job: LaunchdJob) -> String? {

@@ -259,7 +259,8 @@ final class AttributionTests: XCTestCase {
     // MARK: Rule 6, responsible process or coalition
 
     func testTheResponsibleProcessThenTheCoalitionLeaderNameTheApp() {
-        let foo = "/Applications/Foo.app", bar = "/Applications/Bar.app"
+        let foo = "/Applications/Foo.app"
+        let bar = "/Applications/Bar.app"
         let result = attribute([
             fact(800, start: 10, path: "\(foo)/Contents/MacOS/Foo", signature: unsigned, coalition: 80),
             fact(801, start: 5, path: "\(bar)/Contents/MacOS/Bar", signature: unsigned, coalition: 81),
@@ -289,6 +290,30 @@ final class AttributionTests: XCTestCase {
 
         XCTAssertEqual(placement(result, 811).app.group, OriginGroupID(.app(bundlePath: chrome)))
         XCTAssertEqual(placement(result, 811).app.conflicts.map(\.rule), [.responsibleProcess])
+    }
+
+    func testASigningTeamDisagreesWithATerminalOrAgentButNotWithItsOwnAppBundle() {
+        let foo = "/Applications/Foo.app"
+        let helperJob = LaunchdJob(label: "com.example.helper", plistPath: "/Users/me/Library/LaunchAgents/com.example.helper.plist",
+                                   domain: .userAgent, program: "\(foo)/Contents/MacOS/FooHelper",
+                                   resolution: .resolved("\(foo)/Contents/MacOS/FooHelper"))
+        let teamConflict = AttributionConflict(rule: .signingTeam, group: OriginGroupID(.team(id: "EX4MPLE123")),
+                                               evidence: [.signature(example)])
+        let result = attribute(ghosttySession() + [
+            fact(503, ppid: 502, path: "/usr/local/bin/tool", signature: example, cwd: "/Users/me", tty: "ttys001"),
+            fact(600, path: "/usr/local/bin/codex", signature: unsigned),
+            fact(601, ppid: 600, path: "/usr/local/bin/tool", signature: example),
+            fact(602, path: "\(foo)/Contents/MacOS/FooHelper", signature: example, jobs: [helperJob])
+        ])
+
+        XCTAssertEqual(placement(result, 503).app.group, OriginGroupID(.terminal))
+        XCTAssertEqual(placement(result, 503).app.conflicts, [teamConflict], "the tool's signer is recorded under Terminal")
+        XCTAssertEqual(placement(result, 601).app.group, OriginGroupID(.agent(name: "codex")))
+        XCTAssertEqual(placement(result, 601).app.conflicts, [teamConflict], "and under the agent")
+        let helper = placement(result, 602)
+        XCTAssertEqual(helper.app.group, OriginGroupID(.app(bundlePath: foo)))
+        XCTAssertEqual(helper.launchSource.group, OriginGroupID(.launchdJob(label: "com.example.helper")), "the job is matched")
+        XCTAssertEqual(helper.app.conflicts, [], "an app's helper signed by its team, with its own job, disagrees with nothing")
     }
 
     // MARK: Rule 7, launchd job
@@ -394,12 +419,45 @@ final class AttributionTests: XCTestCase {
         XCTAssertEqual(placement(result, 1201).project.group, OriginGroupID(.project(path: "/Users/me/dev/mono")))
         XCTAssertEqual(placement(result, 1202).project.group, OriginGroupID(.project(path: "/Users/me/scratch")))
         XCTAssertEqual(placement(result, 1202).project.rule, .workingDirectory)
-        XCTAssertEqual(placement(result, 1203).project.group, OriginGroupID(.noProject))
+        XCTAssertEqual(placement(result, 1203).project.group, OriginGroupID(.project(path: "/")), "a readable / is the working directory itself")
+        XCTAssertEqual(placement(result, 1203).project.rule, .workingDirectory)
         XCTAssertEqual(placement(result, 1204).project.group, OriginGroupID(.noProject))
         XCTAssertEqual(placement(result, 1204).project.evidence, [.workingDirectoryUnavailable(.denied)])
         XCTAssertEqual(markers.lookups.values.max(), 1, "each folder is looked in once")
-        XCTAssertNil(markers.lookups["/"], "the walk stops below /")
-        XCTAssertEqual(result.project.map(\.name), ["No project", "mono", "api", "scratch"])
+        XCTAssertEqual(markers.lookups["/"], 1, "the walk looks in / too")
+        XCTAssertEqual(result.project.map(\.name), ["No project", "/", "mono", "api", "scratch"])
+
+        let atRoot = Attribution(projectMarkers: FixtureProjectMarkers(["/": [".git"]]), mountTable: FixtureMountTable())
+            .attribute([fact(1206, path: "/x/g", signature: unsigned, cwd: "/private/tmp/work")])
+        XCTAssertEqual(placement(atRoot, 1206).project.group, OriginGroupID(.project(path: "/")), "a marker in / makes / the project")
+        XCTAssertEqual(placement(atRoot, 1206).project.rule, .marker)
+    }
+
+    func testProjectMarkersAreNotLookedForOnAVolumeThatIsNotLocal() {
+        let markers = LocalOnlyMarkers(remote: "/Volumes/share", folders: ["/Volumes/share/disk/app": [".git"], "/Users/me": [".git"]])
+        let mounts = FixtureMountTable([
+            MountPoint(path: "/", isLocal: true),
+            MountPoint(path: "/Volumes/share", isLocal: false),
+            // A disk image opened from the share is local, but the folders above it are on the share.
+            MountPoint(path: "/Volumes/share/disk", isLocal: true)
+        ])
+        let result = Attribution(projectMarkers: markers, mountTable: mounts).attribute([
+            fact(1210, path: "/x/a", signature: unsigned, cwd: "/Volumes/share/dev/site/src"),
+            fact(1211, path: "/x/b", signature: unsigned, cwd: "/Volumes/share/disk/app/src"),
+            fact(1212, path: "/x/c", signature: unsigned, cwd: "/Volumes/share/disk/notes"),
+            fact(1213, path: "/x/d", signature: unsigned, cwd: "/Volumes/shared/x")
+        ])
+
+        let site = placement(result, 1210).project
+        XCTAssertEqual(site.group, OriginGroupID(.project(path: "/Volumes/share/dev/site/src")))
+        XCTAssertEqual(site.rule, .workingDirectory)
+        XCTAssertEqual(site.evidence, [.workingDirectory("/Volumes/share/dev/site/src"), .projectMarkersSkipped(volume: "/Volumes/share")])
+        XCTAssertEqual(placement(result, 1211).project.group, OriginGroupID(.project(path: "/Volumes/share/disk/app")),
+                       "a local volume inside the share is looked in")
+        XCTAssertEqual(placement(result, 1212).project.evidence.last, .projectMarkersSkipped(volume: "/Volumes/share"),
+                       "the walk stops where the local volume ends")
+        XCTAssertEqual(placement(result, 1213).project.rule, .workingDirectory, "mount points are bounded by path components")
+        XCTAssertEqual(placement(result, 1213).project.evidence, [.workingDirectory("/Volumes/shared/x")])
     }
 
     func testTheFileSystemLookupFindsMarkersOnDisk() throws {
@@ -413,6 +471,10 @@ final class AttributionTests: XCTestCase {
 
         XCTAssertEqual(lookup.marker(in: root.path), "Package.swift")
         XCTAssertNil(lookup.marker(in: nested.path))
+    }
+
+    func testTheSystemMountTableListsTheLocalRootVolume() {
+        XCTAssertTrue(SystemMountTable().mounts().contains(MountPoint(path: "/", isLocal: true)))
     }
 
     func testALaunchChainEndingOutsideTheSampleIsNotGuessed() {
@@ -452,8 +514,9 @@ final class AttributionTests: XCTestCase {
         XCTAssertEqual(foo?.totals.restrictedCount, 1)
         XCTAssertEqual(foo?.totals.memory, MetricTotal(sum: 150, measuredCount: 2, unmeasuredCount: 1, isApproximate: true))
         XCTAssertEqual(foo?.totals.cpuPercent, MetricTotal(sum: 12.5, measuredCount: 1, unmeasuredCount: 2, isApproximate: false))
-        XCTAssertEqual(foo?.totals.energy.sum, 1_500)
-        XCTAssertEqual(foo?.totals.billedEnergy.sum, 15)
+        XCTAssertEqual(foo?.totals.energy, MetricTotal(sum: 15, measuredCount: 2, unmeasuredCount: 1, isApproximate: false),
+                       "the group's energy is the billed energy")
+        XCTAssertEqual(foo?.totals.ownEnergy.sum, 1_500)
         XCTAssertEqual(foo?.totals.memory.isComplete, false)
 
         let locked = result.app.first { $0.id == OriginGroupID(.app(bundlePath: "/Applications/Locked.app")) }
@@ -590,6 +653,24 @@ final class AttributionTests: XCTestCase {
             terminal: .value(tty.map { .device($0) } ?? ControllingTerminal.none, source: .bsdInfo)
         )
         return facts
+    }
+}
+
+/// Fixture markers that fail the test when asked about a folder on the remote volume.
+private final class LocalOnlyMarkers: ProjectMarkerLookup, @unchecked Sendable {
+    private let remote: String
+    private let fixture: FixtureProjectMarkers
+
+    init(remote: String, folders: [String: Set<String>]) {
+        self.remote = remote
+        fixture = FixtureProjectMarkers(folders)
+    }
+
+    func marker(in directory: String) -> String? {
+        if directory == remote || directory.hasPrefix(remote + "/"), !directory.hasPrefix(remote + "/disk") {
+            XCTFail("looked for a marker on the remote volume in \(directory)")
+        }
+        return fixture.marker(in: directory)
     }
 }
 
