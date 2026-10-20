@@ -17,8 +17,17 @@ import os
 /// to and removing the notifications on a worker queue.
 @MainActor
 final class WindowListController {
-    private let tracker = FocusTracker()
+    private let tracker: FocusTracker
     private var workspaceObservers: [NSObjectProtocol] = []
+    /// Acts on the listed windows; the switcher calls it (SET-94). It reaches windows through the same source as the
+    /// list, so a listed window's ref names the window the list showed.
+    let windowOperator: any WindowOperator
+
+    init() {
+        let source = AXWindowSource()
+        tracker = FocusTracker(source: source)
+        windowOperator = AXWindowOperator(source: source)
+    }
 
     var isStarted: Bool { !workspaceObservers.isEmpty }
 
@@ -87,7 +96,7 @@ final class FocusTracker: @unchecked Sendable {
         qos: .userInitiated,
         attributes: .concurrent
     )
-    private let source = AXWindowSource()
+    private let source: AXWindowSource
     private let ownProcess = ProcessInfo.processInfo.processIdentifier
     private let listerLock = NSLock()
     private var lister: WindowLister
@@ -99,7 +108,8 @@ final class FocusTracker: @unchecked Sendable {
     /// can never see a deallocated tracker.
     private var context: Unmanaged<FocusTracker>?
 
-    init() {
+    init(source: AXWindowSource) {
+        self.source = source
         lister = WindowLister(source: source)
     }
 

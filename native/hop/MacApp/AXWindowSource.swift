@@ -100,6 +100,11 @@ final class AXWindowSource: WindowSource, @unchecked Sendable {
         lock.withLock { registry.ref(for: ElementKey(window), pid: pid) }
     }
 
+    /// The element of a window that has a ref, or nil when its ref has been dropped (the window closed or its app quit).
+    func element(for ref: HopCore.WindowRef, pid: pid_t) -> AXUIElement? {
+        lock.withLock { registry.key(for: ref, pid: pid)?.element }
+    }
+
     /// The app's focused window, or nil if it has none or did not answer in time.
     func focusedWindow(of pid: pid_t) -> AXUIElement? {
         var value: CFTypeRef?
