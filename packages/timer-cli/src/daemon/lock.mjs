@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { closeSync, fstatSync, fsyncSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -17,6 +18,24 @@ export function pidAlive(pid) {
   } catch (error) {
     return error.code === 'EPERM';
   }
+}
+
+/**
+ * When the process with this pid started, in epoch milliseconds to within a second, or null when
+ * it cannot be told. `ps -o etime` reports the elapsed time on macOS and Linux alike.
+ */
+export function processStartTime(pid, { now = Date.now } = {}) {
+  let output;
+  try {
+    output = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 });
+  } catch {
+    return null;
+  }
+  // [[dd-]hh:]mm:ss
+  const match = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(output);
+  if (!match) return null;
+  const [, days = 0, hours = 0, minutes, seconds] = match.map((part) => (part === undefined ? undefined : Number(part)));
+  return now() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1_000;
 }
 
 function isCode(error, ...codes) {
@@ -87,14 +106,14 @@ export function removeStaleLock(lockPath, held, { now = Date.now } = {}) {
 /**
  * Takes `daemon.lock`, created with O_EXCL and holding the pid. A lock whose pid is not alive, or
  * that has held no pid for longer than `LOCK_WRITE_GRACE_MS`, is stale and replaced. Resolves
- * `{ acquired: true, release }` or `{ acquired: false, holder }` naming the live holder.
+ * `{ acquired: true, release, isHeld }` or `{ acquired: false, holder }` naming the live holder.
  */
 export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAlive, now = Date.now } = {}) {
   let holder = null;
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     try {
       const ino = createLock(lockPath, pid);
-      return { acquired: true, release: () => releaseLock(lockPath, pid, ino) };
+      return { acquired: true, ino, release: () => releaseLock(lockPath, pid, ino), isHeld: () => holdsLock(lockPath, pid, ino) };
     } catch (error) {
       if (!isCode(error, 'EEXIST')) throw error;
     }
@@ -109,10 +128,15 @@ export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAl
   return { acquired: false, holder };
 }
 
+/** True while `daemon.lock` is still the file this holder created. */
+export function holdsLock(lockPath, pid, ino) {
+  const current = readLock(lockPath);
+  return Boolean(current && current.ino === ino && current.pid === pid);
+}
+
 /** Removes the lock only while it is still the file this process created. */
 export function releaseLock(lockPath, pid, ino) {
-  const current = readLock(lockPath);
-  if (current && current.ino === ino && current.pid === pid) {
+  if (holdsLock(lockPath, pid, ino)) {
     try {
       unlinkSync(lockPath);
     } catch (error) {

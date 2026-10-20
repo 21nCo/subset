@@ -4,15 +4,32 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createFakeClock, createRecordingSink, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
+import { createFakeClock, createRecordingSink, pidAlive, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 
 export const DAEMON_ENTRY = fileURLToPath(new URL('../../src/daemon/main.mjs', import.meta.url));
 
-/** A fresh data directory, removed after the test. Short, so the socket path fits every platform. */
+/**
+ * A fresh data directory, removed after the test. Short, so the socket path fits every platform.
+ * A daemon process still holding its lock is stopped first, so no test leaves one behind.
+ */
 export function tempDataDir(t) {
   const dir = mkdtempSync(join(tmpdir(), 'std-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return join(dir, 'data');
+  const dataDir = join(dir, 'data');
+  t.after(async () => {
+    const holder = readLock(join(dataDir, 'daemon.lock'));
+    if (holder?.pid && holder.pid !== process.pid && pidAlive(holder.pid)) {
+      let signalled = true;
+      try {
+        process.kill(holder.pid, 'SIGTERM');
+      } catch {
+        // A lock a test wrote naming a process this user cannot signal.
+        signalled = false;
+      }
+      if (signalled) await eventually(() => !pidAlive(holder.pid), 10_000);
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return dataDir;
 }
 
 /** An in-process daemon on a fake clock with a recording sink. */

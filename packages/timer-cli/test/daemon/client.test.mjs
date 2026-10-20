@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createClient, pidAlive } from '../../src/daemon/index.mjs';
@@ -87,4 +88,35 @@ test('the event stream delivers state from a started daemon', async (t) => {
   assert.equal(received[1].data.structuredContent.timers[0].definition.name, 'Watched');
   stream.close();
   await stream.done;
+});
+
+test('a request that meets a daemon shutting down is run by the daemon started after it', async (t) => {
+  const dataDir = tempDataDir(t);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const socket = join(dataDir, 'daemon.sock');
+  const lock = join(dataDir, 'daemon.lock');
+  // A daemon in its shutdown window: it still holds the lock and answers 503 daemon_unavailable.
+  writeFileSync(lock, `${process.pid}\n`);
+  const closing = createServer((request, response) => {
+    response.writeHead(503, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { code: 'daemon_unavailable', message: 'The daemon is shutting down.' } }));
+  });
+  await new Promise((resolve) => closing.listen(socket, resolve));
+  const spawner = countingSpawn();
+  const client = createClient({ dataDir, spawn: spawner.spawn });
+  t.after(() => stopDaemon(client));
+
+  const pending = client.op('create', { timer: { kind: 'stopwatch', name: 'After' } });
+  // The daemon spawned meanwhile finds the lock held and exits; the old one then finishes closing.
+  await eventually(() => spawner.children.length === 1 && spawner.children[0].child.exitCode !== null);
+  assert.equal(spawner.children[0].child.exitCode, 3);
+  await new Promise((resolve) => closing.close(resolve));
+  rmSync(socket, { force: true });
+  rmSync(lock);
+
+  const reply = await pending;
+  assert.equal(reply.status, 200);
+  assert.equal(spawner.children.length, 2);
+  assert.equal((await client.status()).body.pid, spawner.children[1].child.pid);
+  assert.deepEqual((await client.timers()).body.structuredContent.timers.map((timer) => timer.definition.name), ['After']);
 });

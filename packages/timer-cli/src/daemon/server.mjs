@@ -1,21 +1,25 @@
-import { chmodSync, unlinkSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, lstatSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { join } from 'node:path';
 import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
 import { createRecordingSink, deliverToSink } from './alerts.mjs';
 import { socketRequest } from './client.mjs';
-import { acquireLock, removeStaleLock } from './lock.mjs';
+import { acquireLock, processStartTime, removeStaleLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
 import { createStateStore } from './store.mjs';
 
 export const HEARTBEAT_MS = 15_000;
 export const IDLE_EXIT_MS = 10 * 60_000;
-/** A live pid whose lock is older than this while nothing answers on the socket is a reused pid, not a daemon. */
-export const UNSERVED_LOCK_MS = 10_000;
+/** How much later than its lock a live holder must have started to be another process given the pid. */
+const PID_START_SLACK_MS = 2_000;
 const MAX_BODY_BYTES = 1024 * 1024;
 /** A subscriber that stops reading is dropped rather than buffered without bound. */
 const MAX_SUBSCRIBER_BUFFER = 1024 * 1024;
 const STATUS_BY_CODE = { invalid_input: 400, not_found: 404, invalid_state: 409, limit_reached: 409 };
+/** The name a socket is bound under before it is renamed to `daemon.sock`; no longer than that name. */
+const BIND_NAME = /^\.ds-[0-9a-f]{6}$/;
 
 export class DaemonRunningError extends Error {
   constructor(pid) {
@@ -33,18 +37,29 @@ export function stderrLog(message) {
   process.stderr.write(`${new Date().toISOString()} ${message}\n`);
 }
 
+export class LockLostError extends Error {
+  constructor() {
+    super('daemon.lock is no longer held by this daemon.');
+    this.name = 'LockLostError';
+  }
+}
+
 /**
- * True when the lock names a live pid, but nothing has answered on the socket for longer than
- * `UNSERVED_LOCK_MS`: the system gave the pid of a daemon that died to another process.
+ * True when the lock names a live pid that cannot be the daemon that wrote it: nothing answers on
+ * the socket, and the process with that pid started after the lock was written, so the system gave
+ * the pid of a daemon that died to another process. A daemon that is alive keeps its lock however
+ * old it is and whether or not its socket is there.
  */
-async function isReusedPid(paths, holder) {
-  if (!holder || holder.pid === null || Date.now() - holder.mtimeMs <= UNSERVED_LOCK_MS) return false;
+export async function isReusedPid(paths, holder, { startTimeOf = processStartTime } = {}) {
+  if (!holder || holder.pid === null) return false;
   try {
     await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: 1_000 });
     return false;
   } catch (error) {
-    return isCode(error, 'ENOENT', 'ECONNREFUSED');
+    if (!isCode(error, 'ENOENT', 'ECONNREFUSED')) return false;
   }
+  const startedAt = startTimeOf(holder.pid);
+  return startedAt !== null && startedAt > holder.mtimeMs + PID_START_SLACK_MS;
 }
 
 async function takeLock(paths) {
@@ -87,16 +102,18 @@ export async function startDaemon({
   const lock = await takeLock(paths);
   let stateStore;
   let store;
-  let mark;
+  let marks;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
-    mark = stateStore.loadMark();
+    marks = stateStore.loadMarks();
     // We hold the lock, so any socket file left here belongs to a daemon that is gone.
-    try {
-      unlinkSync(paths.socket);
-    } catch (error) {
-      if (!isCode(error, 'ENOENT')) throw error;
+    for (const path of [paths.socket, ...readdirSync(paths.dataDir).filter((name) => BIND_NAME.test(name)).map((name) => join(paths.dataDir, name))]) {
+      try {
+        unlinkSync(path);
+      } catch (error) {
+        if (!isCode(error, 'ENOENT')) throw error;
+      }
     }
   } catch (error) {
     lock.release();
@@ -112,6 +129,7 @@ export async function startDaemon({
   });
   let idleHandle = null;
   let heartbeatHandle = null;
+  let socketIno = null;
 
   const send = (response, event, data) => {
     response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -122,30 +140,59 @@ export async function startDaemon({
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
 
+  /**
+   * Runs a write only while this daemon still holds `daemon.lock`. One that lost it (the file was
+   * removed or replaced) never writes again and shuts down.
+   */
+  function write(save) {
+    if (!lock.isHeld()) {
+      if (!closing) {
+        log('daemon.lock is no longer held by this daemon; exiting without writing.');
+        shutdown(1);
+      }
+      throw new LockLostError();
+    }
+    save();
+  }
+
   /** Persists a new store before showing it, so nothing reports a change the disk does not hold. */
   function commit(next) {
-    stateStore.save(next);
+    write(() => stateStore.save(next));
     store = next;
     broadcastState();
     updateIdle();
   }
 
+  /** Records running timers whose time is up as finished. A failed save is retried at the next run. */
+  function settleFinished(now) {
+    const timers = store.timers.map((timer) => settle(timer, now));
+    if (timers.every((timer, index) => timer === store.timers[index])) return;
+    try {
+      commit({ ...store, timers });
+    } catch (error) {
+      if (!(error instanceof LockLostError)) log(`could not save finished timers: ${error.message}`);
+    }
+  }
+
   const scheduler = createScheduler({
     clock,
-    initialMark: mark,
+    initialMarks: marks,
     getTimers: () => store.timers,
-    deliver(alerts, now) {
+    onRun(alerts, now) {
       for (const { alert, timer } of alerts) {
         broadcast('alert', alert);
         deliverToSink(sink, alert, timer, log);
       }
-      try {
-        stateStore.saveMark(now);
-        const timers = store.timers.map((timer) => settle(timer, now));
-        if (timers.some((timer, index) => timer !== store.timers[index])) commit({ ...store, timers });
-      } catch (error) {
-        log(`could not save after alerts: ${error.message}`);
+      if (alerts.length) {
+        try {
+          write(() => stateStore.saveMarks(scheduler.marks));
+        } catch (error) {
+          if (!(error instanceof LockLostError)) log(`could not save scheduler.json: ${error.message}`);
+        }
       }
+      if (closing) return;
+      settleFinished(now);
+      updateIdle();
     }
   });
 
@@ -227,9 +274,15 @@ export async function startDaemon({
       fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
       return;
     }
-    // Alerts due before this change are delivered against the timers as they were.
-    scheduler.run();
-    const outcome = runOperation(name, store, input, clock.now());
+    // Alerts due before this change are delivered against the timers as they were, and the
+    // scheduler marks the stretches the change begins from the same moment.
+    const now = clock.now();
+    scheduler.run(now);
+    if (closing) {
+      fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      return;
+    }
+    const outcome = runOperation(name, store, input, now);
     if (!outcome.ok) {
       reply(response, STATUS_BY_CODE[outcome.error.code] ?? 400, { error: outcome.error });
       return;
@@ -238,11 +291,15 @@ export async function startDaemon({
       try {
         commit(outcome.store);
       } catch (error) {
+        if (error instanceof LockLostError) {
+          fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+          return;
+        }
         log(`could not save state.json: ${error.message}`);
         fail(response, 500, 'storage_failed', 'The daemon could not save the change.');
         return;
       }
-      scheduler.run();
+      scheduler.run(now);
     }
     reply(response, 200, outcome.result);
   }
@@ -309,9 +366,14 @@ export async function startDaemon({
     });
   });
 
+  // The socket is bound under another name and renamed into place, so it appears with its final
+  // mode, and so closing the server (which unlinks the bound name) never removes a successor's socket.
+  const bindPath = join(paths.dataDir, `.ds-${randomBytes(3).toString('hex')}`);
   try {
-    await listen(server, paths.socket);
-    chmodSync(paths.socket, 0o600);
+    await listen(server, bindPath);
+    chmodSync(bindPath, 0o600);
+    socketIno = lstatSync(bindPath).ino;
+    renameSync(bindPath, paths.socket);
   } catch (error) {
     server.close();
     lock.release();
@@ -326,8 +388,9 @@ export async function startDaemon({
     for (const response of subscribers) response.end();
     subscribers.clear();
     server.close(() => {
+      // Another daemon may have bound the path since; only this daemon's own socket is removed.
       try {
-        unlinkSync(paths.socket);
+        if (lstatSync(paths.socket).ino === socketIno) unlinkSync(paths.socket);
       } catch (error) {
         if (!isCode(error, 'ENOENT')) log(`could not remove the socket: ${error.message}`);
       }

@@ -3,11 +3,14 @@ import { closeSync, openSync, renameSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { pidAlive, readLock } from './lock.mjs';
 import { daemonPaths, ensureDataDir, resolveDataDir } from './paths.mjs';
 
 /** How long a client waits for a daemon it started to open its socket. */
 export const START_TIMEOUT_MS = 3_000;
 const POLL_MS = 50;
+/** A daemon that exits without opening its socket is spawned again at most this often per start. */
+const MAX_SPAWNS = 3;
 const MAX_LOG_BYTES = 1024 * 1024;
 /** Runs `daemon run` when no CLI path is given (SET-77 passes its own `cli.mjs`). */
 export const DEFAULT_DAEMON_ENTRY = fileURLToPath(new URL('./main.mjs', import.meta.url));
@@ -23,6 +26,18 @@ export class DaemonUnavailableError extends Error {
 /** A socket error that means no daemon is listening, so starting one may help. */
 export function isNotListening(error) {
   return error?.code === 'ENOENT' || error?.code === 'ECONNREFUSED';
+}
+
+/** The reply of a daemon that is shutting down: it did not run the request, and a new daemon will. */
+function isShuttingDown(reply) {
+  return reply.status === 503 && reply.body?.error?.code === 'daemon_unavailable';
+}
+
+class ShuttingDownError extends Error {
+  constructor() {
+    super('The daemon is shutting down.');
+    this.code = 'daemon_shutting_down';
+  }
 }
 
 /**
@@ -106,9 +121,11 @@ export function createClient({
   const paths = daemonPaths(dataDir);
   let starting = null;
 
+  /** Spawns `daemon run`. Resolves the child's state: `exited` turns true when it ends. */
   function spawnDaemon() {
     ensureDataDir(dataDir);
     const logFd = openDaemonLog(paths.log);
+    const state = { exited: false };
     try {
       const child = spawn(execPath, [cliPath, 'daemon', 'run'], {
         detached: true,
@@ -116,29 +133,58 @@ export function createClient({
         env: { ...env, SUBSET_TIMER_DATA_DIR: dataDir }
       });
       // A failed spawn surfaces as the socket never appearing.
-      child.on('error', () => {});
+      child.on('error', () => {
+        state.exited = true;
+      });
+      child.on('exit', () => {
+        state.exited = true;
+      });
       child.unref();
     } finally {
       closeSync(logFd);
     }
+    return state;
   }
 
-  async function startDaemon() {
+  /** True while a live process holds `daemon.lock`, such as a daemon that is still shutting down. */
+  function lockHeld() {
     try {
-      spawnDaemon();
-    } catch (error) {
-      throw new DaemonUnavailableError(`Could not start the Timer daemon: ${error.message}`, error);
+      const holder = readLock(paths.lock);
+      return holder !== null && (holder.pid === null || pidAlive(holder.pid));
+    } catch {
+      return false;
     }
+  }
+
+  /**
+   * Spawns a daemon and waits for its socket. A daemon that was shutting down when this began makes
+   * the new one exit with "already running"; once the old one has released the lock, it spawns again.
+   */
+  async function startDaemon() {
+    const spawnOrFail = () => {
+      try {
+        return spawnDaemon();
+      } catch (error) {
+        throw new DaemonUnavailableError(`Could not start the Timer daemon: ${error.message}`, error);
+      }
+    };
+    let child = spawnOrFail();
+    let spawns = 1;
     const deadline = Date.now() + startTimeoutMs;
     let lastError;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
       try {
-        await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: Math.max(1, deadline - Date.now()) });
-        return;
+        const reply = await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: Math.max(1, deadline - Date.now()) });
+        if (!isShuttingDown(reply)) return;
+        lastError = new ShuttingDownError();
       } catch (error) {
         lastError = error;
         if (!isNotListening(error)) break;
+      }
+      if (child.exited && spawns < MAX_SPAWNS && !lockHeld()) {
+        child = spawnOrFail();
+        spawns++;
       }
     }
     throw new DaemonUnavailableError(`The Timer daemon did not start within ${startTimeoutMs / 1000} s.`, lastError);
@@ -152,18 +198,24 @@ export function createClient({
     return starting;
   }
 
+  /** Runs `attempt`, starting a daemon first when none is listening or the one there is shutting down. */
   async function withDaemon(attempt) {
     try {
-      return await attempt();
+      return checked(await attempt());
     } catch (error) {
-      if (!isNotListening(error)) throw unavailable(error);
+      if (!isNotListening(error) && !(error instanceof ShuttingDownError)) throw unavailable(error);
     }
     await ensureDaemon();
     try {
-      return await attempt();
+      return checked(await attempt());
     } catch (error) {
       throw unavailable(error);
     }
+  }
+
+  function checked(reply) {
+    if (reply && typeof reply.status === 'number' && isShuttingDown(reply)) throw new ShuttingDownError();
+    return reply;
   }
 
   function unavailable(error) {
@@ -183,7 +235,7 @@ export function createClient({
       const outgoing = httpRequest({ socketPath: paths.socket, method: 'GET', path: '/v1/events', agent: false }, (response) => {
         if (response.statusCode !== 200) {
           response.resume();
-          reject(new DaemonUnavailableError(`The daemon refused the event stream (HTTP ${response.statusCode}).`));
+          reject(response.statusCode === 503 ? new ShuttingDownError() : new DaemonUnavailableError(`The daemon refused the event stream (HTTP ${response.statusCode}).`));
           return;
         }
         response.setEncoding('utf8');

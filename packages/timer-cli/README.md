@@ -8,18 +8,19 @@ This private package (`@subset.dev/timer`, version 0.0.0) holds the per-user Tim
 
 | File | Purpose |
 | --- | --- |
-| `state.json` | The SET-74 store (schema version 1). Each write goes to a temp file beside it, is fsynced and renamed over it, and the directory is fsynced. A file that is not JSON or fails `parseStore` is moved to `state.corrupt-<epoch ms>.json`, logged, and the daemon starts with no timers. Temp files a crash left are removed at start. |
-| `scheduler.json` | `{ checkedThrough }`: the time through which alerts were delivered, written after each delivery, so a restarted daemon reports only what it missed. |
+| `state.json` | The SET-74 store (schema version 1). Each write goes to a temp file beside it, is fsynced and renamed over it, and the directory is fsynced (once the rename succeeded, a failed directory fsync is logged and the change stands). A file that is not JSON or fails `parseStore` is moved to `state.corrupt-<epoch ms>.json`, logged, and the daemon starts with no timers. Temp files a crash left are removed at start. |
+| `scheduler.json` | `{ version: 1, marks }`: for each running stretch, the time through which its alerts were delivered, written after each delivery, so a restarted daemon reports only what it missed. |
 | `daemon.lock` | Created with `O_EXCL`, holding the pid. |
-| `daemon.sock` | The socket, mode `0600`. |
+| `daemon.sock` | The socket, mode `0600`. It is bound under a short temporary name (`.ds-<hex>`) and renamed into place. |
 | `daemon.log` | The output of a daemon a client started (one previous log of up to 1 MiB is kept as `daemon.log.1`). |
 
 ## Single writer
 
 - A daemon takes `daemon.lock` before reading `state.json`. A second daemon exits with code 3 and `already running (pid N)`.
 - A lock whose pid is not alive is stale and replaced. A lock with no pid yet is being written and is stale only after 2 s. The check and the removal happen under a `daemon.lock.takeover` marker, itself created with `O_EXCL`, so processes starting together never remove a lock another has just taken.
-- A live pid whose lock is older than 10 s while nothing listens on the socket is a pid the system reused after the daemon died; that lock is replaced too.
-- A daemon removes the lock on exit only while it is still the file it created.
+- A live pid is a pid the system reused after the daemon died only when nothing answers on the socket and that process started (by `ps -o etime`) more than 2 s after the lock was written; that lock is replaced too. A live daemon keeps its lock however old it is and whether or not its socket is there.
+- Before every write the daemon checks that `daemon.lock` is still the file it created. One that lost it never writes again: it answers `503 daemon_unavailable` and exits 1.
+- A daemon removes the lock, and the socket, on exit only while each is still the file it created.
 
 ## Socket API
 
@@ -41,9 +42,9 @@ The daemon saves a change before it answers or sends `state`, so nothing reports
 An `alert` is `{ timerId, kind, at, segment?, secondsLeft?, missed? }`, where `kind` is `segment` (an interval step began; `segment` is that step), `tick` (`secondsLeft` 3, 2 or 1 before a step or countdown ends, when `countdownTicks` is on), `finish`, or `missedWhileAway`.
 
 - The scheduler arms one timeout for the earliest upcoming transition across running timers, from SET-74 `transitionsBetween`, and looks again at least every 60 s so a changed wall clock is noticed. It re-arms after every change. Before a change it delivers the alerts already due against the timers as they were.
-- Each run handles the transitions since the last one. Those more than 2 s late, for example after sleep or while the daemon was not running, collapse into one `missedWhileAway` alert per timer (`missed` counts them; `segment` is the current step), ahead of the ones on time. The timer's state is computed from its timestamps as always.
-- A clock set back by more than 2 s is followed; a smaller step back waits for the clock to catch up, so nothing fires twice.
-- When a timer finishes the daemon records it as finished and sends `state`.
+- Each running stretch (from a start, resume or skip) has a mark: the time through which its transitions were handled. An operation and the scheduler runs around it use one reading of the clock, and a new stretch is marked from that moment, so a skip never fires what it jumped over. Each run handles the transitions since each mark. Those more than 2 s late, for example after sleep or while the daemon was not running, collapse into one `missedWhileAway` alert per timer (`missed` counts them; `segment` is the current step), ahead of the ones on time. The timer's state is computed from its timestamps as always.
+- A mark only moves forward, so after the clock is set back nothing fires twice; what is still ahead fires once the clock reaches it. A stretch begun after the step back is marked from its own start.
+- When a timer finishes the daemon records it as finished and sends `state`. If that save fails it is retried at every later run (at least every 60 s), and the idle exit is re-evaluated after each run.
 - Restarting keeps a running timer running from its timestamps; nothing is paused automatically.
 
 An `AlertSink` is `{ name, alert(alert, timerDefinition) }`. The daemon never waits for it, and a sink that throws or rejects is logged and ignored. A sink honours the timer's `sound` flag. The default is `createRecordingSink()`, which records alerts in memory; the macOS and Linux sinks are SET-77.
@@ -56,7 +57,7 @@ After 10 minutes with no running or paused timer, no `/v1/events` subscriber and
 
 ## Client
 
-`createClient({ dataDir?, cliPath?, spawn? })` from `@subset.dev/timer/daemon` connects to the socket. When the socket is missing or refuses, it spawns `node <cliPath> daemon run` detached and unreferenced (its output goes to `daemon.log`), and waits up to 3 s for the socket; it then rejects with a `DaemonUnavailableError` whose `code` is `daemon_unavailable`. `cliPath` defaults to `src/daemon/main.mjs`, which only runs `daemon run`, until the SET-77 CLI passes its own. The client offers `request`, `op`, `timers`, `presets`, `events`, `status` and `shutdown`; `status` and `shutdown` never start a daemon.
+`createClient({ dataDir?, cliPath?, spawn? })` from `@subset.dev/timer/daemon` connects to the socket. When the socket is missing or refuses, it spawns `node <cliPath> daemon run` detached and unreferenced (its output goes to `daemon.log`), and waits up to 3 s for the socket. A daemon that answers `503 daemon_unavailable` is shutting down and did not run the request: the client waits for it to release the lock, starts a new daemon (respawning one that exited because the old lock was still held) and sends the request there. Otherwise it rejects with a `DaemonUnavailableError` whose `code` is `daemon_unavailable`. `cliPath` defaults to `src/daemon/main.mjs`, which only runs `daemon run`, until the SET-77 CLI passes its own. The client offers `request`, `op`, `timers`, `presets`, `events`, `status` and `shutdown`; `status` and `shutdown` never start a daemon.
 
 `startDaemon({ dataDir, clock, sink, log })` runs a daemon in-process, and `runDaemonCommand({ sink })` is the foreground `daemon run`. `clock` is `{ now, setTimeout, clearTimeout }`: production uses `Date.now()` and `setTimeout`; `createFakeClock()` keeps timeouts on a monotonic timeline apart from the wall clock, as Node does, for tests.
 
@@ -70,12 +71,12 @@ The SET-73 reuse check (see `packages/timer/README.md`) covers this package. The
 
 `npm test --workspace=@subset.dev/timer` runs `node --test test/daemon/*.test.mjs` with temporary data directories against a real socket:
 
-- **Lock:** a second holder is refused; a dead pid's lock and an empty lock older than 2 s are taken over; release leaves a lock another process has created; four concurrent `daemon run` processes, with and without a stale lock, leave exactly one daemon and the others exit 3 with `already running (pid N)`.
-- **Store:** a process killed between the write and the rename leaves the previous store; invalid JSON, an empty file and a store that fails validation are moved aside and logged.
-- **Socket:** `0700` and `0600` modes and no TCP address; every route's success and error codes; a refused write is not applied.
+- **Lock:** a second holder is refused; a dead pid's lock, an empty lock older than 2 s, and a live pid that started after its lock are taken over; a live holder that started before its lock (suspended before listening, or with its socket removed) is never taken over; release leaves a lock another process has created; a daemon that lost its lock never writes again and leaves its successor's socket; four concurrent `daemon run` processes, with and without a stale lock, leave exactly one daemon and the others exit 3 with `already running (pid N)`.
+- **Store:** a process killed between the write and the rename leaves the previous store; a directory fsync failing after the rename keeps the change; invalid JSON, an empty file and a store that fails validation are moved aside and logged.
+- **Socket:** `0700` and `0600` modes and no TCP address; every route's success and error codes; a refused write is not applied; a finish the disk refused is recorded at a later run, sent as `state`, and the daemon then idles out.
 - **Events:** `state`, `alert` and `heartbeat` arrive in order.
-- **Scheduler (fake clock):** a Tabata run fires each of its 68 step, tick and finish alerts once at its own time; pause suppresses them and resume continues without repeats; skip re-arms; a sleep produces one `missedWhileAway` per timer with the state still correct; the 2 s boundary; a restart reports only what it missed.
+- **Scheduler (fake clock):** a Tabata run fires each of its 68 step, tick and finish alerts once at its own time; pause suppresses them and resume continues without repeats; skip re-arms and fires the same alerts with a clock that moves between reads; a clock set back 1.5 s, 5 s or an hour repeats nothing; a timer started after a step back still finishes; a clock set forward is noticed within 60 s; a sleep produces one `missedWhileAway` per timer with the state still correct; the 2 s boundary; a restart reports only what it missed.
 - **Idle exit:** after 10 fake minutes with nothing running, cancelled by a subscriber and by running or paused timers.
-- **Auto-spawn:** a client starts a daemon and later clients reuse it; concurrent clients end up on one daemon; a daemon that never starts is `daemon_unavailable`.
+- **Auto-spawn:** a client starts a daemon and later clients reuse it; concurrent clients end up on one daemon; a request that meets a daemon shutting down runs on the daemon started after it; a daemon that never starts is `daemon_unavailable`.
 
 Not verified here: real sleep and wake on a Mac (SET-85), real sinks (SET-77), and Windows.

@@ -136,7 +136,8 @@ test('a transition at most 2 s late fires as itself; one later is missed', () =>
     const clock = createFakeClock();
     const timer = runningTabata(clock);
     const delivered = [];
-    const scheduler = createScheduler({ clock, getTimers: () => [timer], deliver: (alerts) => delivered.push(...alerts), initialMark: clock.now() });
+    const scheduler = createScheduler({ clock, getTimers: () => [timer], onRun: (alerts) => delivered.push(...alerts) });
+    scheduler.run();
     // The prep's ticks are at 7, 8 and 9 s; the first is handled `lateBy` after it.
     clock.jump(7_000 + lateBy);
     scheduler.run();
@@ -163,21 +164,84 @@ test('a restart reports what was missed while the daemon was down, and nothing i
   assert.deepEqual(later.sink.received.map(({ alert }) => [alert.timerId, alert.kind]), [[id, 'missedWhileAway']]);
 });
 
-test('the scheduler looks again at least every 60 s, so a clock set back is followed', () => {
-  const clock = createFakeClock();
-  const timer = {
-    definition: { kind: 'countdown', durationMs: 3_600_000, id: 't_00000001', name: 'Hour', sound: true, countdownTicks: false, createdAt: clock.now() },
+function runningCountdown(clock, durationMs, countdownTicks) {
+  return {
+    definition: { kind: 'countdown', durationMs, lapsEnabled: false, id: 't_00000001', name: 'Countdown', sound: true, countdownTicks, createdAt: clock.now() },
     runtime: { status: 'running', startedAt: clock.now(), accumulatedMs: 0, pausedAt: null, laps: [], skippedMs: 0 }
   };
-  const delivered = [];
-  const scheduler = createScheduler({ clock, getTimers: () => [timer], deliver: (alerts) => delivered.push(...alerts), initialMark: clock.now() });
+}
+
+test('the scheduler looks again at least every 60 s, so a clock set forward is noticed', () => {
+  const clock = createFakeClock();
+  const timer = runningCountdown(clock, 3_600_000, false);
+  const runs = [];
+  const scheduler = createScheduler({ clock, getTimers: () => [timer], onRun: (alerts, now) => runs.push({ alerts, now }) });
   scheduler.run();
   clock.advance(60_000);
-  assert.equal(scheduler.checkedThrough, clock.now());
-  // The wall clock is set back an hour; the scheduler follows it at its next look.
-  clock.jump(-3_600_000);
+  assert.equal(runs.length, 2);
+  // The wall clock is set forward past the finish; the next look, at most 60 s later, reports it.
+  clock.jump(3_600_000);
   clock.advance(60_000);
-  assert.equal(scheduler.checkedThrough, clock.now());
   scheduler.stop();
-  assert.deepEqual(delivered, []);
+  assert.deepEqual(runs.flatMap(({ alerts }) => alerts.map(({ alert }) => alert.kind)), ['missedWhileAway']);
+});
+
+test('a clock set back repeats no alert, and the ones still ahead fire once when the clock reaches them', () => {
+  for (const back of [1_500, 5_000, 3_600_000]) {
+    const clock = createFakeClock();
+    const startedAt = clock.now();
+    const timer = runningCountdown(clock, 20_000, true);
+    const delivered = [];
+    const scheduler = createScheduler({ clock, getTimers: () => [timer], onRun: (alerts) => delivered.push(...alerts) });
+    scheduler.run();
+    clock.advance(18_000);
+    assert.deepEqual(delivered.map(label), [`tick@${startedAt + 17_000}`, `tick@${startedAt + 18_000}`]);
+    clock.jump(-back);
+    clock.advance(back + 5_000);
+    scheduler.stop();
+    assert.deepEqual(delivered.map(label), [17_000, 18_000, 19_000].map((at) => `tick@${startedAt + at}`).concat(`finish@${startedAt + 20_000}`), `set back ${back} ms`);
+  }
+});
+
+test('a timer started after the clock was set back fires its finish and is recorded finished', async (t) => {
+  const context = await startTestDaemon(t);
+  const { clock, sink, op, daemon } = context;
+  clock.advance(10_000);
+  await op('create', { timer: { kind: 'stopwatch' } });
+  clock.jump(-1_500);
+  const started = await op('start', { timer: { kind: 'countdown', durationMs: 1_000 } });
+  const startedAt = clock.now();
+  clock.advance(1_000);
+  assert.deepEqual(sink.received.map(label), [`finish@${startedAt + 1_000}`]);
+  assert.equal(daemon.store.timers.find((timer) => timer.definition.id === started.body.timer.definition.id).runtime.status, 'finished');
+});
+
+/** A fake clock whose wall time moves on by 1 ms every time it is read, as a real one may between two reads. */
+function driftingClock() {
+  const base = createFakeClock();
+  return {
+    ...base,
+    now() {
+      const value = base.now();
+      base.jump(1);
+      return value;
+    },
+    advance: base.advance,
+    jump: base.jump
+  };
+}
+
+test('skip fires the same alerts however much time passes between reads of the clock', async (t) => {
+  const outcomes = [];
+  for (const clock of [createFakeClock(), driftingClock()]) {
+    const context = await startTestDaemon(t, { clock });
+    const { id } = await startTabata(context);
+    clock.advance(12_000);
+    const beforeSkip = context.sink.received.length;
+    await context.op('skip', { id });
+    clock.advance(11_000);
+    outcomes.push(context.sink.received.slice(beforeSkip).map(({ alert }) => `${alert.kind}:${alert.secondsLeft ?? alert.segment.phase}`));
+  }
+  assert.deepEqual(outcomes[0], ['tick:3', 'tick:2', 'tick:1', 'segment:work']);
+  assert.deepEqual(outcomes[1], outcomes[0]);
 });

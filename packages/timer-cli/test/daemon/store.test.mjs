@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import * as nodeFs from 'node:fs';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -92,11 +93,30 @@ test('the daemon starts empty from a corrupt state file and logs the move', asyn
   assert.ok(readdirSync(dataDir).some((name) => /^state\.corrupt-\d+\.json$/.test(name)));
 });
 
-test('an unreadable mark is ignored', (t) => {
+test('scheduler marks read back; an unreadable or older file is ignored', (t) => {
   const { paths, stateStore } = storeIn(t);
-  assert.equal(stateStore.loadMark(), null);
+  assert.equal(stateStore.loadMarks(), null);
   writeFileSync(paths.scheduler, '{');
-  assert.equal(stateStore.loadMark(), null);
-  stateStore.saveMark(NOW);
-  assert.equal(stateStore.loadMark(), NOW);
+  assert.equal(stateStore.loadMarks(), null);
+  writeFileSync(paths.scheduler, JSON.stringify({ checkedThrough: NOW }));
+  assert.equal(stateStore.loadMarks(), null);
+  const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
+  stateStore.saveMarks(marks);
+  assert.deepEqual(stateStore.loadMarks(), marks);
+});
+
+test('a directory fsync that fails after the rename keeps the new file and is logged, not thrown', (t) => {
+  const { paths, logs } = storeIn(t);
+  const fs = {
+    ...nodeFs,
+    fsyncSync(fd) {
+      if (nodeFs.fstatSync(fd).isDirectory()) throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+      return nodeFs.fsyncSync(fd);
+    }
+  };
+  const stateStore = createStateStore(paths, { fs, log: (message) => logs.push(message), now: () => NOW });
+  const store = storeWithTimer('Kept');
+  stateStore.save(store);
+  assert.deepEqual(JSON.parse(readFileSync(paths.state, 'utf8')), store);
+  assert.ok(logs.some((line) => /^state\.json was replaced, but its directory could not be synced: EIO/.test(line)));
 });

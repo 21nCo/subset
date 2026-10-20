@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
 import { TIMER_LIMITS, TIMER_VIEW_ID, parseStore } from '@subset/timer';
-import { DaemonRunningError, startDaemon } from '../../src/daemon/index.mjs';
-import { rawRequest, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
+import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, startDaemon } from '../../src/daemon/index.mjs';
+import { eventually, rawRequest, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
 
 test('the data directory is 0700, the socket 0600, and there is no TCP listener', async (t) => {
   const { daemon } = await startTestDaemon(t);
@@ -11,7 +11,8 @@ test('the data directory is 0700, the socket 0600, and there is no TCP listener'
   const socket = statSync(daemon.paths.socket);
   assert.equal(socket.isSocket(), true);
   assert.equal(socket.mode & 0o777, 0o600);
-  assert.equal(daemon.server.address(), daemon.paths.socket);
+  // A Unix socket's address is its path; a TCP listener's would be an object.
+  assert.equal(typeof daemon.server.address(), 'string');
 });
 
 test('a second daemon on the same directory is refused while the first runs', async (t) => {
@@ -150,4 +151,36 @@ test('a restarted daemon keeps a running timer running from its timestamps', asy
   const { body } = await second.op('get', { id: started.body.timer.definition.id });
   assert.equal(body.timer.runtime.status, 'running');
   assert.equal(body.timer.projection.elapsedMs, 60_000);
+});
+
+test('a finish the disk refused is recorded at a later run, shown to subscribers, and the daemon then idles out', { skip: process.getuid?.() === 0 && 'root ignores file modes' }, async (t) => {
+  const { op, clock, daemon, logs } = await startTestDaemon(t);
+  const started = await op('start', { timer: { kind: 'countdown', durationMs: 1_000 } });
+  const id = started.body.timer.definition.id;
+  const events = subscribe(daemon.paths.socket);
+  t.after(events.close);
+  await events.waitFor((list) => list.length === 1);
+  const storedStatus = () => parseStore(JSON.parse(readFileSync(daemon.paths.state, 'utf8'))).store.timers[0].runtime.status;
+
+  chmodSync(daemon.paths.dataDir, 0o500);
+  try {
+    clock.advance(1_000);
+  } finally {
+    chmodSync(daemon.paths.dataDir, 0o700);
+  }
+  assert.ok(logs.some((line) => /could not save finished timers/.test(line)));
+  assert.equal(storedStatus(), 'running');
+  assert.equal(daemon.store.timers[0].runtime.status, 'running');
+
+  // The disk works again; the next run, at most a minute later, records the finish and shows it.
+  clock.advance(REARM_MS);
+  assert.equal(storedStatus(), 'finished');
+  assert.equal(daemon.store.timers[0].runtime.status, 'finished');
+  const finished = await events.waitFor((list) => list.some(({ event, data }) => event === 'state' && data.structuredContent.timers[0].runtime.status === 'finished'));
+  assert.deepEqual(finished.filter(({ event }) => event === 'alert').map(({ data }) => [data.timerId, data.kind]), [[id, 'finish']]);
+
+  events.close();
+  await eventually(() => daemon.subscriberCount === 0);
+  clock.advance(IDLE_EXIT_MS);
+  assert.equal(await daemon.closed, 0);
 });
