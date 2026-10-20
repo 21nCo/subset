@@ -18,6 +18,7 @@ struct FixtureProcess {
 }
 
 enum ProcessFixtures {
+    static let mib: UInt64 = 1 << 20
     static let format = UsageFormat(locale: Locale(identifier: "en_US_POSIX"), home: "/Users/me")
     static let chrome = "/Applications/Google Chrome.app"
     static let ghostty = "/Applications/Ghostty.app"
@@ -28,24 +29,24 @@ enum ProcessFixtures {
 
     /// Chrome with two helpers, Ghostty running a shell, `claude` in it, and `node` started by `claude` in a project;
     /// an Apple daemon; and a restricted daemon whose usage macOS refuses to reveal.
-    static func workload(chromeMemory: UInt64 = 900 << 20) -> [FixtureProcess] {
+    static func workload(chromeMemory: UInt64 = 900 * mib) -> [FixtureProcess] {
         let helpers = "\(chrome)/Contents/Frameworks/Google Chrome Framework.framework/Helpers"
         return [
             FixtureProcess(pid: 100, path: "\(chrome)/Contents/MacOS/Google Chrome", memory: chromeMemory, cpu: 10,
                            energy: 4_000_000_000, signature: google),
             FixtureProcess(pid: 101, ppid: 100, path: "\(helpers)/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)",
-                           memory: 300 << 20, cpu: 20, energy: 1_000_000_000, signature: google),
+                           memory: 300 * mib, cpu: 20, energy: 1_000_000_000, signature: google),
             FixtureProcess(pid: 102, ppid: 100, path: "\(helpers)/Google Chrome Helper (GPU).app/Contents/MacOS/Google Chrome Helper (GPU)",
-                           memory: 100 << 20, cpu: 5, energy: 500_000_000, signature: google),
-            FixtureProcess(pid: 200, path: "\(ghostty)/Contents/MacOS/ghostty", memory: 200 << 20, cpu: 1, energy: 100_000_000,
+                           memory: 100 * mib, cpu: 5, energy: 500_000_000, signature: google),
+            FixtureProcess(pid: 200, path: "\(ghostty)/Contents/MacOS/ghostty", memory: 200 * mib, cpu: 1, energy: 100_000_000,
                            signature: mitchell),
-            FixtureProcess(pid: 201, ppid: 200, path: "/bin/zsh", memory: 4 << 20, cpu: 0, energy: 1_000_000, signature: apple,
+            FixtureProcess(pid: 201, ppid: 200, path: "/bin/zsh", memory: 4 * mib, cpu: 0, energy: 1_000_000, signature: apple,
                            cwd: "/Users/me/dev/subset"),
             FixtureProcess(pid: 202, ppid: 201, path: "/Users/me/.local/share/claude/versions/2.1.304", name: "2.1.304",
-                           memory: 400 << 20, cpu: 50, energy: 9_000_000_000, signature: unsigned, cwd: "/Users/me/dev/subset"),
-            FixtureProcess(pid: 203, ppid: 202, path: "/opt/homebrew/Cellar/node/24.1.0/bin/node", memory: 250 << 20, cpu: 80,
+                           memory: 400 * mib, cpu: 50, energy: 9_000_000_000, signature: unsigned, cwd: "/Users/me/dev/subset"),
+            FixtureProcess(pid: 203, ppid: 202, path: "/opt/homebrew/Cellar/node/24.1.0/bin/node", memory: 250 * mib, cpu: 80,
                            energy: 2_000_000_000, signature: unsigned, cwd: "/Users/me/dev/subset"),
-            FixtureProcess(pid: 300, path: "/usr/libexec/exampled", memory: 20 << 20, cpu: 0.5, energy: 10_000_000, signature: apple),
+            FixtureProcess(pid: 300, path: "/usr/libexec/exampled", memory: 20 * mib, cpu: 0.5, energy: 10_000_000, signature: apple),
             FixtureProcess(pid: 400, path: "/usr/libexec/securityd-like", restricted: true, signature: apple),
             FixtureProcess(pid: 401, path: "/usr/libexec/securityd-like", restricted: true, signature: apple)
         ]
