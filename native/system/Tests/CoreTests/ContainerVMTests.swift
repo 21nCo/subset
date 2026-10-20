@@ -10,6 +10,10 @@ final class ContainerVMTests: XCTestCase {
     private let docker = "/Applications/Docker.app"
     private let orbStack = "/Applications/OrbStack.app"
     private let terminal = "/System/Applications/Utilities/Terminal.app"
+    /// The host agents the fixtures' Colima instances record in `ha.pid`, written after each started (at 10).
+    private let recognizer = ContainerVMRecognizer(colimaHostAgents: FixtureColimaHostAgents(
+        [903, 907, 910, 932, 941].map { LimaHostAgentRecord(pid: $0, writtenAt: 20) }
+    ))
 
     // MARK: Fixtures per runtime
 
@@ -34,8 +38,8 @@ final class ContainerVMTests: XCTestCase {
     }
 
     /// Colima with the `vz` VM type, started with `colima start` in Terminal, which is still running: Lima's host
-    /// agent detaches to launchd and runs `ssh` for port forwarding; the VM service's responsible process is
-    /// Terminal, and it shares Terminal's coalition with the host agent.
+    /// agent detaches to launchd, records itself in Colima's `ha.pid`, and runs `ssh` for port forwarding; the VM
+    /// service's responsible process is Terminal, and it shares Terminal's coalition with the host agent.
     private func colimaVZ() -> [ProcessFacts] {
         [
             fact(900, path: "\(terminal)/Contents/MacOS/Terminal", signature: apple, coalition: 90),
@@ -56,7 +60,7 @@ final class ContainerVMTests: XCTestCase {
     }
 
     func testDockerDesktopsProcessesAndItsVirtualMachineServiceAreOneRuntime() {
-        let vms = ContainerVMRecognizer().containerVMs(in: dockerDesktop())
+        let vms = recognizer.containerVMs(in: dockerDesktop())
 
         XCTAssertEqual(vms.map { $0?.runtime }, Array(repeating: .dockerDesktop, count: 4))
         XCTAssertEqual(vms[0]?.detail, "inside Docker.app")
@@ -67,14 +71,14 @@ final class ContainerVMTests: XCTestCase {
     }
 
     func testOrbStacksVirtualMachineServiceFollowsItsResponsibleHelper() {
-        let vms = ContainerVMRecognizer().containerVMs(in: orbStackRuntime())
+        let vms = recognizer.containerVMs(in: orbStackRuntime())
 
         XCTAssertEqual(vms.map { $0?.runtime }, [.orbStack, .orbStack, .orbStack])
         XCTAssertEqual(vms[2]?.detail, "responsible process OrbStack Helper (pid 801)")
     }
 
     func testColimasHostAgentItsChildrenAndItsVirtualMachineServiceAreColima() {
-        let vms = ContainerVMRecognizer().containerVMs(in: colimaVZ())
+        let vms = recognizer.containerVMs(in: colimaVZ())
 
         XCTAssertEqual(vms.map { $0?.runtime }, [nil, nil, nil, .colima, .colima, .colima],
                        "Terminal, its shell, and the colima command are not Colima's VM; the host agent, its ssh, and the VM are")
@@ -86,7 +90,7 @@ final class ContainerVMTests: XCTestCase {
     }
 
     func testQEMUUnderLimasHostAgentIsColima() {
-        let vms = ContainerVMRecognizer().containerVMs(in: colimaQEMU())
+        let vms = recognizer.containerVMs(in: colimaQEMU())
 
         XCTAssertEqual(vms.map { $0?.runtime }, [.colima, .colima])
         XCTAssertEqual(vms[1]?.detail, "started by limactl (pid 910)")
@@ -99,7 +103,7 @@ final class ContainerVMTests: XCTestCase {
             fact(932, ppid: 931, path: "/opt/homebrew/bin/limactl", signature: adHoc, coalition: 93)
         ]
 
-        let vms = ContainerVMRecognizer().containerVMs(in: processes)
+        let vms = recognizer.containerVMs(in: processes)
 
         XCTAssertEqual(vms[0]?.detail, "runs colima under launchd")
         XCTAssertEqual(vms[1]?.detail, "started by colima (pid 930)", "limactl start, under Colima's daemon")
@@ -122,8 +126,8 @@ final class ContainerVMTests: XCTestCase {
             fact(1005, path: "/Users/me/bin/com.apple.Virtualization.VirtualMachine", signature: unsigned, coalition: 103)
         ]
 
-        XCTAssertEqual(ContainerVMRecognizer().containerVMs(in: processes).map { $0?.runtime }, Array(repeating: nil, count: 6))
-        XCTAssertEqual(ContainerVMRecognizer().groups(in: processes), [])
+        XCTAssertEqual(recognizer.containerVMs(in: processes).map { $0?.runtime }, Array(repeating: nil, count: 6))
+        XCTAssertEqual(recognizer.groups(in: processes), [])
     }
 
     func testAVirtualMachineServiceInACoalitionWithTwoRuntimesIsNotGuessed() {
@@ -131,7 +135,7 @@ final class ContainerVMTests: XCTestCase {
             fact(920, ppid: 901, path: "\(orbStack)/Contents/MacOS/OrbStack", signature: orbSignature, responsible: 900, coalition: 90)
         ]
 
-        let vms = ContainerVMRecognizer().containerVMs(in: processes)
+        let vms = recognizer.containerVMs(in: processes)
 
         XCTAssertNil(vms[5], "Terminal's coalition holds Colima and OrbStack, started from the shell")
         XCTAssertEqual(vms[6]?.runtime, .orbStack)
@@ -140,7 +144,7 @@ final class ContainerVMTests: XCTestCase {
     func testTheCoalitionNamesNoMoreVirtualMachineServicesThanItsRuntimeRuns() {
         // A tart VM started in the same Terminal: two services, one Lima host agent.
         let tart = colimaVZ() + [fact(906, path: vmService, signature: apple, responsible: 900, coalition: 90)]
-        XCTAssertEqual(ContainerVMRecognizer().containerVMs(in: tart).suffix(2).map { $0?.runtime }, [nil, nil])
+        XCTAssertEqual(recognizer.containerVMs(in: tart).suffix(2).map { $0?.runtime }, [nil, nil])
 
         // Colima with QEMU in Terminal's coalition, beside a vfkit VM: the host agent runs no VM service.
         let qemu = [
@@ -149,14 +153,14 @@ final class ContainerVMTests: XCTestCase {
             fact(942, ppid: 941, path: "/opt/homebrew/bin/qemu-system-aarch64", signature: adHoc, responsible: 940, coalition: 94),
             fact(943, path: vmService, signature: apple, responsible: 940, coalition: 94)
         ]
-        XCTAssertEqual(ContainerVMRecognizer().containerVMs(in: qemu).map { $0?.runtime }, [nil, .colima, .colima, nil])
+        XCTAssertEqual(recognizer.containerVMs(in: qemu).map { $0?.runtime }, [nil, .colima, .colima, nil])
 
         // Two Colima profiles, two host agents, two services.
         let profiles = colimaVZ() + [
             fact(907, path: "/opt/homebrew/Cellar/lima/1.0.3/bin/limactl", signature: adHoc, responsible: 900, coalition: 90),
             fact(908, path: vmService, signature: apple, responsible: 900, coalition: 90)
         ]
-        XCTAssertEqual(ContainerVMRecognizer().containerVMs(in: profiles).suffix(3).map { $0?.runtime }, [.colima, .colima, .colima])
+        XCTAssertEqual(recognizer.containerVMs(in: profiles).suffix(3).map { $0?.runtime }, [.colima, .colima, .colima])
     }
 
     func testClientsAndTransientCommandsAreNotTheVM() {
@@ -172,7 +176,7 @@ final class ContainerVMTests: XCTestCase {
             fact(962, ppid: 901, path: "\(orbStack)/Contents/MacOS/xbin/docker", signature: orbSignature, responsible: 900, coalition: 90),
             fact(963, ppid: 901, path: "/opt/homebrew/bin/limactl", signature: adHoc, responsible: 900, coalition: 90)
         ]
-        let recognizer = ContainerVMRecognizer()
+        let recognizer = recognizer
 
         XCTAssertEqual(recognizer.containerVMs(in: processes).suffix(7).map { $0?.runtime }, Array(repeating: nil, count: 7))
         let groups = recognizer.groups(in: processes)
@@ -187,7 +191,7 @@ final class ContainerVMTests: XCTestCase {
                                      outcome: .breakdown(breakdown))
         XCTAssertEqual(groups.map { report.status(of: $0.runtime) }, [.measured(breakdown)], "the clients add no runtime to report on")
 
-        let result = Attribution(projectMarkers: FixtureProjectMarkers()).attribute(processes)
+        let result = Attribution(projectMarkers: FixtureProjectMarkers(), containerVM: recognizer).attribute(processes)
         XCTAssertEqual(placement(result, 961).app.group, OriginGroupID(.app(bundlePath: docker)), "a client stays with its app (rule 1)")
         XCTAssertEqual(placement(result, 961).app.rule, .appBundle)
         XCTAssertEqual(placement(result, 963).app.group, OriginGroupID(.terminal), "a transient limactl stays in the terminal")
@@ -202,12 +206,12 @@ final class ContainerVMTests: XCTestCase {
             fact(820, ppid: 800, path: "/bin/zsh", signature: apple, responsible: 800, coalition: 80),
             fact(821, ppid: 820, path: "/Users/me/.cargo/bin/cargo", signature: unsigned, responsible: 800, coalition: 80)
         ]
-        let recognizer = ContainerVMRecognizer()
+        let recognizer = recognizer
 
         XCTAssertEqual(recognizer.containerVMs(in: processes).suffix(5).map { $0?.runtime }, Array(repeating: nil, count: 5))
         XCTAssertEqual(recognizer.groups(in: processes).map { $0.members.map(\.pid) }, [[700, 701, 702, 703], [800, 801, 802]])
 
-        let result = Attribution(projectMarkers: FixtureProjectMarkers()).attribute(processes)
+        let result = Attribution(projectMarkers: FixtureProjectMarkers(), containerVM: recognizer).attribute(processes)
         for pid: Int32 in [721, 722] {
             XCTAssertEqual(placement(result, pid).app.group, OriginGroupID(.agent(name: "claude")), "pid \(pid)")
             XCTAssertEqual(placement(result, pid).app.rule, .codingAgent, "pid \(pid)")
@@ -224,21 +228,86 @@ final class ContainerVMTests: XCTestCase {
             fact(1101, start: 20, path: vmService, signature: apple, responsible: 1100, coalition: 111)
         ]
 
-        XCTAssertNil(ContainerVMRecognizer().containerVMs(in: processes)[1])
+        XCTAssertNil(recognizer.containerVMs(in: processes)[1])
     }
 
     func testAnotherAppStartedUnderARuntimeKeepsItsOwnBundle() {
+        let other = "/Applications/Other.app"
         let processes = colimaQEMU() + [
-            fact(912, ppid: 910, path: "/Applications/Other.app/Contents/MacOS/Other", signature: unsigned, coalition: 91)
+            fact(912, ppid: 910, path: "\(other)/Contents/MacOS/Other", signature: unsigned, coalition: 91),
+            fact(913, ppid: 912, path: "/Users/me/bin/foo", signature: unsigned, responsible: 912, coalition: 91)
         ]
 
-        XCTAssertNil(ContainerVMRecognizer().containerVMs(in: processes)[2])
+        XCTAssertEqual(recognizer.containerVMs(in: processes).suffix(2), [nil, nil], "what the other app starts is the app's")
+        XCTAssertEqual(recognizer.groups(in: processes).map { $0.members.map(\.pid) }, [[910, 911]])
+
+        let result = Attribution(projectMarkers: FixtureProjectMarkers(), containerVM: recognizer).attribute(processes)
+        XCTAssertEqual(placement(result, 913).app.group, OriginGroupID(.app(bundlePath: other)))
+        XCTAssertEqual(placement(result, 913).app.rule, .responsibleProcess)
+    }
+
+    func testPlainLimaIsNotColima() {
+        // Lima's own `limactl start` in Terminal with `vz`, and another instance with QEMU: no Colima instance
+        // records these host agents.
+        let lima = [
+            fact(1200, path: "\(terminal)/Contents/MacOS/Terminal", signature: apple, coalition: 120),
+            fact(1201, ppid: 1200, path: "/bin/zsh", signature: apple, responsible: 1200, coalition: 120),
+            fact(1202, path: "/opt/homebrew/bin/limactl", signature: adHoc, responsible: 1200, coalition: 120),
+            fact(1203, ppid: 1202, path: "/usr/bin/ssh", signature: apple, responsible: 1200, coalition: 120),
+            fact(1204, path: vmService, signature: apple, responsible: 1200, coalition: 120),
+            fact(1210, path: "/opt/homebrew/bin/limactl", signature: adHoc, coalition: 121),
+            fact(1211, ppid: 1210, path: "/opt/homebrew/bin/qemu-system-aarch64", signature: adHoc, coalition: 121),
+            fact(1220, ppid: 1201, path: "/opt/homebrew/bin/limactl", signature: adHoc, responsible: 1200, coalition: 120),
+            fact(1221, ppid: 1220, path: "/opt/homebrew/bin/limactl", signature: adHoc, responsible: 1200, coalition: 120)
+        ]
+
+        XCTAssertEqual(recognizer.containerVMs(in: lima), Array(repeating: nil, count: lima.count))
+        XCTAssertEqual(recognizer.groups(in: lima), [], "no group, so no poll")
+
+        let both = colimaVZ() + lima
+        XCTAssertEqual(recognizer.groups(in: both).map { $0.members.map(\.pid) }, [[903, 904, 905]],
+                       "beside Colima, plain Lima's processes stay out of Colima's group")
+    }
+
+    func testAStaleOrReusedHostAgentRecordIsNotTrusted() {
+        func runtimes(_ records: [LimaHostAgentRecord]) -> [ContainerRuntime?] {
+            ContainerVMRecognizer(colimaHostAgents: FixtureColimaHostAgents(records)).containerVMs(in: colimaQEMU()).map { $0?.runtime }
+        }
+
+        XCTAssertEqual(runtimes([LimaHostAgentRecord(pid: 910, writtenAt: 10)]), [.colima, .colima])
+        XCTAssertEqual(runtimes([LimaHostAgentRecord(pid: 910, writtenAt: 9)]), [nil, nil],
+                       "the file predates the process, so its PID was reused")
+        XCTAssertEqual(runtimes([LimaHostAgentRecord(pid: 909, writtenAt: 20)]), [nil, nil])
+        XCTAssertEqual(runtimes([]), [nil, nil])
+    }
+
+    func testColimasHostAgentsAreReadFromItsLimaHome() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        func write(_ path: String, _ text: String, writtenAt seconds: Double = 1_000) throws {
+            let url = URL(fileURLWithPath: home + path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: url, atomically: false, encoding: .utf8)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: seconds)], ofItemAtPath: url.path)
+        }
+        try write("/.colima/_lima/colima/ha.pid", "903\n", writtenAt: 1_000.5)
+        try write("/.config/colima/_lima/colima-work/ha.pid", "907")
+        try write("/.colima/_lima/colima-bad/ha.pid", "not a pid\n")
+        try write("/.colima/_lima/colima-long/ha.pid", String(repeating: "1", count: 40))
+        try write("/.lima/default/ha.pid", "1202\n")
+        try FileManager.default.createDirectory(atPath: home + "/.colima/_lima/colima-dir/ha.pid", withIntermediateDirectories: true)
+
+        XCTAssertEqual(FileSystemColimaHostAgents(home: home).hostAgents(), [
+            LimaHostAgentRecord(pid: 903, writtenAt: 1_000_500_000),
+            LimaHostAgentRecord(pid: 907, writtenAt: 1_000_000_000)
+        ], "plain Lima's ~/.lima is not read")
+        XCTAssertEqual(FileSystemColimaHostAgents(home: home + "/nobody").hostAgents(), [])
     }
 
     // MARK: Groups and attribution
 
     func testEachRunningRuntimeIsOneGroupWithItsMacOSUsage() {
-        let groups = ContainerVMRecognizer().groups(in: dockerDesktop() + colimaQEMU() + [fact(1, path: "/sbin/launchd", signature: apple)])
+        let groups = recognizer.groups(in: dockerDesktop() + colimaQEMU() + [fact(1, path: "/sbin/launchd", signature: apple)])
 
         XCTAssertEqual(groups.map(\.runtime), [.dockerDesktop, .colima])
         XCTAssertEqual(groups[0].members.map(\.pid), [700, 701, 702, 703])
@@ -250,7 +319,7 @@ final class ContainerVMTests: XCTestCase {
     }
 
     func testRule3PlacesARuntimesProcessesBeforeTheAppBundleAndMacOSRules() {
-        let result = Attribution(projectMarkers: FixtureProjectMarkers()).attribute(dockerDesktop() + colimaVZ())
+        let result = Attribution(projectMarkers: FixtureProjectMarkers(), containerVM: recognizer).attribute(dockerDesktop() + colimaVZ())
         let vm = OriginGroupID(.containerVM(name: "Docker Desktop"))
 
         for pid: Int32 in [700, 701, 702, 703] {
@@ -299,6 +368,12 @@ final class ContainerVMTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    private struct FixtureColimaHostAgents: ColimaHostAgentLookup {
+        let records: [LimaHostAgentRecord]
+        init(_ records: [LimaHostAgentRecord]) { self.records = records }
+        func hostAgents() -> [LimaHostAgentRecord] { records }
+    }
 
     private var apple: CodeSignature { CodeSignature(signingID: "com.apple.x", teamID: nil, isPlatformBinary: true) }
     private var adHoc: CodeSignature { CodeSignature(signingID: "limactl", teamID: nil, isPlatformBinary: false) }

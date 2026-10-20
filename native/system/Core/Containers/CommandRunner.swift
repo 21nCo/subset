@@ -106,8 +106,8 @@ public final class CommandRegistry: Sendable {
 
 /// Test hooks run on either side of the launch, where a shutdown can interleave with it.
 struct LaunchHooks: Sendable {
-    var beforeLaunch: @Sendable () -> Void = {}
-    var afterLaunch: @Sendable () -> Void = {}
+    var beforeLaunch: @Sendable () -> Void = { /* Outside tests nothing waits before the launch. */ }
+    var afterLaunch: @Sendable () -> Void = { /* Outside tests nothing waits after the launch. */ }
 }
 
 /// One command's run. Every path answers the continuation once; the output handlers and the termination handler

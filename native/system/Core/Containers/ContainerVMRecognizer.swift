@@ -1,3 +1,6 @@
+import Darwin
+import Foundation
+
 /// A Docker-compatible runtime whose VM System recognizes. Podman and other runtimes are out of scope.
 public enum ContainerRuntime: String, CaseIterable, Sendable {
     case dockerDesktop
@@ -43,14 +46,17 @@ public enum ContainerRuntime: String, CaseIterable, Sendable {
 ///
 /// 1. The executable is inside an outermost `Docker.app` or `OrbStack.app` bundle and is not one of its clients
 ///    (`isClient`): the runtime's own processes.
-/// 2. Lima's host agent, `limactl` whose parent is launchd or another `limactl`, or Colima's daemon, `colima` whose
-///    parent is launchd (`brew services`, `colima daemon`), by file name or kernel name. A `limactl` or `colima`
-///    command run from a shell, or by such a command (`colima start` running `limactl`), is transient, not the VM;
-///    one that Colima's daemon or the host agent runs is the runtime's by rule 3.
+/// 2. Lima's host agent for a Colima instance, a `limactl` whose PID Lima recorded in that instance's `ha.pid`
+///    under Colima's Lima home (`colimaHostAgents`), in a file written after the process started, or Colima's
+///    daemon, `colima` whose parent is launchd (`brew services`, `colima daemon`), by file name or kernel name. A
+///    host agent no Colima instance records, such as plain Lima's (`limactl start`), is not Colima's and is left
+///    alone, and so is a recorded PID that a later process reuses. A `limactl` or `colima` command run from a shell,
+///    or by such a command (`colima start` running `limactl`), is transient, not the VM; one that Colima's daemon or
+///    the host agent runs is the runtime's by rule 3.
 /// 3. A process outside any app bundle with an ancestor placed by rule 1 or 2: what the runtime started, such as
 ///    `qemu-system-*`, `ssh` port forwarders, and `socket_vmnet` under Lima's host agent. A shell, a coding agent,
-///    or a client between them (`isBoundary`), such as Docker Desktop's terminal, ends it: neither it nor what runs
-///    in it is the VM.
+///    or a client between them (`isBoundary`), such as Docker Desktop's terminal, ends it, and so does another
+///    app's bundle: neither it nor what runs in it is the VM.
 /// 4. Apple's Virtualization.framework VM service (`com.apple.Virtualization.VirtualMachine`), which launchd starts
 ///    on behalf of a runtime: the runtime of its responsible process, else the one runtime found among the other
 ///    members of its coalition, when that runtime accounts for every such service there (`vmCapacity`). Two
@@ -66,14 +72,20 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
     static let clientPrefixes = ["docker-", "kubectl-"]
     static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "fish", "tcsh", "csh", "ksh", "nu"]
 
-    public init() {}
+    /// The host agents Colima's instances record, read once per sample.
+    public let colimaHostAgents: any ColimaHostAgentLookup
+
+    public init(colimaHostAgents: any ColimaHostAgentLookup = FileSystemColimaHostAgents()) {
+        self.colimaHostAgents = colimaHostAgents
+    }
 
     public func containerVMs(in processes: [ProcessFacts]) -> [ContainerVM?] {
         let tree = ProcessTree(processes)
         let bundles = processes.map { $0.executablePath.flatMap(AttributionPass.outermostAppBundle) }
         let commands = processes.map(Self.colimaCommand)
+        let records = colimaHostAgents.hostAgents()
         let hostAgents = Set(processes.indices.filter { index in
-            commands[index] == "limactl" && (processes[index].ppid == 1 || tree.parent[index].map { commands[$0] == "limactl" } == true)
+            commands[index] == "limactl" && records.contains { $0.recorded(processes[index].identity) }
         })
         var found: [ContainerVM?] = processes.indices.map { index in
             if let bundle = bundles[index] { return Self.bundled(processes[index], bundle: bundle) }
@@ -83,7 +95,8 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
         }
 
         let boundaries = processes.map(Self.isBoundary)
-        let runtimeAncestor = tree.nearestAncestor { found[$0] != nil || boundaries[$0] }
+        // A runtime's own bundled processes are already found; any other bundle is another app's and ends the search.
+        let runtimeAncestor = tree.nearestAncestor { found[$0] != nil || boundaries[$0] || bundles[$0] != nil }
         for index in processes.indices where found[index] == nil && bundles[index] == nil && !boundaries[index] {
             guard let ancestor = runtimeAncestor[index], let vm = found[ancestor] else { continue }
             let parent = processes[ancestor]
@@ -181,6 +194,61 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
 
     static func isVirtualMachineService(_ process: ProcessFacts) -> Bool {
         process.executablePath.map(AttributionPass.lastComponent) == virtualMachineService
+    }
+}
+
+/// The PID Lima recorded in an instance's `ha.pid`, and when the file was last written, in microseconds since 1970
+/// like `ProcessIdentity.startTime`.
+public struct LimaHostAgentRecord: Equatable, Sendable {
+    public let pid: Int32
+    public let writtenAt: UInt64
+
+    public init(pid: Int32, writtenAt: UInt64) {
+        self.pid = pid
+        self.writtenAt = writtenAt
+    }
+
+    /// The host agent writes its own PID once it runs, so the process it names started before the file was written.
+    /// A file left behind by an agent that died names a PID that a later process may reuse.
+    func recorded(_ identity: ProcessIdentity) -> Bool {
+        identity.pid == pid && identity.startTime <= writtenAt
+    }
+}
+
+/// Lists the Lima host agents Colima started. `ContainerVMRecognizer` asks once per sample.
+public protocol ColimaHostAgentLookup: Sendable {
+    func hostAgents() -> [LimaHostAgentRecord]
+}
+
+/// Reads `ha.pid` in each instance folder of Colima's Lima home, `_lima` in `~/.colima` or `~/.config/colima`
+/// (`colima` for the default profile, `colima-<profile>` for others). Plain Lima keeps its instances in `~/.lima`,
+/// which is not read; neither is a Colima home under a custom `COLIMA_HOME`.
+public struct FileSystemColimaHostAgents: ColimaHostAgentLookup {
+    public let limaHomes: [String]
+
+    public init(home: String = NSHomeDirectory()) {
+        limaHomes = ["\(home)/.colima/_lima", "\(home)/.config/colima/_lima"]
+    }
+
+    public func hostAgents() -> [LimaHostAgentRecord] {
+        limaHomes.flatMap { limaHome in
+            ((try? FileManager.default.contentsOfDirectory(atPath: limaHome)) ?? []).sorted().compactMap { instance in
+                Self.record(at: "\(limaHome)/\(instance)/ha.pid")
+            }
+        }
+    }
+
+    /// A PID file holds the decimal PID and a newline; anything longer or not a positive PID is not one.
+    static func record(at path: String) -> LimaHostAgentRecord? {
+        var info = stat()
+        guard stat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_mtimespec.tv_sec >= 0,
+              let file = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? file.close() }
+        guard let data = try? file.read(upToCount: 32), data.count < 32,
+              let pid = Int32(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0
+        else { return nil }
+        let written = UInt64(info.st_mtimespec.tv_sec) &* 1_000_000 &+ UInt64(info.st_mtimespec.tv_nsec / 1000)
+        return LimaHostAgentRecord(pid: pid, writtenAt: written)
     }
 }
 
