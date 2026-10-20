@@ -43,6 +43,8 @@ public final class ProcessesWindowModel {
     public private(set) var filterFocusRequest = 0
 
     public let format: UsageFormat
+    /// The Mac's logical cores, for the header before the first sample gives them.
+    private let logicalCoreCount: Int
 
     @ObservationIgnored private var selections: [AttributionLayer: RowID] = [:]
     @ObservationIgnored private var expanded: Set<OriginGroupID> = []
@@ -54,8 +56,9 @@ public final class ProcessesWindowModel {
     @ObservationIgnored private var groups: [OriginGroupID: OriginGroup] = [:]
     @ObservationIgnored private var names: [Int32: String] = [:]
 
-    public init(format: UsageFormat = UsageFormat()) {
+    public init(format: UsageFormat = UsageFormat(), logicalCoreCount: Int = ProcessInfo.processInfo.processorCount) {
         self.format = format
+        self.logicalCoreCount = logicalCoreCount
     }
 
     // MARK: Samples
@@ -76,7 +79,8 @@ public final class ProcessesWindowModel {
         rebuild()
     }
 
-    /// Records a failed sample. The last good sample stays on screen, marked as not current.
+    /// Records a failed sample. The last good sample's process figures stay on screen, marked as not current; the
+    /// memory figures are the failed sample's own reading.
     public func applyFailure(_ message: String, memory: SystemMemory?) {
         failure = message
         self.memory = memory
@@ -88,7 +92,7 @@ public final class ProcessesWindowModel {
 
     public func header(now: Date) -> WindowHeader {
         WindowHeader(sample: sample, memory: memory, failure: failure, cadence: cadence, sampleCadence: sampleCadence,
-                     now: now, format: format)
+                     logicalCoreCount: logicalCoreCount, now: now, format: format)
     }
 
     /// Memory totals double-count shared pages, and restricted processes are a separate count, never zero.
@@ -144,9 +148,11 @@ public final class ProcessesWindowModel {
     }
 
     /// Shows a group, as the menu bar's top groups do: switches to its layer, opens the group holding a subgroup,
-    /// clears a filter that hides it, and selects it.
+    /// clears a filter that hides it, and selects it. A group gone from the current sample only switches the layer,
+    /// keeping its selection and filter.
     public func reveal(_ id: OriginGroupID) {
         layer = id.layer
+        guard groups[id] != nil else { return }
         if id.subgroup != nil { setExpanded(id.parent, true) }
         selection = .group(id)
         if !rows.contains(where: { $0.id == .group(id) }) { filter = "" }

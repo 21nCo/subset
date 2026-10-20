@@ -86,7 +86,8 @@ struct ProcessesView: View {
                     model.collapseSelection()
                     return .handled
                 }
-                .onChange(of: model.selection) { _, selection in
+                // Initially too, so a window opened on a menu-bar group shows it.
+                .onChange(of: model.selection, initial: true) { _, selection in
                     if let selection { proxy.scrollTo(selection) }
                 }
                 .overlay {

@@ -41,7 +41,7 @@ public struct WindowHeader: Equatable, Sendable {
     public let stateText: String
 
     init(sample: ProcessesSample?, memory: SystemMemory?, failure: String?, cadence: SamplingCadence,
-         sampleCadence: SamplingCadence, now: Date, format: UsageFormat) {
+         sampleCadence: SamplingCadence, logicalCoreCount: Int, now: Date, format: UsageFormat) {
         let summary = StatusSummary(snapshot: sample?.snapshot, memory: memory, samplingFailed: failure != nil)
         pressure = summary.pressure
         pressureText = summary.pressureRow
@@ -49,7 +49,9 @@ public struct WindowHeader: Equatable, Sendable {
         memoryText = "Used \(format.bytes(memory?.used)) of \(format.bytes(memory?.physicalMemory)) · "
             + "App \(format.bytes(memory?.app)) · Compressed \(format.bytes(memory?.compressed))"
         swapText = "Swap \(format.bytes(memory?.swapUsed)) of \(format.bytes(memory?.swapTotal))"
-        cpuText = summary.cpuRow(logicalCoreCount: sample?.snapshot.logicalCoreCount)
+        // The core count is shown even while CPU use is unknown.
+        cpuText = summary.cpuRow(logicalCoreCount: nil)
+            + " · \(sample?.snapshot.logicalCoreCount ?? logicalCoreCount) logical cores"
         if let processes = sample?.snapshot.processes {
             let restricted = processes.filter(\.restricted).count
             processText = "\(processes.count) processes · \(restricted) restricted by macOS"
@@ -67,7 +69,9 @@ public struct WindowHeader: Equatable, Sendable {
         case let .stale(age):
             stateText = "Stale: no sample for \(age.components.seconds) s; figures are from the last sample"
         case let .failed(message):
-            stateText = "Sampling failed: \(message)" + (sample == nil ? "" : "; figures are from the last sample")
+            // A failed sample still reads memory, so only the process figures are from the last good sample.
+            let processes = sample.map { "; process figures are from the sample observed at \(format.time($0.observedAt))" }
+            stateText = "Sampling failed: \(message)" + (processes ?? "") + (memory == nil ? "" : "; memory figures are current")
         }
     }
 }

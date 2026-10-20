@@ -183,7 +183,7 @@ final class ProcessesWindowModelTests: XCTestCase {
         model.applyFailure("Could not list processes: listFailed(1)", memory: nil)
         let failed = model.header(now: t0 + 1)
         XCTAssertEqual(failed.state, .failed("Could not list processes: listFailed(1)"))
-        XCTAssertEqual(failed.cpuText, "CPU: unavailable, sampling failed")
+        XCTAssertEqual(failed.cpuText, "CPU: unavailable, sampling failed · 8 logical cores")
 
         model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0 + 30), memory: nil, cadence: .mainWindowVisible)
         XCTAssertEqual(model.header(now: t0 + 31).state, .live(interval: .seconds(2)))
@@ -203,12 +203,32 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.header(now: t0 + 17).state, .stale(age: .seconds(7)))
     }
 
+    func testAFailedSampleSaysWhichFiguresAreFromTheLastGoodSample() throws {
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0),
+                    memory: ProcessFixtures.memory(level: 1, physical: 8 << 30), cadence: .mainWindowVisible)
+
+        // The process list fails, but the memory read in the same sample succeeds and is shown.
+        model.applyFailure("Could not list processes: listFailed(1)", memory: ProcessFixtures.memory(level: 4, physical: 16 << 30))
+        let header = model.header(now: t0 + 4)
+        XCTAssertEqual(header.pressureText, "Memory pressure: Critical")
+        XCTAssertTrue(header.memoryText.hasSuffix("of \(ProcessFixtures.format.bytes(16 << 30)) · App – · Compressed –"),
+                      header.memoryText)
+        XCTAssertEqual(header.stateText, "Sampling failed: Could not list processes: listFailed(1); process figures are "
+            + "from the sample observed at \(ProcessFixtures.format.time(t0)); memory figures are current")
+        XCTAssertEqual(header.processText, "10 processes · 2 restricted by macOS")
+
+        let first = ProcessesWindowModel(format: ProcessFixtures.format)
+        first.applyFailure("Could not list processes: listFailed(1)", memory: nil)
+        XCTAssertEqual(first.header(now: t0).stateText, "Sampling failed: Could not list processes: listFailed(1)")
+    }
+
     func testBeforeTheFirstSampleTheHeaderIsWaiting() {
-        let header = ProcessesWindowModel(format: ProcessFixtures.format).header(now: t0)
+        let header = ProcessesWindowModel(format: ProcessFixtures.format, logicalCoreCount: 12).header(now: t0)
 
         XCTAssertEqual(header.state, .waiting)
         XCTAssertEqual(header.processText, "No processes sampled yet")
-        XCTAssertEqual(header.cpuText, "CPU: not measured yet")
+        XCTAssertEqual(header.cpuText, "CPU: not measured yet · 12 logical cores")
     }
 
     // MARK: Detail and keyboard
@@ -294,6 +314,19 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.selection, .group(chromeGroup))
         XCTAssertEqual(model.filter, "", "a filter hiding the group is cleared")
         XCTAssertTrue(model.rows.contains { $0.id == .group(chromeGroup) })
+    }
+
+    func testRevealingAGroupGoneFromTheSampleKeepsTheSelectionAndFilter() throws {
+        let model = try model()
+        model.filter = "node"
+        model.selection = .process(ProcessFixtures.identity(203))
+        model.layer = .project
+
+        // The menu showed this app before it quit; the window has a newer sample without it.
+        model.reveal(OriginGroupID(.app(bundlePath: "/Applications/Gone.app")))
+        XCTAssertEqual(model.layer, .app)
+        XCTAssertEqual(model.selection, .process(ProcessFixtures.identity(203)))
+        XCTAssertEqual(model.filter, "node", "a filter is cleared only to show a group that exists")
     }
 
     func testTheMenusTopGroupRowsStandStillWhileTheMenuIsOpen() throws {

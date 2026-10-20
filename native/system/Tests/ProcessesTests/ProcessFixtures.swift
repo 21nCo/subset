@@ -94,5 +94,12 @@ enum ProcessFixtures {
         return ProcessesSample(snapshot: snapshot, attribution: attribution, observedAt: observedAt)
     }
 
+    /// A memory reading with only the pressure level and physical memory size.
+    static func memory(level: Int32, physical: UInt64) -> SystemMemory {
+        SystemMemory(raw: RawSystemMemory(pressureLevel: withUnsafeBytes(of: level) { Array($0) }, swapUsage: nil,
+                                          memorySize: withUnsafeBytes(of: physical) { Array($0) }, vmStatistics: nil,
+                                          pageSize: nil))
+    }
+
     static func identity(_ pid: Int32) -> ProcessIdentity { ProcessIdentity(pid: pid, startTime: 10) }
 }
