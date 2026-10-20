@@ -9,6 +9,8 @@ final class DockerCLITests: XCTestCase {
     private var folder: URL!
     private var home: String { folder.appendingPathComponent("home").path }
     private var runLog: String { folder.appendingPathComponent("runs.log").path }
+    private var hostLog: String { folder.appendingPathComponent("hosts.log").path }
+    private var pidFile: String { folder.appendingPathComponent("pid").path }
 
     override func setUpWithError() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("DockerCLITests-\(UUID().uuidString)")
@@ -44,6 +46,32 @@ final class DockerCLITests: XCTestCase {
         XCTAssertEqual(breakdown.totals.cpuPercent.sum, 2.5)
     }
 
+    func testBothCommandsArePinnedToTheEndpointCheckedBeforeTheRun() async throws {
+        let orb = home + "/.orbstack/run/docker.sock"
+        try writeContext("orbstack", host: "unix://\(orb)")
+        // Between the commands the current context becomes a remote one.
+        let stub = try makeStub("""
+        echo "$1" >> '\(runLog)'
+        if [ "$1" = ps ]; then
+          printf '{"currentContext":"prod"}' > '\(home)/.docker/config.json'
+          echo '{"ID":"3f2a9c1b7d4e","Names":"db","Labels":""}'
+        else
+          echo '{"ID":"3f2a9c1b7d4e","Name":"db","CPUPerc":"1.00%","MemUsage":"1MiB / 1GiB"}'
+        fi
+        """)
+
+        let report = await cli([stub]).report()
+
+        XCTAssertEqual(try runs(), ["ps", "stats"])
+        XCTAssertEqual(try String(contentsOfFile: hostLog, encoding: .utf8).split(separator: "\n"),
+                       ["unix://\(orb)", "unix://\(orb)"], "stats reaches the same socket as ps, not the new context")
+        XCTAssertEqual(report.context?.host, "unix://\(orb)")
+        XCTAssertEqual(report.context?.runtime, .orbStack)
+        guard case .breakdown = report.outcome else { return XCTFail("\(report.outcome)") }
+        XCTAssertEqual(DockerCLI.arguments(DockerCLI.listingArguments, host: "unix:///var/run/docker.sock"),
+                       ["--host", "unix:///var/run/docker.sock", "ps", "--format", "{{json .}}"])
+    }
+
     func testTheCLIRunsWithoutTheCallersDockerEnvironment() async throws {
         setenv("DOCKER_HOST", "tcp://203.0.113.9:2376", 1)
         setenv("DOCKER_CONTEXT", "remote", 1)
@@ -75,6 +103,7 @@ final class DockerCLITests: XCTestCase {
         // The first run of a new script may be held for a malware scan past the timeout, so the log may be empty.
         XCTAssertFalse(((try? runs()) ?? []).contains("stats"), "stats is not run after ps fails")
         XCTAssertEqual(DockerCLI.timeout, .seconds(5))
+        XCTAssertEqual(DockerCLI.commandName(DockerCLI.statsArguments), "docker stats")
         XCTAssertEqual(ContainerUnavailable.timedOut(command: "docker ps", seconds: 5).reason, "docker ps did not finish within 5 seconds.")
     }
 
@@ -91,6 +120,14 @@ final class DockerCLITests: XCTestCase {
 
         let stoppedReport = await cli([stopped]).report()
         let failingReport = await cli([failing]).report()
+        let newerCLI = try makeStub("""
+        echo 'failed to connect to the docker API at unix:///Users/me/.colima/default/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/me/.colima/default/docker.sock: connect: no such file or directory' >&2
+        exit 1
+        """, name: "newer")
+        let newerReport = await cli([newerCLI]).report()
+        guard case .unavailable(.daemonNotRunning) = newerReport.outcome else {
+            return XCTFail("Docker CLI 28's message is a stopped daemon")
+        }
 
         XCTAssertEqual(stoppedReport.outcome, .unavailable(.daemonNotRunning(
             message: "Cannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?")))
@@ -132,13 +169,45 @@ final class DockerCLITests: XCTestCase {
     func testTheRunnerReportsALaunchFailureAndStopsRunawayOutput() async throws {
         let notExecutable = folder.appendingPathComponent("plain").path
         try "echo nope".write(toFile: notExecutable, atomically: true, encoding: .utf8)
-        let chatty = try makeStub("exec yes", name: "chatty")
+        let chatty = try makeStub("echo $$ > '\(pidFile)'\nexec yes", name: "chatty")
 
         let launch = await ProcessCommandRunner().run(notExecutable, arguments: [], environment: [:], timeout: .seconds(5))
         let flood = await ProcessCommandRunner(outputLimit: 64 << 10).run(chatty, arguments: [], environment: [:], timeout: .seconds(5))
 
         guard case .failure(.launchFailed) = launch else { return XCTFail("\(launch)") }
         XCTAssertEqual(flood, .failure(.outputTooLarge))
+        try await assertExits(try stubPID(), "the command is stopped past the cap")
+    }
+
+    func testATimedOutCommandIsStopped() async throws {
+        let stub = try await warmedStub("echo $$ > '\(pidFile)'\nexec sleep 30")
+
+        let result = await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .milliseconds(500))
+
+        XCTAssertEqual(result, .failure(.timedOut))
+        try await assertExits(try stubPID(), "the command is stopped past the timeout")
+    }
+
+    func testCancellingTheTaskStopsTheCommandAndAnAlreadyCancelledTaskStartsNone() async throws {
+        let stub = try await warmedStub("echo $$ > '\(pidFile)'\nexec sleep 30")
+
+        let run = Task { await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
+        let pid = try await waitForStubPID()
+        run.cancel()
+
+        let cancelled = await run.value
+        XCTAssertEqual(cancelled, .failure(.cancelled))
+        try await assertExits(pid, "a cancelled run leaves no child")
+
+        try FileManager.default.removeItem(atPath: pidFile)
+        let never = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30))
+        }
+        let notStarted = await never.value
+        XCTAssertEqual(notStarted, .failure(.cancelled))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "nothing was started")
     }
 
     // MARK: Current context
@@ -235,6 +304,25 @@ final class DockerCLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: runLog))
     }
 
+    func testHidingTheWindowDuringASlowListingStopsItAndStartsNoStats() async throws {
+        let stub = try await warmedStub("""
+        echo "$1" >> '\(runLog)'
+        echo $$ > '\(pidFile)'
+        exec sleep 30
+        """)
+        let poller = ContainerPoller(cli: cli([stub], timeout: .seconds(30)))
+
+        let refresh = Task { await poller.refresh(cadence: .mainWindowVisible, runningRuntimes: [.dockerDesktop]) }
+        let pid = try await waitForStubPID()
+        refresh.cancel()
+
+        let report = await refresh.value
+        XCTAssertNil(report, "a cancelled refresh gives no report")
+        try await assertExits(pid, "docker ps is stopped")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try runs(), ["ps"], "stats never starts")
+    }
+
     func testThePollerNeverRunsTwiceAtOnce() async throws {
         let stub = try makeStub("""
         echo "$1" >> '\(runLog)'
@@ -260,12 +348,45 @@ final class DockerCLITests: XCTestCase {
         DockerCLI(home: home, candidates: candidates, timeout: timeout)
     }
 
-    /// An executable `/bin/sh` script standing in for `docker`.
+    /// An executable `/bin/sh` script standing in for `docker`. It logs and drops the `--host` the CLI pins, so
+    /// `$1` is the command.
     private func makeStub(_ body: String, name: String = "docker") throws -> String {
         let path = folder.appendingPathComponent(name).path
-        try "#!/bin/sh\n\(body)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        let host = "if [ \"$1\" = --host ]; then echo \"$2\" >> '\(hostLog)'; shift 2; fi"
+        try "#!/bin/sh\n\(host)\n\(body)\n".write(toFile: path, atomically: true, encoding: .utf8)
         XCTAssertEqual(chmod(path, 0o755), 0)
         return path
+    }
+
+    /// A stub run once already, so the first run's malware scan cannot hold it past a short timeout.
+    private func warmedStub(_ body: String) async throws -> String {
+        let stub = try makeStub("[ \"$1\" = warm ] && exit 0\n\(body)")
+        let warm = await ProcessCommandRunner().run(stub, arguments: ["warm"], environment: [:], timeout: .seconds(30))
+        XCTAssertEqual(try warm.get().status, 0)
+        return stub
+    }
+
+    private func stubPID() throws -> pid_t {
+        let text = try String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try XCTUnwrap(pid_t(text))
+    }
+
+    private func waitForStubPID() async throws -> pid_t {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !FileManager.default.fileExists(atPath: pidFile), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        // The script writes its PID, then replaces itself with the command.
+        try await Task.sleep(for: .milliseconds(100))
+        return try stubPID()
+    }
+
+    /// Waits for the process to exit and be reaped (`SIGTERM`, then `SIGKILL` a second later).
+    private func assertExits(_ pid: pid_t, _ message: String) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while kill(pid, 0) == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertNotEqual(kill(pid, 0), 0, message)
+        XCTAssertEqual(errno, ESRCH, message)
     }
 
     private func runs() throws -> [String] {

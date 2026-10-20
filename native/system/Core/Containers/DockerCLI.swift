@@ -38,8 +38,9 @@ public struct DockerCLI: Sendable {
         }
     }
 
-    /// Runs `docker ps`, then `docker stats`, each with `timeout`, and joins their rows. Any failure gives a report
-    /// without a breakdown and with the reason.
+    /// Runs `docker ps`, then `docker stats`, each with `timeout` and pinned to the current context's endpoint as
+    /// read here, and joins their rows. Any failure gives a report without a breakdown and with the reason. A
+    /// cancelled task starts no further command and stops the one running.
     public func report(at date: Date = Date()) async -> ContainerReport {
         guard let cli = executable() else { return ContainerReport(observedAt: date, outcome: .unavailable(.cliNotFound)) }
         let context: DockerContext
@@ -48,10 +49,10 @@ public struct DockerCLI: Sendable {
         case let .failure(reason): return ContainerReport(observedAt: date, executable: cli, outcome: .unavailable(reason))
         }
         let outcome: ContainerOutcome
-        switch await run(cli, Self.listingArguments) {
+        switch await run(cli, Self.listingArguments, host: context.host) {
         case let .failure(reason): outcome = .unavailable(reason)
         case let .success(listingText):
-            switch await run(cli, Self.statsArguments) {
+            switch await run(cli, Self.statsArguments, host: context.host) {
             case let .failure(reason): outcome = .unavailable(reason)
             case let .success(statsText):
                 let listing = DockerOutput.listing(listingText)
@@ -68,18 +69,26 @@ public struct DockerCLI: Sendable {
         return ContainerReport(observedAt: date, executable: cli, context: context, outcome: outcome)
     }
 
+    /// The arguments for one command: `--host` with the checked endpoint first, so the CLI neither rereads the
+    /// current context (which may have changed since it was checked) nor reaches another daemon.
+    static func arguments(_ command: [String], host: String) -> [String] {
+        ["--host", host] + command
+    }
+
     /// The environment the CLI runs with: `HOME` and a fixed `PATH`, nothing inherited, so `DOCKER_HOST`,
-    /// `DOCKER_CONTEXT`, and `DOCKER_CONFIG` cannot point it elsewhere than the context checked here.
+    /// `DOCKER_CONTEXT`, and `DOCKER_CONFIG` cannot point it elsewhere than the endpoint checked here.
     var environment: [String: String] {
         ["HOME": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "DOCKER_CLI_HINTS": "false"]
     }
 
-    private func run(_ cli: String, _ arguments: [String]) async -> Result<String, ContainerUnavailable> {
+    private func run(_ cli: String, _ arguments: [String], host: String) async -> Result<String, ContainerUnavailable> {
         let command = Self.commandName(arguments)
-        switch await runner.run(cli, arguments: arguments, environment: environment, timeout: timeout) {
+        guard !Task.isCancelled else { return .failure(.cancelled) }
+        switch await runner.run(cli, arguments: Self.arguments(arguments, host: host), environment: environment, timeout: timeout) {
         case let .failure(.launchFailed(message)): return .failure(.launchFailed(command: command, message: message))
         case .failure(.timedOut): return .failure(.timedOut(command: command, seconds: Self.seconds(timeout)))
         case .failure(.outputTooLarge): return .failure(.outputTooLarge(command: command))
+        case .failure(.cancelled): return .failure(.cancelled)
         case let .success(output):
             guard output.status == 0 else {
                 let message = Self.firstLine(output.stderr)
@@ -95,8 +104,10 @@ public struct DockerCLI: Sendable {
         }
     }
 
-    /// What the CLI prints when the daemon is stopped or its socket is missing.
-    static let daemonUnreachableMarkers = ["Cannot connect to the Docker daemon", "Is the docker daemon running", "error during connect"]
+    /// What the CLI prints when the daemon is stopped or its socket is missing; Docker CLI 28 and later print
+    /// "failed to connect to the docker API at unix://…".
+    static let daemonUnreachableMarkers = ["Cannot connect to the Docker daemon", "Is the docker daemon running", "error during connect",
+                                           "failed to connect to the docker API"]
 
     static func seconds(_ duration: Duration) -> Double {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
@@ -260,6 +271,8 @@ public enum ContainerUnavailable: Error, Equatable, Sendable {
     case launchFailed(command: String, message: String)
     case outputTooLarge(command: String)
     case unparsableOutput(command: String)
+    /// The run was stopped before it finished, because the main window was hidden.
+    case cancelled
 
     public var reason: String {
         switch self {
@@ -283,12 +296,15 @@ public enum ContainerUnavailable: Error, Equatable, Sendable {
             "\(command) printed more output than System reads."
         case let .unparsableOutput(command):
             "Could not read the output of \(command)."
+        case .cancelled:
+            "The containers were not measured because the main window was hidden."
         }
     }
 }
 
 /// Runs the CLI at most once every 10 seconds, only while the main window is visible and a runtime's VM is
-/// running, and never twice at once. With only the menu bar in use it never runs.
+/// running, and never twice at once. With only the menu bar in use it never runs. The caller cancels the refresh
+/// when the window is hidden: no further command starts, and the running one is stopped.
 public actor ContainerPoller {
     public static let minimumInterval: Duration = .seconds(10)
     private let cli: DockerCLI
@@ -299,15 +315,17 @@ public actor ContainerPoller {
         self.cli = cli
     }
 
-    /// A new report, or `nil` when the CLI did not run: the window is not visible, no runtime runs, a run is in
-    /// progress, or the last one started less than `minimumInterval` before `now`.
+    /// A new report, or `nil` when the CLI did not run or did not finish: the window is not visible, no runtime
+    /// runs, a run is in progress, the last one started less than `minimumInterval` before `now`, or the task was
+    /// cancelled.
     public func refresh(cadence: SamplingCadence, runningRuntimes: [ContainerRuntime],
                         now: ContinuousClock.Instant = .now) async -> ContainerReport? {
-        guard cadence == .mainWindowVisible, !runningRuntimes.isEmpty, !isRunning else { return nil }
+        guard cadence == .mainWindowVisible, !runningRuntimes.isEmpty, !isRunning, !Task.isCancelled else { return nil }
         if let lastStart, now - lastStart < Self.minimumInterval { return nil }
         isRunning = true
         lastStart = now
         defer { isRunning = false }
-        return await cli.report()
+        let report = await cli.report()
+        return Task.isCancelled ? nil : report
     }
 }

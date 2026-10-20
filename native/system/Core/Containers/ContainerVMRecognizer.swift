@@ -34,28 +34,45 @@ public enum ContainerRuntime: String, CaseIterable, Sendable {
     }
 }
 
-/// App rule 3's recognizer. Over one sample it finds the processes of Docker Desktop, OrbStack, and Colima, by a
-/// closed rule set; the first that applies places a process:
+/// App rule 3's recognizer. Over one sample it finds the processes that run Docker Desktop's, OrbStack's, and
+/// Colima's VM and daemon, by a closed rule set; the first that applies places a process:
 ///
-/// 1. The executable is inside an outermost `Docker.app` or `OrbStack.app` bundle: the runtime's own processes.
-/// 2. The executable is `limactl` or `colima` (file name or kernel name): Colima's host agent and CLI.
+/// 1. The executable is inside an outermost `Docker.app` or `OrbStack.app` bundle and is not one of its clients
+///    (`isClient`): the runtime's own processes.
+/// 2. Lima's host agent, `limactl` whose parent is launchd or another `limactl`, or Colima's daemon, `colima` whose
+///    parent is launchd (`brew services`, `colima daemon`), by file name or kernel name. `limactl` or `colima` run
+///    from a shell or by `colima` is a transient command, not the VM.
 /// 3. A process outside any app bundle with an ancestor placed by rule 1 or 2: what the runtime started, such as
 ///    `qemu-system-*`, `ssh` port forwarders, and `socket_vmnet` under Lima's host agent.
 /// 4. Apple's Virtualization.framework VM service (`com.apple.Virtualization.VirtualMachine`), which launchd starts
 ///    on behalf of a runtime: the runtime of its responsible process, else the one runtime found among the other
-///    members of its coalition. Two runtimes in the coalition leave it unrecognized.
+///    members of its coalition, when that runtime accounts for every such service there (`vmCapacity`). Two
+///    runtimes in the coalition, or more services than the runtime runs VMs, leave them unrecognized.
 ///
-/// A responsible PID that belongs to a process started later than the VM service was reused and is ignored.
+/// A client (the `docker` CLI and its plugins and credential helpers, `kubectl`, OrbStack's `orb`) and a transient
+/// `limactl` or `colima` command are never the VM: they create no group, start no poll, and are placed by the later
+/// App rules, so a client inside an app bundle stays with that app (rule 1). A responsible PID that belongs to a
+/// process started later than the VM service was reused and is ignored.
 public struct ContainerVMRecognizer: ContainerVMRecognizing {
     public static let virtualMachineService = "com.apple.Virtualization.VirtualMachine"
-    static let colimaExecutables: Set<String> = ["limactl", "colima"]
+    static let clientExecutables: Set<String> = ["docker", "kubectl", "hub-tool", "com.docker.cli", "orb", "orbctl"]
+    static let clientPrefixes = ["docker-", "kubectl-"]
 
     public init() {}
 
     public func containerVMs(in processes: [ProcessFacts]) -> [ContainerVM?] {
         let tree = ProcessTree(processes)
         let bundles = processes.map { $0.executablePath.flatMap(AttributionPass.outermostAppBundle) }
-        var found: [ContainerVM?] = processes.indices.map { Self.direct(processes[$0], bundle: bundles[$0]) }
+        let commands = processes.map(Self.colimaCommand)
+        let hostAgents = Set(processes.indices.filter { index in
+            commands[index] == "limactl" && (processes[index].ppid == 1 || tree.parent[index].map { commands[$0] == "limactl" } == true)
+        })
+        var found: [ContainerVM?] = processes.indices.map { index in
+            if let bundle = bundles[index] { return Self.bundled(processes[index], bundle: bundle) }
+            if hostAgents.contains(index) { return ContainerVM(runtime: .colima, detail: "runs Lima's host agent (limactl)") }
+            if commands[index] == "colima", processes[index].ppid == 1 { return ContainerVM(runtime: .colima, detail: "runs colima under launchd") }
+            return nil
+        }
 
         let runtimeAncestor = tree.nearestAncestor { found[$0] != nil }
         for index in processes.indices where found[index] == nil && bundles[index] == nil {
@@ -63,20 +80,36 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
             let parent = processes[ancestor]
             found[index] = vm.identified(by: "started by \(parent.name) (pid \(parent.pid))")
         }
+        // Host agents that run QEMU, whose VM is not a Virtualization.framework service.
+        let qemuAgents = Set(processes.indices.compactMap { index in
+            Self.isQEMU(processes[index]) ? runtimeAncestor[index].flatMap { hostAgents.contains($0) ? $0 : nil } : nil
+        })
 
+        var leftByCoalition: [UInt64: [Int]] = [:]
+        for (index, process) in processes.enumerated() where found[index] == nil && Self.isVirtualMachineService(process) {
+            if let pid = process.responsiblePID, pid != process.pid,
+               let responsible = tree.index(of: pid, startedBy: process.identity.startTime), let vm = found[responsible] {
+                found[index] = vm.identified(by: "responsible process \(processes[responsible].name) (pid \(pid))")
+            } else if let coalition = process.coalitionID {
+                leftByCoalition[coalition, default: []].append(index)
+            }
+        }
         var runtimesByCoalition: [UInt64: [(index: Int, vm: ContainerVM)]] = [:]
         for (index, process) in processes.enumerated() {
             if let coalition = process.coalitionID, let vm = found[index] {
                 runtimesByCoalition[coalition, default: []].append((index, vm))
             }
         }
-        for (index, process) in processes.enumerated() where found[index] == nil && Self.isVirtualMachineService(process) {
-            if let pid = process.responsiblePID, pid != process.pid,
-               let responsible = tree.index(of: pid, startedBy: process.identity.startTime), let vm = found[responsible] {
-                found[index] = vm.identified(by: "responsible process \(processes[responsible].name) (pid \(pid))")
-            } else if let coalition = process.coalitionID, let members = runtimesByCoalition[coalition],
-                      Set(members.compactMap(\.vm.runtime)).count == 1, let member = members.first {
-                let other = processes[member.index]
+        for (coalition, services) in leftByCoalition {
+            guard let members = runtimesByCoalition[coalition], Set(members.compactMap(\.vm.runtime)).count == 1,
+                  let member = members.first(where: { !Self.isVirtualMachineService(processes[$0.index]) }),
+                  let runtime = member.vm.runtime else { continue }
+            let capacity = Self.vmCapacity(of: runtime, members: members.map(\.index), hostAgents: hostAgents, qemuAgents: qemuAgents)
+            // Services already placed through their responsible process use up part of it.
+            let placed = members.count { Self.isVirtualMachineService(processes[$0.index]) }
+            guard services.count <= capacity - placed else { continue }
+            let other = processes[member.index]
+            for index in services {
                 found[index] = member.vm.identified(by: "coalition \(coalition) with \(other.name) (pid \(other.pid))")
             }
         }
@@ -93,18 +126,38 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
         }
     }
 
-    /// Rules 1 and 2, from the process alone.
-    private static func direct(_ process: ProcessFacts, bundle: String?) -> ContainerVM? {
-        if let bundle {
-            let name = AttributionPass.lastComponent(bundle)
-            guard let runtime = ContainerRuntime.allCases.first(where: { $0.bundleName == name }) else { return nil }
-            return ContainerVM(runtime: runtime, detail: "inside \(name)", appBundlePath: bundle)
-        }
-        let file = process.executablePath.map(AttributionPass.lastComponent)
-        if let executable = [file, process.name].compactMap({ $0 }).first(where: colimaExecutables.contains) {
-            return ContainerVM(runtime: .colima, detail: "runs \(executable)")
-        }
-        return nil
+    /// Rule 1, for a process inside an app bundle.
+    private static func bundled(_ process: ProcessFacts, bundle: String) -> ContainerVM? {
+        let name = AttributionPass.lastComponent(bundle)
+        guard let runtime = ContainerRuntime.allCases.first(where: { $0.bundleName == name }),
+              let path = process.executablePath, !isClient(path: path, bundle: bundle) else { return nil }
+        return ContainerVM(runtime: runtime, detail: "inside \(name)", appBundlePath: bundle)
+    }
+
+    /// A command-line client the runtime's app ships (`Docker.app/Contents/Resources/bin/docker`, the target of
+    /// `/usr/local/bin/docker`; OrbStack's `xbin/docker`, the target of `~/.orbstack/bin/docker`), by file name or
+    /// a `cli-plugins` folder. It talks to the daemon and is no part of the VM.
+    static func isClient(path: String, bundle: String) -> Bool {
+        let file = AttributionPass.lastComponent(path)
+        return clientExecutables.contains(file) || clientPrefixes.contains(where: file.hasPrefix)
+            || path.dropFirst(bundle.count).split(separator: "/").contains("cli-plugins")
+    }
+
+    /// `limactl` or `colima`, by file name or kernel name.
+    private static func colimaCommand(_ process: ProcessFacts) -> String? {
+        [process.executablePath.map(AttributionPass.lastComponent), process.name].compactMap { $0 }
+            .first { $0 == "limactl" || $0 == "colima" }
+    }
+
+    /// How many Virtualization.framework VMs a runtime's processes in one coalition run: one for an app's runtime,
+    /// and one per Lima host agent that does not run QEMU for Colima.
+    private static func vmCapacity(of runtime: ContainerRuntime, members: [Int], hostAgents: Set<Int>, qemuAgents: Set<Int>) -> Int {
+        guard runtime == .colima else { return 1 }
+        return members.filter { hostAgents.contains($0) && !qemuAgents.contains($0) }.count
+    }
+
+    private static func isQEMU(_ process: ProcessFacts) -> Bool {
+        [process.executablePath.map(AttributionPass.lastComponent), process.name].contains { $0?.hasPrefix("qemu-system-") == true }
     }
 
     static func isVirtualMachineService(_ process: ProcessFacts) -> Bool {

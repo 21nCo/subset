@@ -21,6 +21,8 @@ public enum CommandFailure: Error, Equatable, Sendable {
     case timedOut
     /// It printed more than the runner keeps, and was stopped.
     case outputTooLarge
+    /// The calling task was cancelled, so it was stopped or never started.
+    case cancelled
 }
 
 /// Runs a local executable without a shell.
@@ -30,8 +32,8 @@ public protocol CommandRunning: Sendable {
 }
 
 /// Runs a command with `Process`, reading its output as it arrives so a full pipe never stalls it. At the timeout,
-/// or once the output passes `outputLimit`, it answers at once and stops the command: `SIGTERM`, then `SIGKILL` a
-/// second later if it is still running.
+/// once the output passes `outputLimit`, or when the calling task is cancelled, it answers at once and stops the
+/// command: `SIGTERM`, then `SIGKILL` a second later if it is still running. A task already cancelled starts nothing.
 public struct ProcessCommandRunner: CommandRunning {
     public static let defaultOutputLimit = 8 << 20
     public let outputLimit: Int
@@ -42,9 +44,13 @@ public struct ProcessCommandRunner: CommandRunning {
 
     public func run(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration) async
         -> Result<CommandOutput, CommandFailure> {
-        await withCheckedContinuation { continuation in
-            CommandRun(limit: outputLimit, continuation: continuation)
-                .start(executable, arguments: arguments, environment: environment, timeout: timeout)
+        let run = CommandRun(limit: outputLimit)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                run.start(executable, arguments: arguments, environment: environment, timeout: timeout, continuation: continuation)
+            }
+        } onCancel: {
+            run.cancel()
         }
     }
 }
@@ -62,13 +68,21 @@ private final class CommandRun: @unchecked Sendable {
     private var stderr = Data()
     private var openPipes = 2
     private var status: Int32?
+    private var launched = false
+    private var cancelled = false
+    private var stopping = false
 
-    init(limit: Int, continuation: CheckedContinuation<Result<CommandOutput, CommandFailure>, Never>) {
+    init(limit: Int) {
         self.limit = limit
-        self.continuation = continuation
     }
 
-    func start(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration) {
+    func start(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration,
+               continuation: CheckedContinuation<Result<CommandOutput, CommandFailure>, Never>) {
+        let proceed = lock.withLock {
+            if !cancelled { self.continuation = continuation }
+            return !cancelled
+        }
+        guard proceed else { return continuation.resume(returning: .failure(.cancelled)) }
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment
@@ -91,10 +105,18 @@ private final class CommandRun: @unchecked Sendable {
             answer(.failure(.launchFailed(error.localizedDescription)))
             return
         }
+        // A cancellation that arrived while the command was starting has answered already; it is stopped here.
+        if lock.withLock({ launched = true; return cancelled }) { stop() }
         let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
             if answer(.failure(.timedOut)) { stop() }
         }
+    }
+
+    /// Answers `cancelled` and stops the command once it has started.
+    func cancel() {
+        let started = lock.withLock { cancelled = true; return launched }
+        if answer(.failure(.cancelled)), started { stop() }
     }
 
     private func receive(_ data: Data, error: Bool) {
@@ -136,6 +158,7 @@ private final class CommandRun: @unchecked Sendable {
     }
 
     private func stop() {
+        guard lock.withLock({ defer { stopping = true }; return !stopping }) else { return }
         stopReading()
         guard process.isRunning else { return }
         let pid = process.processIdentifier

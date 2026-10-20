@@ -111,7 +111,7 @@ final class DockerOutputTests: XCTestCase {
         XCTAssertNil(DockerOutput.composeProject(labels: ""))
     }
 
-    func testStatsJoinTheirListingByIDPrefixOrName() {
+    func testStatsJoinTheirListingByIDPrefixAndNeverAcrossConflictingIDs() {
         let listing = DockerOutput.listing("""
         {"ID":"3f2a9c1b7d4e","Names":"db,alias","Labels":""}
         {"ID":"","Names":"no-id","Labels":""}
@@ -125,7 +125,10 @@ final class DockerOutputTests: XCTestCase {
         let breakdown = ContainerBreakdown(listing: listing, stats: stats)
 
         XCTAssertEqual(listing.skippedLines, 1, "a listing without an ID is skipped")
-        XCTAssertEqual(breakdown.standalone.map(\.name), ["db", "renamed"], "the first of several names is shown")
-        XCTAssertEqual(breakdown.standalone.map(\.cpuPercent), [1, 2], "a full ID matches its short form; else the name matches")
+        XCTAssertEqual(breakdown.standalone.map(\.name), ["db", "renamed", "renamed"], "the first of several names is shown")
+        XCTAssertEqual(breakdown.standalone.map(\.id), ["3f2a9c1b7d4e", "777777777777", "999999999999"])
+        XCTAssertEqual(breakdown.standalone.map(\.cpuPercent), [1, nil, 2],
+                       "a full ID matches its short form; a container recreated under the same name is another container")
+        XCTAssertEqual(breakdown.totals.containerCount, 3)
     }
 }

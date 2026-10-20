@@ -36,6 +36,12 @@ final class SystemMonitor {
         let cadence = SamplingCadence(mainWindowVisible: visible)
         guard cadence != self.cadence else { return }
         self.cadence = cadence
+        if !visible {
+            // Hiding the window stops a container poll in progress: its running command is stopped and no
+            // further one starts.
+            containerRefresh?.cancel()
+            containerRefresh = nil
+        }
         if loop != nil { restart() }
     }
 
@@ -84,7 +90,8 @@ final class SystemMonitor {
         let cadence = cadence
         containerRefresh = Task { [weak self, containerPoller] in
             let report = await containerPoller.refresh(cadence: cadence, runningRuntimes: runtimes)
-            guard let self else { return }
+            // A cancelled refresh was already cleared when the window was hidden.
+            guard let self, !Task.isCancelled else { return }
             if let report { containerReport = report }
             containerRefresh = nil
         }

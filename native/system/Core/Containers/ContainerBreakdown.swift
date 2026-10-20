@@ -57,9 +57,10 @@ public struct ContainerBreakdown: Equatable, Sendable {
     /// Values present in a line that could not be read (not a number with a known unit), left `nil`.
     public let unreadableValues: Int
 
-    /// Joins `docker ps` rows with `docker stats` rows by container ID, where one ID may be a prefix of the other,
-    /// else by name. A container in only one of the two lists (one started or stopped between the commands) is kept,
-    /// without usage or without labels.
+    /// Joins `docker ps` rows with `docker stats` rows by container ID, where one ID may be a prefix of the other;
+    /// only a row without an ID is matched by name. Rows whose IDs differ are different containers even with the same
+    /// name (one recreated between the commands). A container in only one of the two lists is kept, without usage or
+    /// without labels.
     public init(listing: DockerOutput.Parsed<DockerOutput.Listing>, stats: DockerOutput.Parsed<DockerOutput.Stats>) {
         var unmatched = stats.rows
         var containers: [Container] = listing.rows.map { row in
@@ -82,8 +83,8 @@ public struct ContainerBreakdown: Equatable, Sendable {
     }
 
     private static func sameContainer(_ listing: DockerOutput.Listing, _ stats: DockerOutput.Stats) -> Bool {
-        if !listing.id.isEmpty, !stats.id.isEmpty, listing.id.hasPrefix(stats.id) || stats.id.hasPrefix(listing.id) { return true }
-        return stats.name == listing.name
+        guard !listing.id.isEmpty, !stats.id.isEmpty else { return stats.name == listing.name }
+        return listing.id.hasPrefix(stats.id) || stats.id.hasPrefix(listing.id)
     }
 }
 
