@@ -249,6 +249,34 @@ final class DiskEntryTests: XCTestCase {
         XCTAssertEqual(tree.root.sizes?.allocated, 8192)
     }
 
+    func testPlaceholderInsideAPackageFlagsThePackage() throws {
+        var placeholder = file("Model.bin", allocated: 0, logical: 2_000_000)
+        placeholder.flags = UInt32(bitPattern: SF_DATALESS)
+        var placeholderFolder = folder("Assets")
+        placeholderFolder.flags = UInt32(bitPattern: SF_DATALESS)
+        let present = facts(file("Info.plist", allocated: 4096, logical: 900)).0
+        let package = EntryFacts(kind: .package, descent: .package)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: EntryFacts(kind: .directory, descent: .folder))
+        let top = builder.appendChildren([("A.app", package), ("B.app", package), ("C.app", package)],
+                                         to: 0, parentPath: "/fixture")
+        for (owner, name) in [(top, "A.app"), (top + 1, "B.app"), (top + 2, "C.app")] {
+            builder.addToPackage(present, owner: owner, path: "/fixture/\(name)/Info.plist")
+        }
+        builder.addToPackage(facts(placeholder).0, owner: top, path: "/fixture/A.app/Model.bin")
+        builder.addToPackage(facts(placeholderFolder).0, owner: top + 1, path: "/fixture/B.app/Assets")
+        let tree = builder.finish()
+
+        for path in ["A.app", "B.app"] {
+            let item = try XCTUnwrap(tree.item(at: path))
+            XCTAssertTrue(item.flags.contains(.containsDataless), path)
+            XCTAssertFalse(item.flags.contains(.dataless), "the package itself is on this Mac")
+            XCTAssertEqual(item.sizes?.allocated, 4096, "a placeholder adds no allocation")
+        }
+        XCTAssertEqual(tree.item(at: "A.app")?.sizes?.logical, 2_000_900, "a placeholder file keeps its logical size")
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "C.app")).flags.contains(.containsDataless))
+        XCTAssertEqual(tree.item(at: "C.app")?.sizes?.allocated, 4096)
+    }
+
     func testCloneThatSharesOnlySomeBlocksMarksItsAllocatedAsAnUpperBound() {
         // Recorded on APFS: three pure clones carry 0x41; a 4-byte write into one gives it a new clone ID and 0x1.
         var pure = file(allocated: 4 << 20, logical: 4 << 20)

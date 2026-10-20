@@ -64,6 +64,9 @@ public struct DiskItemFlags: OptionSet, Hashable, Sendable {
     /// changed clone gets another ID while sharing most blocks with the first). Unrelated clone groups in one folder
     /// set it too, conservatively.
     public static let allocatedUpperBound = DiskItemFlags(rawValue: 1 << 8)
+    /// A package whose contents, which are not listed, include a `dataless` file or folder: those count as zero
+    /// allocated and a placeholder folder is not read, so the package's sizes leave out data that is not on this Mac.
+    public static let containsDataless = DiskItemFlags(rawValue: 1 << 9)
 }
 
 /// One item of a scan.

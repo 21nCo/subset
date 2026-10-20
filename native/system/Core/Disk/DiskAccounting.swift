@@ -61,10 +61,12 @@ struct TreeBuilder {
         return first
     }
 
-    /// Adds an entry read inside the package `owner` to the package's total.
+    /// Adds an entry read inside the package `owner` to the package's total. A placeholder inside flags the package
+    /// `containsDataless`, since its contents are not listed.
     mutating func addToPackage(_ facts: EntryFacts, owner: Int32, path: @autoclosure () -> String) {
         contributions[Int(owner)].add(facts.contribution)
         insert(facts.flags.intersection(.allocatedUpperBound), into: owner)
+        if facts.flags.contains(.dataless) { insert(.containsDataless, into: owner) }
         if facts.flags.contains(.unreadable) { markUnreadable(owner, path: path(), isItem: false) }
         record(facts, node: owner, isItem: false, path: path())
     }
