@@ -10,6 +10,8 @@ public struct DockerCLI: Sendable {
     public static let timeout: Duration = .seconds(5)
     public static let listingArguments = ["ps", "--format", "{{json .}}"]
     public static let statsArguments = ["stats", "--no-stream", "--format", "{{json .}}"]
+    /// The endpoint of no context, or of the `default` one.
+    public static let defaultHost = "unix:///var/run/docker.sock"
 
     /// In the order tried: Docker Desktop's and Colima's usual links, OrbStack's, and Docker Desktop's own copy.
     public static func candidatePaths(home: String) -> [String] {
@@ -21,13 +23,17 @@ public struct DockerCLI: Sendable {
     public let candidates: [String]
     public let runner: any CommandRunning
     public let timeout: Duration
+    /// The endpoint of no context or `default`: `defaultHost`, or another socket in tests.
+    public let defaultHost: String
 
     public init(home: String = NSHomeDirectory(), candidates: [String]? = nil,
-                runner: any CommandRunning = ProcessCommandRunner(), timeout: Duration = DockerCLI.timeout) {
+                runner: any CommandRunning = ProcessCommandRunner(), timeout: Duration = DockerCLI.timeout,
+                defaultHost: String = DockerCLI.defaultHost) {
         self.home = home
         self.candidates = candidates ?? Self.candidatePaths(home: home)
         self.runner = runner
         self.timeout = timeout
+        self.defaultHost = defaultHost
     }
 
     /// The first candidate that is an executable regular file.
@@ -39,23 +45,23 @@ public struct DockerCLI: Sendable {
     }
 
     /// Runs `docker ps`, then `docker stats`, each with `timeout` and pinned to the real path of the current
-    /// context's socket as resolved here, and joins their rows. An endpoint that belongs to no recognized runtime,
-    /// or whose socket does not exist, is not asked. Any failure gives a report without a breakdown and with the
-    /// reason. A cancelled task starts no further command and stops the one running.
+    /// context's socket as resolved here, and joins their rows. An endpoint whose socket does not exist means the
+    /// daemon is not running; one that belongs to no recognized runtime is not asked. Any failure gives a report
+    /// without a breakdown and with the reason. A cancelled task starts no further command and stops the one running.
     public func report(at date: Date = Date()) async -> ContainerReport {
         guard let cli = executable() else { return ContainerReport(observedAt: date, outcome: .unavailable(.cliNotFound)) }
         let context: DockerContext
-        switch DockerContextReader(home: home).current() {
+        switch DockerContextReader(home: home, defaultHost: defaultHost).current() {
         case let .success(found): context = found
         case let .failure(reason): return ContainerReport(observedAt: date, executable: cli, outcome: .unavailable(reason))
+        }
+        guard let endpoint = context.endpoint else {
+            return ContainerReport(observedAt: date, executable: cli, context: context,
+                                   outcome: .unavailable(.daemonNotRunning(message: "No socket at \(context.missingSocket ?? context.host).")))
         }
         guard context.runtime != nil else {
             return ContainerReport(observedAt: date, executable: cli, context: context,
                                    outcome: .unavailable(.contextNotRecognized(name: context.name, host: context.host)))
-        }
-        guard let endpoint = context.endpoint else {
-            return ContainerReport(observedAt: date, executable: cli, context: context,
-                                   outcome: .unavailable(.daemonNotRunning(message: "No socket at \(context.host.dropFirst("unix://".count)).")))
         }
         let outcome: ContainerOutcome
         switch await run(cli, Self.listingArguments, host: endpoint) {
@@ -143,24 +149,33 @@ public struct DockerContext: Equatable, Sendable {
     /// `unix://` with the socket's real path, which both commands are pinned to, such as
     /// `unix:///Users/me/.orbstack/run/docker.sock`; `nil` when the socket does not exist.
     public let endpoint: String?
-    /// From the socket's real path; `nil` when it belongs to no recognized runtime.
+    /// From the socket's real path, or, when there is no socket, from `missingSocket`; `nil` when it belongs to no
+    /// recognized runtime.
     public let runtime: ContainerRuntime?
+    /// When the socket does not exist, where it would be: the path at the end of the chain of links the endpoint
+    /// starts, such as `~/.docker/run/docker.sock` for Docker Desktop's `/var/run/docker.sock` while its engine is
+    /// stopped.
+    public let missingSocket: String?
 
-    public init(name: String, host: String, endpoint: String?, runtime: ContainerRuntime?) {
+    public init(name: String, host: String, endpoint: String?, runtime: ContainerRuntime?, missingSocket: String? = nil) {
         self.name = name
         self.host = host
         self.endpoint = endpoint
         self.runtime = runtime
+        self.missingSocket = missingSocket
     }
 }
 
 /// Reads the current context the way the CLI does without `DOCKER_HOST` or `DOCKER_CONTEXT`: `currentContext` in
 /// `~/.docker/config.json`, whose endpoint is in `~/.docker/contexts/meta/<sha256 of the name>/meta.json`. No context,
-/// or `default`, is the default socket `/var/run/docker.sock`.
+/// or `default`, is the default socket `/var/run/docker.sock`. An empty `config.json`, which the CLI reads as no
+/// settings, is no context.
 struct DockerContextReader {
-    static let defaultHost = "unix:///var/run/docker.sock"
     static let fileLimit = 1 << 20
+    /// How many links a socket path may go through, as the kernel's `MAXSYMLINKS`.
+    static let linkLimit = 32
     let home: String
+    var defaultHost = DockerCLI.defaultHost
 
     func current() -> Result<DockerContext, ContainerUnavailable> {
         let configPath = home + "/.docker/config.json"
@@ -168,12 +183,12 @@ struct DockerContextReader {
         switch Self.readJSON(configPath) {
         case let .success(config):
             if let current = config["currentContext"] as? String, !current.isEmpty { name = current }
-        case .failure(.missing):
+        case .failure(.missing), .failure(.empty):
             break
         case let .failure(failure):
             return .failure(.contextUnreadable(path: configPath, message: failure.message))
         }
-        guard name != "default" else { return .success(Self.context(name: name, host: Self.defaultHost)) }
+        guard name != "default" else { return .success(Self.context(name: name, host: defaultHost)) }
 
         let digest = SHA256.hash(data: Data(name.utf8)).map { String(format: "%02x", $0) }.joined()
         let metaPath = home + "/.docker/contexts/meta/\(digest)/meta.json"
@@ -192,21 +207,39 @@ struct DockerContextReader {
 
     private static func context(name: String, host: String) -> DockerContext {
         let socket = String(host.dropFirst("unix://".count))
-        let real = realpath(socket, nil).map { pointer in
-            defer { free(pointer) }
-            return String(cString: pointer)
+        if let pointer = realpath(socket, nil) {
+            let real = String(cString: pointer)
+            free(pointer)
+            return DockerContext(name: name, host: host, endpoint: "unix://" + real, runtime: ContainerRuntime.owning(socketPath: real))
         }
-        return DockerContext(name: name, host: host, endpoint: real.map { "unix://" + $0 },
-                             runtime: ContainerRuntime.owning(socketPath: real ?? socket))
+        let missing = linkTarget(socket)
+        return DockerContext(name: name, host: host, endpoint: nil, runtime: ContainerRuntime.owning(socketPath: missing), missingSocket: missing)
+    }
+
+    /// Where a chain of links that leads to no file ends: the path the last link names, or `path` when it is no
+    /// link. A link with a relative target is read from its own folder. A chain longer than `linkLimit` stops there.
+    static func linkTarget(_ path: String) -> String {
+        var current = path
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        for _ in 0..<linkLimit {
+            let count = readlink(current, &buffer, buffer.count - 1)
+            guard count > 0 else { break }
+            let target = String(decoding: buffer.prefix(count).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            current = target.hasPrefix("/") ? target : (current as NSString).deletingLastPathComponent + "/" + target
+        }
+        return current
     }
 
     enum ReadFailure: Error {
         case missing
+        /// No bytes, or only white space.
+        case empty
         case unreadable(String)
 
         var message: String {
             switch self {
             case .missing: "not found"
+            case .empty: "empty"
             case let .unreadable(message): message
             }
         }
@@ -226,6 +259,7 @@ struct DockerContextReader {
         var data = Data(count: Int(info.st_size))
         let count = data.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
         guard count == data.count else { return .failure(.unreadable("could not be read")) }
+        guard data.contains(where: { !Set(" \t\r\n".utf8).contains($0) }) else { return .failure(.empty) }
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return .failure(.unreadable("not a JSON object"))
         }
@@ -249,13 +283,16 @@ public struct ContainerReport: Equatable, Sendable {
 
     /// What this report says about one running runtime's VM. Only the runtime the context's endpoint belongs to gets
     /// the breakdown. An endpoint that belongs to none (Podman's socket, one forwarded from another machine, a custom
-    /// path) is never taken to be a running runtime's, even when only one runs.
+    /// path) is never taken to be a running runtime's, even when only one runs. A missing socket that names no
+    /// runtime means no daemon there, which every running runtime shows.
     public func status(of runtime: ContainerRuntime) -> ContainerBreakdownStatus {
         guard let context else {
             if case let .unavailable(reason) = outcome { return .unavailable(reason) }
             return .notMeasured
         }
         guard let target = context.runtime else {
+            // With no socket at all there is no daemon to recognize, so every running runtime says so.
+            if context.endpoint == nil, case let .unavailable(reason) = outcome { return .unavailable(reason) }
             return .unavailable(.contextNotRecognized(name: context.name, host: context.host))
         }
         guard target == runtime else { return .otherContext(name: context.name, runtime: target) }

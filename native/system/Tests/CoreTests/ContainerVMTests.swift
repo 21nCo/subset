@@ -193,6 +193,30 @@ final class ContainerVMTests: XCTestCase {
         XCTAssertEqual(placement(result, 963).app.group, OriginGroupID(.terminal), "a transient limactl stays in the terminal")
     }
 
+    func testAShellOrCodingAgentRunUnderARuntimeIsNotTheVM() {
+        // Docker Desktop's terminal runs a shell under its UI, and in it a coding agent and its tools; OrbStack's a shell.
+        let processes = dockerDesktop() + orbStackRuntime() + [
+            fact(720, ppid: 700, path: "/bin/zsh", signature: apple, responsible: 700, coalition: 70),
+            fact(721, ppid: 720, path: "/Users/me/.local/bin/claude", signature: unsigned, responsible: 700, coalition: 70),
+            fact(722, ppid: 721, path: "/Users/me/.nvm/versions/node/v22.11.0/bin/node", signature: unsigned, responsible: 700, coalition: 70),
+            fact(820, ppid: 800, path: "/bin/zsh", signature: apple, responsible: 800, coalition: 80),
+            fact(821, ppid: 820, path: "/Users/me/.cargo/bin/cargo", signature: unsigned, responsible: 800, coalition: 80)
+        ]
+        let recognizer = ContainerVMRecognizer()
+
+        XCTAssertEqual(recognizer.containerVMs(in: processes).suffix(5).map { $0?.runtime }, Array(repeating: nil, count: 5))
+        XCTAssertEqual(recognizer.groups(in: processes).map { $0.members.map(\.pid) }, [[700, 701, 702, 703], [800, 801, 802]])
+
+        let result = Attribution(projectMarkers: FixtureProjectMarkers()).attribute(processes)
+        for pid: Int32 in [721, 722] {
+            XCTAssertEqual(placement(result, pid).app.group, OriginGroupID(.agent(name: "claude")), "pid \(pid)")
+            XCTAssertEqual(placement(result, pid).app.rule, .codingAgent, "pid \(pid)")
+        }
+        for pid: Int32 in [720, 820, 821] {
+            XCTAssertNotEqual(placement(result, pid).app.rule, .containerVM, "pid \(pid)")
+        }
+    }
+
     func testAReusedResponsiblePIDDoesNotNameTheRuntime() {
         // The VM service's responsible PID now belongs to a Docker.app process that started after it.
         let processes = [

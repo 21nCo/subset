@@ -117,9 +117,46 @@ final class DockerCLITests: XCTestCase {
 
         let report = await cli([stub]).report()
 
-        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, endpoint: nil, runtime: .colima))
+        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, endpoint: nil, runtime: .colima,
+                                                     missingSocket: home + "/.colima/default/docker.sock"))
         XCTAssertEqual(report.status(of: .colima),
                        .unavailable(.daemonNotRunning(message: "No socket at \(home)/.colima/default/docker.sock.")))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
+    }
+
+    func testADanglingDefaultLinkNamesTheRuntimeWhoseDaemonIsStopped() async throws {
+        // No current context. Docker Desktop's engine is stopped: the default link, through a relative second link,
+        // still names its socket, which is gone.
+        try FileManager.default.removeItem(atPath: home + "/.docker/config.json")
+        let defaultLink = folder.appendingPathComponent("var-run-docker.sock").path
+        let second = folder.appendingPathComponent("second.sock").path
+        try FileManager.default.createSymbolicLink(atPath: defaultLink, withDestinationPath: second)
+        try FileManager.default.createSymbolicLink(atPath: second, withDestinationPath: "home/.docker/run/docker.sock")
+        let stub = try makeStub("echo \"$1\" >> '\(runLog)'")
+
+        let report = await cli([stub], defaultHost: "unix://\(defaultLink)").report()
+
+        let socket = folder.path + "/home/.docker/run/docker.sock"
+        XCTAssertEqual(report.context, DockerContext(name: "default", host: "unix://\(defaultLink)", endpoint: nil,
+                                                     runtime: .dockerDesktop, missingSocket: socket))
+        let stopped = ContainerUnavailable.daemonNotRunning(message: "No socket at \(socket).")
+        XCTAssertEqual(report.status(of: .dockerDesktop), .unavailable(stopped))
+        XCTAssertEqual(report.status(of: .orbStack), .otherContext(name: "default", runtime: .dockerDesktop))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
+    }
+
+    func testADefaultContextWithNoSocketAtAllSaysTheDaemonIsNotRunning() async throws {
+        try "{\"currentContext\":\"default\"}".write(toFile: home + "/.docker/config.json", atomically: true, encoding: .utf8)
+        let absent = folder.appendingPathComponent("docker.sock").path
+        let stub = try makeStub("echo \"$1\" >> '\(runLog)'")
+        let poller = ContainerPoller(cli: cli([stub], defaultHost: "unix://\(absent)"))
+
+        let refreshed = await poller.refresh(cadence: .mainWindowVisible, runningRuntimes: [.orbStack])
+        let report = try XCTUnwrap(refreshed)
+
+        XCTAssertEqual(report.context, DockerContext(name: "default", host: "unix://\(absent)", endpoint: nil, runtime: nil, missingSocket: absent))
+        XCTAssertEqual(report.status(of: .orbStack), .unavailable(.daemonNotRunning(message: "No socket at \(absent).")),
+                       "no daemon, not an unrecognized context")
         XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
     }
 
@@ -373,6 +410,13 @@ final class DockerCLITests: XCTestCase {
         XCTAssertTrue(path.hasSuffix("/meta.json"))
         XCTAssertEqual(message, "not found")
 
+        // The CLI reads an empty config as no settings: the default context.
+        let none = "unix://" + folder.appendingPathComponent("none.sock").path
+        for empty in ["", " \n\t"] {
+            try empty.write(toFile: home + "/.docker/config.json", atomically: true, encoding: .utf8)
+            XCTAssertEqual(try DockerContextReader(home: home, defaultHost: none).current().get().name, "default", "config \(empty.debugDescription)")
+        }
+
         try "not json".write(toFile: home + "/.docker/config.json", atomically: true, encoding: .utf8)
         XCTAssertEqual(DockerContextReader(home: home).current(),
                        .failure(.contextUnreadable(path: home + "/.docker/config.json", message: "not a JSON object")))
@@ -472,8 +516,8 @@ final class DockerCLITests: XCTestCase {
 
     // MARK: Helpers
 
-    private func cli(_ candidates: [String], timeout: Duration = .seconds(5)) -> DockerCLI {
-        DockerCLI(home: home, candidates: candidates, timeout: timeout)
+    private func cli(_ candidates: [String], timeout: Duration = .seconds(5), defaultHost: String = DockerCLI.defaultHost) -> DockerCLI {
+        DockerCLI(home: home, candidates: candidates, timeout: timeout, defaultHost: defaultHost)
     }
 
     /// An executable `/bin/sh` script standing in for `docker`. It logs and drops the `--host` the CLI pins, so

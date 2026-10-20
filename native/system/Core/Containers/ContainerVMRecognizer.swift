@@ -48,7 +48,9 @@ public enum ContainerRuntime: String, CaseIterable, Sendable {
 ///    command run from a shell, or by such a command (`colima start` running `limactl`), is transient, not the VM;
 ///    one that Colima's daemon or the host agent runs is the runtime's by rule 3.
 /// 3. A process outside any app bundle with an ancestor placed by rule 1 or 2: what the runtime started, such as
-///    `qemu-system-*`, `ssh` port forwarders, and `socket_vmnet` under Lima's host agent.
+///    `qemu-system-*`, `ssh` port forwarders, and `socket_vmnet` under Lima's host agent. A shell, a coding agent,
+///    or a client between them (`isBoundary`), such as Docker Desktop's terminal, ends it: neither it nor what runs
+///    in it is the VM.
 /// 4. Apple's Virtualization.framework VM service (`com.apple.Virtualization.VirtualMachine`), which launchd starts
 ///    on behalf of a runtime: the runtime of its responsible process, else the one runtime found among the other
 ///    members of its coalition, when that runtime accounts for every such service there (`vmCapacity`). Two
@@ -62,6 +64,7 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
     public static let virtualMachineService = "com.apple.Virtualization.VirtualMachine"
     static let clientExecutables: Set<String> = ["docker", "kubectl", "hub-tool", "com.docker.cli", "orb", "orbctl"]
     static let clientPrefixes = ["docker-", "kubectl-"]
+    static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "fish", "tcsh", "csh", "ksh", "nu"]
 
     public init() {}
 
@@ -79,8 +82,9 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
             return nil
         }
 
-        let runtimeAncestor = tree.nearestAncestor { found[$0] != nil }
-        for index in processes.indices where found[index] == nil && bundles[index] == nil {
+        let boundaries = processes.map(Self.isBoundary)
+        let runtimeAncestor = tree.nearestAncestor { found[$0] != nil || boundaries[$0] }
+        for index in processes.indices where found[index] == nil && bundles[index] == nil && !boundaries[index] {
             guard let ancestor = runtimeAncestor[index], let vm = found[ancestor] else { continue }
             let parent = processes[ancestor]
             found[index] = vm.identified(by: "started by \(parent.name) (pid \(parent.pid))")
@@ -146,6 +150,16 @@ public struct ContainerVMRecognizer: ContainerVMRecognizing {
         let file = AttributionPass.lastComponent(path)
         return clientExecutables.contains(file) || clientPrefixes.contains(where: file.hasPrefix)
             || path.dropFirst(bundle.count).split(separator: "/").contains("cli-plugins")
+    }
+
+    /// Where rule 3 stops: a shell, a coding agent, or a client, by file name or kernel name. What runs there is the
+    /// user's, even under a runtime's process.
+    static func isBoundary(_ process: ProcessFacts) -> Bool {
+        if AttributionPass.agentName(process) != nil { return true }
+        return [process.executablePath.map(AttributionPass.lastComponent), process.name].contains { name in
+            guard let name else { return false }
+            return shells.contains(name) || clientExecutables.contains(name) || clientPrefixes.contains(where: name.hasPrefix)
+        }
     }
 
     /// `limactl` or `colima`, by file name or kernel name.
