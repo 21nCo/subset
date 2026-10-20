@@ -120,3 +120,41 @@ test('a directory fsync that fails after the rename keeps the new file and is lo
   assert.deepEqual(JSON.parse(readFileSync(paths.state, 'utf8')), store);
   assert.ok(logs.some((line) => /^state\.json was replaced, but its directory could not be synced: EIO/.test(line)));
 });
+
+/** A file system whose write(2) takes at most 5 bytes, and none at all after `capacity` bytes. */
+function shortWritingFs(capacity = Infinity) {
+  let taken = 0;
+  return {
+    ...nodeFs,
+    writeSync(fd, data, offset = 0, length) {
+      const buffer = typeof data === 'string' ? Buffer.from(data) : data;
+      length ??= buffer.length - offset;
+      const count = Math.min(5, length, capacity - taken);
+      taken += count;
+      return count > 0 ? nodeFs.writeSync(fd, buffer, offset, count) : 0;
+    }
+  };
+}
+
+test('a write the file system takes a few bytes at a time is completed', (t) => {
+  const { paths, logs } = storeIn(t);
+  const stateStore = createStateStore(paths, { fs: shortWritingFs(), log: (message) => logs.push(message), now: () => NOW });
+  const store = storeWithTimer('Whole');
+  stateStore.save(store);
+  assert.deepEqual(stateStore.load(), store);
+  const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
+  stateStore.saveMarks(marks);
+  assert.deepEqual(stateStore.loadMarks(), marks);
+});
+
+test('a write the full disk cuts short throws and leaves the previous file and no temp file', (t) => {
+  const { paths, logs } = storeIn(t);
+  const before = storeWithTimer('Before');
+  createStateStore(paths, { now: () => NOW }).save(before);
+  const stateStore = createStateStore(paths, { fs: shortWritingFs(12), log: (message) => logs.push(message), now: () => NOW });
+  assert.throws(() => stateStore.save(storeWithTimer('After')), { code: 'EIO' });
+  assert.throws(() => stateStore.saveMarks([{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW }]), { code: 'EIO' });
+  assert.deepEqual(readdirSync(paths.dataDir), ['state.json']);
+  assert.deepEqual(stateStore.load(), before);
+  assert.deepEqual(logs, []);
+});

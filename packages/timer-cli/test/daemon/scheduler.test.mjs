@@ -245,3 +245,33 @@ test('skip fires the same alerts however much time passes between reads of the c
   assert.deepEqual(outcomes[0], ['tick:3', 'tick:2', 'tick:1', 'segment:work']);
   assert.deepEqual(outcomes[1], outcomes[0]);
 });
+
+test('after a skip, resume or start a restart fires nothing, and the next transitions once each', async (t) => {
+  for (const scenario of ['skip', 'resume', 'start']) {
+    const dataDir = tempDataDir(t);
+    const first = await startTestDaemon(t, { dataDir });
+    const { clock } = first;
+    const { id } = await startTabata(first);
+    clock.advance(3_000);
+    if (scenario === 'skip') assert.equal((await first.op('skip', { id })).body.timer.projection.step.phase, 'work');
+    if (scenario === 'resume') {
+      await first.op('pause', { id });
+      clock.advance(2_000);
+      await first.op('resume', { id });
+    }
+    const changedAt = clock.now();
+    clock.advance(1_000);
+    await first.daemon.shutdown();
+    assert.deepEqual(first.sink.received, [], scenario);
+
+    // The daemon is down for a second; no transition falls in the 2 s since the change.
+    clock.jump(1_000);
+    const again = await startTestDaemon(t, { dataDir, clock });
+    assert.deepEqual(again.sink.received, [], scenario);
+    clock.advance(25_000);
+    const timer = again.daemon.store.timers.find((entry) => entry.definition.id === id);
+    const expected = expectedAlerts(timer, changedAt, clock.now());
+    assert.ok(expected.length > 0);
+    assert.deepEqual(again.sink.received.map(label), expected, scenario);
+  }
+});

@@ -36,27 +36,33 @@ const sameStretch = (mark, stretch) => mark.startedAt === stretch.startedAt && m
  *
  * Every run calls `onRun(alerts, now)`, with the alerts for the transitions since each mark: those
  * more than `LATE_MS` old collapse into one `missedWhileAway` alert per timer, ahead of the ones on
- * time. `initialMarks` are the marks an earlier daemon persisted; on the first run a stretch with
- * none counts from its start, so what happened while no daemon ran is reported as missed.
+ * time. `initialMarks` are the marks an earlier daemon persisted, possibly several for one timer;
+ * on the first run a stretch with none counts from its start, so what happened while no daemon ran
+ * is reported as missed.
  */
 export function createScheduler({ clock = systemClock, getTimers, onRun, initialMarks = null }) {
-  let marks = new Map((initialMarks ?? []).map((mark) => [mark.timerId, mark]));
+  let marks = new Map();
+  let persisted = initialMarks ?? [];
   let firstRun = true;
   let handle = null;
   let stopped = false;
+
+  /** The mark for this timer's running stretch: the one already known, or a new one from `now`. */
+  function markFor(timer, stretch, now) {
+    const timerId = timer.definition.id;
+    const known = [marks.get(timerId), ...persisted.filter((mark) => mark.timerId === timerId)].find((mark) => mark && sameStretch(mark, stretch));
+    return known ?? { timerId, ...stretch, through: firstRun ? stretch.startedAt : Math.max(stretch.startedAt, now) };
+  }
 
   /** Marks for the stretches running now, keeping those already known. */
   function markStretches(now) {
     const next = new Map();
     for (const timer of getTimers()) {
       const stretch = stretchOf(timer);
-      if (!stretch) continue;
-      const timerId = timer.definition.id;
-      const known = marks.get(timerId);
-      if (known && sameStretch(known, stretch)) next.set(timerId, known);
-      else next.set(timerId, { timerId, ...stretch, through: firstRun ? stretch.startedAt : Math.max(stretch.startedAt, now) });
+      if (stretch) next.set(timer.definition.id, markFor(timer, stretch, now));
     }
     marks = next;
+    persisted = [];
     firstRun = false;
   }
 
@@ -129,6 +135,19 @@ export function createScheduler({ clock = systemClock, getTimers, onRun, initial
     /** The marks of the running stretches, as `initialMarks` takes them. */
     get marks() {
       return [...marks.values()];
+    },
+    /**
+     * The marks the next run at `now` would give `timers`' running stretches, so they can be saved
+     * before the timers change: a stretch an operation begins is then marked from that operation
+     * even if the daemon stops before its next run.
+     */
+    marksFor(timers, now) {
+      const result = [];
+      for (const timer of timers) {
+        const stretch = stretchOf(timer);
+        if (stretch) result.push(markFor(timer, stretch, now));
+      }
+      return result;
     }
   };
 }

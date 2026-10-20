@@ -154,3 +154,20 @@ test('a daemon that lost its lock never writes again and leaves its successor\'s
   assert.equal((await second.call('GET', '/v1/daemon')).status, 200);
   assert.deepEqual((await second.call('GET', '/v1/timers')).body.structuredContent.timers.map((timer) => timer.definition.name), ['First', 'Second']);
 });
+
+test('a holder\'s start time is never later than its real start, however slow ps is', () => {
+  // The holder started at 100 s and wrote its lock at 100.1 s. Asked at 101.5 s, ps reports 1 s
+  // elapsed (floored) and takes 2 s to answer.
+  let wall = 101_500;
+  const now = () => wall;
+  const elapsedOf = () => {
+    wall += 2_000;
+    return '00:01\n';
+  };
+  const startedAt = processStartTime(4242, { now, elapsedOf });
+  assert.ok(startedAt <= 100_000, `${startedAt}`);
+  assert.ok(startedAt >= 100_000 - 2_000, `${startedAt}`);
+  assert.equal(processStartTime(4242, { now, elapsedOf: () => { throw new Error('ps failed'); } }), null);
+  assert.equal(processStartTime(4242, { now, elapsedOf: () => '' }), null);
+  assert.equal(processStartTime(4242, { now: () => 200_000_000, elapsedOf: () => '1-02:03:04' }), 200_000_000 - (((24 + 2) * 60 + 3) * 60 + 4) * 1_000 - 1_000);
+});

@@ -20,14 +20,19 @@ export function pidAlive(pid) {
   }
 }
 
+const elapsedTimeOf = (pid) => execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 });
+
 /**
- * When the process with this pid started, in epoch milliseconds to within a second, or null when
- * it cannot be told. `ps -o etime` reports the elapsed time on macOS and Linux alike.
+ * The earliest the process with this pid can have started, in epoch milliseconds, or null when it
+ * cannot be told. `ps -o etime` reports the elapsed time, floored to the second, on macOS and Linux
+ * alike. The clock is read before `ps` runs and the rounding is subtracted, so however slow `ps` is
+ * the result is never later than the real start: a takeover needs proof, not a late estimate.
  */
-export function processStartTime(pid, { now = Date.now } = {}) {
+export function processStartTime(pid, { now = Date.now, elapsedOf = elapsedTimeOf } = {}) {
+  const before = now();
   let output;
   try {
-    output = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 });
+    output = elapsedOf(pid);
   } catch {
     return null;
   }
@@ -35,7 +40,7 @@ export function processStartTime(pid, { now = Date.now } = {}) {
   const match = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(output);
   if (!match) return null;
   const [, days = 0, hours = 0, minutes, seconds] = match.map((part) => (part === undefined ? undefined : Number(part)));
-  return now() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1_000;
+  return before - ((((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1_000 + 1_000);
 }
 
 function isCode(error, ...codes) {

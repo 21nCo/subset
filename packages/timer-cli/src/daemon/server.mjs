@@ -29,6 +29,8 @@ export class DaemonRunningError extends Error {
   }
 }
 
+const stretchKey = (mark) => `${mark.timerId}:${mark.startedAt}:${mark.base}`;
+
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
 }
@@ -174,6 +176,13 @@ export async function startDaemon({
     }
   }
 
+  /** The stretches `scheduler.json` holds marks for. */
+  let savedStretches = new Set((marks ?? []).map(stretchKey));
+  function saveMarks(list) {
+    write(() => stateStore.saveMarks(list));
+    savedStretches = new Set(list.map(stretchKey));
+  }
+
   const scheduler = createScheduler({
     clock,
     initialMarks: marks,
@@ -183,9 +192,11 @@ export async function startDaemon({
         broadcast('alert', alert);
         deliverToSink(sink, alert, timer, log);
       }
-      if (alerts.length) {
+      const current = scheduler.marks;
+      const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
+      if (alerts.length || stretchesChanged) {
         try {
-          write(() => stateStore.saveMarks(scheduler.marks));
+          saveMarks(current);
         } catch (error) {
           if (!(error instanceof LockLostError)) log(`could not save scheduler.json: ${error.message}`);
         }
@@ -289,6 +300,13 @@ export async function startDaemon({
     }
     if (outcome.store !== store) {
       try {
+        // A stretch the change begins (a start, resume or skip) is marked from now before the change
+        // is saved, so a daemon that stops before its next run neither repeats nor reports as missed
+        // what the stretch jumped over. A mark for a stretch that never began is dropped later.
+        const known = scheduler.marks;
+        const knownKeys = new Set(known.map(stretchKey));
+        const begun = scheduler.marksFor(outcome.store.timers, now).filter((mark) => !savedStretches.has(stretchKey(mark)) && !knownKeys.has(stretchKey(mark)));
+        if (begun.length) saveMarks([...known, ...begun]);
         commit(outcome.store);
       } catch (error) {
         if (error instanceof LockLostError) {

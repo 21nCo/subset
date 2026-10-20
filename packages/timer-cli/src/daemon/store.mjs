@@ -13,28 +13,42 @@ function isCode(error, ...codes) {
   return error && codes.includes(error.code);
 }
 
+/** Writes all of `bytes`, as one write(2) may take only part of them, for example on a full disk. */
+function writeAll(fs, fd, bytes) {
+  for (let offset = 0; offset < bytes.length;) {
+    const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
+    if (!(written > 0)) throw Object.assign(new Error('The file system took none of the remaining bytes.'), { code: 'EIO' });
+    offset += written;
+  }
+}
+
+function removeTemp(temp, fs) {
+  try {
+    fs.unlinkSync(temp);
+  } catch {
+    // The temp file is removed at the next start.
+  }
+}
+
 /**
  * Writes `data` to a temp file beside `path`, fsyncs it, renames it over `path` and fsyncs the
- * directory, so a reader sees the old file or the new one, never a partial write. Once the rename
- * succeeded the new file is in place, so a failed directory fsync is logged rather than thrown.
+ * directory, so a reader sees the old file or the new one, never a partial write. A failure before
+ * the rename removes the temp file and throws, leaving `path` as it was. Once the rename succeeded
+ * the new file is in place, so a failed directory fsync is logged rather than thrown.
  */
 export function writeFileAtomic(path, data, { fs = nodeFs, log = () => {} } = {}) {
   const temp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   const fd = fs.openSync(temp, 'wx', 0o600);
   try {
-    fs.writeSync(fd, data);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  try {
+    try {
+      writeAll(fs, fd, Buffer.from(data, 'utf8'));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(temp, path);
   } catch (error) {
-    try {
-      fs.unlinkSync(temp);
-    } catch {
-      // The temp file is removed at the next start.
-    }
+    removeTemp(temp, fs);
     throw error;
   }
   try {

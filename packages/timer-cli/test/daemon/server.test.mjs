@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
-import { TIMER_LIMITS, TIMER_VIEW_ID, parseStore } from '@subset/timer';
-import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, rawRequest, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
+import { TIMER_LIMITS, TIMER_VIEW_ID, parseStore, transitionsBetween } from '@subset/timer';
+import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, createFakeClock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
+import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
 
 test('the data directory is 0700, the socket 0600, and there is no TCP listener', async (t) => {
   const { daemon } = await startTestDaemon(t);
@@ -151,6 +151,30 @@ test('a restarted daemon keeps a running timer running from its timestamps', asy
   const { body } = await second.op('get', { id: started.body.timer.definition.id });
   assert.equal(body.timer.runtime.status, 'running');
   assert.equal(body.timer.projection.elapsedMs, 60_000);
+});
+
+test('a daemon killed right after a skip is restarted without firing what the skip jumped over', async (t) => {
+  const dataDir = tempDataDir(t);
+  const run = spawnDaemonProcess(dataDir);
+  t.after(() => run.child.kill('SIGKILL'));
+  const socket = `${dataDir}/daemon.sock`;
+  await eventually(() => existsSync(socket), 10_000);
+  const started = await socketRequest(socket, 'POST', '/v1/ops/start', { preset: 'tabata' });
+  const id = started.body.timer.definition.id;
+  const skipped = await socketRequest(socket, 'POST', '/v1/ops/skip', { id });
+  assert.equal(skipped.body.timer.projection.step.phase, 'work');
+  run.child.kill('SIGKILL');
+  await run.exited;
+
+  const clock = createFakeClock(Date.now());
+  const restarted = await startTestDaemon(t, { dataDir, clock });
+  assert.deepEqual(restarted.sink.received, []);
+  const restartedAt = clock.now();
+  clock.advance(21_000);
+  const timer = restarted.daemon.store.timers.find((entry) => entry.definition.id === id);
+  const next = transitionsBetween(timer, restartedAt, clock.now()).map((transition) => `${transition.type}@${transition.at}`);
+  assert.deepEqual(next.map((entry) => entry.split('@')[0]), ['tick', 'tick', 'tick', 'segment']);
+  assert.deepEqual(restarted.sink.received.map(({ alert }) => `${alert.kind}@${alert.at}`), next);
 });
 
 test('a finish the disk refused is recorded at a later run, shown to subscribers, and the daemon then idles out', { skip: process.getuid?.() === 0 && 'root ignores file modes' }, async (t) => {
