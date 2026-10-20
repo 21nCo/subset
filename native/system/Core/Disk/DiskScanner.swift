@@ -48,23 +48,27 @@ public struct DiskScanner: Sendable {
     public let progressInterval: Duration
     let bufferSize: Int
     let isPackage: @Sendable (String) -> Bool
+    let mapExtent: PhysicalExtents.Mapper
 
     public init(workers: Int = DiskScanner.defaultWorkers, progressInterval: Duration = .milliseconds(100)) {
         self.init(workers: workers, progressInterval: progressInterval, bufferSize: 128 << 10,
                   isPackage: DiskScanner.launchServicesIsPackage)
     }
 
-    init(workers: Int, progressInterval: Duration, bufferSize: Int, isPackage: @escaping @Sendable (String) -> Bool) {
+    init(workers: Int, progressInterval: Duration, bufferSize: Int, isPackage: @escaping @Sendable (String) -> Bool,
+         mapExtent: @escaping PhysicalExtents.Mapper = PhysicalExtents.logicalToPhysical) {
         self.workers = max(1, workers)
         self.progressInterval = progressInterval
         self.bufferSize = bufferSize
         self.isPackage = isPackage
+        self.mapExtent = mapExtent
     }
 
     /// Scans `root`, calling `onProgress` from a worker thread at most once per `progressInterval`, one call at a time
     /// and with the item count always rising. Cancelling the calling task stops every worker at its next batch of
-    /// entries and returns what was read. The root is resolved and classified on a scan thread too, never on the
-    /// caller's, so no lookup can download a placeholder or hold up the caller's thread.
+    /// entries, or at its next call mapping a clone's ranges, and returns what was read. The root is resolved and
+    /// classified on a scan thread too, never on the caller's, so no lookup can download a placeholder or hold up the
+    /// caller's thread.
     public func scan(_ root: URL = DiskScanner.defaultRoot,
                      onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil) async throws(DiskScanError)
         -> DiskScanResult {
@@ -268,10 +272,12 @@ final class DiskScan: @unchecked Sendable {
                     var facts = EntryFacts(entry) {
                         !job.inPackage && scanner.isPackage(Self.join(job.path, entry.name))
                     }
-                    // A cancelled scan stops reading ranges too, so a batch of clones does not hold it up.
-                    if facts.needsExtents, let id = entry.fileID, !isCancelled {
+                    // A cancelled scan stops reading ranges too, between calls, so a batch of clones or one
+                    // fragmented clone does not hold it up; a clone left unread is counted from its clone ID.
+                    if facts.needsExtents, let id = entry.fileID {
                         facts.use(extents: PhysicalExtents.read(in: fd, name: entry.name, fileID: id,
-                                                                allocated: facts.sizes.allocated))
+                                                                allocated: facts.sizes.allocated,
+                                                                isCancelled: { isCancelled }, map: scanner.mapExtent))
                     }
                     return (name: entry.name, facts: facts)
                 }

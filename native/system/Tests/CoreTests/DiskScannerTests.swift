@@ -267,6 +267,91 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(tree.item(at: "n")?.sizes?.allocated, pureBytes)
     }
 
+    func testCancellingWhileMappingACloneStopsAtOnceAndCountsItFromItsCloneID() async throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("m"), withIntermediateDirectories: false)
+        try Self.write(root.appendingPathComponent("m/a"), bytes: 4 << 20)
+        XCTAssertEqual(clonefile(path("m/a"), path("m/b"), 0), 0)
+        // Two rewritten blocks leave the changed clone in at least three ranges, so mapping it takes several calls.
+        try Self.overwriteFirstBytes(root.appendingPathComponent("m/b"))
+        let fd = open(path("m/b"), O_WRONLY)
+        XCTAssertEqual(pwrite(fd, "abcd", 4, 2 << 20), 4)
+        XCTAssertEqual(fsync(fd), 0)
+        close(fd)
+        let fileBytes = try Self.allocated(path("m/a"))
+        let physical = try Self.physicalBytes([path("m/a"), path("m/b")])
+        XCTAssertEqual(physical, fileBytes + (try Self.privateSize(path("m/b"))))
+        let canceller = Canceller()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let scanner = DiskScanner(workers: 1, progressInterval: .milliseconds(100), bufferSize: 128 << 10,
+                                  isPackage: { _ in false }) { fd, mapping in
+            if calls.withLock({ $0 += 1; return $0 }) == 1 {
+                let deadline = ContinuousClock.now + .seconds(5)
+                while !canceller.hasTask, ContinuousClock.now < deadline { usleep(1000) }
+                canceller.cancel()
+            }
+            return PhysicalExtents.logicalToPhysical(fd, &mapping)
+        }
+        let scanRoot: URL = root
+        let task = Task { try await scanner.scan(scanRoot) }
+        canceller.set(task)
+        let result = try await task.value
+        let returned = ContinuousClock.now
+
+        XCTAssertLessThan(returned - (try XCTUnwrap(canceller.cancelledAt)), .milliseconds(500))
+        XCTAssertEqual(result.outcome, .cancelled)
+        XCTAssertEqual(calls.withLock { $0 }, 1, "no range is looked up once the scan is cancelled")
+        let tree = result.tree
+        XCTAssertNotNil(tree.item(at: "m/a"), "the batch read before the cancellation is kept")
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "m/b")).flags.contains(.allocatedUpperBound),
+                      "its ranges were not read in full")
+        for path in ["", "m"] {
+            XCTAssertTrue(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), "/\(path)")
+        }
+        try Self.assertAllocated(tree, "m", physical: physical)
+        try Self.assertAllocated(tree, "", physical: physical)
+    }
+
+    func testReadingRangesStopsOnceCancelledAndGivesUpOnRepeatedInterruptions() throws {
+        try Self.write(root.appendingPathComponent("f"), bytes: 64 << 10)
+        let fileID = UInt64(try XCTUnwrap(FileManager.default.attributesOfItem(atPath: path("f"))[.systemFileNumber] as? Int))
+        let directory = open(root.path, O_RDONLY | O_DIRECTORY)
+        XCTAssertGreaterThanOrEqual(directory, 0)
+        defer { close(directory) }
+        let openFiles = Self.openDescriptors()
+        // A stand-in for `F_LOG2PHYS_EXT`: 16 ranges of 4 KiB, after `failures` interrupted calls.
+        func read(failures: Int, cancelAfter: Int?) -> (ranges: [Range<UInt64>]?, calls: Int) {
+            let calls = OSAllocatedUnfairLock(initialState: 0)
+            let ranges = PhysicalExtents.read(in: directory, name: "f", fileID: fileID, allocated: 64 << 10,
+                                              isCancelled: { cancelAfter.map { calls.withLock { $0 } >= $0 } ?? false }) {
+                _, mapping in
+                let call = calls.withLock { $0 += 1; return $0 }
+                guard call > failures else { return EINTR }
+                mapping.l2p_devoffset = (1 << 30) + 2 * mapping.l2p_devoffset
+                mapping.l2p_contigbytes = 4096
+                return 0
+            }
+            return (ranges, calls.withLock { $0 })
+        }
+
+        let whole = read(failures: 0, cancelAfter: nil)
+        XCTAssertEqual(whole.ranges?.count, 16)
+        XCTAssertEqual(whole.calls, 16)
+        XCTAssertEqual(read(failures: 3, cancelAfter: nil).calls, 19, "an interrupted call is retried")
+        XCTAssertNotNil(read(failures: PhysicalExtents.retries, cancelAfter: nil).ranges)
+
+        let cancelled = read(failures: 0, cancelAfter: 1)
+        XCTAssertNil(cancelled.ranges, "a read cut short is not counted")
+        XCTAssertEqual(cancelled.calls, 1)
+        XCTAssertEqual(read(failures: 0, cancelAfter: 0).calls, 0)
+        let cancelledWhileRetrying = read(failures: .max, cancelAfter: 2)
+        XCTAssertNil(cancelledWhileRetrying.ranges)
+        XCTAssertEqual(cancelledWhileRetrying.calls, 2, "a retry is not made once cancelled")
+        let interrupted = read(failures: .max, cancelAfter: nil)
+        XCTAssertNil(interrupted.ranges)
+        XCTAssertEqual(interrupted.calls, PhysicalExtents.retries + 1)
+        XCTAssertEqual(Self.openDescriptors(), openFiles, "the file is closed however the read ends")
+    }
+
     func testSymlinkIsCountedAsItselfAndNotFollowed() async throws {
         let outside = root.deletingLastPathComponent().appendingPathComponent("DiskScannerTarget-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
@@ -766,6 +851,11 @@ final class DiskScannerTests: XCTestCase {
         return UInt64(blocks.count) * 4096
     }
 
+    /// The descriptors open in this process.
+    static func openDescriptors() -> [Int32] {
+        (0..<getdtablesize()).filter { fcntl($0, F_GETFD) != -1 }
+    }
+
     /// Rewrites a file's first bytes, so a clone stops sharing that block.
     static func overwriteFirstBytes(_ url: URL) throws {
         let fd = open(url.path, O_WRONLY)
@@ -879,6 +969,7 @@ private final class Canceller: Sendable {
     private let state = OSAllocatedUnfairLock(initialState: State())
 
     var cancelledAt: ContinuousClock.Instant? { state.withLock { $0.cancelledAt } }
+    var hasTask: Bool { state.withLock { $0.task != nil } }
 
     func set(_ task: Task<DiskScanResult, any Error>) {
         let cancelNow = state.withLock { state in

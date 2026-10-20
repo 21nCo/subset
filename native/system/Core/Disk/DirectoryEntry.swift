@@ -173,13 +173,27 @@ private struct FieldReader {
 enum PhysicalExtents {
     /// The most ranges read for one file; a more fragmented file is counted from its clone ID instead.
     static let limit = 4096
+    /// The most interrupted calls in a row retried for one file before it is counted from its clone ID instead.
+    static let retries = 8
+
+    /// Maps the range at `mapping.l2p_devoffset` of the open file `fd`, returning 0 or an `errno`.
+    typealias Mapper = @Sendable (_ fd: Int32, _ mapping: inout log2phys) -> Int32
+
+    @Sendable static func logicalToPhysical(_ fd: Int32, _ mapping: inout log2phys) -> Int32 {
+        fcntl(fd, F_LOG2PHYS_EXT, &mapping) == 0 ? 0 : errno
+    }
 
     /// Reads the ranges of the regular file `name` in the open folder `directory`, or returns `nil` when it cannot be
     /// opened (permissions), is no longer the file `fileID`, has more than `limit` ranges, or its ranges do not add
     /// up to `allocated`, its allocated size over all forks (a compressed file keeps its data in an extended
     /// attribute, a resource fork is not mapped, and a file written meanwhile has changed). Holes are skipped. The
-    /// file is opened without following a link and never read.
-    static func read(in directory: Int32, name: String, fileID: UInt64, allocated: UInt64) -> [Range<UInt64>]? {
+    /// file is opened without following a link and never read. `isCancelled` is asked before every call to `map`,
+    /// retries included, and a cancelled or repeatedly interrupted read returns `nil` too, so a fragmented file on
+    /// slow storage does not hold up a cancelled scan.
+    static func read(in directory: Int32, name: String, fileID: UInt64, allocated: UInt64,
+                     isCancelled: () -> Bool = { false },
+                     map: Mapper = PhysicalExtents.logicalToPhysical) -> [Range<UInt64>]? {
+        guard !isCancelled() else { return nil }
         let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -192,14 +206,19 @@ enum PhysicalExtents {
         var ranges: [Range<UInt64>] = []
         var total: UInt64 = 0
         var offset: off_t = 0
+        var interrupted = 0
         while offset < size {
+            guard !isCancelled() else { return nil }
             var mapping = log2phys()
             mapping.l2p_contigbytes = size - offset
             mapping.l2p_devoffset = offset
-            guard fcntl(fd, F_LOG2PHYS_EXT, &mapping) == 0 else {
-                if errno == EINTR { continue }
-                return nil
+            let error = map(fd, &mapping)
+            guard error == 0 else {
+                guard error == EINTR, interrupted < retries else { return nil }
+                interrupted += 1
+                continue
             }
+            interrupted = 0
             guard mapping.l2p_contigbytes > 0 else { return nil }
             // A hole maps to no device offset.
             if mapping.l2p_devoffset >= 0 {
