@@ -47,11 +47,11 @@ final class SystemMonitor {
     }
 
     /// Stops a container poll in progress before the app quits: its running command gets `SIGKILL` now, since the
-    /// runner's delayed one would never fire.
+    /// runner's delayed one would never fire, and no further command starts.
     func stopContainerPolling() {
         containerRefresh?.cancel()
         containerRefresh = nil
-        ProcessCommandRunner.killRunningCommands()
+        CommandRegistry.shared.shutDown()
     }
 
     /// Restarts the loop so a cadence change applies now. A sample already running finishes; the schedule keeps the

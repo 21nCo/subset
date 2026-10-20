@@ -60,6 +60,7 @@ struct ContainerVMsView: View {
             } label: {
                 Text("Measured inside the VM by docker: \(Self.usage(memory: breakdown.totals.memoryUsed, cpu: breakdown.totals.cpuPercent)) · "
                     + "\(breakdown.totals.containerCount) containers\(observed)")
+                    .help(report?.context?.endpoint.map { "Asked at \($0)" } ?? "")
             }
         }
     }

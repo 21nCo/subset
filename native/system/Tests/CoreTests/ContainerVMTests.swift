@@ -182,7 +182,8 @@ final class ContainerVMTests: XCTestCase {
 
         let breakdown = ContainerBreakdown(listing: DockerOutput.listing(""), stats: DockerOutput.stats(""))
         let report = ContainerReport(observedAt: Date(), executable: "/usr/local/bin/docker",
-                                     context: DockerContext(name: "colima", host: "unix:///Users/me/.colima/default/docker.sock", runtime: .colima),
+                                     context: DockerContext(name: "colima", host: "unix:///Users/me/.colima/default/docker.sock",
+                                                            endpoint: "unix:///Users/me/.colima/default/docker.sock", runtime: .colima),
                                      outcome: .breakdown(breakdown))
         XCTAssertEqual(groups.map { report.status(of: $0.runtime) }, [.measured(breakdown)], "the clients add no runtime to report on")
 

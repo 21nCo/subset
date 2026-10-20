@@ -14,10 +14,13 @@ final class DockerCLITests: XCTestCase {
     /// The current context's endpoint unless a test sets another: Colima's, so the stub runs without depending on
     /// this Mac's `/var/run/docker.sock`.
     private var colimaHost: String { "unix://\(home)/.colima/default/docker.sock" }
+    /// The endpoint the commands are pinned to: the socket's real path (the temporary folder is under `/private`).
+    private var colimaEndpoint: String { "unix://" + resolved(home + "/.colima/default/docker.sock") }
 
     override func setUpWithError() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("DockerCLITests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        try makeSocket(home + "/.colima/default/docker.sock")
         try writeContext("colima", host: colimaHost)
     }
 
@@ -42,8 +45,8 @@ final class DockerCLITests: XCTestCase {
         XCTAssertEqual(try runs(), ["ps --format {{json .}}", "stats --no-stream --format {{json .}}"])
         XCTAssertEqual(report.observedAt, date)
         XCTAssertEqual(report.executable, stub)
-        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, runtime: .colima))
-        XCTAssertEqual(try String(contentsOfFile: hostLog, encoding: .utf8).split(separator: "\n").map(String.init), [colimaHost, colimaHost])
+        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, endpoint: colimaEndpoint, runtime: .colima))
+        XCTAssertEqual(try hosts(), [colimaEndpoint, colimaEndpoint])
         guard case let .breakdown(breakdown) = report.outcome else { return XCTFail("\(report.outcome)") }
         XCTAssertEqual(breakdown.projects.map(\.name), ["shop"])
         XCTAssertEqual(breakdown.totals.memoryUsed.sum, 104_857_600)
@@ -52,6 +55,7 @@ final class DockerCLITests: XCTestCase {
 
     func testBothCommandsArePinnedToTheEndpointCheckedBeforeTheRun() async throws {
         let orb = home + "/.orbstack/run/docker.sock"
+        try makeSocket(orb)
         try writeContext("orbstack", host: "unix://\(orb)")
         // Between the commands the current context becomes a remote one.
         let stub = try makeStub("""
@@ -67,13 +71,56 @@ final class DockerCLITests: XCTestCase {
         let report = await cli([stub]).report()
 
         XCTAssertEqual(try runs(), ["ps", "stats"])
-        XCTAssertEqual(try String(contentsOfFile: hostLog, encoding: .utf8).split(separator: "\n"),
-                       ["unix://\(orb)", "unix://\(orb)"], "stats reaches the same socket as ps, not the new context")
+        let endpoint = "unix://" + resolved(orb)
+        XCTAssertEqual(try hosts(), [endpoint, endpoint], "stats reaches the same socket as ps, not the new context")
         XCTAssertEqual(report.context?.host, "unix://\(orb)")
+        XCTAssertEqual(report.context?.endpoint, endpoint)
         XCTAssertEqual(report.context?.runtime, .orbStack)
         guard case .breakdown = report.outcome else { return XCTFail("\(report.outcome)") }
         XCTAssertEqual(DockerCLI.arguments(DockerCLI.listingArguments, host: "unix:///var/run/docker.sock"),
                        ["--host", "unix:///var/run/docker.sock", "ps", "--format", "{{json .}}"])
+    }
+
+    func testBothCommandsArePinnedToTheSocketALinkReachedWhenChecked() async throws {
+        let orb = home + "/.orbstack/run/docker.sock"
+        let desktop = home + "/.docker/run/docker.sock"
+        try makeSocket(orb)
+        try makeSocket(desktop)
+        let link = folder.appendingPathComponent("docker.sock").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: orb)
+        try writeContext("default-like", host: "unix://\(link)")
+        // Between the commands Docker Desktop repoints the shared link at its own socket.
+        let stub = try makeStub("""
+        echo "$1" >> '\(runLog)'
+        if [ "$1" = ps ]; then
+          ln -sfh '\(desktop)' '\(link)'
+          echo '{"ID":"3f2a9c1b7d4e","Names":"db","Labels":""}'
+        else
+          echo '{"ID":"3f2a9c1b7d4e","Name":"db","CPUPerc":"1.00%","MemUsage":"1MiB / 1GiB"}'
+        fi
+        """)
+
+        let report = await cli([stub]).report()
+
+        XCTAssertEqual(try runs(), ["ps", "stats"])
+        XCTAssertEqual(resolved(link), resolved(desktop), "the link was repointed during the poll")
+        let endpoint = "unix://" + resolved(orb)
+        XCTAssertEqual(try hosts(), [endpoint, endpoint], "both commands reach OrbStack's socket, not the link")
+        XCTAssertEqual(report.context, DockerContext(name: "default-like", host: "unix://\(link)", endpoint: endpoint, runtime: .orbStack))
+        guard case .breakdown = report.outcome else { return XCTFail("\(report.outcome)") }
+        XCTAssertEqual(report.status(of: .dockerDesktop), .otherContext(name: "default-like", runtime: .orbStack))
+    }
+
+    func testAContextWhoseSocketDoesNotExistIsNotAsked() async throws {
+        try FileManager.default.removeItem(atPath: home + "/.colima/default/docker.sock")
+        let stub = try makeStub("echo \"$1\" >> '\(runLog)'")
+
+        let report = await cli([stub]).report()
+
+        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, endpoint: nil, runtime: .colima))
+        XCTAssertEqual(report.status(of: .colima),
+                       .unavailable(.daemonNotRunning(message: "No socket at \(home)/.colima/default/docker.sock.")))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
     }
 
     func testTheCLIRunsWithoutTheCallersDockerEnvironment() async throws {
@@ -212,19 +259,43 @@ final class DockerCLITests: XCTestCase {
         try await assertExits(second, "SIGKILL stops it after a cancellation", within: .seconds(2))
     }
 
-    func testKillingRunningCommandsStopsOneThatIgnoresSIGTERMBeforeItReturns() async throws {
+    func testShuttingDownKillsARunningCommandThatIgnoresSIGTERMBeforeItReturnsAndStartsNoMore() async throws {
         let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
-        let run = Task { await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
+        let registry = CommandRegistry()
+        let run = Task { await ProcessCommandRunner(registry: registry).run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
         let pid = try await waitForStubPID()
 
-        ProcessCommandRunner.killRunningCommands()
+        registry.shutDown()
 
         let killed = await run.value
         XCTAssertEqual(killed, .failure(.cancelled))
         // Well inside the second a cancellation waits before `SIGKILL`, which would not fire in a quitting app.
         try await assertExits(pid, "the command is killed at once", within: .milliseconds(500))
-        let after = await ProcessCommandRunner().run(stub, arguments: ["warm"], environment: [:], timeout: .seconds(5))
-        XCTAssertEqual(try after.get().status, 0, "a later command runs normally")
+        try FileManager.default.removeItem(atPath: pidFile)
+        let after = await ProcessCommandRunner(registry: registry).run(stub, arguments: [], environment: [:], timeout: .seconds(5))
+        XCTAssertEqual(after, .failure(.cancelled), "no command starts after the shutdown")
+        let other = await ProcessCommandRunner(registry: CommandRegistry()).run(stub, arguments: ["warm"], environment: [:], timeout: .seconds(5))
+        XCTAssertEqual(try other.get().status, 0, "another registry's runner is unaffected")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "the refused command was never started")
+    }
+
+    func testAShutdownWhileACommandIsLaunchingKillsItAtOnceOnceLaunched() async throws {
+        let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
+        let registry = CommandRegistry()
+        let pidFile = pidFile
+        // The shutdown lands after the run registered and before it launched; the command then runs until it
+        // ignores SIGTERM, so only an immediate SIGKILL stops it within the bound below.
+        let hooks = LaunchHooks(beforeLaunch: { registry.shutDown() }, afterLaunch: {
+            let deadline = Date().addingTimeInterval(10)
+            while !FileManager.default.fileExists(atPath: pidFile), Date() < deadline { usleep(20_000) }
+            usleep(100_000)
+        })
+
+        let result = await ProcessCommandRunner(registry: registry, hooks: hooks).run(stub, arguments: [], environment: [:], timeout: .seconds(30))
+
+        XCTAssertEqual(result, .failure(.cancelled))
+        try await assertExits(try stubPID(), "the command is killed as soon as it has launched", within: .milliseconds(500))
     }
 
     func testCancellingTheTaskStopsTheCommandAndAnAlreadyCancelledTaskStartsNone() async throws {
@@ -289,7 +360,8 @@ final class DockerCLITests: XCTestCase {
 
         let context = try DockerContextReader(home: home).current().get()
 
-        XCTAssertEqual(context, DockerContext(name: "custom", host: "unix://\(link)", runtime: .orbStack), "a symlinked socket is followed")
+        XCTAssertEqual(context, DockerContext(name: "custom", host: "unix://\(link)", endpoint: "unix://" + resolved(socket), runtime: .orbStack),
+                       "a symlinked socket is followed, and the endpoint is where it leads")
     }
 
     func testAnUnreadableContextGivesItsReason() throws {
@@ -314,8 +386,9 @@ final class DockerCLITests: XCTestCase {
 
     func testAReportCoversOnlyTheRuntimeItsContextReaches() {
         let breakdown = ContainerBreakdown(listing: DockerOutput.listing(""), stats: DockerOutput.stats(""))
-        let orb = DockerContext(name: "orbstack", host: "unix:///Users/me/.orbstack/run/docker.sock", runtime: .orbStack)
-        let custom = DockerContext(name: "custom", host: "unix:///tmp/docker.sock", runtime: nil)
+        let orb = DockerContext(name: "orbstack", host: "unix:///Users/me/.orbstack/run/docker.sock",
+                                endpoint: "unix:///Users/me/.orbstack/run/docker.sock", runtime: .orbStack)
+        let custom = DockerContext(name: "custom", host: "unix:///tmp/docker.sock", endpoint: "unix:///private/tmp/docker.sock", runtime: nil)
         let measured = ContainerReport(observedAt: Date(), executable: "/x", context: orb, outcome: .breakdown(breakdown))
 
         XCTAssertEqual(measured.status(of: .orbStack), .measured(breakdown))
@@ -442,6 +515,23 @@ final class DockerCLITests: XCTestCase {
         while kill(pid, 0) == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
         XCTAssertNotEqual(kill(pid, 0), 0, message)
         XCTAssertEqual(errno, ESRCH, message)
+    }
+
+    private func hosts() throws -> [String] {
+        try String(contentsOfFile: hostLog, encoding: .utf8).split(separator: "\n").map(String.init)
+    }
+
+    /// The real path, as the CLI is pinned to it.
+    private func resolved(_ path: String) -> String {
+        guard let pointer = realpath(path, nil) else { return path }
+        defer { free(pointer) }
+        return String(cString: pointer)
+    }
+
+    /// A file standing in for a runtime's socket: the stub never connects to it.
+    private func makeSocket(_ path: String) throws {
+        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: nil))
     }
 
     private func runs() throws -> [String] {

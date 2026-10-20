@@ -38,10 +38,10 @@ public struct DockerCLI: Sendable {
         }
     }
 
-    /// Runs `docker ps`, then `docker stats`, each with `timeout` and pinned to the current context's endpoint as
-    /// read here, and joins their rows. An endpoint that belongs to no recognized runtime is not asked. Any failure
-    /// gives a report without a breakdown and with the reason. A cancelled task starts no further command and stops
-    /// the one running.
+    /// Runs `docker ps`, then `docker stats`, each with `timeout` and pinned to the real path of the current
+    /// context's socket as resolved here, and joins their rows. An endpoint that belongs to no recognized runtime,
+    /// or whose socket does not exist, is not asked. Any failure gives a report without a breakdown and with the
+    /// reason. A cancelled task starts no further command and stops the one running.
     public func report(at date: Date = Date()) async -> ContainerReport {
         guard let cli = executable() else { return ContainerReport(observedAt: date, outcome: .unavailable(.cliNotFound)) }
         let context: DockerContext
@@ -53,11 +53,15 @@ public struct DockerCLI: Sendable {
             return ContainerReport(observedAt: date, executable: cli, context: context,
                                    outcome: .unavailable(.contextNotRecognized(name: context.name, host: context.host)))
         }
+        guard let endpoint = context.endpoint else {
+            return ContainerReport(observedAt: date, executable: cli, context: context,
+                                   outcome: .unavailable(.daemonNotRunning(message: "No socket at \(context.host.dropFirst("unix://".count)).")))
+        }
         let outcome: ContainerOutcome
-        switch await run(cli, Self.listingArguments, host: context.host) {
+        switch await run(cli, Self.listingArguments, host: endpoint) {
         case let .failure(reason): outcome = .unavailable(reason)
         case let .success(listingText):
-            switch await run(cli, Self.statsArguments, host: context.host) {
+            switch await run(cli, Self.statsArguments, host: endpoint) {
             case let .failure(reason): outcome = .unavailable(reason)
             case let .success(statsText):
                 let listing = DockerOutput.listing(listingText)
@@ -74,8 +78,9 @@ public struct DockerCLI: Sendable {
         return ContainerReport(observedAt: date, executable: cli, context: context, outcome: outcome)
     }
 
-    /// The arguments for one command: `--host` with the checked endpoint first, so the CLI neither rereads the
-    /// current context (which may have changed since it was checked) nor reaches another daemon.
+    /// The arguments for one command: `--host` with the checked socket's real path first, so the CLI neither rereads
+    /// the current context nor follows a link that a runtime has repointed since (both may have changed since the
+    /// check), and so never reaches another daemon than the one the report is attributed to.
     static func arguments(_ command: [String], host: String) -> [String] {
         ["--host", host] + command
     }
@@ -133,10 +138,20 @@ public struct DockerCLI: Sendable {
 /// The Docker context the CLI uses: its name, its endpoint, and the runtime whose VM that endpoint reaches.
 public struct DockerContext: Equatable, Sendable {
     public let name: String
-    /// The Docker endpoint, such as `unix:///Users/me/.orbstack/run/docker.sock`.
+    /// The Docker endpoint as the context gives it, such as `unix:///var/run/docker.sock`.
     public let host: String
+    /// `unix://` with the socket's real path, which both commands are pinned to, such as
+    /// `unix:///Users/me/.orbstack/run/docker.sock`; `nil` when the socket does not exist.
+    public let endpoint: String?
     /// From the socket's real path; `nil` when it belongs to no recognized runtime.
     public let runtime: ContainerRuntime?
+
+    public init(name: String, host: String, endpoint: String?, runtime: ContainerRuntime?) {
+        self.name = name
+        self.host = host
+        self.endpoint = endpoint
+        self.runtime = runtime
+    }
 }
 
 /// Reads the current context the way the CLI does without `DOCKER_HOST` or `DOCKER_CONTEXT`: `currentContext` in
@@ -181,7 +196,8 @@ struct DockerContextReader {
             defer { free(pointer) }
             return String(cString: pointer)
         }
-        return DockerContext(name: name, host: host, runtime: ContainerRuntime.owning(socketPath: real ?? socket))
+        return DockerContext(name: name, host: host, endpoint: real.map { "unix://" + $0 },
+                             runtime: ContainerRuntime.owning(socketPath: real ?? socket))
     }
 
     enum ReadFailure: Error {
