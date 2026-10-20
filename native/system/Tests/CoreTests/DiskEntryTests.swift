@@ -346,6 +346,57 @@ final class DiskEntryTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(tree.item(at: "c/pure")).flags.contains(.allocatedUpperBound))
     }
 
+    func testReadRangesCountTheirUnionInEveryTotalAndAnUnreadCloneStaysAnUpperBound() {
+        // Recorded on APFS: a 4-byte write into a clone gives it a new clone ID and 0x1.
+        var entry = file(allocated: 300, logical: 300)
+        entry.privateSize = 100
+        entry.cloneID = 429_948_961
+        entry.extendedFlags = 0x1
+        var unread = facts(entry).0
+        XCTAssertTrue(unread.needsExtents)
+        unread.use(extents: nil)
+        XCTAssertTrue(unread.flags.contains(.allocatedUpperBound), "without ranges it is counted by clone ID")
+        func clone(_ ranges: [Range<UInt64>]) -> EntryFacts {
+            var facts = facts(entry).0
+            facts.use(extents: ranges)
+            return facts
+        }
+        let read = clone([0..<100, 200..<300])
+        XCTAssertFalse(read.flags.contains(.allocatedUpperBound))
+        XCTAssertEqual(read.contribution.allocated, 0)
+        XCTAssertEqual(read.sizes.allocated, 300, "a file shows its own allocation")
+        var linked = clone([1000..<1100])
+        linked.flags.insert(.hardLinked)
+        linked.link = FileKey(device: 7, id: 77)
+        linked.linkCount = 2
+        linked.contribution = .zero
+
+        // root ─ a ─ (p, q sharing 0..<100, h: a link)   root ─ Tool.app ⊃ (r sharing p's 200..<300)
+        // root ─ m ─ (s: 0..<100, u: unread clone)        root ─ h: the link's other name
+        let folderFacts = EntryFacts(kind: .directory, descent: .folder)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: folderFacts)
+        let top = builder.appendChildren([("a", folderFacts), ("Tool.app", EntryFacts(kind: .package, descent: .package)),
+                                          ("m", folderFacts), ("h", linked)], to: 0, parentPath: "/fixture")
+        _ = builder.appendChildren([("p", read), ("q", clone([0..<100, 300..<350])), ("h", linked)],
+                                   to: top, parentPath: "/fixture/a")
+        builder.addToPackage(clone([200..<300]), owner: top + 1, path: "/fixture/Tool.app/r")
+        _ = builder.appendChildren([("s", clone([0..<100])), ("u", unread)], to: top + 2, parentPath: "/fixture/m")
+        let tree = builder.finish()
+
+        XCTAssertEqual(tree.item(at: "a")?.sizes?.allocated, 100 + 150 + 100, "shared ranges count once, the link too")
+        XCTAssertEqual(tree.item(at: "Tool.app")?.sizes?.allocated, 100)
+        XCTAssertEqual(tree.item(at: "m")?.sizes?.allocated, 100 + 100 + 200)
+        XCTAssertEqual(tree.root.sizes?.allocated, 350 + 100 + 200, "the ranges' union plus the unread clone")
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "h")).flags.contains(.countedElsewhere))
+        for path in ["a", "a/p", "Tool.app", "m/s"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        for path in ["m", "m/u"] {
+            XCTAssertTrue(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+    }
+
     func testRootCountsItsOwnAllocation() {
         // exFAT gives every folder an allocation, the scanned one included.
         var root = folder("sub")

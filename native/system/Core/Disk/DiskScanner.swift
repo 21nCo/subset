@@ -265,9 +265,15 @@ final class DiskScan: @unchecked Sendable {
                 if count == 0 { break }
                 let batch = BulkAttributes.parse(UnsafeRawBufferPointer(buffer), count: Int(count)).map { entry in
                     // Inside a package every folder is read the same way, so Launch Services is not asked.
-                    (name: entry.name, facts: EntryFacts(entry) {
+                    var facts = EntryFacts(entry) {
                         !job.inPackage && scanner.isPackage(Self.join(job.path, entry.name))
-                    })
+                    }
+                    // A cancelled scan stops reading ranges too, so a batch of clones does not hold it up.
+                    if facts.needsExtents, let id = entry.fileID, !isCancelled {
+                        facts.use(extents: PhysicalExtents.read(in: fd, name: entry.name, fileID: id,
+                                                                allocated: facts.sizes.allocated))
+                    }
+                    return (name: entry.name, facts: facts)
                 }
                 children.append(contentsOf: publish(batch))
             }

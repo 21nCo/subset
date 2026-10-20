@@ -27,9 +27,12 @@ struct EntryFacts: Equatable, Sendable {
     /// The inode of a file with more than one hard link, counted once.
     var link: FileKey?
     var linkCount: UInt32 = 1
-    /// The clone ID of a file that may share blocks, whose shared bytes are counted once per ID.
+    /// The clone ID of a file that may share blocks. Its shared bytes are counted once per ID only when its physical
+    /// ranges could not be read.
     var clone: FileKey?
     var shared: UInt64 = 0
+    /// Where a file that shares blocks has them, merged; totals count the union of their contents' ranges.
+    var extents: [Range<UInt64>]?
     /// The file's private bytes, kept when a hard link shows zero: they count where every link is.
     var privateBytes: UInt64 = 0
     /// A folder's inode, so one reached twice is read once.
@@ -112,6 +115,18 @@ struct EntryFacts: Equatable, Sendable {
             // A clone changed after cloning has its own ID, so the blocks it still shares count with each copy.
             if extended & UInt64(EF_SHARES_ALL_BLOCKS) == 0, shared > 0 { self.flags.insert(.allocatedUpperBound) }
         }
+    }
+
+    /// A file sharing blocks with a clone, whose physical ranges make totals exact.
+    var needsExtents: Bool { kind == .file && clone != nil && shared > 0 }
+
+    /// Counts the file from its physical ranges: it adds nothing to its parent itself, its ranges join the union every
+    /// total above counts, and it no longer makes a total an upper bound. Without ranges it stays counted by clone ID.
+    mutating func use(extents: [Range<UInt64>]?) {
+        guard let extents else { return }
+        self.extents = extents
+        flags.remove(.allocatedUpperBound)
+        contribution.allocated = 0
     }
 
     init(kind: DiskItemKind, flags: DiskItemFlags = [], sizes: DiskSizes = .zero,

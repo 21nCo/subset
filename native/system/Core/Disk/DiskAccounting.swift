@@ -1,14 +1,17 @@
 /// Collects a scan's items and resolves its totals once reading stops. Not thread-safe; the scan holds its lock.
 ///
 /// Totals use allocated sizes. A hard-linked file counts once, at its link with the smallest path, and its private
-/// size counts at the closest folder holding every link. A file that may share blocks with a clone adds its private
-/// bytes, and its shared bytes count once per clone ID in each folder: pure clones share an ID, so a folder holding a
-/// file and its clone counts their blocks once. APFS does not say which blocks two clone IDs share, so a total is
-/// exact only while it includes shared bytes from at most one clone ID, every member of which shares all its blocks.
-/// A total with shared bytes from two or more IDs (a clone changed after cloning gets its own ID, and a clone of it
-/// another, though most blocks are still common), or with a file that shares only some of its blocks, may count
-/// blocks more than once, as `du` does; it and every total above it are flagged `allocatedUpperBound`. Unrelated
-/// clone groups in one folder are flagged too, conservatively.
+/// size counts at the closest folder holding every link. A file that shares blocks with a clone and whose physical
+/// ranges were read adds nothing itself: each folder, package, and root counts the union of the ranges of every such
+/// file beneath it, so blocks clones share count once however their clone IDs relate (a clone changed after cloning
+/// gets its own ID, and a clone of it another, though most blocks are still common).
+///
+/// A clone whose ranges could not be read adds its private bytes, and its shared bytes count once per clone ID in
+/// each folder: pure clones share an ID, so a folder holding a file and its clone counts their blocks once. APFS does
+/// not say which blocks two clone IDs share, so such a total is exact only while its shared bytes come from one
+/// source, either one clone ID every member of which shares all its blocks or the read ranges. A total with shared
+/// bytes from two or more sources, or with an unread file that shares only some of its blocks, may count blocks more
+/// than once, as `du` does; it and every total above it are flagged `allocatedUpperBound`.
 struct TreeBuilder {
     struct LinkOccurrence {
         let node: Int32
@@ -26,12 +29,18 @@ struct TreeBuilder {
         let shared: UInt64
     }
 
+    struct ExtentOccurrence {
+        let node: Int32
+        let ranges: [Range<UInt64>]
+    }
+
     let rootPath: String
     private(set) var nodes: [DiskTree.Node] = []
     private var names: [UInt8] = []
     private var contributions: [DiskSizes] = []
     private var links: [LinkOccurrence] = []
     private var clones: [CloneOccurrence] = []
+    private var extents: [ExtentOccurrence] = []
     private var directories: Set<FileKey> = []
     private(set) var unreadablePaths: [String] = []
 
@@ -116,6 +125,8 @@ struct TreeBuilder {
         if let key = facts.link {
             links.append(LinkOccurrence(node: node, isItem: isItem, key: key, linkCount: facts.linkCount,
                                         facts: facts, path: path()))
+        } else if let ranges = facts.extents {
+            extents.append(ExtentOccurrence(node: node, ranges: ranges))
         } else if let key = facts.clone {
             clones.append(CloneOccurrence(node: node, key: key, shared: facts.shared))
         }
@@ -125,15 +136,21 @@ struct TreeBuilder {
     mutating func finish() -> DiskTree {
         var totals = contributions
         var cloneOccurrences = clones
+        var extentOccurrences = extents
         for group in Dictionary(grouping: links, by: \.key).values {
             let counted = group.min { $0.path < $1.path }!
             var add = counted.facts.contribution
             add.logical = counted.facts.sizes.logical
-            add.allocated = counted.facts.clone == nil ? counted.facts.sizes.allocated : counted.facts.privateBytes
-            totals[Int(counted.node)].add(add)
-            if let clone = counted.facts.clone {
+            if let ranges = counted.facts.extents {
+                add.allocated = 0
+                extentOccurrences.append(ExtentOccurrence(node: counted.node, ranges: ranges))
+            } else if let clone = counted.facts.clone {
+                add.allocated = counted.facts.privateBytes
                 cloneOccurrences.append(CloneOccurrence(node: counted.node, key: clone, shared: counted.facts.shared))
+            } else {
+                add.allocated = counted.facts.sizes.allocated
             }
+            totals[Int(counted.node)].add(add)
             for other in group where other.isItem && other.node != counted.node {
                 nodes[Int(other.node)].flags.insert(.countedElsewhere)
             }
@@ -142,22 +159,31 @@ struct TreeBuilder {
             }
         }
         var sharedOnce = [UInt64](repeating: 0, count: nodes.count)
-        // The one clone group whose shared bytes each total includes so far; a second makes it an upper bound.
+        // The one source of shared bytes each total includes so far, a clone group or the read ranges; a second makes
+        // it an upper bound.
         var onlyGroup = [Int32](repeating: -1, count: nodes.count)
+        func claim(_ node: Int32, for id: Int32) {
+            // A walk stops where this source was seen or the flag is already set; the flag spreads up below.
+            var current = node
+            while current >= 0, onlyGroup[Int(current)] != id,
+                  !nodes[Int(current)].flags.contains(.allocatedUpperBound) {
+                guard onlyGroup[Int(current)] < 0 else {
+                    nodes[Int(current)].flags.insert(.allocatedUpperBound)
+                    break
+                }
+                onlyGroup[Int(current)] = id
+                current = nodes[Int(current)].parent
+            }
+        }
+        var ranges: [Int32: [Range<UInt64>]] = [:]
+        for occurrence in extentOccurrences {
+            claim(occurrence.node, for: Int32.max)
+            ranges[occurrence.node, default: []].append(contentsOf: occurrence.ranges)
+        }
         for (index, group) in Dictionary(grouping: cloneOccurrences, by: \.key).values.enumerated() {
             let id = Int32(index)
             for occurrence in group where occurrence.shared > 0 {
-                // A walk stops where this group was seen or the flag is already set; the flag spreads up below.
-                var current = occurrence.node
-                while current >= 0, onlyGroup[Int(current)] != id,
-                      !nodes[Int(current)].flags.contains(.allocatedUpperBound) {
-                    guard onlyGroup[Int(current)] < 0 else {
-                        nodes[Int(current)].flags.insert(.allocatedUpperBound)
-                        break
-                    }
-                    onlyGroup[Int(current)] = id
-                    current = nodes[Int(current)].parent
-                }
+                claim(occurrence.node, for: id)
             }
             guard group.count > 1 else {
                 totals[Int(group[0].node)].allocated += group[0].shared
@@ -186,10 +212,17 @@ struct TreeBuilder {
                 nodes[parent].flags.insert(.allocatedUpperBound)
             }
             if parent >= 0 { totals[parent].add(totals[index]) }
+            // The ranges of every read clone beneath, merged once here and passed up merged.
+            var union: UInt64 = 0
+            if let beneath = ranges.removeValue(forKey: Int32(index)) {
+                let merged = PhysicalExtents.union(beneath)
+                union = PhysicalExtents.bytes(merged)
+                if parent >= 0 { ranges[Int32(parent), default: []].append(contentsOf: merged) }
+            }
             switch nodes[index].kind {
             case .directory, .package:
                 var sizes = totals[index]
-                sizes.allocated += sharedOnce[index]
+                sizes.allocated += sharedOnce[index] + union
                 nodes[index].sizes = sizes
             case .file, .symlink, .other, .mountPoint:
                 break

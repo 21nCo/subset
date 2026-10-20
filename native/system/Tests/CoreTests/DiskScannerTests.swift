@@ -102,7 +102,7 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound), "pure clones are counted exactly")
     }
 
-    func testCloneChangedAfterCloningFlagsEveryTotalThatMayCountItsSharedBlocksTwice() async throws {
+    func testCloneChangedAfterCloningCountsTheBlocksItStillSharesOnce() async throws {
         for folder in ["changed", "pure"] {
             try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
         }
@@ -119,29 +119,27 @@ final class DiskScannerTests: XCTestCase {
         let changedBytes = try Self.privateSize(root.appendingPathComponent("changed/b").path)
         XCTAssertGreaterThan(changedBytes, 0)
         let pureBytes = try Self.allocated(root.appendingPathComponent("pure/d").path)
+        XCTAssertEqual(try Self.physicalBytes(["changed/a", "changed/b", "changed/c"].map(path)), fileBytes + changedBytes)
 
         let tree = try await DiskScanner().scan(root).tree
-        try Self.assertAllocated(tree, "changed", physical: fileBytes + changedBytes)
-        try Self.assertAllocated(tree, "pure", physical: pureBytes)
-        try Self.assertAllocated(tree, "", physical: fileBytes + changedBytes + pureBytes)
+        XCTAssertEqual(tree.item(at: "changed")?.sizes?.allocated, fileBytes + changedBytes)
+        XCTAssertEqual(tree.item(at: "pure")?.sizes?.allocated, pureBytes)
+        XCTAssertEqual(tree.root.sizes?.allocated, fileBytes + changedBytes + pureBytes)
         let changed = try XCTUnwrap(tree.item(at: "changed/b"))
         XCTAssertTrue(changed.flags.contains(.sharesBlocks))
-        XCTAssertTrue(changed.flags.contains(.allocatedUpperBound), "the changed copy shares only some blocks")
-        XCTAssertTrue(try XCTUnwrap(tree.item(at: "changed")).flags.contains(.allocatedUpperBound))
-        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
-        for path in ["pure", "pure/d", "pure/e"] {
-            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        XCTAssertEqual(changed.sizes?.allocated, fileBytes, "a file's own sizes are unchanged")
+        XCTAssertEqual(changed.sizes?.private, changedBytes)
+        for path in ["", "changed", "changed/a", "changed/b", "changed/c", "pure", "pure/d", "pure/e"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), "/\(path)")
         }
-        XCTAssertEqual(tree.item(at: "pure")?.sizes?.allocated, pureBytes)
     }
 
-    func testTwoCloneIDsSharingBlocksFlagTheTotalThatHoldsBoth() async throws {
+    func testTwoCloneIDsSharingBlocksCountTheirCommonBlocksOnce() async throws {
         // y/a is cloned to y/b and y/c; b is changed, so it gets a new clone ID, then cloned to x/d, which shares
         // b's ID. a, c (one ID) and d (another) end up in x, sharing all but one rewritten block.
         for folder in ["x", "y", "z"] {
             try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
         }
-        let path = { (name: String) in self.root.appendingPathComponent(name).path }
         try Self.write(root.appendingPathComponent("y/a"), bytes: 4 << 20)
         XCTAssertEqual(clonefile(path("y/a"), path("y/c"), 0), 0)
         XCTAssertEqual(clonefile(path("y/a"), path("y/b"), 0), 0)
@@ -155,16 +153,118 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(clonefile(path("z/p"), path("z/q"), 0), 0)
         let fileBytes = try Self.allocated(path("x/a"))
         let pureBytes = try Self.allocated(path("z/p"))
+        XCTAssertNotEqual(try Self.cloneID(path("x/a")), try Self.cloneID(path("x/d")), "x holds two clone IDs")
 
         let tree = try await DiskScanner().scan(root).tree
-        let x = try XCTUnwrap(tree.item(at: "x"))
-        XCTAssertTrue(x.flags.contains(.allocatedUpperBound), "x holds two clone IDs that share blocks")
-        try Self.assertAllocated(tree, "x", physical: fileBytes + changedBytes)
-        try Self.assertAllocated(tree, "y", physical: try Self.allocated(path("y/b")))
-        try Self.assertAllocated(tree, "z", physical: pureBytes)
-        XCTAssertFalse(try XCTUnwrap(tree.item(at: "z")).flags.contains(.allocatedUpperBound), "one pure clone group")
-        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+        XCTAssertEqual(tree.item(at: "x")?.sizes?.allocated, fileBytes + changedBytes)
+        XCTAssertEqual(tree.item(at: "y")?.sizes?.allocated, try Self.allocated(path("y/b")))
+        XCTAssertEqual(tree.item(at: "z")?.sizes?.allocated, pureBytes)
+        XCTAssertEqual(tree.root.sizes?.allocated, fileBytes + changedBytes + pureBytes)
+        for path in ["", "x", "y", "z"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), "/\(path)")
+        }
+    }
+
+    func testSparseCloneChangedInDataAndInAHoleCountsEachBlockOnce() async throws {
+        let original = path("s")
+        let fd = open(original, O_CREAT | O_WRONLY, 0o644)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(ftruncate(fd, 64 << 20), 0)
+        for offset in [0, 32 << 20] {
+            XCTAssertEqual(Data(repeating: 0x5A, count: 256 << 10).withUnsafeBytes { pwrite(fd, $0.baseAddress, $0.count, off_t(offset)) },
+                           256 << 10)
+        }
+        XCTAssertEqual(fsync(fd), 0)
+        close(fd)
+        XCTAssertEqual(clonefile(original, path("t"), 0), 0)
+        // t is changed in its data and written inside a hole, where s has no block.
+        try Self.overwriteFirstBytes(root.appendingPathComponent("t"))
+        let changed = open(path("t"), O_WRONLY)
+        XCTAssertEqual(pwrite(changed, "h", 1, 16 << 20), 1)
+        XCTAssertEqual(fsync(changed), 0)
+        close(changed)
+        let fileBytes = try Self.allocated(original)
+        XCTAssertLessThan(fileBytes, 1 << 20, "s is sparse")
+        let changedBytes = try Self.privateSize(path("t"))
+        XCTAssertGreaterThan(try Self.allocated(path("t")), fileBytes, "t allocated a block in the hole")
+        XCTAssertEqual(try Self.physicalBytes([original, path("t")]), fileBytes + changedBytes)
+
+        let tree = try await DiskScanner().scan(root).tree
+        XCTAssertEqual(tree.root.sizes?.allocated, fileBytes + changedBytes)
+        XCTAssertEqual(tree.root.sizes?.logical, 2 * (64 << 20))
+        XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound))
+    }
+
+    func testCloneSplitAcrossAFolderAndAPackageCountsSharedBlocksOnce() async throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("f"), withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("P.app/Contents"), withIntermediateDirectories: true)
+        try Self.write(root.appendingPathComponent("f/a"), bytes: 4 << 20)
+        XCTAssertEqual(clonefile(path("f/a"), path("P.app/Contents/b"), 0), 0)
+        XCTAssertEqual(clonefile(path("f/a"), path("P.app/Contents/c"), 0), 0)
+        try Self.overwriteFirstBytes(root.appendingPathComponent("P.app/Contents/b"))
+        let fileBytes = try Self.allocated(path("f/a"))
+        let changedBytes = try Self.privateSize(path("P.app/Contents/b"))
+        XCTAssertGreaterThan(changedBytes, 0)
+
+        let tree = try await DiskScanner().scan(root).tree
+        let package = try XCTUnwrap(tree.item(at: "P.app"))
+        XCTAssertEqual(package.kind, .package)
+        XCTAssertEqual(package.sizes?.allocated, fileBytes + changedBytes, "b and c share all but b's changed block")
+        XCTAssertEqual(tree.item(at: "f")?.sizes?.allocated, fileBytes)
+        XCTAssertEqual(tree.root.sizes?.allocated, fileBytes + changedBytes)
+        for path in ["", "f", "P.app"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), "/\(path)")
+        }
+    }
+
+    func testHardLinkToAChangedCloneCountsItsBlocksOnce() async throws {
+        for folder in ["h", "k"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
+        }
+        try Self.write(root.appendingPathComponent("h/a"), bytes: 4 << 20)
+        XCTAssertEqual(clonefile(path("h/a"), path("h/b"), 0), 0)
+        try Self.overwriteFirstBytes(root.appendingPathComponent("h/b"))
+        XCTAssertEqual(link(path("h/b"), path("k/link")), 0)
+        let fileBytes = try Self.allocated(path("h/a"))
+        let changedBytes = try Self.privateSize(path("h/b"))
+        XCTAssertGreaterThan(changedBytes, 0)
+
+        let tree = try await DiskScanner().scan(root).tree
+        XCTAssertEqual(tree.item(at: "h")?.sizes?.allocated, fileBytes + changedBytes, "h/b is the link counted")
+        XCTAssertEqual(tree.item(at: "k")?.sizes?.allocated, 0)
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "k/link")).flags.contains(.countedElsewhere))
+        XCTAssertEqual(tree.root.sizes?.allocated, fileBytes + changedBytes)
+        XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound))
+    }
+
+    func testChangedCloneThatCannotBeOpenedFlagsEveryTotalAbove() async throws {
+        try XCTSkipIf(geteuid() == 0, "root opens a file whatever its mode")
+        for folder in ["m", "n"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
+        }
+        try Self.write(root.appendingPathComponent("m/a"), bytes: 4 << 20)
+        XCTAssertEqual(clonefile(path("m/a"), path("m/b"), 0), 0)
+        try Self.overwriteFirstBytes(root.appendingPathComponent("m/b"))
+        XCTAssertEqual(chmod(path("m/b"), 0), 0)
+        try Self.write(root.appendingPathComponent("n/p"), bytes: 1 << 20)
+        XCTAssertEqual(clonefile(path("n/p"), path("n/q"), 0), 0)
+        let fileBytes = try Self.allocated(path("m/a"))
+        let changedBytes = try Self.privateSize(path("m/b"))
+        let pureBytes = try Self.allocated(path("n/p"))
+
+        let result = try await DiskScanner().scan(root)
+        let tree = result.tree
+        let locked = try XCTUnwrap(tree.item(at: "m/b"))
+        XCTAssertEqual(locked.sizes?.allocated, fileBytes, "its sizes come from its folder's listing")
+        XCTAssertTrue(locked.flags.contains(.allocatedUpperBound), "its ranges could not be read")
+        XCTAssertTrue(result.unreadablePaths.isEmpty, "the file is counted, not unknown")
+        for path in ["", "m"] {
+            XCTAssertTrue(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), "/\(path)")
+        }
+        try Self.assertAllocated(tree, "m", physical: fileBytes + changedBytes)
         try Self.assertAllocated(tree, "", physical: fileBytes + changedBytes + pureBytes)
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "n")).flags.contains(.allocatedUpperBound))
+        XCTAssertEqual(tree.item(at: "n")?.sizes?.allocated, pureBytes)
     }
 
     func testSymlinkIsCountedAsItselfAndNotFollowed() async throws {
@@ -627,6 +727,43 @@ final class DiskScannerTests: XCTestCase {
     /// The APFS private size of a file, from `getattrlist`.
     static func privateSize(_ path: String) throws -> UInt64 {
         try XCTUnwrap(BulkAttributes.read(path: path)?.privateSize)
+    }
+
+    private func path(_ relativePath: String) -> String {
+        root.appendingPathComponent(relativePath).path
+    }
+
+    /// The APFS clone ID of a file, from `getattrlist`.
+    static func cloneID(_ path: String) throws -> UInt64 {
+        try XCTUnwrap(BulkAttributes.read(path: path)?.cloneID)
+    }
+
+    /// The bytes the files' data blocks cover together on the container, each block once, read with `F_LOG2PHYS_EXT`
+    /// independently of the scanner.
+    static func physicalBytes(_ paths: [String]) throws -> UInt64 {
+        var blocks: Set<Int64> = []
+        for path in paths {
+            let fd = open(path, O_RDONLY)
+            guard fd >= 0 else { throw POSIXError(.init(rawValue: errno)!) }
+            defer { close(fd) }
+            var info = stat()
+            XCTAssertEqual(fstat(fd, &info), 0)
+            var offset: off_t = 0
+            while offset < info.st_size {
+                var mapping = log2phys()
+                mapping.l2p_contigbytes = info.st_size - offset
+                mapping.l2p_devoffset = offset
+                guard fcntl(fd, F_LOG2PHYS_EXT, &mapping) == 0 else { throw POSIXError(.init(rawValue: errno)!) }
+                if mapping.l2p_devoffset >= 0 {
+                    for block in stride(from: mapping.l2p_devoffset / 4096,
+                                        through: (mapping.l2p_devoffset + mapping.l2p_contigbytes - 1) / 4096, by: 1) {
+                        blocks.insert(block)
+                    }
+                }
+                offset += mapping.l2p_contigbytes
+            }
+        }
+        return UInt64(blocks.count) * 4096
     }
 
     /// Rewrites a file's first bytes, so a clone stops sharing that block.

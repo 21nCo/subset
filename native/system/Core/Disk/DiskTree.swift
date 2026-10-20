@@ -57,13 +57,14 @@ public struct DiskItemFlags: OptionSet, Hashable, Sendable {
     public static let incomplete = DiskItemFlags(rawValue: 1 << 6)
     /// A firmlink, the startup disk's link from the system volume into the data volume (`/Users`, `/Applications`).
     public static let firmlink = DiskItemFlags(rawValue: 1 << 7)
-    /// The allocated size may count blocks shared between clones more than once, so it is an upper bound. APFS gives
-    /// only a clone ID and a shared byte count, so a total is exact only while it includes shared bytes from at most
-    /// one clone ID, every member of which shares all its blocks. Set on a file that shares some but not all of its
-    /// blocks (`EF_MAY_SHARE_BLOCKS` without `EF_SHARES_ALL_BLOCKS`: a clone changed after cloning), and on every
-    /// folder or package whose total includes such a file or shared bytes from two or more clone IDs (a clone of a
-    /// changed clone gets another ID while sharing most blocks with the first). Unrelated clone groups in one folder
-    /// set it too, conservatively.
+    /// The allocated size may count blocks shared between clones more than once, so it is an upper bound. Totals count
+    /// a clone's blocks from its physical ranges, exactly, so this is set only where those could not be read (the file
+    /// cannot be opened, is too fragmented, or its ranges do not add up to its allocated size, as with a compressed
+    /// file). Such a file is counted from its clone ID and shared byte count instead, which is exact only while a total
+    /// includes shared bytes from one source: one clone ID every member of which shares all its blocks, or the read
+    /// ranges. Set on an unread file that shares some but not all of its blocks (`EF_MAY_SHARE_BLOCKS` without
+    /// `EF_SHARES_ALL_BLOCKS`: a clone changed after cloning), and on every folder or package whose total includes such
+    /// a file or shared bytes from two or more sources. Unrelated sources in one folder set it too, conservatively.
     public static let allocatedUpperBound = DiskItemFlags(rawValue: 1 << 8)
     /// A package whose contents, which are not listed, include a `dataless` file or folder: those count as zero
     /// allocated and a placeholder folder is not read, so the package's sizes leave out data that is not on this Mac.
@@ -77,7 +78,7 @@ public struct DiskItem: Equatable, Sendable {
     public let kind: DiskItemKind
     public let flags: DiskItemFlags
     /// For a folder or package, its own allocation plus its contents' totals, with each hard-linked file counted once
-    /// and each clone ID's shared bytes once. `nil` when the item itself could not be read.
+    /// and each block clones share once. `nil` when the item itself could not be read.
     public let sizes: DiskSizes?
     /// The parent's index, `nil` for the root.
     public let parent: Int?

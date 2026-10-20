@@ -166,3 +166,71 @@ private struct FieldReader {
         offset += (count + 3) & ~3
     }
 }
+
+/// Where a clone's blocks are: byte ranges on the APFS container, block aligned, from `F_LOG2PHYS_EXT`. Clones that
+/// share a block report the same range, so the union of their ranges is the space they use together, however their
+/// clone IDs and shared byte counts relate.
+enum PhysicalExtents {
+    /// The most ranges read for one file; a more fragmented file is counted from its clone ID instead.
+    static let limit = 4096
+
+    /// Reads the ranges of the regular file `name` in the open folder `directory`, or returns `nil` when it cannot be
+    /// opened (permissions), is no longer the file `fileID`, has more than `limit` ranges, or its ranges do not add
+    /// up to `allocated`, its allocated size over all forks (a compressed file keeps its data in an extended
+    /// attribute, a resource fork is not mapped, and a file written meanwhile has changed). Holes are skipped. The
+    /// file is opened without following a link and never read.
+    static func read(in directory: Int32, name: String, fileID: UInt64, allocated: UInt64) -> [Range<UInt64>]? {
+        let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        var volume = statfs()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, UInt64(info.st_ino) == fileID,
+              fstatfs(fd, &volume) == 0, volume.f_bsize > 0 else { return nil }
+        let block = UInt64(volume.f_bsize)
+        let size = info.st_size
+        var ranges: [Range<UInt64>] = []
+        var total: UInt64 = 0
+        var offset: off_t = 0
+        while offset < size {
+            var mapping = log2phys()
+            mapping.l2p_contigbytes = size - offset
+            mapping.l2p_devoffset = offset
+            guard fcntl(fd, F_LOG2PHYS_EXT, &mapping) == 0 else {
+                if errno == EINTR { continue }
+                return nil
+            }
+            guard mapping.l2p_contigbytes > 0 else { return nil }
+            // A hole maps to no device offset.
+            if mapping.l2p_devoffset >= 0 {
+                let start = UInt64(mapping.l2p_devoffset) / block * block
+                let end = (UInt64(mapping.l2p_devoffset) + UInt64(mapping.l2p_contigbytes) + block - 1) / block * block
+                guard ranges.count < limit else { return nil }
+                ranges.append(start..<end)
+                total += end - start
+            }
+            offset += mapping.l2p_contigbytes
+        }
+        guard total == allocated else { return nil }
+        return union(ranges)
+    }
+
+    /// Sorts ranges and merges those that overlap or touch.
+    static func union(_ ranges: [Range<UInt64>]) -> [Range<UInt64>] {
+        var merged: [Range<UInt64>] = []
+        merged.reserveCapacity(ranges.count)
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    /// The bytes merged ranges cover.
+    static func bytes(_ merged: [Range<UInt64>]) -> UInt64 {
+        merged.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
+    }
+}
