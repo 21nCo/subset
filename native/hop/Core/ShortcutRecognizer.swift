@@ -13,32 +13,34 @@ public struct KeyEvent: Sendable, Equatable {
     public var modifiers: ModifierMask
     /// Whether this key-down is the keyboard's auto-repeat of a key held down, not a new press.
     public var isRepeat: Bool
-    /// The letter the key types on the current keyboard layout without modifiers, lowercased, when it is an ASCII
-    /// letter; nil when it is not one or is unknown. Operation keys (⌘W) match it, so they follow the layout as menu
-    /// shortcuts do, and fall back to the key's US position (`keyCode`) without it.
-    public var letter: Character?
+    /// The character the key types on the current keyboard layout without modifiers (ASCII lowercased), or nil when
+    /// it is unknown or the key types none. Operation keys (⌘W) match it, so they follow the layout as menu shortcuts
+    /// do; only a key without an ASCII character (a non-Latin layout, or none) falls back to its US position.
+    public var character: Character?
 
     public init(
         _ kind: Kind,
         keyCode: UInt16,
         modifiers: ModifierMask = [],
         isRepeat: Bool = false,
-        letter: Character? = nil
+        character: Character? = nil
     ) {
         self.kind = kind
         self.keyCode = keyCode
         self.modifiers = modifiers.intersection(.all)
         self.isRepeat = kind == .keyDown && isRepeat
-        self.letter = letter.flatMap { $0.isASCII && $0.isLetter ? Character($0.lowercased()) : nil }
+        self.character = character.map { $0.isASCII ? Character($0.lowercased()) : $0 }
     }
 }
 
 /// The keys that act on the selected window while a switch is active, pressed with ⌘ and the holding modifier.
 public enum OperationKey {
-    /// The operation for a key: by its letter when the layout gives one, otherwise by its US key position.
-    public static func operation(letter: Character?, keyCode: UInt16) -> WindowOperation? {
-        if let letter { return byLetter[letter] }
-        return byKeyCode[keyCode]
+    /// The operation for a key: by the ASCII character the layout gives it, so a Latin layout's punctuation on the US
+    /// M, W, H or Q position (AZERTY's comma, Dvorak's comma and apostrophe) matches nothing; by its US key position
+    /// only when the layout gives no ASCII character (a Cyrillic layout, for example, or a dead key).
+    public static func operation(character: Character?, keyCode: UInt16) -> WindowOperation? {
+        guard let character, character.isASCII else { return byKeyCode[keyCode] }
+        return byLetter[character]
     }
 
     private static let byLetter: [Character: WindowOperation] = ["m": .minimize, "w": .close, "h": .hideApp, "q": .quitApp]
@@ -110,7 +112,7 @@ public enum EventClassifier {
         guard key.modifiers.contains(shortcut.holdModifier) else { return Classification(.pass, .modifierReleased) }
         guard key.kind == .keyDown else { return .pass }
         if key.modifiers == shortcut.holdModifier.union(.command) {
-            guard let operation = OperationKey.operation(letter: key.letter, keyCode: key.keyCode) else { return .pass }
+            guard let operation = OperationKey.operation(character: key.character, keyCode: key.keyCode) else { return .pass }
             return Classification(.swallow, .operation(operation))
         }
         guard key.modifiers == shortcut.forwardModifiers || key.modifiers == shortcut.backwardModifiers else { return .pass }

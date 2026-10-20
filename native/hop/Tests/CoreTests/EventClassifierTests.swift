@@ -95,9 +95,9 @@ final class EventClassifierTests: XCTestCase {
             (0x2E, "m", .minimize), (0x0D, "w", .close), (0x04, "h", .hideApp), (0x0C, "q", .quitApp),
         ]
         for (code, letter, operation) in keys {
-            let key = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: [.option, .command], letter: letter))
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: [.option, .command], character: letter))
             XCTAssertEqual(classify(key, active), Classification(.swallow, .operation(operation)), "\(letter)")
-            // Without a letter from the layout, the US key position decides.
+            // Without a character from the layout, the US key position decides.
             XCTAssertEqual(classify(down(code, [.option, .command]), active), Classification(.swallow, .operation(operation)))
             // While idle they are the frontmost app's shortcuts.
             XCTAssertEqual(classify(key, idle), .pass)
@@ -106,15 +106,37 @@ final class EventClassifierTests: XCTestCase {
 
     func testOperationKeysFollowTheKeyboardLayout() {
         // On AZERTY the key in the US W position types Z, and W is where US Z is.
-        let zKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: [.option, .command], letter: "z"))
+        let zKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: [.option, .command], character: "z"))
         XCTAssertEqual(classify(zKeyOnAzerty, active), .pass)
-        let wKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x06, modifiers: [.option, .command], letter: "W"))
+        let wKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x06, modifiers: [.option, .command], character: "W"))
         XCTAssertEqual(classify(wKeyOnAzerty, active), Classification(.swallow, .operation(.close)))
+    }
+
+    func testPunctuationOnALatinLayoutNeverFallsBackToTheUSPosition() {
+        // AZERTY types a comma on the US M position; Dvorak a comma on the US W position and an apostrophe on Q.
+        let keys: [(UInt16, Character)] = [(0x2E, ","), (0x0D, ","), (0x0C, "'")]
+        for (code, character) in keys {
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: [.option, .command], character: character))
+            XCTAssertEqual(classify(key, active), .pass, "\(code) \(character)")
+        }
+    }
+
+    func testANonLatinLayoutFallsBackToTheUSPosition() {
+        // Russian ЙЦУКЕН types ц on the US W position, ь on M, р on H and й on Q.
+        let keys: [(UInt16, Character, WindowOperation)] = [
+            (0x0D, "ц", .close), (0x2E, "ь", .minimize), (0x04, "р", .hideApp), (0x0C, "й", .quitApp),
+        ]
+        for (code, character, operation) in keys {
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: [.option, .command], character: character))
+            XCTAssertEqual(classify(key, active), Classification(.swallow, .operation(operation)), "\(character)")
+        }
+        let otherKey = TapInput.key(KeyEvent(.keyDown, keyCode: 0x00, modifiers: [.option, .command], character: "ф"))
+        XCTAssertEqual(classify(otherKey, active), .pass)
     }
 
     func testOperationKeysNeedExactlyCommandAndTheHoldingModifier() {
         for modifiers: ModifierMask in [.option, [.command], [.option, .command, .shift], [.option, .command, .control]] {
-            let key = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: modifiers, letter: "w"))
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: modifiers, character: "w"))
             let expected: Classification = modifiers.contains(.option) ? .pass : Classification(.pass, .modifierReleased)
             XCTAssertEqual(classify(key, active), expected, "\(modifiers)")
         }

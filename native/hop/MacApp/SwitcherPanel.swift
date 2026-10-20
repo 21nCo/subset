@@ -64,8 +64,8 @@ final class SwitcherPanel: NSPanel {
 final class SwitcherContentView: NSView {
     /// The pointer moved over the cell at this index.
     var onHover: (Int) -> Void = { _ in }
-    /// The cell at this index was clicked.
-    var onChoose: (Int) -> Void = { _ in }
+    /// This window's cell was clicked: pressed and released while it was under the pointer.
+    var onChoose: (HopCore.WindowRef) -> Void = { _ in }
     /// The scroll wheel or trackpad scrolled by this many rows (positive is down).
     var onScroll: (Int) -> Void = { _ in }
 
@@ -85,7 +85,9 @@ final class SwitcherContentView: NSView {
     /// Where the pointer was when the panel appeared: a panel appearing under a resting pointer must not take the
     /// selection from the keyboard, so hovering counts only once the pointer has moved.
     private var pointerAtShow: NSPoint?
-    private var pressedIndex: Int?
+    /// The window whose cell the mouse went down on. A click commits it only if the cell under the pointer on release
+    /// still shows it, so a list that changed in between (after an operation, or a refresh) never commits another window.
+    private var pressedWindow: HopCore.WindowRef?
     private var scrollAccumulator: CGFloat = 0
 
     override init(frame: NSRect) {
@@ -150,7 +152,7 @@ final class SwitcherContentView: NSView {
         model = nil
         message = nil
         pointerAtShow = NSEvent.mouseLocation
-        pressedIndex = nil
+        pressedWindow = nil
         scrollAccumulator = 0
     }
 
@@ -173,12 +175,12 @@ final class SwitcherContentView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        pressedIndex = index(atWindowPoint: event.locationInWindow)
+        pressedWindow = window(atWindowPoint: event.locationInWindow)
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { pressedIndex = nil }
-        guard let pressed = pressedIndex, index(atWindowPoint: event.locationInWindow) == pressed else { return }
+        defer { pressedWindow = nil }
+        guard let pressed = pressedWindow, window(atWindowPoint: event.locationInWindow) == pressed else { return }
         onChoose(pressed)
     }
 
@@ -194,6 +196,11 @@ final class SwitcherContentView: NSView {
         guard rows != 0 else { return }
         scrollAccumulator -= CGFloat(rows) * pitch
         onScroll(rows)
+    }
+
+    private func window(atWindowPoint point: NSPoint) -> HopCore.WindowRef? {
+        guard let model, let index = index(atWindowPoint: point) else { return nil }
+        return model.entries[index].ref
     }
 
     private func index(atWindowPoint point: NSPoint?) -> Int? {

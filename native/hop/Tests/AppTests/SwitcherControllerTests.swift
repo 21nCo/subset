@@ -34,6 +34,62 @@ final class SwitcherControllerTests: XCTestCase {
         }
     }
 
+    /// A left-button event at the middle of the cell at `index`, in the panel's window coordinates.
+    private func mouse(_ type: NSEvent.EventType, onCellAt index: Int, of switcher: SwitcherController) throws -> NSEvent {
+        let model = try XCTUnwrap(switcher.model)
+        let cell = try XCTUnwrap(model.layout.frame(of: index, firstVisibleRow: model.firstVisibleRow))
+        let view = switcher.panel.switcherView
+        let location = view.convert(NSPoint(x: cell.midX, y: cell.midY), to: nil)
+        return try XCTUnwrap(NSEvent.mouseEvent(
+            with: type, location: location, modifierFlags: [], timestamp: 0,
+            windowNumber: switcher.panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ))
+    }
+
+    func testAClickCommitsTheWindowItWasPressedOn() async throws {
+        let recorder = RecordingWindowOperator()
+        lists = [windows]
+        let switcher = controller(recorder)
+        var ended = 0
+        switcher.onSessionEnded = { ended += 1 }
+        switcher.open()
+        let view = switcher.panel.switcherView
+        view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 2, of: switcher))
+        view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 2, of: switcher))
+        XCTAssertFalse(switcher.isOpen)
+        XCTAssertEqual(ended, 1)
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.operation), [.focus])
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[2].ref])
+    }
+
+    func testAClickWhoseCellChangedWindowsBeforeTheReleaseCommitsNothing() async throws {
+        let recorder = RecordingWindowOperator()
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        let switcher = controller(recorder)
+        var ended = 0
+        switcher.onSessionEnded = { ended += 1 }
+        switcher.open()
+        let view = switcher.panel.switcherView
+        view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 2, of: switcher))
+        // ⌘W closes the selected window 1 before the release, so the pressed spot now shows window 3.
+        switcher.apply(.operation(.close))
+        try await wait(until: { switcher.model?.entries.count == 3 }, "the closed window leaves the list")
+        XCTAssertEqual(switcher.model?.entries[2].ref, windows[3].ref)
+        view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 2, of: switcher))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(switcher.isOpen, "the click is dropped")
+        XCTAssertEqual(ended, 0)
+        XCTAssertEqual(recorder.calls.map(\.operation), [.close], "window 3 is never focused")
+        // A new click on that spot chooses the window it now shows.
+        view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 2, of: switcher))
+        view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 2, of: switcher))
+        XCTAssertFalse(switcher.isOpen)
+        try await wait(until: { recorder.calls.count == 2 })
+        XCTAssertEqual(recorder.calls.map(\.operation), [.close, .focus])
+        XCTAssertEqual(recorder.calls.last?.window, windows[3].ref)
+    }
+
     func testCloseKeepsTheSwitcherOpenAndSelectsTheNextWindow() async throws {
         let recorder = RecordingWindowOperator()
         lists = [windows, [windows[0], windows[2], windows[3]]]

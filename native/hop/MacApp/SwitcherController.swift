@@ -40,8 +40,8 @@ final class SwitcherController {
             update { $0.select(index) }
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
-        panel.switcherView.onChoose = { [unowned self] index in
-            guard model != nil else { return }
+        panel.switcherView.onChoose = { [unowned self] window in
+            guard let index = model?.entries.firstIndex(where: { $0.ref == window }) else { return }
             update { $0.select(index) }
             onSessionEnded()
             commit()
