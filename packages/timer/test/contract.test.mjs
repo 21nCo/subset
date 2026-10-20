@@ -3,7 +3,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { OPERATION_NAMES, operations, parseStore, schemas } from '../dist/index.js';
+import { OPERATION_NAMES, OPERATION_WRITE_CLASS, operations, parseStore, schemas } from '../dist/index.js';
+import { readBoardResult, readOutcome } from '../dist/view/view-model.js';
 import { contractFixtures, fixtureText, inputVectors } from '../scripts/contract-fixtures.mjs';
 
 const directory = new URL('../fixtures/contract-v1/', import.meta.url);
@@ -116,6 +117,44 @@ test('the store JSON Schema states the timer rules that need no arithmetic, and 
   for (const [why, value] of expressible) assert.equal(validate(value), false, `JSON Schema accepted: ${why}`);
   for (const [why, value] of runtimeOnly) assert.equal(validate(value), true, `JSON Schema now states: ${why}; move it to the list above`);
   for (const [why, value] of [...expressible, ...runtimeOnly]) assert.equal(parseStore(value).ok, false, `parseStore accepted: ${why}`);
+});
+
+test('every timer change and get result carries the time the host ran it', async () => {
+  const { cases } = await readFixture('operations.json');
+  const timerOperations = OPERATION_NAMES.filter((name) => !name.startsWith('presets.') && name !== 'list');
+  for (const operation of timerOperations) {
+    const passed = cases.filter((item) => item.operation === operation && item.result);
+    assert.ok(passed.length, operation);
+    for (const item of passed) assert.equal(item.result.observedAt, item.now, item.name);
+    const { observedAt, ...withoutTime } = passed[0].result;
+    assert.equal(validator(schemas.outputs[operation])(withoutTime), false, `${operation} result without observedAt`);
+  }
+  assert.deepEqual(timerOperations.filter((name) => OPERATION_WRITE_CLASS[name] !== 'read'), ['create', 'start', 'pause', 'resume', 'lap', 'skip', 'reset', 'remove']);
+});
+
+test('the JSON Schemas and the board refuse the same snapshots that break the stored timer rules', async () => {
+  const props = await readFixture('view-props.json');
+  const { result } = props;
+  const index = Object.fromEntries(result.timers.map((timer, position) => [timer.definition.name, position]));
+  const broken = [
+    ['laps on an interval timer', 'Tabata', (timer) => { timer.runtime.laps = [{ elapsedMs: 0, at: 0 }]; }],
+    ['skips on a countdown', 'Tea', (timer) => { timer.runtime.skippedMs = 1_000; }],
+    ['skips on a stopwatch', 'Run', (timer) => { timer.runtime.skippedMs = 1_000; }],
+    ['a finished stopwatch', 'Run', (timer) => { Object.assign(timer.runtime, { status: 'finished', startedAt: null }); }]
+  ];
+  const results = { result: validator(schemas.result), viewProps: validator(schemas.viewProps), pause: validator(schemas.outputs.pause) };
+  assert.equal(results.result(result), true);
+  assert.equal(results.viewProps(props), true);
+  for (const [why, name, change] of broken) {
+    const value = structuredClone(result);
+    change(value.timers[index[name]]);
+    const timer = value.timers[index[name]];
+    assert.equal(results.result(value), false, `result JSON Schema accepted ${why}`);
+    assert.equal(results.viewProps({ ...props, result: value }), false, `viewProps JSON Schema accepted ${why}`);
+    assert.equal(results.pause({ timer, observedAt: value.observedAt }), false, `pause JSON Schema accepted ${why}`);
+    assert.equal(readBoardResult(value).ok, false, `the board read ${why}`);
+    assert.equal(readOutcome('pause', timer.definition.id, { timer, observedAt: value.observedAt }).ok, false, `the board took a reply with ${why}`);
+  }
 });
 
 test('the create and start selector schemas agree with the runtime for every combination of fields', async () => {

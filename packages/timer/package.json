@@ -8,10 +8,16 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./view": "./src/view/TimerBoard.svelte",
+    "./view-model": {
+      "types": "./dist/view/view-model.d.ts",
+      "default": "./dist/view/view-model.js"
+    },
     "./fixtures/contract-v1/*": "./fixtures/contract-v1/*"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && npm run check:view",
+    "check:view": "svelte-check --tsconfig ./tsconfig.view.json --fail-on-warnings",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "fixtures": "npm run build && node scripts/contract-fixtures.mjs"
@@ -22,6 +28,11 @@
   "devDependencies": {
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.3.0",
     "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "svelte": "^5.57.1"
   }
 }

@@ -42,7 +42,8 @@
             "step": null,
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -123,7 +124,8 @@
               "durationMs": 15000
             }
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -257,7 +259,8 @@
               "durationMs": 300000
             }
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -298,7 +301,8 @@
             "step": null,
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -362,7 +366,8 @@
               "durationMs": 60000
             }
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -458,7 +463,8 @@
               "durationMs": 10000
             }
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -524,7 +530,8 @@
             "step": null,
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -588,7 +595,8 @@
             "step": null,
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -671,7 +679,8 @@
               "durationMs": 20000
             }
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -740,7 +749,8 @@
             },
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
@@ -752,7 +762,8 @@
       },
       "now": 1792400400000,
       "result": {
-        "removedId": "t_rcrt44q9"
+        "removedId": "t_rcrt44q9",
+        "observedAt": 1792400400000
       }
     },
     {
@@ -1128,7 +1139,8 @@
             "step": null,
             "next": null
           }
-        }
+        },
+        "observedAt": 1792400400000
       }
     },
     {
