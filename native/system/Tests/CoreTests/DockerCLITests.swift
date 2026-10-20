@@ -212,6 +212,21 @@ final class DockerCLITests: XCTestCase {
         try await assertExits(second, "SIGKILL stops it after a cancellation", within: .seconds(2))
     }
 
+    func testKillingRunningCommandsStopsOneThatIgnoresSIGTERMBeforeItReturns() async throws {
+        let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
+        let run = Task { await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
+        let pid = try await waitForStubPID()
+
+        ProcessCommandRunner.killRunningCommands()
+
+        let killed = await run.value
+        XCTAssertEqual(killed, .failure(.cancelled))
+        // Well inside the second a cancellation waits before `SIGKILL`, which would not fire in a quitting app.
+        try await assertExits(pid, "the command is killed at once", within: .milliseconds(500))
+        let after = await ProcessCommandRunner().run(stub, arguments: ["warm"], environment: [:], timeout: .seconds(5))
+        XCTAssertEqual(try after.get().status, 0, "a later command runs normally")
+    }
+
     func testCancellingTheTaskStopsTheCommandAndAnAlreadyCancelledTaskStartsNone() async throws {
         let stub = try await warmedStub("echo $$ > '\(pidFile)'\nexec sleep 30")
 

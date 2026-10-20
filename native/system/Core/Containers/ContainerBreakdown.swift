@@ -133,12 +133,23 @@ public enum DockerOutput {
     public static func stats(_ output: String) -> Parsed<Stats> {
         parse(output) { object, unreadable in
             guard let id = nonEmpty(object["ID"]) else { return nil }
-            let usage = (object["MemUsage"] as? String).map { $0.components(separatedBy: " / ") }
+            let usage = memoryUsage(object["MemUsage"], &unreadable)
             return Stats(id: id, name: nonEmpty(object["Name"]),
                          cpuPercent: read(object["CPUPerc"], percent, &unreadable),
-                         memoryUsed: read(usage?.first, bytes, &unreadable),
-                         memoryLimit: read(usage.flatMap { $0.count == 2 ? $0[1] : nil }, bytes, &unreadable))
+                         memoryUsed: read(usage?.used, bytes, &unreadable),
+                         memoryLimit: read(usage?.limit, bytes, &unreadable))
         }
+    }
+
+    /// `MemUsage` split into its `used / limit` halves. An absent, empty, or `--` value is unmeasured; any other
+    /// value that is not a string of exactly two halves is counted as unreadable once.
+    private static func memoryUsage(_ raw: Any?, _ unreadable: inout Int) -> (used: String, limit: String)? {
+        guard let raw else { return nil }
+        guard let text = (raw as? String)?.trimmingCharacters(in: .whitespaces) else { unreadable += 1; return nil }
+        guard !text.isEmpty, text != "--" else { return nil }
+        let halves = text.components(separatedBy: " / ")
+        guard halves.count == 2 else { unreadable += 1; return nil }
+        return (halves[0], halves[1])
     }
 
     /// The compose project in a `Labels` value, `k=v` pairs joined by commas. Compose project names hold only

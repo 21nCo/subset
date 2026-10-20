@@ -4,21 +4,32 @@ import SystemCore
 /// Each running container runtime's VM: what macOS measures for its processes, and beneath it the containers and
 /// compose projects the runtime reports from inside the VM. The two figures are shown side by side and never
 /// reconciled. SET-44 places this under the VM's origin group.
+///
+/// The view is never taller than `maxHeight`: past it, the runtimes and their containers scroll, so every row stays
+/// reachable and the process table below keeps its space however many containers run.
 struct ContainerVMsView: View {
+    static let maxHeight: CGFloat = 96
+
     let groups: [ContainerVMGroup]
     let report: ContainerReport?
+    @State private var contentHeight: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(groups, id: \.runtime) { group in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(group.runtime.displayName).font(.headline)
-                    Text("On this Mac: \(Self.usage(memory: group.totals.memory, cpu: group.totals.cpuPercent)) · "
-                        + "\(group.totals.processCount) processes")
-                    breakdown(report?.status(of: group.runtime) ?? .notMeasured)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(groups, id: \.runtime) { group in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.runtime.displayName).font(.headline)
+                        Text("On this Mac: \(Self.usage(memory: group.totals.memory, cpu: group.totals.cpuPercent)) · "
+                            + "\(group.totals.processCount) processes")
+                        breakdown(report?.status(of: group.runtime) ?? .notMeasured)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
+        .frame(height: min(contentHeight, Self.maxHeight))
         .font(.callout)
         .textSelection(.enabled)
     }

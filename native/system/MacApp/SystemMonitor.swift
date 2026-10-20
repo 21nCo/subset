@@ -46,6 +46,14 @@ final class SystemMonitor {
         if loop != nil { restart() }
     }
 
+    /// Stops a container poll in progress before the app quits: its running command gets `SIGKILL` now, since the
+    /// runner's delayed one would never fire.
+    func stopContainerPolling() {
+        containerRefresh?.cancel()
+        containerRefresh = nil
+        ProcessCommandRunner.killRunningCommands()
+    }
+
     /// Restarts the loop so a cadence change applies now. A sample already running finishes; the schedule keeps the
     /// next one from starting sooner than the new interval after it started.
     private func restart() {

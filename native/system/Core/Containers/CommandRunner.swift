@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// What a finished command printed and its exit status.
 public struct CommandOutput: Equatable, Sendable {
@@ -53,6 +54,12 @@ public struct ProcessCommandRunner: CommandRunning {
             run.cancel()
         }
     }
+
+    /// Stops every command still running now with `SIGKILL` and answers each run `cancelled`, before it returns. For
+    /// an app about to quit, whose delayed `SIGKILL` would never fire, so a command stuck on a socket would outlive it.
+    public static func killRunningCommands() {
+        CommandRun.killAll()
+    }
 }
 
 /// One command's run. Every path answers the continuation once; the output handlers and the termination handler
@@ -71,6 +78,9 @@ private final class CommandRun: @unchecked Sendable {
     private var launched = false
     private var cancelled = false
     private var stopping = false
+
+    /// Runs whose command has started and not yet exited.
+    private static let live = OSAllocatedUnfairLock(initialState: [ObjectIdentifier: CommandRun]())
 
     init(limit: Int) {
         self.limit = limit
@@ -94,12 +104,16 @@ private final class CommandRun: @unchecked Sendable {
         process.terminationHandler = { [self] process in
             // Clearing the handler releases this run once the pipes are closed too.
             process.terminationHandler = nil
+            Self.live.withLock { _ = $0.removeValue(forKey: ObjectIdentifier(self)) }
             lock.withLock { status = process.terminationStatus }
             finishIfDone()
         }
         do {
+            // Registered before the launch, so a command is never running unregistered; removed when it exits.
+            Self.live.withLock { $0[ObjectIdentifier(self)] = self }
             try process.run()
         } catch {
+            Self.live.withLock { _ = $0.removeValue(forKey: ObjectIdentifier(self)) }
             process.terminationHandler = nil
             stopReading()
             answer(.failure(.launchFailed(error.localizedDescription)))
@@ -117,6 +131,20 @@ private final class CommandRun: @unchecked Sendable {
     func cancel() {
         let started = lock.withLock { cancelled = true; return launched }
         if answer(.failure(.cancelled)), started { stop() }
+    }
+
+    static func killAll() {
+        for run in live.withLock({ Array($0.values) }) { run.killNow() }
+    }
+
+    /// Answers `cancelled` and sends `SIGKILL` at once.
+    private func killNow() {
+        answer(.failure(.cancelled))
+        // A command still starting is stopped once it has launched.
+        guard lock.withLock({ cancelled = true; if launched { stopping = true }; return launched }) else { return }
+        stopReading()
+        guard process.isRunning else { return }
+        Darwin.kill(process.processIdentifier, SIGKILL)
     }
 
     private func receive(_ data: Data, error: Bool) {

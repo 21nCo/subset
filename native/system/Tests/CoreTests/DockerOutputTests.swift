@@ -74,6 +74,23 @@ final class DockerOutputTests: XCTestCase {
         XCTAssertEqual(breakdown.standalone.map(\.name), ["a", "b"], "stats rows without a listing are still containers")
     }
 
+    func testAMemoryUsageThatIsNotUsedSlashLimitIsCountedOnce() {
+        let stats = DockerOutput.stats("""
+        {"CPUPerc":"1.00%","ID":"aaaaaaaaaaaa","MemUsage":123}
+        {"CPUPerc":"1.00%","ID":"bbbbbbbbbbbb","MemUsage":"1MiB / 2GiB / 3GiB"}
+        {"CPUPerc":"1.00%","ID":"cccccccccccc","MemUsage":"1MiB"}
+        {"CPUPerc":"1.00%","ID":"dddddddddddd","MemUsage":"--"}
+        {"CPUPerc":"1.00%","ID":"eeeeeeeeeeee"}
+        {"CPUPerc":"--","ID":"ffffffffffff","MemUsage":"-- / --"}
+        """)
+
+        XCTAssertEqual(stats.rows.count, 6)
+        XCTAssertEqual(stats.skippedLines, 0)
+        XCTAssertEqual(stats.unreadableValues, 3, "a number, three halves, and one half are each one unreadable value")
+        XCTAssertTrue(stats.rows.allSatisfy { $0.memoryUsed == nil && $0.memoryLimit == nil })
+        XCTAssertEqual(stats.rows.map(\.cpuPercent), [1, 1, 1, 1, 1, nil])
+    }
+
     func testOutputWithLinesButNoReadableRowIsUnparsable() {
         XCTAssertTrue(DockerOutput.listing("<html>proxy error</html>\n{}\n").isUnparsable)
         XCTAssertFalse(DockerOutput.listing("").isUnparsable, "no output is no running containers")
