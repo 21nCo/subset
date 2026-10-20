@@ -111,12 +111,29 @@ export function subscribe(socketPath) {
 }
 
 /** Waits for a condition that depends on socket I/O. */
-export async function eventually(condition, timeoutMs = 5_000) {
+export function eventually(condition, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for a condition.');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      try {
+        if (condition()) return resolve();
+      } catch (error) {
+        return reject(error);
+      }
+      if (Date.now() > deadline) return reject(new Error('Timed out waiting for a condition.'));
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
+/** Resolves what `promise` resolves, or rejects when it has not settled within `timeoutMs`; a test never waits unbounded. */
+export function within(promise, timeoutMs = 5_000, what = 'the daemon to close') {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for ${what}.`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** Runs `main.mjs daemon run` as a separate process. */

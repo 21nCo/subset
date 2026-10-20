@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { TIMER_LIMITS, TIMER_VIEW_ID, emptyStore, parseStore, runOperation, transitionsBetween } from '@subset/timer';
 import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, createFakeClock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
+import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 test('the data directory is 0700, the socket 0600, and there is no TCP listener', async (t) => {
   const { daemon } = await startTestDaemon(t);
@@ -139,7 +139,7 @@ test('shutdown answers, then removes the socket and the lock', async (t) => {
   const { call, daemon } = await startTestDaemon(t);
   const response = await call('POST', '/v1/shutdown');
   assert.deepEqual([response.status, response.body], [200, { ok: true }]);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
   assert.equal(existsSync(daemon.paths.socket), false);
   assert.equal(existsSync(daemon.paths.lock), false);
 });
@@ -167,7 +167,7 @@ test('a daemon killed right after a skip is restarted without firing what the sk
   const skipped = await socketRequest(socket, 'POST', '/v1/ops/skip', { id });
   assert.equal(skipped.body.timer.projection.step.phase, 'work');
   run.child.kill('SIGKILL');
-  await run.exited;
+  await within(run.exited, 10_000);
 
   const clock = createFakeClock(Date.now());
   const restarted = await startTestDaemon(t, { dataDir, clock });
@@ -209,7 +209,7 @@ test('a finish the disk refused is recorded at a later run, shown to subscribers
   events.close();
   await eventually(() => daemon.subscriberCount === 0);
   clock.advance(IDLE_EXIT_MS);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
 });
 
 /** A valid store whose state frame is over 1 MiB: paused stopwatches holding the most laps allowed. */
@@ -266,7 +266,7 @@ test('a request to a daemon that lost its lock is answered 503 and not applied',
   unlinkSync(daemon.paths.lock);
   const reply = await op('create', { timer: { kind: 'stopwatch' } });
   assert.deepEqual([reply.status, reply.body.error.code], [503, 'daemon_unavailable']);
-  assert.equal(await daemon.closed, 1);
+  assert.equal(await within(daemon.closed), 1);
   assert.equal(existsSync(daemon.paths.state), false);
 });
 
@@ -275,7 +275,7 @@ test('a read from a daemon that lost its lock is answered 503', async (t) => {
   unlinkSync(daemon.paths.lock);
   const reply = await call('GET', '/v1/timers');
   assert.deepEqual([reply.status, reply.body.error.code], [503, 'daemon_unavailable']);
-  assert.equal(await daemon.closed, 1);
+  assert.equal(await within(daemon.closed), 1);
 });
 
 test('a request still arriving when shutdown begins is answered 503 and not applied', async (t) => {
@@ -296,6 +296,6 @@ test('a request still arriving when shutdown begins is answered 503 and not appl
   });
   const { status, body } = await reply;
   assert.deepEqual([status, body.error.code], [503, 'daemon_unavailable']);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
   assert.equal(existsSync(daemon.paths.state), false);
 });

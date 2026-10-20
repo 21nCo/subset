@@ -94,6 +94,42 @@ function parseEvents(onEvent) {
   };
 }
 
+function checked(reply) {
+  if (reply && typeof reply.status === 'number' && isShuttingDown(reply)) throw new ShuttingDownError();
+  return reply;
+}
+
+function unavailable(error) {
+  if (error instanceof DaemonUnavailableError) return error;
+  return new DaemonUnavailableError(`The Timer daemon is unavailable: ${error.message}`, error);
+}
+
+/** Resolves once the stream ends, closes or fails. */
+function streamDone(response) {
+  return new Promise((settle) => {
+    for (const name of ['end', 'close', 'error']) response.on(name, settle);
+  });
+}
+
+/** Opens `/v1/events`, resolving `{ close, done }` once the daemon accepts the stream. */
+function openEventStream(socketPath, onEvent) {
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest({ socketPath, method: 'GET', path: '/v1/events', agent: false }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(response.statusCode === 503 ? new ShuttingDownError() : new DaemonUnavailableError(`The daemon refused the event stream (HTTP ${response.statusCode}).`));
+        return;
+      }
+      response.setEncoding('utf8');
+      const done = streamDone(response);
+      response.on('data', parseEvents(onEvent));
+      resolve({ close: () => outgoing.destroy(), done });
+    });
+    outgoing.on('error', reject);
+    outgoing.end();
+  });
+}
+
 /** Opens the daemon log for a spawned daemon's output, keeping one previous log of up to 1 MiB. */
 function openDaemonLog(logPath) {
   try {
@@ -146,11 +182,14 @@ export function createClient({
     return state;
   }
 
-  /** True while a live process holds `daemon.lock`, such as a daemon that is still shutting down. */
+  /**
+   * True while a live process holds `daemon.lock`, such as a daemon that is still shutting down. A
+   * lock is never seen before its pid is in it, so one without a valid pid is stale.
+   */
   function lockHeld() {
     try {
       const holder = readLock(paths.lock);
-      return holder !== null && (holder.pid === null || pidAlive(holder.pid));
+      return Boolean(holder?.pid) && pidAlive(holder.pid);
     } catch {
       return false;
     }
@@ -213,16 +252,6 @@ export function createClient({
     }
   }
 
-  function checked(reply) {
-    if (reply && typeof reply.status === 'number' && isShuttingDown(reply)) throw new ShuttingDownError();
-    return reply;
-  }
-
-  function unavailable(error) {
-    if (error instanceof DaemonUnavailableError) return error;
-    return new DaemonUnavailableError(`The Timer daemon is unavailable: ${error.message}`, error);
-  }
-
   /** `{ status, body }` for one request, starting the daemon if needed. */
   const request = (method, path, body) => withDaemon(() => socketRequest(paths.socket, method, path, body));
 
@@ -231,25 +260,7 @@ export function createClient({
    * when the stream ends.
    */
   function events(onEvent) {
-    return withDaemon(() => new Promise((resolve, reject) => {
-      const outgoing = httpRequest({ socketPath: paths.socket, method: 'GET', path: '/v1/events', agent: false }, (response) => {
-        if (response.statusCode !== 200) {
-          response.resume();
-          reject(response.statusCode === 503 ? new ShuttingDownError() : new DaemonUnavailableError(`The daemon refused the event stream (HTTP ${response.statusCode}).`));
-          return;
-        }
-        response.setEncoding('utf8');
-        const done = new Promise((settle) => {
-          response.on('end', settle);
-          response.on('close', settle);
-          response.on('error', settle);
-        });
-        response.on('data', parseEvents(onEvent));
-        resolve({ close: () => outgoing.destroy(), done });
-      });
-      outgoing.on('error', reject);
-      outgoing.end();
-    }));
+    return withDaemon(() => openEventStream(paths.socket, onEvent));
   }
 
   return {

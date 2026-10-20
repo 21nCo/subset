@@ -3,7 +3,7 @@ import * as nodeFs from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { emptyStore, parseStore } from '@subset/timer';
 
-const TEMP_SUFFIX = /\.[0-9]+\.[0-9a-f]{8}\.tmp$/;
+const TEMP_SUFFIX = /\.\d+\.[0-9a-f]{8}\.tmp$/;
 const MARKS_VERSION = 1;
 
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -14,10 +14,10 @@ function isCode(error, ...codes) {
 }
 
 /** Writes all of `bytes`, as one write(2) may take only part of them, for example on a full disk. */
-function writeAll(fs, fd, bytes) {
+export function writeAll(fs, fd, bytes) {
   for (let offset = 0; offset < bytes.length;) {
     const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
-    if (!(written > 0)) throw Object.assign(new Error('The file system took none of the remaining bytes.'), { code: 'EIO' });
+    if (typeof written !== 'number' || written <= 0) throw Object.assign(new Error('The file system took none of the remaining bytes.'), { code: 'EIO' });
     offset += written;
   }
 }
@@ -94,7 +94,11 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
   function moveAside(reason) {
     const stamp = now();
     let target = join(paths.dataDir, `state.corrupt-${stamp}.json`);
-    for (let suffix = 1; fs.existsSync(target); suffix++) target = join(paths.dataDir, `state.corrupt-${stamp}-${suffix}.json`);
+    let suffix = 0;
+    while (fs.existsSync(target)) {
+      suffix += 1;
+      target = join(paths.dataDir, `state.corrupt-${stamp}-${suffix}.json`);
+    }
     fs.renameSync(paths.state, target);
     log(`state.json could not be read (${reason}); moved it to ${basename(target)} and started with no timers.`);
   }

@@ -66,27 +66,29 @@ export function createScheduler({ clock = systemClock, getTimers, onRun, initial
     firstRun = false;
   }
 
+  /** Advances `timer`'s mark to `now`; adds what fell due since to `missed` (one alert) and `onTime`. */
+  function collect(timer, now, missed, onTime) {
+    const mark = marks.get(timer.definition.id);
+    if (!mark) return;
+    const transitions = transitionsBetween(timer, mark.through, now);
+    if (now > mark.through) marks.set(mark.timerId, { ...mark, through: now });
+    const { definition } = timer;
+    const late = transitions.filter((transition) => now - transition.at > LATE_MS);
+    if (late.length) {
+      const alert = { timerId: definition.id, kind: 'missedWhileAway', missed: late.length, at: now };
+      const { step } = project(timer, now);
+      if (step) alert.segment = stepSegment(step);
+      missed.push({ alert, timer: definition });
+    }
+    for (const transition of transitions) {
+      if (now - transition.at <= LATE_MS) onTime.push({ alert: alertFromTransition(transition, definition), timer: definition });
+    }
+  }
+
   function due(now) {
     const missed = [];
     const onTime = [];
-    for (const timer of getTimers()) {
-      const mark = marks.get(timer.definition.id);
-      if (!mark) continue;
-      const transitions = transitionsBetween(timer, mark.through, now);
-      if (now > mark.through) marks.set(mark.timerId, { ...mark, through: now });
-      if (!transitions.length) continue;
-      const { definition } = timer;
-      const late = transitions.filter((transition) => now - transition.at > LATE_MS);
-      if (late.length) {
-        const alert = { timerId: definition.id, kind: 'missedWhileAway', missed: late.length, at: now };
-        const { step } = project(timer, now);
-        if (step) alert.segment = stepSegment(step);
-        missed.push({ alert, timer: definition });
-      }
-      for (const transition of transitions) {
-        if (now - transition.at <= LATE_MS) onTime.push({ alert: alertFromTransition(transition, definition), timer: definition });
-      }
-    }
+    for (const timer of getTimers()) collect(timer, now, missed, onTime);
     // Sorting is stable, so one timer's transitions at the same time keep the engine's order.
     onTime.sort((a, b) => a.alert.at - b.alert.at);
     return [...missed, ...onTime];

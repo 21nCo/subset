@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import test from 'node:test';
 import { IDLE_EXIT_MS } from '../../src/daemon/index.mjs';
-import { eventually, startTestDaemon, subscribe } from './helpers.mjs';
+import { eventually, startTestDaemon, subscribe, within } from './helpers.mjs';
 
 function settled(promise) {
   let done = false;
@@ -22,7 +22,7 @@ test('with nothing running and no subscriber the daemon exits 0 after 10 minutes
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(exited(), false);
   clock.advance(1);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
   assert.equal(existsSync(daemon.paths.socket), false);
   assert.equal(existsSync(daemon.paths.lock), false);
 });
@@ -42,7 +42,7 @@ test('an events subscriber cancels the idle exit until it leaves', async (t) => 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(exited(), false);
   clock.advance(1);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
 });
 
 test('running and paused timers keep the daemon alive; the countdown starts when the last one finishes', async (t) => {
@@ -58,5 +58,5 @@ test('running and paused timers keep the daemon alive; the countdown starts when
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(exited(), false);
   clock.advance(1);
-  assert.equal(await daemon.closed, 0);
+  assert.equal(await within(daemon.closed), 0);
 });

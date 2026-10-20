@@ -3,15 +3,17 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
-import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, removeStaleLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
+import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
+import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 function deadPid() {
   const { pid } = spawnSync(process.execPath, ['-e', '']);
   return pid;
 }
+
+const TOKEN = 'a'.repeat(32);
+const LOCK_CONTENT = new RegExp(`^${process.pid}\n[0-9a-f]{32}\n$`);
 
 function lockPath(t) {
   const dir = tempDataDir(t);
@@ -23,7 +25,7 @@ test('the lock is created holding the pid, refuses a second holder and is releas
   const path = lockPath(t);
   const first = await acquireLock(path);
   assert.equal(first.acquired, true);
-  assert.equal(readFileSync(path, 'utf8'), `${process.pid}\n`);
+  assert.match(readFileSync(path, 'utf8'), LOCK_CONTENT);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   const second = await acquireLock(path, { pid: 999_999 });
   assert.equal(second.acquired, false);
@@ -40,25 +42,42 @@ test('a lock whose pid is not alive is taken over', async (t) => {
   assert.equal(readLock(path).pid, process.pid);
 });
 
-test('a lock without a pid is being written, until it is older than the grace period', async (t) => {
+test('a lock without a valid pid is stale at once, as no lock is ever seen half written', async (t) => {
   const path = lockPath(t);
-  writeFileSync(path, '');
-  const young = await acquireLock(path);
-  assert.equal(young.acquired, false);
-  assert.equal(young.holder.pid, null);
-  const old = (Date.now() - 5_000) / 1000;
-  utimesSync(path, old, old);
-  assert.equal((await acquireLock(path)).acquired, true);
+  for (const content of ['', 'garbage\n']) {
+    writeFileSync(path, content);
+    const lock = await acquireLock(path);
+    assert.equal(lock.acquired, true, JSON.stringify(content));
+    lock.release();
+  }
+});
+
+test('a lock created again at the same path by the same process is told apart from the earlier one', async (t) => {
+  const path = lockPath(t);
+  const first = await acquireLock(path);
+  // As when the lock is removed from under a daemon and its successor runs in the same process:
+  // Linux then often gives the new file the inode the removed one had.
+  unlinkSync(path);
+  const second = await acquireLock(path);
+  assert.equal(second.acquired, true);
+  assert.notEqual(second.token, first.token);
+  assert.equal(first.isHeld(), false);
+  assert.equal(second.isHeld(), true);
+  first.release();
+  assert.equal(second.isHeld(), true);
+  second.release();
+  assert.equal(existsSync(path), false);
 });
 
 test('releasing leaves a lock another process has since created', async (t) => {
   const path = lockPath(t);
   const lock = await acquireLock(path);
-  writeFileSync(`${path}.next`, '1\n');
+  const successor = `${deadPid()}\n${TOKEN}\n`;
+  writeFileSync(`${path}.next`, successor);
   // Another daemon replaced the lock (as after a takeover); this one must not remove it.
   renameSync(`${path}.next`, path);
   lock.release();
-  assert.equal(readFileSync(path, 'utf8'), '1\n');
+  assert.equal(readFileSync(path, 'utf8'), successor);
 });
 
 for (const stale of [false, true]) {
@@ -89,7 +108,7 @@ for (const stale of [false, true]) {
       assert.equal(runs[exit.index].stderr().trim(), `already running (pid ${survivor.child.pid})`);
     }
     await socketRequest(join(dataDir, 'daemon.sock'), 'POST', '/v1/shutdown');
-    assert.equal(await survivor.exited, 0);
+    assert.equal(await within(survivor.exited, 10_000), 0);
     assert.equal(existsSync(join(dataDir, 'daemon.lock')), false);
     assert.equal(existsSync(join(dataDir, 'daemon.sock')), false);
   });
@@ -154,7 +173,7 @@ test('a daemon that lost its lock never writes or alerts again and leaves its su
   // The first daemon's countdown finishes: it would record and announce that, but it no longer
   // holds the lock, so its successor does both.
   first.clock.advance(1_000);
-  assert.equal(await first.daemon.closed, 1);
+  assert.equal(await within(first.daemon.closed), 1);
   await events.connected;
   await eventually(() => events.ended);
   assert.ok(first.logs.some((line) => /daemon\.lock is no longer held/.test(line)));
@@ -182,7 +201,7 @@ for (const timers of ['paused', 'none']) {
       const before = files();
 
       first.clock.advance(60_000);
-      assert.equal(await Promise.race([first.daemon.closed, sleep(5_000, 'still running', { ref: false })]), 1);
+      assert.equal(await within(first.daemon.closed), 1);
       await eventually(() => events.ended);
       assert.deepEqual(files(), before);
       // The old daemon is gone, so whatever answers on the socket is its successor, still holding its lock.
@@ -211,29 +230,87 @@ test('a holder\'s start time is never later than its real start, however slow ps
   assert.equal(processStartTime(4242, { now: () => 200_000_000, elapsedOf: () => '1-02:03:04' }), 200_000_000 - (((24 + 2) * 60 + 3) * 60 + 4) * 1_000 - 1_000);
 });
 
-test('a creator held up before writing its pid, whose empty lock was replaced, does not acquire', async (t) => {
+test('a lock is never seen before its pid and token are in it', async (t) => {
   const path = lockPath(t);
-  const successor = 4242;
-  let replaced = false;
+  const seen = [];
   const fs = {
     ...nodeFs,
     writeSync(...args) {
-      if (!replaced) {
-        replaced = true;
-        // Past the grace period, another process removes the empty lock and creates its own.
-        const old = (Date.now() - 5_000) / 1000;
-        utimesSync(path, old, old);
-        assert.equal(removeStaleLock(path, readLock(path)), true);
-        writeFileSync(path, `${successor}\n`, { flag: 'wx' });
-      }
+      // Another process looks while this one writes.
+      seen.push(readLock(path));
       return nodeFs.writeSync(...args);
     }
   };
-  const lock = await acquireLock(path, { fs, isAlive: (pid) => pid === successor });
-  assert.equal(replaced, true);
+  const lock = await acquireLock(path, { fs });
+  assert.equal(lock.acquired, true);
+  assert.deepEqual(seen, [null]);
+  assert.match(readFileSync(path, 'utf8'), LOCK_CONTENT);
+});
+
+test('a takeover marker whose holder is gone is removed at once, as are files it left', async (t) => {
+  const path = lockPath(t);
+  const dead = deadPid();
+  writeFileSync(path, `${dead}\n`);
+  writeFileSync(`${path}.takeover`, `${dead}\n${TOKEN}\n`);
+  const leftovers = [`${path}.${dead}-${TOKEN}.new`, `${path}.takeover.${dead}-${TOKEN}.dead`];
+  const live = `${path}.${process.ppid}-${TOKEN}.new`;
+  for (const file of [...leftovers, live]) writeFileSync(file, '');
+  const started = Date.now();
+  const lock = await acquireLock(path);
+  assert.equal(lock.acquired, true);
+  assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
+  assert.equal(existsSync(`${path}.takeover`), false);
+  assert.deepEqual(leftovers.filter((file) => existsSync(file)), []);
+  // One a live process is still writing is left to it.
+  assert.equal(existsSync(live), true);
+});
+
+test('a takeover marker whose holder is alive is kept however long it is stopped, unless the pid was reused', async (t) => {
+  const path = lockPath(t);
+  const stale = `${deadPid()}\n`;
+  writeFileSync(path, stale);
+  const marker = `${path}.takeover`;
+  const held = `${process.ppid}\n${TOKEN}\n`;
+  writeFileSync(marker, held);
+  const writtenAt = Date.now() - 60_000;
+  utimesSync(marker, writtenAt / 1000, writtenAt / 1000);
+  // Its holder started before the marker: it is a process stopped mid-takeover, and acts when it resumes.
+  const stopped = await acquireLock(path, { startTimeOf: () => writtenAt - 1_000 });
+  assert.equal(stopped.acquired, false);
+  assert.equal(readFileSync(path, 'utf8'), stale);
+  assert.equal(readFileSync(marker, 'utf8'), held);
+  // It started after the marker: the holder died and the system gave its pid to another process.
+  const reused = await acquireLock(path, { startTimeOf: () => writtenAt + 30_000 });
+  assert.equal(reused.acquired, true);
+  assert.equal(existsSync(marker), false);
+});
+
+test('removing an abandoned takeover marker puts back one another process claimed in the meantime', async (t) => {
+  const path = lockPath(t);
+  const stale = `${deadPid()}\n`;
+  writeFileSync(path, stale);
+  const marker = `${path}.takeover`;
+  writeFileSync(marker, `${deadPid()}\n${TOKEN}\n`);
+  const claimed = `${process.ppid}\n${'b'.repeat(32)}\n`;
+  let swapped = false;
+  const fs = {
+    ...nodeFs,
+    renameSync(from, to) {
+      if (from === marker && !swapped) {
+        // After this process read the abandoned marker, another removed it and claimed its own.
+        swapped = true;
+        unlinkSync(marker);
+        writeFileSync(marker, claimed);
+      }
+      return nodeFs.renameSync(from, to);
+    }
+  };
+  const lock = await acquireLock(path, { fs });
+  assert.equal(swapped, true);
   assert.equal(lock.acquired, false);
-  assert.equal(lock.holder.pid, successor);
-  assert.equal(readFileSync(path, 'utf8'), `${successor}\n`);
+  assert.equal(readFileSync(marker, 'utf8'), claimed);
+  assert.equal(readFileSync(path, 'utf8'), stale);
+  assert.deepEqual(readdirSync(join(path, '..')).filter((name) => name.endsWith('.dead') || name.endsWith('.new')), []);
 });
 
 test('a pid write that fails leaves no lock behind, and one that is short is completed', async (t) => {
@@ -247,7 +324,7 @@ test('a pid write that fails leaves no lock behind, and one that is short is com
   };
   for (const [name, writeSync] of Object.entries(failures)) {
     await assert.rejects(acquireLock(path, { fs: { ...nodeFs, writeSync } }), (error) => ['ENOSPC', 'EIO'].includes(error.code), name);
-    assert.equal(existsSync(path), false, name);
+    assert.deepEqual(readdirSync(join(path, '..')), [], name);
     const started = Date.now();
     const lock = await acquireLock(path);
     assert.equal(lock.acquired, true, name);
@@ -257,7 +334,7 @@ test('a pid write that fails leaves no lock behind, and one that is short is com
   const oneByte = (fd, buffer, offset) => nodeFs.writeSync(fd, buffer, offset, 1);
   const lock = await acquireLock(path, { fs: { ...nodeFs, writeSync: oneByte } });
   assert.equal(lock.acquired, true);
-  assert.equal(readFileSync(path, 'utf8'), `${process.pid}\n`);
+  assert.match(readFileSync(path, 'utf8'), LOCK_CONTENT);
 });
 
 for (const step of ['locked', 'bound']) {

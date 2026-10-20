@@ -109,7 +109,7 @@ export async function startDaemon({
   log = stderrLog,
   idleExitMs = IDLE_EXIT_MS,
   heartbeatMs = HEARTBEAT_MS,
-  startupHook = () => {}
+  startupHook = async () => {}
 } = {}) {
   const paths = ensureDataDir(dataDir);
   const lock = await takeLock(paths);
@@ -189,7 +189,7 @@ export async function startDaemon({
     if (held) return true;
     if (!closing) {
       log('daemon.lock is no longer held by this daemon; exiting without writing.');
-      shutdown(1);
+      void shutdown(1);
     }
     return false;
   }
@@ -274,7 +274,7 @@ export async function startDaemon({
       idleHandle = null;
       if (busy()) return;
       log('idle for 10 minutes; exiting.');
-      shutdown(0);
+      void shutdown(0);
     }, idleExitMs);
   }
 
@@ -351,28 +351,32 @@ export async function startDaemon({
       reply(response, STATUS_BY_CODE[outcome.error.code] ?? 400, { error: outcome.error });
       return;
     }
-    if (outcome.store !== store) {
-      try {
-        // A stretch the change begins (a start, resume or skip) is marked from now before the change
-        // is saved, so a daemon that stops before its next run neither repeats nor reports as missed
-        // what the stretch jumped over. A mark for a stretch that never began is dropped later.
-        const known = scheduler.marks;
-        const knownKeys = new Set(known.map(stretchKey));
-        const begun = scheduler.marksFor(outcome.store.timers, now).filter((mark) => !savedStretches.has(stretchKey(mark)) && !knownKeys.has(stretchKey(mark)));
-        if (begun.length) saveMarks([...known, ...begun]);
-        commit(outcome.store);
-      } catch (error) {
-        if (error instanceof LockLostError) {
-          fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
-          return;
-        }
-        log(`could not save state.json: ${error.message}`);
-        fail(response, 500, 'storage_failed', 'The daemon could not save the change.');
-        return;
-      }
-      scheduler.run(now);
-    }
+    if (outcome.store !== store && !applyChange(response, outcome.store, now)) return;
     reply(response, 200, outcome.result);
+  }
+
+  /** Saves and publishes `next`, the store after an operation at `now`; answers and returns false when that fails. */
+  function applyChange(response, next, now) {
+    try {
+      // A stretch the change begins (a start, resume or skip) is marked from now before the change
+      // is saved, so a daemon that stops before its next run neither repeats nor reports as missed
+      // what the stretch jumped over. A mark for a stretch that never began is dropped later.
+      const known = scheduler.marks;
+      const knownKeys = new Set(known.map(stretchKey));
+      const begun = scheduler.marksFor(next.timers, now).filter((mark) => !savedStretches.has(stretchKey(mark)) && !knownKeys.has(stretchKey(mark)));
+      if (begun.length) saveMarks([...known, ...begun]);
+      commit(next);
+    } catch (error) {
+      if (error instanceof LockLostError) {
+        fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+        return false;
+      }
+      log(`could not save state.json: ${error.message}`);
+      fail(response, 500, 'storage_failed', 'The daemon could not save the change.');
+      return false;
+    }
+    scheduler.run(now);
+    return true;
   }
 
   function subscribe(request, response) {
@@ -396,7 +400,7 @@ export async function startDaemon({
     '/v1/shutdown': {
       POST: (request, response) => {
         response.setHeader('connection', 'close');
-        response.on('finish', () => shutdown(0));
+        response.on('finish', () => void shutdown(0));
         reply(response, 200, { ok: true });
       }
     }
@@ -408,7 +412,7 @@ export async function startDaemon({
       return;
     }
     updateIdle({ activity: true });
-    const { pathname } = new URL(request.url ?? '/', 'http://daemon');
+    const [pathname] = (request.url ?? '/').split('?');
     if (pathname.startsWith('/v1/ops/')) {
       let name;
       try {
