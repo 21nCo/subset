@@ -3,7 +3,8 @@
   from their timestamps every 250 ms and runs every change through `actions.invoke`. It never fetches:
   each host supplies its own transport. After each change it reads the board through `list`; the pure
   reconciler in `view-model.ts` (`actionIssued`, `replySettled`, `readIssued`, `readSettled`,
-  `hostArrived`, `boardView`, `needsRead`) owns what the replies, those reads and the host's `result` show.
+  `hostArrived`, `boardView`, `nextRead`) owns what the replies, those reads and the host's `result` show,
+  and when the board reads again.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
@@ -13,7 +14,7 @@
   import TimerCard from './TimerCard.svelte';
   import {
     REFRESH_MS, actionIssued, boardView, cancelsRepeat, emptyBoardState, failureText, focusDisplaced, formatClockTime, hostArrived,
-    needsRead, pickAnnouncements, pressDestructive, readBoardResult, readIssued, readPresets, readSettled, readsAfter, replySettled, reproject,
+    nextRead, pickAnnouncements, pressDestructive, readBoardResult, readIssued, readPresets, readSettled, readsAfter, replySettled, reproject,
     type ActionFailure, type AnnouncedStates, type Armed, type ControlName, type TimerBoardProps
   } from './view-model.js';
 
@@ -76,6 +77,7 @@
     const settled = replySettled(known, operation, timerId, outcome, issue.issued);
     known = settled.state;
     if (readsAfter(operation, outcome)) void refresh();
+    else drain();
     if (!settled.outcome.ok) {
       fail(settled.outcome.failure);
       return null;
@@ -84,39 +86,36 @@
     return settled.outcome.result;
   }
 
-  // `list` reads in flight.
-  let reading = 0;
-  // Each new host result is recorded, so later actions and reads come after it. While a change is still
-  // shown over it or after a failed read, it prompts a read (see `needsRead`).
+  // Each new host result is recorded, so later actions and reads come after it.
   $effect(() => {
     const host = read;
     untrack(() => {
       if (!host.ok) return;
       known = hostArrived(known, host.result);
-      if (reading === 0 && needsRead(host.result, known)) void refresh();
+      drain();
     });
   });
+
+  /** Issues the one read the reconciler asks for, if any (see `nextRead`); called after every event. */
+  function drain() {
+    if (read.ok && nextRead(read.result, known)) void refresh();
+  }
 
   /** Reads the host's board, which retires the changes the base then comes after. */
   async function refresh(): Promise<void> {
     const issue = readIssued(known);
     known = issue.state;
-    reading += 1;
     const outcome = await invoke('list', {});
-    reading -= 1;
     const settled = readSettled(known, issue.issued, outcome);
-    // An ignored read (a later-issued one already succeeded) neither fails nor clears a List failure.
-    const taken = settled.state !== known;
     known = settled.state;
+    // An ignored read (a later-issued one already succeeded) neither fails nor clears a List failure.
     if (settled.failure) {
       // It does not replace an action's failure still shown, such as the refused change it followed.
       if (failure?.operation === 'list' || !failure) fail(settled.failure);
-      return;
+    } else if (settled.taken && failure?.operation === 'list') {
+      failure = null;
     }
-    if (taken && failure?.operation === 'list') failure = null;
-    // A host result that arrived during the read and is shown over it may still predate a change; a read
-    // issued now comes after that result.
-    if (taken && reading === 0 && read.ok && needsRead(read.result, known)) void refresh();
+    drain();
   }
 
   async function control(timerId: string, name: ControlName): Promise<void> {

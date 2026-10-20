@@ -7,7 +7,7 @@ import { emptyStore, operations, schemas, timerBoard } from '../dist/index.js';
 import {
   CONFIRM_MS, actionIssued, boardView, cancelsRepeat, controlStates, countdownSpecFrom, createInputFrom, durationText, emptyBoardState, emptyCountdownDraft,
   emptyIntervalDraft, failureText, focusDisplaced, formatClockTime, formatElapsed, formatRemaining, intervalDraftFrom, intervalSpecFrom, keyControl,
-  hostArrived, needsRead, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets,
+  hostArrived, nextRead, parseDurationText, pickAnnouncements, pressDestructive, primaryControl, readBoardResult, readIssued, readOutcome, readPresets,
   readRefresh, readSettled, readsAfter, replySettled, reproject, ringProgress
 } from '../dist/view/view-model.js';
 
@@ -421,18 +421,18 @@ test('a change stays shown until a board observed after it committed, from the h
       assert.deepEqual(shown(boardView(before, readSettled(state, earlier, late).state)), change, `${operation}: earlier read at ${late.observedAt - AT}`);
     }
     assert.deepEqual(readSettled(state, earlier, list(reply.store, AT + 5)).state.pending, [], `${operation}: earlier read after the commit`);
-    // Its own read fails: the change stays shown, and the board asks to read again on the next host result.
+    // Its own read fails: the change stays shown, and the board waits for the host's next result to read again.
     const failed = readSettled(state, own.issued, new Error('offline'));
     assert.equal(failureText(failed.failure), 'List failed: offline');
     assert.deepEqual(shown(boardView(before, failed.state)), change, `${operation} after a failed read`);
-    assert.equal(needsRead(before, failed.state), true);
+    assert.equal(failed.state.awaitingHost, true);
     // Newer host results then win, so a failed read never leaves the change shown over them.
     assert.deepEqual(shown(boardView(newer, failed.state)), held(later), `${operation}: newer host result after a failed read`);
-    assert.equal(needsRead(newer, failed.state), false);
+    assert.deepEqual(hostArrived(failed.state, newer).pending, [], operation);
     // Its own read, in the commit's millisecond, confirms it; the earlier read settling after it changes nothing.
     const confirmed = readSettled(state, own.issued, list(reply.store, AT)).state;
     assert.deepEqual(confirmed.pending, [], operation);
-    assert.deepEqual(readSettled(confirmed, earlier, list(store, AT)), { state: confirmed, failure: null });
+    assert.deepEqual(readSettled(confirmed, earlier, list(store, AT)), { state: { ...confirmed, inFlight: confirmed.inFlight - 1 }, failure: null, taken: false });
     // A host result observed at the same time as the board's read loses the tie to it; a newer one wins.
     assert.deepEqual(shown(boardView(timerBoard(store, AT), confirmed)), change, `${operation} on a tie`);
     assert.deepEqual(shown(boardView(newer, confirmed)), held(later), `${operation} after a later change`);
@@ -442,7 +442,7 @@ test('a change stays shown until a board observed after it committed, from the h
     let delayed = acted(emptyBoardState(), operation, scene.id, reply.result);
     delayed = readSettled(readIssued(delayed).state, delayed.seq + 1, new Error('offline')).state;
     assert.deepEqual(shown(boardView(newer, delayed)), held(later), `${operation} reply after a newer host result`);
-    assert.equal(needsRead(newer, delayed), false);
+    assert.equal(nextRead(newer, hostArrived(delayed, newer)), false);
     // A refused change was still answered by the host, so the board reads again; a call that threw may not have.
     assert.equal(readsAfter(operation, { error: { code: 'invalid_state', message: 'no' } }), true);
     assert.equal(readsAfter(operation, new Error('offline')), false);
@@ -533,11 +533,12 @@ test('what the board saw orders a change before a host clock that steps back, fo
     const lost = readIssued(state);
     state = readSettled(lost.state, lost.issued, new Error('offline')).state;
     assert.deepEqual(shown(boardView(early, state)), change, `${operation} over a host result that arrived before the call`);
-    assert.equal(needsRead(early, state), true);
+    assert.equal(nextRead(early, state), false, `${operation}: waits for the host after a failed read`);
     // One that arrives after the reply may have been observed before or after the commit: its observedAt
-    // decides, and the change keeps its own millisecond.
+    // decides, and the change keeps its own millisecond. The board reads again while the change still shows.
     for (const [host, expected] of [[timerBoard(store, AT - 50), change], [timerBoard(store, AT), change], [timerBoard(later, AT + 40), held(later)]]) {
       assert.deepEqual(shown(boardView(host, hostArrived(state, host))), expected, `${operation}: host result at ${host.observedAt - AT} after the reply`);
+      assert.equal(nextRead(host, hostArrived(state, host)), expected === change, `${operation}: read after a host result at ${host.observedAt - AT}`);
     }
     // A read issued after the reply retires the change and wins over the host result that arrived before it,
     // both though observed earlier.
@@ -612,13 +613,13 @@ test('a host result from before a change that arrives during its confirming read
         // The stale result is the base, and it does not come after the change, so the change stays shown and pending.
         assert.deepEqual(shown(boardView(stale, state)), change, name);
         assert.equal(state.pending.length, 1, name);
-        assert.equal(needsRead(stale, state), true, name);
+        assert.equal(nextRead(stale, state), true, name);
         // The board reads again; issued after the stale result arrived, that read comes after it and retires the change.
         const again = readIssued(state);
         state = readSettled(again.state, again.issued, list(reply.store, AT - 10 - back + 1)).state;
         assert.deepEqual(shown(boardView(stale, state)), change, `${name}, then a later read`);
         assert.deepEqual(state.pending, [], name);
-        assert.equal(needsRead(stale, state), false, name);
+        assert.equal(nextRead(stale, state), false, name);
       }
     }
     // A host result observed after the commit retires the change, so the host's next result, from a clock that
@@ -635,7 +636,109 @@ test('a host result from before a change that arrives during its confirming read
   }
 });
 
-test('retiring a change never changes the board shown, with host results delivered late or during reads, and a final read ends at the host state', () => {
+/**
+ * A board driven as TimerBoard drives it: after every event it issues the one read `nextRead` asks for.
+ * `serve()` gives the outcome of a read the host runs when it is issued.
+ */
+function drivenBoard(host, serve) {
+  const board = { state: hostArrived(emptyBoardState(), host), host, reads: [], followUps: 0 };
+  const drain = () => {
+    if (!nextRead(board.host, board.state)) return;
+    const read = readIssued(board.state);
+    board.state = read.state;
+    board.reads.push({ issued: read.issued, outcome: serve() });
+    board.followUps += 1;
+  };
+  Object.assign(board, {
+    /** An action and its reply; the host answered it, so the board reads (`readsAfter`). */
+    act(operation, id, reply) {
+      board.state = acted(board.state, operation, id, reply);
+      const read = readIssued(board.state);
+      board.state = read.state;
+      board.reads.push({ issued: read.issued, outcome: serve() });
+      drain();
+    },
+    arrive(result) {
+      board.host = result;
+      board.state = hostArrived(board.state, result);
+      drain();
+    },
+    /** Settles the read at `index` among those in flight, with its outcome or `outcome`. */
+    settle(index, outcome) {
+      const [read] = board.reads.splice(index, 1);
+      board.state = readSettled(board.state, read.issued, outcome ?? read.outcome).state;
+      assert.ok(board.state.inFlight >= 0 && board.state.inFlight === board.reads.length);
+      drain();
+    }
+  });
+  return board;
+}
+
+test('the board reads again whenever a change still shows and no read is in flight, however its reads settle, for every timer operation', () => {
+  for (const operation of Object.keys(SCENARIOS)) {
+    const { store, input, ...scene } = { input: undefined, ...SCENARIOS[operation]() };
+    const reply = operations[operation](store, input ?? { id: scene.id }, AT);
+    const id = scene.id ?? reply.result.timer.definition.id;
+    const refused = { error: { code: 'invalid_state', message: 'no' } };
+    for (const back of [1, 500, 3_600_000]) {
+      for (const [order, older] of [['newest first', 'ok'], ['newest first', 'offline'], ['oldest first', 'ok'], ['oldest first', 'offline']]) {
+        const name = `${operation}, clock ${back} ms back, reads settle ${order}, older read ${older}`;
+        // The board changes the timer, then a refused action issues a second read. A host result captured before
+        // the change arrives while both are in flight; before the second read runs, the clock steps back and
+        // another surface changes the board (after a removal it adds a timer, else it removes the timer).
+        const later = operation === 'remove'
+          ? operations.create(reply.store, { timer: { kind: 'stopwatch', name: 'Later' } }, AT - 20 - back).store
+          : operations.remove(reply.store, { id }, AT - 20 - back).store;
+        let serve = () => list(reply.store, AT - 30 - back);
+        const board = drivenBoard(timerBoard(store, AT - 100), () => serve());
+        board.act(operation, scene.id, reply.result);
+        serve = () => list(later, AT - 10 - back);
+        board.act('pause', id, refused);
+        board.arrive(timerBoard(store, AT - 10));
+        assert.equal(board.followUps, 0, name);
+        serve = () => list(later, AT - 10 - back + 1);
+        const [first, second] = order === 'newest first' ? [1, 0] : [0, 0];
+        board.settle(first, order === 'oldest first' && older === 'offline' ? new Error('offline') : undefined);
+        assert.equal(board.followUps, 0, `${name}: a read still in flight`);
+        board.settle(second, order === 'newest first' && older === 'offline' ? new Error('offline') : undefined);
+        // The host result outranks both reads, so the change still shows over it: the board reads once more.
+        assert.equal(board.followUps, 1, name);
+        board.settle(0);
+        assert.equal(board.followUps, 1, `${name}: no extra read`);
+        assert.deepEqual(shown(boardView(board.host, board.state)), held(later), name);
+        assert.deepEqual(board.state.pending, [], name);
+        assert.equal(board.state.inFlight, 0, name);
+        assert.equal(nextRead(board.host, board.state), false, name);
+      }
+    }
+
+    // A read the board takes fails with no host result since it was issued: the board waits for the host's next
+    // result, then reads once; when a host result arrived during the failed read, it reads again at once.
+    for (const during of [false, true]) {
+      const name = `${operation}, failed read, host result ${during ? 'during it' : 'after it'}`;
+      const board = drivenBoard(timerBoard(store, AT - 100), () => list(reply.store, AT + 1));
+      board.act(operation, scene.id, reply.result);
+      if (during) board.arrive(timerBoard(store, AT - 50));
+      board.settle(0, new Error('offline'));
+      assert.equal(board.state.awaitingHost, !during, name);
+      assert.equal(board.followUps, during ? 1 : 0, name);
+      if (!during) {
+        assert.equal(nextRead(board.host, board.state), false, name);
+        board.arrive(timerBoard(store, AT - 50));
+        assert.equal(board.followUps, 1, name);
+      }
+      // That read fails too, with no host result since: the board waits again rather than retrying.
+      board.settle(0, new Error('offline'));
+      assert.equal(board.followUps, 1, `${name}: no retry`);
+      board.arrive(timerBoard(store, AT - 40));
+      board.settle(0);
+      assert.deepEqual(shown(boardView(board.host, board.state)), held(reply.store), name);
+      assert.deepEqual([board.followUps, board.state.pending, board.state.inFlight], [2, [], 0], name);
+    }
+  }
+});
+
+test('retiring a change never changes the board shown, with host results delivered late or during reads, the board reading until no change shows, and a final read ends at the host state', () => {
   let seed = 11;
   const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
   const pick = (items) => items[Math.floor(random() * items.length)];
@@ -650,11 +753,22 @@ test('retiring a change never changes the board shown, with host results deliver
       let state = hostArrived(emptyBoardState(), host);
       const ids = [];
       let reads = [];
+      let failing = 0.25;
+      // Issues the read `nextRead` asks for, as TimerBoard does after every event.
+      const drain = () => {
+        if (!nextRead(host, state)) return;
+        const read = readIssued(state);
+        state = read.state;
+        reads.push({ issued: read.issued, outcome: random() < failing ? new Error('offline') : list(store, at + 2) });
+      };
       // Moves to `next` and checks that the changes it dropped were hidden already: keeping them shows the same board.
-      const move = (next) => {
+      // A reply the host answered is followed by its own read instead (`readsAfter`).
+      const move = (next, drains = true) => {
         const dropped = state.pending.filter((change) => !next.pending.some((each) => each.id === change.id));
         state = next;
         assert.deepEqual(boardView(host, { ...state, pending: [...state.pending, ...dropped] }), boardView(host, state), name);
+        assert.equal(state.inFlight, reads.length, name);
+        if (drains) drain();
       };
       const arrive = () => {
         host = pick(captured);
@@ -673,11 +787,11 @@ test('retiring a change never changes the board shown, with host results deliver
         const call = actionIssued(state);
         state = call.state;
         if (random() < 0.3) arrive();
-        move(replySettled(state, operation, operation === 'create' ? null : input(ids).id, reply.result, call.issued).state);
+        move(replySettled(state, operation, operation === 'create' ? null : input(ids).id, reply.result, call.issued).state, false);
         captured.push(timerBoard(store, at + 1));
         const issued = readIssued(state);
         state = issued.state;
-        reads.push({ issued: issued.issued, outcome: random() < 0.25 ? new Error('offline') : list(store, at + 2) });
+        reads.push({ issued: issued.issued, outcome: random() < failing ? new Error('offline') : list(store, at + 2) });
         while (random() < 0.5 && reads.length) {
           if (random() < 0.5) arrive();
           settleOne();
@@ -688,7 +802,15 @@ test('retiring a change never changes the board shown, with host results deliver
         if (random() < 0.5) arrive();
         settleOne();
       }
-      // The host passes its current board, and a read issued after everything settles it.
+      // Quiet: no read is in flight, and a change still shows only while the board waits for the host after a
+      // failed read. The host then passes its current board, and the board reads until no change shows.
+      assert.ok(state.awaitingHost || !nextRead(host, state), name);
+      failing = 0;
+      host = timerBoard(store, at);
+      move(hostArrived(state, host));
+      while (reads.length) settleOne();
+      assert.deepEqual([state.awaitingHost, state.inFlight, nextRead(host, state)], [false, 0, false], name);
+      // A read issued after everything settles it.
       host = timerBoard(store, at);
       move(hostArrived(state, host));
       const last = readIssued(state);

@@ -248,8 +248,9 @@ export interface PendingChange extends BoardEvent {
 
 /**
  * What the board knows beyond the host's `result`, changed only by `actionIssued`, `replySettled`,
- * `readIssued`, `readSettled` and `hostArrived` and shown by `boardView`. Each takes the next number
- * of a local sequence (`seq`), so the board knows which of its events ended before another began.
+ * `readIssued`, `readSettled` and `hostArrived`, shown by `boardView` and read again when `nextRead`
+ * says so. Each takes the next number of a local sequence (`seq`), so the board knows which of its
+ * events ended before another began.
  */
 export interface BoardState {
   seq: number;
@@ -259,11 +260,16 @@ export interface BoardState {
   host: { result: TimerBoardResult; arrived: number } | null;
   /** At most one per timer, the latest. */
   pending: readonly PendingChange[];
-  /** The latest settled read failed and no later-issued read has succeeded. */
-  readFailed: boolean;
+  /** `list` reads issued and not yet settled, ignored ones included. */
+  inFlight: number;
+  /**
+   * The latest read the board took failed and the host has passed no result since that read was
+   * issued, so another read now would likely fail too: the board waits for the host's next result.
+   */
+  awaitingHost: boolean;
 }
 
-export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, host: null, pending: [], readFailed: false });
+export const emptyBoardState = (): BoardState => ({ seq: 0, read: null, host: null, pending: [], inFlight: 0, awaitingHost: false });
 
 /** Whether `a` ended before `b` began, so `b` saw the host after `a` changed or read it. */
 const before = (a: Span, b: Span) => a.end < b.start;
@@ -308,28 +314,40 @@ export function replySettled(state: BoardState, operation: OperationName, timerI
   return { state: { ...state, seq, pending }, outcome: read };
 }
 
-/** Numbers a `list` read the board is about to issue. */
-export const readIssued = issue;
-
-/**
- * Settles the `list` read numbered `issued`. Reads count in the order the board issued them, so one
- * that settles after a later-issued read is ignored, whatever its `observedAt`. A taken read retires
- * the changes the base then supersedes (see `retire`). A failed read changes nothing but `readFailed`;
- * its failure is shown unless a later-issued read already succeeded.
- */
-export function readSettled(state: BoardState, issued: number, outcome: unknown): { state: BoardState; failure: ActionFailure | null } {
-  if (state.read && issued < state.read.span.start) return { state, failure: null };
-  const read = readRefresh(outcome);
-  if (!read.ok) return { state: { ...state, readFailed: true }, failure: read.failure };
-  const seq = state.seq + 1;
-  const own = { result: read.result, observedAt: read.result.observedAt, span: { start: issued, end: seq } };
-  return { state: retire({ ...state, seq, read: own, readFailed: false }), failure: null };
+/** Numbers a `list` read the board is about to issue and counts it in flight until `readSettled`. */
+export function readIssued(state: BoardState): { state: BoardState; issued: number } {
+  const next = issue(state);
+  return { state: { ...next.state, inFlight: state.inFlight + 1 }, issued: next.issued };
 }
 
-/** Records that the host passed `result`, so the board's later events come after it, and retires what the base then supersedes. */
+/**
+ * Settles the `list` read numbered `issued`; every read the board issued settles here once, so it is
+ * no longer in flight. Reads count in the order the board issued them, so one that settles after a
+ * later-issued read is ignored (`taken` false), whatever its `observedAt` or outcome. A taken read
+ * retires the changes the base then supersedes (see `retire`). A taken failure changes nothing else:
+ * its failure is shown, and the board waits for the host's next result before it reads again, unless
+ * one arrived while the read was in flight.
+ */
+export function readSettled(state: BoardState, issued: number, outcome: unknown): { state: BoardState; failure: ActionFailure | null; taken: boolean } {
+  const settled = { ...state, inFlight: state.inFlight - 1 };
+  if (state.read && issued < state.read.span.start) return { state: settled, failure: null, taken: false };
+  const read = readRefresh(outcome);
+  if (!read.ok) {
+    const hostSince = state.host !== null && state.host.arrived > issued;
+    return { state: { ...settled, awaitingHost: !hostSince }, failure: read.failure, taken: true };
+  }
+  const seq = state.seq + 1;
+  const own = { result: read.result, observedAt: read.result.observedAt, span: { start: issued, end: seq } };
+  return { state: retire({ ...settled, seq, read: own, awaitingHost: false }), failure: null, taken: true };
+}
+
+/**
+ * Records that the host passed `result`, so the board's later events come after it, and retires what
+ * the base then supersedes. A new result ends a wait after a failed read.
+ */
 export function hostArrived(state: BoardState, result: TimerBoardResult): BoardState {
   if (state.host?.result === result) return state;
-  return retire({ ...state, seq: state.seq + 1, host: { result, arrived: state.seq + 1 } });
+  return retire({ ...state, seq: state.seq + 1, host: { result, arrived: state.seq + 1 }, awaitingHost: false });
 }
 
 /**
@@ -382,15 +400,15 @@ export function boardView(host: TimerBoardResult, state: BoardState): TimerBoard
 }
 
 /**
- * Whether the board should read the host's board again: a change is still laid over the base, and
- * either its last read failed or the base is a host result rather than its own latest read. The board
- * asks when the host passes a new result and after a read it takes; a read issued then comes after
- * that host result, so it can retire the change, and only a newer host result arriving during it
- * prompts another.
+ * Whether the board should issue a `list` read now: no read is in flight, a change is still laid over
+ * the base (no board seen after it has replaced it), and the board is not waiting for the host's next
+ * result after a failed read. The board asks after every event (an action's reply, each read settling,
+ * ignored ones included, and each host result) and issues at most one read. That read is issued after
+ * everything the board has seen, so taken as the base it retires every change; only a host result
+ * arriving while it is in flight and observed later can outrank it, and then the board reads once more.
  */
-export function needsRead(host: TimerBoardResult, state: BoardState): boolean {
-  const { base, changes } = overlay(host, state);
-  return changes.length > 0 && (state.readFailed || base !== state.read);
+export function nextRead(host: TimerBoardResult, state: BoardState): boolean {
+  return state.inFlight === 0 && !state.awaitingHost && overlay(host, state).changes.length > 0;
 }
 
 /** The share of a timer's ring that is filled, from 0 to 1, or null for a stopwatch, which has no end. */
