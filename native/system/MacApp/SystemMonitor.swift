@@ -11,6 +11,8 @@ final class SystemMonitor {
     /// The latest successful sample with its attribution to origins.
     private(set) var sample: ProcessesSample?
     private(set) var memory: SystemMemory?
+    /// When `memory` was read, which is also when the latest sample, successful or not, was taken.
+    private(set) var memoryObservedAt: Date?
     private(set) var sampleError: String?
     /// The running container runtimes' VMs, from the latest sample.
     private(set) var containerVMs: [ContainerVMGroup] = []
@@ -91,6 +93,7 @@ final class SystemMonitor {
             sampleError = "Could not list processes: \(error)"
         }
         memory = result.memory
+        memoryObservedAt = result.memoryObservedAt
         onUpdate?()
         refreshContainers()
     }
@@ -127,7 +130,8 @@ private actor SamplingWorker {
         sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource(), origin: .live(launchd: launchdJobs))
     }
 
-    func sample() -> (processes: Result<ProcessesSample, any Error>, memory: SystemMemory, containerVMs: [ContainerVMGroup]) {
+    func sample() -> (processes: Result<ProcessesSample, any Error>, memory: SystemMemory, memoryObservedAt: Date,
+                      containerVMs: [ContainerVMGroup]) {
         let processes = Result { () throws -> ProcessesSample in
             let snapshot = try sampler.sample()
             // Read before attribution, whose project-marker lookups touch the disk: the time is when usage was read.
@@ -137,6 +141,7 @@ private actor SamplingWorker {
                                    observedAt: observedAt)
         }
         let containerVMs = (try? processes.get()).map { ContainerVMRecognizer().groups(in: $0.snapshot.processes) } ?? []
-        return (processes, SystemMemory(raw: memorySource.read()), containerVMs)
+        let memory = SystemMemory(raw: memorySource.read())
+        return (processes, memory, .now, containerVMs)
     }
 }

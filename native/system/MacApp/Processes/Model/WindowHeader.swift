@@ -3,25 +3,34 @@ import SystemCore
 
 /// Whether the figures on screen are current.
 public enum SamplingState: Equatable, Sendable {
-    /// No sample has succeeded yet.
+    /// No sample has been attempted yet.
     case waiting
     /// The latest sample is at most three intervals old; `interval` is the current one.
     case live(interval: Duration)
-    /// No sample has arrived for more than three intervals (the Mac slept, or sampling stalled); the figures are
-    /// from `observedAt`.
-    case stale(age: Duration)
-    /// The latest sample failed; the figures, if any, are from the last one that succeeded.
+    /// No sample has been attempted for more than three intervals (the Mac slept, or sampling stalled); `failure`
+    /// is why the last attempt failed, or `nil` when it succeeded.
+    case stale(age: Duration, failure: String?)
+    /// The latest sample, at most three intervals old, failed; the process figures, if any, are from the last one
+    /// that succeeded.
     case failed(String)
 
     /// After three missed intervals the figures are no longer called current. The interval is the longer of the
-    /// current one and the one in effect when the sample was taken, since the next sample may come that late.
-    static func classify(observedAt: Date?, failure: String?, cadence: SamplingCadence, sampleCadence: SamplingCadence,
+    /// current one and the one in effect at the last attempt, since the next attempt may come that late.
+    static func classify(lastAttempt: Date?, failure: String?, cadence: SamplingCadence, attemptCadence: SamplingCadence,
                          now: Date) -> SamplingState {
+        guard let lastAttempt else { return .waiting }
+        let age = Self.age(of: lastAttempt, now: now)
+        if age > allowedAge(cadence: cadence, attemptCadence: attemptCadence) { return .stale(age: age, failure: failure) }
         if let failure { return .failed(failure) }
-        guard let observedAt else { return .waiting }
-        let age = Duration.seconds(max(0, now.timeIntervalSince(observedAt)))
-        let allowed = max(cadence.interval, sampleCadence.interval) * 3
-        return age > allowed ? .stale(age: age) : .live(interval: cadence.interval)
+        return .live(interval: cadence.interval)
+    }
+
+    static func allowedAge(cadence: SamplingCadence, attemptCadence: SamplingCadence) -> Duration {
+        max(cadence.interval, attemptCadence.interval) * 3
+    }
+
+    static func age(of date: Date, now: Date) -> Duration {
+        .seconds(max(0, now.timeIntervalSince(date)))
     }
 }
 
@@ -40,8 +49,9 @@ public struct WindowHeader: Equatable, Sendable {
     public let state: SamplingState
     public let stateText: String
 
-    init(sample: ProcessesSample?, memory: SystemMemory?, failure: String?, cadence: SamplingCadence,
-         sampleCadence: SamplingCadence, logicalCoreCount: Int, now: Date, format: UsageFormat) {
+    /// `memoryObservedAt` is when `memory` was read; `failure` is the latest attempt's, with when it was made.
+    init(sample: ProcessesSample?, memory: SystemMemory?, memoryObservedAt: Date?, failure: (message: String, at: Date)?,
+         cadence: SamplingCadence, attemptCadence: SamplingCadence, logicalCoreCount: Int, now: Date, format: UsageFormat) {
         let summary = StatusSummary(snapshot: sample?.snapshot, memory: memory, samplingFailed: failure != nil)
         pressure = summary.pressure
         pressureText = summary.pressureRow
@@ -59,19 +69,30 @@ public struct WindowHeader: Equatable, Sendable {
             processText = "No processes sampled yet"
         }
         observedText = sample.map { "Observed at \(format.time($0.observedAt))" } ?? "Not observed yet"
-        state = SamplingState.classify(observedAt: sample?.observedAt, failure: failure, cadence: cadence,
-                                       sampleCadence: sampleCadence, now: now)
+        state = SamplingState.classify(lastAttempt: failure?.at ?? sample?.observedAt, failure: failure?.message,
+                                       cadence: cadence, attemptCadence: attemptCadence, now: now)
+        // After a failure the process figures are the last good sample's and the memory figures are from their own
+        // read: each says when it was observed, and memory is called current only while that read is.
+        let processClause = sample.map { "; process figures are from the sample observed at \(format.time($0.observedAt))" } ?? ""
+        var memoryClause = ""
+        if memory != nil, let memoryObservedAt {
+            let allowed = SamplingState.allowedAge(cadence: cadence, attemptCadence: attemptCadence)
+            memoryClause = SamplingState.age(of: memoryObservedAt, now: now) > allowed
+                ? "; memory figures are from \(format.time(memoryObservedAt))"
+                : "; memory figures are current"
+        }
         switch state {
         case .waiting:
             stateText = "Waiting for the first sample"
         case let .live(interval):
             stateText = "Sampling every \(interval.components.seconds) s"
-        case let .stale(age):
+        case let .stale(age, nil):
             stateText = "Stale: no sample for \(age.components.seconds) s; figures are from the last sample"
+        case let .stale(age, message?):
+            stateText = "Stale: no sample attempted for \(age.components.seconds) s; the last one failed: \(message)"
+                + processClause + memoryClause
         case let .failed(message):
-            // A failed sample still reads memory, so only the process figures are from the last good sample.
-            let processes = sample.map { "; process figures are from the sample observed at \(format.time($0.observedAt))" }
-            stateText = "Sampling failed: \(message)" + (processes ?? "") + (memory == nil ? "" : "; memory figures are current")
+            stateText = "Sampling failed: \(message)" + processClause + memoryClause
         }
     }
 }

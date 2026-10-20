@@ -52,9 +52,14 @@ enum ProcessFixtures {
     }
 
     /// Samples the processes twice, two seconds apart, and attributes the second sample. The project marker is
-    /// `/Users/me/dev/subset/.git`.
-    static func sample(_ processes: [FixtureProcess], observedAt: Date = Date(timeIntervalSince1970: 1_000_000)) throws -> ProcessesSample {
+    /// `/Users/me/dev/subset/.git`; the launchd plists name `launchdJobs` (by executable) and could not all be read
+    /// when `launchdScanFailures` is not empty.
+    static func sample(_ processes: [FixtureProcess], observedAt: Date = Date(timeIntervalSince1970: 1_000_000),
+                       launchdJobs: [String: [LaunchdJob]] = [:],
+                       launchdScanFailures: [LaunchdScanFailure] = []) throws -> ProcessesSample {
         let readers = FixtureSignalReaders()
+        readers.launchdJobs = launchdJobs
+        readers.launchdScanFailures = launchdScanFailures
         for process in processes {
             readers.signatures[process.pid] = process.signature.map { .value($0, source: .codeSigning) }
                 ?? .unavailable(.processExited, source: .codeSigning)

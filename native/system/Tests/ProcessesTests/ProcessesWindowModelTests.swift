@@ -172,7 +172,7 @@ final class ProcessesWindowModelTests: XCTestCase {
 
         // No sample for more than three 2-second intervals: the figures are no longer called current.
         let stale = model.header(now: t0 + 7)
-        XCTAssertEqual(stale.state, .stale(age: .seconds(7)))
+        XCTAssertEqual(stale.state, .stale(age: .seconds(7), failure: nil))
         XCTAssertEqual(stale.stateText, "Stale: no sample for 7 s; figures are from the last sample")
         XCTAssertFalse(model.rows.isEmpty, "the last figures stay on screen")
 
@@ -180,8 +180,8 @@ final class ProcessesWindowModelTests: XCTestCase {
         model.setCadence(.menuBarOnly)
         XCTAssertEqual(model.header(now: t0 + 25).state, .live(interval: .seconds(10)))
 
-        model.applyFailure("Could not list processes: listFailed(1)", memory: nil)
-        let failed = model.header(now: t0 + 1)
+        model.applyFailure("Could not list processes: listFailed(1)", memory: nil, at: t0 + 26, cadence: .menuBarOnly)
+        let failed = model.header(now: t0 + 27)
         XCTAssertEqual(failed.state, .failed("Could not list processes: listFailed(1)"))
         XCTAssertEqual(failed.cpuText, "CPU: unavailable, sampling failed · 8 logical cores")
 
@@ -196,11 +196,11 @@ final class ProcessesWindowModelTests: XCTestCase {
         // The window opens 8 s after a 10-second menu-bar sample; the next one may still be up to 10 s away.
         model.setCadence(.mainWindowVisible)
         XCTAssertEqual(model.header(now: t0 + 8).state, .live(interval: .seconds(2)))
-        XCTAssertEqual(model.header(now: t0 + 31).state, .stale(age: .seconds(31)))
+        XCTAssertEqual(model.header(now: t0 + 31).state, .stale(age: .seconds(31), failure: nil))
 
         // Once a sample at the window's cadence arrives, three missed 2-second intervals are stale again.
         model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0 + 10), memory: nil, cadence: .mainWindowVisible)
-        XCTAssertEqual(model.header(now: t0 + 17).state, .stale(age: .seconds(7)))
+        XCTAssertEqual(model.header(now: t0 + 17).state, .stale(age: .seconds(7), failure: nil))
     }
 
     func testAFailedSampleSaysWhichFiguresAreFromTheLastGoodSample() throws {
@@ -209,7 +209,9 @@ final class ProcessesWindowModelTests: XCTestCase {
                     memory: ProcessFixtures.memory(level: 1, physical: 8 << 30), cadence: .mainWindowVisible)
 
         // The process list fails, but the memory read in the same sample succeeds and is shown.
-        model.applyFailure("Could not list processes: listFailed(1)", memory: ProcessFixtures.memory(level: 4, physical: 16 << 30))
+        let message = "Could not list processes: listFailed(1)"
+        model.applyFailure(message, memory: ProcessFixtures.memory(level: 4, physical: 16 << 30), at: t0 + 2,
+                           cadence: .mainWindowVisible)
         let header = model.header(now: t0 + 4)
         XCTAssertEqual(header.pressureText, "Memory pressure: Critical")
         XCTAssertTrue(header.memoryText.hasSuffix("of \(ProcessFixtures.format.bytes(16 << 30)) · App – · Compressed –"),
@@ -218,9 +220,30 @@ final class ProcessesWindowModelTests: XCTestCase {
             + "from the sample observed at \(ProcessFixtures.format.time(t0)); memory figures are current")
         XCTAssertEqual(header.processText, "10 processes · 2 restricted by macOS")
 
+        // The sampler then pauses: neither the processes nor the memory are called current, and each says when it
+        // was observed.
+        let paused = model.header(now: t0 + 60)
+        XCTAssertEqual(paused.state, .stale(age: .seconds(58), failure: message))
+        XCTAssertEqual(paused.stateText, "Stale: no sample attempted for 58 s; the last one failed: \(message); process "
+            + "figures are from the sample observed at \(ProcessFixtures.format.time(t0)); memory figures are from "
+            + "\(ProcessFixtures.format.time(t0 + 2))")
+        XCTAssertFalse(paused.stateText.contains("current"), paused.stateText)
+
+        // Failures that keep reading memory keep it current, while the processes stay on the last good sample.
+        model.applyFailure(message, memory: ProcessFixtures.memory(level: 2, physical: 16 << 30), at: t0 + 62,
+                           cadence: .mainWindowVisible)
+        model.applyFailure(message, memory: ProcessFixtures.memory(level: 2, physical: 16 << 30), at: t0 + 64,
+                           cadence: .mainWindowVisible)
+        let repeated = model.header(now: t0 + 65)
+        XCTAssertEqual(repeated.state, .failed(message))
+        XCTAssertEqual(repeated.stateText, "Sampling failed: \(message); process figures are from the sample observed at "
+            + "\(ProcessFixtures.format.time(t0)); memory figures are current")
+
         let first = ProcessesWindowModel(format: ProcessFixtures.format)
-        first.applyFailure("Could not list processes: listFailed(1)", memory: nil)
+        first.applyFailure(message, memory: nil, at: t0, cadence: .mainWindowVisible)
         XCTAssertEqual(first.header(now: t0).stateText, "Sampling failed: Could not list processes: listFailed(1)")
+        XCTAssertEqual(first.header(now: t0 + 7).state, .stale(age: .seconds(7), failure: message),
+                       "a failure before the first good sample also goes stale once the sampler pauses")
     }
 
     func testBeforeTheFirstSampleTheHeaderIsWaiting() {
@@ -292,6 +315,78 @@ final class ProcessesWindowModelTests: XCTestCase {
         model.collapseSelection()
         XCTAssertFalse(model.isExpanded(agentGroup))
         XCTAssertEqual(model.rows.count, 5)
+    }
+
+    func testTheLaunchdLabelSaysWhenTheScanCouldNotIdentifyAJob() throws {
+        let failure = LaunchdScanFailure(path: "/Library/LaunchDaemons/locked.plist", code: EACCES)
+        let tool = "/Users/me/bin/tool"
+        let job = LaunchdJob(label: "dev.me.tool", plistPath: "/Users/me/Library/LaunchAgents/dev.me.tool.plist",
+                             domain: .userAgent, program: tool, resolution: .resolved(tool))
+        let processes = [
+            FixtureProcess(pid: 500, path: tool, memory: 1 << 20, signature: ProcessFixtures.unsigned),
+            FixtureProcess(pid: 501, path: "/Users/me/bin/other", memory: 1 << 20, signature: ProcessFixtures.unsigned)
+        ]
+        func label(_ pid: Int32, _ sample: ProcessesSample) throws -> String? {
+            let model = ProcessesWindowModel(format: ProcessFixtures.format)
+            model.apply(sample, memory: nil, cadence: .mainWindowVisible)
+            model.selection = .process(ProcessFixtures.identity(pid))
+            return try XCTUnwrap(model.detail).fields.first { $0.label == "launchd label" }?.value
+        }
+
+        let complete = try ProcessFixtures.sample(processes, launchdJobs: [tool: [job]])
+        XCTAssertEqual(try label(500, complete), "dev.me.tool")
+        XCTAssertEqual(try label(501, complete), "None identified", "every plist was read and none names it")
+
+        let incomplete = try ProcessFixtures.sample(processes, launchdJobs: [tool: [job]], launchdScanFailures: [failure])
+        let partial = try XCTUnwrap(try label(500, incomplete))
+        XCTAssertTrue(partial.hasPrefix("None identified; the scan is incomplete"), partial)
+        XCTAssertTrue(partial.contains("/Library/LaunchDaemons/locked.plist (\(failure.reason))"), partial)
+        let unread = try XCTUnwrap(try label(501, incomplete))
+        XCTAssertEqual(unread, "Unavailable: \(SignalFailure.incompleteScan([failure]).reason)")
+    }
+
+    func testTheSelectionStaysOnAShownRow() throws {
+        let model = try model()
+        let subgroup = OriginGroupID(.agent(name: "claude"), subgroup: "/Users/me/dev/subset")
+        let node = RowID.process(ProcessFixtures.identity(203))
+        func shown() -> Bool { model.selection.map { selection in model.rows.contains { $0.id == selection } } ?? true }
+
+        // Closing a group holding the selection selects the group.
+        model.setExpanded(agentGroup, true)
+        model.setExpanded(subgroup, true)
+        model.selection = node
+        model.toggle(agentGroup)
+        XCTAssertEqual(model.selection, .group(agentGroup))
+        XCTAssertTrue(shown())
+
+        // A filter that hides the selection moves it to the shown group holding it, or clears it.
+        model.toggle(agentGroup)
+        model.selection = node
+        model.filter = "2.1.304"
+        XCTAssertEqual(model.selection, .group(subgroup), "the filter shows claude but not node in their subgroup")
+        XCTAssertTrue(shown())
+        model.filter = "chrome"
+        XCTAssertNil(model.selection, "nothing holding the selection is shown")
+        model.filter = ""
+
+        // A sample that moves the selected process into a closed group opens that group to it.
+        let tool = FixtureProcess(pid: 500, path: "/Users/me/bin/tool", memory: 1 << 20, signature: ProcessFixtures.unsigned)
+        var adopted = tool
+        adopted.ppid = 202
+        adopted.cwd = "/Users/me/dev/subset"
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload() + [tool], observedAt: t0 + 2), memory: nil,
+                    cadence: .mainWindowVisible)
+        model.setExpanded(OriginGroupID(.unattributed(executable: "/Users/me/bin/tool")), true)
+        model.selection = .process(ProcessFixtures.identity(500))
+        XCTAssertTrue(shown())
+        model.setExpanded(agentGroup, false)
+        model.setExpanded(subgroup, false)
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload() + [adopted], observedAt: t0 + 4), memory: nil,
+                    cadence: .mainWindowVisible)
+        XCTAssertEqual(model.selection, .process(ProcessFixtures.identity(500)))
+        XCTAssertEqual(model.detail?.placement?.group, "Agent: claude › subset")
+        XCTAssertTrue(shown(), "the process's new group and subgroup opened")
+        XCTAssertTrue(model.isExpanded(agentGroup) && model.isExpanded(subgroup))
     }
 
     // MARK: Menu bar

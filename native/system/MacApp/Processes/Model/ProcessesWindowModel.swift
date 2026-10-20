@@ -13,12 +13,16 @@ import SystemCore
 public final class ProcessesWindowModel {
     public private(set) var sample: ProcessesSample?
     public private(set) var memory: SystemMemory?
+    /// When `memory` was read: with the sample, or by a failed sample that still read it.
+    @ObservationIgnored private var memoryObservedAt: Date?
     /// Why the latest sample failed, or `nil` when it succeeded.
     public private(set) var failure: String?
+    /// When the latest sample failed.
+    @ObservationIgnored private var failedAt: Date?
     public private(set) var cadence: SamplingCadence = .mainWindowVisible
-    /// The cadence in effect when the shown sample was taken. Until the next sample arrives, staleness is measured
-    /// against the longer of this and `cadence`, so opening the window does not call a menu-bar sample stale.
-    @ObservationIgnored private var sampleCadence: SamplingCadence = .mainWindowVisible
+    /// The cadence in effect at the latest attempt. Until the next one, staleness is measured against the longer of
+    /// this and `cadence`, so opening the window does not call a menu-bar sample stale.
+    @ObservationIgnored private var attemptCadence: SamplingCadence = .mainWindowVisible
 
     public var layer: AttributionLayer = .app {
         didSet { if layer != oldValue { layerDidChange() } }
@@ -63,27 +67,35 @@ public final class ProcessesWindowModel {
 
     // MARK: Samples
 
-    /// Shows a new sample. A selection whose group or process is gone is cleared; a selected process that exited
-    /// leaves its group selected while that group still exists.
-    public func apply(_ sample: ProcessesSample, memory: SystemMemory?, cadence: SamplingCadence) {
+    /// Shows a new sample, with the memory read alongside it at `memoryObservedAt` (the sample's time when `nil`). A
+    /// selection whose group or process is gone is cleared; a selected process that exited leaves its group selected
+    /// while that group still exists; one the sample moved into a closed group opens it.
+    public func apply(_ sample: ProcessesSample, memory: SystemMemory?, memoryObservedAt: Date? = nil,
+                      cadence: SamplingCadence) {
         let previous = self.sample?.attribution
         self.sample = sample
         self.memory = memory
+        self.memoryObservedAt = memoryObservedAt ?? sample.observedAt
         self.cadence = cadence
-        sampleCadence = cadence
+        attemptCadence = cadence
         failure = nil
+        failedAt = nil
         index(sample)
         if let selection, !exists(selection) {
             self.selection = fallback(for: selection, previous: previous)
         }
-        rebuild()
+        rebuild(revealingSelection: true)
     }
 
-    /// Records a failed sample. The last good sample's process figures stay on screen, marked as not current; the
-    /// memory figures are the failed sample's own reading.
-    public func applyFailure(_ message: String, memory: SystemMemory?) {
+    /// Records a sample that failed at `at`, at `cadence`. The last good sample's process figures stay on screen,
+    /// marked as not current; the memory figures are the failed sample's own reading, made at `at`.
+    public func applyFailure(_ message: String, memory: SystemMemory?, at: Date, cadence: SamplingCadence) {
         failure = message
+        failedAt = at
         self.memory = memory
+        memoryObservedAt = memory == nil ? nil : at
+        self.cadence = cadence
+        attemptCadence = cadence
     }
 
     public func setCadence(_ cadence: SamplingCadence) {
@@ -91,7 +103,8 @@ public final class ProcessesWindowModel {
     }
 
     public func header(now: Date) -> WindowHeader {
-        WindowHeader(sample: sample, memory: memory, failure: failure, cadence: cadence, sampleCadence: sampleCadence,
+        WindowHeader(sample: sample, memory: memory, memoryObservedAt: memoryObservedAt,
+                     failure: failure.map { ($0, failedAt ?? now) }, cadence: cadence, attemptCadence: attemptCadence,
                      logicalCoreCount: logicalCoreCount, now: now, format: format)
     }
 
@@ -111,7 +124,13 @@ public final class ProcessesWindowModel {
         filterOpened.contains(id) ? !filterCollapsed.contains(id) : expanded.contains(id)
     }
 
+    /// Closing a group that holds the selection selects the group, as an outline view does.
     public func setExpanded(_ id: OriginGroupID, _ open: Bool) {
+        mark(id, open: open)
+        rebuild()
+    }
+
+    private func mark(_ id: OriginGroupID, open: Bool) {
         if filterOpened.contains(id) {
             if open { filterCollapsed.remove(id) } else { filterCollapsed.insert(id) }
         } else if open {
@@ -119,7 +138,6 @@ public final class ProcessesWindowModel {
         } else {
             expanded.remove(id)
         }
-        rebuild()
     }
 
     public func toggle(_ id: OriginGroupID) {
@@ -228,8 +246,16 @@ public final class ProcessesWindowModel {
     }
 
     private func launchdLabel(_ process: ProcessFacts) -> String {
-        guard process.origin != nil else { return "Not read yet" }
-        return process.launchdLabel ?? "None identified"
+        guard let jobs = process.origin?.launchdJobs else { return "Not read yet" }
+        switch jobs {
+        case let .unavailable(failure, _):
+            return "Unavailable: \(failure.reason)"
+        case let .value(found, _):
+            if let label = process.launchdLabel { return label }
+            guard !found.isComplete else { return "None identified" }
+            let failures = found.scanFailures.map { "\($0.path) (\($0.reason))" }.joined(separator: ", ")
+            return "None identified; the scan is incomplete, so an unread plist may name it: \(failures)"
+        }
     }
 
     /// What a row's Reveal in Finder and Copy path act on: a process's executable, or the app bundle or folder a group
@@ -282,16 +308,12 @@ public final class ProcessesWindowModel {
 
     private func layerDidChange() {
         if case let .process(identity)? = selection, facts[identity] != nil {
-            if let placed = sample?.attribution.attribution(of: identity) {
-                let (group, subgroup) = Self.placement(placed, layer)
-                expanded.insert(group)
-                if let subgroup { expanded.insert(subgroup) }
-            }
             selections[layer] = selection
         } else {
             selection = selections[layer].flatMap { exists($0) ? $0 : nil }
         }
-        rebuild()
+        // A selected process's groups in the new layer open to it.
+        rebuild(revealingSelection: true)
     }
 
     static func placement(_ attribution: ProcessAttribution, _ layer: AttributionLayer) -> (OriginGroupID, OriginGroupID?) {
@@ -303,7 +325,34 @@ public final class ProcessesWindowModel {
         }
     }
 
-    private func rebuild() {
+    /// Rebuilds the rows, then keeps the selection on one of them. With `revealingSelection` (a new sample or layer),
+    /// the groups holding a hidden selection open to it; otherwise, or when the filter still hides it, the nearest
+    /// shown group holding it is selected, or nothing.
+    private func rebuild(revealingSelection: Bool = false) {
+        build()
+        guard let selection, !rows.contains(where: { $0.id == selection }) else { return }
+        let ancestors = ancestors(of: selection)
+        if revealingSelection, !ancestors.isEmpty {
+            for case let .group(id) in ancestors { mark(id, open: true) }
+            build()
+            if rows.contains(where: { $0.id == selection }) { return }
+        }
+        self.selection = ancestors.first { ancestor in rows.contains { $0.id == ancestor } }
+    }
+
+    /// The groups holding a row in the current layer, nearest first.
+    private func ancestors(of row: RowID) -> [RowID] {
+        switch row {
+        case let .group(id):
+            return id.subgroup == nil ? [] : [.group(id.parent)]
+        case let .process(identity):
+            guard let placed = sample?.attribution.attribution(of: identity) else { return [] }
+            let (group, subgroup) = Self.placement(placed, layer)
+            return [subgroup, group].compactMap { $0 }.map(RowID.group)
+        }
+    }
+
+    private func build() {
         var rows: [ProcessRow] = []
         parents = [:]
         filterOpened = []

@@ -44,9 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.statusMenu = statusMenu
         monitor.onUpdate = { [monitor, processes] in
             if let error = monitor.sampleError {
-                processes.applyFailure(error, memory: monitor.memory)
+                processes.applyFailure(error, memory: monitor.memory, at: monitor.memoryObservedAt ?? .now,
+                                       cadence: monitor.cadence)
             } else if let sample = monitor.sample {
-                processes.apply(sample, memory: monitor.memory, cadence: monitor.cadence)
+                processes.apply(sample, memory: monitor.memory, memoryObservedAt: monitor.memoryObservedAt,
+                                cadence: monitor.cadence)
             }
             statusMenu.update(monitor.summary, logicalCoreCount: monitor.snapshot?.logicalCoreCount,
                               topGroups: TopGroups(attribution: monitor.sample?.attribution, samplingFailed: monitor.sampleError != nil))
