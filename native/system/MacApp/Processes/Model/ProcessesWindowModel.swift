@@ -16,6 +16,9 @@ public final class ProcessesWindowModel {
     /// Why the latest sample failed, or `nil` when it succeeded.
     public private(set) var failure: String?
     public private(set) var cadence: SamplingCadence = .mainWindowVisible
+    /// The cadence in effect when the shown sample was taken. Until the next sample arrives, staleness is measured
+    /// against the longer of this and `cadence`, so opening the window does not call a menu-bar sample stale.
+    @ObservationIgnored private var sampleCadence: SamplingCadence = .mainWindowVisible
 
     public var layer: AttributionLayer = .app {
         didSet { if layer != oldValue { layerDidChange() } }
@@ -64,6 +67,7 @@ public final class ProcessesWindowModel {
         self.sample = sample
         self.memory = memory
         self.cadence = cadence
+        sampleCadence = cadence
         failure = nil
         index(sample)
         if let selection, !exists(selection) {
@@ -83,7 +87,8 @@ public final class ProcessesWindowModel {
     }
 
     public func header(now: Date) -> WindowHeader {
-        WindowHeader(sample: sample, memory: memory, failure: failure, cadence: cadence, now: now, format: format)
+        WindowHeader(sample: sample, memory: memory, failure: failure, cadence: cadence, sampleCadence: sampleCadence,
+                     now: now, format: format)
     }
 
     /// Memory totals double-count shared pages, and restricted processes are a separate count, never zero.

@@ -130,9 +130,11 @@ private actor SamplingWorker {
     func sample() -> (processes: Result<ProcessesSample, any Error>, memory: SystemMemory, containerVMs: [ContainerVMGroup]) {
         let processes = Result { () throws -> ProcessesSample in
             let snapshot = try sampler.sample()
+            // Read before attribution, whose project-marker lookups touch the disk: the time is when usage was read.
+            let observedAt = Date.now
             return ProcessesSample(snapshot: snapshot,
                                    attribution: attribution.attribute(snapshot.processes, launchdJobs: launchdJobs.jobs),
-                                   observedAt: .now)
+                                   observedAt: observedAt)
         }
         let containerVMs = (try? processes.get()).map { ContainerVMRecognizer().groups(in: $0.snapshot.processes) } ?? []
         return (processes, SystemMemory(raw: memorySource.read()), containerVMs)

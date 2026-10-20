@@ -5,7 +5,7 @@ import SystemCore
 public enum SamplingState: Equatable, Sendable {
     /// No sample has succeeded yet.
     case waiting
-    /// The latest sample is at most three intervals old.
+    /// The latest sample is at most three intervals old; `interval` is the current one.
     case live(interval: Duration)
     /// No sample has arrived for more than three intervals (the Mac slept, or sampling stalled); the figures are
     /// from `observedAt`.
@@ -13,12 +13,15 @@ public enum SamplingState: Equatable, Sendable {
     /// The latest sample failed; the figures, if any, are from the last one that succeeded.
     case failed(String)
 
-    /// After three missed intervals the figures are no longer called current.
-    static func classify(observedAt: Date?, failure: String?, cadence: SamplingCadence, now: Date) -> SamplingState {
+    /// After three missed intervals the figures are no longer called current. The interval is the longer of the
+    /// current one and the one in effect when the sample was taken, since the next sample may come that late.
+    static func classify(observedAt: Date?, failure: String?, cadence: SamplingCadence, sampleCadence: SamplingCadence,
+                         now: Date) -> SamplingState {
         if let failure { return .failed(failure) }
         guard let observedAt else { return .waiting }
         let age = Duration.seconds(max(0, now.timeIntervalSince(observedAt)))
-        return age > cadence.interval * 3 ? .stale(age: age) : .live(interval: cadence.interval)
+        let allowed = max(cadence.interval, sampleCadence.interval) * 3
+        return age > allowed ? .stale(age: age) : .live(interval: cadence.interval)
     }
 }
 
@@ -37,8 +40,8 @@ public struct WindowHeader: Equatable, Sendable {
     public let state: SamplingState
     public let stateText: String
 
-    init(sample: ProcessesSample?, memory: SystemMemory?, failure: String?, cadence: SamplingCadence, now: Date,
-         format: UsageFormat) {
+    init(sample: ProcessesSample?, memory: SystemMemory?, failure: String?, cadence: SamplingCadence,
+         sampleCadence: SamplingCadence, now: Date, format: UsageFormat) {
         let summary = StatusSummary(snapshot: sample?.snapshot, memory: memory, samplingFailed: failure != nil)
         pressure = summary.pressure
         pressureText = summary.pressureRow
@@ -54,7 +57,8 @@ public struct WindowHeader: Equatable, Sendable {
             processText = "No processes sampled yet"
         }
         observedText = sample.map { "Observed at \(format.time($0.observedAt))" } ?? "Not observed yet"
-        state = SamplingState.classify(observedAt: sample?.observedAt, failure: failure, cadence: cadence, now: now)
+        state = SamplingState.classify(observedAt: sample?.observedAt, failure: failure, cadence: cadence,
+                                       sampleCadence: sampleCadence, now: now)
         switch state {
         case .waiting:
             stateText = "Waiting for the first sample"

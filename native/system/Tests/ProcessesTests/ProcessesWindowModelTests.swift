@@ -189,6 +189,20 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.header(now: t0 + 31).state, .live(interval: .seconds(2)))
     }
 
+    func testOpeningTheWindowDoesNotCallAMenuBarSampleStale() throws {
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0), memory: nil, cadence: .menuBarOnly)
+
+        // The window opens 8 s after a 10-second menu-bar sample; the next one may still be up to 10 s away.
+        model.setCadence(.mainWindowVisible)
+        XCTAssertEqual(model.header(now: t0 + 8).state, .live(interval: .seconds(2)))
+        XCTAssertEqual(model.header(now: t0 + 31).state, .stale(age: .seconds(31)))
+
+        // Once a sample at the window's cadence arrives, three missed 2-second intervals are stale again.
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0 + 10), memory: nil, cadence: .mainWindowVisible)
+        XCTAssertEqual(model.header(now: t0 + 17).state, .stale(age: .seconds(7)))
+    }
+
     func testBeforeTheFirstSampleTheHeaderIsWaiting() {
         let header = ProcessesWindowModel(format: ProcessFixtures.format).header(now: t0)
 
@@ -280,5 +294,36 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.selection, .group(chromeGroup))
         XCTAssertEqual(model.filter, "", "a filter hiding the group is cleared")
         XCTAssertTrue(model.rows.contains { $0.id == .group(chromeGroup) })
+    }
+
+    func testTheMenusTopGroupRowsStandStillWhileTheMenuIsOpen() throws {
+        let first = TopGroups(attribution: try ProcessFixtures.sample(ProcessFixtures.workload()).attribution,
+                              samplingFailed: false, format: ProcessFixtures.format)
+        let second = TopGroups(attribution: try ProcessFixtures.sample(ProcessFixtures.workload(chromeMemory: 1 << 20)).attribution,
+                               samplingFailed: false, format: ProcessFixtures.format)
+        XCTAssertNotEqual(first, second)
+        var menu = TopGroupsMenuState()
+        XCTAssertEqual(menu.slots.count, 3)
+        XCTAssertTrue(menu.slots.allSatisfy { $0 == nil })
+
+        XCTAssertTrue(menu.receive(first))
+        XCTAssertEqual(menu.slots.map { $0?.id }, first.entries.map(\.id))
+
+        // A sample arriving while the menu is open leaves every row on the group it shows, so a click opens that one.
+        XCTAssertFalse(menu.menuWillOpen())
+        XCTAssertFalse(menu.receive(second))
+        XCTAssertEqual(menu.slots.map { $0?.id }, first.entries.map(\.id))
+        menu.menuDidClose()
+        XCTAssertEqual(menu.shown, first, "the chosen item's action may run after the menu closes")
+
+        // It is shown the next time the menu opens, or at once with the next sample while closed.
+        XCTAssertTrue(menu.menuWillOpen())
+        XCTAssertEqual(menu.shown, second)
+        menu.menuDidClose()
+        let failed = TopGroups(attribution: nil, samplingFailed: true)
+        XCTAssertTrue(menu.receive(failed))
+        XCTAssertEqual(menu.slots.count, 3, "the rows stay; unused ones are hidden")
+        XCTAssertTrue(menu.slots.allSatisfy { $0 == nil })
+        XCTAssertFalse(menu.menuWillOpen(), "a set shown while closed is not applied again")
     }
 }
