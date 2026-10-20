@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
 
-/// How far a scan has got. Bytes are allocated bytes with each hard-linked file counted once; clones are resolved
-/// only in the final totals.
+/// How far a scan has got. Bytes are allocated bytes, folders' own allocation included, with each hard-linked file and
+/// folder counted once; clones are resolved only in the final totals, so each copy counts here in full.
 public struct DiskScanProgress: Equatable, Sendable {
     public var items: Int
     public var allocatedBytes: UInt64
@@ -108,6 +108,9 @@ final class DiskScan: @unchecked Sendable {
         let path: String
         /// Inside a package: entries add to `node`'s total and are not items.
         let inPackage: Bool
+        /// The folder is the item `node` itself rather than a folder inside its package, so failing to read it makes
+        /// the item's size unknown.
+        let isItem: Bool
     }
 
     private let scanner: DiskScanner
@@ -133,9 +136,9 @@ final class DiskScan: @unchecked Sendable {
         let name = rootPath == "/" ? "/" : (rootPath as NSString).lastPathComponent
         let root = Self.rootFacts(rootPath, name: name, isPackage: scanner.isPackage)
         var builder = TreeBuilder(rootPath: rootPath, rootName: name, root: root)
-        _ = builder.visit(root.directory)
+        _ = builder.admit(root)
         self.builder = builder
-        queue = root.descent.map { [Job(node: 0, path: rootPath, inPackage: $0 == .package)] } ?? []
+        queue = root.descent.map { [Job(node: 0, path: rootPath, inPackage: $0 == .package, isItem: true)] } ?? []
         progress = DiskScanProgress(items: 0, allocatedBytes: root.contribution.allocated, currentPath: rootPath)
     }
 
@@ -242,8 +245,7 @@ final class DiskScan: @unchecked Sendable {
                 let batch = BulkAttributes.parse(UnsafeRawBufferPointer(buffer), count: Int(count)).map { entry in
                     (name: entry.name, facts: EntryFacts(entry) { scanner.isPackage(Self.join(job.path, entry.name)) })
                 }
-                children.append(contentsOf: batch)
-                publish(batch.map(\.facts))
+                children.append(contentsOf: publish(batch))
             }
         }
         condition.withLock {
@@ -251,13 +253,14 @@ final class DiskScan: @unchecked Sendable {
                 busy -= 1
                 condition.broadcast()
             }
-            if readError != 0 { builder.markUnreadable(job.node, path: job.path, isItem: !job.inPackage) }
+            if readError != 0 { builder.markUnreadable(job.node, path: job.path, isItem: job.isItem) }
             if partial { builder.insert(.partial, into: job.node) }
             if job.inPackage {
                 for child in children {
                     builder.addToPackage(child.facts, owner: job.node, path: Self.join(job.path, child.name))
-                    if child.facts.descent != nil, builder.visit(child.facts.directory) {
-                        queue.append(Job(node: job.node, path: Self.join(job.path, child.name), inPackage: true))
+                    if child.facts.descent != nil {
+                        queue.append(Job(node: job.node, path: Self.join(job.path, child.name), inPackage: true,
+                                         isItem: false))
                     }
                 }
                 return
@@ -269,39 +272,40 @@ final class DiskScan: @unchecked Sendable {
             }
             let first = builder.appendChildren(children, to: job.node, parentPath: job.path)
             for (offset, child) in children.enumerated() where child.facts.descent != nil {
-                let node = first + Int32(offset)
-                guard builder.visit(child.facts.directory) else {
-                    builder.insert(.countedElsewhere, into: node)
-                    continue
-                }
-                queue.append(Job(node: node, path: Self.join(job.path, child.name),
-                                 inPackage: child.facts.descent == .package))
+                queue.append(Job(node: first + Int32(offset), path: Self.join(job.path, child.name),
+                                 inPackage: child.facts.descent == .package, isItem: true))
             }
         }
     }
 
-    private func publish(_ batch: [EntryFacts]) {
-        let snapshot: DiskScanProgress? = condition.withLock {
-            progress.items += batch.count
-            for facts in batch {
-                if let link = facts.link {
+    /// Admits a batch's folders to the tree, so one reached twice counts once, adds the batch to the progress, and
+    /// reports it when due. Returns the batch as admitted.
+    private func publish(_ batch: [(name: String, facts: EntryFacts)]) -> [(name: String, facts: EntryFacts)] {
+        let (admitted, snapshot): ([(name: String, facts: EntryFacts)], DiskScanProgress?) = condition.withLock {
+            let admitted = batch.map { (name: $0.name, facts: builder.admit($0.facts)) }
+            progress.items += admitted.count
+            for (_, facts) in admitted {
+                if facts.descent != nil {
+                    progress.allocatedBytes += facts.contribution.allocated
+                } else if let link = facts.link {
                     if countedLinks.insert(link).inserted { progress.allocatedBytes += facts.sizes.allocated }
                 } else {
                     progress.allocatedBytes += facts.sizes.allocated
                 }
             }
-            guard onProgress != nil else { return nil }
+            guard onProgress != nil else { return (admitted, nil) }
             let now = ContinuousClock.now
-            if let lastPublished, now - lastPublished < scanner.progressInterval { return nil }
+            if let lastPublished, now - lastPublished < scanner.progressInterval { return (admitted, nil) }
             lastPublished = now
-            return progress
+            return (admitted, progress)
         }
-        guard let snapshot else { return }
+        guard let snapshot else { return admitted }
         delivery.withLock {
             guard snapshot.items > deliveredItems else { return }
             deliveredItems = snapshot.items
             onProgress?(snapshot)
         }
+        return admitted
     }
 
     static func join(_ parent: String, _ name: String) -> String {

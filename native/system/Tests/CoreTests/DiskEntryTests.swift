@@ -178,7 +178,75 @@ final class DiskEntryTests: XCTestCase {
         XCTAssertEqual(tree.root.sizes?.allocated, 1 + 2 + 4 + 8 + 100 + 50)
         XCTAssertEqual(tree.root.sizes?.private, 15)
         XCTAssertEqual(tree.item(at: "a/x")?.sizes?.allocated, 101, "a file shows its own allocation")
-        XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound), "pure clones are counted exactly")
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "a")).flags.contains(.allocatedUpperBound), "one clone group is exact")
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "b")).flags.contains(.allocatedUpperBound), "two clone IDs may overlap")
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+    }
+
+    private func pureClone(_ id: UInt64, shared: UInt64) -> EntryFacts {
+        var facts = EntryFacts(kind: .file, flags: .sharesBlocks,
+                               sizes: DiskSizes(logical: shared, allocated: shared, private: 0))
+        facts.contribution = DiskSizes(logical: shared, allocated: 0, private: 0)
+        facts.clone = FileKey(device: 1, id: id)
+        facts.shared = shared
+        return facts
+    }
+
+    func testTwoPureCloneIDsMarkEveryTotalHoldingBothAsAnUpperBound() {
+        // Recorded on APFS: a and c (clone 1) and d, a clone of a changed clone (clone 2), all carry 0x41 and share
+        // nearly every block. root ─ n ─ x ─ (a, c, d)   root ─ n ─ y ─ (e, f: clone 3)
+        //                                                root ─ Tool.app ⊃ (clone 4, clone 5)   root ─ z ─ (g: clone 6, h: 0 shared)
+        let folderFacts = EntryFacts(kind: .directory, descent: .folder)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: folderFacts)
+        let top = builder.appendChildren([("n", folderFacts), ("Tool.app", EntryFacts(kind: .package, descent: .package)),
+                                          ("z", folderFacts)], to: 0, parentPath: "/fixture")
+        let n = builder.appendChildren([("x", folderFacts), ("y", folderFacts)], to: top, parentPath: "/fixture/n")
+        _ = builder.appendChildren([("a", pureClone(1, shared: 100)), ("c", pureClone(1, shared: 100)),
+                                    ("d", pureClone(2, shared: 100))], to: n, parentPath: "/fixture/n/x")
+        _ = builder.appendChildren([("e", pureClone(3, shared: 40)), ("f", pureClone(3, shared: 40))],
+                                   to: n + 1, parentPath: "/fixture/n/y")
+        builder.addToPackage(pureClone(4, shared: 30), owner: top + 1, path: "/fixture/Tool.app/one")
+        builder.addToPackage(pureClone(5, shared: 30), owner: top + 1, path: "/fixture/Tool.app/two")
+        _ = builder.appendChildren([("g", pureClone(6, shared: 20)), ("h", pureClone(7, shared: 0))],
+                                   to: top + 2, parentPath: "/fixture/z")
+        let tree = builder.finish()
+
+        for path in ["n/x", "n", "Tool.app"] {
+            XCTAssertTrue(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+        for path in ["n/y", "z", "n/x/a", "n/x/d"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        XCTAssertEqual(tree.item(at: "n/y")?.sizes?.allocated, 40, "one pure group counts its blocks once, exactly")
+        XCTAssertEqual(tree.item(at: "z")?.sizes?.allocated, 20, "a clone that shares nothing adds no second group")
+        XCTAssertEqual(tree.item(at: "n/x")?.sizes?.allocated, 200, "each clone ID counts once, an upper bound")
+    }
+
+    func testFolderReachedTwiceCountsItsOwnAllocationOnce() {
+        // A directory hard link (HFS+): two entries for one folder, each with its own allocation.
+        var linked = EntryFacts(kind: .directory, contribution: DiskSizes(logical: 0, allocated: 4096, private: 4096),
+                                descent: .folder)
+        linked.directory = FileKey(device: 1, id: 77)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: EntryFacts(kind: .directory, descent: .folder))
+        let first = builder.admit(linked)
+        let second = builder.admit(linked)
+        XCTAssertEqual(first, linked)
+        XCTAssertNil(second.descent, "the folder is read once")
+        XCTAssertTrue(second.flags.contains(.countedElsewhere))
+        let package = EntryFacts(kind: .package, descent: .package)
+        let top = builder.appendChildren([("a", first), ("b", second), ("Tool.app", package)], to: 0, parentPath: "/fixture")
+
+        var inner = linked
+        inner.directory = FileKey(device: 1, id: 78)
+        builder.addToPackage(builder.admit(inner), owner: top + 2, path: "/fixture/Tool.app/one")
+        builder.addToPackage(builder.admit(inner), owner: top + 2, path: "/fixture/Tool.app/two")
+        let tree = builder.finish()
+        XCTAssertEqual(tree.item(at: "a")?.sizes?.allocated, 4096)
+        XCTAssertEqual(tree.item(at: "b")?.sizes?.allocated, 0)
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "b")).flags.contains(.countedElsewhere))
+        XCTAssertEqual(tree.item(at: "Tool.app")?.sizes?.allocated, 4096, "inside a package too")
+        XCTAssertEqual(tree.root.sizes?.allocated, 8192)
     }
 
     func testCloneThatSharesOnlySomeBlocksMarksItsAllocatedAsAnUpperBound() {

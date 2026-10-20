@@ -3,9 +3,12 @@
 /// Totals use allocated sizes. A hard-linked file counts once, at its link with the smallest path, and its private
 /// size counts at the closest folder holding every link. A file that may share blocks with a clone adds its private
 /// bytes, and its shared bytes count once per clone ID in each folder: pure clones share an ID, so a folder holding a
-/// file and its clone counts their blocks once. A clone changed after cloning gets its own ID, so the blocks it still
-/// shares count with each copy, as `du` counts them; such a file and every folder above it are flagged
-/// `allocatedUpperBound`.
+/// file and its clone counts their blocks once. APFS does not say which blocks two clone IDs share, so a total is
+/// exact only while it includes shared bytes from at most one clone ID, every member of which shares all its blocks.
+/// A total with shared bytes from two or more IDs (a clone changed after cloning gets its own ID, and a clone of it
+/// another, though most blocks are still common), or with a file that shares only some of its blocks, may count
+/// blocks more than once, as `du` does; it and every total above it are flagged `allocatedUpperBound`. Unrelated
+/// clone groups in one folder are flagged too, conservatively.
 struct TreeBuilder {
     struct LinkOccurrence {
         let node: Int32
@@ -66,17 +69,23 @@ struct TreeBuilder {
         record(facts, node: owner, isItem: false, path: path())
     }
 
-    /// Records a folder about to be read, or returns `false` when it was reached before (a directory hard link).
-    mutating func visit(_ key: FileKey?) -> Bool {
-        guard let key else { return true }
-        return directories.insert(key).inserted
+    /// Records a folder about to be read. One reached before (a directory hard link) comes back counting nothing,
+    /// flagged `countedElsewhere`, and not to be read.
+    mutating func admit(_ facts: EntryFacts) -> EntryFacts {
+        guard facts.descent != nil, let key = facts.directory, !directories.insert(key).inserted else { return facts }
+        var duplicate = facts
+        duplicate.flags.insert(.countedElsewhere)
+        duplicate.contribution = .zero
+        duplicate.descent = nil
+        return duplicate
     }
 
     mutating func insert(_ flags: DiskItemFlags, into node: Int32) {
         nodes[Int(node)].flags.formUnion(flags)
     }
 
-    /// A folder that could not be opened or read: an item's size becomes unknown; a package's is incomplete.
+    /// A folder that could not be opened or read: an item's size (a package's too) becomes unknown; a folder inside a
+    /// package makes the package's sizes a lower bound.
     mutating func markUnreadable(_ node: Int32, path: String, isItem: Bool) {
         insert(isItem ? .unreadable : .incomplete, into: node)
         unreadablePaths.append(path)
@@ -124,7 +133,23 @@ struct TreeBuilder {
             }
         }
         var sharedOnce = [UInt64](repeating: 0, count: nodes.count)
-        for group in Dictionary(grouping: cloneOccurrences, by: \.key).values {
+        // The one clone group whose shared bytes each total includes so far; a second makes it an upper bound.
+        var onlyGroup = [Int32](repeating: -1, count: nodes.count)
+        for (index, group) in Dictionary(grouping: cloneOccurrences, by: \.key).values.enumerated() {
+            let id = Int32(index)
+            for occurrence in group where occurrence.shared > 0 {
+                // A walk stops where this group was seen or the flag is already set; the flag spreads up below.
+                var current = occurrence.node
+                while current >= 0, onlyGroup[Int(current)] != id,
+                      !nodes[Int(current)].flags.contains(.allocatedUpperBound) {
+                    guard onlyGroup[Int(current)] < 0 else {
+                        nodes[Int(current)].flags.insert(.allocatedUpperBound)
+                        break
+                    }
+                    onlyGroup[Int(current)] = id
+                    current = nodes[Int(current)].parent
+                }
+            }
             guard group.count > 1 else {
                 totals[Int(group[0].node)].allocated += group[0].shared
                 continue

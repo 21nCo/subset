@@ -111,15 +111,19 @@ final class DiskScannerTests: XCTestCase {
         for copy in ["changed/b", "changed/c"] {
             XCTAssertEqual(clonefile(original.path, root.appendingPathComponent(copy).path, 0), 0)
         }
-        let fd = open(root.appendingPathComponent("changed/b").path, O_WRONLY)
-        XCTAssertGreaterThanOrEqual(fd, 0)
-        XCTAssertEqual(pwrite(fd, "abcd", 4, 0), 4)
-        XCTAssertEqual(fsync(fd), 0)
-        close(fd)
+        try Self.overwriteFirstBytes(root.appendingPathComponent("changed/b"))
         try Self.write(root.appendingPathComponent("pure/d"), bytes: 1 << 20)
         XCTAssertEqual(clonefile(root.appendingPathComponent("pure/d").path, root.appendingPathComponent("pure/e").path, 0), 0)
+        // The copies share every block but the one rewritten in b.
+        let fileBytes = try Self.allocated(original.path)
+        let changedBytes = try Self.privateSize(root.appendingPathComponent("changed/b").path)
+        XCTAssertGreaterThan(changedBytes, 0)
+        let pureBytes = try Self.allocated(root.appendingPathComponent("pure/d").path)
 
         let tree = try await DiskScanner().scan(root).tree
+        try Self.assertAllocated(tree, "changed", physical: fileBytes + changedBytes)
+        try Self.assertAllocated(tree, "pure", physical: pureBytes)
+        try Self.assertAllocated(tree, "", physical: fileBytes + changedBytes + pureBytes)
         let changed = try XCTUnwrap(tree.item(at: "changed/b"))
         XCTAssertTrue(changed.flags.contains(.sharesBlocks))
         XCTAssertTrue(changed.flags.contains(.allocatedUpperBound), "the changed copy shares only some blocks")
@@ -128,7 +132,39 @@ final class DiskScannerTests: XCTestCase {
         for path in ["pure", "pure/d", "pure/e"] {
             XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
         }
-        XCTAssertEqual(tree.item(at: "pure")?.sizes?.allocated, try Self.allocated(root.appendingPathComponent("pure/d").path))
+        XCTAssertEqual(tree.item(at: "pure")?.sizes?.allocated, pureBytes)
+    }
+
+    func testTwoCloneIDsSharingBlocksFlagTheTotalThatHoldsBoth() async throws {
+        // y/a is cloned to y/b and y/c; b is changed, so it gets a new clone ID, then cloned to x/d, which shares
+        // b's ID. a, c (one ID) and d (another) end up in x, sharing all but one rewritten block.
+        for folder in ["x", "y", "z"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
+        }
+        let path = { (name: String) in self.root.appendingPathComponent(name).path }
+        try Self.write(root.appendingPathComponent("y/a"), bytes: 4 << 20)
+        XCTAssertEqual(clonefile(path("y/a"), path("y/c"), 0), 0)
+        XCTAssertEqual(clonefile(path("y/a"), path("y/b"), 0), 0)
+        try Self.overwriteFirstBytes(root.appendingPathComponent("y/b"))
+        let changedBytes = try Self.privateSize(path("y/b"))
+        XCTAssertGreaterThan(changedBytes, 0)
+        XCTAssertEqual(clonefile(path("y/b"), path("x/d"), 0), 0)
+        XCTAssertEqual(rename(path("y/a"), path("x/a")), 0)
+        XCTAssertEqual(rename(path("y/c"), path("x/c")), 0)
+        try Self.write(root.appendingPathComponent("z/p"), bytes: 1 << 20)
+        XCTAssertEqual(clonefile(path("z/p"), path("z/q"), 0), 0)
+        let fileBytes = try Self.allocated(path("x/a"))
+        let pureBytes = try Self.allocated(path("z/p"))
+
+        let tree = try await DiskScanner().scan(root).tree
+        let x = try XCTUnwrap(tree.item(at: "x"))
+        XCTAssertTrue(x.flags.contains(.allocatedUpperBound), "x holds two clone IDs that share blocks")
+        try Self.assertAllocated(tree, "x", physical: fileBytes + changedBytes)
+        try Self.assertAllocated(tree, "y", physical: try Self.allocated(path("y/b")))
+        try Self.assertAllocated(tree, "z", physical: pureBytes)
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "z")).flags.contains(.allocatedUpperBound), "one pure clone group")
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+        try Self.assertAllocated(tree, "", physical: fileBytes + changedBytes + pureBytes)
     }
 
     func testSymlinkIsCountedAsItselfAndNotFollowed() async throws {
@@ -207,9 +243,13 @@ final class DiskScannerTests: XCTestCase {
         let rootBlocks = try Self.allocated(sub.path)
         XCTAssertGreaterThan(rootBlocks, 0)
 
-        let result = try await DiskScanner().scan(sub)
+        let last = OSAllocatedUnfairLock<DiskScanProgress?>(initialState: nil)
+        let result = try await DiskScanner(progressInterval: .zero).scan(sub) { progress in
+            last.withLock { $0 = progress }
+        }
         let totals = try XCTUnwrap(result.totals)
         let expected = try Self.statTotals(sub.path)
+        XCTAssertEqual(last.withLock { $0 }?.allocatedBytes, totals.allocated, "progress counts folders' allocation")
         XCTAssertEqual(totals.allocated, expected.allocated)
         XCTAssertEqual(totals.logical, expected.logical)
         XCTAssertEqual(totals.allocated / 1024, try Self.duKilobytes(sub.path))
@@ -264,6 +304,52 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertTrue(result.tree.root.flags.contains(.incomplete), "the root's total is a lower bound")
         XCTAssertEqual(result.totals?.allocated, try Self.allocated(root.appendingPathComponent("visible").path))
         XCTAssertEqual(result.outcome, .completed)
+    }
+
+    func testUnreadablePackageIsCountedAsUnknownAsAChildAndAsTheRoot() async throws {
+        try XCTSkipIf(geteuid() == 0, "root reads a folder whatever its mode")
+        let bundle = root.appendingPathComponent("Tool.app")
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try Self.write(bundle.appendingPathComponent("Contents/Tool"), bytes: 100_000)
+        try Self.write(root.appendingPathComponent("visible"), bytes: 10_000)
+        XCTAssertEqual(chmod(bundle.path, 0), 0)
+        defer { chmod(bundle.path, 0o755) }
+
+        let result = try await DiskScanner().scan(root)
+        let package = try XCTUnwrap(result.tree.item(at: "Tool.app"))
+        XCTAssertEqual(package.kind, .package)
+        XCTAssertNil(package.sizes, "a package that cannot be opened has an unknown size, not zero")
+        XCTAssertTrue(package.flags.contains(.unreadable))
+        XCTAssertEqual(result.unreadablePaths, [bundle.path])
+        XCTAssertTrue(result.tree.root.flags.contains(.incomplete))
+        XCTAssertEqual(result.totals?.allocated, try Self.allocated(root.appendingPathComponent("visible").path))
+
+        let chosen = try await DiskScanner().scan(bundle)
+        XCTAssertEqual(chosen.tree.root.kind, .package)
+        XCTAssertNil(chosen.totals)
+        XCTAssertTrue(chosen.tree.root.flags.contains(.unreadable))
+        XCTAssertEqual(chosen.unreadablePaths, [bundle.path])
+    }
+
+    func testUnreadableFolderInsideAPackageLeavesThePackageSizedAndIncomplete() async throws {
+        try XCTSkipIf(geteuid() == 0, "root reads a folder whatever its mode")
+        let bundle = root.appendingPathComponent("Tool.app")
+        let locked = bundle.appendingPathComponent("Contents/Locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Self.write(bundle.appendingPathComponent("Contents/Tool"), bytes: 100_000)
+        try Self.write(locked.appendingPathComponent("secret"), bytes: 50_000)
+        XCTAssertEqual(chmod(locked.path, 0), 0)
+        defer { chmod(locked.path, 0o755) }
+
+        let result = try await DiskScanner().scan(root)
+        let package = try XCTUnwrap(result.tree.item(at: "Tool.app"))
+        XCTAssertEqual(package.kind, .package)
+        XCTAssertFalse(package.flags.contains(.unreadable))
+        XCTAssertTrue(package.flags.contains(.incomplete), "the package's size is a lower bound")
+        XCTAssertEqual(package.sizes?.allocated, try Self.allocated(bundle.appendingPathComponent("Contents/Tool").path))
+        XCTAssertEqual(package.sizes?.logical, 100_000)
+        XCTAssertEqual(result.unreadablePaths, [locked.path])
+        XCTAssertTrue(result.tree.root.flags.contains(.incomplete))
     }
 
     func testTotalsMatchStatAndHardLinksMatchDu() async throws {
@@ -382,6 +468,32 @@ final class DiskScannerTests: XCTestCase {
         var info = stat()
         guard lstat(path, &info) == 0 else { throw POSIXError(.init(rawValue: errno)!) }
         return UInt64(info.st_blocks) * 512
+    }
+
+    /// The APFS private size of a file, from `getattrlist`.
+    static func privateSize(_ path: String) throws -> UInt64 {
+        try XCTUnwrap(BulkAttributes.read(path: path)?.privateSize)
+    }
+
+    /// Rewrites a file's first bytes, so a clone stops sharing that block.
+    static func overwriteFirstBytes(_ url: URL) throws {
+        let fd = open(url.path, O_WRONLY)
+        guard fd >= 0 else { throw POSIXError(.init(rawValue: errno)!) }
+        defer { close(fd) }
+        XCTAssertEqual(pwrite(fd, "abcd", 4, 0), 4)
+        XCTAssertEqual(fsync(fd), 0)
+    }
+
+    /// An unflagged total must equal the space its contents use; a flagged one may only exceed it.
+    static func assertAllocated(_ tree: DiskTree, _ relativePath: String, physical: UInt64,
+                                file: StaticString = #filePath, line: UInt = #line) throws {
+        let item = try XCTUnwrap(tree.item(at: relativePath), file: file, line: line)
+        let allocated = try XCTUnwrap(item.sizes?.allocated, file: file, line: line)
+        if item.flags.contains(.allocatedUpperBound) {
+            XCTAssertGreaterThanOrEqual(allocated, physical, "/\(relativePath)", file: file, line: line)
+        } else {
+            XCTAssertEqual(allocated, physical, "/\(relativePath) is unflagged, so it must be exact", file: file, line: line)
+        }
     }
 
     /// A folder's entries from `readdir`, which, unlike `FileManager`, lists the AppleDouble (`._`) files that hold

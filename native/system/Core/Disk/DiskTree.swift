@@ -3,7 +3,8 @@ public struct DiskSizes: Equatable, Sendable {
     /// The size its contents claim (`st_size`, summed over all forks).
     public var logical: UInt64
     /// The space allocated on the volume, the figure totals use. A sparse file allocates less than its logical size,
-    /// a compressed one too. An upper bound when the item is flagged `allocatedUpperBound`.
+    /// a compressed one too. Exact unless the item is flagged `allocatedUpperBound`, when it may count blocks clones
+    /// share more than once.
     public var allocated: UInt64
     /// The space freed if only this item were deleted: allocated blocks not shared with a clone, not kept by a local
     /// snapshot, and not reachable through a hard link outside the item. A lower bound: APFS reports a compressed
@@ -55,10 +56,13 @@ public struct DiskItemFlags: OptionSet, Hashable, Sendable {
     public static let incomplete = DiskItemFlags(rawValue: 1 << 6)
     /// A firmlink, the startup disk's link from the system volume into the data volume (`/Users`, `/Applications`).
     public static let firmlink = DiskItemFlags(rawValue: 1 << 7)
-    /// The allocated size may count blocks shared between diverged clones more than once, so it is an upper bound. Set
-    /// on a file that shares some but not all of its blocks (`EF_MAY_SHARE_BLOCKS` without `EF_SHARES_ALL_BLOCKS`: a
-    /// clone changed after cloning, or the file it was cloned from) and on every folder or package whose total
-    /// includes one. Pure clones, which share all their blocks, are counted exactly and do not set it.
+    /// The allocated size may count blocks shared between clones more than once, so it is an upper bound. APFS gives
+    /// only a clone ID and a shared byte count, so a total is exact only while it includes shared bytes from at most
+    /// one clone ID, every member of which shares all its blocks. Set on a file that shares some but not all of its
+    /// blocks (`EF_MAY_SHARE_BLOCKS` without `EF_SHARES_ALL_BLOCKS`: a clone changed after cloning), and on every
+    /// folder or package whose total includes such a file or shared bytes from two or more clone IDs (a clone of a
+    /// changed clone gets another ID while sharing most blocks with the first). Unrelated clone groups in one folder
+    /// set it too, conservatively.
     public static let allocatedUpperBound = DiskItemFlags(rawValue: 1 << 8)
 }
 
@@ -68,8 +72,8 @@ public struct DiskItem: Equatable, Sendable {
     public let name: String
     public let kind: DiskItemKind
     public let flags: DiskItemFlags
-    /// For a folder or package, its own allocation plus its contents' totals, with each hard-linked file and pure
-    /// clone counted once. `nil` when the item itself could not be read.
+    /// For a folder or package, its own allocation plus its contents' totals, with each hard-linked file counted once
+    /// and each clone ID's shared bytes once. `nil` when the item itself could not be read.
     public let sizes: DiskSizes?
     /// The parent's index, `nil` for the root.
     public let parent: Int?
