@@ -275,3 +275,21 @@ test('after a skip, resume or start a restart fires nothing, and the next transi
     assert.deepEqual(again.sink.received.map(label), expected, scenario);
   }
 });
+
+test('a transition that falls due while another is delivered fires as itself, on time', async (t) => {
+  const context = await startTestDaemon(t);
+  const { clock, sink, op } = context;
+  const startedAt = clock.now();
+  for (const durationMs of [1_000, 1_005]) assert.equal((await op('start', { timer: { kind: 'countdown', durationMs } })).status, 200);
+  const deliveredAt = [];
+  const record = sink.alert.bind(sink);
+  sink.alert = (alert, timer) => {
+    deliveredAt.push(clock.now());
+    record(alert, timer);
+    // The first delivery (or the save after it) takes 10 ms, past the second timer's finish.
+    if (deliveredAt.length === 1) clock.jump(10);
+  };
+  clock.advance(2_000);
+  assert.deepEqual(sink.received.map(label), [`finish@${startedAt + 1_000}`, `finish@${startedAt + 1_005}`]);
+  assert.ok(deliveredAt[1] - (startedAt + 1_005) <= LATE_MS, `${deliveredAt[1] - startedAt}`);
+});

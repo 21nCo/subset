@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { DaemonRunningError, acquireLock, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, spawnDaemonProcess, startTestDaemon, tempDataDir } from './helpers.mjs';
+import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, removeStaleLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
+import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
 
 function deadPid() {
   const { pid } = spawnSync(process.execPath, ['-e', '']);
@@ -136,21 +137,29 @@ test('a running daemon whose socket was removed keeps its lock', async (t) => {
   assert.equal(readLock(join(dataDir, 'daemon.lock')).pid, run.child.pid);
 });
 
-test('a daemon that lost its lock never writes again and leaves its successor\'s socket', async (t) => {
+test('a daemon that lost its lock never writes or alerts again and leaves its successor\'s socket', async (t) => {
   const dataDir = tempDataDir(t);
   const first = await startTestDaemon(t, { dataDir });
+  const events = subscribe(first.daemon.paths.socket);
+  await events.waitFor((list) => list.length === 1);
   await first.op('start', { timer: { kind: 'countdown', durationMs: 1_000, name: 'First' } });
+  await events.waitFor((list) => list.length === 2);
   // The lock is removed from under the first daemon, and a second one starts.
   unlinkSync(first.daemon.paths.lock);
   const second = await startTestDaemon(t, { dataDir, clock: createFakeClock(first.clock.now()) });
   assert.equal((await second.op('create', { timer: { kind: 'stopwatch', name: 'Second' } })).status, 200);
   const written = readFileSync(join(dataDir, 'state.json'), 'utf8');
 
-  // The first daemon's countdown finishes: it would record that, but it no longer holds the lock.
+  // The first daemon's countdown finishes: it would record and announce that, but it no longer
+  // holds the lock, so its successor does both.
   first.clock.advance(1_000);
   assert.equal(await first.daemon.closed, 1);
+  await events.connected;
+  await eventually(() => events.ended);
   assert.ok(first.logs.some((line) => /daemon\.lock is no longer held/.test(line)));
   assert.equal(readFileSync(join(dataDir, 'state.json'), 'utf8'), written);
+  assert.deepEqual(first.sink.received, []);
+  assert.deepEqual(events.events.map(({ event }) => event), ['state', 'state']);
   assert.equal((await second.call('GET', '/v1/daemon')).status, 200);
   assert.deepEqual((await second.call('GET', '/v1/timers')).body.structuredContent.timers.map((timer) => timer.definition.name), ['First', 'Second']);
 });
@@ -171,3 +180,72 @@ test('a holder\'s start time is never later than its real start, however slow ps
   assert.equal(processStartTime(4242, { now, elapsedOf: () => '' }), null);
   assert.equal(processStartTime(4242, { now: () => 200_000_000, elapsedOf: () => '1-02:03:04' }), 200_000_000 - (((24 + 2) * 60 + 3) * 60 + 4) * 1_000 - 1_000);
 });
+
+test('a creator held up before writing its pid, whose empty lock was replaced, does not acquire', async (t) => {
+  const path = lockPath(t);
+  const successor = 4242;
+  let replaced = false;
+  const fs = {
+    ...nodeFs,
+    writeSync(...args) {
+      if (!replaced) {
+        replaced = true;
+        // Past the grace period, another process removes the empty lock and creates its own.
+        const old = (Date.now() - 5_000) / 1000;
+        utimesSync(path, old, old);
+        assert.equal(removeStaleLock(path, readLock(path)), true);
+        writeFileSync(path, `${successor}\n`, { flag: 'wx' });
+      }
+      return nodeFs.writeSync(...args);
+    }
+  };
+  const lock = await acquireLock(path, { fs, isAlive: (pid) => pid === successor });
+  assert.equal(replaced, true);
+  assert.equal(lock.acquired, false);
+  assert.equal(lock.holder.pid, successor);
+  assert.equal(readFileSync(path, 'utf8'), `${successor}\n`);
+});
+
+test('a pid write that fails leaves no lock behind, and one that is short is completed', async (t) => {
+  const path = lockPath(t);
+  const failures = {
+    throws(fd, buffer, offset) {
+      nodeFs.writeSync(fd, buffer, offset, 1);
+      throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    },
+    'takes no bytes': () => 0
+  };
+  for (const [name, writeSync] of Object.entries(failures)) {
+    await assert.rejects(acquireLock(path, { fs: { ...nodeFs, writeSync } }), (error) => ['ENOSPC', 'EIO'].includes(error.code), name);
+    assert.equal(existsSync(path), false, name);
+    const started = Date.now();
+    const lock = await acquireLock(path);
+    assert.equal(lock.acquired, true, name);
+    assert.ok(Date.now() - started < 1_000, name);
+    lock.release();
+  }
+  const oneByte = (fd, buffer, offset) => nodeFs.writeSync(fd, buffer, offset, 1);
+  const lock = await acquireLock(path, { fs: { ...nodeFs, writeSync: oneByte } });
+  assert.equal(lock.acquired, true);
+  assert.equal(readFileSync(path, 'utf8'), `${process.pid}\n`);
+});
+
+for (const step of ['locked', 'bound']) {
+  test(`a daemon whose lock is taken over once it is ${step} leaves its successor reachable`, async (t) => {
+    const dataDir = tempDataDir(t);
+    let successor;
+    const startupHook = async (at) => {
+      if (at !== step) return;
+      // The lock is removed from under the starting daemon, and another daemon starts and listens.
+      unlinkSync(join(dataDir, 'daemon.lock'));
+      successor = await startTestDaemon(t, { dataDir, sink: { ...createRecordingSink(), name: 'successor' } });
+    };
+    await assert.rejects(startDaemon({ dataDir, log: () => {}, startupHook }), (error) => error instanceof LockLostError);
+    assert.ok(successor);
+    const { body } = await socketRequest(join(dataDir, 'daemon.sock'), 'GET', '/v1/daemon');
+    assert.equal(body.alerts, 'successor');
+    // It still holds the lock: it can write.
+    assert.equal((await successor.op('create', { timer: { kind: 'stopwatch' } })).status, 200);
+    assert.deepEqual(readdirSync(dataDir).filter((name) => name.startsWith('.ds-')), []);
+  });
+}

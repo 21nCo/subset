@@ -113,8 +113,9 @@ export function createScheduler({ clock = systemClock, getTimers, onRun, initial
     for (const timer of getTimers()) {
       const mark = marks.get(timer.definition.id);
       if (!mark) continue;
-      const from = Math.max(now, mark.through);
-      const [next] = transitionsBetween(timer, from, from + REARM_MS);
+      // From the mark, not from now: a transition that fell due while the run delivered and saved is
+      // armed at once and handled on time. A mark ahead of now (the clock was set back) waits for it.
+      const [next] = transitionsBetween(timer, mark.through, Math.max(now, mark.through) + REARM_MS);
       if (next) delay = Math.min(delay, Math.max(1, next.at - now));
     }
     handle = clock.setTimeout(() => {

@@ -91,6 +91,9 @@ function listen(server, socketPath) {
  * Starts the per-user daemon: the single writer of `state.json`, serving HTTP/1.1 JSON on
  * `daemon.sock` only. Throws `DaemonRunningError` when another daemon holds the lock. Resolves a
  * handle whose `closed` promise settles with the exit code after `shutdown` or the idle exit.
+ *
+ * `startupHook(step)` runs, for tests, once the lock is taken (`locked`) and once the socket is
+ * bound but not yet published (`bound`). Throws `LockLostError` when the lock is lost before then.
  */
 export async function startDaemon({
   dataDir = resolveDataDir(),
@@ -98,7 +101,8 @@ export async function startDaemon({
   sink = createRecordingSink(),
   log = stderrLog,
   idleExitMs = IDLE_EXIT_MS,
-  heartbeatMs = HEARTBEAT_MS
+  heartbeatMs = HEARTBEAT_MS,
+  startupHook = () => {}
 } = {}) {
   const paths = ensureDataDir(dataDir);
   const lock = await takeLock(paths);
@@ -109,7 +113,9 @@ export async function startDaemon({
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
-    // We hold the lock, so any socket file left here belongs to a daemon that is gone.
+    await startupHook('locked');
+    // While we hold the lock, any socket file left here belongs to a daemon that is gone.
+    if (!lock.isHeld()) throw new LockLostError();
     for (const path of [paths.socket, ...readdirSync(paths.dataDir).filter((name) => BIND_NAME.test(name)).map((name) => join(paths.dataDir, name))]) {
       try {
         unlinkSync(path);
@@ -143,17 +149,20 @@ export async function startDaemon({
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
 
   /**
-   * Runs a write only while this daemon still holds `daemon.lock`. One that lost it (the file was
-   * removed or replaced) never writes again and shuts down.
+   * True while this daemon still holds `daemon.lock`. One that lost it (the file was removed or
+   * replaced) never writes, publishes or alerts again, and shuts down.
    */
-  function write(save) {
-    if (!lock.isHeld()) {
-      if (!closing) {
-        log('daemon.lock is no longer held by this daemon; exiting without writing.');
-        shutdown(1);
-      }
-      throw new LockLostError();
+  function stillHeld() {
+    if (lock.isHeld()) return true;
+    if (!closing) {
+      log('daemon.lock is no longer held by this daemon; exiting without writing.');
+      shutdown(1);
     }
+    return false;
+  }
+
+  function write(save) {
+    if (!stillHeld()) throw new LockLostError();
     save();
   }
 
@@ -188,6 +197,8 @@ export async function startDaemon({
     initialMarks: marks,
     getTimers: () => store.timers,
     onRun(alerts, now) {
+      // A successor that took the lock delivers these alerts itself.
+      if (alerts.length && !stillHeld()) return;
       for (const { alert, timer } of alerts) {
         broadcast('alert', alert);
         deliverToSink(sink, alert, timer, log);
@@ -386,14 +397,22 @@ export async function startDaemon({
 
   // The socket is bound under another name and renamed into place, so it appears with its final
   // mode, and so closing the server (which unlinks the bound name) never removes a successor's socket.
+  // It is published only while this daemon still holds the lock, so it never replaces a successor's.
   const bindPath = join(paths.dataDir, `.ds-${randomBytes(3).toString('hex')}`);
   try {
     await listen(server, bindPath);
     chmodSync(bindPath, 0o600);
     socketIno = lstatSync(bindPath).ino;
+    await startupHook('bound');
+    if (!lock.isHeld()) throw new LockLostError();
     renameSync(bindPath, paths.socket);
   } catch (error) {
     server.close();
+    try {
+      unlinkSync(bindPath);
+    } catch (unlinkError) {
+      if (!isCode(unlinkError, 'ENOENT')) log(`could not remove ${bindPath}: ${unlinkError.message}`);
+    }
     lock.release();
     throw error;
   }

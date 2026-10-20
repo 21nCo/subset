@@ -69,6 +69,7 @@ export function subscribe(socketPath) {
     }
   };
   let outgoing;
+  let ended = false;
   const connected = new Promise((resolve, reject) => {
     outgoing = request({ socketPath, method: 'GET', path: '/v1/events', agent: false }, (response) => {
       response.setEncoding('utf8');
@@ -84,6 +85,9 @@ export function subscribe(socketPath) {
         }
         check();
       });
+      response.on('close', () => {
+        ended = true;
+      });
       resolve(response);
     });
     outgoing.on('error', reject);
@@ -92,6 +96,9 @@ export function subscribe(socketPath) {
   return {
     events,
     connected,
+    get ended() {
+      return ended;
+    },
     waitFor(predicate, timeoutMs = 5_000) {
       if (predicate(events)) return Promise.resolve(events);
       return new Promise((resolve, reject) => {

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { closeSync, fstatSync, fsyncSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 /** A lock with no pid yet is being written by the daemon that created it, unless it is older than this. */
@@ -69,24 +70,38 @@ export function readLock(lockPath) {
   return { pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, raw, ino: stat.ino, mtimeMs: stat.mtimeMs };
 }
 
-function createLock(lockPath, pid) {
-  const fd = openSync(lockPath, 'wx', 0o600);
+/**
+ * Creates the lock with O_EXCL and writes the whole pid, looping over short writes, then fsyncs.
+ * Resolves its inode; a failed write rejects after removing the file, while it is still this one.
+ */
+async function createLock(lockPath, pid, { fs, now }) {
+  const fd = fs.openSync(lockPath, 'wx', 0o600);
+  let ino;
   try {
-    writeSync(fd, `${pid}\n`);
-    fsyncSync(fd);
-    return fstatSync(fd).ino;
+    ino = fs.fstatSync(fd).ino;
+    const bytes = Buffer.from(`${pid}\n`);
+    for (let offset = 0; offset < bytes.length;) {
+      const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
+      if (!(written > 0)) throw Object.assign(new Error('The lock file took no bytes.'), { code: 'EIO' });
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+  } catch (error) {
+    if (ino !== undefined) await removeOwnLock(lockPath, ino, { now });
+    throw error;
   } finally {
-    closeSync(fd);
+    fs.closeSync(fd);
   }
+  return ino;
 }
 
 /**
- * Removes `held`, the lock file seen earlier, if it is still the same file with the same content.
- * A `.takeover` marker, itself created exclusively, makes the check and the removal one step among
- * processes taking over at once, so none of them removes a lock another has just created.
- * Returns false when another process is mid-takeover.
+ * Runs `remove(current)` holding the `.takeover` marker, itself created exclusively, so that checking
+ * the lock and removing it are one step among processes taking over or releasing at once, and none
+ * of them removes a lock another has just created. Returns false when another process holds the
+ * marker; one a process left behind when it crashed is removed after `TAKEOVER_STALE_MS`.
  */
-export function removeStaleLock(lockPath, held, { now = Date.now } = {}) {
+function withTakeoverMarker(lockPath, remove, { now = Date.now } = {}) {
   const marker = `${lockPath}.takeover`;
   try {
     closeSync(openSync(marker, 'wx', 0o600));
@@ -101,24 +116,46 @@ export function removeStaleLock(lockPath, held, { now = Date.now } = {}) {
   }
   try {
     const current = readLock(lockPath);
-    if (current && current.ino === held.ino && current.raw === held.raw) unlinkSync(lockPath);
+    if (current && remove(current)) unlinkSync(lockPath);
     return true;
   } finally {
     unlinkSync(marker);
   }
 }
 
+/** Removes the lock while it is still the file with inode `ino`, whatever it holds, waiting out a takeover. */
+async function removeOwnLock(lockPath, ino, { now }) {
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (withTakeoverMarker(lockPath, (current) => current.ino === ino, { now })) return;
+    await sleep(RETRY_MS);
+  }
+}
+
+/**
+ * Removes `held`, the lock file seen earlier, if it is still the same file with the same content.
+ * Returns false when another process is mid-takeover.
+ */
+export function removeStaleLock(lockPath, held, { now = Date.now } = {}) {
+  return withTakeoverMarker(lockPath, (current) => current.ino === held.ino && current.raw === held.raw, { now });
+}
+
 /**
  * Takes `daemon.lock`, created with O_EXCL and holding the pid. A lock whose pid is not alive, or
- * that has held no pid for longer than `LOCK_WRITE_GRACE_MS`, is stale and replaced. Resolves
+ * that has held no pid for longer than `LOCK_WRITE_GRACE_MS`, is stale and replaced. The lock is
+ * acquired only once the path names the file this call created, holding its whole pid: a creator
+ * held up past the grace, whose empty file another process replaced, does not acquire. Resolves
  * `{ acquired: true, release, isHeld }` or `{ acquired: false, holder }` naming the live holder.
+ * `fs` replaces the calls that create and write the file, for tests.
  */
-export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAlive, now = Date.now } = {}) {
+export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAlive, now = Date.now, fs = nodeFs } = {}) {
   let holder = null;
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     try {
-      const ino = createLock(lockPath, pid);
-      return { acquired: true, ino, release: () => releaseLock(lockPath, pid, ino), isHeld: () => holdsLock(lockPath, pid, ino) };
+      const ino = await createLock(lockPath, pid, { fs, now });
+      if (holdsLock(lockPath, pid, ino)) {
+        return { acquired: true, ino, release: () => releaseLock(lockPath, pid, ino, { now }), isHeld: () => holdsLock(lockPath, pid, ino) };
+      }
+      // Another process replaced this file before the pid was in it; the file at the path is its own.
     } catch (error) {
       if (!isCode(error, 'EEXIST')) throw error;
     }
@@ -139,13 +176,10 @@ export function holdsLock(lockPath, pid, ino) {
   return Boolean(current && current.ino === ino && current.pid === pid);
 }
 
-/** Removes the lock only while it is still the file this process created. */
-export function releaseLock(lockPath, pid, ino) {
-  if (holdsLock(lockPath, pid, ino)) {
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isCode(error, 'ENOENT')) throw error;
-    }
-  }
+/**
+ * Removes the lock only while it is still the file this process created. During another process's
+ * takeover it is left, naming a pid that is about to exit, which the next daemon replaces.
+ */
+export function releaseLock(lockPath, pid, ino, { now = Date.now } = {}) {
+  withTakeoverMarker(lockPath, (current) => current.ino === ino && current.pid === pid, { now });
 }
