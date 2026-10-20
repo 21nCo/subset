@@ -19,11 +19,11 @@ final class SwitcherControllerTests: XCTestCase {
         )
     }
 
+    /// The apps each read (by its number, from 1) leaves out because they did not answer in time.
+    private var skipping: [Int: [pid_t]] = [:]
+
     private func controller(_ windowOperator: RecordingWindowOperator) -> SwitcherController {
-        SwitcherController(readWindows: { [unowned self] in
-            reads += 1
-            return lists.count > 1 ? lists.removeFirst() : lists[0]
-        }, windowOperator: windowOperator)
+        SwitcherController(readWindows: readWindows, windowOperator: windowOperator)
     }
 
     private func wait(until condition: () -> Bool, _ message: String = "") async throws {
@@ -287,9 +287,146 @@ final class SwitcherControllerTests: XCTestCase {
         switcher.cancel()
     }
 
-    private func readWindows() -> [WindowEntry] {
+    // MARK: - Pointer input while keys wait
+
+    func testAHoverAfterAWaitingCloseLeavesTheCloseOnItsWindow() async throws {
+        let gate = GatedWindowOperator(holding: [.minimize])
+        lists = [windows]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.minimize))
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        switcher.panel.switcherView.onHover(2)
+        switcher.panel.switcherView.onHover(1)
+        switcher.panel.switcherView.onHover(2)
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the waiting close runs after the read")
+        XCTAssertEqual(gate.calls.map(\.operation), [.minimize, .close])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "⌘W was pressed on window 1")
+        try await wait(until: { reads == 3 }, "the close is read")
+        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[2].ref, "the hover applies after the close")
+        switcher.cancel()
+    }
+
+    func testAHoverAfterAWaitingQuitLeavesTheQuitOnItsApp() async throws {
+        let gate = GatedWindowOperator(holding: [.hideApp])
+        lists = [windows]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.hideApp))
+        switcher.apply(.operation(.quitApp))
+        try await wait(until: { gate.held == 1 })
+        switcher.panel.switcherView.onHover(3)
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the waiting quit runs after the read")
+        XCTAssertEqual(gate.calls.map(\.operation), [.hideApp, .quitApp])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "⌘Q was pressed on App 1")
+        switcher.cancel()
+    }
+
+    func testAHoverAfterAWaitingCloseThenAReleaseFocusesTheHoveredWindowAfterTheClose() async throws {
+        let gate = GatedWindowOperator(holding: [.minimize])
+        lists = [windows]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.minimize))
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        switcher.panel.switcherView.onHover(2)
+        switcher.commit()
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 3 }, "the close, then the commit")
+        XCTAssertEqual(gate.calls.map(\.operation), [.minimize, .close, .focus])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref, windows[2].ref])
+        XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testCancellingAfterAWaitingCloseAndAHoverDoesNothingMore() async throws {
+        let gate = GatedWindowOperator(holding: [.minimize])
+        lists = [windows]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.minimize))
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        switcher.panel.switcherView.onHover(2)
+        switcher.cancel()
+        gate.release(.done)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(gate.calls.map(\.operation), [.minimize])
+        XCTAssertEqual(reads, 1)
+    }
+
+    // MARK: - Reads that skip an app
+
+    func testARefusedCloseThenAReadThatSkipsItsAppLeavesTheNextCloseOnThatWindow() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        // The read after the refused close times out on App 1, so window 1 is unknown, not gone.
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        skipping = [2: [windows[1].pid]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        gate.release(.refused("timed out"))
+        try await wait(until: { gate.calls.count == 2 }, "the waiting close runs after the read")
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "window 2 is never closed")
+        XCTAssertEqual(switcher.model?.entries, windows, "window 1 stays listed where it was")
+        gate.release(.done)
+        switcher.cancel()
+    }
+
+    func testADeliveredQuitThenAReadThatSkipsItsAppLeavesTheNextQuitOnThatApp() async throws {
+        let gate = GatedWindowOperator(holding: [.quitApp])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        skipping = [2: [windows[1].pid]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.quitApp))
+        switcher.apply(.operation(.quitApp))
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done) // App 1 is asking to save and does not answer the read
+        try await wait(until: { gate.calls.count == 2 }, "the waiting quit runs after the read")
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "App 2 is never quit")
+        gate.release(.done)
+        switcher.cancel()
+    }
+
+    func testAReleaseWhileACloseIsPendingFocusesItsWindowWhenTheReadSkipsItsApp() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        skipping = [2: [windows[1].pid]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the read, then the commit")
+        XCTAssertEqual(gate.calls.map(\.operation), [.close, .focus])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "the save prompt comes forward, not window 2")
+    }
+
+    func testAnAppQuittingKeepsTheWindowsOfAnAppTheReadSkipped() async throws {
+        let recorder = RecordingWindowOperator()
+        // App 3 quit; App 1 did not answer the read that follows.
+        lists = [windows, [windows[0], windows[2]]]
+        skipping = [2: [windows[1].pid]]
+        let switcher = controller(recorder)
+        switcher.open()
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        try await wait(until: { reads == 2 }, "an app quitting reads the list again")
+        XCTAssertEqual(switcher.model?.entries, [windows[0], windows[1], windows[2]], "only the quit app's window leaves")
+        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref)
+        switcher.cancel()
+    }
+
+    private func readWindows() -> WindowList {
         reads += 1
-        return lists.count > 1 ? lists.removeFirst() : lists[0]
+        let windows = lists.count > 1 ? lists.removeFirst() : lists[0]
+        return WindowList(windows: windows, skippedApps: (skipping[reads] ?? []).map { SkippedApp(pid: $0, reason: .timedOut) })
     }
 }
 

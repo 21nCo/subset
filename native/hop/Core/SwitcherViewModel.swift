@@ -88,9 +88,20 @@ public struct SwitcherViewModel: Sendable, Equatable {
     // MARK: - List changes
 
     /// Replaces the list with a fresh one, keeping the selection on its window, or on the window that followed it
-    /// when it is gone (the one before it when none after it remains).
-    public mutating func refreshed(_ fresh: [WindowEntry]) {
+    /// when it is gone (the one before it when none after it remains). The windows of `unread` apps, which did not
+    /// answer this read, are not known to be gone: they stay listed, each after the window it followed.
+    public mutating func refreshed(_ fresh: [WindowEntry], unread: Set<pid_t> = []) {
         let previous = entries
+        var fresh = fresh
+        var next = 0
+        for old in unread.isEmpty ? [] : previous {
+            if let index = fresh.firstIndex(where: { $0.ref == old.ref }) {
+                next = index + 1
+            } else if unread.contains(old.pid) {
+                fresh.insert(old, at: next)
+                next += 1
+            }
+        }
         let selected = selection
         entries = fresh
         layout = SwitcherLayout(count: fresh.count, available: available, metrics: layout.metrics)

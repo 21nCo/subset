@@ -229,6 +229,20 @@ final class SwitcherViewModelTests: XCTestCase {
         XCTAssertEqual(model.selection, 1, "a list that fills again opens on the previous window")
     }
 
+    func testARefreshKeepsTheWindowsOfAppsThatDidNotAnswerWhereTheyWere() {
+        let windows = entries(6)
+        var model = SwitcherViewModel(entries: windows, available: wide)
+        model.select(2)
+        // App 1 (windows 2 and 3) timed out; App 0's window 1 closed.
+        model.refreshed([windows[0], windows[4], windows[5]], unread: [windows[2].pid])
+        XCTAssertEqual(model.entries, [windows[0], windows[2], windows[3], windows[4], windows[5]])
+        XCTAssertEqual(model.selectedEntry?.ref, windows[2].ref, "an unread window is not taken as gone")
+        // A read that answers for App 1 settles it.
+        model.refreshed([windows[0], windows[4], windows[5]])
+        XCTAssertEqual(model.entries, [windows[0], windows[4], windows[5]])
+        XCTAssertEqual(model.selectedEntry?.ref, windows[4].ref)
+    }
+
     func testARefreshRelaysOutTheGrid() {
         var model = SwitcherViewModel(entries: entries(60), available: wide)
         model.select(59)

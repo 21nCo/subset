@@ -11,7 +11,8 @@ import os
 /// An operation is pending until the list has been read again after its result: only that read shows whether a closed
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
-/// switcher at once.
+/// switcher at once. A hover after a waiting key waits behind it too, and selects the window it was over, not the place.
+/// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone.
 @MainActor
 final class SwitcherController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switcher")
@@ -20,8 +21,9 @@ final class SwitcherController {
     /// How long after an operation the list is read again, so a window that is closing has gone from Accessibility.
     static let refreshDelay: Duration = .milliseconds(250)
 
-    /// Reads the window list, most recently used first; blocks for at most 0.3 s (`WindowListController.refresh()`).
-    private let readWindows: () -> [WindowEntry]
+    /// Reads the window list, most recently used first, with the apps that did not answer; blocks for at most 0.3 s
+    /// (`WindowListController.refresh()`).
+    private let readWindows: () -> WindowList
     private let windowOperator: any WindowOperator
     let panel = SwitcherPanel()
     private(set) var model: SwitcherViewModel?
@@ -38,6 +40,8 @@ final class SwitcherController {
 
     private enum Deferred {
         case event(SwitchSession.Event)
+        /// Select this window, as a hover over it did, if it is still listed.
+        case select(HopCore.WindowRef)
         /// Commit the selection, or only this window (a click chose it) if it is still listed.
         case commit(HopCore.WindowRef?)
     }
@@ -47,12 +51,18 @@ final class SwitcherController {
     /// An operation found Hop without the Accessibility permission.
     var onNotPermitted: () -> Void = {}
 
-    init(readWindows: @escaping () -> [WindowEntry], windowOperator: any WindowOperator) {
+    init(readWindows: @escaping () -> WindowList, windowOperator: any WindowOperator) {
         self.readWindows = readWindows
         self.windowOperator = windowOperator
         panel.switcherView.onHover = { [unowned self] index in
-            guard let model, model.selection != index else { return }
-            update { $0.select(index) }
+            guard let model, model.entries.indices.contains(index) else { return }
+            if deferred.isEmpty {
+                if model.selection != index { update { $0.select(index) } }
+                return
+            }
+            // Only the last hover matters once it waits.
+            if case .select = deferred.last { deferred.removeLast() }
+            deferred.append(.select(model.entries[index].ref))
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
         panel.switcherView.onChoose = { [unowned self] window in
@@ -68,7 +78,7 @@ final class SwitcherController {
     func open() {
         reset()
         let screen = Self.screenUnderPointer()
-        let model = SwitcherViewModel(entries: readWindows(), available: screen?.visibleFrame.size ?? .zero)
+        let model = SwitcherViewModel(entries: readWindows().windows, available: screen?.visibleFrame.size ?? .zero)
         self.model = model
         self.screen = screen
         loadIcons()
@@ -159,6 +169,8 @@ final class SwitcherController {
         while pending == 0, !deferred.isEmpty {
             switch deferred.removeFirst() {
             case let .event(event): run(event)
+            case let .select(window):
+                if let index = model?.entries.firstIndex(where: { $0.ref == window }) { update { $0.select(index) } }
             case let .commit(window): commit(only: window)
             }
         }
@@ -178,8 +190,8 @@ final class SwitcherController {
 
     private func refresh() {
         guard model != nil else { return }
-        let windows = readWindows()
-        model?.refreshed(windows)
+        let list = readWindows()
+        model?.refreshed(list.windows, unread: Set(list.skippedApps.map(\.pid)))
         loadIcons()
         render()
     }

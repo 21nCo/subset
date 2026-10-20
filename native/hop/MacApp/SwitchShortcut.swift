@@ -32,7 +32,7 @@ final class SwitchShortcutController {
 
     convenience init(windowList: WindowListController, store: ShortcutStore = ShortcutStore()) {
         self.init(
-            switcher: SwitcherController(readWindows: { windowList.refresh().windows }, windowOperator: windowList.windowOperator),
+            switcher: SwitcherController(readWindows: { windowList.refresh() }, windowOperator: windowList.windowOperator),
             store: store
         )
     }

@@ -22,7 +22,7 @@ final class SwitchShortcutTests: XCTestCase {
         let switcher = SwitcherController(readWindows: { [unowned self] in
             reads += 1
             Thread.sleep(forTimeInterval: 0.3)
-            return windows
+            return WindowList(windows: windows)
         }, windowOperator: recorder)
         let defaults = UserDefaults(suiteName: "SwitchShortcutTests.\(UUID().uuidString)")!
         return (SwitchShortcutController(switcher: switcher, store: ShortcutStore(defaults: defaults), isTrusted: { true }), switcher)
