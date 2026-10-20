@@ -79,7 +79,7 @@ public struct OriginExplanation: Sendable {
     public func describe(_ evidence: AttributionEvidence) -> String {
         switch evidence {
         case let .executable(path, name):
-            return path.map { "Runs `\(format.path($0))`" } ?? "No executable path; named \(name)"
+            return path.map { "Runs `\(format.path($0))`" } ?? "No executable path; named \(OriginGroup.displayName(name))"
         case let .appBundle(path):
             return "Inside `\(bundleName(path))`"
         case let .systemLocation(prefix, platformBinary):

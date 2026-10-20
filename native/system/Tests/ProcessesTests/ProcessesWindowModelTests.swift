@@ -324,6 +324,27 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertTrue(model.rows.contains { $0.id == .group(entry.id) }, "the filter matches the name shown")
     }
 
+    func testAnUnnamedProcessIsCalledUnnamedWhereverItIsNamed() throws {
+        let model = try model(ProcessFixtures.workload() + [
+            FixtureProcess(pid: 9, path: nil, name: "", memory: 2 << 30),
+            FixtureProcess(pid: 10, ppid: 9, path: "/Users/me/bin/child", memory: 1 << 20, signature: ProcessFixtures.unsigned)
+        ])
+        let unnamed = RowID.process(ProcessFixtures.identity(9))
+
+        model.layer = .vendor
+        model.filter = "unnamed"
+        XCTAssertTrue(model.rows.contains { $0.id == unnamed }, "the filter matches the name the row shows")
+        XCTAssertEqual(model.rows.first { $0.id == unnamed }?.name, "Unnamed")
+        model.filter = ""
+
+        model.layer = .app
+        model.selection = .process(ProcessFixtures.identity(10))
+        XCTAssertEqual(model.detail?.fields.first { $0.label == "Parent" }?.value, "Unnamed, pid 9")
+        model.selection = unnamed
+        let evidence = try XCTUnwrap(model.detail?.placement?.evidence)
+        XCTAssertTrue(evidence.contains("No executable path; named Unnamed"), "\(evidence)")
+    }
+
     func testGroupPathsAreOfferedOnlyForAFileOrFolder() throws {
         let model = try model()
 
@@ -460,6 +481,21 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.layer, .app)
         XCTAssertEqual(model.selection, .process(ProcessFixtures.identity(203)))
         XCTAssertEqual(model.filter, "node", "a filter is cleared only to show a group that exists")
+    }
+
+    func testRevealingASubgroupHiddenByAFilterShowsAndSelectsIt() throws {
+        // A tool under claude outside its project, so the filter opens the agent group for it but not the subgroup.
+        let model = try model(ProcessFixtures.workload()
+            + [FixtureProcess(pid: 206, ppid: 202, path: "/Users/me/bin/tool", memory: 1 << 20, signature: ProcessFixtures.unsigned)])
+        let subgroup = OriginGroupID(.agent(name: "claude"), subgroup: "/Users/me/dev/subset")
+        model.filter = "tool"
+        XCTAssertTrue(model.isExpanded(agentGroup))
+        XCTAssertFalse(model.rows.contains { $0.id == .group(subgroup) })
+
+        model.reveal(subgroup)
+        XCTAssertEqual(model.filter, "")
+        XCTAssertEqual(model.selection, .group(subgroup))
+        XCTAssertTrue(model.rows.contains { $0.id == .group(subgroup) }, "the agent group stays open once the filter is cleared")
     }
 
     func testTheMenusTopGroupRowsStandStillWhileTheMenuIsOpen() throws {

@@ -89,7 +89,7 @@ public struct ProcessRow: Identifiable, Equatable, Sendable {
     static func process(_ process: ProcessFacts, depth: Int, format: UsageFormat) -> ProcessRow {
         let unmeasured = process.restricted ? "Restricted" : "–"
         let spokenUnmeasured = process.restricted ? "restricted by macOS" : "not measured"
-        let name = process.name.isEmpty ? "Unnamed" : process.name
+        let name = process.displayName
         return ProcessRow(
             id: .process(process.identity), depth: depth, name: name, detail: "pid \(process.pid)",
             isExpandable: false, isExpanded: false,
@@ -115,6 +115,12 @@ extension OriginGroup {
     static func displayName(_ name: String) -> String { name.isEmpty ? "Unnamed" : name }
 }
 
+extension ProcessFacts {
+    /// The name the window shows for a process, in its row, the detail pane, the filter, and evidence that names it.
+    /// A process with no name is shown as "Unnamed".
+    public var displayName: String { OriginGroup.displayName(name) }
+}
+
 /// Sort order, largest first. A missing value sorts last; ties go by name, then identity, so the order is stable
 /// from sample to sample.
 enum UsageOrder {
@@ -136,7 +142,7 @@ enum UsageOrder {
             case .orderedAscending: return false
             case .orderedDescending: return true
             case .orderedSame:
-                let byName = lhs.name.localizedStandardCompare(rhs.name)
+                let byName = lhs.displayName.localizedStandardCompare(rhs.displayName)
                 return byName == .orderedSame ? lhs.identity < rhs.identity : byName == .orderedAscending
             }
         }

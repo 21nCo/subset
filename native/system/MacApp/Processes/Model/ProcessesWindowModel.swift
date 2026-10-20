@@ -171,9 +171,14 @@ public final class ProcessesWindowModel {
     public func reveal(_ id: OriginGroupID) {
         layer = id.layer
         guard groups[id] != nil else { return }
-        if id.subgroup != nil { setExpanded(id.parent, true) }
-        selection = .group(id)
+        // Opened by the user rather than the filter, so it stays open when the filter is cleared.
+        if id.subgroup != nil {
+            expanded.insert(id.parent)
+            filterCollapsed.remove(id.parent)
+        }
+        build()
         if !rows.contains(where: { $0.id == .group(id) }) { filter = "" }
+        selection = .group(id)
     }
 
     // MARK: Detail
@@ -231,7 +236,7 @@ public final class ProcessesWindowModel {
             DetailField("Energy used", process.energy.map(format.energy) ?? unmeasured)
         ]
         return RowDetail(
-            title: process.name.isEmpty ? "Unnamed" : process.name, subtitle: "Process \(process.pid)", placement: placement, fields: fields,
+            title: process.displayName, subtitle: "Process \(process.pid)", placement: placement, fields: fields,
             path: process.executablePath, containerRuntime: nil, process: process
         )
     }
@@ -282,7 +287,7 @@ public final class ProcessesWindowModel {
 
     private func index(_ sample: ProcessesSample) {
         facts = Dictionary(sample.snapshot.processes.map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
-        names = Dictionary(sample.snapshot.processes.map { ($0.pid, $0.name) }, uniquingKeysWith: { first, _ in first })
+        names = Dictionary(sample.snapshot.processes.map { ($0.pid, $0.displayName) }, uniquingKeysWith: { first, _ in first })
         var groups: [OriginGroupID: OriginGroup] = [:]
         for layer in AttributionLayer.allCases {
             for group in sample.attribution.groups(layer) {
@@ -369,7 +374,7 @@ public final class ProcessesWindowModel {
         let childQuery = query.flatMap { group.displayName.localizedCaseInsensitiveContains($0) ? nil : $0 }
         let inSubgroup = Set(group.subgroups.flatMap(\.members))
         let processes = group.members.filter { !inSubgroup.contains($0) }.compactMap { facts[$0] }
-            .filter { process in childQuery.map { process.name.localizedCaseInsensitiveContains($0) } ?? true }
+            .filter { process in childQuery.map { process.displayName.localizedCaseInsensitiveContains($0) } ?? true }
         let subgroups = group.subgroups.filter { subgroup in childQuery.map { matches(subgroup, $0) } ?? true }
         if childQuery != nil {
             guard !processes.isEmpty || !subgroups.isEmpty else { return }
@@ -391,7 +396,7 @@ public final class ProcessesWindowModel {
 
     private func matches(_ group: OriginGroup, _ query: String) -> Bool {
         group.displayName.localizedCaseInsensitiveContains(query)
-            || group.members.contains { facts[$0]?.name.localizedCaseInsensitiveContains(query) == true }
+            || group.members.contains { facts[$0]?.displayName.localizedCaseInsensitiveContains(query) == true }
     }
 }
 
