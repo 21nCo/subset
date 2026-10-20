@@ -107,6 +107,40 @@ final class AttributionTests: XCTestCase {
                        "a platform signature places a binary in a cryptex on the Preboot volume")
     }
 
+    func testOnlyAPlatformSignaturePlacesABinaryInAFirmlinkedDataFolder() {
+        let filter = "/usr/libexec/cups/filter/vendorfilter"
+        let processes = ghosttySession() + [
+            fact(610, path: filter, signature: nil),
+            fact(611, path: "/usr/libexec/cups/backend/vendorbackend", signature: nil, signatureSignal: .unavailable(.denied, source: .codeSigning)),
+            fact(612, ppid: 502, path: "/System/Library/Caches/tool", signature: nil, responsible: 500, cwd: "/Users/me", tty: "ttys001"),
+            fact(613, path: "/usr/libexec/cups/filter/rastertopdf", signature: apple),
+            fact(614, path: "/usr/libexec/cupsd-like", signature: nil)
+        ]
+
+        let result = attribute(processes)
+
+        XCTAssertEqual(placement(result, 610).app.group, OriginGroupID(.unattributed(executable: filter)),
+                       "an unread signature does not make a CUPS filter on the Data volume Apple's")
+        XCTAssertEqual(placement(result, 611).app.rule, .unattributed)
+        XCTAssertEqual(placement(result, 612).app.group, OriginGroupID(.terminal),
+                       "nor a binary in a firmlinked cache folder")
+        XCTAssertEqual(placement(result, 613).app.evidence, [.systemLocation(prefix: "/usr/libexec", platformBinary: true)],
+                       "a platform signature places a CUPS filter")
+        XCTAssertEqual(placement(result, 614).app.rule, .macOS, "the prefixes are bounded by path components")
+    }
+
+    /// Every Data-volume folder this Mac firmlinks under a rule-2 location is one of the unsealed locations.
+    func testEveryFirmlinkUnderASystemLocationIsUnsealed() throws {
+        guard let firmlinks = try? String(contentsOfFile: "/usr/share/firmlinks", encoding: .utf8) else {
+            throw XCTSkip("no /usr/share/firmlinks on this Mac")
+        }
+        let folders = firmlinks.split(separator: "\n").compactMap { $0.split(separator: "\t").first.map { "\($0)/" } }
+        XCTAssertFalse(folders.isEmpty)
+        for folder in folders where AttributionNames.systemPrefixes.contains(where: { folder.hasPrefix($0) }) {
+            XCTAssertTrue(AttributionNames.unsealedSystemPrefixes.contains { folder.hasPrefix($0) }, folder)
+        }
+    }
+
     // MARK: Rule 3, container VM hook
 
     func testAContainerVMFallsThroughToItsResponsibleAppUntilTheHookRecognizesIt() {

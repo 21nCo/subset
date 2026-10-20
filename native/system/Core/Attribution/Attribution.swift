@@ -391,8 +391,8 @@ private final class AttributionPass {
     }
 
     /// Whether rule 2 may place a binary at this system path: a platform signature anywhere under the rule's
-    /// locations, or a signature that is not yet read on the sealed system volume only. A known non-platform
-    /// signature never does.
+    /// locations, or a signature that is not yet read only outside the writable, unsealed locations among them. A
+    /// known non-platform signature never does.
     static func isPlatformLocation(_ path: String, platformBinary: Bool?) -> Bool {
         switch platformBinary {
         case true?: true

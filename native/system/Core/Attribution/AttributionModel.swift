@@ -354,9 +354,22 @@ public enum AttributionNames {
     /// Rule 2: the system locations.
     public static let systemPrefixes = ["/System/", "/usr/libexec/", "/usr/sbin/", "/usr/bin/", "/sbin/"]
 
-    /// Rule 2: the volumes mounted under `/System` that are writable and not sealed (Data, Preboot, …). Only an
-    /// affirmative platform signature places a binary there.
-    public static let unsealedSystemPrefixes = ["/System/Volumes/"]
+    /// Rule 2: the writable, unsealed locations under the system locations. Only an affirmative platform signature
+    /// places a binary there. These are the volumes mounted under `/System` (Data, Preboot, …) and the Data-volume
+    /// folders that `/usr/share/firmlinks` links into the system volume, which the kernel reports by their
+    /// firmlinked path (third-party CUPS filters and backends in `/usr/libexec/cups`, downloaded assets and caches
+    /// under `/System/Library`).
+    public static let unsealedSystemPrefixes = [
+        "/System/Volumes/",
+        "/System/Library/Caches/",
+        "/System/Library/Assets/",
+        "/System/Library/PreinstalledAssets/",
+        "/System/Library/AssetsV2/",
+        "/System/Library/PreinstalledAssetsV2/",
+        "/System/Library/CoreServices/CoreTypes.bundle/Contents/Library/",
+        "/System/Library/Speech/",
+        "/usr/libexec/cups/"
+    ]
 
     /// Rule 8: Homebrew's prefixes.
     public static let homebrewPrefixes = ["/opt/homebrew/", "/usr/local/Cellar/"]
