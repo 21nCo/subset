@@ -84,9 +84,9 @@ private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
         let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
-        // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key.
+        // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key with ⌘.
         let character = kind == .keyDown && modifiers.contains(.command)
-            ? NSEvent(cgEvent: event)?.charactersIgnoringModifiers?.first
+            ? KeyLayout.current()?.commandCharacter(keyCode: keyCode)
             : nil
         return .key(KeyEvent(kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat, character: character))
     default:

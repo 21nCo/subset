@@ -13,9 +13,10 @@ public struct KeyEvent: Sendable, Equatable {
     public var modifiers: ModifierMask
     /// Whether this key-down is the keyboard's auto-repeat of a key held down, not a new press.
     public var isRepeat: Bool
-    /// The character the key types on the current keyboard layout without modifiers (ASCII lowercased), or nil when
-    /// it is unknown or the key types none. Operation keys (⌘W) match it, so they follow the layout as menu shortcuts
-    /// do; only a key without an ASCII character (a non-Latin layout, or none) falls back to its US position.
+    /// The character the key gives on the current keyboard layout with ⌘ alone (ASCII lowercased), or nil when it is
+    /// unknown or the key gives none. Operation keys (⌘W) match it, so they follow the layout as menu key equivalents
+    /// do; only a key without an ASCII character (a layout whose ⌘ map is non-Latin, or none) falls back to its US
+    /// position.
     public var character: Character?
 
     public init(
@@ -35,9 +36,9 @@ public struct KeyEvent: Sendable, Equatable {
 
 /// The keys that act on the selected window while a switch is active, pressed with ⌘ and the holding modifier.
 public enum OperationKey {
-    /// The operation for a key: by the ASCII character the layout gives it, so a Latin layout's punctuation on the US
-    /// M, W, H or Q position (AZERTY's comma, Dvorak's comma and apostrophe) matches nothing; by its US key position
-    /// only when the layout gives no ASCII character (a Cyrillic layout, for example, or a dead key).
+    /// The operation for a key: by the ASCII character the layout gives it with ⌘, so punctuation on the US M, W, H
+    /// or Q position (AZERTY's comma, Dvorak's comma and apostrophe) matches nothing; by its US key position only when
+    /// there is no ASCII character.
     public static func operation(character: Character?, keyCode: UInt16) -> WindowOperation? {
         guard let character, character.isASCII else { return byKeyCode[keyCode] }
         return byLetter[character]
