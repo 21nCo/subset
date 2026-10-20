@@ -9,6 +9,14 @@ import XCTest
 final class LiveAttributionTests: XCTestCase {
     func testEveryLiveProcessIsPlacedOncePerLayer() throws {
         let launchd = LaunchdJobIndex()
+        launchd.refreshIfChanged()
+        let plists = LaunchdFolders.live().plistFolders.flatMap { folder in
+            ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".plist") }
+        }
+        if !plists.isEmpty {
+            XCTAssertFalse(launchd.jobs.isEmpty && launchd.unreadablePlists.isEmpty && launchd.scanFailures.isEmpty,
+                           "the index read the \(plists.count) job plists")
+        }
         var sampler = Sampler(source: LibprocProcessSource(), origin: OriginSignalReader.live())
         _ = try sampler.sample()
         let processes = try sampler.sample().processes

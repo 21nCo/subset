@@ -181,7 +181,8 @@ private final class AttributionPass {
         if let bundle = bundles[index] {
             candidates.append(Candidate(rule: .appBundle, origin: .app(bundlePath: bundle), evidence: [.appBundle(path: bundle)]))
         }
-        if let path, let prefix = AttributionNames.systemPrefixes.first(where: { path.hasPrefix($0) }), process.isPlatformBinary != false {
+        if let path, let prefix = AttributionNames.systemPrefixes.first(where: { path.hasPrefix($0) }),
+           Self.isPlatformLocation(path, platformBinary: process.isPlatformBinary) {
             let label = process.launchdLabel
             candidates.append(Candidate(
                 rule: .macOS, origin: .macOS, subgroup: label,
@@ -387,6 +388,17 @@ private final class AttributionPass {
         if let file = parts.last, AttributionNames.codingAgents.contains(file) { return file }
         if parts.count == 3, parts[1] == "versions", AttributionNames.codingAgents.contains(parts[0]) { return parts[0] }
         return nil
+    }
+
+    /// Whether rule 2 may place a binary at this system path: a platform signature anywhere under the rule's
+    /// locations, or a signature that is not yet read on the sealed system volume only. A known non-platform
+    /// signature never does.
+    static func isPlatformLocation(_ path: String, platformBinary: Bool?) -> Bool {
+        switch platformBinary {
+        case true?: true
+        case false?: false
+        case nil: !AttributionNames.unsealedSystemPrefixes.contains { path.hasPrefix($0) }
+        }
     }
 
     /// The formula (or cask) a Homebrew path names: `/opt/homebrew/{Cellar,opt,Caskroom}/<name>/…` or

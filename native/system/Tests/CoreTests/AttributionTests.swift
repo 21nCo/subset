@@ -83,6 +83,30 @@ final class AttributionTests: XCTestCase {
         XCTAssertEqual(placement(result, 300).launchSource.group, OriginGroupID(.system))
     }
 
+    func testOnlyAPlatformSignaturePlacesABinaryOnAWritableSystemVolume() {
+        let tool = "/System/Volumes/Data/Users/me/bin/tool"
+        var unread = fact(601, ppid: 600, path: tool, signature: nil)
+        unread.origin = nil
+        let processes = ghosttySession() + [
+            fact(503, ppid: 502, path: tool, signature: nil, responsible: 500, cwd: "/Users/me", tty: "ttys001"),
+            fact(600, path: "/Users/me/.local/bin/claude", signature: anthropic),
+            unread,
+            fact(602, path: "/usr/libexec/x", signature: nil),
+            fact(603, path: "/System/Volumes/Preboot/Cryptexes/OS/usr/libexec/y", signature: apple)
+        ]
+
+        let result = attribute(processes)
+
+        XCTAssertEqual(placement(result, 503).app.group, OriginGroupID(.terminal),
+                       "an unavailable signature does not make a binary on the Data volume Apple's")
+        XCTAssertEqual(placement(result, 601).app.group, OriginGroupID(.agent(name: "claude")),
+                       "nor do origin signals that were never read")
+        XCTAssertEqual(placement(result, 602).app.evidence, [.systemLocation(prefix: "/usr/libexec", platformBinary: nil)],
+                       "an unread signature still places a binary on the sealed system volume")
+        XCTAssertEqual(placement(result, 603).app.evidence, [.systemLocation(prefix: "/System", platformBinary: true)],
+                       "a platform signature places a binary in a cryptex on the Preboot volume")
+    }
+
     // MARK: Rule 3, container VM hook
 
     func testAContainerVMFallsThroughToItsResponsibleAppUntilTheHookRecognizesIt() {

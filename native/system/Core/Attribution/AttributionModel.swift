@@ -351,8 +351,12 @@ public enum AttributionNames {
         KnownTerminal(name: "Cursor", bundleName: "Cursor.app", isEditor: true)
     ]
 
-    /// Rule 2: the sealed system locations.
+    /// Rule 2: the system locations.
     public static let systemPrefixes = ["/System/", "/usr/libexec/", "/usr/sbin/", "/usr/bin/", "/sbin/"]
+
+    /// Rule 2: the volumes mounted under `/System` that are writable and not sealed (Data, Preboot, …). Only an
+    /// affirmative platform signature places a binary there.
+    public static let unsealedSystemPrefixes = ["/System/Volumes/"]
 
     /// Rule 8: Homebrew's prefixes.
     public static let homebrewPrefixes = ["/opt/homebrew/", "/usr/local/Cellar/"]
