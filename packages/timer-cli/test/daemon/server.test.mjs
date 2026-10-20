@@ -253,8 +253,12 @@ test('a subscriber that stops reading is dropped, and the daemon carries on', as
   stalled.write('GET /v1/events HTTP/1.1\r\nhost: daemon\r\n\r\n');
   stalled.pause();
   await eventually(() => daemon.subscriberCount === 1);
-  // Heartbeats queue behind the undrained state frame until it has waited more than 30 s.
+  // Heartbeats queue behind the undrained state frame until it has waited more than 30 s, which a
+  // wall clock set an hour forward does not shorten.
+  clock.jump(3_600_000);
   clock.advance(30_000);
+  // A request round trip gives a dropped subscriber's connection time to close.
+  assert.equal((await call('GET', '/v1/daemon')).status, 200);
   assert.equal(daemon.subscriberCount, 1);
   clock.advance(15_000);
   await eventually(() => daemon.subscriberCount === 0);

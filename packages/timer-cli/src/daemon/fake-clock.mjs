@@ -2,7 +2,7 @@
  * A manual clock and timer source with the shape of `systemClock`, for tests. Like Node's timers,
  * timeouts run on a monotonic timeline, separate from the wall clock `now` returns: `advance`
  * moves both forward and fires each due timeout in order at its own time, while `jump` moves only
- * the wall clock, as a sleeping computer or a changed system clock does.
+ * the wall clock, as a sleeping computer or a changed system clock does. `monotonic` reads the timeline.
  */
 export function createFakeClock(start = Date.UTC(2026, 0, 1)) {
   let wall = start;
@@ -26,6 +26,7 @@ export function createFakeClock(start = Date.UTC(2026, 0, 1)) {
 
   return {
     now: () => wall,
+    monotonic: () => monotonic,
     setTimeout(callback, ms) {
       const id = ++sequence;
       pending.set(id, { at: monotonic + Math.max(0, Math.floor(Number(ms) || 0)), callback });

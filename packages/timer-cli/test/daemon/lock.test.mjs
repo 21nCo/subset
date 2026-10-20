@@ -13,6 +13,7 @@ function deadPid() {
 }
 
 const TOKEN = 'a'.repeat(32);
+const OTHER = 'b'.repeat(32);
 const LOCK_CONTENT = new RegExp(`^${process.pid}\n[0-9a-f]{32}\n$`);
 
 function lockPath(t) {
@@ -250,16 +251,22 @@ test('a lock is never seen before its pid and token are in it', async (t) => {
 test('a takeover marker whose holder is gone is removed at once, as are files it left', async (t) => {
   const path = lockPath(t);
   const dead = deadPid();
-  writeFileSync(path, `${dead}\n`);
-  writeFileSync(`${path}.takeover`, `${dead}\n${TOKEN}\n`);
-  const leftovers = [`${path}.${dead}-${TOKEN}.new`, `${path}.takeover.${dead}-${TOKEN}.dead`];
+  writeFileSync(path, `${dead}\n${TOKEN}\n`);
+  writeFileSync(`${path}.takeover.${TOKEN}`, `${dead}\n${OTHER}\n`);
+  const leftovers = [
+    `${path}.${dead}-${TOKEN}.new`,
+    `${path}.takeover.${TOKEN}.${dead}-${OTHER}.new`,
+    // Markers for generations their files no longer hold: nobody acts on them again.
+    `${path}.takeover.${OTHER}`,
+    `${path}.takeover.${OTHER}.takeover.${TOKEN}`
+  ];
   const live = `${path}.${process.ppid}-${TOKEN}.new`;
-  for (const file of [...leftovers, live]) writeFileSync(file, '');
+  for (const file of [...leftovers, live]) writeFileSync(file, `${process.ppid}\n${TOKEN}\n`);
   const started = Date.now();
   const lock = await acquireLock(path);
   assert.equal(lock.acquired, true);
   assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
-  assert.equal(existsSync(`${path}.takeover`), false);
+  assert.equal(existsSync(`${path}.takeover.${TOKEN}`), false);
   assert.deepEqual(leftovers.filter((file) => existsSync(file)), []);
   // One a live process is still writing is left to it.
   assert.equal(existsSync(live), true);
@@ -267,50 +274,41 @@ test('a takeover marker whose holder is gone is removed at once, as are files it
 
 test('a takeover marker whose holder is alive is kept however long it is stopped, unless the pid was reused', async (t) => {
   const path = lockPath(t);
-  const stale = `${deadPid()}\n`;
+  const stale = `${deadPid()}\n${TOKEN}\n`;
   writeFileSync(path, stale);
-  const marker = `${path}.takeover`;
-  const held = `${process.ppid}\n${TOKEN}\n`;
+  const marker = `${path}.takeover.${TOKEN}`;
+  const held = `${process.ppid}\n${OTHER}\n`;
   writeFileSync(marker, held);
   const writtenAt = Date.now() - 60_000;
   utimesSync(marker, writtenAt / 1000, writtenAt / 1000);
   // Its holder started before the marker: it is a process stopped mid-takeover, and acts when it resumes.
   const stopped = await acquireLock(path, { startTimeOf: () => writtenAt - 1_000 });
-  assert.equal(stopped.acquired, false);
+  assert.deepEqual(stopped, { acquired: false, holder: null });
   assert.equal(readFileSync(path, 'utf8'), stale);
   assert.equal(readFileSync(marker, 'utf8'), held);
   // It started after the marker: the holder died and the system gave its pid to another process.
   const reused = await acquireLock(path, { startTimeOf: () => writtenAt + 30_000 });
   assert.equal(reused.acquired, true);
-  assert.equal(existsSync(marker), false);
+  assert.deepEqual(readdirSync(join(path, '..')), ['daemon.lock']);
 });
 
-test('removing an abandoned takeover marker puts back one another process claimed in the meantime', async (t) => {
+test('a process that removes a stale lock on its last try still creates its own', async (t) => {
   const path = lockPath(t);
-  const stale = `${deadPid()}\n`;
-  writeFileSync(path, stale);
-  const marker = `${path}.takeover`;
-  writeFileSync(marker, `${deadPid()}\n${TOKEN}\n`);
-  const claimed = `${process.ppid}\n${'b'.repeat(32)}\n`;
-  let swapped = false;
+  writeFileSync(path, `${deadPid()}\n${TOKEN}\n`);
+  let tries = 0;
   const fs = {
     ...nodeFs,
-    renameSync(from, to) {
-      if (from === marker && !swapped) {
-        // After this process read the abandoned marker, another removed it and claimed its own.
-        swapped = true;
-        unlinkSync(marker);
-        writeFileSync(marker, claimed);
-      }
-      return nodeFs.renameSync(from, to);
+    linkSync(from, to) {
+      if (to === path) tries++;
+      // Another process holds the takeover until this one's last try.
+      else if (tries < 50) throw Object.assign(new Error('file exists'), { code: 'EEXIST' });
+      return nodeFs.linkSync(from, to);
     }
   };
   const lock = await acquireLock(path, { fs });
-  assert.equal(swapped, true);
-  assert.equal(lock.acquired, false);
-  assert.equal(readFileSync(marker, 'utf8'), claimed);
-  assert.equal(readFileSync(path, 'utf8'), stale);
-  assert.deepEqual(readdirSync(join(path, '..')).filter((name) => name.endsWith('.dead') || name.endsWith('.new')), []);
+  assert.equal(tries, 51);
+  assert.equal(lock.acquired, true);
+  assert.equal(lock.isHeld(), true);
 });
 
 test('a pid write that fails leaves no lock behind, and one that is short is completed', async (t) => {

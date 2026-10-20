@@ -57,7 +57,9 @@ export class LockLostError extends Error {
  * True when the lock names a live pid that cannot be the daemon that wrote it: nothing answers on
  * the socket, and the process with that pid started after the lock was written, so the system gave
  * the pid of a daemon that died to another process. A daemon that is alive keeps its lock however
- * old it is and whether or not its socket is there.
+ * old it is and whether or not its socket is there, unless (on Linux, where `ps` counts from boot)
+ * the wall clock was set forward past the lock's age while its socket is missing; it then notices
+ * the loss within a heartbeat and exits without writing.
  */
 export async function isReusedPid(paths, holder, { startTimeOf = processStartTime } = {}) {
   if (!holder || holder.pid === null) return false;
@@ -147,6 +149,10 @@ export async function startDaemon({
   let heartbeatHandle = null;
   let socketIno = null;
 
+  // How long a frame has waited is measured on a monotonic clock, so a changed wall clock neither
+  // drops a subscriber that is reading nor keeps one that stopped.
+  const monotonicNow = () => (clock.monotonic ?? clock.now)();
+  const elapsedSince = (start) => monotonicNow() - start;
   const send = (response, event, data) => {
     const subscriber = subscribers.get(response);
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -157,10 +163,10 @@ export async function startDaemon({
     if (event !== 'alert') subscriber.queue = subscriber.queue.filter((queued) => queued.event !== event);
     subscriber.queue.push({ event, frame });
     const alertBytes = subscriber.queue.reduce((total, queued) => total + (queued.event === 'alert' ? queued.frame.length : 0), 0);
-    if (clock.now() - subscriber.waitingSince > SUBSCRIBER_STALL_MS || alertBytes > MAX_QUEUED_ALERT_BYTES) response.destroy();
+    if (elapsedSince(subscriber.waitingSince) > SUBSCRIBER_STALL_MS || alertBytes > MAX_QUEUED_ALERT_BYTES) response.destroy();
   };
   function waitForDrain(response, subscriber) {
-    subscriber.waitingSince = clock.now();
+    subscriber.waitingSince = monotonicNow();
     response.once('drain', () => {
       subscriber.waitingSince = null;
       while (subscriber.queue.length) {

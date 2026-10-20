@@ -9,6 +9,7 @@ export const REARM_MS = 60_000;
 /** The production clock and timer source; tests inject a fake with the same shape. */
 export const systemClock = {
   now: () => Date.now(),
+  monotonic: () => performance.now(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (handle) => clearTimeout(handle)
 };
