@@ -16,11 +16,12 @@ import { tempDataDir, within } from './helpers.mjs';
 
 const CONTENDER = fileURLToPath(new URL('./lock-contender.mjs', import.meta.url));
 const LOCK = '^daemon\\.lock$';
-// Stops a process recovering an abandoned marker just before it acts on what it read.
-const RECOVERING = [{ op: 'renameSync', name: 'takeover' }, { op: 'openSync', name: 'takeover\\..*takeover\\.' }];
-// Stops a process that removed an abandoned marker aside just before it puts back what it found there.
-const RESTORING = [{ op: 'linkSync', name: '\\.dead$' }];
-const at = (id, points) => points.map((point) => ({ id, ...point }));
+// Stops a process that read an abandoned marker just before its first act on what it read, and
+// again before its second, whatever form they take. It counts the calls that create, link or move a
+// takeover file: the first two are its claim of the lock's own marker, refused while the abandoned
+// one is there.
+const TAKEOVER_FILE = { op: 'openSync|linkSync|renameSync', name: '^daemon\\.lock\\.takeover' };
+const RECOVERING = [{ id: 'a1', ...TAKEOVER_FILE, nth: 3 }, { id: 'a2', ...TAKEOVER_FILE, nth: 4 }];
 
 function deadPid() {
   return spawnSync(process.execPath, ['-e', '']).pid;
@@ -81,7 +82,7 @@ test('recovering an abandoned marker never lets a process that read it earlier d
 
   // A reads the abandoned marker and stops before acting on it.
   const a = contender();
-  assert.deepEqual(await a.run('acquire', [...at('a1', RECOVERING), ...at('a2', RESTORING)]), { paused: 'a1' });
+  assert.deepEqual(await a.run('acquire', RECOVERING), { paused: 'a1' });
   // B removes the abandoned marker, claims the removal and stops just before removing the stale lock.
   const b = contender();
   assert.deepEqual(await b.run('acquire', [{ id: 'b', op: 'unlinkSync', name: LOCK }]), { paused: 'b' });
@@ -105,7 +106,7 @@ test('a live owner releasing while another process takes over a reused pid never
   await crashMidRemoval(contender, 'removeStale');
 
   const a = contender();
-  assert.deepEqual(await a.run('removeStale', [...at('a1', RECOVERING), ...at('a2', RESTORING)]), { paused: 'a1' });
+  assert.deepEqual(await a.run('removeStale', RECOVERING), { paused: 'a1' });
   // R recovers the abandoned marker (and, judging the owner's pid reused, may remove its lock).
   const r = contender();
   assert.equal((await r.run('removeStale')).done, 'removeStale');
@@ -128,7 +129,7 @@ test('a marker abandoned while an abandoned marker was being removed is recovere
   await crashMidRemoval(contender, 'acquire');
   // This one dies while removing the first abandoned marker.
   const crashed = contender();
-  const recovering = [{ id: 'y', op: 'unlinkSync', name: '^daemon\\.lock\\.takeover(\\.[0-9a-f]{32})?$' }, { id: 'y', op: 'renameSync', name: 'takeover' }];
+  const recovering = [{ id: 'y', op: 'unlinkSync', name: '^daemon\\.lock\\.takeover\\.[0-9a-f]{32}$' }];
   assert.deepEqual(await crashed.run('acquire', recovering), { paused: 'y' });
   await crashed.kill();
 

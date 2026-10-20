@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
@@ -253,21 +253,22 @@ test('a takeover marker whose holder is gone is removed at once, as are files it
   const dead = deadPid();
   writeFileSync(path, `${dead}\n${TOKEN}\n`);
   writeFileSync(`${path}.takeover.${TOKEN}`, `${dead}\n${OTHER}\n`);
-  const leftovers = [
-    `${path}.${dead}-${TOKEN}.new`,
-    `${path}.takeover.${TOKEN}.${dead}-${OTHER}.new`,
-    // Markers for generations their files no longer hold: nobody acts on them again.
-    `${path}.takeover.${OTHER}`,
-    `${path}.takeover.${OTHER}.takeover.${TOKEN}`
-  ];
+  const [inert, inertNext] = ['c', 'd'].map((digit) => digit.repeat(32));
+  const leftovers = {
+    [`${path}.${dead}-${TOKEN}.new`]: `${dead}\n${TOKEN}\n`,
+    [`${path}.takeover.${TOKEN}.${dead}-${OTHER}.new`]: `${dead}\n${OTHER}\n`,
+    // A marker for a generation no file holds, and the marker for removing it: nobody acts on them again.
+    [`${path}.takeover.${inert}`]: `${process.ppid}\n${inertNext}\n`,
+    [`${path}.takeover.${inertNext}`]: `${process.ppid}\n${'e'.repeat(32)}\n`
+  };
   const live = `${path}.${process.ppid}-${TOKEN}.new`;
-  for (const file of [...leftovers, live]) writeFileSync(file, `${process.ppid}\n${TOKEN}\n`);
+  for (const [file, content] of Object.entries({ ...leftovers, [live]: `${process.ppid}\n${TOKEN}\n` })) writeFileSync(file, content);
   const started = Date.now();
   const lock = await acquireLock(path);
   assert.equal(lock.acquired, true);
   assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
   assert.equal(existsSync(`${path}.takeover.${TOKEN}`), false);
-  assert.deepEqual(leftovers.filter((file) => existsSync(file)), []);
+  assert.deepEqual(Object.keys(leftovers).filter((file) => existsSync(file)), []);
   // One a live process is still writing is left to it.
   assert.equal(existsSync(live), true);
 });
@@ -290,6 +291,51 @@ test('a takeover marker whose holder is alive is kept however long it is stopped
   const reused = await acquireLock(path, { startTimeOf: () => writtenAt + 30_000 });
   assert.equal(reused.acquired, true);
   assert.deepEqual(readdirSync(join(path, '..')), ['daemon.lock']);
+});
+
+test('a chain of markers abandoned by processes that each died removing the one before is recovered, under names of bounded length', async (t) => {
+  const path = lockPath(t);
+  const names = [];
+  const recording = (crash) => ({
+    ...nodeFs,
+    ...Object.fromEntries(['openSync', 'linkSync', 'renameSync'].map((op) => [op, (...args) => {
+      for (const arg of args.slice(0, op === 'openSync' ? 1 : 2)) names.push(basename(arg));
+      return nodeFs[op](...args);
+    }])),
+    unlinkSync(file) {
+      // The process dies as it removes the lock or an abandoned marker; only its own temporary file goes.
+      if (crash && !file.endsWith('.new')) throw Object.assign(new Error('crashed'), { code: 'CRASHED' });
+      return nodeFs.unlinkSync(file);
+    }
+  });
+  writeFileSync(path, `${deadPid()}\n${TOKEN}\n`);
+  // Each process leaves one more marker than the one before it found; more than any fixed depth.
+  for (let died = 0; died < 12; died++) {
+    await assert.rejects(acquireLock(path, { pid: deadPid(), fs: recording(true) }), (error) => error.code === 'CRASHED', `process ${died}`);
+  }
+  assert.equal(readdirSync(join(path, '..')).filter((name) => name.includes('.takeover.')).length, 12);
+  const started = Date.now();
+  const lock = await acquireLock(path, { fs: recording(false) });
+  assert.equal(lock.acquired, true);
+  assert.ok(Date.now() - started < 3_000, `${Date.now() - started} ms`);
+  assert.equal(lock.isHeld(), true);
+  assert.deepEqual(readdirSync(join(path, '..')), ['daemon.lock']);
+  const longest = Math.max(...names.map((name) => Buffer.byteLength(name)));
+  assert.ok(longest <= 255, `${longest} bytes`);
+});
+
+test('a lock file that cannot be written reports why, even when its cleanup fails too', async (t) => {
+  const path = lockPath(t);
+  const fs = {
+    ...nodeFs,
+    linkSync() {
+      throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+    },
+    unlinkSync() {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    }
+  };
+  await assert.rejects(acquireLock(path, { fs }), (error) => error.code === 'EIO');
 });
 
 test('a process that removes a stale lock on its last try still creates its own', async (t) => {

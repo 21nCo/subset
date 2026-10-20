@@ -12,15 +12,17 @@ const MARKER_CHECK_AGE_MS = 10_000;
 const PID_START_SLACK_MS = 2_000;
 const ATTEMPTS = 50;
 const RETRY_MS = 20;
-/** How often one removal claims a marker after removing an abandoned one, and how deep abandoned markers are followed. */
+/** How often one removal claims a marker after removing an abandoned one. */
 const MARKER_TRIES = 3;
-const MAX_MARKER_DEPTH = 8;
 /** `ps` by its absolute path, so a directory earlier in PATH cannot replace it. */
 const PS = '/bin/ps';
 /** A file this module writes beside the lock and removes once done: `<lock or marker>.<pid>-<token>.new`. */
 const LEFTOVER = /^(.+)\.(\d+)-[0-9a-f]{32}\.new$/;
-/** What follows the lock's name in a marker's: `.takeover.<generation>`, once per level. */
-const MARKER = /^(?:\.takeover\.[0-9a-f]{32})+$/;
+/**
+ * What follows the lock's name in a marker's: `.takeover.<generation>`. Every marker, including one
+ * for removing an abandoned marker, sits beside the lock under this one bounded name.
+ */
+const MARKER = /^\.takeover\.([0-9a-f]{32})$/;
 
 /** True when a process with this pid exists, including one owned by another user. */
 export function pidAlive(pid) {
@@ -99,6 +101,15 @@ function unlinkQuietly(path, fs = nodeFs) {
   }
 }
 
+/** Cleanup that never hides the error being handled; a file left behind is removed by the next daemon. */
+function unlinkBestEffort(path, fs) {
+  try {
+    fs.unlinkSync(path);
+  } catch {
+    // Left for removeLeftovers, once this pid is gone.
+  }
+}
+
 /**
  * Creates `path` holding `content`, whole from the moment it exists: the content is written and
  * fsynced to a file of its own, which is then hard-linked to `path`. Returns false when `path`
@@ -120,7 +131,7 @@ function createExclusive(path, content, pid, fs) {
     if (isCode(error, 'EEXIST')) return false;
     throw error;
   } finally {
-    unlinkQuietly(temp, fs);
+    unlinkBestEffort(temp, fs);
   }
 }
 
@@ -140,17 +151,22 @@ function isAbandoned(held, { isAlive, startTimeOf, now }) {
   return startedAt !== null && startedAt > held.mtimeMs + PID_START_SLACK_MS;
 }
 
+const markerOf = (lockPath, gen) => `${lockPath}.takeover.${gen}`;
+
 /**
  * Removes `path` (the lock, or a marker) while it still holds generation `gen`. The removal is done
- * holding `<path>.takeover.<gen>`, created exclusively and naming this process. Generations are
+ * holding `<lock>.takeover.<gen>`, created exclusively and naming this process. Generations are
  * never reused, and `path` only stops holding `gen` when the holder of that marker removes it, so
  * the holder's check and removal are one step: no other process can remove or replace `path` in
- * between, whatever it saw earlier. An abandoned marker is removed the same way, under a marker of
- * its own generation. Returns `removed`, `gone` (`path` no longer holds `gen`) or `busy` (a live
- * process holds the marker).
+ * between, whatever it saw earlier. An abandoned marker is removed the same way, under the marker
+ * of its own generation, beside the lock like every other: names stay the same length however
+ * many holders died removing abandoned markers, and the whole chain is followed. `seen` holds the
+ * generations on the chain, which only a corrupt marker could repeat. Returns `removed`, `gone`
+ * (`path` no longer holds `gen`) or `busy` (a live process holds the marker).
  */
-function removeGeneration(path, gen, context, depth = 0) {
-  const marker = `${path}.takeover.${gen}`;
+function removeGeneration(path, gen, context, seen = new Set()) {
+  const marker = markerOf(context.lockPath, gen);
+  seen.add(gen);
   for (let tries = 0; tries < MARKER_TRIES; tries++) {
     if (createExclusive(marker, ownerContent(context.pid, newToken()), context.pid, context.fs)) {
       try {
@@ -165,39 +181,51 @@ function removeGeneration(path, gen, context, depth = 0) {
       }
     }
     const held = readLock(marker);
-    if (held && (depth >= MAX_MARKER_DEPTH || !isAbandoned(held, context))) return 'busy';
-    if (held && removeGeneration(marker, generationOf(held), context, depth + 1) === 'busy') return 'busy';
+    if (!held) continue;
+    const next = generationOf(held);
+    if (seen.has(next) || !isAbandoned(held, context)) return 'busy';
+    if (removeGeneration(marker, next, context, seen) === 'busy') return 'busy';
   }
   return 'busy';
 }
 
-const contextOf = ({ pid = process.pid, isAlive = pidAlive, startTimeOf = processStartTime, now = Date.now, fs = nodeFs } = {}) => ({ pid, isAlive, startTimeOf, now, fs });
+const contextOf = (lockPath, { pid = process.pid, isAlive = pidAlive, startTimeOf = processStartTime, now = Date.now, fs = nodeFs } = {}) => ({ lockPath, pid, isAlive, startTimeOf, now, fs });
 
 /**
  * Removes `held`, the lock file seen earlier, if the lock still holds the same acquisition. Returns
  * false when another process is removing it.
  */
 export function removeStaleLock(lockPath, held, options = {}) {
-  return removeGeneration(lockPath, generationOf(held), contextOf(options)) !== 'busy';
+  return removeGeneration(lockPath, generationOf(held), contextOf(lockPath, options)) !== 'busy';
 }
 
 /**
  * Removes files left beside the lock by processes that crashed: a `.new` file of a pid that is gone,
- * and a marker whose file no longer holds its generation, which nobody acts on again.
+ * and a marker for a generation that neither the lock nor any marker holds, which nobody acts on
+ * again: generations are never reused, so no file will hold it later.
  */
 function removeLeftovers(lockPath, { isAlive, fs }) {
   const directory = dirname(lockPath);
   const lockName = basename(lockPath);
-  const markerName = (name) => name.startsWith(`${lockName}.takeover.`) && MARKER.test(name.slice(lockName.length));
-  // Shorter first: removing a marker leaves the markers for its own removal inert.
-  for (const name of readdirSync(directory).sort((a, b) => a.length - b.length)) {
+  const generationIn = (name) => (name.startsWith(lockName) ? MARKER.exec(name.slice(lockName.length))?.[1] : undefined);
+  const markers = new Map();
+  for (const name of readdirSync(directory)) {
     const leftover = LEFTOVER.exec(name);
     if (leftover) {
-      if ((leftover[1] === lockName || markerName(leftover[1])) && !isAlive(Number(leftover[2]))) unlinkQuietly(join(directory, name), fs);
-    } else if (markerName(name)) {
-      const cut = name.lastIndexOf('.takeover.');
-      const target = readLock(join(directory, name.slice(0, cut)));
-      if (!target || generationOf(target) !== name.slice(cut + '.takeover.'.length)) unlinkQuietly(join(directory, name), fs);
+      if ((leftover[1] === lockName || generationIn(leftover[1])) && !isAlive(Number(leftover[2]))) unlinkQuietly(join(directory, name), fs);
+    } else if (generationIn(name)) {
+      markers.set(generationIn(name), join(directory, name));
+    }
+  }
+  // Removing a marker leaves the marker for its own removal inert, so repeat until none is.
+  for (let removed = true; removed; ) {
+    const held = new Set([lockPath, ...markers.values()].map(readLock).filter(Boolean).map(generationOf));
+    removed = false;
+    for (const [gen, path] of markers) {
+      if (held.has(gen)) continue;
+      unlinkQuietly(path, fs);
+      markers.delete(gen);
+      removed = true;
     }
   }
 }
@@ -210,7 +238,7 @@ function removeLeftovers(lockPath, { isAlive, fs }) {
  * create, write and remove files, for tests.
  */
 export async function acquireLock(lockPath, options = {}) {
-  const context = contextOf(options);
+  const context = contextOf(lockPath, options);
   const token = newToken();
   for (let tries = 1; ; tries++) {
     if (createExclusive(lockPath, ownerContent(context.pid, token), context.pid, context.fs)) {
@@ -236,5 +264,5 @@ export function holdsLock(lockPath, token) {
  * takeover it is left, naming a pid that is about to exit, which the next daemon replaces.
  */
 export function releaseLock(lockPath, token, options = {}) {
-  removeGeneration(lockPath, token, contextOf(options));
+  removeGeneration(lockPath, token, contextOf(lockPath, options));
 }

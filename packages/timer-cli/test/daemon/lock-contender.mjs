@@ -11,12 +11,19 @@ import { acquireLock, readLock, removeStaleLock } from '../../src/daemon/lock.mj
 const [lockPath, fifo] = process.argv.slice(2);
 const reply = (message) => nodeFs.writeSync(1, `${JSON.stringify(message)}\n`);
 
-// Pause points of the current command: `{ id, op, arg = 0, name }` stops before the first call of
-// `op` whose argument `arg` has a base name matching `name`. Points sharing an id stop once.
+// Pause points of the current command: `{ id, op, arg = 0, name, nth = 1 }` stops before the nth
+// call of an `op` (a pattern such as `openSync|renameSync`) whose argument `arg` has a base name
+// matching `name`. Points sharing an id stop once.
 let pauses = [];
 const fired = new Set();
+const seen = new Map();
+const matches = (pause, op, args) => new RegExp(`^(?:${pause.op})$`).test(op) && new RegExp(pause.name).test(basename(String(args[pause.arg ?? 0])));
 function before(op, args) {
-  const point = pauses.find((pause) => pause.op === op && !fired.has(pause.id) && new RegExp(pause.name).test(basename(String(args[pause.arg ?? 0]))));
+  let point;
+  for (const pause of pauses.filter((candidate) => matches(candidate, op, args))) {
+    seen.set(pause, (seen.get(pause) ?? 0) + 1);
+    point ??= !fired.has(pause.id) && seen.get(pause) === (pause.nth ?? 1) ? pause : undefined;
+  }
   if (!point) return;
   fired.add(point.id);
   reply({ paused: point.id });
