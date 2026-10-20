@@ -286,6 +286,44 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(restricted["Team ID"], "None (Apple platform binary)")
     }
 
+    func testAConflictWithAGroupMissingFromTheSampleIsNamedNotKeyed() throws {
+        // Tools under the agent, signed by teams that run nothing else, so no App group is keyed by those teams.
+        let named = CodeSignature(signingID: "com.example.tool", teamID: "EX4MPLE123", isPlatformBinary: false,
+                                  teamName: "Example Inc")
+        let unnamed = CodeSignature(signingID: "com.other.tool", teamID: "0THER45678", isPlatformBinary: false)
+        let model = try model(ProcessFixtures.workload() + [
+            FixtureProcess(pid: 204, ppid: 202, path: "/usr/local/bin/tool", memory: 1 << 20, signature: named),
+            FixtureProcess(pid: 205, ppid: 202, path: "/usr/local/bin/other", memory: 1 << 20, signature: unnamed)
+        ])
+
+        model.selection = .process(ProcessFixtures.identity(204))
+        let conflicts = try XCTUnwrap(model.detail?.placement?.conflicts)
+        XCTAssertEqual(conflicts.count, 1)
+        XCTAssertTrue(conflicts[0].contains("also points to Example Inc"), conflicts[0])
+        XCTAssertFalse(conflicts[0].contains("team:"), conflicts[0])
+
+        model.selection = .process(ProcessFixtures.identity(205))
+        let other = try XCTUnwrap(model.detail?.placement?.conflicts.first)
+        XCTAssertTrue(other.contains("also points to Team 0THER45678"), other)
+        XCTAssertFalse(other.contains("team:"), other)
+    }
+
+    func testAnUnnamedGroupIsCalledUnnamedInTheMenuAndTheDetailPane() throws {
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        let sample = try ProcessFixtures.sample(ProcessFixtures.workload()
+            + [FixtureProcess(pid: 9, path: nil, name: "", memory: 2 << 30)])
+        model.apply(sample, memory: nil, cadence: .mainWindowVisible)
+        let top = TopGroups(attribution: sample.attribution, samplingFailed: false, format: ProcessFixtures.format)
+
+        let entry = try XCTUnwrap(top.entries.first)
+        XCTAssertTrue(entry.title.hasPrefix("Unnamed — ≈"), entry.title)
+        XCTAssertTrue(entry.accessibilityLabel.hasPrefix("Unnamed, memory"), entry.accessibilityLabel)
+        model.reveal(entry.id)
+        XCTAssertEqual(model.detail?.title, "Unnamed")
+        model.filter = "unnamed"
+        XCTAssertTrue(model.rows.contains { $0.id == .group(entry.id) }, "the filter matches the name shown")
+    }
+
     func testGroupPathsAreOfferedOnlyForAFileOrFolder() throws {
         let model = try model()
 

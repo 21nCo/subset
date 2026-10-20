@@ -204,7 +204,7 @@ public final class ProcessesWindowModel {
         var runtime: String?
         if case let .containerVM(name) = group.id.origin { runtime = name }
         return RowDetail(
-            title: group.name, subtitle: "\(group.id.subgroup == nil ? "Group" : "Subgroup") in the \(layer.title) layer",
+            title: group.displayName, subtitle: "\(group.id.subgroup == nil ? "Group" : "Subgroup") in the \(layer.title) layer",
             placement: nil, fields: fields, path: path, containerRuntime: runtime, process: nil
         )
     }
@@ -213,7 +213,8 @@ public final class ProcessesWindowModel {
         let explanation = OriginExplanation(process: process, format: format) { [names] in names[$0] }
         let placement = sample?.attribution.attribution(of: process.identity).map {
             PlacementDetail(layer: layer, attribution: $0, explanation: explanation) { [groups] id in
-                groups[id]?.name ?? id.description
+                // A conflict may point to a group no process in the sample was placed in.
+                groups[id]?.displayName ?? OriginGroup.displayName(id.name(members: [process]))
             }
         }
         let parent = names[process.ppid].map { "\($0), pid \(process.ppid)" } ?? "pid \(process.ppid)"
@@ -230,7 +231,7 @@ public final class ProcessesWindowModel {
             DetailField("Energy used", process.energy.map(format.energy) ?? unmeasured)
         ]
         return RowDetail(
-            title: process.name, subtitle: "Process \(process.pid)", placement: placement, fields: fields,
+            title: process.name.isEmpty ? "Unnamed" : process.name, subtitle: "Process \(process.pid)", placement: placement, fields: fields,
             path: process.executablePath, containerRuntime: nil, process: process
         )
     }
@@ -365,7 +366,7 @@ public final class ProcessesWindowModel {
 
     private func append(_ group: OriginGroup, depth: Int, parent: RowID?, query: String?, into rows: inout [ProcessRow]) {
         // A group whose name matches shows everything in it; otherwise only what matches.
-        let childQuery = query.flatMap { group.name.localizedCaseInsensitiveContains($0) ? nil : $0 }
+        let childQuery = query.flatMap { group.displayName.localizedCaseInsensitiveContains($0) ? nil : $0 }
         let inSubgroup = Set(group.subgroups.flatMap(\.members))
         let processes = group.members.filter { !inSubgroup.contains($0) }.compactMap { facts[$0] }
             .filter { process in childQuery.map { process.name.localizedCaseInsensitiveContains($0) } ?? true }
@@ -389,7 +390,7 @@ public final class ProcessesWindowModel {
     }
 
     private func matches(_ group: OriginGroup, _ query: String) -> Bool {
-        group.name.localizedCaseInsensitiveContains(query)
+        group.displayName.localizedCaseInsensitiveContains(query)
             || group.members.contains { facts[$0]?.name.localizedCaseInsensitiveContains(query) == true }
     }
 }

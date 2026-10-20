@@ -73,8 +73,7 @@ public struct ProcessRow: Identifiable, Equatable, Sendable {
         let memory = format.spokenTotal(totals.memory, format.bytes)
         let energy = format.spokenTotal(totals.ownEnergy, format.energy)
         let spokenRestricted = totals.restrictedCount > 0 ? ", \(totals.restrictedCount) restricted by macOS" : ""
-        // An unattributed process without a path or kernel name gives its group an empty name.
-        let name = group.name.isEmpty ? "Unnamed" : group.name
+        let name = group.displayName
         return ProcessRow(
             id: .group(group.id), depth: depth, name: name, detail: count + restricted, isExpandable: true,
             isExpanded: isExpanded,
@@ -108,6 +107,14 @@ public struct ProcessRow: Identifiable, Equatable, Sendable {
     }
 }
 
+extension OriginGroup {
+    /// The name the window and the menu show. An unattributed process without a path or kernel name gives its
+    /// group an empty name, shown as "Unnamed".
+    public var displayName: String { Self.displayName(name) }
+
+    static func displayName(_ name: String) -> String { name.isEmpty ? "Unnamed" : name }
+}
+
 /// Sort order, largest first. A missing value sorts last; ties go by name, then identity, so the order is stable
 /// from sample to sample.
 enum UsageOrder {
@@ -117,7 +124,7 @@ enum UsageOrder {
             case .orderedAscending: return false
             case .orderedDescending: return true
             case .orderedSame:
-                let byName = lhs.name.localizedStandardCompare(rhs.name)
+                let byName = lhs.displayName.localizedStandardCompare(rhs.displayName)
                 return byName == .orderedSame ? lhs.id < rhs.id : byName == .orderedAscending
             }
         }

@@ -28,8 +28,8 @@ public struct TopGroups: Equatable, Sendable {
             .prefix(count)
             .map { group in
                 let memory = format.total(group.totals.memory, format.bytes)
-                return Entry(id: group.id, title: "\(group.name) — \(memory)",
-                             accessibilityLabel: "\(group.name), memory \(format.spokenTotal(group.totals.memory, format.bytes)). Opens System on this group.")
+                return Entry(id: group.id, title: "\(group.displayName) — \(memory)",
+                             accessibilityLabel: "\(group.displayName), memory \(format.spokenTotal(group.totals.memory, format.bytes)). Opens System on this group.")
             }
         placeholder = entries.isEmpty ? "Top memory: no group measured" : nil
     }
