@@ -63,12 +63,19 @@ public struct DiskScanner: Sendable {
 
     /// Scans `root`, calling `onProgress` from a worker thread at most once per `progressInterval`, one call at a time
     /// and with the item count always rising. Cancelling the calling task stops every worker at its next batch of
-    /// entries and returns what was read.
+    /// entries and returns what was read. The root is resolved and classified on a scan thread too, never on the
+    /// caller's, so no lookup can download a placeholder or hold up the caller's thread.
     public func scan(_ root: URL = DiskScanner.defaultRoot,
                      onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil) async throws(DiskScanError)
         -> DiskScanResult {
-        let path = try Self.resolve(root.path)
-        let scan = DiskScan(scanner: self, rootPath: path, onProgress: onProgress)
+        let lookup = await withCheckedContinuation { (continuation: CheckedContinuation<Result<DiskScan, DiskScanError>, Never>) in
+            DiskScan.spawn {
+                continuation.resume(returning: Result { () throws(DiskScanError) in
+                    DiskScan(scanner: self, rootPath: try Self.resolve(root.path), onProgress: onProgress)
+                })
+            }
+        }
+        let scan = try lookup.get()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 scan.start { continuation.resume(returning: $0) }
@@ -167,11 +174,20 @@ final class DiskScan: @unchecked Sendable {
             running = scanner.workers
         }
         for _ in 0..<scanner.workers {
-            let thread = Thread { [self] in work() }
-            thread.name = "Disk scan"
-            thread.qualityOfService = .utility
-            thread.start()
+            Self.spawn { [self] in work() }
         }
+    }
+
+    /// Runs `body` on a new scan thread on which reading a dataless file or folder never downloads it.
+    static func spawn(_ body: @escaping @Sendable () -> Void) {
+        let thread = Thread {
+            setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD,
+                           IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+            body()
+        }
+        thread.name = "Disk scan"
+        thread.qualityOfService = .utility
+        thread.start()
     }
 
     func cancel() {
@@ -184,8 +200,6 @@ final class DiskScan: @unchecked Sendable {
     private var isCancelled: Bool { condition.withLock { cancelled } }
 
     private func work() {
-        // Reading a dataless file or folder must never download it.
-        setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
         let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: scanner.bufferSize, alignment: 8)
         defer { buffer.deallocate() }
         while let job = nextJob() {

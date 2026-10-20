@@ -232,6 +232,23 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.entriesRead, expected.entries + 2)
     }
 
+    func testRootIsClassifiedOnAThreadThatNeverDownloads() async throws {
+        // Launch Services is asked only about folders with an extension.
+        let chosen = root.appendingPathComponent("Chosen.d")
+        try FileManager.default.createDirectory(at: chosen.appendingPathComponent("a.d"), withIntermediateDirectories: true)
+        let policies = OSAllocatedUnfairLock(initialState: [String: Int32]())
+        let scanner = DiskScanner(workers: 2, progressInterval: .milliseconds(100), bufferSize: 128 << 10) { path in
+            let policy = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+            policies.withLock { $0[path] = policy }
+            return false
+        }
+
+        let result = try await scanner.scan(chosen)
+        let path = result.tree.rootPath
+        let off = IOPOL_MATERIALIZE_DATALESS_FILES_OFF
+        XCTAssertEqual(policies.withLock { $0 }, [path: off, path + "/a.d": off])
+    }
+
     func testChosenPackageIsOneItemWithItsTotal() async throws {
         let bundle = root.appendingPathComponent("Tool.app")
         try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
