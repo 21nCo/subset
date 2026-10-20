@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, removeStaleLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
@@ -163,6 +164,35 @@ test('a daemon that lost its lock never writes or alerts again and leaves its su
   assert.equal((await second.call('GET', '/v1/daemon')).status, 200);
   assert.deepEqual((await second.call('GET', '/v1/timers')).body.structuredContent.timers.map((timer) => timer.definition.name), ['First', 'Second']);
 });
+
+for (const timers of ['paused', 'none']) {
+  for (const loss of ['removed', 'replaced']) {
+    test(`a daemon with ${timers === 'paused' ? 'a paused timer' : 'no timers'} and a subscriber notices its lock was ${loss} within a minute`, async (t) => {
+      const dataDir = tempDataDir(t);
+      const first = await startTestDaemon(t, { dataDir });
+      if (timers === 'paused') {
+        const { id } = (await first.op('start', { timer: { kind: 'stopwatch', name: 'Paused' } })).body.timer.definition;
+        await first.op('pause', { id });
+      }
+      const events = subscribe(first.daemon.paths.socket);
+      await events.waitFor((list) => list.length === 1);
+      const files = () => Object.fromEntries(['state.json', 'scheduler.json'].map((name) => [name, existsSync(join(dataDir, name)) ? readFileSync(join(dataDir, name), 'utf8') : null]));
+      unlinkSync(first.daemon.paths.lock);
+      const second = loss === 'replaced' ? await startTestDaemon(t, { dataDir, clock: createFakeClock(first.clock.now()) }) : null;
+      const before = files();
+
+      first.clock.advance(60_000);
+      assert.equal(await Promise.race([first.daemon.closed, sleep(5_000, 'still running', { ref: false })]), 1);
+      await eventually(() => events.ended);
+      assert.deepEqual(files(), before);
+      // The old daemon is gone, so whatever answers on the socket is its successor, still holding its lock.
+      if (second) {
+        assert.equal((await second.call('GET', '/v1/daemon')).status, 200);
+        assert.equal(readLock(join(dataDir, 'daemon.lock')).pid, process.pid);
+      }
+    });
+  }
+}
 
 test('a holder\'s start time is never later than its real start, however slow ps is', () => {
   // The holder started at 100 s and wrote its lock at 100.1 s. Asked at 101.5 s, ps reports 1 s

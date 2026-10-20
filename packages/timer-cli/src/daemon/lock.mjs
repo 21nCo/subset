@@ -103,8 +103,14 @@ async function createLock(lockPath, pid, { fs, now }) {
  */
 function withTakeoverMarker(lockPath, remove, { now = Date.now } = {}) {
   const marker = `${lockPath}.takeover`;
+  let markerIno;
   try {
-    closeSync(openSync(marker, 'wx', 0o600));
+    const fd = openSync(marker, 'wx', 0o600);
+    try {
+      markerIno = fstatSync(fd).ino;
+    } finally {
+      closeSync(fd);
+    }
   } catch (error) {
     if (!isCode(error, 'EEXIST')) throw error;
     try {
@@ -114,12 +120,26 @@ function withTakeoverMarker(lockPath, remove, { now = Date.now } = {}) {
     }
     return false;
   }
+  // A process stopped long enough for its marker to be taken as abandoned no longer owns it, and
+  // then removes neither the lock nor another process's marker.
+  const ownsMarker = () => {
+    try {
+      return statSync(marker).ino === markerIno;
+    } catch (error) {
+      if (isCode(error, 'ENOENT')) return false;
+      throw error;
+    }
+  };
   try {
     const current = readLock(lockPath);
-    if (current && remove(current)) unlinkSync(lockPath);
+    if (current && remove(current) && ownsMarker()) unlinkSync(lockPath);
     return true;
   } finally {
-    unlinkSync(marker);
+    try {
+      if (ownsMarker()) unlinkSync(marker);
+    } catch (error) {
+      if (!isCode(error, 'ENOENT')) throw error;
+    }
   }
 }
 

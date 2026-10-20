@@ -174,11 +174,19 @@ export async function startDaemon({
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
 
   /**
-   * True while this daemon still holds `daemon.lock`. One that lost it (the file was removed or
-   * replaced) never writes, publishes or alerts again, and shuts down.
+   * True while this daemon still holds `daemon.lock`. It is checked on every scheduler run (at
+   * least once a minute), heartbeat and request, so one that lost it (the file was removed or
+   * replaced, or can no longer be read) never writes, publishes or alerts again, and shuts down,
+   * ending its event streams so subscribers reconnect to the daemon that holds it.
    */
   function stillHeld() {
-    if (lock.isHeld()) return true;
+    let held = false;
+    try {
+      held = lock.isHeld();
+    } catch (error) {
+      log(`could not read daemon.lock: ${error.message}`);
+    }
+    if (held) return true;
     if (!closing) {
       log('daemon.lock is no longer held by this daemon; exiting without writing.');
       shutdown(1);
@@ -210,11 +218,13 @@ export async function startDaemon({
     }
   }
 
-  /** The stretches `scheduler.json` holds marks for. */
+  /** The stretches `scheduler.json` holds marks for, and whether a failed save left it behind. */
   let savedStretches = new Set((marks ?? []).map(stretchKey));
+  let marksDirty = false;
   function saveMarks(list) {
     write(() => stateStore.saveMarks(list));
     savedStretches = new Set(list.map(stretchKey));
+    marksDirty = false;
   }
 
   const scheduler = createScheduler({
@@ -223,17 +233,20 @@ export async function startDaemon({
     getTimers: () => store.timers,
     onRun(alerts, now) {
       // A successor that took the lock delivers these alerts itself.
-      if (alerts.length && !stillHeld()) return;
+      if (!stillHeld()) return;
       for (const { alert, timer } of alerts) {
         broadcast('alert', alert);
         deliverToSink(sink, alert, timer, log);
       }
       const current = scheduler.marks;
       const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
-      if (alerts.length || stretchesChanged) {
+      // A save that failed is retried at every later run, so a restart never reports as missed
+      // what was delivered.
+      if (alerts.length || stretchesChanged || marksDirty) {
         try {
           saveMarks(current);
         } catch (error) {
+          marksDirty = true;
           if (!(error instanceof LockLostError)) log(`could not save scheduler.json: ${error.message}`);
         }
       }
@@ -266,6 +279,8 @@ export async function startDaemon({
   }
 
   function heartbeat() {
+    heartbeatHandle = null;
+    if (!stillHeld()) return;
     heartbeatHandle = clock.setTimeout(heartbeat, heartbeatMs);
     broadcast('heartbeat', { at: clock.now() });
   }
@@ -388,7 +403,7 @@ export async function startDaemon({
   };
 
   async function handle(request, response) {
-    if (closing) {
+    if (closing || !stillHeld()) {
       fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
       return;
     }

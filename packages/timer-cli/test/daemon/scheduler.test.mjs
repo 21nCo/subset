@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { chmodSync } from 'node:fs';
 import test from 'node:test';
 import { BUILT_IN_PRESETS, project, transitionsBetween } from '@subset/timer';
-import { LATE_MS, createFakeClock, createScheduler } from '../../src/daemon/index.mjs';
+import { LATE_MS, REARM_MS, createFakeClock, createScheduler } from '../../src/daemon/index.mjs';
 import { startTestDaemon, tempDataDir } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
@@ -292,4 +293,31 @@ test('a transition that falls due while another is delivered fires as itself, on
   clock.advance(2_000);
   assert.deepEqual(sink.received.map(label), [`finish@${startedAt + 1_000}`, `finish@${startedAt + 1_005}`]);
   assert.ok(deliveredAt[1] - (startedAt + 1_005) <= LATE_MS, `${deliveredAt[1] - startedAt}`);
+});
+
+test('a checkpoint the disk refused after an alert is saved at a later run, so a restart reports nothing', { skip: process.getuid?.() === 0 && 'root ignores file modes' }, async (t) => {
+  const dataDir = tempDataDir(t);
+  const first = await startTestDaemon(t, { dataDir });
+  const { clock } = first;
+  const segments = [{ label: 'Work', phase: 'work', durationMs: 5_000 }, { label: 'Rest', phase: 'rest', durationMs: 200_000 }];
+  const started = await first.op('start', { timer: { kind: 'interval', rounds: 2, segments, countdownTicks: false } });
+  const startedAt = clock.now();
+  const { id } = started.body.timer.definition;
+
+  chmodSync(dataDir, 0o500);
+  try {
+    clock.advance(5_000);
+  } finally {
+    chmodSync(dataDir, 0o700);
+  }
+  assert.deepEqual(first.sink.received.map(label), [`segment@${startedAt + 5_000}`]);
+  assert.ok(first.logs.some((line) => /could not save scheduler\.json/.test(line)));
+  // The disk works again; the next run has no transition, a re-arm a minute later.
+  clock.advance(REARM_MS);
+  await first.daemon.shutdown();
+
+  const again = await startTestDaemon(t, { dataDir, clock });
+  assert.deepEqual(again.sink.received, []);
+  clock.advance(startedAt + 205_000 - clock.now());
+  assert.deepEqual(again.sink.received.map(({ alert }) => [alert.timerId, alert.kind, alert.at]), [[id, 'segment', startedAt + 205_000]]);
 });

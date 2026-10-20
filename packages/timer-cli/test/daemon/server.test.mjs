@@ -270,6 +270,14 @@ test('a request to a daemon that lost its lock is answered 503 and not applied',
   assert.equal(existsSync(daemon.paths.state), false);
 });
 
+test('a read from a daemon that lost its lock is answered 503', async (t) => {
+  const { call, daemon } = await startTestDaemon(t);
+  unlinkSync(daemon.paths.lock);
+  const reply = await call('GET', '/v1/timers');
+  assert.deepEqual([reply.status, reply.body.error.code], [503, 'daemon_unavailable']);
+  assert.equal(await daemon.closed, 1);
+});
+
 test('a request still arriving when shutdown begins is answered 503 and not applied', async (t) => {
   const { daemon } = await startTestDaemon(t);
   const reply = new Promise((resolve, reject) => {
