@@ -21,12 +21,16 @@ public enum ContainerRuntime: String, CaseIterable, Sendable {
         }
     }
 
-    /// The runtime a Docker socket belongs to, by its real path: Docker Desktop's `~/.docker/run/docker.sock`,
-    /// OrbStack's `~/.orbstack/run/docker.sock`, or `docker.sock` in a Colima profile folder (`~/.colima/<profile>/`,
-    /// or `~/.config/colima/<profile>/` where Colima follows XDG).
+    /// The runtime a Docker socket belongs to, by its real path: Docker Desktop's `~/.docker/run/docker.sock` or the
+    /// sockets in its app container that it links to (`docker-cli.sock`, `docker.raw.sock`), OrbStack's
+    /// `~/.orbstack/run/docker.sock`, or `docker.sock` in a Colima profile folder (`~/.colima/<profile>/`, or
+    /// `~/.config/colima/<profile>/` where Colima follows XDG). Any other socket, such as Podman's or one forwarded
+    /// from another machine, belongs to none.
     public static func owning(socketPath path: String) -> ContainerRuntime? {
         let parts = path.split(separator: "/").map(String.init)
         if parts.suffix(3) == [".docker", "run", "docker.sock"] { return .dockerDesktop }
+        if parts.dropLast().suffix(4) == ["Library", "Containers", "com.docker.docker", "Data"],
+           parts.last == "docker-cli.sock" || parts.last == "docker.raw.sock" { return .dockerDesktop }
         if parts.suffix(3) == [".orbstack", "run", "docker.sock"] { return .orbStack }
         let folder = parts.dropLast(2).suffix(2)
         if parts.last == "docker.sock", folder.last == ".colima" || folder == [".config", "colima"] { return .colima }
@@ -40,8 +44,9 @@ public enum ContainerRuntime: String, CaseIterable, Sendable {
 /// 1. The executable is inside an outermost `Docker.app` or `OrbStack.app` bundle and is not one of its clients
 ///    (`isClient`): the runtime's own processes.
 /// 2. Lima's host agent, `limactl` whose parent is launchd or another `limactl`, or Colima's daemon, `colima` whose
-///    parent is launchd (`brew services`, `colima daemon`), by file name or kernel name. `limactl` or `colima` run
-///    from a shell or by `colima` is a transient command, not the VM.
+///    parent is launchd (`brew services`, `colima daemon`), by file name or kernel name. A `limactl` or `colima`
+///    command run from a shell, or by such a command (`colima start` running `limactl`), is transient, not the VM;
+///    one that Colima's daemon or the host agent runs is the runtime's by rule 3.
 /// 3. A process outside any app bundle with an ancestor placed by rule 1 or 2: what the runtime started, such as
 ///    `qemu-system-*`, `ssh` port forwarders, and `socket_vmnet` under Lima's host agent.
 /// 4. Apple's Virtualization.framework VM service (`com.apple.Virtualization.VirtualMachine`), which launchd starts

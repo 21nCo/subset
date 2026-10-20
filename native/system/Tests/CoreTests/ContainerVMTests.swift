@@ -182,10 +182,9 @@ final class ContainerVMTests: XCTestCase {
 
         let breakdown = ContainerBreakdown(listing: DockerOutput.listing(""), stats: DockerOutput.stats(""))
         let report = ContainerReport(observedAt: Date(), executable: "/usr/local/bin/docker",
-                                     context: DockerContext(name: "default", host: "unix:///var/run/docker.sock", runtime: nil),
+                                     context: DockerContext(name: "colima", host: "unix:///Users/me/.colima/default/docker.sock", runtime: .colima),
                                      outcome: .breakdown(breakdown))
-        XCTAssertEqual(report.status(of: .colima, running: groups.map(\.runtime)), .measured(breakdown),
-                       "Colima is still the only running runtime")
+        XCTAssertEqual(groups.map { report.status(of: $0.runtime) }, [.measured(breakdown)], "the clients add no runtime to report on")
 
         let result = Attribution(projectMarkers: FixtureProjectMarkers()).attribute(processes)
         XCTAssertEqual(placement(result, 961).app.group, OriginGroupID(.app(bundlePath: docker)), "a client stays with its app (rule 1)")
@@ -260,12 +259,18 @@ final class ContainerVMTests: XCTestCase {
 
     func testDockerSocketsNameTheirRuntime() {
         XCTAssertEqual(ContainerRuntime.owning(socketPath: "/Users/me/.docker/run/docker.sock"), .dockerDesktop)
+        let desktopData = "/Users/me/Library/Containers/com.docker.docker/Data/"
+        XCTAssertEqual(ContainerRuntime.owning(socketPath: desktopData + "docker-cli.sock"), .dockerDesktop, "what ~/.docker/run/docker.sock links to")
+        XCTAssertEqual(ContainerRuntime.owning(socketPath: desktopData + "docker.raw.sock"), .dockerDesktop)
+        XCTAssertNil(ContainerRuntime.owning(socketPath: desktopData + "backend.sock"))
         XCTAssertEqual(ContainerRuntime.owning(socketPath: "/Users/me/.orbstack/run/docker.sock"), .orbStack)
         XCTAssertEqual(ContainerRuntime.owning(socketPath: "/Users/me/.colima/default/docker.sock"), .colima)
         XCTAssertEqual(ContainerRuntime.owning(socketPath: "/Users/me/.config/colima/work/docker.sock"), .colima)
         XCTAssertNil(ContainerRuntime.owning(socketPath: "/var/run/docker.sock"))
         XCTAssertNil(ContainerRuntime.owning(socketPath: "/Users/colima/sockets/docker.sock"), "a user named colima is not Colima")
         XCTAssertNil(ContainerRuntime.owning(socketPath: "/Users/me/.colima/default/containerd.sock"))
+        XCTAssertNil(ContainerRuntime.owning(socketPath: "/Users/me/.local/share/containers/podman/machine/podman.sock"), "Podman is out of scope")
+        XCTAssertNil(ContainerRuntime.owning(socketPath: "/Users/me/.ssh/forwarded/docker.sock"), "a socket forwarded from another machine")
     }
 
     // MARK: Helpers

@@ -11,10 +11,14 @@ final class DockerCLITests: XCTestCase {
     private var runLog: String { folder.appendingPathComponent("runs.log").path }
     private var hostLog: String { folder.appendingPathComponent("hosts.log").path }
     private var pidFile: String { folder.appendingPathComponent("pid").path }
+    /// The current context's endpoint unless a test sets another: Colima's, so the stub runs without depending on
+    /// this Mac's `/var/run/docker.sock`.
+    private var colimaHost: String { "unix://\(home)/.colima/default/docker.sock" }
 
     override func setUpWithError() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("DockerCLITests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        try writeContext("colima", host: colimaHost)
     }
 
     override func tearDownWithError() throws {
@@ -38,8 +42,8 @@ final class DockerCLITests: XCTestCase {
         XCTAssertEqual(try runs(), ["ps --format {{json .}}", "stats --no-stream --format {{json .}}"])
         XCTAssertEqual(report.observedAt, date)
         XCTAssertEqual(report.executable, stub)
-        XCTAssertEqual(report.context?.name, "default")
-        XCTAssertEqual(report.context?.host, "unix:///var/run/docker.sock")
+        XCTAssertEqual(report.context, DockerContext(name: "colima", host: colimaHost, runtime: .colima))
+        XCTAssertEqual(try String(contentsOfFile: hostLog, encoding: .utf8).split(separator: "\n").map(String.init), [colimaHost, colimaHost])
         guard case let .breakdown(breakdown) = report.outcome else { return XCTFail("\(report.outcome)") }
         XCTAssertEqual(breakdown.projects.map(\.name), ["shop"])
         XCTAssertEqual(breakdown.totals.memoryUsed.sum, 104_857_600)
@@ -188,6 +192,26 @@ final class DockerCLITests: XCTestCase {
         try await assertExits(try stubPID(), "the command is stopped past the timeout")
     }
 
+    func testACommandThatIgnoresSIGTERMIsKilledAfterATimeoutOrACancellation() async throws {
+        // An ignored signal stays ignored across exec, so `sleep` survives SIGTERM.
+        let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
+
+        let timedOut = await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .milliseconds(500))
+        XCTAssertEqual(timedOut, .failure(.timedOut))
+        let first = try stubPID()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(kill(first, 0), 0, "SIGTERM alone does not stop it")
+        try await assertExits(first, "SIGKILL stops it after a timeout", within: .seconds(2))
+
+        try FileManager.default.removeItem(atPath: pidFile)
+        let run = Task { await ProcessCommandRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
+        let second = try await waitForStubPID()
+        run.cancel()
+        let cancelled = await run.value
+        XCTAssertEqual(cancelled, .failure(.cancelled))
+        try await assertExits(second, "SIGKILL stops it after a cancellation", within: .seconds(2))
+    }
+
     func testCancellingTheTaskStopsTheCommandAndAnAlreadyCancelledTaskStartsNone() async throws {
         let stub = try await warmedStub("echo $$ > '\(pidFile)'\nexec sleep 30")
 
@@ -219,6 +243,23 @@ final class DockerCLITests: XCTestCase {
         let report = await cli([stub]).report()
 
         XCTAssertEqual(report.outcome, .unavailable(.remoteContext(name: "prod", host: "ssh://deploy@203.0.113.9")))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
+    }
+
+    func testASocketNoRuntimeOwnsIsNotAskedEvenWithOneRuntimeRunning() async throws {
+        let podman = home + "/.local/share/containers/podman/machine/podman.sock"
+        try FileManager.default.createDirectory(atPath: (podman as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: podman, contents: nil)
+        try writeContext("podman-machine-default", host: "unix://\(podman)")
+        let stub = try makeStub("echo \"$1\" >> '\(runLog)'\necho '{\"ID\":\"3f2a9c1b7d4e\",\"Names\":\"db\"}'")
+        let poller = ContainerPoller(cli: cli([stub]))
+
+        let refreshed = await poller.refresh(cadence: .mainWindowVisible, runningRuntimes: [.orbStack])
+        let report = try XCTUnwrap(refreshed)
+
+        let reason = ContainerUnavailable.contextNotRecognized(name: "podman-machine-default", host: "unix://\(podman)")
+        XCTAssertEqual(report.outcome, .unavailable(reason))
+        XCTAssertEqual(report.status(of: .orbStack), .unavailable(reason), "OrbStack alone is not shown Podman's containers")
         XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "the CLI never ran")
     }
 
@@ -262,15 +303,14 @@ final class DockerCLITests: XCTestCase {
         let custom = DockerContext(name: "custom", host: "unix:///tmp/docker.sock", runtime: nil)
         let measured = ContainerReport(observedAt: Date(), executable: "/x", context: orb, outcome: .breakdown(breakdown))
 
-        XCTAssertEqual(measured.status(of: .orbStack, running: [.dockerDesktop, .orbStack]), .measured(breakdown))
-        XCTAssertEqual(measured.status(of: .dockerDesktop, running: [.dockerDesktop, .orbStack]),
+        XCTAssertEqual(measured.status(of: .orbStack), .measured(breakdown))
+        XCTAssertEqual(measured.status(of: .dockerDesktop),
                        .otherContext(name: "orbstack", runtime: .orbStack))
         let unknown = ContainerReport(observedAt: Date(), executable: "/x", context: custom, outcome: .breakdown(breakdown))
-        XCTAssertEqual(unknown.status(of: .colima, running: [.colima]), .measured(breakdown), "the only running runtime")
-        XCTAssertEqual(unknown.status(of: .colima, running: [.colima, .orbStack]),
-                       .unavailable(.contextNotRecognized(name: "custom", host: "unix:///tmp/docker.sock")))
+        XCTAssertEqual(unknown.status(of: .colima), .unavailable(.contextNotRecognized(name: "custom", host: "unix:///tmp/docker.sock")),
+                       "a socket no runtime owns is never given to the only one running")
         let missing = ContainerReport(observedAt: Date(), outcome: .unavailable(.cliNotFound))
-        XCTAssertEqual(missing.status(of: .colima, running: [.colima, .orbStack]), .unavailable(.cliNotFound))
+        XCTAssertEqual(missing.status(of: .colima), .unavailable(.cliNotFound))
     }
 
     // MARK: Poller
@@ -382,8 +422,8 @@ final class DockerCLITests: XCTestCase {
     }
 
     /// Waits for the process to exit and be reaped (`SIGTERM`, then `SIGKILL` a second later).
-    private func assertExits(_ pid: pid_t, _ message: String) async throws {
-        let deadline = ContinuousClock.now + .seconds(5)
+    private func assertExits(_ pid: pid_t, _ message: String, within limit: Duration = .seconds(5)) async throws {
+        let deadline = ContinuousClock.now + limit
         while kill(pid, 0) == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
         XCTAssertNotEqual(kill(pid, 0), 0, message)
         XCTAssertEqual(errno, ESRCH, message)

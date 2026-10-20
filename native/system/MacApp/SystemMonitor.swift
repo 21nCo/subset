@@ -13,7 +13,7 @@ final class SystemMonitor {
     /// The running container runtimes' VMs, from the latest sample.
     private(set) var containerVMs: [ContainerVMGroup] = []
     /// The latest container breakdown from the Docker-compatible CLI, which runs only while the main window is
-    /// visible.
+    /// visible; dropped when the window is hidden.
     private(set) var containerReport: ContainerReport?
     /// Called on the main actor after each sample.
     @ObservationIgnored var onUpdate: (() -> Void)?
@@ -38,9 +38,10 @@ final class SystemMonitor {
         self.cadence = cadence
         if !visible {
             // Hiding the window stops a container poll in progress: its running command is stopped and no
-            // further one starts.
+            // further one starts. The last report is dropped, so reopening the window never shows it as current.
             containerRefresh?.cancel()
             containerRefresh = nil
+            containerReport = nil
         }
         if loop != nil { restart() }
     }

@@ -39,14 +39,19 @@ public struct DockerCLI: Sendable {
     }
 
     /// Runs `docker ps`, then `docker stats`, each with `timeout` and pinned to the current context's endpoint as
-    /// read here, and joins their rows. Any failure gives a report without a breakdown and with the reason. A
-    /// cancelled task starts no further command and stops the one running.
+    /// read here, and joins their rows. An endpoint that belongs to no recognized runtime is not asked. Any failure
+    /// gives a report without a breakdown and with the reason. A cancelled task starts no further command and stops
+    /// the one running.
     public func report(at date: Date = Date()) async -> ContainerReport {
         guard let cli = executable() else { return ContainerReport(observedAt: date, outcome: .unavailable(.cliNotFound)) }
         let context: DockerContext
         switch DockerContextReader(home: home).current() {
         case let .success(found): context = found
         case let .failure(reason): return ContainerReport(observedAt: date, executable: cli, outcome: .unavailable(reason))
+        }
+        guard context.runtime != nil else {
+            return ContainerReport(observedAt: date, executable: cli, context: context,
+                                   outcome: .unavailable(.contextNotRecognized(name: context.name, host: context.host)))
         }
         let outcome: ContainerOutcome
         switch await run(cli, Self.listingArguments, host: context.host) {
@@ -226,14 +231,15 @@ public struct ContainerReport: Equatable, Sendable {
         self.outcome = outcome
     }
 
-    /// What this report says about one running runtime's VM. The context's endpoint names the runtime; an endpoint
-    /// that names none (a custom socket path) is taken to be the only running runtime's, when only one runs.
-    public func status(of runtime: ContainerRuntime, running: [ContainerRuntime]) -> ContainerBreakdownStatus {
+    /// What this report says about one running runtime's VM. Only the runtime the context's endpoint belongs to gets
+    /// the breakdown. An endpoint that belongs to none (Podman's socket, one forwarded from another machine, a custom
+    /// path) is never taken to be a running runtime's, even when only one runs.
+    public func status(of runtime: ContainerRuntime) -> ContainerBreakdownStatus {
         guard let context else {
             if case let .unavailable(reason) = outcome { return .unavailable(reason) }
             return .notMeasured
         }
-        guard let target = context.runtime ?? (running.count == 1 ? running.first : nil) else {
+        guard let target = context.runtime else {
             return .unavailable(.contextNotRecognized(name: context.name, host: context.host))
         }
         guard target == runtime else { return .otherContext(name: context.name, runtime: target) }

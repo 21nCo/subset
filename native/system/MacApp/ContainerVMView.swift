@@ -15,7 +15,7 @@ struct ContainerVMsView: View {
                     Text(group.runtime.displayName).font(.headline)
                     Text("On this Mac: \(Self.usage(memory: group.totals.memory, cpu: group.totals.cpuPercent)) · "
                         + "\(group.totals.processCount) processes")
-                    breakdown(report?.status(of: group.runtime, running: groups.map(\.runtime)) ?? .notMeasured)
+                    breakdown(report?.status(of: group.runtime) ?? .notMeasured)
                 }
             }
         }
@@ -29,9 +29,9 @@ struct ContainerVMsView: View {
         case .notMeasured:
             Text("Containers: not measured yet.").foregroundStyle(.secondary)
         case let .unavailable(reason):
-            Text("Containers: no breakdown. \(reason.reason)").foregroundStyle(.secondary)
+            Text("Containers: no breakdown\(observed). \(reason.reason)").foregroundStyle(.secondary)
         case let .otherContext(name, runtime):
-            Text("Containers: not listed; the current Docker context “\(name)” reaches \(runtime.displayName).")
+            Text("Containers: not listed\(observed); the current Docker context “\(name)” reaches \(runtime.displayName).")
                 .foregroundStyle(.secondary)
         case let .measured(breakdown):
             DisclosureGroup {
@@ -48,10 +48,14 @@ struct ContainerVMsView: View {
                 }
             } label: {
                 Text("Measured inside the VM by docker: \(Self.usage(memory: breakdown.totals.memoryUsed, cpu: breakdown.totals.cpuPercent)) · "
-                    + "\(breakdown.totals.containerCount) containers"
-                    + (report.map { " at \($0.observedAt.formatted(date: .omitted, time: .standard))" } ?? ""))
+                    + "\(breakdown.totals.containerCount) containers\(observed)")
             }
         }
+    }
+
+    /// When the report was taken, so a reason or breakdown is never shown as current without its time.
+    private var observed: String {
+        report.map { " at \($0.observedAt.formatted(date: .omitted, time: .standard))" } ?? ""
     }
 
     private static func line(_ container: Container) -> String {
