@@ -34,10 +34,11 @@ function setup(t) {
   t.after(() => rmSync(fifos, { recursive: true, force: true }));
   const lockPath = join(dataDir, 'daemon.lock');
   let count = 0;
-  const contender = () => {
+  const contender = ({ clockStepMs = 0 } = {}) => {
     const fifo = join(fifos, `c${count++}`);
     execFileSync('mkfifo', [fifo]);
-    const child = spawn(process.execPath, [CONTENDER, lockPath, fifo], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const env = { ...process.env, CLOCK_STEP_MS: String(clockStepMs) };
+    const child = spawn(process.execPath, [CONTENDER, lockPath, fifo], { env, stdio: ['pipe', 'pipe', 'inherit'] });
     const exited = new Promise((resolve) => child.once('exit', resolve));
     t.after(() => child.kill('SIGKILL'));
     const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
@@ -138,5 +139,24 @@ test('a marker abandoned while an abandoned marker was being removed is recovere
   assert.deepEqual(await z.run('acquire'), { done: 'acquire', acquired: true });
   assert.ok(Date.now() - started < 3_000, `${Date.now() - started} ms`);
   assert.equal(await z.holds(), true);
+  assert.deepEqual(readdirSync(dataDir), ['daemon.lock']);
+});
+
+test('a process whose wall clock was set forward never judges a live takeover abandoned', async (t) => {
+  const { dataDir, lockPath, contender } = setup(t);
+  writeFileSync(lockPath, `${deadPid()}\n${'0'.repeat(32)}\n`);
+  // A holds the stale lock's marker and stops just before removing the lock.
+  const a = contender();
+  assert.deepEqual(await a.run('acquire', [{ id: 'a', op: 'unlinkSync', name: LOCK }]), { paused: 'a' });
+  // B starts after the wall clock is set forward a minute: past any age of A's marker, while the
+  // time A has run (which Linux counts from boot) stays as it was.
+  const b = contender({ clockStepMs: 60_000 });
+  assert.deepEqual(await b.run('acquire'), { done: 'acquire', acquired: false });
+  assert.equal(readdirSync(dataDir).filter((name) => name.includes('.takeover.')).length, 1);
+  assert.deepEqual(await a.resume(), { done: 'acquire', acquired: true });
+
+  assert.equal(await a.holds(), true);
+  assert.equal(await b.holds(), false);
+  assert.equal(readLock(lockPath).pid, a.pid);
   assert.deepEqual(readdirSync(dataDir), ['daemon.lock']);
 });

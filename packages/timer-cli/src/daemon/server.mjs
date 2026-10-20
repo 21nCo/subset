@@ -4,16 +4,13 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
 import { createRecordingSink, deliverToSink } from './alerts.mjs';
-import { socketRequest } from './client.mjs';
-import { acquireLock, processStartTime, removeStaleLock } from './lock.mjs';
+import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
 import { createStateStore } from './store.mjs';
 
 export const HEARTBEAT_MS = 15_000;
 export const IDLE_EXIT_MS = 10 * 60_000;
-/** How much later than its lock a live holder must have started to be another process given the pid. */
-const PID_START_SLACK_MS = 2_000;
 const MAX_BODY_BYTES = 1024 * 1024;
 /**
  * While a subscriber has a frame undrained, later state and heartbeat frames replace the queued
@@ -53,32 +50,8 @@ export class LockLostError extends Error {
   }
 }
 
-/**
- * True when the lock names a live pid that cannot be the daemon that wrote it: nothing answers on
- * the socket, and the process with that pid started after the lock was written, so the system gave
- * the pid of a daemon that died to another process. A daemon that is alive keeps its lock however
- * old it is and whether or not its socket is there, unless (on Linux, where `ps` counts from boot)
- * the wall clock was set forward past the lock's age while its socket is missing; it then notices
- * the loss within a heartbeat and exits without writing.
- */
-export async function isReusedPid(paths, holder, { startTimeOf = processStartTime } = {}) {
-  if (!holder || holder.pid === null) return false;
-  try {
-    await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: 1_000 });
-    return false;
-  } catch (error) {
-    if (!isCode(error, 'ENOENT', 'ECONNREFUSED')) return false;
-  }
-  const startedAt = startTimeOf(holder.pid);
-  return startedAt !== null && startedAt > holder.mtimeMs + PID_START_SLACK_MS;
-}
-
 async function takeLock(paths) {
-  let lock = await acquireLock(paths.lock);
-  if (!lock.acquired && await isReusedPid(paths, lock.holder)) {
-    removeStaleLock(paths.lock, lock.holder);
-    lock = await acquireLock(paths.lock);
-  }
+  const lock = await acquireLock(paths.lock);
   if (!lock.acquired) throw new DaemonRunningError(lock.holder?.pid ?? null);
   return lock;
 }

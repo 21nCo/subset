@@ -2,19 +2,28 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { createClient, pidAlive, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, tempDataDir } from './helpers.mjs';
+import { eventually, tempDataDir, within } from './helpers.mjs';
 
-/** Counts the daemons a client starts, using the real spawn. */
-function countingSpawn() {
+/**
+ * Counts the daemons a client starts, using the real spawn. Once the test ends, a daemon that is
+ * still starting (as one that lost a race can be on a busy machine) is stopped before its data
+ * directory is removed, so none outlives the test or recreates the directory.
+ */
+function countingSpawn(t, dataDir) {
   const children = [];
   const wrapped = (...args) => {
     const child = spawn(...args);
-    children.push({ child, args });
+    children.push({ child, args, exited: new Promise((resolve) => child.once('exit', resolve)) });
     return child;
   };
+  t.after(async () => {
+    for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await within(Promise.all(children.map(({ exited }) => exited)), 10_000);
+    rmSync(dirname(dataDir), { recursive: true, force: true });
+  });
   return { spawn: wrapped, children };
 }
 
@@ -30,7 +39,7 @@ async function stopDaemon(client) {
 
 test('a client starts a detached daemon on first use and later clients reuse it', async (t) => {
   const dataDir = tempDataDir(t);
-  const spawner = countingSpawn();
+  const spawner = countingSpawn(t, dataDir);
   const client = createClient({ dataDir, spawn: spawner.spawn });
   t.after(() => stopDaemon(client));
 
@@ -55,7 +64,8 @@ test('a client starts a detached daemon on first use and later clients reuse it'
 
 test('clients starting at once end up on one daemon', async (t) => {
   const dataDir = tempDataDir(t);
-  const clients = Array.from({ length: 3 }, () => createClient({ dataDir }));
+  const spawner = countingSpawn(t, dataDir);
+  const clients = Array.from({ length: 3 }, () => createClient({ dataDir, spawn: spawner.spawn }));
   t.after(() => stopDaemon(clients[0]));
   const replies = await Promise.all(clients.map((client) => client.op('create', { timer: { kind: 'stopwatch' } })));
   assert.deepEqual(replies.map((reply) => reply.status), [200, 200, 200]);
@@ -77,7 +87,7 @@ test('a daemon that never comes up is reported as daemon_unavailable', async (t)
 
 test('the event stream delivers state from a started daemon', async (t) => {
   const dataDir = tempDataDir(t);
-  const client = createClient({ dataDir });
+  const client = createClient({ dataDir, spawn: countingSpawn(t, dataDir).spawn });
   t.after(() => stopDaemon(client));
   const received = [];
   const stream = await client.events((event) => received.push(event));
@@ -102,7 +112,7 @@ test('a request that meets a daemon shutting down is run by the daemon started a
     response.end(JSON.stringify({ error: { code: 'daemon_unavailable', message: 'The daemon is shutting down.' } }));
   });
   await new Promise((resolve) => closing.listen(socket, resolve));
-  const spawner = countingSpawn();
+  const spawner = countingSpawn(t, dataDir);
   const client = createClient({ dataDir, spawn: spawner.spawn });
   t.after(() => stopDaemon(client));
 
@@ -125,7 +135,7 @@ test('a request that meets a real daemon which lost its lock is run by the daemo
   const dataDir = tempDataDir(t);
   const first = await startDaemon({ dataDir, log: () => {} });
   t.after(() => first.shutdown());
-  const spawner = countingSpawn();
+  const spawner = countingSpawn(t, dataDir);
   const client = createClient({ dataDir, spawn: spawner.spawn });
   t.after(() => stopDaemon(client));
   unlinkSync(first.paths.lock);

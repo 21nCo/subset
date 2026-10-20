@@ -3,12 +3,18 @@
 // test writes to its FIFO, so the test decides what other processes do in between.
 //
 // argv: <lock path> <fifo path>. stdin: one JSON command per line. stdout: one JSON reply per line.
+// CLOCK_STEP_MS sets this process's wall clock forward by that much, as a clock step would.
 import * as nodeFs from 'node:fs';
 import { basename } from 'node:path';
 import { createInterface } from 'node:readline';
 import { acquireLock, readLock, removeStaleLock } from '../../src/daemon/lock.mjs';
 
 const [lockPath, fifo] = process.argv.slice(2);
+const step = Number(process.env.CLOCK_STEP_MS ?? 0);
+if (step) {
+  const realNow = Date.now;
+  Date.now = () => realNow() + step;
+}
 const reply = (message) => nodeFs.writeSync(1, `${JSON.stringify(message)}\n`);
 
 // Pause points of the current command: `{ id, op, arg = 0, name, nth = 1 }` stops before the nth
@@ -42,7 +48,7 @@ const commands = {
     lock = await acquireLock(lockPath, options);
     return { acquired: lock.acquired };
   },
-  // As `daemon run` does with a live holder it judged a reused pid: remove that lock, then acquire.
+  // As a process that judged the live holder's pid given to another process does: remove that lock, then acquire.
   async takeover() {
     lock = await acquireLock(lockPath, options);
     if (!lock.acquired && lock.holder) {

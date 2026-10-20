@@ -3,7 +3,7 @@ import { closeSync, openSync, renameSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { pidAlive, readLock } from './lock.mjs';
+import { holderAlive, readLock } from './lock.mjs';
 import { daemonPaths, ensureDataDir, resolveDataDir } from './paths.mjs';
 
 /** How long a client waits for a daemon it started to open its socket. */
@@ -184,12 +184,12 @@ export function createClient({
 
   /**
    * True while a live process holds `daemon.lock`, such as a daemon that is still shutting down. A
-   * lock is never seen before its pid is in it, so one without a valid pid is stale.
+   * lock is never seen before its pid is in it, so one without a valid pid is stale, as is one whose
+   * pid now belongs to a process born otherwise.
    */
   function lockHeld() {
     try {
-      const holder = readLock(paths.lock);
-      return Boolean(holder?.pid) && pidAlive(holder.pid);
+      return holderAlive(readLock(paths.lock));
     } catch {
       return false;
     }

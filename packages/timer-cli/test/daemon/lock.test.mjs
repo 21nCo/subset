@@ -4,7 +4,7 @@ import * as nodeFs from 'node:fs';
 import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import test from 'node:test';
-import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, daemonPaths, isReusedPid, processStartTime, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
+import { DaemonRunningError, LockLostError, acquireLock, createRecordingSink, createFakeClock, isReusedPid, processBirth, readLock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 function deadPid() {
@@ -14,7 +14,8 @@ function deadPid() {
 
 const TOKEN = 'a'.repeat(32);
 const OTHER = 'b'.repeat(32);
-const LOCK_CONTENT = new RegExp(`^${process.pid}\n[0-9a-f]{32}\n$`);
+const BIRTH = processBirth(process.pid);
+const LOCK_CONTENT = new RegExp(`^${process.pid}\n[0-9a-f]{32}\n${BIRTH.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')}\n$`);
 
 function lockPath(t) {
   const dir = tempDataDir(t);
@@ -115,48 +116,83 @@ for (const stale of [false, true]) {
   });
 }
 
-test('a lock whose live pid started after the lock was written is a reused pid, and is replaced', async (t) => {
+test('the lock names the birth of its holder, which stays the same for its life and is read exactly', async (t) => {
+  assert.ok(BIRTH, 'this process has a birth');
+  const path = lockPath(t);
+  const lock = await acquireLock(path);
+  assert.equal(readLock(path).birth, BIRTH);
+  lock.release();
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' });
+  t.after(() => child.kill('SIGKILL'));
+  await eventually(() => processBirth(child.pid) !== null);
+  assert.equal(processBirth(child.pid), processBirth(child.pid));
+  assert.equal(processBirth(deadPid()), null);
+
+  // Linux: the boot id and field 22 of /proc/<pid>/stat, after a command name that holds spaces and parentheses.
+  const fields = ['S', ...Array.from({ length: 18 }, (_, index) => String(index + 1)), '987654', '0'];
+  const proc = (stat) => (file) => (file.endsWith('/stat') ? stat : '1b2c-3d\n');
+  assert.equal(processBirth(42, { platform: 'linux', readFile: proc(`42 (a b) (c) ${fields.join(' ')}\n`) }), 'linux-1b2c-3d-987654');
+  assert.equal(processBirth(42, { platform: 'linux', readFile: proc('42 (short) S 1\n') }), null);
+  assert.equal(processBirth(42, { platform: 'linux', readFile: () => { throw new Error('ENOENT'); } }), null);
+  // Elsewhere: the start ps reports, in UTC and without spaces.
+  assert.equal(processBirth(42, { platform: 'darwin', lstartOf: () => 'Tue Oct 20 14:30:41 2026    \n' }), 'ps-Tue_Oct_20_14:30:41_2026');
+  assert.equal(processBirth(42, { platform: 'darwin', lstartOf: () => '' }), null);
+  assert.equal(processBirth(42, { platform: 'darwin', lstartOf: () => { throw new Error('ps failed'); } }), null);
+});
+
+test('a pid is reused only when the process with it now was born otherwise than its holder, whatever the clock', () => {
+  const held = { pid: 4242, birth: 'ps-Tue_Oct_20_14:30:41_2026' };
+  assert.equal(isReusedPid(held, { birthOf: () => held.birth }), false);
+  assert.equal(isReusedPid(held, { birthOf: () => 'ps-Tue_Oct_20_14:31:00_2026' }), true);
+  // When either birth cannot be told, the holder is taken to be alive.
+  assert.equal(isReusedPid(held, { birthOf: () => null }), false);
+  assert.equal(isReusedPid({ ...held, birth: null }, { birthOf: () => 'ps-other' }), false);
+  assert.equal(isReusedPid({ pid: null, birth: null }), false);
+});
+
+test('a lock whose live pid now belongs to a process born otherwise is replaced at once, and one of its own holder never', async (t) => {
   const dataDir = tempDataDir(t);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' });
   t.after(() => bystander.kill('SIGKILL'));
-  await eventually(() => processStartTime(bystander.pid) !== null);
+  await eventually(() => processBirth(bystander.pid) !== null);
   const path = join(dataDir, 'daemon.lock');
-  // Written after the bystander started, the lock could be its own.
-  writeFileSync(path, `${bystander.pid}\n`);
-  await assert.rejects(startDaemon({ dataDir, log: () => {} }), (error) => error instanceof DaemonRunningError && error.pid === bystander.pid);
+  // Its own lock, or one that names no birth, could be the bystander's.
+  for (const content of [`${bystander.pid}\n${TOKEN}\n${processBirth(bystander.pid)}\n`, `${bystander.pid}\n${TOKEN}\n`]) {
+    writeFileSync(path, content);
+    await assert.rejects(startDaemon({ dataDir, log: () => {} }), (error) => error instanceof DaemonRunningError && error.pid === bystander.pid);
+    assert.equal(readFileSync(path, 'utf8'), content);
+  }
 
-  // Written 20 s before the bystander started, it belonged to a daemon that died.
-  const old = (Date.now() - 20_000) / 1000;
-  utimesSync(path, old, old);
+  // A lock written by a process born otherwise: that daemon died and the system gave its pid away.
+  writeFileSync(path, `${bystander.pid}\n${TOKEN}\nps-Thu_Jan__1_00:00:00_1970\n`);
+  const started = Date.now();
   const daemon = await startDaemon({ dataDir, log: () => {} });
   t.after(() => daemon.shutdown());
+  assert.ok(Date.now() - started < 1_000, `${Date.now() - started} ms`);
   assert.equal(readLock(path).pid, process.pid);
 });
 
-test('a live holder that started before its lock is never replaced, however old the lock and with no socket', async (t) => {
-  const dataDir = tempDataDir(t);
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const paths = daemonPaths(dataDir);
-  const lockedAt = Date.now() - 3_600_000;
-  const holder = { pid: process.pid, mtimeMs: lockedAt };
-  // A daemon suspended between taking the lock and listening, or one whose socket was removed.
-  assert.equal(await isReusedPid(paths, holder, { startTimeOf: () => lockedAt - 1_000 }), false);
-  assert.equal(await isReusedPid(paths, holder, { startTimeOf: () => lockedAt + 1_000 }), false);
-  assert.equal(await isReusedPid(paths, holder, { startTimeOf: () => null }), false);
-  assert.equal(await isReusedPid(paths, holder, { startTimeOf: () => lockedAt + 60_000 }), true);
-});
-
-test('a running daemon whose socket was removed keeps its lock', async (t) => {
-  const dataDir = tempDataDir(t);
-  const run = spawnDaemonProcess(dataDir);
-  t.after(() => run.child.kill('SIGKILL'));
-  const socket = join(dataDir, 'daemon.sock');
-  await eventually(() => existsSync(socket), 10_000);
-  unlinkSync(socket);
-  await assert.rejects(startDaemon({ dataDir, log: () => {} }), (error) => error instanceof DaemonRunningError && error.pid === run.child.pid);
-  assert.equal(readLock(join(dataDir, 'daemon.lock')).pid, run.child.pid);
-});
+for (const stepMs of [0, 60_000, 3_600_000]) {
+  test(`a running daemon whose socket was removed keeps its lock${stepMs ? ` after the wall clock is set forward ${stepMs / 60_000} min` : ''}`, async (t) => {
+    const dataDir = tempDataDir(t);
+    const run = spawnDaemonProcess(dataDir);
+    t.after(() => run.child.kill('SIGKILL'));
+    const socket = join(dataDir, 'daemon.sock');
+    await eventually(() => existsSync(socket), 10_000);
+    unlinkSync(socket);
+    const lock = readFileSync(join(dataDir, 'daemon.lock'), 'utf8');
+    // The new daemon sees a wall clock set forward past the lock's age, as after a clock step.
+    const realNow = Date.now;
+    Date.now = () => realNow() + stepMs;
+    try {
+      await assert.rejects(startDaemon({ dataDir, log: () => {} }), (error) => error instanceof DaemonRunningError && error.pid === run.child.pid);
+    } finally {
+      Date.now = realNow;
+    }
+    assert.equal(readFileSync(join(dataDir, 'daemon.lock'), 'utf8'), lock);
+  });
+}
 
 test('a daemon that lost its lock never writes or alerts again and leaves its successor\'s socket', async (t) => {
   const dataDir = tempDataDir(t);
@@ -214,23 +250,6 @@ for (const timers of ['paused', 'none']) {
   }
 }
 
-test('a holder\'s start time is never later than its real start, however slow ps is', () => {
-  // The holder started at 100 s and wrote its lock at 100.1 s. Asked at 101.5 s, ps reports 1 s
-  // elapsed (floored) and takes 2 s to answer.
-  let wall = 101_500;
-  const now = () => wall;
-  const elapsedOf = () => {
-    wall += 2_000;
-    return '00:01\n';
-  };
-  const startedAt = processStartTime(4242, { now, elapsedOf });
-  assert.ok(startedAt <= 100_000, `${startedAt}`);
-  assert.ok(startedAt >= 100_000 - 2_000, `${startedAt}`);
-  assert.equal(processStartTime(4242, { now, elapsedOf: () => { throw new Error('ps failed'); } }), null);
-  assert.equal(processStartTime(4242, { now, elapsedOf: () => '' }), null);
-  assert.equal(processStartTime(4242, { now: () => 200_000_000, elapsedOf: () => '1-02:03:04' }), 200_000_000 - (((24 + 2) * 60 + 3) * 60 + 4) * 1_000 - 1_000);
-});
-
 test('a lock is never seen before its pid and token are in it', async (t) => {
   const path = lockPath(t);
   const seen = [];
@@ -273,23 +292,26 @@ test('a takeover marker whose holder is gone is removed at once, as are files it
   assert.equal(existsSync(live), true);
 });
 
-test('a takeover marker whose holder is alive is kept however long it is stopped, unless the pid was reused', async (t) => {
+test('a takeover marker whose holder is alive is kept however long it is stopped, unless its pid now belongs to a process born otherwise', async (t) => {
   const path = lockPath(t);
   const stale = `${deadPid()}\n${TOKEN}\n`;
   writeFileSync(path, stale);
   const marker = `${path}.takeover.${TOKEN}`;
-  const held = `${process.ppid}\n${OTHER}\n`;
-  writeFileSync(marker, held);
-  const writtenAt = Date.now() - 60_000;
-  utimesSync(marker, writtenAt / 1000, writtenAt / 1000);
-  // Its holder started before the marker: it is a process stopped mid-takeover, and acts when it resumes.
-  const stopped = await acquireLock(path, { startTimeOf: () => writtenAt - 1_000 });
-  assert.deepEqual(stopped, { acquired: false, holder: null });
-  assert.equal(readFileSync(path, 'utf8'), stale);
-  assert.equal(readFileSync(marker, 'utf8'), held);
-  // It started after the marker: the holder died and the system gave its pid to another process.
-  const reused = await acquireLock(path, { startTimeOf: () => writtenAt + 30_000 });
+  const old = (Date.now() - 3_600_000) / 1000;
+  // A process stopped mid-takeover an hour ago, which acts when it resumes; also one that names no birth.
+  for (const held of [`${process.ppid}\n${OTHER}\n${processBirth(process.ppid)}\n`, `${process.ppid}\n${OTHER}\n`]) {
+    writeFileSync(marker, held);
+    utimesSync(marker, old, old);
+    assert.deepEqual(await acquireLock(path), { acquired: false, holder: null });
+    assert.equal(readFileSync(path, 'utf8'), stale);
+    assert.equal(readFileSync(marker, 'utf8'), held);
+  }
+  // Its holder died and the system gave its pid to another process: recovered at once, however new.
+  writeFileSync(marker, `${process.ppid}\n${OTHER}\nps-Thu_Jan__1_00:00:00_1970\n`);
+  const started = Date.now();
+  const reused = await acquireLock(path);
   assert.equal(reused.acquired, true);
+  assert.ok(Date.now() - started < 1_000, `${Date.now() - started} ms`);
   assert.deepEqual(readdirSync(join(path, '..')), ['daemon.lock']);
 });
 

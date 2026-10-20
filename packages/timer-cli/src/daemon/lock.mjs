@@ -1,15 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
-import { closeSync, fstatSync, openSync, readdirSync, readFileSync } from 'node:fs';
+import { closeSync, openSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { writeAll } from './store.mjs';
 
-/** A takeover marker held this long by a live pid is checked for a pid the system gave to another process. */
-const MARKER_CHECK_AGE_MS = 10_000;
-/** How much later than its marker a live holder must have started to be another process given the pid. */
-const PID_START_SLACK_MS = 2_000;
 const ATTEMPTS = 50;
 const RETRY_MS = 20;
 /** How often one removal claims a marker after removing an abandoned one. */
@@ -23,6 +19,8 @@ const LEFTOVER = /^(.+)\.(\d+)-[0-9a-f]{32}\.new$/;
  * for removing an abandoned marker, sits beside the lock under this one bounded name.
  */
 const MARKER = /^\.takeover\.([0-9a-f]{32})$/;
+/** A process birth as written in a lock or marker. */
+const BIRTH = /^[!-~]{1,128}$/;
 
 /** True when a process with this pid exists, including one owned by another user. */
 export function pidAlive(pid) {
@@ -35,28 +33,37 @@ export function pidAlive(pid) {
   }
 }
 
-const elapsedTimeOf = (pid) => execFileSync(PS, ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 });
+const startOf = (pid) => execFileSync(PS, ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 });
 
 /**
- * The earliest the process with this pid can have started, in epoch milliseconds, or null when it
- * cannot be told. `ps -o etime` reports the elapsed time, floored to the second, on macOS and Linux
- * alike. The clock is read before `ps` runs and the rounding is subtracted, so however slow `ps` is
- * the result is never later than the real start: a takeover needs proof, not a late estimate.
+ * The birth of the process with this pid: a string that stays the same for the life of that
+ * process, whatever the wall clock does, and that a process later given the pid does not share.
+ * Null when it cannot be told. On Linux it is the boot id and the start time in clock ticks since
+ * boot (`/proc/<pid>/stat` field 22); elsewhere the start time `ps -o lstart` reports, which the
+ * kernel records once at fork (to the second, in UTC).
  */
-export function processStartTime(pid, { now = Date.now, elapsedOf = elapsedTimeOf } = {}) {
-  const before = now();
-  let output;
+export function processBirth(pid, { platform = process.platform, readFile = readFileSync, lstartOf = startOf } = {}) {
   try {
-    output = elapsedOf(pid);
+    if (platform === 'linux') {
+      const stat = readFile(`/proc/${pid}/stat`, 'utf8');
+      // The command name in parentheses can hold spaces; field 22 is the 20th after it.
+      const starttime = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+      const bootId = readFile('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+      return /^\d+$/.test(starttime) && /^[0-9a-f-]{1,64}$/.test(bootId) ? `linux-${bootId}-${starttime}` : null;
+    }
+    const birth = `ps-${lstartOf(pid).trim().replaceAll(/\s+/g, '_')}`;
+    return birth !== 'ps-' && BIRTH.test(birth) ? birth : null;
   } catch {
     return null;
   }
-  // [[dd-]hh:]mm:ss
-  const match = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(output);
-  if (!match) return null;
-  const [days, hours, minutes, seconds] = match.slice(1).map((part) => Number(part ?? 0));
-  return before - ((((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1_000 + 1_000);
 }
+
+let ownBirth;
+/** This process's birth, read once. */
+const birthOfSelf = () => {
+  ownBirth ??= { value: processBirth(process.pid) };
+  return ownBirth.value;
+};
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
@@ -64,12 +71,17 @@ function isCode(error, ...codes) {
 
 const newToken = () => randomBytes(16).toString('hex');
 
-/** What a holder writes: its pid, and a token no other acquisition has, so its file is told apart from any later one. */
-const ownerContent = (pid, token) => `${pid}\n${token}\n`;
+/**
+ * What a holder writes: its pid, a token no other acquisition has, so its file is told apart from
+ * any later one, and its birth when it can be told, so a process later given the pid is told apart
+ * from it.
+ */
+const ownerContent = (context, token) => `${context.pid}\n${token}\n${context.birth === null ? '' : `${context.birth}\n`}`;
 
 /**
  * The holder of the lock (or of a takeover marker), or null when there is no such file. `raw` is
- * the whole content, unique to one acquisition; `pid` is null when the file holds no valid pid.
+ * the whole content, unique to one acquisition; `pid` is null when the file holds no valid pid, and
+ * `birth` when it names no birth.
  */
 export function readLock(lockPath) {
   let fd;
@@ -79,18 +91,15 @@ export function readLock(lockPath) {
     if (isCode(error, 'ENOENT')) return null;
     throw error;
   }
-  // Read the content and the time from one open file, so both describe the same lock.
   let raw;
-  let stat;
   try {
-    stat = fstatSync(fd);
     raw = readFileSync(fd, 'utf8');
   } finally {
     closeSync(fd);
   }
-  const match = /^(\d+)\n(?:([0-9a-f]{32})\n)?$/.exec(raw);
+  const match = /^(\d+)\n(?:([0-9a-f]{32})\n(?:([!-~]{1,128})\n)?)?$/.exec(raw);
   const pid = match ? Number(match[1]) : null;
-  return { pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, token: match?.[2] ?? null, raw, mtimeMs: stat.mtimeMs };
+  return { pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, token: match?.[2] ?? null, birth: match?.[3] ?? null, raw };
 }
 
 function unlinkQuietly(path, fs = nodeFs) {
@@ -139,16 +148,30 @@ function createExclusive(path, content, pid, fs) {
 const generationOf = (held) => held.token ?? createHash('sha256').update(held.raw).digest('hex').slice(0, 32);
 
 /**
- * A marker naming a process that is gone is abandoned, and so, once it is this old, is one whose
- * pid now belongs to a process that started after it was written. A live holder keeps its marker
- * however long it is stopped, so no other process acts in its place.
+ * True when the live process with the holder's pid is another process than the holder: the holder
+ * named its birth, and the process with that pid now was born otherwise, so the holder is gone and
+ * the system gave its pid away. The wall clock plays no part, so a step of it never makes a live
+ * holder look gone. When either birth cannot be told, the holder is taken to be alive.
  */
-function isAbandoned(held, { isAlive, startTimeOf, now }) {
+export function isReusedPid(held, { birthOf = processBirth } = {}) {
+  if (!held?.pid || held.birth === null) return false;
+  const current = birthOf(held.pid);
+  return current !== null && current !== held.birth;
+}
+
+/** True while the process that wrote `held` (a lock or marker) is alive. */
+export function holderAlive(held, { isAlive = pidAlive, birthOf = processBirth } = {}) {
+  return Boolean(held?.pid) && isAlive(held.pid) && !isReusedPid(held, { birthOf });
+}
+
+/**
+ * A marker whose holder is gone is abandoned, including one whose pid now belongs to another
+ * process. A live holder keeps its marker however long it is stopped, so no other process acts in
+ * its place.
+ */
+function isAbandoned(held, context) {
   // The marker sections of this process are synchronous, so a marker naming it is left over.
-  if (held.pid === null || held.pid === process.pid || !isAlive(held.pid)) return true;
-  if (now() - held.mtimeMs < MARKER_CHECK_AGE_MS) return false;
-  const startedAt = startTimeOf(held.pid);
-  return startedAt !== null && startedAt > held.mtimeMs + PID_START_SLACK_MS;
+  return held.pid === process.pid || !holderAlive(held, context);
 }
 
 const markerOf = (lockPath, gen) => `${lockPath}.takeover.${gen}`;
@@ -168,7 +191,7 @@ function removeGeneration(path, gen, context, seen = new Set()) {
   const marker = markerOf(context.lockPath, gen);
   seen.add(gen);
   for (let tries = 0; tries < MARKER_TRIES; tries++) {
-    if (createExclusive(marker, ownerContent(context.pid, newToken()), context.pid, context.fs)) {
+    if (createExclusive(marker, ownerContent(context, newToken()), context.pid, context.fs)) {
       try {
         const current = readLock(path);
         if (!current || generationOf(current) !== gen) return 'gone';
@@ -189,7 +212,11 @@ function removeGeneration(path, gen, context, seen = new Set()) {
   return 'busy';
 }
 
-const contextOf = (lockPath, { pid = process.pid, isAlive = pidAlive, startTimeOf = processStartTime, now = Date.now, fs = nodeFs } = {}) => ({ lockPath, pid, isAlive, startTimeOf, now, fs });
+/** `pid`, `birth`, `isAlive`, `birthOf` and `fs` replace this process's identity and its view of others, for tests. */
+function contextOf(lockPath, { pid = process.pid, isAlive = pidAlive, birthOf = processBirth, birth, fs = nodeFs } = {}) {
+  const ownBirth = pid === process.pid ? birthOfSelf() : birthOf(pid);
+  return { lockPath, pid, isAlive, birthOf, birth: birth === undefined ? ownBirth : birth, fs };
+}
 
 /**
  * Removes `held`, the lock file seen earlier, if the lock still holds the same acquisition. Returns
@@ -231,8 +258,9 @@ function removeLeftovers(lockPath, { isAlive, fs }) {
 }
 
 /**
- * Takes `daemon.lock`, created exclusively and holding the pid and a token of this acquisition. A
- * lock whose pid is not alive, or that holds no valid pid, is stale and replaced. Resolves
+ * Takes `daemon.lock`, created exclusively and holding the pid, a token of this acquisition and the
+ * process birth. A lock whose holder is gone (its pid is not alive or now belongs to a process born
+ * otherwise), or that holds no valid pid, is stale and replaced. Resolves
  * `{ acquired: true, token, release, isHeld }`, or `{ acquired: false, holder }` naming the live
  * holder (null when another process kept removing a stale lock). `fs` replaces the calls that
  * create, write and remove files, for tests.
@@ -241,12 +269,12 @@ export async function acquireLock(lockPath, options = {}) {
   const context = contextOf(lockPath, options);
   const token = newToken();
   for (let tries = 1; ; tries++) {
-    if (createExclusive(lockPath, ownerContent(context.pid, token), context.pid, context.fs)) {
+    if (createExclusive(lockPath, ownerContent(context, token), context.pid, context.fs)) {
       removeLeftovers(lockPath, context);
       return { acquired: true, token, release: () => releaseLock(lockPath, token, options), isHeld: () => holdsLock(lockPath, token) };
     }
     const current = readLock(lockPath);
-    if (current?.pid && context.isAlive(current.pid)) return { acquired: false, holder: current };
+    if (current && holderAlive(current, context)) return { acquired: false, holder: current };
     // Gone already, or stale and removed: create it at once. Otherwise another process is removing it.
     if (!current || removeGeneration(lockPath, generationOf(current), context) !== 'busy') continue;
     if (tries >= ATTEMPTS) return { acquired: false, holder: null };
