@@ -317,22 +317,41 @@ final class DockerCLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "the refused command was never started")
     }
 
-    func testAShutdownWhileACommandIsLaunchingKillsItAtOnceOnceLaunched() async throws {
+    func testAShutdownBeforeACommandLaunchesKeepsItFromLaunching() async throws {
         let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
         let registry = CommandRegistry()
-        let pidFile = pidFile
-        // The shutdown lands after the run registered and before it launched; the command then runs until it
-        // ignores SIGTERM, so only an immediate SIGKILL stops it within the bound below.
-        let hooks = LaunchHooks(beforeLaunch: { registry.shutDown() }, afterLaunch: {
-            let deadline = Date().addingTimeInterval(10)
-            while !FileManager.default.fileExists(atPath: pidFile), Date() < deadline { usleep(20_000) }
-            usleep(100_000)
-        })
+        // The shutdown lands after the run registered and before it launched.
+        let hooks = LaunchHooks(beforeLaunch: { registry.shutDown() })
 
         let result = await ProcessCommandRunner(registry: registry, hooks: hooks).run(stub, arguments: [], environment: [:], timeout: .seconds(30))
 
         XCTAssertEqual(result, .failure(.cancelled))
-        try await assertExits(try stubPID(), "the command is killed as soon as it has launched", within: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "the command never launched")
+    }
+
+    func testAShutdownRightAfterTheLaunchKillsTheCommandBeforeItReturnsWithoutTheRunnersThread() async throws {
+        let stub = try await warmedStub("trap '' TERM\necho $$ > '\(pidFile)'\nexec sleep 30")
+        let registry = CommandRegistry()
+        // The runner's thread stays held just after the launch until the end, as in an app that exits first.
+        let held = DispatchSemaphore(value: 0)
+        let hooks = LaunchHooks(afterLaunch: { held.wait() })
+        defer { held.signal() }
+        let run = Task { await ProcessCommandRunner(registry: registry, hooks: hooks).run(stub, arguments: [], environment: [:], timeout: .seconds(30)) }
+        let pid = try await waitForStubPID()
+
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            Thread.detachNewThread {
+                registry.shutDown()
+                done.resume()
+            }
+        }
+
+        // Well inside the second a cancellation waits before `SIGKILL`.
+        try await assertExits(pid, "the command is killed by the shutdown itself", within: .milliseconds(500))
+        held.signal()
+        let result = await run.value
+        XCTAssertEqual(result, .failure(.cancelled))
     }
 
     func testCancellingTheTaskStopsTheCommandAndAnAlreadyCancelledTaskStartsNone() async throws {

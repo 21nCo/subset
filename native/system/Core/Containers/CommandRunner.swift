@@ -78,9 +78,10 @@ public final class CommandRegistry: Sendable {
 
     public init() {}
 
-    /// Before it returns, sends `SIGKILL` to every command still running and answers each run `cancelled`; a run
-    /// still starting is killed as soon as it has launched, and no later run starts. For an app about to quit, whose
-    /// delayed `SIGKILL` would never fire, so a command stuck on a socket would outlive it.
+    /// Before it returns, sends `SIGKILL` to every command already launched and answers each run `cancelled`; a run
+    /// not launched yet never launches, and no later run starts. It does not rely on any runner thread, so no child
+    /// is left alive when it returns. For an app about to quit, whose delayed `SIGKILL` would never fire, so a
+    /// command stuck on a socket would outlive it.
     public func shutDown() {
         let runs = state.withLock { state in
             state.shutDown = true
@@ -113,6 +114,9 @@ struct LaunchHooks: Sendable {
 /// keep the run alive until the command has exited and both pipes are closed.
 private final class CommandRun: @unchecked Sendable {
     private let lock = NSLock()
+    /// Held across `process.run()` and recording the launch, and by `killNow()`, which so finds the command either
+    /// not launched, and stops it from launching, or launched with a known pid it kills itself.
+    private let launchLock = NSLock()
     private let process = Process()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
@@ -126,7 +130,7 @@ private final class CommandRun: @unchecked Sendable {
     private let hooks: LaunchHooks
     private var launched = false
     private var cancelled = false
-    /// The registry was shut down: `SIGKILL` at once, also when that happened while the command was launching.
+    /// The registry was shut down: the command is killed, or never launches.
     private var killRequested = false
     private var stopping = false
 
@@ -163,28 +167,34 @@ private final class CommandRun: @unchecked Sendable {
             lock.withLock { status = process.terminationStatus }
             finishIfDone()
         }
-        do {
-            hooks.beforeLaunch()
-            try process.run()
-        } catch {
-            registry.remove(self)
-            process.terminationHandler = nil
-            stopReading()
+        hooks.beforeLaunch()
+        let launch: Result<Bool, Error> = launchLock.withLock {
+            // A shutdown or cancellation that came first has answered already; nothing is launched for it.
+            guard !lock.withLock({ killRequested || cancelled }) else { return .success(false) }
+            do {
+                try process.run()
+            } catch {
+                return .failure(error)
+            }
+            lock.withLock { launched = true }
+            return .success(true)
+        }
+        switch launch {
+        case .success(true):
+            break
+        case .success(false):
+            abandonLaunch()
+            answer(.failure(.cancelled))
+            return
+        case .failure(let error):
+            abandonLaunch()
             answer(.failure(.launchFailed(error.localizedDescription)))
             return
         }
         hooks.afterLaunch()
-        // A cancellation or shutdown that arrived while the command was starting has answered already; the command
-        // is stopped here, at once after a shutdown.
-        let (kill, cancel) = lock.withLock {
-            launched = true
-            if killRequested { stopping = true }
-            return (killRequested, cancelled)
-        }
-        if kill {
-            sendKill()
-            return
-        }
+        // A shutdown after the launch has killed the command itself; a cancellation is stopped here.
+        let (killed, cancel) = lock.withLock { (killRequested, cancelled) }
+        if killed { return }
         if cancel { stop() }
         let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
@@ -198,22 +208,27 @@ private final class CommandRun: @unchecked Sendable {
         if answer(.failure(.cancelled)), started { stop() }
     }
 
-    /// Answers `cancelled` and sends `SIGKILL` at once, or, for a command still launching, as soon as it has launched.
+    /// Answers `cancelled` and, before it returns, sends `SIGKILL` to the command if it has launched, or makes sure
+    /// it never launches.
     func killNow() {
         answer(.failure(.cancelled))
-        let started = lock.withLock {
-            cancelled = true
-            killRequested = true
-            if launched { stopping = true }
-            return launched
+        launchLock.withLock {
+            let started = lock.withLock {
+                cancelled = true
+                killRequested = true
+                if launched { stopping = true }
+                return launched
+            }
+            guard started else { return }
+            stopReading()
+            if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
         }
-        if started { sendKill() }
     }
 
-    private func sendKill() {
+    private func abandonLaunch() {
+        registry.remove(self)
+        process.terminationHandler = nil
         stopReading()
-        guard process.isRunning else { return }
-        Darwin.kill(process.processIdentifier, SIGKILL)
     }
 
     private func receive(_ data: Data, error: Bool) {
