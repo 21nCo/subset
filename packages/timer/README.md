@@ -1,6 +1,6 @@
 # Timer capability (SET-74, SET-75)
 
-This private package owns Timer's domain: timer definitions and presets, a pure state machine computed from timestamps, explicit operations with JSON Schemas, the versioned agent result with the registered view ID `subset.timer.board@1`, and that board view as a host-agnostic Svelte 5 component. It has no process, file I/O or network code. The later hosts (the per-user daemon, the `subset-timer` CLI, the MCP server, the local web host and the macOS app, SET-76 to SET-82) use this contract; none of them exists yet, and no Timer surface is available.
+This private package owns Timer's domain: timer definitions and presets, a pure state machine computed from timestamps, explicit operations with JSON Schemas, the versioned agent result with the registered view ID `subset.timer.board@1`, and that board view as a host-agnostic Svelte 5 component. It has no process, file I/O or network code. The later hosts (the per-user daemon, the `subset-timer` CLI, the MCP server, the local web host and the macOS app, SET-76 to SET-82) use this contract. The daemon is in `packages/timer-cli` (SET-76); the others do not exist yet, and no Timer surface is available.
 
 ## Capability boundary
 

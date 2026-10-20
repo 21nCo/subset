@@ -1,0 +1,20 @@
+{
+  "name": "@subset.dev/timer",
+  "version": "0.0.0",
+  "description": "Local Timer daemon and command line for multi-timers and interval workouts",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./daemon": "./src/daemon/index.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --test test/daemon/*.test.mjs"
+  },
+  "dependencies": {
+    "@subset/timer": "*"
+  }
+}
