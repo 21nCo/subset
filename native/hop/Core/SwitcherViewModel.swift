@@ -106,23 +106,24 @@ public struct SwitcherViewModel: Sendable, Equatable {
     }
 
     /// Records an operation's result: sets or clears the message and, until the next refresh confirms it, shows the
-    /// windows as the operation left them (a closed window or a quit app's windows gone, a minimized window or a hidden
-    /// app flagged).
+    /// windows as the operation left them (a minimized window or a hidden app flagged, a window or app found gone
+    /// removed). A close or quit that was delivered removes nothing: the app may be asking to save, so the window
+    /// stays listed and selected until a refresh no longer lists it.
     public mutating func finished(_ request: Request, result: OperationResult) {
         message = Self.message(for: result, of: request.operation, appName: request.window.appName)
         let ref = request.window.ref
         let pid = request.window.pid
         var updated = entries
         switch (request.operation, result) {
-        case (.close, .done), (_, .windowGone):
+        case (_, .windowGone):
             updated.removeAll { $0.ref == ref }
-        case (.quitApp, .done), (_, .appGone):
+        case (_, .appGone):
             updated.removeAll { $0.pid == pid }
         case (.minimize, .done):
             for index in updated.indices where updated[index].ref == ref { updated[index].isMinimized = true }
         case (.hideApp, .done):
             for index in updated.indices where updated[index].pid == pid { updated[index].isAppHidden = true }
-        case (.focus, _), (_, .refused), (_, .notPermitted):
+        case (.focus, _), (.close, .done), (.quitApp, .done), (_, .refused), (_, .notPermitted):
             return
         }
         refreshed(updated)

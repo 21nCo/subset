@@ -198,10 +198,10 @@ final class SwitcherViewModelTests: XCTestCase {
         model.select(1)
         let request = model.handle(.operation(.close))!
         model.finished(request, result: .done)
-        XCTAssertEqual(model.entries.map(\.ref), [windows[0], windows[2], windows[3]].map(\.ref))
-        XCTAssertEqual(model.selectedEntry?.ref, windows[2].ref)
+        XCTAssertEqual(model.entries, windows, "a delivered close may be waiting on a save prompt")
+        XCTAssertEqual(model.selectedEntry?.ref, windows[1].ref)
         XCTAssertNil(model.message)
-        // The refresh that follows agrees; the selection stays on the window that followed the closed one.
+        // The refresh that follows no longer lists it; the selection moves to the window that followed it.
         model.refreshed([windows[0], windows[2], windows[3]])
         XCTAssertEqual(model.selectedEntry?.ref, windows[2].ref)
     }
@@ -248,6 +248,8 @@ final class SwitcherViewModelTests: XCTestCase {
         XCTAssertEqual(model.entries.map(\.isAppHidden), [false, false, true, true, false, false])
         model.select(4)
         model.finished(.init(.quitApp, on: windows[4]), result: .done)
+        XCTAssertEqual(model.entries.map(\.ref), windows.map(\.ref), "a delivered quit may be waiting on a save prompt")
+        model.finished(.init(.quitApp, on: windows[4]), result: .appGone)
         XCTAssertEqual(model.entries.map(\.ref), windows.prefix(4).map(\.ref))
         XCTAssertEqual(model.selectedEntry?.ref, windows[3].ref, "nothing follows the quit app's windows")
     }

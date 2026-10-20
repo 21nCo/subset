@@ -191,4 +191,139 @@ final class SwitcherControllerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(recorder.calls, [])
     }
+
+    // MARK: - Operations still pending
+
+    func testReleasingWhileACloseIsPendingFocusesTheWindowThatFollowsItOnceItIsGone() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        XCTAssertFalse(switcher.panel.isVisible, "the switcher hides at once")
+        try await wait(until: { gate.held == 1 })
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "nothing is focused while the close is pending")
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the list is read again, then the release commits")
+        XCTAssertEqual(gate.calls.map(\.operation), [.close, .focus])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref], "the closed window is never focused")
+        XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testACloseThatLeavesTheWindowOpenKeepsItSelected() async throws {
+        let recorder = RecordingWindowOperator()
+        lists = [windows] // the app asked to save: window 1 is still listed after ⌘W
+        let switcher = controller(recorder)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(switcher.model?.entries, windows, "a delivered close is not taken as the window gone")
+        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref)
+        try await wait(until: { reads == 2 }, "the list is read again")
+        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref, "the prompting window stays selected")
+        switcher.apply(.operation(.close))
+        try await wait(until: { reads == 3 })
+        switcher.commit()
+        try await wait(until: { recorder.calls.count == 3 })
+        XCTAssertEqual(recorder.calls.map(\.operation), [.close, .close, .focus])
+        XCTAssertEqual(recorder.calls.map(\.window), Array(repeating: windows[1].ref, count: 3),
+                       "no other window is closed or focused")
+    }
+
+    func testAnOperationKeyWhileACloseIsPendingActsOnTheSelectionOnceTheListIsReadAgain() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref], "the second ⌘W waits for the first")
+        gate.release(.done)
+        try await wait(until: { gate.held == 1 && gate.calls.count == 2 }, "the second ⌘W runs after the read")
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref])
+        gate.release(.done)
+        switcher.cancel()
+    }
+
+    func testAClickOnAWindowWhoseCloseIsPendingCommitsNothingOnceItIsGone() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        var ended = 0
+        switcher.onSessionEnded = { ended += 1 }
+        switcher.open()
+        switcher.apply(.operation(.close))
+        let view = switcher.panel.switcherView
+        view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 1, of: switcher))
+        view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 1, of: switcher))
+        XCTAssertEqual(ended, 1)
+        XCTAssertFalse(switcher.panel.isVisible)
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { reads == 2 }, "the list is read again")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "the clicked window is gone, so nothing is focused")
+        XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testReopeningWhileACommitWaitsDropsTheOldCommit() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        switcher.open()
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "the old switch focuses nothing")
+        XCTAssertTrue(switcher.isOpen, "the new switch stays open")
+        XCTAssertEqual(reads, 2, "the old close's read is dropped too")
+        switcher.cancel()
+    }
+
+    private func readWindows() -> [WindowEntry] {
+        reads += 1
+        return lists.count > 1 ? lists.removeFirst() : lists[0]
+    }
+}
+
+/// Holds the operations it is told to until the test releases them, first in first out, as the serial operator would
+/// run them; answers the others at once with `.done`.
+private final class GatedWindowOperator: WindowOperator, @unchecked Sendable {
+    private let lock = NSLock()
+    private let holding: Set<WindowOperation>
+    struct Call: Equatable {
+        var operation: WindowOperation
+        var window: HopCore.WindowRef
+    }
+
+    private var recorded: [Call] = []
+    private var waiting: [CheckedContinuation<OperationResult, Never>] = []
+
+    init(holding: Set<WindowOperation>) {
+        self.holding = holding
+    }
+
+    var calls: [Call] { lock.withLock { recorded } }
+    var held: Int { lock.withLock { waiting.count } }
+
+    func release(_ result: OperationResult) {
+        let next = lock.withLock { waiting.isEmpty ? nil : waiting.removeFirst() }
+        next?.resume(returning: result)
+    }
+
+    func perform(_ operation: WindowOperation, on window: WindowEntry) async -> OperationResult {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                recorded.append(Call(operation: operation, window: window.ref))
+                if holding.contains(operation) { waiting.append(continuation) } else { continuation.resume(returning: .done) }
+            }
+        }
+    }
 }

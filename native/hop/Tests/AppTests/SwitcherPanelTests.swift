@@ -57,7 +57,7 @@ final class SwitcherPanelTests: XCTestCase {
         let after = children(of: list)
         XCTAssertTrue(after.elementsEqual(before, by: ===), "the same window keeps its element")
         XCTAssertEqual(after.map { $0.isAccessibilitySelected() }, [false, false, true])
-        model.finished(.init(.close, on: windows[2]), result: .done)
+        model.refreshed(Array(windows.prefix(2)))
         view.update(.switcher(model, icons: [:]))
         XCTAssertEqual(children(of: list).map { $0.accessibilityLabel() ?? "" }, ["One, A", "Two, B"])
     }

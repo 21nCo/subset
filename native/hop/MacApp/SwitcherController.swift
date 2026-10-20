@@ -7,6 +7,11 @@ import os
 /// selected window forward. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
 /// that finds Hop without the Accessibility permission reopens onboarding instead. Nothing about a window, and never a
 /// title, is logged.
+///
+/// An operation is pending until the list has been read again after its result: only that read shows whether a closed
+/// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
+/// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
+/// switcher at once.
 @MainActor
 final class SwitcherController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switcher")
@@ -26,6 +31,16 @@ final class SwitcherController {
     private var generation = 0
     private var messageTask: Task<Void, Never>?
     private var terminationObserver: NSObjectProtocol?
+    /// Operations performed whose result has not yet been followed by a fresh read of the list.
+    private var pending = 0
+    /// What came while an operation was pending, carried out in order once none is.
+    private var deferred: [Deferred] = []
+
+    private enum Deferred {
+        case event(SwitchSession.Event)
+        /// Commit the selection, or only this window (a click chose it) if it is still listed.
+        case commit(HopCore.WindowRef?)
+    }
 
     /// The switcher ended the session itself (a click chose a window), so the host's session must end too.
     var onSessionEnded: () -> Void = {}
@@ -41,10 +56,9 @@ final class SwitcherController {
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
         panel.switcherView.onChoose = { [unowned self] window in
-            guard let index = model?.entries.firstIndex(where: { $0.ref == window }) else { return }
-            update { $0.select(index) }
+            guard model?.entries.contains(where: { $0.ref == window }) == true else { return }
             onSessionEnded()
-            commit()
+            commit(only: window)
         }
     }
 
@@ -64,8 +78,16 @@ final class SwitcherController {
         Self.log.debug("Switcher opened with \(model.entries.count, privacy: .public) windows")
     }
 
-    /// Applies a session event: moves the selection, or performs an operation on the selected window.
+    /// Applies a session event: moves the selection, or performs an operation on the selected window. While an
+    /// operation is pending, an operation key, and anything after it, waits.
     func apply(_ event: SwitchSession.Event) {
+        guard model != nil else { return }
+        if case .operation = event, pending > 0 { return deferred.append(.event(event)) }
+        if !deferred.isEmpty { return deferred.append(.event(event)) }
+        run(event)
+    }
+
+    private func run(_ event: SwitchSession.Event) {
         guard var model else { return }
         let request = model.handle(event)
         self.model = model
@@ -75,7 +97,18 @@ final class SwitcherController {
 
     /// Hides the switcher and brings the selected window forward.
     func commit() {
-        let target = model?.selectedEntry
+        commit(only: nil)
+    }
+
+    /// Hides the switcher and brings `window` forward if it is still listed, or the selected window when it is nil.
+    /// While an operation is pending, the window is chosen once the list has been read again after it.
+    private func commit(only window: HopCore.WindowRef?) {
+        guard pending == 0 else {
+            deferred.append(.commit(window))
+            panel.hide()
+            return
+        }
+        let target = if let window { model?.entries.first { $0.ref == window } } else { model?.selectedEntry }
         reset()
         guard let target else { return }
         let generation = generation
@@ -104,6 +137,7 @@ final class SwitcherController {
 
     private func perform(_ request: SwitcherViewModel.Request) {
         let generation = generation
+        pending += 1
         Task { [windowOperator] in
             let result = await windowOperator.perform(request.operation, on: request.window)
             Self.log.debug("""
@@ -114,7 +148,19 @@ final class SwitcherController {
             guard self.generation == generation, self.model != nil else { return }
             self.update { $0.finished(request, result: result) }
             if self.model?.message != nil { self.scheduleMessageClear() }
-            if result != .notPermitted { self.scheduleRefresh(after: Self.refreshDelay) }
+            if result == .notPermitted { return self.settle() }
+            self.scheduleRefresh(after: Self.refreshDelay, settling: true)
+        }
+    }
+
+    /// An operation's result has been reconciled with the list; once none is pending, carries out what waited.
+    private func settle() {
+        pending -= 1
+        while pending == 0, !deferred.isEmpty {
+            switch deferred.removeFirst() {
+            case let .event(event): run(event)
+            case let .commit(window): commit(only: window)
+            }
         }
     }
 
@@ -138,14 +184,16 @@ final class SwitcherController {
         render()
     }
 
-    /// Reads the list again after `delay`, unless the switcher has closed by then. Each request gets its own read, so
-    /// an app quitting does not cancel the later read that waits for a closing window to go.
-    private func scheduleRefresh(after delay: Duration) {
+    /// Reads the list again after `delay`, unless the switcher has closed by then, and then settles the operation it
+    /// follows if `settling`. Each request gets its own read, so an app quitting does not cancel the later read that
+    /// waits for a closing window to go.
+    private func scheduleRefresh(after delay: Duration, settling: Bool = false) {
         let generation = generation
         Task {
             try? await Task.sleep(for: delay)
             guard self.generation == generation else { return }
             self.refresh()
+            if settling { self.settle() }
         }
     }
 
@@ -163,6 +211,8 @@ final class SwitcherController {
     private func reset() {
         generation += 1
         model = nil
+        pending = 0
+        deferred = []
         messageTask?.cancel()
         messageTask = nil
         if let terminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver) }
