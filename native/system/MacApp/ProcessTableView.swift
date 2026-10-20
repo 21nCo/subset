@@ -11,6 +11,10 @@ struct ProcessTableView: View {
         VStack(alignment: .leading, spacing: 0) {
             MemorySummaryView(snapshot: monitor.snapshot, memory: monitor.memory, error: monitor.sampleError)
                 .padding(12)
+            if !monitor.containerVMs.isEmpty {
+                ContainerVMsView(groups: monitor.containerVMs, report: monitor.containerReport)
+                    .padding([.horizontal, .bottom], 12)
+            }
             VSplitView {
                 Table(rows, selection: $selection, sortOrder: $sortOrder) {
                     TableColumn("Process", value: \.name)

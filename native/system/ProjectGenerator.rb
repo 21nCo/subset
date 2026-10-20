@@ -95,6 +95,7 @@ end
 add_sources(core_group, core_target, "Core/*.swift")
 add_sources(core_group.new_group("Attribution", "Attribution"), core_target, "Core/Attribution/*.swift")
 add_sources(core_group.new_group("Signals", "Signals"), core_target, "Core/Signals/*.swift")
+add_sources(core_group.new_group("Containers", "Containers"), core_target, "Core/Containers/*.swift")
 add_sources(app_group, app_target, "MacApp/*.swift")
 add_sources(tests_group, test_target, "Tests/CoreTests/*.swift")
 app_group.new_file("Info.plist")

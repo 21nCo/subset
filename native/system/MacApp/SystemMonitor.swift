@@ -10,6 +10,11 @@ final class SystemMonitor {
     private(set) var snapshot: ProcessSnapshot?
     private(set) var memory: SystemMemory?
     private(set) var sampleError: String?
+    /// The running container runtimes' VMs, from the latest sample.
+    private(set) var containerVMs: [ContainerVMGroup] = []
+    /// The latest container breakdown from the Docker-compatible CLI, which runs only while the main window is
+    /// visible.
+    private(set) var containerReport: ContainerReport?
     /// Called on the main actor after each sample.
     @ObservationIgnored var onUpdate: (() -> Void)?
 
@@ -17,6 +22,8 @@ final class SystemMonitor {
     @ObservationIgnored private var cadence = SamplingCadence.menuBarOnly
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var schedule = SamplingSchedule()
+    @ObservationIgnored private let containerPoller = ContainerPoller()
+    @ObservationIgnored private var containerRefresh: Task<Void, Never>?
 
     var summary: StatusSummary { StatusSummary(snapshot: snapshot, memory: memory, samplingFailed: sampleError != nil) }
 
@@ -59,12 +66,28 @@ final class SystemMonitor {
         switch result.processes {
         case let .success(snapshot):
             self.snapshot = snapshot
+            containerVMs = result.containerVMs
             sampleError = nil
         case let .failure(error):
             sampleError = "Could not list processes: \(error)"
         }
         memory = result.memory
         onUpdate?()
+        refreshContainers()
+    }
+
+    /// Asks the poller for a container breakdown without holding up sampling. The poller runs the CLI only while
+    /// the main window is visible and a VM runs, at most once every 10 seconds.
+    private func refreshContainers() {
+        guard containerRefresh == nil, cadence == .mainWindowVisible, !containerVMs.isEmpty else { return }
+        let runtimes = containerVMs.map(\.runtime)
+        let cadence = cadence
+        containerRefresh = Task { [weak self, containerPoller] in
+            let report = await containerPoller.refresh(cadence: cadence, runningRuntimes: runtimes)
+            guard let self else { return }
+            if let report { containerReport = report }
+            containerRefresh = nil
+        }
     }
 }
 
@@ -73,8 +96,9 @@ private actor SamplingWorker {
     private var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource(), origin: .live())
     private let memorySource = LiveSystemMemorySource()
 
-    func sample() -> (processes: Result<ProcessSnapshot, any Error>, memory: SystemMemory) {
+    func sample() -> (processes: Result<ProcessSnapshot, any Error>, memory: SystemMemory, containerVMs: [ContainerVMGroup]) {
         let processes = Result { try sampler.sample() }
-        return (processes, SystemMemory(raw: memorySource.read()))
+        let containerVMs = (try? processes.get()).map { ContainerVMRecognizer().groups(in: $0.processes) } ?? []
+        return (processes, SystemMemory(raw: memorySource.read()), containerVMs)
     }
 }

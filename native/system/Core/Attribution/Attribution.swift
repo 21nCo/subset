@@ -9,7 +9,7 @@ public struct Attribution: Sendable {
 
     public init(projectMarkers: any ProjectMarkerLookup = FileSystemProjectMarkers(),
                 mountTable: any MountTableReading = SystemMountTable(),
-                containerVM: (any ContainerVMRecognizing)? = nil) {
+                containerVM: (any ContainerVMRecognizing)? = ContainerVMRecognizer()) {
         self.projectMarkers = projectMarkers
         self.mountTable = mountTable
         self.containerVM = containerVM
@@ -79,6 +79,8 @@ private struct Candidate {
     let origin: Origin
     var subgroup: String?
     let evidence: [AttributionEvidence]
+    /// For a container VM, its runtime's app bundle.
+    var vmAppBundle: String?
 }
 
 /// What the Project layer found for one process.
@@ -107,10 +109,11 @@ private struct LaunchFinding {
     let evidence: [AttributionEvidence]
 }
 
-private final class AttributionPass {
+final class AttributionPass {
     let tree: ProcessTree
     private let markers: any ProjectMarkerLookup
-    private let containerVM: (any ContainerVMRecognizing)?
+    /// Each process's container VM, from rule 3's recognizer.
+    private let containerVMs: [ContainerVM?]
     private let orphanedByLabel: [String: [LaunchdJob]]
     private let mounts: [MountPoint]
     private var markerCache: [String: MarkerSearch] = [:]
@@ -131,7 +134,8 @@ private final class AttributionPass {
         tree = ProcessTree(processes)
         self.markers = markers
         self.mounts = mounts
-        self.containerVM = containerVM
+        let vms = containerVM?.containerVMs(in: tree.processes) ?? []
+        containerVMs = vms.count == tree.count ? vms : Array(repeating: nil, count: tree.count)
         orphanedByLabel = Dictionary(grouping: launchdJobs.filter(\.orphaned), by: \.label)
         bundles = processes.map { $0.executablePath.flatMap(Self.outermostAppBundle) }
         agentNames = processes.map(Self.agentName)
@@ -175,7 +179,7 @@ private final class AttributionPass {
             evidence: [.executable(path: process.executablePath, name: process.name), signatureEvidence(process)]
         )
         let conflicts = candidates.dropFirst()
-            .filter { Self.disagrees($0, with: winner) }
+            .filter { Self.disagrees($0, with: winner, bundle: bundles[index]) }
             .map { AttributionConflict(rule: $0.rule, group: OriginGroupID($0.origin, subgroup: $0.subgroup), evidence: $0.evidence) }
         return Placement(winner.origin, subgroup: winner.subgroup, rule: winner.rule, confidence: winner.rule.confidence,
                          evidence: winner.evidence, conflicts: Array(conflicts))
@@ -186,9 +190,14 @@ private final class AttributionPass {
     /// any other group. A Team ID (rule 9, or rule 7 for a job outside an app bundle) names who signed the code: it
     /// disagrees with a winner that names no signer (macOS, a container VM, an agent, a terminal, Homebrew), not
     /// with an app bundle, which is that signed code, or with an app found through a signal. A Homebrew path only
-    /// restates the executable's location and never disagrees.
-    private static func disagrees(_ candidate: Candidate, with winner: Candidate) -> Bool {
+    /// restates the executable's location and never disagrees. A container VM found through its runtime's app is
+    /// that app: the app agrees, and so does the Team ID of a process inside the app's bundle.
+    private static func disagrees(_ candidate: Candidate, with winner: Candidate, bundle: String?) -> Bool {
         guard candidate.origin != winner.origin else { return false }
+        if winner.rule == .containerVM, let vmBundle = winner.vmAppBundle {
+            if candidate.origin == .app(bundlePath: vmBundle) { return false }
+            if bundle == vmBundle, case .team = candidate.origin { return false }
+        }
         switch (candidate.rule, candidate.origin) {
         case (.responsibleProcess, _), (.launchdJob, .app):
             return true
@@ -199,13 +208,17 @@ private final class AttributionPass {
         }
     }
 
-    /// Every App rule from 1 to 9 that matches, in precedence order. Rule 6 may give two: the responsible process,
-    /// then the coalition leader.
+    /// Every App rule from 1 to 9 that matches, in precedence order: rule 3 first when it matches, then the rest in
+    /// order. Rule 6 may give two: the responsible process, then the coalition leader.
     private func appCandidates(_ index: Int, project: ProjectFinding) -> [Candidate] {
         let process = tree.processes[index]
         let path = process.executablePath
         var candidates: [Candidate] = []
 
+        if let vm = containerVMs[index] {
+            candidates.append(Candidate(rule: .containerVM, origin: .containerVM(name: vm.name), evidence: [.containerVM(vm)],
+                                        vmAppBundle: vm.appBundlePath))
+        }
         if let bundle = bundles[index] {
             candidates.append(Candidate(rule: .appBundle, origin: .app(bundlePath: bundle), evidence: [.appBundle(path: bundle)]))
         }
@@ -217,9 +230,6 @@ private final class AttributionPass {
                 evidence: [.systemLocation(prefix: String(prefix.dropLast()), platformBinary: process.isPlatformBinary)]
                     + jobEvidence(process, label: label)
             ))
-        }
-        if let vm = containerVM?.containerVM(for: process) {
-            candidates.append(Candidate(rule: .containerVM, origin: .containerVM(name: vm.name), evidence: [.containerVM(vm)]))
         }
         if let agent = agentAt[index], let name = agentNames[agent] {
             candidates.append(Candidate(rule: .codingAgent, origin: .agent(name: name), subgroup: project.path,
