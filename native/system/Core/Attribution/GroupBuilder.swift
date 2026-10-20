@@ -64,3 +64,11 @@ enum GroupBuilder {
         path.split(separator: "/").last.map(String.init) ?? path
     }
 }
+
+extension OriginGroupID {
+    /// The name this group has, or would have, with these members: how to name a group a placement or conflict
+    /// points to when the sample has no group for it. A team's name comes from the members' signatures.
+    public func name(members: [ProcessFacts]) -> String {
+        GroupBuilder.name(self, members: members)
+    }
+}

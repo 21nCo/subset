@@ -11,8 +11,8 @@ public struct GroupTotals: Equatable, Sendable {
     /// The group's energy: nanojoules billed to the members (`ri_billed_energy`), the sum SET-42 specifies. It
     /// covers work other processes did on the members' behalf, so it is not the members' own energy use.
     public let energy: MetricTotal<UInt64>
-    /// The members' own energy (`ri_energy_nj`) in nanojoules since each started, the figure the process table
-    /// shows as Energy Used.
+    /// The members' own energy (`ri_energy_nj`) in nanojoules since each started, the figure the System window
+    /// shows as Energy.
     public let ownEnergy: MetricTotal<UInt64>
 
     init<Members: Sequence>(_ members: Members) where Members.Element == ProcessFacts {

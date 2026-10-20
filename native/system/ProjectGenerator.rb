@@ -5,8 +5,8 @@ require "xcodeproj"
 require "fileutils"
 require "tmpdir"
 
-# Generates System.xcodeproj from the same sources as Package.swift: a static SystemCore library, the Subset System
-# menu-bar app that links it, and the core unit tests. Run `ruby ProjectGenerator.rb` from this folder after adding
+# Generates System.xcodeproj from the same sources as Package.swift: the static SystemCore and SystemProcesses (the
+# window's view models) libraries, the Subset System menu-bar app that links them, and the unit tests of each. Run `ruby ProjectGenerator.rb` from this folder after adding
 # or removing a source file; CI regenerates the project and fails if the committed copy differs.
 Dir.chdir(__dir__)
 project_path = File.join(__dir__, "System.xcodeproj")
@@ -20,19 +20,29 @@ project.root_object.attributes["TargetAttributes"] = {}
 core_group = project.main_group.new_group("Core", "Core")
 app_group = project.main_group.new_group("MacApp", "MacApp")
 tests_group = project.main_group.new_group("Tests", "Tests/CoreTests")
+processes_tests_group = project.main_group.new_group("ProcessesTests", "Tests/ProcessesTests")
 
+# Each library is created before the targets that depend on it: the derived IDs come from the first path that reaches
+# an object, and a path through a dependency would include the ID it is deriving.
 core_target = project.new_target(:static_library, "SystemCore", :osx, "14.0")
+processes_target = project.new_target(:static_library, "SystemProcesses", :osx, "14.0")
 app_target = project.new_target(:application, "SubsetSystem", :osx, "14.0")
 test_target = project.new_target(:unit_test_bundle, "SystemCoreTests", :osx, "14.0")
+processes_test_target = project.new_target(:unit_test_bundle, "SystemProcessesTests", :osx, "14.0")
+processes_target.add_dependency(core_target)
 app_target.add_dependency(core_target)
+app_target.add_dependency(processes_target)
 test_target.add_dependency(core_target)
+processes_test_target.add_dependency(core_target)
+processes_test_target.add_dependency(processes_target)
 
 # new_target links Cocoa through a DEVELOPER_DIR path pinned to one SDK version; frameworks are added relative to
 # SDKROOT below instead.
-[core_target, app_target, test_target].each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
+all_targets = [core_target, processes_target, app_target, test_target, processes_test_target]
+all_targets.each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
 project.frameworks_group.recursive_children.select { |child| child.isa == "PBXFileReference" }.each(&:remove_from_project)
 project.frameworks_group.groups.each(&:remove_from_project)
-[app_target, test_target].each do |target|
+[app_target, test_target, processes_test_target].each do |target|
   project.root_object.attributes["TargetAttributes"][target.uuid] = { "CreatedOnToolsVersion" => "26.4" }
 end
 
@@ -45,14 +55,16 @@ COMMON_SETTINGS = {
   "SUPPORTED_PLATFORMS" => "macosx"
 }.freeze
 
-core_target.build_configurations.each do |config|
-  COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
-  config.build_settings["PRODUCT_NAME"] = "SystemCore"
-  config.build_settings["PRODUCT_MODULE_NAME"] = "SystemCore"
-  config.build_settings["DEFINES_MODULE"] = "YES"
-  # Only the app belongs in the release archive.
-  config.build_settings["SKIP_INSTALL"] = "YES"
-  config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+[core_target, processes_target].each do |library|
+  library.build_configurations.each do |config|
+    COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
+    config.build_settings["PRODUCT_NAME"] = library.name
+    config.build_settings["PRODUCT_MODULE_NAME"] = library.name
+    config.build_settings["DEFINES_MODULE"] = "YES"
+    # Only the app belongs in the release archive.
+    config.build_settings["SKIP_INSTALL"] = "YES"
+    config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+  end
 end
 
 app_target.build_configurations.each do |config|
@@ -78,12 +90,15 @@ end
 app_target.product_reference.path = "Subset System.app"
 app_target.product_reference.name = "Subset System.app"
 
-test_target.build_configurations.each do |config|
-  COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
-  config.build_settings["PRODUCT_NAME"] = "$(TARGET_NAME)"
-  config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.subset.system.tests"
-  config.build_settings["GENERATE_INFOPLIST_FILE"] = "YES"
-  config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+# Neither test bundle has a host app: both test their libraries without launching the menu-bar app or any UI.
+{ test_target => "dev.subset.system.tests", processes_test_target => "dev.subset.system.processes-tests" }.each do |target, id|
+  target.build_configurations.each do |config|
+    COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
+    config.build_settings["PRODUCT_NAME"] = "$(TARGET_NAME)"
+    config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = id
+    config.build_settings["GENERATE_INFOPLIST_FILE"] = "YES"
+    config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+  end
 end
 
 def add_sources(group, target, pattern)
@@ -97,12 +112,19 @@ add_sources(core_group.new_group("Attribution", "Attribution"), core_target, "Co
 add_sources(core_group.new_group("Signals", "Signals"), core_target, "Core/Signals/*.swift")
 add_sources(core_group.new_group("Containers", "Containers"), core_target, "Core/Containers/*.swift")
 add_sources(app_group, app_target, "MacApp/*.swift")
+processes_group = app_group.new_group("Processes", "Processes")
+add_sources(processes_group, app_target, "MacApp/Processes/*.swift")
+add_sources(processes_group.new_group("Model", "Model"), processes_target, "MacApp/Processes/Model/*.swift")
 add_sources(tests_group, test_target, "Tests/CoreTests/*.swift")
+add_sources(processes_tests_group, processes_test_target, "Tests/ProcessesTests/*.swift")
 app_group.new_file("Info.plist")
 app_group.new_file("SubsetSystem.entitlements")
 
 app_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
+app_target.frameworks_build_phase.add_file_reference(processes_target.product_reference)
 test_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
+processes_test_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
+processes_test_target.frameworks_build_phase.add_file_reference(processes_target.product_reference)
 %w[AppKit.framework SwiftUI.framework].each do |framework|
   file_ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}", :sdk_root)
   app_target.frameworks_build_phase.add_file_reference(file_ref)
@@ -126,6 +148,7 @@ begin
   scheme = Xcodeproj::XCScheme.new
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, test_target, launch_target: true)
+  scheme.add_test_target(processes_test_target)
   scheme.save_as(staged_path, "SubsetSystem", true)
 
   generated = Dir.glob("**/*", base: staged_path).select { |path| File.file?(File.join(staged_path, path)) }.sort

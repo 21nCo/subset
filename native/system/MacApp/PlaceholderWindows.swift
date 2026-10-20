@@ -34,6 +34,9 @@ final class PlaceholderWindowController {
         }
     }
 
+    /// Whether this window receives key presses, so its menu shortcuts apply to it.
+    var isKey: Bool { window.isKeyWindow }
+
     func show() {
         // An accessory app is not active until asked; activate so the window comes to the front with focus.
         NSApp.activate()

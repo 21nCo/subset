@@ -1,14 +1,18 @@
 import Foundation
 import Observation
 import SystemCore
+import SystemProcesses
 
 /// Samples processes and memory on the cadence the visible UI needs and publishes the latest results. Samples
 /// live only in memory.
 @MainActor
 @Observable
 final class SystemMonitor {
-    private(set) var snapshot: ProcessSnapshot?
+    /// The latest successful sample with its attribution to origins.
+    private(set) var sample: ProcessesSample?
     private(set) var memory: SystemMemory?
+    /// When `memory` was read, which is also when the latest sample, successful or not, was taken.
+    private(set) var memoryObservedAt: Date?
     private(set) var sampleError: String?
     /// The running container runtimes' VMs, from the latest sample.
     private(set) var containerVMs: [ContainerVMGroup] = []
@@ -19,11 +23,13 @@ final class SystemMonitor {
     @ObservationIgnored var onUpdate: (() -> Void)?
 
     @ObservationIgnored private let worker = SamplingWorker()
-    @ObservationIgnored private var cadence = SamplingCadence.menuBarOnly
+    @ObservationIgnored private(set) var cadence = SamplingCadence.menuBarOnly
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var schedule = SamplingSchedule()
     @ObservationIgnored private let containerPoller = ContainerPoller()
     @ObservationIgnored private var containerRefresh: Task<Void, Never>?
+
+    var snapshot: ProcessSnapshot? { sample?.snapshot }
 
     var summary: StatusSummary { StatusSummary(snapshot: snapshot, memory: memory, samplingFailed: sampleError != nil) }
 
@@ -79,14 +85,15 @@ final class SystemMonitor {
         let result = await worker.sample()
         schedule.finish()
         switch result.processes {
-        case let .success(snapshot):
-            self.snapshot = snapshot
+        case let .success(sample):
+            self.sample = sample
             containerVMs = result.containerVMs
             sampleError = nil
         case let .failure(error):
             sampleError = "Could not list processes: \(error)"
         }
         memory = result.memory
+        memoryObservedAt = result.memoryObservedAt
         onUpdate?()
         refreshContainers()
     }
@@ -107,14 +114,34 @@ final class SystemMonitor {
     }
 }
 
-/// Owns the sampler off the main actor, so reading several hundred processes never blocks the UI.
+/// Owns the sampler and attribution off the main actor, so reading and grouping several hundred processes never
+/// blocks the UI.
 private actor SamplingWorker {
-    private var sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource(), origin: .live())
+    private let launchdJobs: LaunchdJobIndex
+    private var sampler: Sampler
+    private let attribution = Attribution()
     private let memorySource = LiveSystemMemorySource()
 
-    func sample() -> (processes: Result<ProcessSnapshot, any Error>, memory: SystemMemory, containerVMs: [ContainerVMGroup]) {
-        let processes = Result { try sampler.sample() }
-        let containerVMs = (try? processes.get()).map { ContainerVMRecognizer().groups(in: $0.processes) } ?? []
-        return (processes, SystemMemory(raw: memorySource.read()), containerVMs)
+    init() {
+        // The origin reader and attribution share one launchd index, so orphaned plists are flagged from the same
+        // scan that matched the processes.
+        let launchdJobs = LaunchdJobIndex()
+        self.launchdJobs = launchdJobs
+        sampler = Sampler(source: LibprocProcessSource(), hostCPU: LiveHostCPUSource(), origin: .live(launchd: launchdJobs))
+    }
+
+    func sample() -> (processes: Result<ProcessesSample, any Error>, memory: SystemMemory, memoryObservedAt: Date,
+                      containerVMs: [ContainerVMGroup]) {
+        let processes = Result { () throws -> ProcessesSample in
+            let snapshot = try sampler.sample()
+            // Read before attribution, whose project-marker lookups touch the disk: the time is when usage was read.
+            let observedAt = Date.now
+            return ProcessesSample(snapshot: snapshot,
+                                   attribution: attribution.attribute(snapshot.processes, launchdJobs: launchdJobs.jobs),
+                                   observedAt: observedAt)
+        }
+        let containerVMs = (try? processes.get()).map { ContainerVMRecognizer().groups(in: $0.snapshot.processes) } ?? []
+        let memory = SystemMemory(raw: memorySource.read())
+        return (processes, memory, .now, containerVMs)
     }
 }

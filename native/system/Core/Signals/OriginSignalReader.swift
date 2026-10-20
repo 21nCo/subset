@@ -50,13 +50,13 @@ public final class OriginSignalReader: @unchecked Sendable {
         self.now = now
     }
 
-    /// Reads this Mac.
-    public static func live() -> OriginSignalReader {
+    /// Reads this Mac. Pass the launchd index to share it, such as with attribution's orphaned-plist check.
+    public static func live(launchd: any LaunchdJobReading = LaunchdJobIndex()) -> OriginSignalReader {
         OriginSignalReader(
             responsible: LiveResponsibleProcessReader(),
             coalition: LiveCoalitionReader(),
             codeSignature: CachedCodeSignatureReader(),
-            launchd: LaunchdJobIndex(),
+            launchd: launchd,
             context: LiveProcessContextReader(),
             check: LibprocProcessSource.check
         )

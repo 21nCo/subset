@@ -3,10 +3,10 @@ import SystemCore
 
 /// Each running container runtime's VM: what macOS measures for its processes, and beneath it the containers and
 /// compose projects the runtime reports from inside the VM. The two figures are shown side by side and never
-/// reconciled. SET-44 places this under the VM's origin group.
+/// reconciled. The System window's detail pane shows it for the selected container VM's origin group.
 ///
 /// The view is never taller than `maxHeight`: past it, the runtimes and their containers scroll, so every row stays
-/// reachable and the process table below keeps its space however many containers run.
+/// reachable and the rest of the detail pane keeps its space however many containers run.
 struct ContainerVMsView: View {
     static let maxHeight: CGFloat = 96
 
