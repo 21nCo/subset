@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createClient, pidAlive } from '../../src/daemon/index.mjs';
+import { createClient, pidAlive, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, tempDataDir } from './helpers.mjs';
 
 /** Counts the daemons a client starts, using the real spawn. */
@@ -119,4 +119,21 @@ test('a request that meets a daemon shutting down is run by the daemon started a
   assert.equal(spawner.children.length, 2);
   assert.equal((await client.status()).body.pid, spawner.children[1].child.pid);
   assert.deepEqual((await client.timers()).body.structuredContent.timers.map((timer) => timer.definition.name), ['After']);
+});
+
+test('a request that meets a real daemon which lost its lock is run by the daemon started after it', async (t) => {
+  const dataDir = tempDataDir(t);
+  const first = await startDaemon({ dataDir, log: () => {} });
+  t.after(() => first.shutdown());
+  const spawner = countingSpawn();
+  const client = createClient({ dataDir, spawn: spawner.spawn });
+  t.after(() => stopDaemon(client));
+  unlinkSync(first.paths.lock);
+
+  const reply = await client.op('create', { timer: { kind: 'stopwatch', name: 'Moved' } });
+  assert.equal(reply.status, 200);
+  assert.equal(await first.closed, 1);
+  assert.equal(spawner.children.length, 1);
+  assert.equal((await client.status()).body.pid, spawner.children[0].child.pid);
+  assert.deepEqual((await client.timers()).body.structuredContent.timers.map((timer) => timer.definition.name), ['Moved']);
 });

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
+import { connect } from 'node:net';
+import { join } from 'node:path';
 import test from 'node:test';
-import { TIMER_LIMITS, TIMER_VIEW_ID, parseStore, transitionsBetween } from '@subset/timer';
+import { TIMER_LIMITS, TIMER_VIEW_ID, emptyStore, parseStore, runOperation, transitionsBetween } from '@subset/timer';
 import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, createFakeClock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
 
@@ -207,4 +210,84 @@ test('a finish the disk refused is recorded at a later run, shown to subscribers
   await eventually(() => daemon.subscriberCount === 0);
   clock.advance(IDLE_EXIT_MS);
   assert.equal(await daemon.closed, 0);
+});
+
+/** A valid store whose state frame is over 1 MiB: paused stopwatches holding the most laps allowed. */
+function writeLargeStore(dataDir, count, now) {
+  let { store, result } = runOperation('start', emptyStore(), { timer: { kind: 'stopwatch', name: 'Laps' } }, now);
+  const id = result.timer.definition.id;
+  for (let lap = 0; lap < TIMER_LIMITS.laps; lap++) store = runOperation('lap', store, { id }, now + (lap + 1) * 1_234).store;
+  store = runOperation('pause', store, { id }, now + TIMER_LIMITS.laps * 1_234 + 1).store;
+  const [timer] = store.timers;
+  store = { ...store, timers: Array.from({ length: count }, (_, index) => ({ ...timer, definition: { ...timer.definition, id: `t_aa${String(index).padStart(6, '0')}` } })) };
+  assert.equal(parseStore(store).ok, true);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(dataDir, 'state.json'), JSON.stringify(store));
+}
+
+test('a subscriber that keeps reading gets every state frame, even one over 1 MiB', async (t) => {
+  const dataDir = tempDataDir(t);
+  const clock = createFakeClock();
+  writeLargeStore(dataDir, 30, clock.now() - 2_000_000);
+  const { op, daemon } = await startTestDaemon(t, { dataDir, clock });
+  const events = subscribe(daemon.paths.socket);
+  t.after(events.close);
+  await events.waitFor((list) => list.length === 1);
+  assert.ok(JSON.stringify(events.events[0].data).length > 1024 * 1024);
+  assert.equal(events.events[0].data.structuredContent.timers.length, 30);
+
+  await op('create', { timer: { kind: 'stopwatch', name: 'One more' } });
+  await op('create', { timer: { kind: 'stopwatch', name: 'And another' } });
+  await events.waitFor((list) => list.length === 3);
+  assert.deepEqual(events.events.map(({ event, data }) => [event, data.structuredContent.timers.length]), [['state', 30], ['state', 31], ['state', 32]]);
+  assert.equal(daemon.subscriberCount, 1);
+});
+
+test('a subscriber that stops reading is dropped, and the daemon carries on', async (t) => {
+  const dataDir = tempDataDir(t);
+  const clock = createFakeClock();
+  writeLargeStore(dataDir, 30, clock.now() - 2_000_000);
+  const { call, daemon } = await startTestDaemon(t, { dataDir, clock });
+  const stalled = connect(daemon.paths.socket);
+  t.after(() => stalled.destroy());
+  stalled.write('GET /v1/events HTTP/1.1\r\nhost: daemon\r\n\r\n');
+  stalled.pause();
+  await eventually(() => daemon.subscriberCount === 1);
+  // Heartbeats queue behind the undrained state frame until it has waited more than 30 s.
+  clock.advance(30_000);
+  assert.equal(daemon.subscriberCount, 1);
+  clock.advance(15_000);
+  await eventually(() => daemon.subscriberCount === 0);
+  assert.equal((await call('GET', '/v1/daemon')).status, 200);
+});
+
+test('a request to a daemon that lost its lock is answered 503 and not applied', async (t) => {
+  const { op, daemon } = await startTestDaemon(t);
+  unlinkSync(daemon.paths.lock);
+  const reply = await op('create', { timer: { kind: 'stopwatch' } });
+  assert.deepEqual([reply.status, reply.body.error.code], [503, 'daemon_unavailable']);
+  assert.equal(await daemon.closed, 1);
+  assert.equal(existsSync(daemon.paths.state), false);
+});
+
+test('a request still arriving when shutdown begins is answered 503 and not applied', async (t) => {
+  const { daemon } = await startTestDaemon(t);
+  const reply = new Promise((resolve, reject) => {
+    const outgoing = request({ socketPath: daemon.paths.socket, method: 'POST', path: '/v1/ops/create', agent: false }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+    });
+    outgoing.on('error', reject);
+    // The daemon is handling the request, still reading its body, when shutdown begins.
+    daemon.server.once('request', () => {
+      daemon.shutdown(0);
+      outgoing.end('{"kind":"stopwatch"}}');
+    });
+    outgoing.write('{"timer":');
+  });
+  const { status, body } = await reply;
+  assert.deepEqual([status, body.error.code], [503, 'daemon_unavailable']);
+  assert.equal(await daemon.closed, 0);
+  assert.equal(existsSync(daemon.paths.state), false);
 });

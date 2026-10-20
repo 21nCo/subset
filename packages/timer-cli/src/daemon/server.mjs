@@ -15,8 +15,15 @@ export const IDLE_EXIT_MS = 10 * 60_000;
 /** How much later than its lock a live holder must have started to be another process given the pid. */
 const PID_START_SLACK_MS = 2_000;
 const MAX_BODY_BYTES = 1024 * 1024;
-/** A subscriber that stops reading is dropped rather than buffered without bound. */
-const MAX_SUBSCRIBER_BUFFER = 1024 * 1024;
+/**
+ * While a subscriber has a frame undrained, later state and heartbeat frames replace the queued
+ * one and alerts queue up. One that leaves a frame undrained this long, or queues more alerts than
+ * this, has stopped reading and is dropped.
+ */
+const SUBSCRIBER_STALL_MS = 30_000;
+const MAX_QUEUED_ALERT_BYTES = 1024 * 1024;
+/** How long requests already being handled get to finish, with a 503 at most, once shutdown begins. */
+const SHUTDOWN_GRACE_MS = 1_000;
 const STATUS_BY_CODE = { invalid_input: 400, not_found: 404, invalid_state: 409, limit_reached: 409 };
 /** The name a socket is bound under before it is renamed to `daemon.sock`; no longer than that name. */
 const BIND_NAME = /^\.ds-[0-9a-f]{6}$/;
@@ -129,7 +136,8 @@ export async function startDaemon({
   }
 
   const startedAt = clock.now();
-  const subscribers = new Set();
+  /** Each subscriber's response, with the frames waiting for it to drain the earlier ones. */
+  const subscribers = new Map();
   let closing = false;
   let resolveClosed;
   const closed = new Promise((resolve) => {
@@ -140,11 +148,28 @@ export async function startDaemon({
   let socketIno = null;
 
   const send = (response, event, data) => {
-    response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    if (response.writableLength > MAX_SUBSCRIBER_BUFFER) response.destroy();
+    const subscriber = subscribers.get(response);
+    const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    if (subscriber.waitingSince === null) {
+      if (!response.write(frame)) waitForDrain(response, subscriber);
+      return;
+    }
+    if (event !== 'alert') subscriber.queue = subscriber.queue.filter((queued) => queued.event !== event);
+    subscriber.queue.push({ event, frame });
+    const alertBytes = subscriber.queue.reduce((total, queued) => total + (queued.event === 'alert' ? queued.frame.length : 0), 0);
+    if (clock.now() - subscriber.waitingSince > SUBSCRIBER_STALL_MS || alertBytes > MAX_QUEUED_ALERT_BYTES) response.destroy();
   };
+  function waitForDrain(response, subscriber) {
+    subscriber.waitingSince = clock.now();
+    response.once('drain', () => {
+      subscriber.waitingSince = null;
+      while (subscriber.queue.length) {
+        if (!response.write(subscriber.queue.shift().frame)) return waitForDrain(response, subscriber);
+      }
+    });
+  }
   const broadcast = (event, data) => {
-    for (const response of subscribers) send(response, event, data);
+    for (const response of subscribers.keys()) send(response, event, data);
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
 
@@ -247,6 +272,8 @@ export async function startDaemon({
 
   function reply(response, status, body) {
     const text = JSON.stringify(body);
+    // While shutting down, each connection is closed once its answer is sent.
+    if (closing) response.setHeader('connection', 'close');
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text) });
     response.end(text);
   }
@@ -335,7 +362,7 @@ export async function startDaemon({
 
   function subscribe(request, response) {
     response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
-    subscribers.add(response);
+    subscribers.set(response, { queue: [], waitingSince: null });
     send(response, 'state', agentTimerResult(store, clock.now()));
     updateIdle();
     response.on('close', () => {
@@ -353,6 +380,7 @@ export async function startDaemon({
     },
     '/v1/shutdown': {
       POST: (request, response) => {
+        response.setHeader('connection', 'close');
         response.on('finish', () => shutdown(0));
         reply(response, 200, { ok: true });
       }
@@ -422,9 +450,13 @@ export async function startDaemon({
     closing = true;
     scheduler.stop();
     for (const handle of [idleHandle, heartbeatHandle]) if (handle !== null) clock.clearTimeout(handle);
-    for (const response of subscribers) response.end();
+    for (const response of subscribers.keys()) response.end();
     subscribers.clear();
+    // Requests already being handled answer (a change not yet applied gets 503) before their
+    // connections are closed; those still open after the grace are closed then.
+    const grace = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
     server.close(() => {
+      clearTimeout(grace);
       // Another daemon may have bound the path since; only this daemon's own socket is removed.
       try {
         if (lstatSync(paths.socket).ino === socketIno) unlinkSync(paths.socket);
@@ -438,7 +470,7 @@ export async function startDaemon({
       }
       resolveClosed(code);
     });
-    server.closeAllConnections();
+    server.closeIdleConnections();
     return closed;
   }
 
