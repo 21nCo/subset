@@ -57,6 +57,18 @@ enum BulkAttributes {
         return list
     }
 
+    /// Reads one path's attributes with `getattrlist`, without following a symbolic link, or returns `nil` with `errno`
+    /// set. `ATTR_CMN_ERROR` is only for `getattrlistbulk`, so it is not asked for.
+    static func read(path: String) -> DirectoryEntry? {
+        var list = list
+        list.commonattr &= ~attrgroup_t(ATTR_CMN_ERROR)
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 4096, alignment: 8)
+        defer { buffer.deallocate() }
+        guard getattrlist(path, &list, buffer.baseAddress!, buffer.count, UInt32(options) | UInt32(FSOPT_NOFOLLOW)) == 0
+        else { return nil }
+        return parse(UnsafeRawBufferPointer(buffer), count: 1).first
+    }
+
     /// Parses `count` entries from a buffer `getattrlistbulk` filled. Each entry starts with its length, then the
     /// attributes it returned, packed in bit order within each group (common, directory, file, extended), except that
     /// `ATTR_CMN_ERROR` comes right after the returned set. Only returned attributes take space. An entry whose name

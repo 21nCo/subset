@@ -109,6 +109,8 @@ struct EntryFacts: Equatable, Sendable {
             clone = FileKey(device: device, id: id)
             shared = allocated - privateSize
             if link == nil { contribution.allocated = privateSize }
+            // A clone changed after cloning has its own ID, so the blocks it still shares count with each copy.
+            if extended & UInt64(EF_SHARES_ALL_BLOCKS) == 0, shared > 0 { self.flags.insert(.allocatedUpperBound) }
         }
     }
 

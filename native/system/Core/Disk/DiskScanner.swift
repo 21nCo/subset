@@ -61,8 +61,9 @@ public struct DiskScanner: Sendable {
         self.isPackage = isPackage
     }
 
-    /// Scans `root`, calling `onProgress` from a worker thread at most once per `progressInterval`. Cancelling the
-    /// calling task stops every worker at its next batch of entries and returns what was read.
+    /// Scans `root`, calling `onProgress` from a worker thread at most once per `progressInterval`, one call at a time
+    /// and with the item count always rising. Cancelling the calling task stops every worker at its next batch of
+    /// entries and returns what was read.
     public func scan(_ root: URL = DiskScanner.defaultRoot,
                      onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil) async throws(DiskScanError)
         -> DiskScanResult {
@@ -122,14 +123,35 @@ final class DiskScan: @unchecked Sendable {
     private var countedLinks: Set<FileKey> = []
     private var lastPublished: ContinuousClock.Instant?
     private var finish: ((DiskScanResult) -> Void)?
+    /// Serializes progress callbacks, which run outside `condition`, so a snapshot older than one delivered is dropped.
+    private let delivery = NSLock()
+    private var deliveredItems = 0
 
     init(scanner: DiskScanner, rootPath: String, onProgress: (@Sendable (DiskScanProgress) -> Void)?) {
         self.scanner = scanner
         self.onProgress = onProgress
         let name = rootPath == "/" ? "/" : (rootPath as NSString).lastPathComponent
-        builder = TreeBuilder(rootPath: rootPath, rootName: name)
-        queue = [Job(node: 0, path: rootPath, inPackage: false)]
-        progress = DiskScanProgress(items: 0, allocatedBytes: 0, currentPath: rootPath)
+        let root = Self.rootFacts(rootPath, name: name, isPackage: scanner.isPackage)
+        var builder = TreeBuilder(rootPath: rootPath, rootName: name, root: root)
+        _ = builder.visit(root.directory)
+        self.builder = builder
+        queue = root.descent.map { [Job(node: 0, path: rootPath, inPackage: $0 == .package)] } ?? []
+        progress = DiskScanProgress(items: 0, allocatedBytes: root.contribution.allocated, currentPath: rootPath)
+    }
+
+    /// Classifies the scanned folder from its own attributes, as its parent would: its allocation counts, a package is
+    /// one item, and a placeholder is not read. Its mount status is ignored, since a chosen volume is what is scanned.
+    static func rootFacts(_ path: String, name: String, isPackage: (String) -> Bool) -> EntryFacts {
+        guard var entry = BulkAttributes.read(path: path), entry.error == 0 || entry.error == EILSEQ else {
+            // Its own allocation is unknown, so its totals are a lower bound.
+            return EntryFacts(kind: .directory, flags: .incomplete, descent: .folder)
+        }
+        // A volume's root reports the volume's name; the error was only for a name that is not UTF-8.
+        entry.name = name
+        entry.error = 0
+        entry.objectType = entry.objectType ?? VDIR.rawValue
+        entry.mountStatus = nil
+        return EntryFacts(entry) { isPackage(path) }
     }
 
     func start(_ finish: @escaping (DiskScanResult) -> Void) {
@@ -274,7 +296,12 @@ final class DiskScan: @unchecked Sendable {
             lastPublished = now
             return progress
         }
-        if let snapshot { onProgress?(snapshot) }
+        guard let snapshot else { return }
+        delivery.withLock {
+            guard snapshot.items > deliveredItems else { return }
+            deliveredItems = snapshot.items
+            onProgress?(snapshot)
+        }
     }
 
     static func join(_ parent: String, _ name: String) -> String {

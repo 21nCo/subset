@@ -3,7 +3,7 @@ public struct DiskSizes: Equatable, Sendable {
     /// The size its contents claim (`st_size`, summed over all forks).
     public var logical: UInt64
     /// The space allocated on the volume, the figure totals use. A sparse file allocates less than its logical size,
-    /// a compressed one too.
+    /// a compressed one too. An upper bound when the item is flagged `allocatedUpperBound`.
     public var allocated: UInt64
     /// The space freed if only this item were deleted: allocated blocks not shared with a clone, not kept by a local
     /// snapshot, and not reachable through a hard link outside the item. A lower bound: APFS reports a compressed
@@ -55,6 +55,11 @@ public struct DiskItemFlags: OptionSet, Hashable, Sendable {
     public static let incomplete = DiskItemFlags(rawValue: 1 << 6)
     /// A firmlink, the startup disk's link from the system volume into the data volume (`/Users`, `/Applications`).
     public static let firmlink = DiskItemFlags(rawValue: 1 << 7)
+    /// The allocated size may count blocks shared between diverged clones more than once, so it is an upper bound. Set
+    /// on a file that shares some but not all of its blocks (`EF_MAY_SHARE_BLOCKS` without `EF_SHARES_ALL_BLOCKS`: a
+    /// clone changed after cloning, or the file it was cloned from) and on every folder or package whose total
+    /// includes one. Pure clones, which share all their blocks, are counted exactly and do not set it.
+    public static let allocatedUpperBound = DiskItemFlags(rawValue: 1 << 8)
 }
 
 /// One item of a scan.
@@ -63,8 +68,8 @@ public struct DiskItem: Equatable, Sendable {
     public let name: String
     public let kind: DiskItemKind
     public let flags: DiskItemFlags
-    /// For a folder or package, its contents' totals with each hard-linked file and pure clone counted once. `nil`
-    /// when the item itself could not be read.
+    /// For a folder or package, its own allocation plus its contents' totals, with each hard-linked file and pure
+    /// clone counted once. `nil` when the item itself could not be read.
     public let sizes: DiskSizes?
     /// The parent's index, `nil` for the root.
     public let parent: Int?

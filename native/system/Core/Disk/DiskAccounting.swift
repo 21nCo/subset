@@ -4,7 +4,8 @@
 /// size counts at the closest folder holding every link. A file that may share blocks with a clone adds its private
 /// bytes, and its shared bytes count once per clone ID in each folder: pure clones share an ID, so a folder holding a
 /// file and its clone counts their blocks once. A clone changed after cloning gets its own ID, so the blocks it still
-/// shares count with each copy, as `du` counts them.
+/// shares count with each copy, as `du` counts them; such a file and every folder above it are flagged
+/// `allocatedUpperBound`.
 struct TreeBuilder {
     struct LinkOccurrence {
         let node: Int32
@@ -31,9 +32,10 @@ struct TreeBuilder {
     private var directories: Set<FileKey> = []
     private(set) var unreadablePaths: [String] = []
 
-    init(rootPath: String, rootName: String) {
+    /// Starts a tree whose root is the scanned folder, classified from its own attributes like any entry.
+    init(rootPath: String, rootName: String, root: EntryFacts) {
         self.rootPath = rootPath
-        _ = append(name: rootName, facts: EntryFacts(kind: .directory, descent: .folder), parent: -1)
+        _ = append(name: rootName, facts: root, parent: -1)
     }
 
     var count: Int { nodes.count }
@@ -59,6 +61,7 @@ struct TreeBuilder {
     /// Adds an entry read inside the package `owner` to the package's total.
     mutating func addToPackage(_ facts: EntryFacts, owner: Int32, path: @autoclosure () -> String) {
         contributions[Int(owner)].add(facts.contribution)
+        insert(facts.flags.intersection(.allocatedUpperBound), into: owner)
         if facts.flags.contains(.unreadable) { markUnreadable(owner, path: path(), isItem: false) }
         record(facts, node: owner, isItem: false, path: path())
     }
@@ -144,6 +147,9 @@ struct TreeBuilder {
             if !nodes[index].flags.isDisjoint(with: lowerBound) {
                 nodes[index].flags.insert(.incomplete)
                 if parent >= 0 { nodes[parent].flags.insert(.incomplete) }
+            }
+            if parent >= 0, nodes[index].flags.contains(.allocatedUpperBound) {
+                nodes[parent].flags.insert(.allocatedUpperBound)
             }
             if parent >= 0 { totals[parent].add(totals[index]) }
             switch nodes[index].kind {

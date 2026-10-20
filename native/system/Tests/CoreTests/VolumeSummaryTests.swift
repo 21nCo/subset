@@ -14,6 +14,10 @@ final class VolumeSummaryTests: XCTestCase {
         XCTAssertEqual(summary.available, 115_729_567_744)
         XCTAssertEqual(summary.purgeable, 7_019_537_545)
         XCTAssertNil(summary.snapshotBytes)
+        // tmutil is on every Mac, so a format the parser does not understand fails here rather than reading as unknown.
+        guard case .count = summary.snapshots else {
+            return XCTFail("tmutil listlocalsnapshots was not parsed: \(summary.snapshots)")
+        }
     }
 
     func testPurgeableIsUnavailableWhenAFigureIsMissingOrSmaller() {
@@ -77,6 +81,10 @@ final class VolumeSummaryTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary.available ?? .max, capacity)
         XCTAssertNotNil(summary.values.mountPoint)
         XCTAssertNil(summary.snapshotBytes)
+        // tmutil is on every Mac, so a format the parser does not understand fails here rather than reading as unknown.
+        guard case .count = summary.snapshots else {
+            return XCTFail("tmutil listlocalsnapshots was not parsed: \(summary.snapshots)")
+        }
     }
 }
 

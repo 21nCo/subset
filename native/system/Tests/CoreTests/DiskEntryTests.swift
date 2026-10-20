@@ -157,8 +157,8 @@ final class DiskEntryTests: XCTestCase {
     func testClonesSplitAcrossFoldersCountSharedBytesOncePerFolder() {
         // root ─ a ─ (x: clone 1, 100 shared) (y: clone 1, 60 shared)
         //      └ b ─ (z: clone 1, 100 shared) (w: clone 2, 50 shared)
-        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture")
         let folderFacts = EntryFacts(kind: .directory, descent: .folder)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: folderFacts)
         let first = builder.appendChildren([("a", folderFacts), ("b", folderFacts)], to: 0, parentPath: "/fixture")
         func clone(_ id: UInt64, shared: UInt64, private: UInt64) -> EntryFacts {
             var facts = EntryFacts(kind: .file, sizes: DiskSizes(logical: shared + `private`, allocated: shared + `private`,
@@ -178,5 +178,78 @@ final class DiskEntryTests: XCTestCase {
         XCTAssertEqual(tree.root.sizes?.allocated, 1 + 2 + 4 + 8 + 100 + 50)
         XCTAssertEqual(tree.root.sizes?.private, 15)
         XCTAssertEqual(tree.item(at: "a/x")?.sizes?.allocated, 101, "a file shows its own allocation")
+        XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound), "pure clones are counted exactly")
+    }
+
+    func testCloneThatSharesOnlySomeBlocksMarksItsAllocatedAsAnUpperBound() {
+        // Recorded on APFS: three pure clones carry 0x41; a 4-byte write into one gives it a new clone ID and 0x1.
+        var pure = file(allocated: 4 << 20, logical: 4 << 20)
+        pure.privateSize = 0
+        pure.cloneID = 429_948_957
+        pure.extendedFlags = 0x41
+        let pureFacts = facts(pure).0
+        XCTAssertTrue(pureFacts.flags.contains(.sharesBlocks))
+        XCTAssertFalse(pureFacts.flags.contains(.allocatedUpperBound))
+
+        var changed = pure
+        changed.privateSize = 16384
+        changed.cloneID = 429_948_961
+        changed.extendedFlags = 0x1
+        let changedFacts = facts(changed).0
+        XCTAssertTrue(changedFacts.flags.contains(.sharesBlocks))
+        XCTAssertTrue(changedFacts.flags.contains(.allocatedUpperBound))
+        XCTAssertEqual(changedFacts.shared, (4 << 20) - 16384)
+
+        // Once nothing is shared, nothing can be counted twice.
+        changed.privateSize = 4 << 20
+        XCTAssertFalse(facts(changed).0.flags.contains(.allocatedUpperBound))
+    }
+
+    func testUpperBoundReachesEveryFolderAndPackageAboveAndNoOther() {
+        // root ─ a ─ b ─ (changed)   root ─ c ─ (pure)   root ─ Tool.app ⊃ (changed)
+        var changed = EntryFacts(kind: .file, flags: [.sharesBlocks, .allocatedUpperBound],
+                                 sizes: DiskSizes(logical: 10, allocated: 10, private: 2))
+        changed.contribution = DiskSizes(logical: 10, allocated: 2, private: 2)
+        changed.clone = FileKey(device: 1, id: 5)
+        changed.shared = 8
+        var pure = EntryFacts(kind: .file, flags: .sharesBlocks, sizes: DiskSizes(logical: 10, allocated: 10, private: 0))
+        pure.contribution = DiskSizes(logical: 10, allocated: 0, private: 0)
+        pure.clone = FileKey(device: 1, id: 6)
+        pure.shared = 10
+        let folderFacts = EntryFacts(kind: .directory, descent: .folder)
+        var builder = TreeBuilder(rootPath: "/fixture", rootName: "fixture", root: folderFacts)
+        let first = builder.appendChildren([("a", folderFacts), ("c", folderFacts),
+                                            ("Tool.app", EntryFacts(kind: .package, descent: .package))],
+                                           to: 0, parentPath: "/fixture")
+        let b = builder.appendChildren([("b", folderFacts)], to: first, parentPath: "/fixture/a")
+        _ = builder.appendChildren([("changed", changed)], to: b, parentPath: "/fixture/a/b")
+        _ = builder.appendChildren([("pure", pure)], to: first + 1, parentPath: "/fixture/c")
+        builder.addToPackage(changed, owner: first + 2, path: "/fixture/Tool.app/Contents/changed")
+        let tree = builder.finish()
+
+        for path in ["a/b/changed", "a/b", "a", "Tool.app"] {
+            XCTAssertTrue(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "c")).flags.contains(.allocatedUpperBound))
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: "c/pure")).flags.contains(.allocatedUpperBound))
+    }
+
+    func testRootCountsItsOwnAllocation() {
+        // exFAT gives every folder an allocation, the scanned one included.
+        var root = folder("sub")
+        root.allocatedSize = 4096
+        let rootFacts = facts(root).0
+        XCTAssertEqual(rootFacts.contribution, DiskSizes(logical: 0, allocated: 4096, private: 4096))
+        var builder = TreeBuilder(rootPath: "/Volumes/Stick/sub", rootName: "sub", root: rootFacts)
+        let child = EntryFacts(kind: .directory, contribution: DiskSizes(logical: 0, allocated: 4096, private: 4096),
+                               descent: .folder)
+        let first = builder.appendChildren([("a", child)], to: 0, parentPath: "/Volumes/Stick/sub")
+        let file = EntryFacts(kind: .file, sizes: DiskSizes(logical: 3, allocated: 4096, private: 4096),
+                              contribution: DiskSizes(logical: 3, allocated: 4096, private: 4096))
+        _ = builder.appendChildren([("f", file)], to: first, parentPath: "/Volumes/Stick/sub/a")
+        let tree = builder.finish()
+        XCTAssertEqual(tree.item(at: "a")?.sizes, DiskSizes(logical: 3, allocated: 8192, private: 8192))
+        XCTAssertEqual(tree.root.sizes, DiskSizes(logical: 3, allocated: 12288, private: 12288))
     }
 }

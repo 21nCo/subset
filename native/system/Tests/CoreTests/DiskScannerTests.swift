@@ -99,6 +99,36 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(tree.root.sizes?.allocated, fileBytes, "three pure clones count their blocks once")
         XCTAssertEqual(tree.root.sizes?.logical, 3 * (4 << 20))
         XCTAssertLessThan(try XCTUnwrap(tree.root.sizes?.private), fileBytes)
+        XCTAssertFalse(tree.root.flags.contains(.allocatedUpperBound), "pure clones are counted exactly")
+    }
+
+    func testCloneChangedAfterCloningFlagsEveryTotalThatMayCountItsSharedBlocksTwice() async throws {
+        for folder in ["changed", "pure"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: false)
+        }
+        let original = root.appendingPathComponent("changed/a")
+        try Self.write(original, bytes: 4 << 20)
+        for copy in ["changed/b", "changed/c"] {
+            XCTAssertEqual(clonefile(original.path, root.appendingPathComponent(copy).path, 0), 0)
+        }
+        let fd = open(root.appendingPathComponent("changed/b").path, O_WRONLY)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(pwrite(fd, "abcd", 4, 0), 4)
+        XCTAssertEqual(fsync(fd), 0)
+        close(fd)
+        try Self.write(root.appendingPathComponent("pure/d"), bytes: 1 << 20)
+        XCTAssertEqual(clonefile(root.appendingPathComponent("pure/d").path, root.appendingPathComponent("pure/e").path, 0), 0)
+
+        let tree = try await DiskScanner().scan(root).tree
+        let changed = try XCTUnwrap(tree.item(at: "changed/b"))
+        XCTAssertTrue(changed.flags.contains(.sharesBlocks))
+        XCTAssertTrue(changed.flags.contains(.allocatedUpperBound), "the changed copy shares only some blocks")
+        XCTAssertTrue(try XCTUnwrap(tree.item(at: "changed")).flags.contains(.allocatedUpperBound))
+        XCTAssertTrue(tree.root.flags.contains(.allocatedUpperBound))
+        for path in ["pure", "pure/d", "pure/e"] {
+            XCTAssertFalse(try XCTUnwrap(tree.item(at: path)).flags.contains(.allocatedUpperBound), path)
+        }
+        XCTAssertEqual(tree.item(at: "pure")?.sizes?.allocated, try Self.allocated(root.appendingPathComponent("pure/d").path))
     }
 
     func testSymlinkIsCountedAsItselfAndNotFollowed() async throws {
@@ -139,6 +169,82 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.tree.item(at: "plain.d")?.kind, .directory, "an extension alone does not make a package")
         XCTAssertEqual(result.entriesRead, 6, "the package's contents are read for its total")
         XCTAssertEqual(result.tree.count, 3)
+    }
+
+    func testChosenPackageIsOneItemWithItsTotal() async throws {
+        let bundle = root.appendingPathComponent("Tool.app")
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+        try Self.write(bundle.appendingPathComponent("Contents/MacOS/Tool"), bytes: 100_000)
+        try Self.write(bundle.appendingPathComponent("Contents/Info.plist"), bytes: 1_000)
+        let expected = try Self.statTotals(bundle.path)
+
+        let result = try await DiskScanner().scan(bundle)
+        XCTAssertEqual(result.tree.root.kind, .package)
+        XCTAssertEqual(result.tree.root.name, "Tool.app")
+        XCTAssertTrue(result.tree.root.children.isEmpty, "a package's contents are not listed")
+        XCTAssertEqual(result.tree.count, 1)
+        XCTAssertEqual(result.totals?.allocated, expected.allocated)
+        XCTAssertEqual(result.totals?.logical, 101_000)
+        XCTAssertEqual(result.entriesRead, expected.entries)
+        XCTAssertEqual(result.outcome, .completed)
+    }
+
+    func testRootsOwnAllocationCountsOnAVolumeThatAllocatesFolders() async throws {
+        // exFAT allocates a cluster to every folder, the scanned one included; APFS folders allocate nothing.
+        let image = root.appendingPathComponent("stick.dmg").path
+        let mountPoint = root.appendingPathComponent("mnt").path
+        try XCTSkipUnless(Self.run("/usr/bin/hdiutil", ["create", "-quiet", "-size", "16m", "-fs", "ExFAT", "-volname",
+                                                         "SCANTEST", "-layout", "NONE", image]),
+                          "hdiutil could not create an exFAT image")
+        try XCTSkipUnless(Self.run("/usr/bin/hdiutil", ["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint",
+                                                         mountPoint, image]),
+                          "hdiutil could not attach the image")
+        defer { _ = Self.run("/usr/bin/hdiutil", ["detach", "-force", mountPoint]) }
+        let sub = URL(fileURLWithPath: mountPoint).appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub.appendingPathComponent("a/b"), withIntermediateDirectories: true)
+        try Self.write(sub.appendingPathComponent("a/one"), bytes: 3)
+        try Self.write(sub.appendingPathComponent("a/b/two"), bytes: 70_000)
+        let rootBlocks = try Self.allocated(sub.path)
+        XCTAssertGreaterThan(rootBlocks, 0)
+
+        let result = try await DiskScanner().scan(sub)
+        let totals = try XCTUnwrap(result.totals)
+        let expected = try Self.statTotals(sub.path)
+        XCTAssertEqual(totals.allocated, expected.allocated)
+        XCTAssertEqual(totals.logical, expected.logical)
+        XCTAssertEqual(totals.allocated / 1024, try Self.duKilobytes(sub.path))
+        let children = result.tree.children(of: 0).reduce(UInt64(0)) { $0 + ($1.sizes?.allocated ?? 0) }
+        XCTAssertEqual(totals.allocated, children + rootBlocks, "the scanned folder adds its own allocation")
+
+        // A chosen volume is scanned, although its root is a mount point.
+        let volume = try await DiskScanner().scan(URL(fileURLWithPath: mountPoint))
+        XCTAssertEqual(volume.tree.root.kind, .directory)
+        XCTAssertNotNil(volume.tree.item(at: "sub/a/b/two"))
+        XCTAssertGreaterThan(try XCTUnwrap(volume.totals?.allocated), totals.allocated)
+    }
+
+    func testProgressRisesAndCountsAHardLinkPairOnce() async throws {
+        let fileManager = FileManager.default
+        for index in 0..<8 {
+            let folder = root.appendingPathComponent("f\(index)")
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: false)
+            for file in 0..<20 { try Self.write(folder.appendingPathComponent("\(file)"), bytes: 5_000) }
+        }
+        try Self.write(root.appendingPathComponent("f0/big"), bytes: 1 << 20)
+        XCTAssertEqual(link(root.appendingPathComponent("f0/big").path, root.appendingPathComponent("f7/big-link").path), 0)
+        let expected = try Self.statTotals(root.path)
+        let snapshots = OSAllocatedUnfairLock(initialState: [DiskScanProgress]())
+
+        let result = try await DiskScanner(progressInterval: .zero).scan(root) { progress in
+            snapshots.withLock { $0.append(progress) }
+        }
+        let seen = snapshots.withLock { $0 }
+        let last = try XCTUnwrap(seen.last)
+        XCTAssertEqual(zip(seen, seen.dropFirst()).filter { $0.items >= $1.items }.count, 0, "items always rise")
+        XCTAssertEqual(last.items, result.entriesRead)
+        XCTAssertEqual(last.allocatedBytes, expected.allocated, "the hard link pair counts once")
+        XCTAssertTrue(seen.contains { $0.currentPath.hasPrefix(root.path + "/f") }, "the current path follows the workers")
+        XCTAssertTrue(seen.allSatisfy { $0.currentPath == root.path || $0.currentPath.hasPrefix(root.path + "/") })
     }
 
     func testUnreadableFolderIsCountedAsUnknownAndListed() async throws {
@@ -278,6 +384,19 @@ final class DiskScannerTests: XCTestCase {
         return UInt64(info.st_blocks) * 512
     }
 
+    /// A folder's entries from `readdir`, which, unlike `FileManager`, lists the AppleDouble (`._`) files that hold
+    /// extended attributes on exFAT and FAT.
+    static func names(in path: String) throws -> [String] {
+        guard let directory = opendir(path) else { throw POSIXError(.init(rawValue: errno)!) }
+        defer { closedir(directory) }
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            if name != ".", name != ".." { names.append(name) }
+        }
+        return names
+    }
+
     /// Allocated (`st_blocks`) and logical (`st_size`) bytes under `path` from `lstat`, each inode once. Folders
     /// count their blocks, not their size, as `du` does.
     static func statTotals(_ path: String) throws -> (allocated: UInt64, logical: UInt64, entries: Int) {
@@ -291,7 +410,7 @@ final class DiskScannerTests: XCTestCase {
             guard seen.insert(info.st_ino).inserted else { return }
             allocated += UInt64(info.st_blocks) * 512
             if info.st_mode & S_IFMT == S_IFDIR {
-                for name in try FileManager.default.contentsOfDirectory(atPath: path) {
+                for name in try names(in: path) {
                     entries += 1
                     try visit(path + "/" + name)
                 }
@@ -302,6 +421,18 @@ final class DiskScannerTests: XCTestCase {
         try visit(path)
         // Every link is an entry, even when its inode was counted.
         return (allocated, logical, entries)
+    }
+
+    /// Runs a tool, discarding its output, and returns whether it succeeded.
+    static func run(_ executable: String, _ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
     }
 
     static func duKilobytes(_ path: String) throws -> UInt64 {
