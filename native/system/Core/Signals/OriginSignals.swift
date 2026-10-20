@@ -91,11 +91,15 @@ public struct CodeSignature: Equatable, Sendable {
     public let teamID: String?
     /// A nonzero `kSecCodeInfoPlatformIdentifier`: Apple signed the code as part of macOS.
     public let isPlatformBinary: Bool
+    /// The team's name from the signing certificate, such as "Google LLC" from "Developer ID Application: Google
+    /// LLC (EQHXZ8M8AV)"; `nil` without a Team ID or when the certificate does not name the team.
+    public let teamName: String?
 
-    public init(signingID: String?, teamID: String?, isPlatformBinary: Bool) {
+    public init(signingID: String?, teamID: String?, isPlatformBinary: Bool, teamName: String? = nil) {
         self.signingID = signingID
         self.teamID = teamID
         self.isPlatformBinary = isPlatformBinary
+        self.teamName = teamName
     }
 
     public var isSigned: Bool { signingID != nil }

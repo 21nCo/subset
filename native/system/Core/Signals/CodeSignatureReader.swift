@@ -115,7 +115,8 @@ public final class CachedCodeSignatureReader: CodeSignatureReading, @unchecked S
 public struct SecCodeSignatureReader: CodeSignatureReading {
     public init() {}
 
-    public func codeSignature(of identity: ProcessIdentity, executablePath: String?) -> Signal<CodeSignature> {
+    /// Reads the running code by PID; the executable path is not needed.
+    public func codeSignature(of identity: ProcessIdentity, executablePath _: String?) -> Signal<CodeSignature> {
         var code: SecCode?
         let attributes = [kSecGuestAttributePid: NSNumber(value: identity.pid)] as CFDictionary
         let guestStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
@@ -160,11 +161,22 @@ public struct SecCodeSignatureReader: CodeSignatureReading {
     /// Unsigned code yields a dictionary without an identifier, which is a valid answer.
     static func signature(from information: [String: Any]) -> CodeSignature {
         let platform = (information[kSecCodeInfoPlatformIdentifier as String] as? NSNumber)?.intValue ?? 0
+        let teamID = information[kSecCodeInfoTeamIdentifier as String] as? String
+        let leaf = (information[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
         return CodeSignature(
             signingID: information[kSecCodeInfoIdentifier as String] as? String,
-            teamID: information[kSecCodeInfoTeamIdentifier as String] as? String,
-            isPlatformBinary: platform != 0
+            teamID: teamID,
+            isPlatformBinary: platform != 0,
+            teamName: leaf.flatMap { SecCertificateCopySubjectSummary($0) as String? }.flatMap { teamName(subject: $0, teamID: teamID) }
         )
+    }
+
+    /// The team's name in a signing certificate's common name, "<kind>: <name> (<Team ID>)", when the Team ID
+    /// there is the signature's own.
+    static func teamName(subject: String, teamID: String?) -> String? {
+        guard let teamID, subject.hasSuffix(" (\(teamID))"), let colon = subject.range(of: ": ") else { return nil }
+        let name = subject[colon.upperBound...].dropLast(teamID.count + 3).trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
     }
 
     /// Security reports a failed system call as 100000 plus its `errno`.

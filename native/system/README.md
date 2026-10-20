@@ -2,7 +2,7 @@
 
 System is a menu-bar app that will show where a Mac's CPU, memory, and disk space go, grouped by **origin** rather than as a flat process list: the app a helper belongs to, what launched it, the project a dev server runs in, and the containers inside a Docker-compatible VM. It is a Subset capability in the `planned` state.
 
-This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) of the System outcome ([SET-38](https://linear.app/21n/issue/SET-38)), its process sampling ([SET-40](https://linear.app/21n/issue/SET-40)), and the origin signals read for each process ([SET-41](https://linear.app/21n/issue/SET-41)): a menu-bar app that shows total CPU and memory pressure, a temporary process table in the main window with each process's raw origin signals, an empty Settings window, a testable `SystemCore` package, a generated Xcode project, and macOS CI. It does not group processes by origin, scan disks, run cleanups, call AI providers, or ship the agent helper; those are SET-42 through SET-52.
+This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) of the System outcome ([SET-38](https://linear.app/21n/issue/SET-38)), its process sampling ([SET-40](https://linear.app/21n/issue/SET-40)), the origin signals read for each process ([SET-41](https://linear.app/21n/issue/SET-41)), and the attribution of processes to origins ([SET-42](https://linear.app/21n/issue/SET-42)): a menu-bar app that shows total CPU and memory pressure, a temporary process table in the main window with each process's raw origin signals, an empty Settings window, a testable `SystemCore` package with the attribution rules, a generated Xcode project, and macOS CI. The app does not show origin groups yet (SET-44), scan disks, run cleanups, call AI providers, or ship the agent helper; those are SET-43 through SET-52.
 
 ## Capability boundary
 
@@ -14,7 +14,7 @@ This folder holds the app shell ([SET-39](https://linear.app/21n/issue/SET-39)) 
 | --- | --- | --- |
 | Processes, CPU, memory | Darwin process APIs on this Mac, sampled in memory (implemented) | SET-40 |
 | Origin signals per process | Responsibility, coalition, code signature, launchd plists, working directory, terminal (implemented) | SET-41 |
-| Origin (app, launcher, project) | Grouping rules over those signals, the bundle path, and the parent chain | SET-42 |
+| Origin (app, vendor, launch source, project) | Grouping rules over those signals, the bundle path, and the parent chain (implemented; not shown in the app yet) | SET-42 |
 | Containers | The local Docker-compatible CLI | SET-43 |
 | Disk usage | The file system, under the user's Full Disk Access choice | SET-45, SET-46 |
 
@@ -35,7 +35,7 @@ Samples and scan results stay in memory; there is no persisted history. All meas
 
 | Owner | Responsibility |
 | --- | --- |
-| `Core/` (`SystemCore`) | Domain logic, pure Swift plus Darwin; no AppKit or SwiftUI. It holds the app identity, the status menu's command list, the `ProcessFacts` contract and its sources, the `Sampler`, `SystemMemory`, the menu-bar summary, and the origin signal readers in `Core/Signals/`. |
+| `Core/` (`SystemCore`) | Domain logic, pure Swift plus Darwin; no AppKit or SwiftUI. It holds the app identity, the status menu's command list, the `ProcessFacts` contract and its sources, the `Sampler`, `SystemMemory`, the menu-bar summary, the origin signal readers in `Core/Signals/`, and the attribution rules in `Core/Attribution/`. |
 | `MacApp/` | The menu-bar host: the status item, the sampling loop (`SystemMonitor`), the main and Settings windows, and the About panel. |
 
 No other app, package, or product imports this code.
@@ -62,7 +62,7 @@ Agreement with Activity Monitor on a real workload is checked in SET-53, not her
 | --- | --- | --- |
 | Responsible process | The private `responsibility_get_pid_responsible_for_pid`, resolved with `dlsym` | Own processes only; others are `denied` |
 | Coalition ID | The private `PROC_PIDCOALITIONINFO` flavor (20) of `proc_pidinfo`, resolved with `dlsym`; the resource coalition | Every process |
-| Code signature: signing identifier, Team ID, Apple platform binary | `SecCodeCopyGuestWithAttributes` by PID, then `SecCodeCopySigningInformation`, published once `SecCodeCheckValidity` (without network access) finds the running code matches the file and the kernel's status of the running code (`kSecCodeInfoStatus`) agrees that it is signed, or both are unsigned | Every process; one whose file was replaced since it started (an app updated while it runs, or a signed program replaced by an unsigned file) is `unavailable` |
+| Code signature: signing identifier, Team ID and the team's name from the leaf certificate's common name, Apple platform binary | `SecCodeCopyGuestWithAttributes` by PID, then `SecCodeCopySigningInformation`, published once `SecCodeCheckValidity` (without network access) finds the running code matches the file and the kernel's status of the running code (`kSecCodeInfoStatus`) agrees that it is signed, or both are unsigned | Every process; one whose file was replaced since it started (an app updated while it runs, or a signed program replaced by an unsigned file) is `unavailable` |
 | launchd jobs: label, plist, domain, `orphaned` | An index of `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`, and `Contents/Library/LaunchAgents` in each app in `/Applications` and `~/Applications` | Every readable plist; an unreadable plist or an unchecked program is recorded and carried with the jobs found, and a process with no job found then reads `incompleteScan` |
 | Working directory | `PROC_PIDVNODEPATHINFO` | Own processes only |
 | Controlling terminal | `e_tdev` from `PROC_PIDTBSDINFO`, else from the process table (`sysctl` `KERN_PROC_PID`) | Every process |
@@ -76,6 +76,51 @@ Agreement with Activity Monitor on a real workload is checked in SET-53, not her
 - **Not read:** command-line arguments (they can hold secrets) and root-only sources such as `launchctl procinfo`.
 
 The live tests read the test process's own working directory, terminal state, and code signature, launchd's (pid 1) signature and restricted reads, and record whatever the two private interfaces return. Whether the signals are right for real apps, agents, and dev servers is checked on a working Mac in SET-53.
+
+## Origin attribution
+
+`Attribution` (`Core/Attribution/`) takes one sample's `[ProcessFacts]`, every indexed launchd job (`LaunchdJobIndex.jobs`), a project-marker lookup, and a mount table, and places every process in exactly one group in each of four layers. Each placement (`ProcessAttribution`) names the group, the rule that placed it, a confidence (`rule`, `signal`, or `fallback`), and the evidence used. It reads nothing but the marker lookup and the mount table, so the same inputs always give the same groups. Real-workload agreement is checked in SET-53, not here; misattributions outside the rules below are SET-61 follow-ups.
+
+**App layer.** A closed rule set; the first rule that matches places the process:
+
+| # | Rule | Group | Confidence |
+| --- | --- | --- | --- |
+| 1 | The executable is inside an outermost `*.app` bundle: a `.app` path component followed by `Contents` (or an iOS app's `Wrapper`), so a folder merely named `x.app` does not count. Helpers, XPC services, login items, and a terminal app's own processes. | The app, by bundle path, shown with the bundle's file name | rule |
+| 2 | An Apple platform binary under `/System`, `/usr/libexec`, `/usr/sbin`, `/usr/bin`, or `/sbin`. A signature that is not yet read does not contradict a location on the sealed system volume, which holds only Apple's files. The writable, unsealed locations among them need a platform signature: the volumes under `/System/Volumes` (Data, Preboot, …) and the Data-volume folders that `/usr/share/firmlinks` links in (`/usr/libexec/cups`, and `Caches`, `Assets`, `AssetsV2`, `PreinstalledAssets`, `PreinstalledAssetsV2`, `Speech`, and `CoreServices/CoreTypes.bundle/Contents/Library` under `/System/Library`). A signature that says it is not a platform binary contradicts any location. | macOS, sub-grouped by launchd label when known | rule |
+| 3 | A container VM, from the `ContainerVMRecognizing` hook SET-43 provides; without it nothing matches here. | The VM | rule |
+| 4 | The process or an ancestor runs a coding agent: `claude`, `codex`, `cursor-agent`, `droid`, `opencode`, `amp`, or `gemini`, as the kernel's process name, the executable's file name, or the agent folder of a versioned install (`…/claude/versions/2.1.304`, the layout of Claude Code's native installer, whose kernel name is the version). The agent's own process counts, so the agent's footprint is in its group. | "Agent: \<name\>", sub-grouped by project | rule |
+| 5 | A strict ancestor runs a known terminal app (bundle `Terminal.app`, `iTerm.app`, `Ghostty.app`, `Warp.app`, `WezTerm.app`, `kitty.app`, `Alacritty.app`, `Visual Studio Code.app`, or `Cursor.app`). VS Code and Cursor also start language servers and other tools, so under them only a process with a controlling terminal is in the integrated terminal. | Terminal, sub-grouped by project | rule |
+| 6 | The responsible process, else the coalition's earliest-started member (its leader, as far as a non-root reader can tell), is another process inside an app bundle. A responsible PID that belongs to a process started later than this one was reused and is ignored. | That app | signal |
+| 7 | `launchdLabel` is set (`LaunchdMatch.job`) and its plist is in an app bundle's `Contents/Library/LaunchAgents` (that app) or the executable has a Team ID (that team). A job with neither falls through, so a Homebrew service reaches rule 8. | The app or team | signal |
+| 8 | The executable is under `/opt/homebrew` or `/usr/local/Cellar`. The formula is the folder after `Cellar`, `opt`, or `Caskroom`. | "Homebrew: \<formula\>", or "Homebrew" | rule |
+| 9 | The signature has a Team ID. | The team, shown with its name from the signing certificate (`CodeSignature.teamName`, such as "Google LLC") or "Team \<ID\>" | signal |
+| 10 | Nothing matched. | The executable path, or the process name without one | fallback |
+
+Later rules that also match are evaluated too, and one that names a different origin than the winner is recorded in `Placement.conflicts` with its evidence; it never changes the placement. The responsible process, the coalition leader, and a launchd job's owning app (rules 6 and 7) name an app, so any other group disagrees with them: a dev server whose responsible process is Terminal stays in Terminal, with Terminal.app recorded. A Team ID (rule 9, or rule 7 for a job outside an app bundle) names who signed the code, so it is recorded when the winner names no signer (macOS, a container VM, an agent, a terminal, or Homebrew), such as a signed tool run in a terminal, and not when the winner is an app bundle, which is that signed code, or an app found through rule 6 or 7. A Homebrew path only restates the executable's location and is never a conflict.
+
+**Other layers.**
+
+- **Vendor:** Apple (platform binary), the Team ID (named from the certificate when it names the team), unsigned (no Team ID; ad hoc signatures such as Homebrew's included), or signature unavailable. An unread or unreadable signature is never reported as unsigned.
+- **Launch source:** the parent's coding agent ("Coding agent: \<name\>"; the agent's own process was started by whatever started the agent), else a terminal session (rule 5's test), else the nearest of the process and its ancestors that has a launchd label (the label), is a login item (`Contents/Library/LoginItems` inside an app), is inside an app bundle or has an app as its responsible process ("Launched by an app"), or has launchd as its parent ("System"). A chain that ends at a parent missing from the sample is "System" with `fallback` confidence and the missing PID as evidence. On a Mac with an unreadable launchd plist (see Origin signals) no process has a label, so launch agents show as System or as launched by an app.
+- **Project:** the nearest folder at or above the working directory holding `.git`, `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Package.swift`, `Gemfile`, or `pom.xml` (looked for in that order, with `lstat`, once per folder per call, `/` included), else the working directory itself (`/` too), else no project when the working directory is unavailable. Markers are looked for only on local volumes: the mount table is read once per call with `getmntinfo_r_np(MNT_NOWAIT)`, which asks no file system and fills a buffer owned by that call (plain `getmntinfo` shares one buffer across the process, so concurrent calls could overwrite or free it), and the walk stops at the first folder on a volume without `MNT_LOCAL` (SMB, NFS, AFP, most FUSE volumes), whose `lstat` can hang. Such a process's project is its working directory, with the skipped volume as evidence. The working directory is readable only for the user's own processes.
+
+**Totals.** Each group and subgroup sums its members: memory (`physFootprint`, marked `isApproximate` because shared pages count once per member), CPU percent, and energy, which is the billed energy (`ri_billed_energy`) as SET-42 specifies. Billed energy covers work other processes did on the members' behalf and is usually far below their own use (see Units), so the members' own energy (`ri_energy_nj`) is summed separately as `ownEnergy`. Each figure counts measured and unmeasured members, and `restrictedCount` counts restricted members separately; a member without a value is never added as zero, and a group with no measured member has no sum. Sums saturate rather than overflow.
+
+**Identity and cost.** A group's `OriginGroupID` is built from paths, labels, Team IDs, and names, never PIDs, so it is the same in every sample and the UI can keep expansion and selection. Groups are ordered by identity and members keep the order they were given. A parent index is built once per call and each ancestor question (nearest agent, nearest terminal, inherited launch source) is answered for the whole sample at once, so attribution is linear in the number of processes; the 2,000-process test checks the step count on a 2,000-deep chain, where a walk per process would follow about two million links.
+
+**Known limits** (SET-53 checks real workloads; SET-61 collects follow-ups):
+
+- Rule 2 precedes rules 4 and 5, so `/usr/bin` tools started from a terminal or agent (`/usr/bin/login`, `/usr/bin/git`, `/usr/bin/python3`) are macOS, and Apple binaries outside the rule's locations, such as `/bin/zsh` outside any terminal or agent, are unattributed.
+- A platform binary never gets a launchd label from SET-41's signals (`LaunchdMatch.sharedExecutable`, and Apple's own jobs are not indexed), so the macOS group has no label subgroups yet.
+- The coalition leader is the earliest-started member in the sample; macOS does not tell a non-root reader which member leads.
+- Rule 1 takes the outermost `*.app` wherever it is, so a process run from an app bundle nested in a framework or Homebrew keg (framework Python's `Python.framework/…/Resources/Python.app`) joins that app's group, even a dev server in a terminal or agent session.
+- A Virtualization.framework VM process lives under `/System`, so rule 2 claims it before SET-43's hook at rule 3 is asked.
+- Terminal and agent subgroups use the process's own project; a process whose working directory cannot be read (another user's) is in the group but in no subgroup.
+- Working directories inside app bundles and app containers (an XPC service's bundle folder, `~/Library/Containers/…/Data`) become projects of their own under the "working directory itself" rule.
+- A working directory on a network or FUSE volume, or in a local volume mounted inside one, never finds a marker on that volume, so a repository on a network share is grouped by its working directory rather than its root.
+- The live marker lookup stats files in each working directory's folders. In a folder macOS protects (Documents, Desktop, Downloads), that may need the user's permission; the app does not run attribution yet, and its on-screen behavior is checked in SET-44 and SET-53.
+
+The fixture tests record one process per rule (Chrome renderer helpers, an XPC service and login item, an Apple daemon and an unsigned binary on a writable system volume, a container VM through a stand-in recognizer, `node` under `claude` under `zsh` under Ghostty, a dev server in Terminal and in VS Code's integrated terminal, an app found through its responsible process and coalition, a launch agent with an orphaned plist of the same label, a Homebrew service and its workers, a signed tool, an unsigned binary), the precedence between conflicting signals and which of them are recorded as conflicts, the project walk through `/` and its stop at a network volume, totals with restricted members, group identity across two samples, and the linear-time bound. A live test attributes this Mac's processes and checks that each is placed once per layer.
 
 ## Surfaces
 
