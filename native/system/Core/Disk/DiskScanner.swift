@@ -106,6 +106,8 @@ final class DiskScan: @unchecked Sendable {
     private struct Job {
         let node: Int32
         let path: String
+        /// The folder's volume and inode as its entry reported them, checked again once it is opened.
+        let identity: FileKey?
         /// Inside a package: entries add to `node`'s total and are not items.
         let inPackage: Bool
         /// The folder is the item `node` itself rather than a folder inside its package, so failing to read it makes
@@ -138,7 +140,9 @@ final class DiskScan: @unchecked Sendable {
         var builder = TreeBuilder(rootPath: rootPath, rootName: name, root: root)
         _ = builder.admit(root)
         self.builder = builder
-        queue = root.descent.map { [Job(node: 0, path: rootPath, inPackage: $0 == .package, isItem: true)] } ?? []
+        queue = root.descent.map {
+            [Job(node: 0, path: rootPath, identity: root.opensAs, inPackage: $0 == .package, isItem: true)]
+        } ?? []
         progress = DiskScanProgress(items: 0, allocatedBytes: root.contribution.allocated, currentPath: rootPath)
     }
 
@@ -219,18 +223,21 @@ final class DiskScan: @unchecked Sendable {
         }
     }
 
-    /// Reads one folder in batches, checking for cancellation before each, then adds what it read to the tree.
+    /// Reads one folder in batches, checking for cancellation before each, then adds what it read to the tree. A
+    /// folder that is no longer the one its entry described is not read.
     private func read(_ job: Job, buffer: UnsafeMutableRawBufferPointer) {
         var children: [(name: String, facts: EntryFacts)] = []
         var readError: Int32 = 0
         var partial = false
+        var opened = Opened.expected
         let fd = Self.openDirectory(job.path)
         if fd < 0 {
             readError = -fd
         } else {
             defer { close(fd) }
+            opened = job.identity.map { Self.check(fd, against: $0) } ?? .expected
             var list = BulkAttributes.list
-            while true {
+            while opened == .expected {
                 if isCancelled {
                     partial = true
                     break
@@ -243,7 +250,10 @@ final class DiskScan: @unchecked Sendable {
                 }
                 if count == 0 { break }
                 let batch = BulkAttributes.parse(UnsafeRawBufferPointer(buffer), count: Int(count)).map { entry in
-                    (name: entry.name, facts: EntryFacts(entry) { scanner.isPackage(Self.join(job.path, entry.name)) })
+                    // Inside a package every folder is read the same way, so Launch Services is not asked.
+                    (name: entry.name, facts: EntryFacts(entry) {
+                        !job.inPackage && scanner.isPackage(Self.join(job.path, entry.name))
+                    })
                 }
                 children.append(contentsOf: publish(batch))
             }
@@ -255,12 +265,23 @@ final class DiskScan: @unchecked Sendable {
             }
             if readError != 0 { builder.markUnreadable(job.node, path: job.path, isItem: job.isItem) }
             if partial { builder.insert(.partial, into: job.node) }
+            switch opened {
+            case .expected:
+                break
+            case .mounted:
+                // Inside a package the folder's own allocation, counted when it was listed, stays.
+                if job.isItem { builder.becameMountPoint(job.node) }
+                return
+            case .replaced:
+                builder.insert(.incomplete, into: job.node)
+                return
+            }
             if job.inPackage {
                 for child in children {
                     builder.addToPackage(child.facts, owner: job.node, path: Self.join(job.path, child.name))
                     if child.facts.descent != nil {
-                        queue.append(Job(node: job.node, path: Self.join(job.path, child.name), inPackage: true,
-                                         isItem: false))
+                        queue.append(Job(node: job.node, path: Self.join(job.path, child.name),
+                                         identity: child.facts.opensAs, inPackage: true, isItem: false))
                     }
                 }
                 return
@@ -273,7 +294,8 @@ final class DiskScan: @unchecked Sendable {
             let first = builder.appendChildren(children, to: job.node, parentPath: job.path)
             for (offset, child) in children.enumerated() where child.facts.descent != nil {
                 queue.append(Job(node: first + Int32(offset), path: Self.join(job.path, child.name),
-                                 inPackage: child.facts.descent == .package, isItem: true))
+                                 identity: child.facts.opensAs, inPackage: child.facts.descent == .package,
+                                 isItem: true))
             }
         }
     }
@@ -306,6 +328,26 @@ final class DiskScan: @unchecked Sendable {
             onProgress?(snapshot)
         }
         return admitted
+    }
+
+    /// What an opened folder is, against the entry it was queued from.
+    enum Opened: Equatable {
+        case expected
+        /// Another volume was mounted on it after its parent was read.
+        case mounted
+        /// Another folder took its place on the same volume.
+        case replaced
+    }
+
+    /// Compares an opened folder's volume and inode with those its entry reported. The volume is the file system's
+    /// ID, which `ATTR_CMNEXT_REALDEVID` reports: `st_dev` gives the startup disk's system volume the data volume's.
+    static func check(_ fd: Int32, against expected: FileKey) -> Opened {
+        var info = stat()
+        var volume = statfs()
+        guard fstat(fd, &info) == 0, fstatfs(fd, &volume) == 0 else { return .replaced }
+        // A volume that did not report its device (`0`) is checked by inode alone.
+        if expected.device != 0, UInt32(bitPattern: volume.f_fsid.val.0) != expected.device { return .mounted }
+        return UInt64(info.st_ino) == expected.id ? .expected : .replaced
     }
 
     static func join(_ parent: String, _ name: String) -> String {

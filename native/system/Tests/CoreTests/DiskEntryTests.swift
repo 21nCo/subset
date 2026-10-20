@@ -105,7 +105,22 @@ final class DiskEntryTests: XCTestCase {
         XCTAssertEqual(deniedFacts.kind, .directory)
         XCTAssertTrue(deniedFacts.flags.contains(.unreadable))
         XCTAssertNil(deniedFacts.descent)
-        XCTAssertEqual(deniedFacts.error, EPERM)
+        XCTAssertEqual(deniedFacts.error, EPERM, "a type that was returned is kept")
+
+        // getattrlistbulk returns only the name and the error for an entry whose attributes failed.
+        var failed = DirectoryEntry(name: "Mail")
+        failed.error = EACCES
+        let failedFacts = facts(failed).0
+        XCTAssertEqual(failedFacts.kind, .other)
+        XCTAssertEqual(failedFacts.flags, .unreadable)
+        XCTAssertNil(failedFacts.descent)
+        XCTAssertEqual(failedFacts.error, EACCES)
+        var builder = TreeBuilder(rootPath: "/r", rootName: "r", root: EntryFacts(kind: .directory, descent: .folder))
+        _ = builder.appendChildren([(name: "Mail", facts: failedFacts)], to: 0, parentPath: "/r")
+        XCTAssertEqual(builder.unreadablePaths, ["/r/Mail"])
+        let tree = builder.finish()
+        XCTAssertNil(tree.item(at: "Mail")?.sizes)
+        XCTAssertTrue(tree.root.flags.contains(.incomplete))
 
         var noSize = file()
         noSize.allocatedSize = nil

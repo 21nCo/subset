@@ -207,6 +207,31 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.tree.count, 3)
     }
 
+    func testLaunchServicesIsNotAskedInsideAPackage() async throws {
+        let bundle = root.appendingPathComponent("Tool.app")
+        for folder in ["Contents/Resources/en.lproj", "Contents/Frameworks/Kit.framework/Versions",
+                       "Contents/PlugIns/Share.appex", "Contents/Library/Helper.app/Contents"] {
+            try FileManager.default.createDirectory(at: bundle.appendingPathComponent(folder),
+                                                    withIntermediateDirectories: true)
+            try Self.write(bundle.appendingPathComponent(folder + "/data"), bytes: 20_000)
+        }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("plain.d"), withIntermediateDirectories: false)
+        let expected = try Self.statTotals(bundle.path)
+        let asked = OSAllocatedUnfairLock(initialState: [String]())
+        let scanner = DiskScanner(workers: 4, progressInterval: .milliseconds(100), bufferSize: 128 << 10) { path in
+            asked.withLock { $0.append(path) }
+            return path.hasSuffix(".app")
+        }
+
+        let result = try await scanner.scan(root)
+        XCTAssertEqual(asked.withLock { $0 }.sorted(), [bundle.path, root.appendingPathComponent("plain.d").path])
+        let package = try XCTUnwrap(result.tree.item(at: "Tool.app"))
+        XCTAssertEqual(package.kind, .package)
+        XCTAssertEqual(package.sizes?.allocated, expected.allocated)
+        XCTAssertEqual(package.sizes?.logical, 80_000)
+        XCTAssertEqual(result.entriesRead, expected.entries + 2)
+    }
+
     func testChosenPackageIsOneItemWithItsTotal() async throws {
         let bundle = root.appendingPathComponent("Tool.app")
         try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
@@ -415,6 +440,118 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertTrue((0..<result.tree.count).contains { result.tree[$0].flags.contains(.partial) })
     }
 
+    func testFolderReplacedAfterItWasListedIsNotRead() async throws {
+        let fileManager = FileManager.default
+        for name in ["a", "b", "z"] {
+            try fileManager.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: false)
+            try Self.write(root.appendingPathComponent("\(name)/old"), bytes: 10_000)
+        }
+        let rootPath = root.path
+        let moved = root.deletingLastPathComponent().appendingPathComponent("DiskScannerMoved-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: moved) }
+        let swapped = OSAllocatedUnfairLock(initialState: false)
+
+        // One worker reports the root's only batch before it queues the folders listed in it.
+        let result = try await DiskScanner(workers: 1, progressInterval: .zero).scan(root) { progress in
+            guard progress.currentPath == rootPath, !swapped.withLock({ $0 }) else { return }
+            swapped.withLock { $0 = true }
+            let b = URL(fileURLWithPath: rootPath).appendingPathComponent("b")
+            do {
+                try FileManager.default.moveItem(at: b, to: moved)
+                try FileManager.default.createDirectory(at: b, withIntermediateDirectories: false)
+                try Self.write(b.appendingPathComponent("new"), bytes: 200_000)
+            } catch {
+                XCTFail("could not replace b: \(error)")
+            }
+        }
+        XCTAssertTrue(swapped.withLock { $0 })
+        let b = try XCTUnwrap(result.tree.item(at: "b"))
+        XCTAssertEqual(b.kind, .directory)
+        XCTAssertTrue(b.flags.contains(.incomplete))
+        XCTAssertTrue(b.children.isEmpty, "the folder put in its place is not read")
+        XCTAssertEqual(b.sizes?.allocated, 0)
+        let fileBytes = try Self.allocated(root.appendingPathComponent("a/old").path)
+        XCTAssertEqual(result.tree.item(at: "a")?.sizes?.allocated, fileBytes)
+        XCTAssertEqual(result.tree.item(at: "z")?.sizes?.allocated, fileBytes)
+        XCTAssertEqual(result.totals?.allocated, 2 * fileBytes)
+        XCTAssertTrue(result.tree.root.flags.contains(.incomplete))
+        XCTAssertEqual(result.outcome, .completed)
+    }
+
+    func testVolumeMountedOnAListedFolderIsNotCrossed() async throws {
+        let fileManager = FileManager.default
+        for name in ["a", "b", "z"] {
+            try fileManager.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: false)
+            try Self.write(root.appendingPathComponent("\(name)/old"), bytes: 10_000)
+        }
+        let image = root.deletingLastPathComponent().appendingPathComponent("DiskScannerMount-\(UUID().uuidString).dmg")
+        defer { try? fileManager.removeItem(at: image) }
+        try XCTSkipUnless(Self.run("/usr/bin/hdiutil", ["create", "-quiet", "-size", "16m", "-fs", "ExFAT", "-volname",
+                                                         "MOUNTTEST", "-layout", "NONE", image.path]),
+                          "hdiutil could not create an exFAT image")
+        let rootPath = root.path
+        let mountPoint = root.appendingPathComponent("b").path
+        let attached = OSAllocatedUnfairLock(initialState: false)
+        defer { _ = Self.run("/usr/bin/hdiutil", ["detach", "-force", mountPoint]) }
+
+        let result = try await DiskScanner(workers: 1, progressInterval: .zero).scan(root) { progress in
+            guard progress.currentPath == rootPath, !attached.withLock({ $0 }) else { return }
+            let mounted = Self.run("/usr/bin/hdiutil", ["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint",
+                                                        mountPoint, image.path])
+            attached.withLock { $0 = mounted }
+        }
+        try XCTSkipUnless(attached.withLock { $0 }, "hdiutil could not attach the image")
+        let b = try XCTUnwrap(result.tree.item(at: "b"))
+        XCTAssertEqual(b.kind, .mountPoint)
+        XCTAssertEqual(b.sizes, .zero)
+        XCTAssertTrue(b.children.isEmpty, "the volume mounted after b was listed is not read")
+        let fileBytes = try Self.allocated(root.appendingPathComponent("a/old").path)
+        XCTAssertEqual(result.totals?.allocated, 2 * fileBytes)
+        XCTAssertFalse(result.tree.root.flags.contains(.incomplete))
+    }
+
+    func testIdentityCheckPassesTheStartupDisksFoldersAndSkipsFirmlinks() throws {
+        // The startup disk's root is on the system volume, whose folders report another st_dev than their volume.
+        var checked: [String] = []
+        for entry in try Self.entries(in: "/") where entry.objectType == VDIR.rawValue {
+            let facts = EntryFacts(entry) { false }
+            guard facts.descent != nil else { continue }
+            let path = "/" + entry.name
+            guard let identity = facts.opensAs else {
+                // /Users, /Applications, /Library: the entry is the link on the system volume, not the folder it opens.
+                XCTAssertTrue(facts.flags.contains(.firmlink), path)
+                XCTAssertNotEqual(facts.directory, Self.opened(path), "\(path) would never pass a check")
+                continue
+            }
+            XCTAssertEqual(identity, Self.opened(path), path)
+            checked.append(path)
+        }
+        XCTAssertTrue(checked.contains("/System"))
+        // A firmlink chosen as the root is read with getattrlist, which describes the folder it opens.
+        for path in ["/Users", "/System", "/"] {
+            let root = DiskScan.rootFacts(path, name: path, isPackage: { _ in false })
+            XCTAssertEqual(root.opensAs, Self.opened(path), path)
+        }
+        let fd = DiskScan.openDirectory("/System")
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { close(fd) }
+        let system = try XCTUnwrap(Self.opened("/System"))
+        XCTAssertEqual(DiskScan.check(fd, against: system), .expected)
+        XCTAssertEqual(DiskScan.check(fd, against: FileKey(device: system.device, id: system.id + 1)), .replaced)
+        XCTAssertEqual(DiskScan.check(fd, against: FileKey(device: system.device &+ 1, id: system.id)), .mounted)
+    }
+
+    /// The file system ID and inode `DiskScan.check` compares for the folder `path` opens.
+    static func opened(_ path: String) -> FileKey? {
+        let fd = DiskScan.openDirectory(path)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        var volume = statfs()
+        guard fstat(fd, &info) == 0, fstatfs(fd, &volume) == 0 else { return nil }
+        return FileKey(device: UInt32(bitPattern: volume.f_fsid.val.0), id: UInt64(info.st_ino))
+    }
+
     func testMountPointsAreNotCrossed() async throws {
         // On macOS 10.15 and later every entry of /System/Volumes is a volume mounted there.
         let result = try await DiskScanner().scan(URL(fileURLWithPath: "/System/Volumes"))
@@ -494,6 +631,23 @@ final class DiskScannerTests: XCTestCase {
         } else {
             XCTAssertEqual(allocated, physical, "/\(relativePath) is unflagged, so it must be exact", file: file, line: line)
         }
+    }
+
+    /// A folder's entries from `getattrlistbulk`, as the scanner reads them.
+    static func entries(in path: String) throws -> [DirectoryEntry] {
+        let fd = DiskScan.openDirectory(path)
+        guard fd >= 0 else { throw POSIXError(.init(rawValue: -fd)!) }
+        defer { close(fd) }
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 128 << 10, alignment: 8)
+        defer { buffer.deallocate() }
+        var list = BulkAttributes.list
+        var entries: [DirectoryEntry] = []
+        while true {
+            let count = getattrlistbulk(fd, &list, buffer.baseAddress!, buffer.count, BulkAttributes.options)
+            guard count > 0 else { break }
+            entries += BulkAttributes.parse(UnsafeRawBufferPointer(buffer), count: Int(count))
+        }
+        return entries
     }
 
     /// A folder's entries from `readdir`, which, unlike `FileManager`, lists the AppleDouble (`._`) files that hold

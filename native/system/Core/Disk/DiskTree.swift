@@ -30,7 +30,7 @@ public enum DiskItemKind: UInt8, Sendable {
     case package
     /// A symbolic link, counted as itself and never followed.
     case symlink
-    /// A FIFO, socket, or device node.
+    /// A FIFO, socket, or device node, or an unreadable entry whose type was not returned.
     case other
     /// A directory another volume (or an automount trigger) is mounted on. It is not crossed and counts as zero.
     case mountPoint
@@ -52,7 +52,8 @@ public struct DiskItemFlags: OptionSet, Hashable, Sendable {
     public static let countedElsewhere = DiskItemFlags(rawValue: 1 << 4)
     /// The file may share blocks with a clone (`EF_MAY_SHARE_BLOCKS`).
     public static let sharesBlocks = DiskItemFlags(rawValue: 1 << 5)
-    /// Something inside could not be read or was not scanned, so the item's sizes are a lower bound.
+    /// Something inside could not be read or was not scanned, so the item's sizes are a lower bound. A folder replaced
+    /// by another between being listed and being opened is not read and carries it.
     public static let incomplete = DiskItemFlags(rawValue: 1 << 6)
     /// A firmlink, the startup disk's link from the system volume into the data volume (`/Users`, `/Applications`).
     public static let firmlink = DiskItemFlags(rawValue: 1 << 7)

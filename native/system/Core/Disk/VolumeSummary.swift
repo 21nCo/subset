@@ -39,14 +39,14 @@ public enum LocalSnapshots: Equatable, Sendable {
     /// The list could not be read; the reason says why.
     case unavailable(String)
 
-    /// Parses `tmutil listlocalsnapshots <mount point>` output: an optional `Snapshots for disk …:` heading, then one
-    /// `com.apple.TimeMachine.<date>.local` name per line. Any other line means the format is not understood, so the
-    /// count is unavailable rather than wrong.
+    /// Parses `tmutil listlocalsnapshots <mount point>` output: an optional heading (`Snapshots for disk …:`, or
+    /// `Snapshots for volume group containing disk …:`), then one `com.apple.TimeMachine.<date>.local` name per line.
+    /// Any other line means the format is not understood, so the count is unavailable rather than wrong.
     public init(tmutilOutput output: String) {
         var count = 0
         for line in output.split(whereSeparator: \.isNewline) {
             let text = line.trimmingCharacters(in: .whitespaces)
-            if text.isEmpty || (text.hasPrefix("Snapshots for disk ") && text.hasSuffix(":")) { continue }
+            if text.isEmpty || (text.hasPrefix("Snapshots for ") && text.hasSuffix(":")) { continue }
             guard text.hasPrefix("com.apple.TimeMachine."), !text.contains(" ") else {
                 self = .unavailable("tmutil printed a line System does not recognize: \(text.prefix(80))")
                 return

@@ -82,6 +82,13 @@ struct TreeBuilder {
         return duplicate
     }
 
+    /// A folder that turned out, when opened, to be another volume's root: mounted after its parent was read, it counts
+    /// zero and is not read, like a mount point listed as one.
+    mutating func becameMountPoint(_ node: Int32) {
+        nodes[Int(node)].kind = .mountPoint
+        contributions[Int(node)] = .zero
+    }
+
     mutating func insert(_ flags: DiskItemFlags, into node: Int32) {
         nodes[Int(node)].flags.formUnion(flags)
     }

@@ -34,6 +34,9 @@ struct EntryFacts: Equatable, Sendable {
     var privateBytes: UInt64 = 0
     /// A folder's inode, so one reached twice is read once.
     var directory: FileKey?
+    /// The identity the folder must still have when it is opened. A firmlink's entry describes the link on the
+    /// read-only system volume, not the folder it opens on the data volume, so it is not checked.
+    var opensAs: FileKey? { flags.contains(.firmlink) ? nil : directory }
     /// The errno that made the entry unreadable.
     var error: Int32 = 0
 
@@ -47,7 +50,8 @@ struct EntryFacts: Equatable, Sendable {
         let device = entry.realDevice ?? 0
         let flags = entry.flags ?? 0
         guard entry.error == 0, let type else {
-            self.init(kind: type == VDIR.rawValue ? .directory : .file, flags: .unreadable)
+            // An entry whose attributes failed returns no type, so its kind is unknown.
+            self.init(kind: type.map(Self.kind) ?? .other, flags: .unreadable)
             error = entry.error == 0 ? EIO : entry.error
             return
         }
@@ -74,11 +78,7 @@ struct EntryFacts: Equatable, Sendable {
             directory = entry.fileID.map { FileKey(device: device, id: $0) }
             return
         }
-        let kind: DiskItemKind = switch type {
-        case VREG.rawValue: .file
-        case VLNK.rawValue: .symlink
-        default: .other
-        }
+        let kind = Self.kind(type)
         let logical = entry.logicalSize ?? (kind == .other ? 0 : nil)
         let allocated = entry.allocatedSize ?? (kind == .other ? 0 : nil)
         guard let logical, let allocated else {
@@ -121,6 +121,15 @@ struct EntryFacts: Equatable, Sendable {
         self.sizes = sizes
         self.contribution = contribution
         self.descent = descent
+    }
+
+    static func kind(_ objectType: UInt32) -> DiskItemKind {
+        switch objectType {
+        case VDIR.rawValue: .directory
+        case VREG.rawValue: .file
+        case VLNK.rawValue: .symlink
+        default: .other
+        }
     }
 
     /// `Foo.app` has one; `.git`, `notes.`, and `README` do not.

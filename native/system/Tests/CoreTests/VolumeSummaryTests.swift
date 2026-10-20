@@ -14,10 +14,6 @@ final class VolumeSummaryTests: XCTestCase {
         XCTAssertEqual(summary.available, 115_729_567_744)
         XCTAssertEqual(summary.purgeable, 7_019_537_545)
         XCTAssertNil(summary.snapshotBytes)
-        // tmutil is on every Mac, so a format the parser does not understand fails here rather than reading as unknown.
-        guard case .count = summary.snapshots else {
-            return XCTFail("tmutil listlocalsnapshots was not parsed: \(summary.snapshots)")
-        }
     }
 
     func testPurgeableIsUnavailableWhenAFigureIsMissingOrSmaller() {
@@ -40,18 +36,31 @@ final class VolumeSummaryTests: XCTestCase {
 
         """
         XCTAssertEqual(LocalSnapshots(tmutilOutput: output), .count(2))
-        // Before macOS 13 the list had no heading.
+        // tmutil carries a second heading for a volume group.
+        let group = """
+        Snapshots for volume group containing disk /:
+        com.apple.TimeMachine.2026-10-19-083012.local
+        com.apple.TimeMachine.2026-10-20-093544.local
+
+        """
+        XCTAssertEqual(LocalSnapshots(tmutilOutput: group), .count(2))
+        // A list without a heading counts too.
         XCTAssertEqual(LocalSnapshots(tmutilOutput: "com.apple.TimeMachine.2021-01-01-000000.local\n"), .count(1))
     }
 
     func testNoSnapshotsIsZeroNotUnavailable() {
         XCTAssertEqual(LocalSnapshots(tmutilOutput: "Snapshots for disk /:\n"), .count(0))
+        XCTAssertEqual(LocalSnapshots(tmutilOutput: "Snapshots for volume group containing disk /:\n"), .count(0))
         XCTAssertEqual(LocalSnapshots(tmutilOutput: ""), .count(0))
     }
 
     func testUnrecognizedOutputIsUnavailable() {
-        guard case .unavailable = LocalSnapshots(tmutilOutput: "Snapshots for disk /:\nSomething went wrong\n") else {
-            return XCTFail("an unrecognized line was counted")
+        for output in ["Snapshots for disk /:\nSomething went wrong\n",
+                       "Snapshots for volume group containing disk /:\nSomething went wrong\n",
+                       "Snapshots for disk /:\ncom.apple.TimeMachine.2026-10-20-093544.local\nSnapshots unavailable\n"] {
+            guard case .unavailable = LocalSnapshots(tmutilOutput: output) else {
+                return XCTFail("an unrecognized line was counted: \(output)")
+            }
         }
     }
 
@@ -84,6 +93,12 @@ final class VolumeSummaryTests: XCTestCase {
         // tmutil is on every Mac, so a format the parser does not understand fails here rather than reading as unknown.
         guard case .count = summary.snapshots else {
             return XCTFail("tmutil listlocalsnapshots was not parsed: \(summary.snapshots)")
+        }
+        // The startup disk, which the issue names: tmutil listlocalsnapshots /.
+        let startup = await VolumeSummary.read(volumeOf: URL(fileURLWithPath: "/"))
+        XCTAssertEqual(startup.values.mountPoint, "/")
+        guard case .count = startup.snapshots else {
+            return XCTFail("tmutil listlocalsnapshots / was not parsed: \(startup.snapshots)")
         }
     }
 }
