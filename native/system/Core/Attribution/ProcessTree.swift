@@ -105,20 +105,24 @@ public protocol MountTableReading: Sendable {
     func mounts() -> [MountPoint]
 }
 
-/// Reads the mount table with `getmntinfo(MNT_NOWAIT)`, which returns the kernel's cached figures without asking
-/// any file system, so a hung volume cannot block it.
+/// Reads the mount table with `getmntinfo_r_np(MNT_NOWAIT)`, which returns the kernel's cached figures without
+/// asking any file system, so a hung volume cannot block it. Unlike `getmntinfo`, whose array is one buffer shared by
+/// the whole process, it fills a buffer this call owns, so concurrent calls cannot overwrite or free each other's.
 public struct SystemMountTable: MountTableReading {
     public init() {}
 
     public func mounts() -> [MountPoint] {
         var buffer: UnsafeMutablePointer<statfs>?
-        let count = getmntinfo(&buffer, MNT_NOWAIT)
+        let count = getmntinfo_r_np(&buffer, MNT_NOWAIT)
+        defer { free(buffer) }
         guard count > 0, let buffer else { return [] }
-        return UnsafeBufferPointer(start: buffer, count: Int(count)).map { volume in
-            var name = volume.f_mntonname
-            let path = withUnsafeBytes(of: &name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-            return MountPoint(path: path, isLocal: volume.f_flags & UInt32(MNT_LOCAL) != 0)
-        }
+        return UnsafeBufferPointer(start: buffer, count: Int(count)).map(Self.mountPoint)
+    }
+
+    private static func mountPoint(_ volume: statfs) -> MountPoint {
+        var name = volume.f_mntonname
+        let path = withUnsafeBytes(of: &name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return MountPoint(path: path, isLocal: volume.f_flags & UInt32(MNT_LOCAL) != 0)
     }
 }
 

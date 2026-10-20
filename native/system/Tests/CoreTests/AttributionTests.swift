@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 @testable import SystemCore
 import XCTest
 
@@ -475,6 +476,42 @@ final class AttributionTests: XCTestCase {
 
     func testTheSystemMountTableListsTheLocalRootVolume() {
         XCTAssertTrue(SystemMountTable().mounts().contains(MountPoint(path: "/", isLocal: true)))
+    }
+
+    func testReadingTheMountTableLeavesTheProcessSharedBufferAlone() throws {
+        // `getmntinfo` hands every caller the same buffer; mark it as another caller still reading it would see it.
+        var shared: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&shared, MNT_NOWAIT)
+        let buffer = try XCTUnwrap(count > 0 ? shared : nil)
+        let sentinel = Array("/sentinel".utf8CString)
+        withUnsafeMutableBytes(of: &buffer[0].f_mntonname) { bytes in
+            sentinel.withUnsafeBytes { bytes.copyMemory(from: $0) }
+        }
+
+        _ = SystemMountTable().mounts()
+
+        var name = buffer[0].f_mntonname
+        XCTAssertEqual(withUnsafeBytes(of: &name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }, "/sentinel")
+        _ = getmntinfo(&shared, MNT_NOWAIT)
+    }
+
+    func testConcurrentMountTableReadsEachGetACompleteSnapshot() {
+        let serial = SystemMountTable().mounts()
+        let shared = SystemMountTable()
+        let snapshots = OSAllocatedUnfairLock<[[MountPoint]]>(initialState: [])
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            let table = index.isMultiple(of: 2) ? shared : SystemMountTable()
+            for _ in 0..<50 {
+                let mounts = table.mounts()
+                snapshots.withLock { $0.append(mounts) }
+            }
+        }
+        let all = snapshots.withLock { $0 }
+        XCTAssertEqual(all.count, 64 * 50)
+        for mounts in all {
+            XCTAssertTrue(mounts.contains(MountPoint(path: "/", isLocal: true)))
+            XCTAssertEqual(mounts, serial)
+        }
     }
 
     func testALaunchChainEndingOutsideTheSampleIsNotGuessed() {
