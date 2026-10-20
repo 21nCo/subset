@@ -11,6 +11,10 @@ struct ProcessTableView: View {
         VStack(alignment: .leading, spacing: 0) {
             MemorySummaryView(snapshot: monitor.snapshot, memory: monitor.memory, error: monitor.sampleError)
                 .padding(12)
+            if !monitor.containerVMs.isEmpty {
+                ContainerVMsView(groups: monitor.containerVMs, report: monitor.containerReport)
+                    .padding([.horizontal, .bottom], 12)
+            }
             VSplitView {
                 Table(rows, selection: $selection, sortOrder: $sortOrder) {
                     TableColumn("Process", value: \.name)
@@ -31,7 +35,9 @@ struct ProcessTableView: View {
                 }
                 .frame(minHeight: 200)
                 OriginSignalsView(process: monitor.snapshot?.processes.first { $0.identity == selection })
-                    .frame(minHeight: 120, idealHeight: 180)
+                    // Low enough that the table keeps its 200 points in the default 820×520 window beside a full
+                    // container breakdown.
+                    .frame(minHeight: 80, idealHeight: 180)
             }
         }
         .frame(minWidth: 640, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)

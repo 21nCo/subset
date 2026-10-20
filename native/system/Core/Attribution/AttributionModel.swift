@@ -28,7 +28,9 @@ public enum AppRule: Int, CaseIterable, Comparable, Sendable {
     case appBundle = 1
     /// An Apple platform binary under `/System`, `/usr/libexec`, `/usr/sbin`, `/usr/bin`, or `/sbin`.
     case macOS
-    /// A container VM process, recognized by the hook SET-43 provides; never matches without it.
+    /// A container VM's process (`ContainerVMRecognizer`). Its processes run inside the runtime's app bundle or are
+    /// Apple's Virtualization.framework service under `/System`, so a process the recognizer claims is placed here
+    /// even when rule 1 or 2 also matches.
     case containerVM
     /// The process or an ancestor runs a coding agent (`AttributionNames.codingAgents`).
     case codingAgent
@@ -47,7 +49,7 @@ public enum AppRule: Int, CaseIterable, Comparable, Sendable {
 
     public var confidence: AttributionConfidence {
         switch self {
-        // SET-42 leaves the container VM rule's confidence open; its recognizer is a fixed rule like the others.
+        // The container VM recognizer is a fixed rule set like the others, though its rule 4 reads signals.
         case .appBundle, .macOS, .containerVM, .codingAgent, .terminalSession, .homebrew: .rule
         case .responsibleProcess, .launchdJob, .signingTeam: .signal
         case .unattributed: .fallback
@@ -316,22 +318,43 @@ public struct OriginGroup: Identifiable, Equatable, Sendable {
     public let subgroups: [OriginGroup]
 }
 
-/// A container VM that SET-43's recognizer found.
+/// A container VM process that rule 3's recognizer found.
 public struct ContainerVM: Equatable, Sendable {
     public let name: String
     /// What identified it, for the evidence.
-    public let detail: String
+    public private(set) var detail: String
+    /// The runtime, when the recognizer is `ContainerVMRecognizer`.
+    public let runtime: ContainerRuntime?
+    /// The runtime's app bundle, when it has one: the bundle the process runs in, or the bundle of the runtime
+    /// process that identified it. A responsible process or Team ID naming this app agrees with the placement.
+    public let appBundlePath: String?
 
-    public init(name: String, detail: String) {
+    public init(name: String, detail: String, appBundlePath: String? = nil) {
         self.name = name
         self.detail = detail
+        runtime = nil
+        self.appBundlePath = appBundlePath
+    }
+
+    public init(runtime: ContainerRuntime, detail: String, appBundlePath: String? = nil) {
+        name = runtime.displayName
+        self.detail = detail
+        self.runtime = runtime
+        self.appBundlePath = appBundlePath
+    }
+
+    /// The same VM, identified by `detail`.
+    func identified(by detail: String) -> ContainerVM {
+        var copy = self
+        copy.detail = detail
+        return copy
     }
 }
 
-/// The hook for App rule 3. SET-43 provides the recognizer; without one, a VM process falls through to the later
-/// rules.
+/// The hook for App rule 3, asked once per sample. `ContainerVMRecognizer` is the built-in one.
 public protocol ContainerVMRecognizing: Sendable {
-    func containerVM(for process: ProcessFacts) -> ContainerVM?
+    /// The container VM each process belongs to, in the order given, or `nil`.
+    func containerVMs(in processes: [ProcessFacts]) -> [ContainerVM?]
 }
 
 /// The fixed names the rules match. The acceptance set is exactly these; anything else is a later follow-up (SET-61).

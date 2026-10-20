@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.start()
     }
 
+    func applicationWillTerminate(_: Notification) {
+        monitor.stopContainerPolling()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
 
     /// Reopening the app from Finder or `open` while it runs shows the main window, since there is no Dock icon.

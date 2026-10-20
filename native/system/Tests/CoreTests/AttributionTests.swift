@@ -38,11 +38,12 @@ final class AttributionTests: XCTestCase {
     }
 
     func testAnXPCServiceAndALoginItemBelongToTheirApp() {
-        let app = "/Applications/Docker.app"
+        // Docker.app, the earlier example here, is now a container runtime (rule 3; ContainerVMTests).
+        let app = "/Applications/Tailscale.app"
         let result = attribute([
-            fact(200, path: "\(app)/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop", signature: docker),
-            fact(201, path: "\(app)/Contents/XPCServices/com.docker.helper.xpc/Contents/MacOS/com.docker.helper", signature: docker),
-            fact(202, path: "\(app)/Contents/Library/LoginItems/DockerHelper.app/Contents/MacOS/DockerHelper", signature: docker),
+            fact(200, path: "\(app)/Contents/MacOS/Tailscale Helper.app/Contents/MacOS/Tailscale Helper", signature: tailscale),
+            fact(201, path: "\(app)/Contents/XPCServices/io.tailscale.helper.xpc/Contents/MacOS/io.tailscale.helper", signature: tailscale),
+            fact(202, path: "\(app)/Contents/Library/LoginItems/TailscaleLogin.app/Contents/MacOS/TailscaleLogin", signature: tailscale),
             // A folder that merely ends in .app, with no bundle Contents, is not a bundle.
             fact(203, ppid: 1, path: "/Users/me/dev/my.app/bin/server", signature: unsigned)
         ])
@@ -52,7 +53,7 @@ final class AttributionTests: XCTestCase {
         }
         XCTAssertEqual(placement(result, 202).launchSource.group, OriginGroupID(.loginItem(bundlePath: app)))
         XCTAssertEqual(placement(result, 202).launchSource.rule, .loginItem)
-        XCTAssertEqual(result.launchSource.first { $0.id.origin == .loginItem(bundlePath: app) }?.name, "Login item: Docker")
+        XCTAssertEqual(result.launchSource.first { $0.id.origin == .loginItem(bundlePath: app) }?.name, "Login item: Tailscale")
         XCTAssertEqual(placement(result, 203).app.rule, .unattributed)
     }
 
@@ -144,13 +145,14 @@ final class AttributionTests: XCTestCase {
 
     // MARK: Rule 3, container VM hook
 
-    func testAContainerVMFallsThroughToItsResponsibleAppUntilTheHookRecognizesIt() {
+    func testAContainerVMFallsThroughToItsResponsibleAppUnlessARecognizerClaimsIt() {
         let podman = "/Applications/Podman Desktop.app"
         let processes = [
             fact(400, path: "\(podman)/Contents/MacOS/Podman Desktop", signature: unsigned, coalition: 40),
             fact(401, ppid: 1, path: "/opt/podman/bin/vfkit", signature: unsigned, responsible: 400, coalition: 41)
         ]
 
+        // The built-in recognizer leaves Podman, which is out of scope, to the later rules.
         let without = attribute(processes)
         let with = Attribution(projectMarkers: FixtureProjectMarkers(), containerVM: VMRecognizer()).attribute(processes)
 
@@ -632,7 +634,7 @@ final class AttributionTests: XCTestCase {
     // MARK: Fixtures
 
     private var google: CodeSignature { CodeSignature(signingID: "com.google.Chrome", teamID: "EQHXZ8M8AV", isPlatformBinary: false, teamName: "Google LLC") }
-    private var docker: CodeSignature { CodeSignature(signingID: "com.docker.docker", teamID: "9BNSXJN65R", isPlatformBinary: false) }
+    private var tailscale: CodeSignature { CodeSignature(signingID: "io.tailscale.ipn.macsys", teamID: "W5364U7YZB", isPlatformBinary: false) }
     private var microsoft: CodeSignature { CodeSignature(signingID: "com.microsoft.VSCode", teamID: "UBF8T346G9", isPlatformBinary: false) }
     private var anthropic: CodeSignature { CodeSignature(signingID: "com.anthropic.claude-code", teamID: "Q6L2SF6YDW", isPlatformBinary: false) }
     private var ghosttySignature: CodeSignature { CodeSignature(signingID: "com.mitchellh.ghostty", teamID: "24VZTF6M5V", isPlatformBinary: false) }
@@ -711,9 +713,9 @@ private final class LocalOnlyMarkers: ProjectMarkerLookup, @unchecked Sendable {
     }
 }
 
-/// A stand-in for SET-43's recognizer: Podman's `vfkit` runs the machine VM.
+/// A stand-in recognizer: Podman's `vfkit` runs the machine VM.
 private struct VMRecognizer: ContainerVMRecognizing {
-    func containerVM(for process: ProcessFacts) -> ContainerVM? {
-        process.executablePath == "/opt/podman/bin/vfkit" ? ContainerVM(name: "Podman machine", detail: "vfkit") : nil
+    func containerVMs(in processes: [ProcessFacts]) -> [ContainerVM?] {
+        processes.map { $0.executablePath == "/opt/podman/bin/vfkit" ? ContainerVM(name: "Podman machine", detail: "vfkit") : nil }
     }
 }
