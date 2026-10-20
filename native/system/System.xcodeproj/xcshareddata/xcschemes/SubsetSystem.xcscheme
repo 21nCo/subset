@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "07FFD623DE5EC8C7E4801EB0A41D8816"
+               BlueprintIdentifier = "698D0BAD2C5281638D204E807C4EC81D"
                BuildableName = "Subset System.app"
                BlueprintName = "SubsetSystem"
                ReferencedContainer = "container:System.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "07FFD623DE5EC8C7E4801EB0A41D8816"
+            BlueprintIdentifier = "698D0BAD2C5281638D204E807C4EC81D"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -58,6 +58,16 @@
                BlueprintIdentifier = "40ADA5C83D62E19E086F48DEC6CBA5E5"
                BuildableName = "SystemCoreTests.xctest"
                BlueprintName = "SystemCoreTests"
+               ReferencedContainer = "container:System.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "EC01CF3D2698C1744E00ECC2E19F259D"
+               BuildableName = "SystemProcessesTests.xctest"
+               BlueprintName = "SystemProcessesTests"
                ReferencedContainer = "container:System.xcodeproj">
             </BuildableReference>
          </TestableReference>
@@ -77,7 +87,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "07FFD623DE5EC8C7E4801EB0A41D8816"
+            BlueprintIdentifier = "698D0BAD2C5281638D204E807C4EC81D"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -94,7 +104,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "07FFD623DE5EC8C7E4801EB0A41D8816"
+            BlueprintIdentifier = "698D0BAD2C5281638D204E807C4EC81D"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
