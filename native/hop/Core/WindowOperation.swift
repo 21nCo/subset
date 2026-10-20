@@ -1,6 +1,7 @@
 import Foundation
 
-/// An action on a listed window or its app. The switcher's keys call these (SET-94); there is no batch operation.
+/// An action on a listed window or its app. Releasing the shortcut focuses, and the switcher's ⌘ keys call the others;
+/// there is no batch operation.
 public enum WindowOperation: Sendable, Equatable, CaseIterable {
     /// Bring the window to the front and give it focus: the switch itself.
     case focus

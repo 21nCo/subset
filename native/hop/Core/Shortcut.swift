@@ -34,14 +34,16 @@ public enum KeyCode {
     public static let escape: UInt16 = 0x35
     public static let leftArrow: UInt16 = 0x7B
     public static let rightArrow: UInt16 = 0x7C
+    public static let downArrow: UInt16 = 0x7D
+    public static let upArrow: UInt16 = 0x7E
 
     /// The modifier keys themselves (Command, Shift, Caps Lock, Option, Control, their right-hand twins, and Fn).
     /// They arrive as flag changes, not key presses, so none of them can be a shortcut key.
     public static let modifierKeys: Set<UInt16> = [0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F]
 
-    /// The keys an active switch already gives a meaning (Esc cancels, ← and → step), so none of them can be the
-    /// shortcut key.
-    public static let reserved: Set<UInt16> = [escape, leftArrow, rightArrow]
+    /// The keys an active switch already gives a meaning with the holding modifier (Esc cancels, ← and → step, ↑ and ↓
+    /// move by row), so none of them can be the shortcut key.
+    public static let reserved: Set<UInt16> = [escape, leftArrow, rightArrow, upArrow, downArrow]
 }
 
 /// The hold-to-switch shortcut: hold `holdModifier` and press `keyCode` to switch forward; add Shift to switch
@@ -51,7 +53,7 @@ public struct Shortcut: Sendable, Hashable {
     public enum Invalid: Error, Equatable {
         /// The holding modifier is not exactly Option or exactly Control.
         case holdModifier(ModifierMask)
-        /// The key is a modifier key, Esc (which cancels a switch), or ← or → (which step one).
+        /// The key is a modifier key, Esc (which cancels a switch), or an arrow key (which moves its selection).
         case keyCode(UInt16)
     }
 

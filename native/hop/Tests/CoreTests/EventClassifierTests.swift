@@ -3,7 +3,7 @@ import XCTest
 
 final class EventClassifierTests: XCTestCase {
     private let shortcut = Shortcut.default
-    private let idle = SwitchSession(count: 3)
+    private let idle = SwitchSession()
     private var active: SwitchSession {
         var session = idle
         session.handle(.trigger(.forward))
@@ -54,9 +54,6 @@ final class EventClassifierTests: XCTestCase {
         XCTAssertEqual(classify(down(KeyCode.tab, [.option, .control]), idle), .pass)
     }
 
-    func testTheShortcutPassesWhenThereIsNothingToSwitchTo() {
-        XCTAssertEqual(classify(down(KeyCode.tab, .option), SwitchSession(count: 0)), .pass)
-    }
 
     func testAControlShortcutMatchesControlNotOption() throws {
         let control = try Shortcut(holdModifier: .control, keyCode: KeyCode.tab)
@@ -83,6 +80,45 @@ final class EventClassifierTests: XCTestCase {
         // ⇧ with an arrow or Esc keeps their meaning.
         XCTAssertEqual(classify(down(KeyCode.rightArrow, [.option, .shift]), active), Classification(.swallow, .step(.forward)))
         XCTAssertEqual(classify(down(KeyCode.escape, [.option, .shift]), active), Classification(.swallow, .escape))
+    }
+
+    func testUpAndDownMoveByRowWhileActive() {
+        XCTAssertEqual(classify(down(KeyCode.downArrow, .option), active), Classification(.swallow, .row(.down)))
+        XCTAssertEqual(classify(down(KeyCode.upArrow, .option), active), Classification(.swallow, .row(.up)))
+        XCTAssertEqual(classify(down(KeyCode.upArrow, [.option, .shift]), active), Classification(.swallow, .row(.up)))
+        XCTAssertEqual(classify(down(KeyCode.downArrow, [.option, .control]), active), .pass)
+        XCTAssertEqual(classify(down(KeyCode.downArrow, .option), idle), .pass)
+    }
+
+    func testCommandKeysWithTheHoldingModifierActOnTheSelectedWindow() {
+        let keys: [(UInt16, Character, WindowOperation)] = [
+            (0x2E, "m", .minimize), (0x0D, "w", .close), (0x04, "h", .hideApp), (0x0C, "q", .quitApp),
+        ]
+        for (code, letter, operation) in keys {
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: [.option, .command], letter: letter))
+            XCTAssertEqual(classify(key, active), Classification(.swallow, .operation(operation)), "\(letter)")
+            // Without a letter from the layout, the US key position decides.
+            XCTAssertEqual(classify(down(code, [.option, .command]), active), Classification(.swallow, .operation(operation)))
+            // While idle they are the frontmost app's shortcuts.
+            XCTAssertEqual(classify(key, idle), .pass)
+        }
+    }
+
+    func testOperationKeysFollowTheKeyboardLayout() {
+        // On AZERTY the key in the US W position types Z, and W is where US Z is.
+        let zKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: [.option, .command], letter: "z"))
+        XCTAssertEqual(classify(zKeyOnAzerty, active), .pass)
+        let wKeyOnAzerty = TapInput.key(KeyEvent(.keyDown, keyCode: 0x06, modifiers: [.option, .command], letter: "W"))
+        XCTAssertEqual(classify(wKeyOnAzerty, active), Classification(.swallow, .operation(.close)))
+    }
+
+    func testOperationKeysNeedExactlyCommandAndTheHoldingModifier() {
+        for modifiers: ModifierMask in [.option, [.command], [.option, .command, .shift], [.option, .command, .control]] {
+            let key = TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: modifiers, letter: "w"))
+            let expected: Classification = modifiers.contains(.option) ? .pass : Classification(.pass, .modifierReleased)
+            XCTAssertEqual(classify(key, active), expected, "\(modifiers)")
+        }
+        XCTAssertEqual(classify(down(0x00 /* A */, [.option, .command]), active), .pass)
     }
 
     func testOtherKeysPassWhileActive() {
@@ -122,14 +158,16 @@ final class ShortcutRecognizerTests: XCTestCase {
     private let optionUp = TapInput.key(KeyEvent(.flagsChanged, keyCode: 0x3A, modifiers: []))
 
     func testAFullSwitchSwallowsOnlyItsKeysAndCommits() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 4)
-        XCTAssertEqual(recognizer.handle(optionDown).disposition, .pass)
-        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)).disposition, .swallow)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
+        XCTAssertEqual(recognizer.handle(optionDown), .init(disposition: .pass, outcome: nil))
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)),
+                       .init(disposition: .swallow, event: .trigger(.forward), outcome: nil))
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab, .option)).disposition, .swallow)
-        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)).disposition, .swallow)
-        XCTAssertEqual(recognizer.session.state, .active(selection: 2))
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)),
+                       .init(disposition: .swallow, event: .step(.forward), outcome: nil))
+        XCTAssertTrue(recognizer.session.isActive)
         let release = recognizer.handle(optionUp)
-        XCTAssertEqual(release, .init(disposition: .pass, outcome: .commit(index: 2)))
+        XCTAssertEqual(release, .init(disposition: .pass, outcome: .commit))
         // Tab was let go after ⌥: its key-up still belongs to the switch.
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab)).disposition, .swallow)
         // Afterwards Tab is an ordinary key again.
@@ -138,7 +176,7 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testAKeyHeldFromBeforeTheSwitchIsReleasedToItsApp() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.rightArrow)).disposition, .pass)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertTrue(recognizer.session.isActive)
@@ -146,19 +184,19 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testAnArrowHeldFromBeforeTheSwitchKeepsRepeatingInItsApp() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.rightArrow)).disposition, .pass)
         _ = recognizer.handle(optionDown)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         // The → repeats now carry ⌥, but the app saw → go down, so they are its and step nothing.
         XCTAssertEqual(recognizer.handle(repeating(KeyCode.rightArrow, .option)), .init(disposition: .pass, outcome: nil))
-        XCTAssertEqual(recognizer.session.state, .active(selection: 1))
+        XCTAssertTrue(recognizer.session.isActive)
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.rightArrow, .option)).disposition, .pass)
-        XCTAssertEqual(recognizer.handle(optionUp), .init(disposition: .pass, outcome: .commit(index: 1)))
+        XCTAssertEqual(recognizer.handle(optionUp), .init(disposition: .pass, outcome: .commit))
     }
 
     func testEscapeHeldFromBeforeTheSwitchDoesNotCancelIt() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.escape)).disposition, .pass)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertEqual(recognizer.handle(repeating(KeyCode.escape, .option)), .init(disposition: .pass, outcome: nil))
@@ -167,12 +205,12 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testTabHeldPastTheReleaseStaysSwallowedUntilItsKeyUp() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         // Holding Tab keeps stepping, as each repeat belongs to the switch.
-        XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab, .option)).disposition, .swallow)
-        XCTAssertEqual(recognizer.session.state, .active(selection: 2))
-        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit(index: 2))
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab, .option)),
+                       .init(disposition: .swallow, event: .step(.forward), outcome: nil))
+        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit)
         // The press began as the shortcut, so its later repeats and key-up never reach the app.
         XCTAssertEqual(recognizer.handle(repeating(KeyCode.tab)), .init(disposition: .swallow, outcome: nil))
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab)).disposition, .swallow)
@@ -181,7 +219,7 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testARepeatNeverStartsASwitch() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         _ = recognizer.handle(optionUp)
         // ⌥ goes down again while the swallowed Tab still repeats: a new switch needs a new press.
@@ -193,17 +231,17 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testAnArrowHeldPastTheReleaseStaysSwallowed() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         _ = recognizer.handle(key(.keyUp, KeyCode.tab, .option))
         XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.rightArrow, .option)).disposition, .swallow)
-        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit(index: 2))
+        XCTAssertEqual(recognizer.handle(optionUp).outcome, .commit)
         XCTAssertEqual(recognizer.handle(repeating(KeyCode.rightArrow)).disposition, .swallow)
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.rightArrow)).disposition, .swallow)
     }
 
     func testEscapeCancelsAndItsKeyUpIsSwallowed() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.escape, .option)), .init(disposition: .swallow, outcome: .cancel))
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.escape, .option)).disposition, .swallow)
@@ -211,14 +249,14 @@ final class ShortcutRecognizerTests: XCTestCase {
     }
 
     func testTapDisabledCancelsAndForgetsPendingKeyUps() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertEqual(recognizer.handle(.tapDisabled), .init(disposition: .pass, outcome: .cancel))
         XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab)).disposition, .pass)
     }
 
     func testResetCancelsAnActiveSwitch() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 3)
+        var recognizer = ShortcutRecognizer(shortcut: .default)
         _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
         XCTAssertEqual(recognizer.reset(), .cancel)
         XCTAssertFalse(recognizer.session.isActive)
@@ -226,12 +264,34 @@ final class ShortcutRecognizerTests: XCTestCase {
         XCTAssertNil(recognizer.reset())
     }
 
-    func testAnEmptyListLetsTheShortcutThrough() {
-        var recognizer = ShortcutRecognizer(shortcut: .default, windowCount: 0)
-        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)).disposition, .pass)
-        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab, .option)).disposition, .pass)
-        XCTAssertNil(recognizer.listChanged(count: 2))
-        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, .option)).disposition, .swallow)
-        XCTAssertEqual(recognizer.listChanged(count: 0), .cancel)
+    func testHoldingDownKeepsMovingByRowButHoldingAnOperationKeyActsOnce() {
+        var recognizer = ShortcutRecognizer(shortcut: .default)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.downArrow, .option)).event, .row(.down))
+        XCTAssertEqual(recognizer.handle(repeating(KeyCode.downArrow, .option)),
+                       .init(disposition: .swallow, event: .row(.down), outcome: nil))
+        XCTAssertEqual(recognizer.handle(key(.keyDown, 0x0D, [.option, .command])),
+                       .init(disposition: .swallow, event: .operation(.close), outcome: nil))
+        XCTAssertEqual(recognizer.handle(repeating(0x0D, [.option, .command])),
+                       .init(disposition: .swallow, outcome: nil), "a held ⌘W closes one window")
+        XCTAssertEqual(recognizer.handle(key(.keyUp, 0x0D, [.option, .command])).disposition, .swallow)
+        XCTAssertTrue(recognizer.session.isActive)
+    }
+
+    func testTheShortcutStartsASwitchWhateverTheWindowCount() {
+        // The switcher shows "No windows" when there are none, so the trigger never depends on the list.
+        var recognizer = ShortcutRecognizer(shortcut: .default)
+        XCTAssertEqual(recognizer.handle(key(.keyDown, KeyCode.tab, [.option, .shift])),
+                       .init(disposition: .swallow, event: .trigger(.backward), outcome: nil))
+    }
+
+    func testEndingTheSessionKeepsTheKeysPressedForIt() {
+        // A click chose a window while ⌥ and Tab were still down.
+        var recognizer = ShortcutRecognizer(shortcut: .default)
+        _ = recognizer.handle(key(.keyDown, KeyCode.tab, .option))
+        XCTAssertTrue(recognizer.endSession())
+        XCTAssertEqual(recognizer.handle(key(.keyUp, KeyCode.tab, .option)).disposition, .swallow)
+        XCTAssertEqual(recognizer.handle(optionUp), .init(disposition: .pass, outcome: nil))
+        XCTAssertFalse(recognizer.endSession())
     }
 }

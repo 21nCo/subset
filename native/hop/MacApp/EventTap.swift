@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import HopCore
 
@@ -83,7 +84,11 @@ private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
         let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
-        return .key(KeyEvent(kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat))
+        // Only a ⌘ key-down can be an operation key, which matches the letter the layout gives the key.
+        let letter = kind == .keyDown && modifiers.contains(.command)
+            ? NSEvent(cgEvent: event)?.charactersIgnoringModifiers?.first
+            : nil
+        return .key(KeyEvent(kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat, letter: letter))
     default:
         return nil
     }

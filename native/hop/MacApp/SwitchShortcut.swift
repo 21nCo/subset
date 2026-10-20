@@ -4,10 +4,12 @@ import HopCore
 import os
 
 /// Runs the hold-to-switch shortcut while Hop has the Accessibility permission: owns the event tap and the
-/// `ShortcutRecognizer` it drives, and keeps the session's window count current.
+/// `ShortcutRecognizer` it drives, and hands the switch to the `SwitcherController`: the trigger opens the switcher,
+/// steps, row moves and operation keys go to it, releasing the holding modifier commits and Esc or an interruption
+/// cancels.
 ///
-/// Until the overlay and focusing land (SET-94), a committed switch only logs the selected index, at debug level.
-/// Nothing about a window, and never its title, is logged.
+/// The tap's callback must return quickly, so the trigger only marks the switcher to open, on the next pass of the main
+/// run loop; any input that arrives before then opens it first, so every key is applied to the list it was meant for.
 @MainActor
 final class SwitchShortcutController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switch")
@@ -15,14 +17,21 @@ final class SwitchShortcutController {
     private let store: ShortcutStore
     private var recognizer: ShortcutRecognizer
     private var tap: EventTap?
-    private let windowCount = WindowCountPlaceholder()
+    private let switcher: SwitcherController
+    /// A trigger was accepted and the switcher has not opened yet.
+    private var opening = false
     /// Called when the system disabled the tap and Hop no longer holds the Accessibility permission.
     var onTrustLost: () -> Void = {}
+    /// Called when the shortcut, or an operation, finds Hop without the Accessibility permission: samples the
+    /// permission again and shows onboarding.
+    var onNeedsPermission: () -> Void = {}
 
-    init(store: ShortcutStore = ShortcutStore()) {
+    init(windowList: WindowListController, store: ShortcutStore = ShortcutStore()) {
         self.store = store
         recognizer = ShortcutRecognizer(shortcut: store.shortcut)
-        windowCount.onChange = { [weak self] count in self?.listChanged(count: count) }
+        switcher = SwitcherController(readWindows: { windowList.refresh().windows }, windowOperator: windowList.windowOperator)
+        switcher.onSessionEnded = { [unowned self] in recognizer.endSession() }
+        switcher.onNotPermitted = { [unowned self] in onNeedsPermission() }
     }
 
     var isInstalled: Bool { tap?.isInstalled ?? false }
@@ -33,14 +42,12 @@ final class SwitchShortcutController {
     func install() -> Bool {
         if isInstalled { return true }
         recognizer.shortcut = store.shortcut
-        listChanged(count: windowCount.current)
         let tap = EventTap { [unowned self] input in handle(input) }
         guard tap.install() else {
             Self.log.error("The system refused the keyboard event tap")
             return false
         }
         self.tap = tap
-        windowCount.start()
         Self.log.info("Switch shortcut \(self.recognizer.shortcut.displayName, privacy: .public) installed")
         return true
     }
@@ -50,14 +57,35 @@ final class SwitchShortcutController {
         guard let tap else { return }
         tap.remove()
         self.tap = nil
-        windowCount.stop()
-        report(recognizer.reset())
+        opening = false
+        _ = recognizer.reset()
+        switcher.cancel()
         Self.log.info("Switch shortcut removed")
     }
 
     private func handle(_ input: TapInput) -> Disposition {
+        openIfTriggered()
         let result = recognizer.handle(input)
-        report(result.outcome)
+        switch result.event {
+        case .trigger:
+            if AXIsProcessTrusted() {
+                opening = true
+                DispatchQueue.main.async { [weak self] in self?.openIfTriggered() }
+            } else {
+                // Access was revoked since the last sample: there is no list to show, so ask for it again.
+                recognizer.endSession()
+                DispatchQueue.main.async { [weak self] in self?.onNeedsPermission() }
+            }
+        case let event?:
+            switcher.apply(event)
+        case nil:
+            break
+        }
+        switch result.outcome {
+        case .commit: switcher.commit()
+        case .cancel: switcher.cancel()
+        case nil: break
+        }
         if input == .tapDisabled {
             // The system disables a tap whose callback was too slow, or on some user input such as secure text
             // entry. Turn it back on at once unless the permission is gone, which also disables it.
@@ -72,46 +100,10 @@ final class SwitchShortcutController {
         return result.disposition
     }
 
-    private func listChanged(count: Int) {
-        report(recognizer.listChanged(count: count))
-    }
-
-    private func report(_ outcome: SwitchSession.Outcome?) {
-        switch outcome {
-        case let .commit(index): Self.log.debug("Switch committed at index \(index, privacy: .public)")
-        case .cancel: Self.log.debug("Switch cancelled")
-        case nil: break
-        }
-    }
-}
-
-/// Stands in for the window list (SET-92) by reporting how many apps with a Dock presence are running, so a switch can
-/// start and commit before windows are enumerated. It reads only the count, never names or windows, and updates on
-/// app launch and quit instead of polling.
-@MainActor
-final class WindowCountPlaceholder {
-    var onChange: (Int) -> Void = { _ in }
-    private var observers: [NSObjectProtocol] = []
-
-    var current: Int {
-        NSWorkspace.shared.runningApplications.reduce(0) { $0 + ($1.activationPolicy == .regular ? 1 : 0) }
-    }
-
-    func start() {
-        guard observers.isEmpty else { return }
-        let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.onChange(self.current)
-                }
-            })
-        }
-    }
-
-    func stop() {
-        observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
-        observers.removeAll()
+    /// Opens the switcher for a trigger the tap accepted, unless the session ended before it could open.
+    private func openIfTriggered() {
+        guard opening else { return }
+        opening = false
+        if recognizer.session.isActive { switcher.open() }
     }
 }

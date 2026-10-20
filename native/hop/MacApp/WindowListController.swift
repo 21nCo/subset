@@ -4,7 +4,7 @@ import HopCore
 import os
 
 /// Keeps the window list's recency order current while Hop has the Accessibility permission, and rebuilds the list
-/// on `refresh()`, which the switcher calls when it opens (SET-94).
+/// on `refresh()`, which the switcher calls when it opens and after an operation.
 ///
 /// `start()` seeds the order from the window server's front-to-back order (`CGWindowListCopyWindowInfo`, matched to
 /// windows by owner and frame; window names are never read). From then on an app's activation
@@ -19,7 +19,7 @@ import os
 final class WindowListController {
     private let tracker: FocusTracker
     private var workspaceObservers: [NSObjectProtocol] = []
-    /// Acts on the listed windows; the switcher calls it (SET-94). It reaches windows through the same source as the
+    /// Acts on the listed windows for the switcher. It reaches windows through the same source as the
     /// list, so a listed window's ref names the window the list showed.
     let windowOperator: any WindowOperator
 

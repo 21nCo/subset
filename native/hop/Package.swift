@@ -25,6 +25,13 @@ let package = Package(
             name: "HopCoreTests",
             dependencies: ["HopCore"],
             path: "Tests/CoreTests"
+        ),
+        // Inspects the app's views (the switcher panel's accessibility tree) without a window server session. SwiftPM
+        // only: the Xcode project's test bundle covers HopCore.
+        .testTarget(
+            name: "HopAppTests",
+            dependencies: ["Hop", "HopCore"],
+            path: "Tests/AppTests"
         )
     ]
 )
