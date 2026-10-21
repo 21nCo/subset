@@ -1,0 +1,1084 @@
+import Darwin
+import Foundation
+@testable import SystemCore
+import XCTest
+
+/// One fixture tree per reclaim rule, built in a temporary home folder on the runner's APFS volume, scanned with the
+/// real `DiskScanner`, and matched with an injected app list, runtime list, and Docker report.
+final class ReclaimRulesTests: XCTestCase {
+    private var home: String!
+    private let now = Date()
+
+    static let editor = InstalledApp(
+        path: "/Applications/Editor.app", bundleID: "com.example.editor", name: "Editor", names: ["Editor", "Example Editor"],
+        signature: CodeSignature(signingID: "com.example.editor", teamID: "EXAMPLE123", isPlatformBinary: false, teamName: "Example Ltd"))
+    static let safari = InstalledApp(
+        path: "/Applications/Safari.app", bundleID: "com.apple.Safari", name: "Safari",
+        signature: CodeSignature(signingID: "com.apple.Safari", teamID: nil, isPlatformBinary: true))
+    static let apps = InstalledApps([editor, safari])
+
+    override func setUpWithError() throws {
+        let base = NSTemporaryDirectory() + "ReclaimRulesTests-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: false)
+        let real = try XCTUnwrap(realpath(base, nil))
+        defer { free(real) }
+        home = String(cString: real)
+    }
+
+    override func tearDownWithError() throws {
+        if let home { try? FileManager.default.removeItem(atPath: home) }
+    }
+
+    // MARK: Catalog
+
+    func testTheCatalogIsVersionOneWithExactlyTheIssuesRules() {
+        XCTAssertEqual(ReclaimRules.catalogVersion, 1)
+        // No cleanup has a guaranteed immediate yield. A Trash cleanup frees nothing until the Trash is emptied, pnpm
+        // and Homebrew prune part of their folders, npm, Yarn and simctl decide from their own configuration what they
+        // delete, Docker reports an upper bound, and System never empties the Trash.
+        XCTAssertEqual(ReclaimYield.allCases,
+                       [.movesAllMeasuredToTrash, .partOfMeasured, .estimated, .reportedUpperBound, .noCleanup])
+        let table: [(ReclaimRuleID, ReclaimRisk, ReclaimCleanup, ReclaimYield)] = [
+            (.xcodeDerivedData, .safe, .trash, .movesAllMeasuredToTrash),
+            (.xcodeDeviceSupport, .safe, .trash, .movesAllMeasuredToTrash),
+            (.unavailableSimulators, .safe, .command(["xcrun", "simctl", "delete", "unavailable"]), .estimated),
+            (.simulatorCaches, .safe, .trash, .movesAllMeasuredToTrash),
+            (.xcodeArchives, .review, .trashEachItem, .movesAllMeasuredToTrash),
+            (.staleNodeModules, .safe, .trash, .movesAllMeasuredToTrash),
+            (.npmCache, .safe, .command(["npm", "cache", "clean", "--force"]), .estimated),
+            (.pnpmStore, .safe, .command(["pnpm", "store", "prune"]), .partOfMeasured),
+            (.yarnCache, .safe, .command(["yarn", "cache", "clean"]), .estimated),
+            (.homebrewCache, .safe, .command(["brew", "cleanup"]), .partOfMeasured),
+            (.dockerImages, .safe, .command(["docker", "image", "prune", "-f"]), .reportedUpperBound),
+            (.cargoRegistryCache, .safe, .trash, .movesAllMeasuredToTrash),
+            (.gradleCaches, .safe, .trash, .movesAllMeasuredToTrash),
+            (.pipCache, .safe, .trash, .movesAllMeasuredToTrash),
+            (.appCaches, .safe, .trashPerApp, .movesAllMeasuredToTrash),
+            (.deviceBackups, .review, .trashEachItem, .movesAllMeasuredToTrash),
+            (.oldInstallers, .review, .trashEachItem, .movesAllMeasuredToTrash),
+            (.appLeftovers, .review, .trashEachItem, .movesAllMeasuredToTrash),
+            (.trash, .info, .none, .noCleanup)
+        ]
+        XCTAssertEqual(ReclaimRules.all.map(\.id), table.map(\.0))
+        XCTAssertEqual(ReclaimRules.all.map(\.id), ReclaimRuleID.allCases)
+        for (rule, expected) in zip(ReclaimRules.all, table) {
+            XCTAssertEqual(rule.risk, expected.1, "\(rule.id)")
+            XCTAssertEqual(rule.cleanup, expected.2, "\(rule.id)")
+            XCTAssertEqual(rule.yield, expected.3, "\(rule.id)")
+            XCTAssertFalse(rule.explanation.isEmpty || rule.rebuild.isEmpty || rule.name.isEmpty || rule.location.isEmpty)
+        }
+    }
+
+    // MARK: One fixture per rule
+
+    func testXcodeDerivedDataMatchesEachProjectFolder() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/Build/Products/app", bytes: 300_000)
+        try write("Library/Developer/Xcode/DerivedData/Tool-def/Index.noindex/data", bytes: 100_000)
+
+        let match = try only(.xcodeDerivedData, in: try await analyze())
+
+        try assertItems(match, ["Library/Developer/Xcode/DerivedData/App-abc", "Library/Developer/Xcode/DerivedData/Tool-def"],
+                        root: "Library/Developer/Xcode/DerivedData")
+        XCTAssertEqual(match.risk, .safe)
+        // Moving the folders to the Trash frees nothing until the Trash is emptied.
+        XCTAssertEqual(match.rule.yield, .movesAllMeasuredToTrash)
+        XCTAssertEqual(match.movedToTrash, match.bytes.bytes)
+    }
+
+    func testXcodeDeviceSupportMatchesEveryOSVersionInEachDeviceSupportFolder() async throws {
+        try write("Library/Developer/Xcode/iOS DeviceSupport/iPhone15,2 18.0 (22A3354)/Symbols/dyld", bytes: 400_000)
+        try write("Library/Developer/Xcode/watchOS DeviceSupport/Watch6,1 11.0 (22R349)/Symbols/dyld", bytes: 200_000)
+        try write("Library/Developer/Xcode/UserData/IDEEditorInteractivityHistory", bytes: 50_000)
+
+        let match = try only(.xcodeDeviceSupport, in: try await analyze())
+
+        XCTAssertEqual(match.items.map(\.path), [
+            path("Library/Developer/Xcode/iOS DeviceSupport/iPhone15,2 18.0 (22A3354)"),
+            path("Library/Developer/Xcode/watchOS DeviceSupport/Watch6,1 11.0 (22R349)")
+        ])
+        XCTAssertEqual(match.items.map(\.root), [path("Library/Developer/Xcode/iOS DeviceSupport"),
+                                                 path("Library/Developer/Xcode/watchOS DeviceSupport")])
+        try assertBytes(match)
+        XCTAssertEqual(match.risk, .safe)
+    }
+
+    func testUnavailableSimulatorsAreDevicesWhoseRuntimeIsNotInstalled() async throws {
+        let devices = "Library/Developer/CoreSimulator/Devices"
+        try device("\(devices)/11111111-1111-1111-1111-111111111111", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0", bytes: 500_000)
+        try device("\(devices)/22222222-2222-2222-2222-222222222222", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-3", bytes: 300_000)
+        let runtimes = SimulatorRuntimes.installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3"])
+
+        let match = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
+
+        try assertItems(match, ["\(devices)/11111111-1111-1111-1111-111111111111"], root: devices)
+        XCTAssertEqual(match.cleanup, .command(["xcrun", "simctl", "delete", "unavailable"]))
+        // simctl decides itself which devices it deletes, so their usage is an estimate, not a guaranteed yield.
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertEqual(match.rule.yield, .estimated)
+        XCTAssertNil(match.movedToTrash)
+
+        // A plist the scan found not downloaded or unreadable is not read, so its device is not judged.
+        let scanned = try await analyze(runtimes: runtimes).tree
+        let plist = try XCTUnwrap(scanned.index(atPath: path("\(devices)/11111111-1111-1111-1111-111111111111/device.plist")))
+        for flags in [DiskItemFlags.dataless, .unreadable] {
+            var tree = scanned
+            tree.nodes[plist].flags = flags
+            let unread = try only(.unavailableSimulators, in: Analysis(
+                tree: tree, entries: [], matches: ReclaimMatcher.matches(in: tree, origins: [], context: context(runtimes: runtimes))))
+            XCTAssertEqual(unread.bytes, .unavailable(path("\(devices)/11111111-1111-1111-1111-111111111111/device.plist was not read.")))
+        }
+
+        // A device that names no runtime is not judged.
+        try device("\(devices)/44444444-4444-4444-4444-444444444444", runtime: "", bytes: 100_000)
+        let unnamed = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
+        XCTAssertEqual(unnamed.items.count, 1)
+        guard case .scanned(_, _, complete: false, _) = unnamed.bytes else { return XCTFail("\(unnamed.bytes)") }
+        try FileManager.default.removeItem(atPath: path("\(devices)/44444444-4444-4444-4444-444444444444"))
+
+        // A device whose plist cannot be read is not counted, and the sum says it is incomplete.
+        try write("\(devices)/33333333-3333-3333-3333-333333333333/data/disk", bytes: 100_000)
+        let partial = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
+        XCTAssertEqual(partial.items.count, 1)
+        guard case .scanned(_, _, complete: false, _) = partial.bytes else { return XCTFail("\(partial.bytes)") }
+
+        // Without the runtime list no device is called unavailable.
+        let unknown = try only(.unavailableSimulators, in: try await analyze(runtimes: .unknown("images.plist is unreadable")))
+        XCTAssertEqual(unknown.items, [])
+        XCTAssertEqual(unknown.bytes, .unavailable("images.plist is unreadable"))
+    }
+
+    func testSimulatorCachesMatchTheirContents() async throws {
+        try write("Library/Developer/CoreSimulator/Caches/dyld/24A335/dyld_sim_shared_cache_arm64e", bytes: 600_000)
+
+        let match = try only(.simulatorCaches, in: try await analyze())
+
+        try assertItems(match, ["Library/Developer/CoreSimulator/Caches/dyld"], root: "Library/Developer/CoreSimulator/Caches")
+        XCTAssertEqual(match.risk, .safe)
+    }
+
+    func testXcodeArchivesAreEachArchiveInItsDateFolderForReview() async throws {
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App 01-09-2026, 10.00.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App 01-09-2026, 10.00.xcarchive/dSYMs/App.dSYM/data", bytes: 300_000)
+        try write("Library/Developer/Xcode/Archives/2026-10-02/Tool 02-10-2026, 09.00.xcarchive/Info.plist", bytes: 10_000)
+
+        let match = try only(.xcodeArchives, in: try await analyze())
+
+        try assertItems(match, ["Library/Developer/Xcode/Archives/2026-09-01/App 01-09-2026, 10.00.xcarchive",
+                                "Library/Developer/Xcode/Archives/2026-10-02/Tool 02-10-2026, 09.00.xcarchive"],
+                        root: "Library/Developer/Xcode/Archives")
+        XCTAssertEqual(match.risk, .review)
+        XCTAssertEqual(match.cleanup, .trashEachItem)
+    }
+
+    func testNodeModulesIsStaleOnlyWhenItsProjectIsUntouchedForMoreThanThirtyDays() async throws {
+        try project("dev/old", untouchedFor: 31)
+        try project("dev/recent", untouchedFor: 29)
+        // A file deep in the project counts, though it leaves the project folder's own time alone.
+        try project("dev/edited", untouchedFor: 31)
+        try touch("dev/edited/src/index.js", daysAgo: 2)
+        // Outside project folders, in Library, and in hidden folders nothing is suggested.
+        try project(".vscode/extensions/example.extension-1.0.0", untouchedFor: 90)
+        try project("Library/Application Support/Editor/plugin", untouchedFor: 90)
+        try write("dev/notaproject/node_modules/x/index.js", bytes: 4_096)
+        try touchTree("dev/notaproject", daysAgo: 90)
+
+        let match = try only(.staleNodeModules, in: try await analyze())
+
+        try assertItems(match, ["dev/old/node_modules"], root: "dev/old")
+        XCTAssertEqual(match.risk, .safe)
+        XCTAssertEqual(match.cleanup, .trash)
+    }
+
+    func testAChangeInsideAPackageKeepsItsProjectFreshAndAnUnreadPackageLeavesItUnjudged() async throws {
+        // Saving a file inside an Xcode project leaves the package's own time alone.
+        for name in ["old", "edited", "locked"] {
+            try project("dev/\(name)", untouchedFor: 31)
+            try write("dev/\(name)/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata", bytes: 4_096)
+            try touchTree("dev/\(name)", daysAgo: 31, skipping: "node_modules")
+        }
+        try touch("dev/edited/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata", daysAgo: 2)
+
+        let analysis = try await analyze()
+        XCTAssertEqual(analysis.tree.item(at: "dev/edited/App.xcodeproj")?.kind, .package)
+        let match = try only(.staleNodeModules, in: analysis)
+        XCTAssertEqual(match.items.map(\.path), [path("dev/locked/node_modules"), path("dev/old/node_modules")])
+        try assertBytes(match)
+
+        // A folder inside the package that cannot be read may hold something newer.
+        let locked = path("dev/locked/App.xcodeproj/project.xcworkspace")
+        XCTAssertEqual(chmod(locked, 0), 0)
+        defer { chmod(locked, 0o755) }
+        let unjudged = try only(.staleNodeModules, in: try await analyze())
+        XCTAssertEqual(unjudged.items.map(\.path), [path("dev/old/node_modules")])
+        guard case .scanned(_, _, complete: false, _) = unjudged.bytes else { return XCTFail("\(unjudged.bytes)") }
+    }
+
+    func testNpmCacheIsTheCacacheFolder() async throws {
+        try write(".npm/_cacache/content-v2/sha512/ab/cd/blob", bytes: 250_000)
+        try write(".npm/_logs/debug.log", bytes: 4_096)
+
+        let match = try only(.npmCache, in: try await analyze())
+
+        try assertItems(match, [".npm/_cacache"], root: ".npm")
+        XCTAssertEqual(match.cleanup, .command(["npm", "cache", "clean", "--force"]))
+        // npm empties the folder its own cache setting names, which System does not read: the usage is an estimate.
+        XCTAssertEqual(match.rule.yield, .estimated)
+        XCTAssertNil(match.movedToTrash)
+    }
+
+    func testPnpmStoreIsEachDefaultStoreThatExists() async throws {
+        try write("Library/pnpm/store/v10/files/00/abc", bytes: 200_000)
+        try write(".pnpm-store/v3/files/00/def", bytes: 100_000)
+
+        let match = try only(.pnpmStore, in: try await analyze())
+
+        XCTAssertEqual(match.items.map(\.path), [path(".pnpm-store"), path("Library/pnpm/store")])
+        try assertBytes(match)
+        XCTAssertEqual(match.cleanup, .command(["pnpm", "store", "prune"]))
+        // The prune keeps every package a project references, so the stores' usage is not what it frees.
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertEqual(match.rule.yield, .partOfMeasured)
+        XCTAssertNil(match.movedToTrash)
+    }
+
+    func testYarnCacheIsItsCachesFolderAndYarnsOrigin() async throws {
+        try write("Library/Caches/Yarn/v6/npm-left-pad-1.3.0/package.tgz", bytes: 150_000)
+        try write("Library/Caches/Yarn/v4/npm-left-pad-1.1.0/package.tgz", bytes: 50_000)
+
+        let analysis = try await analyze()
+        let match = try only(.yarnCache, in: analysis)
+
+        try assertItems(match, ["Library/Caches/Yarn"], root: "Library/Caches")
+        XCTAssertEqual(match.cleanup, .command(["yarn", "cache", "clean"]))
+        // The usage counts every Yarn version's folder, while Yarn 1 empties only its own (v6): an estimate.
+        XCTAssertEqual(match.rule.yield, .estimated)
+        XCTAssertNil(match.movedToTrash)
+        let entry = try XCTUnwrap(analysis.entries.first { $0.identifier == "Yarn" })
+        XCTAssertEqual(entry.rule, .developerTool)
+        XCTAssertEqual(entry.developerTool, "Yarn")
+        XCTAssertNil(entry.risk, "a tool's cache folder is not a leftover")
+    }
+
+    func testHomebrewCacheIsItsCachesFolder() async throws {
+        try write("Library/Caches/Homebrew/downloads/abc--wget-1.24.5.bottle.tar.gz", bytes: 350_000)
+
+        let match = try only(.homebrewCache, in: try await analyze())
+
+        try assertItems(match, ["Library/Caches/Homebrew"], root: "Library/Caches")
+        XCTAssertEqual(match.cleanup, .command(["brew", "cleanup"]))
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertEqual(match.rule.yield, .partOfMeasured, "brew cleanup keeps current downloads")
+        XCTAssertNil(match.movedToTrash)
+    }
+
+    func testDockerImagesComeFromSystemDFAndAreUnavailableWithoutTheCLI() async throws {
+        let recorded = DockerOutputTests.systemDF
+        let space = try XCTUnwrap(DockerOutput.imageSpace(recorded))
+        let reported = try only(.dockerImages, in: try await analyze(docker: .reported(space, observedAt: now)))
+        // Docker's 2.064GB may be up to 2,064,500,000 bytes before rounding.
+        XCTAssertEqual(reported.bytes, .dockerReclaimable(upTo: 2_064_500_000, total: 3_370_000_000))
+        // Reclaimable counts every unused image, while the safe cleanup removes only dangling ones: an upper bound,
+        // never the amount freed.
+        XCTAssertNil(reported.bytes.bytes)
+        XCTAssertEqual(reported.rule.yield, .reportedUpperBound)
+        XCTAssertNil(reported.movedToTrash)
+        XCTAssertEqual(reported.bytes.upperBound, 2_064_500_000)
+        XCTAssertEqual(reported.risk, .safe)
+        XCTAssertEqual(reported.cleanup, .command(["docker", "image", "prune", "-f"]))
+
+        let missing = await DockerCLI(home: home, candidates: [home + "/no-docker"]).imageUsage()
+        XCTAssertEqual(missing, .unavailable(.cliNotFound))
+        let unavailable = try only(.dockerImages, in: try await analyze(docker: missing))
+        XCTAssertEqual(unavailable.bytes, .unavailable(ContainerUnavailable.cliNotFound.reason))
+        // A run stopped before it finished says so, not why the container poll stops.
+        let cancelled = try only(.dockerImages, in: try await analyze(docker: .unavailable(.cancelled)))
+        XCTAssertEqual(cancelled.bytes, .unavailable("docker system df was stopped before it finished, so the images were not measured."))
+
+        // Without a report the rule is left out.
+        let notAsked = try await analyze()
+        XCTAssertTrue(notAsked.matches.allSatisfy { $0.rule.id != .dockerImages })
+    }
+
+    func testCargoRegistryCacheMatchesItsContents() async throws {
+        try write(".cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/serde-1.0.210.crate", bytes: 80_000)
+        try write(".cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.210/lib.rs", bytes: 20_000)
+
+        let match = try only(.cargoRegistryCache, in: try await analyze())
+
+        try assertItems(match, [".cargo/registry/cache/index.crates.io-1949cf8c6b5b557f"], root: ".cargo/registry/cache")
+    }
+
+    func testGradleCachesMatchTheirContents() async throws {
+        try write(".gradle/caches/modules-2/files-2.1/com.example/lib/1.0/lib.jar", bytes: 120_000)
+        try write(".gradle/caches/8.10/transforms/abc/out.jar", bytes: 60_000)
+
+        let match = try only(.gradleCaches, in: try await analyze())
+
+        try assertItems(match, [".gradle/caches/8.10", ".gradle/caches/modules-2"], root: ".gradle/caches")
+    }
+
+    func testPipCacheMatchesItsContents() async throws {
+        try write("Library/Caches/pip/http-v2/a/b/c/body", bytes: 90_000)
+        try write("Library/Caches/pip/wheels/ab/cd/pkg-1.0-py3-none-any.whl", bytes: 30_000)
+
+        let match = try only(.pipCache, in: try await analyze())
+
+        try assertItems(match, ["Library/Caches/pip/http-v2", "Library/Caches/pip/wheels"], root: "Library/Caches/pip")
+    }
+
+    func testAppCachesAreGroupedPerInstalledApp() async throws {
+        try write("Library/Caches/com.example.editor/Cache.db", bytes: 200_000)
+        try write("Library/Caches/com.example.editor.ShipIt/update.zip", bytes: 100_000)
+        try write("Library/Caches/com.apple.Safari/WebKitCache/blob", bytes: 50_000)
+        try write("Library/Caches/com.apple.akd/cache", bytes: 10_000)
+        try write("Library/Caches/com.removed.player/cache", bytes: 10_000)
+
+        let analysis = try await analyze()
+        let caches = analysis.matches.filter { $0.rule.id == .appCaches }
+
+        XCTAssertEqual(caches.map(\.app?.path), ["/Applications/Editor.app", "/Applications/Safari.app"])
+        try assertItems(caches[0], ["Library/Caches/com.example.editor", "Library/Caches/com.example.editor.ShipIt"],
+                        root: "Library/Caches")
+        try assertItems(caches[1], ["Library/Caches/com.apple.Safari"], root: "Library/Caches")
+        XCTAssertEqual(caches[0].cleanup, .trashPerApp)
+        XCTAssertEqual(caches[0].risk, .safe)
+        // macOS's own cache is neither an app cache nor a leftover; a removed app's is a leftover.
+        XCTAssertFalse(analysis.matches.contains { $0.items.contains { $0.path.hasSuffix("com.apple.akd") } })
+        XCTAssertEqual(analysis.matches.filter { $0.rule.id == .appLeftovers }.map(\.identifier), ["com.removed.player"])
+
+        // With an app unread, the removed app's cache may be that app's, so the app caches found are not all there are.
+        let unreadApp = "/Applications/Broken.app has no readable bundle identifier."
+        let incomplete = try await analyze(apps: InstalledApps(Self.apps.apps, unread: [unreadApp]))
+        let found = incomplete.matches.filter { $0.rule.id == .appCaches }
+        XCTAssertEqual(found.map(\.app?.path), ["/Applications/Editor.app", "/Applications/Safari.app"])
+        for match in found {
+            guard case .scanned(_, _, complete: false, _) = match.bytes else { return XCTFail("\(match.bytes)") }
+        }
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.example.editor"))
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.example.editor.ShipIt"))
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.apple.Safari"))
+        let none = try only(.appCaches, in: try await analyze(apps: InstalledApps(Self.apps.apps, unread: [unreadApp])))
+        XCTAssertEqual(none.items, [])
+        XCTAssertEqual(none.bytes, .unavailable(
+            "\(path("Library/Caches/com.removed.player")) may be leftovers or an installed app's data: \(unreadApp)"))
+    }
+
+    func testDeviceBackupsAreEachBackupForReview() async throws {
+        try write("Library/Application Support/MobileSync/Backup/00008110-001A2B3C4D5E6F70/Manifest.db", bytes: 400_000)
+        try write("Library/Application Support/MobileSync/Backup/00008030-000A1B2C3D4E5F60/Manifest.db", bytes: 200_000)
+
+        let match = try only(.deviceBackups, in: try await analyze())
+
+        try assertItems(match, ["Library/Application Support/MobileSync/Backup/00008030-000A1B2C3D4E5F60",
+                                "Library/Application Support/MobileSync/Backup/00008110-001A2B3C4D5E6F70"],
+                        root: "Library/Application Support/MobileSync/Backup")
+        XCTAssertEqual(match.risk, .review)
+    }
+
+    func testOldInstallersAreDiskImagesAndPackagesInDownloadsUntouchedForNinetyDays() async throws {
+        try write("Downloads/Old App.dmg", bytes: 300_000)
+        try touch("Downloads/Old App.dmg", daysAgo: 91)
+        try write("Downloads/installers/Driver.PKG", bytes: 200_000)
+        try touch("Downloads/installers/Driver.PKG", daysAgo: 200)
+        try write("Downloads/New App.pkg", bytes: 100_000)
+        try touch("Downloads/New App.pkg", daysAgo: 89)
+        try write("Downloads/notes.txt", bytes: 4_096)
+        try touch("Downloads/notes.txt", daysAgo: 400)
+        // Modified long ago but added to Downloads today, as a download that keeps its server's time.
+        try write("Downloads/Fresh Download.dmg", bytes: 100_000)
+        try setTimes("Downloads/Fresh Download.dmg", modified: now.addingTimeInterval(-400 * 86_400), added: now)
+
+        let match = try only(.oldInstallers, in: try await analyze())
+
+        try assertItems(match, ["Downloads/Old App.dmg", "Downloads/installers/Driver.PKG"], root: "Downloads")
+        XCTAssertEqual(match.risk, .review)
+        XCTAssertEqual(match.cleanup, .trashEachItem)
+    }
+
+    func testLeftoversAreBundleIDsNoInstalledAppHas() async throws {
+        // A fake bundle ID with no installed app, in several Library folders.
+        try write("Library/Containers/com.removed.tool/Data/Library/data", bytes: 150_000)
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 4_096)
+        try write("Library/HTTPStorages/com.removed.tool.binarycookies", bytes: 4_096)
+        try write("Library/Group Containers/ZZZZZ99999.com.removed.tool/shared.db", bytes: 50_000)
+        // The installed app's own data is not a leftover.
+        try write("Library/Application Support/com.example.editor/state.db", bytes: 100_000)
+        try write("Library/Preferences/com.example.editor.plist", bytes: 4_096)
+        try write("Library/Group Containers/EXAMPLE123.com.example.shared/group.db", bytes: 4_096)
+        try write("Library/Logs/com.apple.CloudTelemetry/log", bytes: 4_096)
+
+        let analysis = try await analyze()
+        let leftovers = analysis.matches.filter { $0.rule.id == .appLeftovers }
+
+        XCTAssertEqual(leftovers.map(\.identifier), ["com.removed.tool"])
+        let match = try XCTUnwrap(leftovers.first)
+        XCTAssertEqual(match.items.map(\.path), [
+            path("Library/Containers/com.removed.tool"),
+            path("Library/Group Containers/ZZZZZ99999.com.removed.tool"),
+            path("Library/HTTPStorages/com.removed.tool.binarycookies"),
+            path("Library/Preferences/com.removed.tool.plist")
+        ])
+        XCTAssertEqual(match.items.map(\.root), [path("Library/Containers"), path("Library/Group Containers"),
+                                                 path("Library/HTTPStorages"), path("Library/Preferences")])
+        try assertBytes(match)
+        XCTAssertEqual(match.risk, .review)
+        XCTAssertEqual(analysis.entries.filter { $0.risk == .review }.map(\.identifier).sorted(),
+                       Array(repeating: "com.removed.tool", count: 4))
+
+        // With the app installed, the same entries are its data and nothing is left over.
+        let installed = InstalledApps(Self.apps.apps + [InstalledApp(
+            path: "/Applications/Tool.app", bundleID: "com.removed.tool", name: "Tool",
+            signature: CodeSignature(signingID: "com.removed.tool", teamID: "ZZZZZ99999", isPlatformBinary: false))])
+        let again = try await analyze(apps: installed)
+        XCTAssertFalse(again.matches.contains { $0.rule.id == .appLeftovers })
+        XCTAssertTrue(again.entries.filter { $0.identifier == "com.removed.tool" }.allSatisfy { $0.app?.path == "/Applications/Tool.app" })
+    }
+
+    func testLeftoversAnUnreadAppMayOwnAreUnknownRatherThanNone() async throws {
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 4_096)
+        let unreadApp = "/Applications/Broken.app has no readable bundle identifier."
+        let incomplete = InstalledApps(Self.apps.apps, unread: [unreadApp])
+        func report(_ analysis: Analysis, _ apps: InstalledApps) -> DiskOriginReport {
+            DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home, apps: apps)
+        }
+
+        // With an app unread the fake ID may be its: a possible leftover, so the leftovers are unknown, not none.
+        let unknown = try await analyze(apps: incomplete)
+        XCTAssertEqual(unknown.entries.map(\.rule), [.possibleLeftover])
+        let match = try only(.appLeftovers, in: unknown)
+        XCTAssertEqual(match.items, [])
+        XCTAssertEqual(match.bytes, .unavailable(
+            "\(path("Library/Preferences/com.removed.tool.plist")) may be leftovers or an installed app's data: \(unreadApp)"))
+        let unknownReport = report(unknown, incomplete)
+        XCTAssertEqual(unknownReport.leftovers?.items, [])
+        XCTAssertEqual(unknownReport.leftovers?.isLowerBound, true)
+        XCTAssertEqual(unknownReport.unattributed?.items, unknown.entries.map(\.index))
+
+        // A group container may be the data of an app whose signature was not read, so the leftovers found elsewhere
+        // are not all there are.
+        try write("Library/Group Containers/group.com.gone.app/data", bytes: 4_096)
+        let unsigned = InstalledApps(Self.apps.apps + [InstalledApp(path: "/Applications/Odd.app", bundleID: "org.odd.app",
+                                                                    name: "Odd", signature: nil)])
+        XCTAssertTrue(unsigned.isComplete)
+        let partial = try await analyze(apps: unsigned)
+        let found = try only(.appLeftovers, in: partial)
+        XCTAssertEqual(found.items.map(\.path), [path("Library/Preferences/com.removed.tool.plist")])
+        guard case .scanned(_, _, complete: false, _) = found.bytes else { return XCTFail("\(found.bytes)") }
+        XCTAssertEqual(report(partial, unsigned).leftovers?.isLowerBound, true)
+
+        // With every app and signature read, both are leftovers and the sums are exact.
+        let complete = try await analyze()
+        let leftovers = complete.matches.filter { $0.rule.id == .appLeftovers }
+        XCTAssertEqual(leftovers.map(\.identifier), ["com.gone.app", "com.removed.tool"])
+        for leftover in leftovers { try assertBytes(leftover) }
+        XCTAssertEqual(report(complete, Self.apps).leftovers?.isLowerBound, false)
+    }
+
+    func testTheTrashIsInformationOnly() async throws {
+        try write(".Trash/Old Project/file", bytes: 200_000)
+
+        let match = try only(.trash, in: try await analyze())
+
+        try assertItems(match, [".Trash"], root: "")
+        XCTAssertEqual(match.risk, .info)
+        XCTAssertEqual(match.cleanup, .none)
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertEqual(match.rule.yield, .noCleanup, "System frees nothing from the Trash")
+        XCTAssertNil(match.movedToTrash)
+    }
+
+    // MARK: Boundaries
+
+    func testAFolderThatCannotBeReadHasUnavailableBytes() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
+        let folder = path("Library/Developer/Xcode/DerivedData")
+        XCTAssertEqual(chmod(folder, 0), 0)
+        defer { chmod(folder, 0o755) }
+
+        let match = try only(.xcodeDerivedData, in: try await analyze())
+
+        XCTAssertEqual(match.items, [])
+        XCTAssertEqual(match.bytes, .unavailable("\(folder) could not be read."))
+    }
+
+    func testARuleFolderThatIsALinkIsNotFollowed() async throws {
+        try write("elsewhere/Homebrew/downloads/bottle.tar.gz", bytes: 10_000)
+        try write("elsewhere/DerivedData/App-abc/data", bytes: 10_000)
+        for (link, target) in [("Library/Caches/Homebrew", "elsewhere/Homebrew"), ("Library/Developer/Xcode/DerivedData", "elsewhere/DerivedData")] {
+            try FileManager.default.createDirectory(atPath: (path(link) as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(atPath: path(link), withDestinationPath: path(target))
+        }
+
+        let analysis = try await analyze()
+
+        for (id, link) in [(ReclaimRuleID.homebrewCache, "Library/Caches/Homebrew"), (.xcodeDerivedData, "Library/Developer/Xcode/DerivedData")] {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items, [], link)
+            XCTAssertEqual(match.bytes, .unavailable("\(path(link)) is a link, so it was not read."), link)
+        }
+    }
+
+    func testALinkAboveARuleFolderOrInPlaceOfALibraryFolderIsNotRead() async throws {
+        for relative in ["Developer/Xcode/DerivedData/App-abc/data", "Developer/Xcode/iOS DeviceSupport/18.0 (22A)/Symbols/lib",
+                         "Developer/Xcode/Archives/2026-01-01/App.xcarchive/Info.plist", "Developer/CoreSimulator/Caches/dyld/cache",
+                         "Caches/Homebrew/downloads/bottle", "Caches/Yarn/v6/pkg", "Caches/pip/http/blob",
+                         "Caches/com.example.editor/Cache.db", "Caches/com.gone.app/cache",
+                         "Application Support/MobileSync/Backup/0000-0000/Manifest.db", "Application Support/com.example.editor/data"] {
+            try write("elsewhere/" + relative, bytes: 4_096)
+        }
+        try device("elsewhere/Developer/CoreSimulator/Devices/11111111-1111-1111-1111-111111111111", runtime: "gone", bytes: 4_096)
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 4_096)
+        try write("Library/Preferences/settings.plist", bytes: 4_096)
+        try write("Library/Containers/com.example.editor/Data/file", bytes: 4_096)
+        for folder in ["Developer", "Caches", "Application Support"] {
+            try FileManager.default.createSymbolicLink(atPath: path("Library/" + folder), withDestinationPath: path("elsewhere/" + folder))
+        }
+        func link(_ folder: String) -> String { "\(path("Library/" + folder)) is a link, so it was not read." }
+
+        let analysis = try await analyze()
+
+        let below: [(ReclaimRuleID, String)] = [
+            (.xcodeDerivedData, "Developer"), (.xcodeDeviceSupport, "Developer"), (.xcodeArchives, "Developer"),
+            (.unavailableSimulators, "Developer"), (.simulatorCaches, "Developer"), (.homebrewCache, "Caches"),
+            (.yarnCache, "Caches"), (.pipCache, "Caches"), (.appCaches, "Caches"), (.deviceBackups, "Application Support"),
+        ]
+        for (id, folder) in below {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items, [], "\(id)")
+            XCTAssertEqual(match.bytes, .unavailable(link(folder)), "\(id)")
+        }
+        // The leftover found elsewhere is not all there are.
+        let leftovers = try only(.appLeftovers, in: analysis)
+        XCTAssertEqual(leftovers.items.map(\.path), [path("Library/Preferences/com.removed.tool.plist")])
+        guard case .scanned(_, _, complete: false, _) = leftovers.bytes else { return XCTFail("\(leftovers.bytes)") }
+        let report = DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                        apps: Self.apps)
+        XCTAssertEqual(report.unlistedFolders, [link("Application Support"), link("Caches")])
+        let groups = report.apps + report.vendors + [report.leftovers, report.unattributed].compactMap { $0 }
+        XCTAssertEqual(groups.map(\.name), ["Editor", "Example Ltd", "Leftovers", "Not attributed"])
+        XCTAssertTrue(groups.allSatisfy(\.isLowerBound))
+        XCTAssertEqual(report.developerTools.first { $0.name == "Xcode" }?.isLowerBound, true)
+
+        // A regular file holds no folder, so nothing below it is there.
+        try FileManager.default.removeItem(atPath: path("Library/Caches"))
+        try Data().write(to: URL(fileURLWithPath: path("Library/Caches")))
+        let file = try await analyze()
+        for id in [ReclaimRuleID.homebrewCache, .yarnCache, .pipCache, .appCaches] {
+            XCTAssertFalse(file.matches.contains { $0.rule.id == id }, "\(id)")
+        }
+        XCTAssertEqual(DiskOrigins.report(entries: file.entries, matches: file.matches, tree: file.tree, home: home,
+                                          apps: Self.apps).unlistedFolders, [link("Application Support")])
+    }
+
+    /// The scanner gives an entry whose name is not UTF-8 no name, no type, and `unreadable`: it may be any app's data
+    /// or a leftover, so the Library folder holding it is not judged in full. A named unreadable entry is judged by its
+    /// name like any other.
+    func testANamelessUnreadableLibraryEntryLeavesItsFolderNotJudgedInFull() async throws {
+        try write("Library/Caches/com.example.editor/Cache.db", bytes: 100_000)
+        try write("Library/Caches/nameless/data", bytes: 4_096)
+        try write("Library/Caches/Google/data", bytes: 4_096)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        func analysis(_ relative: String, keepingName: Bool) throws -> (Analysis, DiskOriginReport) {
+            var tree = scanned
+            let index = try XCTUnwrap(tree.index(atPath: path(relative)))
+            if !keepingName { tree.nodes[index].nameLength = 0 }
+            (tree.nodes[index].kind, tree.nodes[index].flags, tree.nodes[index].childCount) = (.other, .unreadable, 0)
+            let entries = DiskOrigins.entries(in: tree, home: home, apps: Self.apps)
+            let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context())
+            return (Analysis(tree: tree, entries: entries, matches: matches),
+                    DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: home, apps: Self.apps))
+        }
+
+        let (nameless, report) = try analysis("Library/Caches/nameless", keepingName: false)
+        let reason = "\(path("Library/Caches"))/ could not be read, so what it is is unknown."
+        let caches = try only(.appCaches, in: nameless)
+        XCTAssertEqual(caches.items.map(\.path), [path("Library/Caches/com.example.editor")])
+        guard case .scanned(_, _, complete: false, _) = caches.bytes else { return XCTFail("\(caches.bytes)") }
+        XCTAssertEqual(try only(.appLeftovers, in: nameless).bytes, .unavailable(reason))
+        XCTAssertEqual(report.unlistedFolders, [reason])
+        XCTAssertEqual(report.leftovers?.items, [])
+        XCTAssertEqual(report.leftovers?.isLowerBound, true)
+        XCTAssertEqual(report.apps.map(\.name), ["Editor"])
+        XCTAssertTrue(report.apps.allSatisfy(\.isLowerBound))
+
+        let (named, namedReport) = try analysis("Library/Caches/Google", keepingName: true)
+        XCTAssertEqual(named.entries.first { $0.path == path("Library/Caches/Google") }?.rule, .unattributed)
+        XCTAssertEqual(try only(.appCaches, in: named).bytes,
+                       .scanned(private: try Self.allocated(under: path("Library/Caches/com.example.editor")),
+                                allocated: try Self.allocated(under: path("Library/Caches/com.example.editor")),
+                                complete: true, allocatedUpperBound: false))
+        XCTAssertFalse(named.matches.contains { $0.rule.id == .appLeftovers })
+        XCTAssertEqual(namedReport.unlistedFolders, [])
+        XCTAssertNil(namedReport.leftovers)
+        XCTAssertFalse(namedReport.apps.contains(where: \.isLowerBound))
+    }
+
+    func testRuleFoldersTheScanDidNotReadInFullAreUnknownNotEmpty() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/DerivedData/Tool-def/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Caches/Homebrew/downloads/bottle.tar.gz", bytes: 10_000)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let derivedData = "Library/Developer/Xcode/DerivedData"
+        func match(_ id: ReclaimRuleID, _ tree: DiskTree) throws -> ReclaimMatch {
+            try only(id, in: Analysis(tree: tree, entries: [], matches: ReclaimMatcher.matches(in: tree, origins: [], context: context())))
+        }
+
+        // A cancelled scan flags each folder it had queued but not read `partial`, with nothing listed.
+        let queued = try match(.xcodeDerivedData, marking(scanned, derivedData, .partial, listing: false))
+        XCTAssertEqual(queued.items, [])
+        XCTAssertEqual(queued.bytes, .unavailable("\(path(derivedData)) was not read in full."))
+        // Cancelled partway through the folder: what was listed counts, as a lower bound.
+        let midway = try match(.xcodeDerivedData, marking(scanned, derivedData, .partial, listing: true))
+        XCTAssertEqual(midway.items.count, 2)
+        guard case .scanned(_, _, complete: false, _) = midway.bytes else { return XCTFail("\(midway.bytes)") }
+        // A folder replaced before it was opened is `incomplete` and lists nothing.
+        let replaced = try match(.xcodeDerivedData, marking(scanned, derivedData, .incomplete, listing: false))
+        XCTAssertEqual(replaced.bytes, .unavailable("\(path(derivedData)) was not read."))
+        // A folder above the rule's not read in full: every rule beneath is unknown, not absent.
+        let developer = marking(scanned, "Library/Developer", .partial, listing: false)
+        for id in [ReclaimRuleID.xcodeDerivedData, .xcodeDeviceSupport, .unavailableSimulators, .simulatorCaches, .xcodeArchives] {
+            XCTAssertEqual(try match(id, developer).bytes, .unavailable("\(path("Library/Developer")) was not read in full."), "\(id)")
+        }
+        // Read in full, a missing rule folder is simply absent.
+        let full = ReclaimMatcher.matches(in: scanned, origins: [], context: context())
+        XCTAssertFalse(full.contains { $0.rule.id == .xcodeDeviceSupport || $0.rule.id == .simulatorCaches })
+        // A tool's own folder cancelled: its sum is a lower bound.
+        let brew = try match(.homebrewCache, marking(scanned, "Library/Caches/Homebrew/downloads", .partial, listing: false))
+        guard case .scanned(_, _, complete: false, _) = brew.bytes else { return XCTFail("\(brew.bytes)") }
+    }
+
+    func testUnreadableFoldersARuleSearchesMakeItsSumIncomplete() async throws {
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/2026-10-01/Tool.xcarchive/Info.plist", bytes: 10_000)
+        try write("Downloads/Old App.dmg", bytes: 10_000)
+        try touch("Downloads/Old App.dmg", daysAgo: 120)
+        try write("Downloads/locked/Other.dmg", bytes: 10_000)
+        try touch("Downloads/locked/Other.dmg", daysAgo: 120)
+        try project("dev/old", untouchedFor: 40)
+        try write("dev/locked/app/package.json", bytes: 200)
+        let locked = ["Library/Developer/Xcode/Archives/2026-10-01", "Downloads/locked", "dev/locked"].map(path)
+        for folder in locked { XCTAssertEqual(chmod(folder, 0), 0) }
+        defer { for folder in locked { chmod(folder, 0o755) } }
+
+        let analysis = try await analyze()
+
+        for (id, found) in [(ReclaimRuleID.xcodeArchives, "Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"),
+                            (.oldInstallers, "Downloads/Old App.dmg"), (.staleNodeModules, "dev/old/node_modules")] {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items.map(\.path), [path(found)], "\(id)")
+            guard case .scanned(_, _, complete: false, _) = match.bytes else { return XCTFail("\(id): \(match.bytes)") }
+        }
+
+        // With nothing found, an unreadable folder still makes the rule unknown, not empty.
+        try FileManager.default.removeItem(atPath: path("Downloads/Old App.dmg"))
+        let unknown = try only(.oldInstallers, in: try await analyze())
+        XCTAssertEqual(unknown.items, [])
+        XCTAssertEqual(unknown.bytes, .unavailable("\(path("Downloads/locked")) could not be read."))
+    }
+
+    func testAScanOfAFolderInsideHomeFindsItsStaleNodeModules() async throws {
+        try project("dev/old", untouchedFor: 40)
+
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: path("dev"))).tree
+        let matches = ReclaimMatcher.matches(in: tree, origins: [], context: context())
+
+        XCTAssertEqual(matches.map(\.rule.id), [.staleNodeModules])
+        XCTAssertEqual(matches.first?.items.map(\.path), [path("dev/old/node_modules")])
+    }
+
+    func testStaleNodeModulesNeedsTheProjectAndTheFoldersAboveHomeListedInFull() async throws {
+        try project("dev/old", untouchedFor: 40)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        func match(_ tree: DiskTree, home: String) throws -> ReclaimMatch {
+            let context = ReclaimContext(home: home, now: now, installedApps: Self.apps, simulatorRuntimes: .installed([]))
+            let found = ReclaimMatcher.matches(in: tree, origins: [], context: context).filter { $0.rule.id == .staleNodeModules }
+            XCTAssertEqual(found.count, 1)
+            return try XCTUnwrap(found.first)
+        }
+        XCTAssertEqual(try match(scanned, home: home).items.map(\.path), [path("dev/old/node_modules")])
+
+        // The project's source is another volume, which the scan did not enter: its last change is unknown.
+        var mounted = scanned
+        let source = try XCTUnwrap(scanned.index(atPath: path("dev/old/src")))
+        mounted.nodes[source].kind = .mountPoint
+        mounted.nodes[source].childCount = 0
+        let unknownAge = try match(mounted, home: home)
+        XCTAssertEqual(unknownAge.items, [])
+        guard case let .unavailable(reason) = unknownAge.bytes else { return XCTFail("\(unknownAge.bytes)") }
+        XCTAssertTrue(reason.hasPrefix("\(path("dev/old")) was not read in full, so its last change is unknown."), reason)
+
+        // A scan of a folder above home that did not list the folder holding it: unknown, not absent.
+        try project("users/me/dev/old", untouchedFor: 40)
+        let above = marking(try await DiskScanner().scan(URL(fileURLWithPath: home)).tree, "users", .partial, listing: false)
+        XCTAssertEqual(try match(above, home: path("users/me")).bytes, .unavailable("\(path("users")) was not read in full."))
+    }
+
+    func testAScanRootedInsideNodeModulesSuggestsNothing() async throws {
+        try write("dev/old/node_modules/pkg/package.json", bytes: 200)
+        try write("dev/old/node_modules/pkg/node_modules/inner/index.js", bytes: 4_096)
+        try touchTree("dev/old", daysAgo: 90)
+
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: path("dev/old/node_modules"))).tree
+
+        XCTAssertEqual(ReclaimMatcher.matches(in: tree, origins: [], context: context()).map(\.rule.id), [])
+    }
+
+    func testLeftoversOfTwoTeamsAreSeparateAndHardLinksCountOnce() async throws {
+        try write("Library/Group Containers/AAAAAAAAAA.office/data", bytes: 10_000)
+        try write("Library/Group Containers/BBBBBBBBBB.office/data", bytes: 10_000)
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 40_960)
+        try FileManager.default.createDirectory(atPath: path("Library/Logs"), withIntermediateDirectories: true)
+        XCTAssertEqual(link(path("Library/Preferences/com.removed.tool.plist"), path("Library/Logs/com.removed.tool")), 0)
+
+        let analysis = try await analyze()
+        let leftovers = analysis.matches.filter { $0.rule.id == .appLeftovers }
+
+        XCTAssertEqual(leftovers.map { $0.items.map(\.path) }, [
+            [path("Library/Group Containers/AAAAAAAAAA.office")], [path("Library/Group Containers/BBBBBBBBBB.office")],
+            [path("Library/Logs/com.removed.tool"), path("Library/Preferences/com.removed.tool.plist")]
+        ])
+        let linked = try Self.allocated(under: path("Library/Preferences/com.removed.tool.plist"))
+        let removed = try XCTUnwrap(leftovers.last)
+        guard case let .scanned(_, allocated, complete, _) = removed.bytes else { return XCTFail("\(removed.bytes)") }
+        XCTAssertEqual(allocated, linked, "two links to one file")
+        XCTAssertFalse(complete)
+        let report = DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                        apps: Self.apps)
+        let group = try XCTUnwrap(report.leftovers)
+        XCTAssertEqual(group.allocated, linked + (try Self.allocated(under: path("Library/Group Containers/AAAAAAAAAA.office")))
+                           + (try Self.allocated(under: path("Library/Group Containers/BBBBBBBBBB.office"))))
+        XCTAssertTrue(group.isLowerBound)
+    }
+
+    /// Every state the scanner leaves an entry in, placed in each folder a rule walks: an entry the search cannot see
+    /// into or tell the kind of makes the match incomplete with items and unavailable without; one listed in full
+    /// changes nothing.
+    func testEveryEntryStateInEveryWalkedFolderIsJudgedOrMakesTheMatchIncomplete() async throws {
+        enum State: CaseIterable {
+            case none, unreadable, unreadableUntyped, partial, incompleteListed, incompleteUnlisted, dataless, mountPoint,
+                 countedElsewhere
+
+            var isJudged: Bool { self == .none || self == .incompleteListed }
+        }
+        let installed = "com.apple.CoreSimulator.SimRuntime.iOS-18-3"
+        let devices = "Library/Developer/CoreSimulator/Devices"
+        try write("Downloads/Old App.dmg", bytes: 10_000)
+        try touch("Downloads/Old App.dmg", daysAgo: 120)
+        try write("Downloads/probe/readme.txt", bytes: 100)
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/probe/readme.txt", bytes: 100)
+        try write("Library/Developer/Xcode/iOS DeviceSupport/18.0/Symbols/dyld", bytes: 10_000)
+        try write("Library/Developer/Xcode/tvOS DeviceSupport/18.0/Symbols/dyld", bytes: 10_000)
+        try device("\(devices)/11111111-1111-1111-1111-111111111111", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0", bytes: 10_000)
+        try device("\(devices)/probe", runtime: installed, bytes: 10_000)
+        try write("dev/probe/readme.txt", bytes: 100)
+        try project("dev/old", untouchedFor: 31)
+        try write("dev/old/probe/readme.txt", bytes: 100)
+        try touchTree("dev/old", daysAgo: 31, skipping: "node_modules")
+        try project("dev/other", untouchedFor: 31)
+        let context = context(runtimes: .installed([installed]))
+        let found = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+
+        func placing(_ state: State, at relative: String, in tree: DiskTree) throws -> DiskTree {
+            let index = try XCTUnwrap(tree.index(atPath: path(relative)), relative)
+            var placed = tree
+            switch state {
+            case .none: return tree
+            case .unreadable: placed.nodes[index].flags.insert(.unreadable)
+            case .unreadableUntyped: (placed.nodes[index].kind, placed.nodes[index].flags) = (.other, .unreadable)
+            case .partial: return marking(tree, relative, .partial, listing: false)
+            case .incompleteListed: return marking(tree, relative, .incomplete, listing: true)
+            case .incompleteUnlisted: return marking(tree, relative, .incomplete, listing: false)
+            case .dataless: placed.nodes[index].flags = .dataless
+            case .mountPoint: placed.nodes[index].kind = .mountPoint
+            case .countedElsewhere: placed.nodes[index].flags.insert(.countedElsewhere)
+            }
+            placed.nodes[index].childCount = 0
+            return placed
+        }
+        func match(_ id: ReclaimRuleID, _ tree: DiskTree) -> ReclaimMatch? {
+            ReclaimMatcher.matches(in: tree, origins: [], context: context).first { $0.rule.id == id }
+        }
+
+        // The walked folder's probe, the rule, and what it finds with the probe judged and with it unjudged.
+        let deviceSupport = ["Library/Developer/Xcode/iOS DeviceSupport/18.0"]
+        let projects = ["dev/old/node_modules", "dev/other/node_modules"]
+        let walks: [(probe: String, rule: ReclaimRuleID, judged: [String], unjudged: [String])] = [
+            ("Downloads/probe", .oldInstallers, ["Downloads/Old App.dmg"], ["Downloads/Old App.dmg"]),
+            ("Library/Developer/Xcode/Archives/probe", .xcodeArchives, ["Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"],
+             ["Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"]),
+            ("Library/Developer/Xcode/tvOS DeviceSupport", .xcodeDeviceSupport,
+             deviceSupport + ["Library/Developer/Xcode/tvOS DeviceSupport/18.0"], deviceSupport),
+            ("\(devices)/probe", .unavailableSimulators, ["\(devices)/11111111-1111-1111-1111-111111111111"],
+             ["\(devices)/11111111-1111-1111-1111-111111111111"]),
+            ("dev/probe", .staleNodeModules, projects, projects),
+            // Inside a project its age is unknown, so that project is not stale, whatever else it holds.
+            ("dev/old/probe", .staleNodeModules, projects, ["dev/other/node_modules"])
+        ]
+        for (probe, rule, judged, unjudged) in walks {
+            for state in State.allCases {
+                let label = "\(rule) \(probe) \(state)"
+                let matched = try XCTUnwrap(match(rule, try placing(state, at: probe, in: found)), label)
+                XCTAssertEqual(matched.items.map(\.path), (state.isJudged ? judged : unjudged).map(path), label)
+                guard case let .scanned(_, _, complete, _) = matched.bytes else { XCTFail("\(label): \(matched.bytes)"); continue }
+                XCTAssertEqual(complete, state.isJudged, label)
+            }
+        }
+
+        // An iCloud placeholder of a project's source keeps it out, and the match says so.
+        let evicted = try XCTUnwrap(match(.staleNodeModules, try placing(.dataless, at: "dev/old/src", in: found)))
+        XCTAssertEqual(evicted.items.map(\.path), [path("dev/other/node_modules")])
+        guard case .scanned(_, _, complete: false, _) = evicted.bytes else { return XCTFail("\(evicted.bytes)") }
+        // A rule folder below a placeholder, or below an entry whose kind is unknown, is unknown rather than absent.
+        XCTAssertEqual(match(.xcodeArchives, try placing(.dataless, at: "Library/Developer", in: found))?.bytes,
+                       .unavailable("\(path("Library/Developer")) is not downloaded, so it was not read."))
+        XCTAssertEqual(match(.oldInstallers, try placing(.unreadableUntyped, at: "Downloads", in: found))?.bytes,
+                       .unavailable("\(path("Downloads")) could not be read."))
+        XCTAssertEqual(match(.xcodeArchives, try placing(.unreadableUntyped, at: "Library/Developer", in: found))?.bytes,
+                       .unavailable("\(path("Library/Developer")) could not be read."))
+
+        // With nothing else found, an unjudged probe makes the rule unknown rather than empty.
+        for removed in ["Downloads/Old App.dmg", "Library/Developer/Xcode/Archives/2026-09-01", "Library/Developer/Xcode/iOS DeviceSupport",
+                        "\(devices)/11111111-1111-1111-1111-111111111111", "dev/old", "dev/other"] {
+            try FileManager.default.removeItem(atPath: path(removed))
+        }
+        let nothingFound = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        for (probe, rule, _, _) in walks where probe != "dev/old/probe" {
+            for state in State.allCases {
+                let label = "\(rule) \(probe) \(state) alone"
+                let alone = match(rule, try placing(state, at: probe, in: nothingFound))
+                switch (state.isJudged, alone?.bytes) {
+                case (true, nil), (true, .scanned(_, _, true, _)?): break
+                case let (false, .unavailable(reason)?):
+                    XCTAssertEqual(alone?.items, [], label)
+                    if state == .unreadableUntyped {
+                        XCTAssertEqual(reason, "\(path(probe)) could not be read, so what it is is unknown.", label)
+                    }
+                default: XCTFail("\(label): \(String(describing: alone?.bytes))")
+                }
+            }
+        }
+    }
+
+    func testAnAllocatedSizeThatMayCountClonedBlocksTwiceMakesItsSumsUpperBounds() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/DerivedData/Tool-def/data", bytes: 10_000)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let app = try XCTUnwrap(scanned.index(atPath: path("Library/Developer/Xcode/DerivedData/App-abc")))
+        let tool = try XCTUnwrap(scanned.index(atPath: path("Library/Developer/Xcode/DerivedData/Tool-def")))
+        var flagged = scanned
+        flagged.nodes[app].flags.insert(.allocatedUpperBound)
+        func upperBound(_ tree: DiskTree) throws -> Bool {
+            let match = try only(.xcodeDerivedData, in: Analysis(tree: tree, entries: [],
+                                                                  matches: ReclaimMatcher.matches(in: tree, origins: [], context: context())))
+            guard case let .scanned(_, _, true, upperBound) = match.bytes else { XCTFail("\(match.bytes)"); return false }
+            return upperBound
+        }
+
+        XCTAssertFalse(try upperBound(scanned))
+        XCTAssertTrue(try upperBound(flagged))
+        XCTAssertFalse(DiskOrigins.group(.leftovers, name: "", items: [app, tool], tree: scanned, incomplete: false).allocatedUpperBound)
+        let group = DiskOrigins.group(.leftovers, name: "", items: [app, tool], tree: flagged, incomplete: false)
+        XCTAssertTrue(group.allocatedUpperBound)
+        XCTAssertFalse(group.isLowerBound)
+    }
+
+    /// Each item's total counts its own clones' blocks once, but a sum over two items holding clones of each other
+    /// counts the shared blocks in each, so it is flagged.
+    func testClonesSharedAcrossItemsMakeTheAllocatedSumsUpperBounds() async throws {
+        let derivedData = "Library/Developer/Xcode/DerivedData"
+        try write(derivedData + "/A/f", bytes: 200_000)
+        try write(derivedData + "/B/g", bytes: 200_000)
+        try write("Library/Caches/com.example.editor/blob", bytes: 200_000)
+        try write("Library/Application Support/com.example.editor/other", bytes: 200_000)
+        let fileBytes = try Self.allocated(under: path(derivedData + "/A/f"))
+        func sums() async throws -> (match: ReclaimMatch, report: DiskOriginReport) {
+            let analysis = try await analyze()
+            return (try only(.xcodeDerivedData, in: analysis),
+                    DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                       apps: Self.apps))
+        }
+        func flags(_ report: DiskOriginReport) -> [String: Bool] {
+            Dictionary(uniqueKeysWithValues: (report.apps + report.vendors + report.developerTools).map {
+                ($0.name, $0.allocatedUpperBound)
+            })
+        }
+
+        // No clones: exact.
+        var (match, report) = try await sums()
+        try assertBytes(match)
+        XCTAssertEqual(flags(report), ["Editor": false, "Example Ltd": false, "Xcode": false])
+
+        // B's file and the Editor's Application Support file become clones of A's file and the Editor's cache.
+        for (original, copy) in [(derivedData + "/A/f", derivedData + "/B/g"),
+                                 ("Library/Caches/com.example.editor/blob", "Library/Application Support/com.example.editor/other")] {
+            try FileManager.default.removeItem(atPath: path(copy))
+            XCTAssertEqual(clonefile(path(original), path(copy), 0), 0)
+        }
+        (match, report) = try await sums()
+        guard case let .scanned(privateBytes, allocated, complete, upperBound) = match.bytes else { return XCTFail("\(match.bytes)") }
+        XCTAssertGreaterThanOrEqual(allocated, 2 * fileBytes, "each folder counts the shared blocks")
+        XCTAssertLessThan(privateBytes, fileBytes, "shared blocks are never private")
+        XCTAssertTrue(complete)
+        XCTAssertTrue(upperBound)
+        XCTAssertEqual(flags(report), ["Editor": true, "Example Ltd": true, "Xcode": true])
+        XCTAssertFalse(report.apps[0].isLowerBound)
+
+        // One item holding both clones counts their blocks once, exactly.
+        try FileManager.default.removeItem(atPath: path(derivedData + "/B"))
+        XCTAssertEqual(clonefile(path(derivedData + "/A/f"), path(derivedData + "/A/g"), 0), 0)
+        (match, _) = try await sums()
+        guard case let .scanned(_, allocated, true, false) = match.bytes else { return XCTFail("\(match.bytes)") }
+        XCTAssertEqual(allocated, try Self.allocated(under: path(derivedData + "/A")) - fileBytes)
+    }
+
+    func testTheScanRecordsTheLaterOfModificationAndDateAdded() async throws {
+        try write("a", bytes: 10)
+        try setTimes("a", modified: Date(timeIntervalSince1970: 1_600_000_000), added: Date(timeIntervalSince1970: 1_700_000_000))
+        try write("b", bytes: 10)
+        try setTimes("b", modified: Date(timeIntervalSince1970: 1_750_000_000), added: Date(timeIntervalSince1970: 1_650_000_000))
+
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+
+        XCTAssertEqual(tree.item(at: "a")?.touched, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(tree.item(at: "b")?.touched, Date(timeIntervalSince1970: 1_750_000_000))
+    }
+
+    // MARK: Helpers
+
+    /// The tree with the folder at `relative` flagged as the scanner flags one it did not read in full (`partial` when
+    /// cancelled, `incomplete` when replaced), its listing dropped when it was not read at all, and every folder above
+    /// it `incomplete`, as the scanner's totals mark them.
+    func marking(_ tree: DiskTree, _ relative: String, _ flags: DiskItemFlags, listing: Bool) -> DiskTree {
+        var marked = tree
+        guard let index = tree.index(atPath: path(relative)) else {
+            XCTFail("no \(relative)")
+            return tree
+        }
+        marked.nodes[index].flags.formUnion(flags.union(.incomplete))
+        if !listing { marked.nodes[index].childCount = 0 }
+        var parent = tree[index].parent
+        while let above = parent {
+            marked.nodes[above].flags.insert(.incomplete)
+            parent = tree[above].parent
+        }
+        return marked
+    }
+
+    struct Analysis {
+        let tree: DiskTree
+        let entries: [DiskOriginEntry]
+        let matches: [ReclaimMatch]
+    }
+
+    private func context(apps: InstalledApps = ReclaimRulesTests.apps, runtimes: SimulatorRuntimes = .installed([]),
+                         docker: DockerImageUsage? = nil) -> ReclaimContext {
+        ReclaimContext(home: home, now: now, installedApps: apps, simulatorRuntimes: runtimes, dockerImages: docker)
+    }
+
+    private func analyze(apps: InstalledApps = ReclaimRulesTests.apps, runtimes: SimulatorRuntimes = .installed([]),
+                         docker: DockerImageUsage? = nil) async throws -> Analysis {
+        let result = try await DiskScanner().scan(URL(fileURLWithPath: home))
+        let entries = DiskOrigins.entries(in: result.tree, home: home, apps: apps)
+        let matches = ReclaimMatcher.matches(in: result.tree, origins: entries,
+                                             context: context(apps: apps, runtimes: runtimes, docker: docker))
+        return Analysis(tree: result.tree, entries: entries, matches: matches)
+    }
+
+    private func only(_ id: ReclaimRuleID, in analysis: Analysis, file: StaticString = #filePath, line: UInt = #line) throws -> ReclaimMatch {
+        let found = analysis.matches.filter { $0.rule.id == id }
+        XCTAssertEqual(found.count, 1, "matches: \(analysis.matches.map(\.rule.id))", file: file, line: line)
+        return try XCTUnwrap(found.first, file: file, line: line)
+    }
+
+    private func path(_ relative: String) -> String {
+        relative.isEmpty ? home : home + "/" + relative
+    }
+
+    /// The items' paths and roots, and bytes equal to what the items allocate on disk.
+    private func assertItems(_ match: ReclaimMatch, _ items: [String], root: String,
+                             file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(match.items.map(\.path), items.map(path), file: file, line: line)
+        XCTAssertEqual(Set(match.items.map(\.root)), [path(root)], file: file, line: line)
+        try assertBytes(match, file: file, line: line)
+    }
+
+    /// The match's private and allocated bytes equal the blocks its items' files and folders hold, from `lstat`, and
+    /// are complete. Fresh fixture files share no blocks, so all of them are private.
+    private func assertBytes(_ match: ReclaimMatch, file: StaticString = #filePath, line: UInt = #line) throws {
+        let expected = try match.items.reduce(UInt64(0)) { $0 + (try Self.allocated(under: $1.path)) }
+        XCTAssertGreaterThan(expected, 0, file: file, line: line)
+        XCTAssertEqual(match.bytes, .scanned(private: expected, allocated: expected, complete: true, allocatedUpperBound: false), file: file, line: line)
+        XCTAssertEqual(match.bytes.bytes, expected, file: file, line: line)
+        // No cleanup frees its usage at once. A Trash cleanup moves it to the Trash, which frees nothing until the Trash
+        // is emptied; the others measure usage, not a yield.
+        let trashed: Set<ReclaimRuleID> = [
+            .xcodeDerivedData, .xcodeDeviceSupport, .simulatorCaches, .xcodeArchives, .staleNodeModules,
+            .cargoRegistryCache, .gradleCaches, .pipCache, .appCaches, .deviceBackups, .oldInstallers, .appLeftovers
+        ]
+        XCTAssertEqual(match.movedToTrash, trashed.contains(match.rule.id) ? expected : nil, file: file, line: line)
+    }
+
+    static func allocated(under path: String) throws -> UInt64 {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { throw POSIXError(.ENOENT) }
+        var total = UInt64(info.st_blocks) * 512
+        guard info.st_mode & S_IFMT == S_IFDIR else { return total }
+        for name in try FileManager.default.contentsOfDirectory(atPath: path) {
+            total += try allocated(under: path + "/" + name)
+        }
+        return total
+    }
+
+    private func write(_ relative: String, bytes: Int) throws {
+        let url = URL(fileURLWithPath: path(relative))
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Random bytes, so APFS cannot compress them.
+        var data = Data(count: bytes)
+        data.withUnsafeMutableBytes { arc4random_buf($0.baseAddress!, bytes) }
+        try data.write(to: url)
+    }
+
+    private func device(_ relative: String, runtime: String, bytes: Int) throws {
+        try write(relative + "/data/disk", bytes: bytes)
+        let plist = try PropertyListSerialization.data(fromPropertyList: ["runtime": runtime, "UDID": "x"], format: .xml, options: 0)
+        try plist.write(to: URL(fileURLWithPath: path(relative + "/device.plist")))
+    }
+
+    /// A project folder with `package.json`, a source file, and `node_modules`, everything but `node_modules` last
+    /// touched `days` ago; `node_modules` itself was touched just now.
+    private func project(_ relative: String, untouchedFor days: Double) throws {
+        try write(relative + "/package.json", bytes: 200)
+        try write(relative + "/src/index.js", bytes: 2_000)
+        try write(relative + "/node_modules/left-pad/index.js", bytes: 8_000)
+        try write(relative + "/node_modules/left-pad/node_modules/inner/index.js", bytes: 4_096)
+        try touchTree(relative, daysAgo: days, skipping: "node_modules")
+    }
+
+    private func touch(_ relative: String, daysAgo days: Double) throws {
+        let date = now.addingTimeInterval(-days * 86_400)
+        try setTimes(relative, modified: date, added: date)
+    }
+
+    /// Sets the times of a folder and everything in it, deepest first so that no change touches a folder again.
+    private func touchTree(_ relative: String, daysAgo days: Double, skipping skipped: String? = nil) throws {
+        let root = path(relative)
+        let items = (FileManager.default.subpaths(atPath: root) ?? [])
+            .filter { subpath in skipped.map { !subpath.split(separator: "/").contains(Substring($0)) } ?? true }
+            .sorted { $0.split(separator: "/").count > $1.split(separator: "/").count }
+        for item in items { try touch(relative + "/" + item, daysAgo: days) }
+        try touch(relative, daysAgo: days)
+    }
+
+    /// Sets the modification time and the date added, as `setattrlist` allows.
+    private func setTimes(_ relative: String, modified: Date, added: Date) throws {
+        var list = attrlist()
+        list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        list.commonattr = attrgroup_t(ATTR_CMN_MODTIME | ATTR_CMN_ADDEDTIME)
+        var times = (timespec(tv_sec: Int(modified.timeIntervalSince1970), tv_nsec: 0),
+                     timespec(tv_sec: Int(added.timeIntervalSince1970), tv_nsec: 0))
+        let status = setattrlist(path(relative), &list, &times, MemoryLayout.size(ofValue: times), UInt32(FSOPT_NOFOLLOW))
+        if status != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+}

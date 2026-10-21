@@ -42,6 +42,7 @@ struct TreeBuilder {
     private var clones: [CloneOccurrence] = []
     private var extents: [ExtentOccurrence] = []
     private var directories: Set<FileKey> = []
+    private var newestInPackages: [Int32: Int64] = [:]
     private(set) var unreadablePaths: [String] = []
 
     /// Starts a tree whose root is the scanned folder, classified from its own attributes like any entry.
@@ -77,6 +78,10 @@ struct TreeBuilder {
         insert(facts.flags.intersection(.allocatedUpperBound), into: owner)
         if facts.flags.contains(.dataless) { insert(.containsDataless, into: owner) }
         if facts.flags.contains(.unreadable) { markUnreadable(owner, path: path(), isItem: false) }
+        let unknown = DiskTree.Node.unknownTime, touched = facts.touched ?? unknown
+        newestInPackages[owner] = newestInPackages[owner].map { newest in
+            newest == unknown || touched == unknown ? unknown : max(newest, touched)
+        } ?? touched
         record(facts, node: owner, isItem: false, path: path())
     }
 
@@ -114,7 +119,8 @@ struct TreeBuilder {
         let bytes = Array(name.utf8.prefix(Int(UInt16.max)))
         nodes.append(DiskTree.Node(
             nameStart: UInt32(names.count), nameLength: UInt16(bytes.count), kind: facts.kind, flags: facts.flags,
-            parent: parent, firstChild: index + 1, childCount: 0, sizes: facts.sizes))
+            parent: parent, firstChild: index + 1, childCount: 0, sizes: facts.sizes,
+            touched: facts.touched ?? DiskTree.Node.unknownTime))
         names.append(contentsOf: bytes)
         contributions.append(facts.contribution)
         return index
@@ -228,7 +234,7 @@ struct TreeBuilder {
                 break
             }
         }
-        return DiskTree(rootPath: rootPath, nodes: nodes, names: names)
+        return DiskTree(rootPath: rootPath, nodes: nodes, names: names, newestInPackages: newestInPackages)
     }
 
     /// The deepest node that is an ancestor of, or one of, every node given.

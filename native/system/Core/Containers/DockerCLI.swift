@@ -49,19 +49,12 @@ public struct DockerCLI: Sendable {
     /// daemon is not running; one that belongs to no recognized runtime is not asked. Any failure gives a report
     /// without a breakdown and with the reason. A cancelled task starts no further command and stops the one running.
     public func report(at date: Date = Date()) async -> ContainerReport {
-        guard let cli = executable() else { return ContainerReport(observedAt: date, outcome: .unavailable(.cliNotFound)) }
-        let context: DockerContext
-        switch DockerContextReader(home: home, defaultHost: defaultHost).current() {
-        case let .success(found): context = found
-        case let .failure(reason): return ContainerReport(observedAt: date, executable: cli, outcome: .unavailable(reason))
-        }
-        guard let endpoint = context.endpoint else {
-            return ContainerReport(observedAt: date, executable: cli, context: context,
-                                   outcome: .unavailable(.daemonNotRunning(message: "No socket at \(context.missingSocket ?? context.host).")))
-        }
-        guard context.runtime != nil else {
-            return ContainerReport(observedAt: date, executable: cli, context: context,
-                                   outcome: .unavailable(.contextNotRecognized(name: context.name, host: context.host)))
+        let cli: String, context: DockerContext, endpoint: String
+        switch target() {
+        case let .unavailable(executable, found, reason):
+            return ContainerReport(observedAt: date, executable: executable, context: found, outcome: .unavailable(reason))
+        case let .ready(executable, found, socket):
+            (cli, context, endpoint) = (executable, found, socket)
         }
         let outcome: ContainerOutcome
         switch await run(cli, Self.listingArguments, host: endpoint) {
@@ -84,6 +77,32 @@ public struct DockerCLI: Sendable {
         return ContainerReport(observedAt: date, executable: cli, context: context, outcome: outcome)
     }
 
+    /// Where a command would run: the CLI, the current context, and the real path of its socket, or why it would not.
+    enum Target {
+        case ready(executable: String, context: DockerContext, endpoint: String)
+        case unavailable(executable: String?, context: DockerContext?, reason: ContainerUnavailable)
+    }
+
+    /// Finds the CLI and reads the current context. An endpoint whose socket does not exist means the daemon is not
+    /// running; one that belongs to no recognized runtime is not asked.
+    func target() -> Target {
+        guard let cli = executable() else { return .unavailable(executable: nil, context: nil, reason: .cliNotFound) }
+        let context: DockerContext
+        switch DockerContextReader(home: home, defaultHost: defaultHost).current() {
+        case let .success(found): context = found
+        case let .failure(reason): return .unavailable(executable: cli, context: nil, reason: reason)
+        }
+        guard let endpoint = context.endpoint else {
+            return .unavailable(executable: cli, context: context,
+                                reason: .daemonNotRunning(message: "No socket at \(context.missingSocket ?? context.host)."))
+        }
+        guard context.runtime != nil else {
+            return .unavailable(executable: cli, context: context,
+                                reason: .contextNotRecognized(name: context.name, host: context.host))
+        }
+        return .ready(executable: cli, context: context, endpoint: endpoint)
+    }
+
     /// The arguments for one command: `--host` with the checked socket's real path first, so the CLI neither rereads
     /// the current context nor follows a link that a runtime has repointed since (both may have changed since the
     /// check), and so never reaches another daemon than the one the report is attributed to.
@@ -97,8 +116,10 @@ public struct DockerCLI: Sendable {
         ["HOME": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "DOCKER_CLI_HINTS": "false"]
     }
 
-    private func run(_ cli: String, _ arguments: [String], host: String) async -> Result<String, ContainerUnavailable> {
+    func run(_ cli: String, _ arguments: [String], host: String, timeout: Duration? = nil) async
+        -> Result<String, ContainerUnavailable> {
         let command = Self.commandName(arguments)
+        let timeout = timeout ?? self.timeout
         guard !Task.isCancelled else { return .failure(.cancelled) }
         switch await runner.run(cli, arguments: Self.arguments(arguments, host: host), environment: environment, timeout: timeout) {
         case let .failure(.launchFailed(message)): return .failure(.launchFailed(command: command, message: message))
@@ -129,8 +150,9 @@ public struct DockerCLI: Sendable {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
     }
 
+    /// `docker` and the subcommand: the arguments before the first option (`docker ps`, `docker system df`).
     static func commandName(_ arguments: [String]) -> String {
-        "docker " + (arguments.first ?? "")
+        (["docker"] + arguments.prefix { !$0.hasPrefix("-") }).joined(separator: " ")
     }
 
     /// The first non-empty line of the CLI's error output, at most 300 characters.

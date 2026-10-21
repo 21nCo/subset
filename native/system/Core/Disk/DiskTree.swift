@@ -1,3 +1,5 @@
+import Foundation
+
 /// The sizes of a scanned item, in bytes.
 public struct DiskSizes: Equatable, Sendable {
     /// The size its contents claim (`st_size`, summed over all forks).
@@ -84,6 +86,10 @@ public struct DiskItem: Equatable, Sendable {
     public let parent: Int?
     /// The indices of the listed children; a package's contents are not listed.
     public let children: Range<Int>
+    /// The later of when the item was last modified and when it was put in its folder (its date added); `nil` when
+    /// the file system returned neither. A folder's own time, which changes when an entry in it is added, removed,
+    /// or renamed, not when a file deeper down is written.
+    public let touched: Date?
 }
 
 /// A scan's items, packed for memory: one fixed-size record per item and one buffer for all names. Children of a
@@ -98,12 +104,19 @@ public struct DiskTree: Sendable {
         var firstChild: Int32
         var childCount: Int32
         var sizes: DiskSizes
+        /// Seconds since 1970, `Node.unknownTime` when unknown.
+        var touched: Int64
+
+        static let unknownTime = Int64.min
     }
 
     /// The scanned root's path.
     public let rootPath: String
     var nodes: [Node]
     var names: [UInt8]
+    /// The latest `touched` of the entries read inside each package with any, by the package's index, which the tree
+    /// does not list; `Node.unknownTime` when one had no time.
+    var newestInPackages: [Int32: Int64] = [:]
 
     public var count: Int { nodes.count }
     public var root: DiskItem { self[0] }
@@ -114,7 +127,8 @@ public struct DiskTree: Sendable {
         return DiskItem(
             index: index, name: name(of: index), kind: node.kind, flags: node.flags,
             sizes: node.flags.contains(.unreadable) ? nil : node.sizes,
-            parent: node.parent < 0 ? nil : Int(node.parent), children: first..<(first + Int(node.childCount)))
+            parent: node.parent < 0 ? nil : Int(node.parent), children: first..<(first + Int(node.childCount)),
+            touched: node.touched == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(node.touched)))
     }
 
     public func children(of index: Int) -> [DiskItem] {
@@ -141,6 +155,14 @@ public struct DiskTree: Sendable {
             current = next
         }
         return self[current]
+    }
+
+    /// The latest time the item, or for a package an entry read inside it, was touched; `nil` when one has no time.
+    /// A package's own time does not change when a file inside it is written.
+    func newestTouch(_ index: Int) -> Date? {
+        let own = nodes[index].touched
+        let newest = newestInPackages[Int32(index)].map { $0 == Node.unknownTime ? $0 : max($0, own) } ?? own
+        return own == Node.unknownTime || newest == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(newest))
     }
 
     func name(of index: Int) -> String {

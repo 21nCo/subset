@@ -7,12 +7,16 @@ struct DirectoryEntry: Equatable, Sendable {
     var error: Int32 = 0
     /// `ATTR_CMN_OBJTYPE` (`VREG`, `VDIR`, `VLNK`, ...).
     var objectType: UInt32?
+    /// `ATTR_CMN_MODTIME`, in seconds since 1970: when the item's contents last changed.
+    var modified: Int64?
     /// The Finder flags from `ATTR_CMN_FNDRINFO`, which hold the bundle bit.
     var finderFlags: UInt16?
     /// `ATTR_CMN_FLAGS`, the `st_flags` bits such as `SF_DATALESS` and `SF_FIRMLINK`.
     var flags: UInt32?
     /// `ATTR_CMN_FILEID`, the inode number.
     var fileID: UInt64?
+    /// `ATTR_CMN_ADDEDTIME`, in seconds since 1970: when the item was created in or moved into its folder.
+    var added: Int64?
     /// `ATTR_FILE_LINKCOUNT`.
     var linkCount: UInt32?
     /// `ATTR_FILE_TOTALSIZE`, the logical size of all forks.
@@ -38,8 +42,8 @@ struct DirectoryEntry: Equatable, Sendable {
 /// The attributes the scanner asks `getattrlistbulk` for, and the parser for the buffer it fills.
 enum BulkAttributes {
     static let common: attrgroup_t = attrgroup_t(bitPattern: Int32(bitPattern: ATTR_CMN_RETURNED_ATTRS))
-        | attrgroup_t(ATTR_CMN_NAME | ATTR_CMN_ERROR | ATTR_CMN_OBJTYPE | ATTR_CMN_FNDRINFO | ATTR_CMN_FLAGS
-            | ATTR_CMN_FILEID)
+        | attrgroup_t(ATTR_CMN_NAME | ATTR_CMN_ERROR | ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME | ATTR_CMN_FNDRINFO
+            | ATTR_CMN_FLAGS | ATTR_CMN_FILEID | ATTR_CMN_ADDEDTIME)
     static let directory = attrgroup_t(ATTR_DIR_MOUNTSTATUS | ATTR_DIR_ALLOCSIZE)
     static let file = attrgroup_t(ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE)
     static let extended = attrgroup_t(ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_REALDEVID | ATTR_CMNEXT_CLONEID
@@ -109,6 +113,7 @@ enum BulkAttributes {
         }
         result.error = result.name.isEmpty && error == 0 ? EILSEQ : error
         if has(returned.commonattr, ATTR_CMN_OBJTYPE) { result.objectType = reader.read(UInt32.self) }
+        if has(returned.commonattr, ATTR_CMN_MODTIME) { result.modified = reader.read(timespec.self).map { Int64($0.tv_sec) } }
         if has(returned.commonattr, ATTR_CMN_FNDRINFO) {
             // FileInfo and FolderInfo both keep their big-endian finderFlags at byte 8 of the 32 bytes.
             if let raw = reader.peek(UInt16.self, at: 8) { result.finderFlags = UInt16(bigEndian: raw) }
@@ -116,6 +121,7 @@ enum BulkAttributes {
         }
         if has(returned.commonattr, ATTR_CMN_FLAGS) { result.flags = reader.read(UInt32.self) }
         if has(returned.commonattr, ATTR_CMN_FILEID) { result.fileID = reader.read(UInt64.self) }
+        if has(returned.commonattr, ATTR_CMN_ADDEDTIME) { result.added = reader.read(timespec.self).map { Int64($0.tv_sec) } }
         if has(returned.dirattr, ATTR_DIR_MOUNTSTATUS) { result.mountStatus = reader.read(UInt32.self) }
         if has(returned.dirattr, ATTR_DIR_ALLOCSIZE) { result.allocatedSize = reader.readSize() }
         if has(returned.fileattr, ATTR_FILE_LINKCOUNT) { result.linkCount = reader.read(UInt32.self) }

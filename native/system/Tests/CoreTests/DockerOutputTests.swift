@@ -2,8 +2,16 @@
 import XCTest
 
 /// Recorded `docker ps --format '{{json .}}'` and `docker stats --no-stream --format '{{json .}}'` lines (Docker CLI
-/// 27): parsing, compose grouping, unit conversion, and malformed lines.
+/// 27): parsing, compose grouping, unit conversion, and malformed lines; and `docker system df --format json`.
 final class DockerOutputTests: XCTestCase {
+    /// Recorded `docker system df --format json` (Docker CLI 27), one line per kind of object.
+    static let systemDF = """
+    {"Active":"2","Reclaimable":"2.064GB (61%)","Size":"3.37GB","TotalCount":"7","Type":"Images"}
+    {"Active":"2","Reclaimable":"0B (0%)","Size":"1.09kB","TotalCount":"2","Type":"Containers"}
+    {"Active":"1","Reclaimable":"0B (0%)","Size":"41.94MB","TotalCount":"1","Type":"Local Volumes"}
+    {"Active":"0","Reclaimable":"512.3MB","Size":"512.3MB","TotalCount":"14","Type":"Build Cache"}
+    """
+
     private let psOutput = """
     {"Command":"\\"docker-entrypoint.s…\\"","CreatedAt":"2026-10-19 09:12:44 +0200 CEST","ID":"3f2a9c1b7d4e","Image":"postgres:16","Labels":"com.docker.compose.config-hash=ab12,com.docker.compose.container-number=1,com.docker.compose.oneoff=False,com.docker.compose.project=shop,com.docker.compose.project.config_files=/Users/me/dev/shop/compose.yaml,com.docker.compose.service=db,com.docker.compose.version=2.29.7","LocalVolumes":"1","Mounts":"shop_pgdata","Names":"shop-db-1","Networks":"shop_default","Ports":"0.0.0.0:5432-\\u003e5432/tcp","RunningFor":"2 hours ago","Size":"0B","State":"running","Status":"Up 2 hours"}
     {"Command":"\\"node server.js\\"","CreatedAt":"2026-10-19 09:12:45 +0200 CEST","ID":"8b1e0d6c5a2f","Image":"shop-web","Labels":"com.docker.compose.project.working_dir=/Users/me/dev/shop,com.docker.compose.project=shop,com.docker.compose.service=web","LocalVolumes":"0","Mounts":"","Names":"shop-web-1","Networks":"shop_default","Ports":"0.0.0.0:3000-\\u003e3000/tcp","RunningFor":"2 hours ago","Size":"0B","State":"running","Status":"Up 2 hours"}
@@ -147,5 +155,39 @@ final class DockerOutputTests: XCTestCase {
         XCTAssertEqual(breakdown.standalone.map(\.cpuPercent), [1, nil, 2],
                        "a full ID matches its short form; a container recreated under the same name is another container")
         XCTAssertEqual(breakdown.totals.containerCount, 3)
+    }
+
+    func testSystemDFGivesTheImagesRow() {
+        XCTAssertEqual(DockerOutput.imageSpace(Self.systemDF),
+                       DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_500_000))
+        // Only the Images row counts, wherever it is, and a count may be a number.
+        let reordered = """
+        {"Active":"0","Reclaimable":"1GB","Size":"1GB","TotalCount":"3","Type":"Build Cache"}
+        not json
+        {"Active":0,"Reclaimable":"0B (0%)","Size":"12.5MB","TotalCount":1,"Type":"Images"}
+        """
+        XCTAssertEqual(DockerOutput.imageSpace(reordered), DockerImageSpace(count: 1, active: 0, size: 12_500_000, reclaimable: 0))
+    }
+
+    func testReclaimableIsTheMostItsRoundedFigureMayBe() {
+        // Docker prints four significant digits, so 2,064,499,999 bytes reads 2.064GB: half a unit in the last digit
+        // shown is added, as it is to a whole number.
+        for (text, ceiling) in [("2.064GB", 2_064_500_000), ("999.9MB", 999_950_000), ("1GB", 1_500_000_000),
+                                ("1.5kB", 1_550), ("0B", 0), ("512B", 512)] as [(String, UInt64)] {
+            XCTAssertEqual(DockerOutput.ceiling(text), ceiling, text)
+            let row = #"{"Type":"Images","Size":"9GB","Reclaimable":"\#(text) (10%)"}"#
+            XCTAssertEqual(DockerOutput.imageSpace(row)?.reclaimable, ceiling, text)
+        }
+        XCTAssertGreaterThanOrEqual(DockerOutput.ceiling("2.064GB") ?? 0, 2_064_499_999)
+        for text in ["lots", "1e3GB", "1..2GB", ".5GB", "GB"] { XCTAssertNil(DockerOutput.ceiling(text), text) }
+    }
+
+    func testSystemDFWithoutAReadableImagesRowIsNothing() {
+        XCTAssertNil(DockerOutput.imageSpace(""))
+        XCTAssertNil(DockerOutput.imageSpace(#"{"Type":"Containers","Size":"1GB","Reclaimable":"0B"}"#))
+        XCTAssertNil(DockerOutput.imageSpace(#"{"Type":"Images","Size":"lots","Reclaimable":"some"}"#))
+        // One readable size is kept, the other is unknown.
+        XCTAssertEqual(DockerOutput.imageSpace(#"{"Type":"Images","Size":"2GB","Reclaimable":"--"}"#),
+                       DockerImageSpace(count: nil, active: nil, size: 2_000_000_000, reclaimable: nil))
     }
 }
