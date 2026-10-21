@@ -11,11 +11,13 @@ import os
 /// The tap's callback must return quickly and never reads the window list, so the trigger only marks the switcher to
 /// open, on the next pass of the main run loop. What the session does before then is held and applied in order once it
 /// has opened, so every key is applied to the list it was meant for; a switch cancelled before then never opens.
+///
+/// Changed settings apply at once (`settingsChanged(_:)`): a new shortcut, and the shown windows in an open switcher; and while the Settings window records one the tap passes
+/// every event (`isSuspended`), so the recorder sees the keys a switch would otherwise take.
 @MainActor
 final class SwitchShortcutController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switch")
 
-    private let store: ShortcutStore
     private var recognizer: ShortcutRecognizer
     private var tap: EventTap?
     private let switcher: SwitcherController
@@ -30,17 +32,20 @@ final class SwitchShortcutController {
     /// permission again and shows onboarding.
     var onNeedsPermission: () -> Void = {}
 
-    convenience init(windowList: WindowListController, store: ShortcutStore = ShortcutStore()) {
+    convenience init(windowList: WindowListController, settings: @escaping () -> Settings) {
         self.init(
-            switcher: SwitcherController(readWindows: { windowList.refresh() }, windowOperator: windowList.windowOperator),
-            store: store
+            switcher: SwitcherController(
+                readWindows: { windowList.refresh() },
+                windowOperator: windowList.windowOperator,
+                settings: settings
+            ),
+            shortcut: settings().shortcut
         )
     }
 
-    init(switcher: SwitcherController, store: ShortcutStore, isTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }) {
-        self.store = store
+    init(switcher: SwitcherController, shortcut: Shortcut, isTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }) {
         self.isTrusted = isTrusted
-        recognizer = ShortcutRecognizer(shortcut: store.shortcut)
+        recognizer = ShortcutRecognizer(shortcut: shortcut)
         self.switcher = switcher
         switcher.onSessionEnded = { [unowned self] in recognizer.endSession() }
         switcher.onNotPermitted = { [unowned self] in onNeedsPermission() }
@@ -48,12 +53,37 @@ final class SwitchShortcutController {
 
     var isInstalled: Bool { tap?.isInstalled ?? false }
 
-    /// Installs the tap with the stored shortcut. Call only while the process is trusted; returns false if the
-    /// system refused the tap.
+    /// The shortcut the tap recognizes.
+    var shortcut: Shortcut { recognizer.shortcut }
+
+    /// While true, the tap passes every event and no switch starts: the Settings window is recording a shortcut.
+    /// Suspending cancels any switch in progress.
+    var isSuspended = false {
+        didSet {
+            if isSuspended, !oldValue { interrupt() }
+        }
+    }
+
+    /// Switches to `shortcut` at once. A switch in progress under the old shortcut is cancelled, since its holding
+    /// modifier may no longer be the one held.
+    func use(_ shortcut: Shortcut) {
+        guard shortcut != recognizer.shortcut else { return }
+        interrupt()
+        recognizer.shortcut = shortcut
+        Self.log.info("Switch shortcut changed to \(shortcut.displayName, privacy: .public)")
+    }
+
+    /// Applies changed settings at once: a new shortcut (`use(_:)`), and the Shown-windows options and excluded apps to
+    /// an open switcher.
+    func settingsChanged(_ settings: Settings) {
+        use(settings.shortcut)
+        switcher.settingsChanged()
+    }
+
+    /// Installs the tap. Call only while the process is trusted; returns false if the system refused the tap.
     @discardableResult
     func install() -> Bool {
         if isInstalled { return true }
-        recognizer.shortcut = store.shortcut
         let tap = EventTap { [unowned self] input in handle(input) }
         guard tap.install() else {
             Self.log.error("The system refused the keyboard event tap")
@@ -69,14 +99,23 @@ final class SwitchShortcutController {
         guard let tap else { return }
         tap.remove()
         self.tap = nil
+        interrupt()
+        Self.log.info("Switch shortcut removed")
+    }
+
+    /// Cancels any switch in progress, including one waiting to open, and forgets the presses in progress.
+    private func interrupt() {
         opening = false
         held = []
         _ = recognizer.reset()
         switcher.cancel()
-        Self.log.info("Switch shortcut removed")
     }
 
     func handle(_ input: TapInput) -> Disposition {
+        if isSuspended {
+            if input == .tapDisabled { tapWasDisabled() }
+            return .pass
+        }
         let result = recognizer.handle(input)
         if case .trigger = result.event, !isTrusted() {
             // Access was revoked since the last sample: there is no list to show, so ask for it again.
@@ -91,18 +130,20 @@ final class SwitchShortcutController {
         } else {
             apply(result)
         }
-        if input == .tapDisabled {
-            // The system disables a tap whose callback was too slow, or on some user input such as secure text
-            // entry. Turn it back on at once unless the permission is gone, which also disables it.
-            if isTrusted() {
-                Self.log.info("The system disabled the event tap; re-enabled it")
-                tap?.reenable()
-            } else {
-                // Removing the tap from inside its own callback is deferred to the next run loop pass.
-                DispatchQueue.main.async { [weak self] in self?.onTrustLost() }
-            }
-        }
+        if input == .tapDisabled { tapWasDisabled() }
         return result.disposition
+    }
+
+    /// The system disables a tap whose callback was too slow, or on some user input such as secure text entry. Turn it
+    /// back on at once unless the permission is gone, which also disables it.
+    private func tapWasDisabled() {
+        if isTrusted() {
+            Self.log.info("The system disabled the event tap; re-enabled it")
+            tap?.reenable()
+        } else {
+            // Removing the tap from inside its own callback is deferred to the next run loop pass.
+            DispatchQueue.main.async { [weak self] in self?.onTrustLost() }
+        }
     }
 
     private func apply(_ result: ShortcutRecognizer.Result) {

@@ -18,6 +18,10 @@ final class AXWindowOperator: WindowOperator {
     func perform(_ operation: WindowOperation, on window: WindowEntry) async -> OperationResult {
         await operations.perform(operation, on: window)
     }
+
+    func perform(_ operation: WindowOperation, onApp app: AppEntry) async -> OperationResult {
+        await operations.perform(operation, onApp: app)
+    }
 }
 
 /// Accessibility requests on a listed window or its app.

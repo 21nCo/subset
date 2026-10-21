@@ -24,8 +24,7 @@ final class SwitchShortcutTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.3)
             return WindowList(windows: windows)
         }, windowOperator: recorder)
-        let defaults = UserDefaults(suiteName: "SwitchShortcutTests.\(UUID().uuidString)")!
-        return (SwitchShortcutController(switcher: switcher, store: ShortcutStore(defaults: defaults), isTrusted: { true }), switcher)
+        return (SwitchShortcutController(switcher: switcher, shortcut: .default, isTrusted: { true }), switcher)
     }
 
     private func key(_ kind: KeyEvent.Kind, _ keyCode: UInt16, _ modifiers: ModifierMask) -> TapInput {
@@ -67,5 +66,42 @@ final class SwitchShortcutTests: XCTestCase {
         XCTAssertEqual(reads, 0)
         XCTAssertTrue(recorder.calls.isEmpty)
         XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testANewShortcutAppliesAtOnceAndCancelsASwitchUnderTheOldOne() async throws {
+        let recorder = RecordingWindowOperator()
+        let (tap, switcher) = shortcut(recorder)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .swallow)
+        try await wait(until: { switcher.isOpen })
+        let controlGrave = try Shortcut(holdModifier: .control, keyCode: KeyCode.grave)
+        tap.use(controlGrave)
+        XCTAssertFalse(switcher.isOpen, "the switch under ⌥Tab is cancelled")
+        XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3A, [])), .pass)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .pass, "⌥Tab is no longer the shortcut")
+        XCTAssertEqual(tap.handle(key(.keyUp, KeyCode.tab, .option)), .pass)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.grave, .control)), .swallow)
+        XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3B, [])), .pass)
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.operation), [.focus], "only the ⌃` switch committed")
+    }
+
+    func testWhileSuspendedEveryEventPassesAndASwitchInProgressIsCancelled() async throws {
+        let recorder = RecordingWindowOperator()
+        let (tap, switcher) = shortcut(recorder)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .swallow)
+        try await wait(until: { switcher.isOpen })
+        tap.isSuspended = true
+        XCTAssertFalse(switcher.isOpen)
+        for input in [key(.keyDown, KeyCode.tab, .option), key(.keyUp, KeyCode.tab, .option),
+                      key(.keyDown, KeyCode.escape, .option), TapInput.tapDisabled] {
+            XCTAssertEqual(tap.handle(input), .pass, "\(input)")
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(switcher.isOpen)
+        tap.isSuspended = false
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .swallow, "recording ended: ⌥Tab switches again")
+        try await wait(until: { switcher.isOpen })
+        switcher.cancel()
+        XCTAssertTrue(recorder.calls.isEmpty)
     }
 }

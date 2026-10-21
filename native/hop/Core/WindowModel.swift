@@ -130,16 +130,18 @@ public struct WindowEntry: Sendable, Equatable {
     }
 }
 
-/// A regular app with no switchable window, for the option to list windowless apps (SET-95).
+/// A regular app with no switchable window, for the option to list windowless apps (`ShownWindows.windowlessApps`).
 public struct AppEntry: Sendable, Equatable {
     public var pid: pid_t
     public var bundleIdentifier: String?
     public var name: String
+    public var isHidden: Bool
 
     public init(_ app: SourceApp) {
         pid = app.pid
         bundleIdentifier = app.bundleIdentifier
         name = app.name
+        isHidden = app.isHidden
     }
 }
 

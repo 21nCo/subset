@@ -84,6 +84,10 @@ public protocol AppControl: Sendable {
 /// is done even if the app then asks to save: Hop leaves that prompt to the user. **hideApp** hides the app, and is
 /// done when it was hidden already. **quitApp** asks the app to quit normally, never by force, and Finder is never
 /// quit.
+///
+/// On an app listed without windows (`perform(_:onApp:)`), **focus** unhides the app if it is hidden, activates it and
+/// makes it frontmost, and succeeds when the app reads back as frontmost within `readBackTimeout`; **hideApp** and
+/// **quitApp** are as above; **minimize** and **close** are refused, since there is no window.
 public final class AccessibilityWindowOperator: WindowOperator {
     /// How long focus waits for the window to read back as the app's focused window.
     public static let defaultReadBackTimeout: Duration = .milliseconds(500)
@@ -112,6 +116,12 @@ public final class AccessibilityWindowOperator: WindowOperator {
         }
     }
 
+    public func perform(_ operation: WindowOperation, onApp app: AppEntry) async -> OperationResult {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: self.run(operation, onApp: app)) }
+        }
+    }
+
     private func run(_ operation: WindowOperation, on window: WindowEntry) -> OperationResult {
         guard accessibility.isTrusted() else { return .notPermitted }
         if operation == .quitApp, window.bundleIdentifier == Self.finderBundleIdentifier {
@@ -123,28 +133,62 @@ public final class AccessibilityWindowOperator: WindowOperator {
         case .focus:
             return focus(window, app: app)
         case .minimize:
-            return attempt(on: window, refusal: "can't be minimized") { () throws(AccessibilityFailure) in
+            return attempt(on: window.owner, refusal: "can't be minimized") { () throws(AccessibilityFailure) in
                 try accessibility.setMinimized(true, window: ref, pid: pid)
             }
         case .close:
-            return attempt(on: window, refusal: "can't be closed") { () throws(AccessibilityFailure) in
+            return attempt(on: window.owner, refusal: "can't be closed") { () throws(AccessibilityFailure) in
                 try accessibility.pressCloseButton(ref, pid: pid)
             }
         case .hideApp:
-            // An app that is already hidden may not take the request; it is hidden all the same.
-            if apps.hide(pid) { return .done }
-            guard let app = runningApp(of: window) else { return .appGone }
-            return app.isHidden ? .done : .refused("did not hide")
+            return hide(window.owner)
         case .quitApp:
-            return delivered(apps.terminate(pid), to: window, refusal: "did not quit")
+            return delivered(apps.terminate(pid), to: window.owner, refusal: "did not quit")
         }
+    }
+
+    private func run(_ operation: WindowOperation, onApp app: AppEntry) -> OperationResult {
+        guard accessibility.isTrusted() else { return .notPermitted }
+        if operation == .quitApp, app.bundleIdentifier == Self.finderBundleIdentifier {
+            return .refused("Finder can't be quit")
+        }
+        let owner = Owner(pid: app.pid, bundleIdentifier: app.bundleIdentifier)
+        guard let state = runningApp(owner) else { return .appGone }
+        switch operation {
+        case .focus:
+            if state.isHidden || app.isHidden, !apps.unhide(app.pid), runningApp(owner) == nil { return .appGone }
+            return attempt(on: owner, refusal: "did not come to front") { () throws(AccessibilityFailure) in
+                _ = apps.activate(app.pid)
+                do throws(AccessibilityFailure) {
+                    try Self.step { () throws(AccessibilityFailure) in try accessibility.makeFrontmost(pid: app.pid) }
+                    if try readBack(nil, pid: app.pid) { return }
+                } catch .invalidElement {
+                    // There is no window to have gone; an app element that is invalid while the app runs is a refusal.
+                    throw .failed
+                }
+                throw .failed
+            }
+        case .minimize, .close:
+            return .refused("has no window")
+        case .hideApp:
+            return hide(owner)
+        case .quitApp:
+            return delivered(apps.terminate(app.pid), to: owner, refusal: "did not quit")
+        }
+    }
+
+    private func hide(_ owner: Owner) -> OperationResult {
+        // An app that is already hidden may not take the request; it is hidden all the same.
+        if apps.hide(owner.pid) { return .done }
+        guard let app = runningApp(owner) else { return .appGone }
+        return app.isHidden ? .done : .refused("did not hide")
     }
 
     private func focus(_ window: WindowEntry, app: RunningAppState) -> OperationResult {
         let (ref, pid) = (window.ref, window.pid)
         // Unhiding an app that is not hidden changes nothing, so either report of hiding is enough.
         if app.isHidden || window.isAppHidden, !apps.unhide(pid), runningApp(of: window) == nil { return .appGone }
-        return attempt(on: window, refusal: "did not come to front") { () throws(AccessibilityFailure) in
+        return attempt(on: window.owner, refusal: "did not come to front") { () throws(AccessibilityFailure) in
             // A window without `kAXMinimized`, such as a dialog, cannot be minimized.
             if try Self.step({ () throws(AccessibilityFailure) in try accessibility.isMinimized(ref, pid: pid) }) == true {
                 try Self.step { () throws(AccessibilityFailure) in try accessibility.setMinimized(false, window: ref, pid: pid) }
@@ -164,16 +208,16 @@ public final class AccessibilityWindowOperator: WindowOperator {
         }
     }
 
-    /// Reads back whether the app is frontmost and its focused window is the window, until both are or
-    /// `readBackTimeout` has passed. A background app's focused window can already be the window, so frontmost is
-    /// read too. A read that fails because the app is slow or cannot say is retried until then. No read starts after
-    /// the deadline, and a read that answers after it does not count, so focus is never confirmed late.
-    private func readBack(_ window: WindowRef, pid: pid_t) throws(AccessibilityFailure) -> Bool {
+    /// Reads back whether the app is frontmost and its focused window is the window (when there is one), until both
+    /// are or `readBackTimeout` has passed. A background app's focused window can already be the window, so frontmost
+    /// is read too. A read that fails because the app is slow or cannot say is retried until then. No read starts
+    /// after the deadline, and a read that answers after it does not count, so focus is never confirmed late.
+    private func readBack(_ window: WindowRef?, pid: pid_t) throws(AccessibilityFailure) -> Bool {
         let deadline = ContinuousClock.now + readBackTimeout
         while ContinuousClock.now < deadline {
             do throws(AccessibilityFailure) {
                 if try accessibility.isFrontmost(pid: pid), ContinuousClock.now < deadline,
-                   try accessibility.isFocused(window, pid: pid) {
+                   try window.map({ window throws(AccessibilityFailure) in try accessibility.isFocused(window, pid: pid) }) ?? true {
                     return ContinuousClock.now <= deadline
                 }
             } catch {
@@ -207,7 +251,7 @@ public final class AccessibilityWindowOperator: WindowOperator {
     }
 
     private func attempt(
-        on window: WindowEntry,
+        on owner: Owner,
         refusal: String,
         _ requests: () throws(AccessibilityFailure) -> Void
     ) -> OperationResult {
@@ -216,7 +260,7 @@ public final class AccessibilityWindowOperator: WindowOperator {
             return .done
         } catch {
             if error == .notPermitted { return .notPermitted }
-            guard runningApp(of: window) != nil else { return .appGone }
+            guard runningApp(owner) != nil else { return .appGone }
             switch error {
             case .invalidElement: return .windowGone
             case .timedOut: return .refused("not responding")
@@ -225,18 +269,32 @@ public final class AccessibilityWindowOperator: WindowOperator {
         }
     }
 
-    private func delivered(_ sent: Bool, to window: WindowEntry, refusal: String) -> OperationResult {
+    private func delivered(_ sent: Bool, to owner: Owner, refusal: String) -> OperationResult {
         if sent { return .done }
-        return runningApp(of: window) == nil ? .appGone : .refused(refusal)
+        return runningApp(owner) == nil ? .appGone : .refused(refusal)
     }
 
-    /// The window's app if it still runs. A different bundle ID at the same pid is another app that reused it.
     private func runningApp(of window: WindowEntry) -> RunningAppState? {
-        guard let app = apps.app(window.pid), app.bundleIdentifier == window.bundleIdentifier else { return nil }
+        runningApp(window.owner)
+    }
+
+    /// The app if it still runs. A different bundle ID at the same pid is another app that reused it.
+    private func runningApp(_ owner: Owner) -> RunningAppState? {
+        guard let app = apps.app(owner.pid), app.bundleIdentifier == owner.bundleIdentifier else { return nil }
         return app
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
     }
+}
+
+/// The app an operation acts on, by pid and the bundle ID it had when listed.
+private struct Owner {
+    var pid: pid_t
+    var bundleIdentifier: String?
+}
+
+private extension WindowEntry {
+    var owner: Owner { Owner(pid: pid, bundleIdentifier: bundleIdentifier) }
 }

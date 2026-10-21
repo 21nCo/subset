@@ -31,7 +31,7 @@ final class SwitcherPanelTests: XCTestCase {
             entry(2, title: "Inbox", app: "Mail", minimized: true),
             entry(3, title: "", app: "Finder", hidden: true),
         ]
-        view.update(.switcher(SwitcherViewModel(entries: windows, available: CGSize(width: 1440, height: 900)), icons: [:]))
+        view.update(.switcher(SwitcherViewModel(items: windows.map(SwitcherItem.window), available: CGSize(width: 1440, height: 900)), icons: [:]))
 
         let list = try XCTUnwrap(view.accessibilityChildren()?.first as? NSAccessibilityElement)
         XCTAssertEqual(list.accessibilityRole(), .list)
@@ -48,7 +48,7 @@ final class SwitcherPanelTests: XCTestCase {
     func testTheSelectionAndTheListFollowTheModel() throws {
         let view = SwitcherContentView()
         let windows = [entry(1, title: "One", app: "A"), entry(2, title: "Two", app: "B"), entry(3, title: "Three", app: "C")]
-        var model = SwitcherViewModel(entries: windows, available: CGSize(width: 1440, height: 900))
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: CGSize(width: 1440, height: 900))
         view.update(.switcher(model, icons: [:]))
         let list = try XCTUnwrap(view.accessibilityChildren()?.first as? NSAccessibilityElement)
         let before = children(of: list)
@@ -57,14 +57,14 @@ final class SwitcherPanelTests: XCTestCase {
         let after = children(of: list)
         XCTAssertTrue(after.elementsEqual(before, by: ===), "the same window keeps its element")
         XCTAssertEqual(after.map { $0.isAccessibilitySelected() }, [false, false, true])
-        model.refreshed(Array(windows.prefix(2)))
+        model.refreshed(windows.prefix(2).map(SwitcherItem.window))
         view.update(.switcher(model, icons: [:]))
         XCTAssertEqual(children(of: list).map { $0.accessibilityLabel() ?? "" }, ["One, A", "Two, B"])
     }
 
     func testAnEmptyListSaysNoWindows() throws {
         let view = SwitcherContentView()
-        let size = view.update(.switcher(SwitcherViewModel(entries: [], available: CGSize(width: 1440, height: 900)), icons: [:]))
+        let size = view.update(.switcher(SwitcherViewModel(items: [], available: CGSize(width: 1440, height: 900)), icons: [:]))
         let text = try XCTUnwrap(view.accessibilityChildren()?.first as? NSAccessibilityElement)
         XCTAssertEqual(view.accessibilityChildren()?.count, 1, "no list without windows")
         XCTAssertEqual(text.accessibilityRole(), .staticText)
@@ -75,9 +75,9 @@ final class SwitcherPanelTests: XCTestCase {
     func testAMessageIsReadWithTheList() throws {
         let view = SwitcherContentView()
         let windows = [entry(1, title: "One", app: "Xcode"), entry(2, title: "Two", app: "Mail")]
-        var model = SwitcherViewModel(entries: windows, available: CGSize(width: 1440, height: 900))
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: CGSize(width: 1440, height: 900))
         let plain = view.update(.switcher(model, icons: [:]))
-        model.finished(.init(.minimize, on: windows[0]), result: .refused("can't be minimized"))
+        model.finished(.init(.minimize, on: .window(windows[0])), result: .refused("can't be minimized"))
         let withMessage = view.update(.switcher(model, icons: [:]))
         XCTAssertEqual(withMessage.height, plain.height + SwitcherContentView.footerHeight)
         let labels = view.accessibilityChildren()?.compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }

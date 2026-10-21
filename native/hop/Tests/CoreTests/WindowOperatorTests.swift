@@ -426,6 +426,71 @@ final class WindowOperatorTests: XCTestCase {
         }
     }
 
+    // MARK: - Windowless apps
+
+    private func performOnApp(
+        _ operation: WindowOperation,
+        bundle: String? = "com.example.editor",
+        hidden: Bool = false,
+        readBackTimeout: Duration = AccessibilityWindowOperator.defaultReadBackTimeout
+    ) async -> OperationResult {
+        let app = AppEntry(SourceApp(pid: 10, bundleIdentifier: bundle, name: "Editor", isHidden: hidden))
+        let windowOperator = AccessibilityWindowOperator(accessibility: accessibility, apps: apps, readBackTimeout: readBackTimeout)
+        return await windowOperator.perform(operation, onApp: app)
+    }
+
+    func testFocusOnAWindowlessAppActivatesItAndConfirmsItIsFrontmost() async {
+        let result = await performOnApp(.focus)
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(log.calls, [.lookUpApp, .activate, .makeFrontmost, .isFrontmost], "no window is read or raised")
+    }
+
+    func testFocusOnAHiddenWindowlessAppUnhidesItFirst() async {
+        apps = FakeApps(log: log, state: RunningAppState(bundleIdentifier: "com.example.editor", isHidden: true))
+        let result = await performOnApp(.focus)
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(log.calls, [.lookUpApp, .unhide, .activate, .makeFrontmost, .isFrontmost])
+    }
+
+    func testAWindowlessAppThatDoesNotComeForwardIsRefused() async {
+        accessibility.frontmostFromRead = nil
+        let result = await performOnApp(.focus, readBackTimeout: .milliseconds(300))
+        XCTAssertEqual(result, .refused("did not come to front"))
+        XCTAssertGreaterThan(log.calls.filter { $0 == .isFrontmost }.count, 1, "frontmost is read until the deadline")
+    }
+
+    func testAnInvalidAppElementOfARunningWindowlessAppIsARefusalNotAClosedWindow() async {
+        accessibility.failures = [.makeFrontmost: .invalidElement]
+        let result = await performOnApp(.focus)
+        XCTAssertEqual(result, .refused("did not come to front"))
+    }
+
+    func testAWindowlessAppHasNoWindowToMinimizeOrClose() async {
+        for operation in [WindowOperation.minimize, .close] {
+            let result = await performOnApp(operation)
+            XCTAssertEqual(result, .refused("has no window"), "\(operation)")
+        }
+        XCTAssertEqual(Set(log.calls), [.lookUpApp], "no request is sent")
+    }
+
+    func testAWindowlessAppCanBeHiddenAndQuitButFinderIsNeverQuit() async {
+        let hidden = await performOnApp(.hideApp)
+        let quit = await performOnApp(.quitApp)
+        XCTAssertEqual([hidden, quit], [.done, .done])
+        XCTAssertEqual(log.calls, [.lookUpApp, .hide, .lookUpApp, .terminate])
+        let finder = await performOnApp(.quitApp, bundle: "com.apple.finder")
+        XCTAssertEqual(finder, .refused("Finder can't be quit"))
+    }
+
+    func testAWindowlessAppThatExitedOrWasReplacedIsGoneAndUntrustedHopAsksNothing() async {
+        let replaced = await performOnApp(.focus, bundle: "com.example.other")
+        XCTAssertEqual(replaced, .appGone, "another app now has the pid")
+        accessibility.trusted = false
+        let untrusted = await performOnApp(.focus)
+        XCTAssertEqual(untrusted, .notPermitted)
+        XCTAssertEqual(log.calls, [.lookUpApp])
+    }
+
     // MARK: - Threads
 
     @MainActor
@@ -449,7 +514,7 @@ final class WindowOperatorTests: XCTestCase {
 
     // MARK: - Recording fake
 
-    func testTheRecordingOperatorRecordsEachOperationAndAnswersAsSet() async {
+    func testTheRecordingOperatorRecordsEachOperationAndAnswersAsSet() async throws {
         let recording = RecordingWindowOperator(results: [.close: .windowGone])
         let window = entry()
         let closed = await recording.perform(.close, on: window)
@@ -459,5 +524,10 @@ final class WindowOperatorTests: XCTestCase {
         XCTAssertEqual([closed, quit, focused], [.windowGone, .refused("Finder can't be quit"), .done])
         XCTAssertEqual(recording.calls.map(\.operation), [.close, .quitApp, .focus])
         XCTAssertEqual(Set(recording.calls.map(\.window)), [WindowRef(rawValue: 7)])
+        _ = await recording.perform(.focus, onApp: AppEntry(SourceApp(pid: 12, bundleIdentifier: nil, name: "Notes")))
+        let last = try XCTUnwrap(recording.calls.last)
+        XCTAssertEqual([last.operation], [.focus])
+        XCTAssertNil(last.window, "an app cell has no window")
+        XCTAssertEqual(last.pid, 12)
     }
 }

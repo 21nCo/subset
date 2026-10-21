@@ -1,25 +1,31 @@
 import CoreGraphics
 
-/// The open switcher: the windows it lists, the selection, the grid they are laid out in, the scrolled position, and
-/// the message about the last operation. Pure state; the host builds one from a fresh window list when a switch
-/// starts, feeds it the session's events and the mouse, performs the operations it asks for, and draws it.
+/// The open switcher: the windows (and, with `ShownWindows.windowlessApps`, windowless apps) it lists, the selection,
+/// the grid they are laid out in, the scrolled position, and the message about the last operation. Pure state; the
+/// host builds one from a fresh window list when a switch starts, feeds it the session's events and the mouse,
+/// performs the operations it asks for, and draws it.
 ///
-/// The selection is the index of a listed window, or nil when the list is empty. It follows its window, not its place:
-/// when the list changes, the selected window stays selected, and if it is gone the selection moves to the window that
+/// The selection is the index of a listed item, or nil when the list is empty. It follows its item, not its place:
+/// when the list changes, the selected item stays selected, and if it is gone the selection moves to the item that
 /// followed it.
+///
+/// Every listed item passes `filter`, whichever way the list changed: a fresh list, the kept items of apps that did not
+/// answer, an operation's result, or a new filter.
 public struct SwitcherViewModel: Sendable, Equatable {
-    /// An operation for the host to perform on a listed window.
+    /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
         public var operation: WindowOperation
-        public var window: WindowEntry
+        public var item: SwitcherItem
 
-        public init(_ operation: WindowOperation, on window: WindowEntry) {
+        public init(_ operation: WindowOperation, on item: SwitcherItem) {
             self.operation = operation
-            self.window = window
+            self.item = item
         }
     }
 
-    public private(set) var entries: [WindowEntry]
+    public private(set) var items: [SwitcherItem]
+    /// The Shown-windows options and excluded apps the listed items pass.
+    public private(set) var filter: SwitcherFilter
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
     public private(set) var firstVisibleRow = 0
@@ -28,17 +34,31 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// The usable size of the screen the switcher is on.
     public let available: CGSize
 
-    /// Opens on the previous window (index 1), the usual target, or on the only window there is, whichever direction
-    /// the shortcut started in.
-    public init(entries: [WindowEntry], available: CGSize, metrics: SwitcherMetrics = .standard) {
-        self.entries = entries
+    /// Opens on the previous window, the usual target, or on the only item there is, whichever direction the shortcut
+    /// started in. `items` is the whole list, the current window first; only the items `filter` shows are listed.
+    public init(
+        items: [SwitcherItem],
+        available: CGSize,
+        metrics: SwitcherMetrics = .standard,
+        filter: SwitcherFilter = .showingEverything
+    ) {
+        let listed = items.filter(filter.shows)
+        self.items = listed
+        self.filter = filter
         self.available = available
-        layout = SwitcherLayout(count: entries.count, available: available, metrics: metrics)
-        selection = entries.isEmpty ? nil : min(1, entries.count - 1)
+        layout = SwitcherLayout(count: listed.count, available: available, metrics: metrics)
+        selection = Self.openingSelection(listed, of: items)
     }
 
-    public var selectedEntry: WindowEntry? {
-        selection.map { entries[$0] }
+    /// The previous window: index 1 when the first listed item is the first of `all`, the current window, and index 0
+    /// when the filter left the current window out; or the only item there is.
+    private static func openingSelection(_ listed: [SwitcherItem], of all: [SwitcherItem]) -> Int? {
+        guard let first = listed.first else { return nil }
+        return first.id == all.first?.id ? min(1, listed.count - 1) : 0
+    }
+
+    public var selectedItem: SwitcherItem? {
+        selection.map { items[$0] }
     }
 
     public var visibleIndices: Range<Int> {
@@ -48,8 +68,9 @@ public struct SwitcherViewModel: Sendable, Equatable {
     // MARK: - Session events
 
     /// Applies a session event: a further trigger or step moves the selection by one, wrapping around; ↑ and ↓ move it
-    /// by a row; an operation key returns the operation to perform on the selected window. Other events change
-    /// nothing here: the host ends the switcher on them.
+    /// by a row; an operation key returns the operation to perform on the selected window. An app cell has no window
+    /// to minimize or close, so only ⌘H and ⌘Q act on it. Other events change nothing here: the host ends the switcher
+    /// on them.
     @discardableResult
     public mutating func handle(_ event: SwitchSession.Event) -> Request? {
         switch event {
@@ -59,7 +80,9 @@ public struct SwitcherViewModel: Sendable, Equatable {
             guard let selection else { return nil }
             select(layout.index(moving: direction, from: selection))
         case let .operation(operation):
-            return selectedEntry.map { Request(operation, on: $0) }
+            guard let item = selectedItem else { return nil }
+            if item.window == nil, operation != .hideApp, operation != .quitApp { return nil }
+            return Request(operation, on: item)
         case .modifierReleased, .escape, .interrupted:
             break
         }
@@ -67,15 +90,15 @@ public struct SwitcherViewModel: Sendable, Equatable {
     }
 
     private mutating func step(_ direction: SwitchDirection) {
-        guard let selection, !entries.isEmpty else { return }
+        guard let selection, !items.isEmpty else { return }
         let offset = direction == .forward ? 1 : -1
-        select(((selection + offset) % entries.count + entries.count) % entries.count)
+        select(((selection + offset) % items.count + items.count) % items.count)
     }
 
-    /// Selects the window at `index`, as hovering over it does, and scrolls it into view. An index outside the list
+    /// Selects the item at `index`, as hovering over it does, and scrolls it into view. An index outside the list
     /// changes nothing.
     public mutating func select(_ index: Int) {
-        guard entries.indices.contains(index) else { return }
+        guard items.indices.contains(index) else { return }
         selection = index
         firstVisibleRow = layout.firstVisibleRow(showing: index, from: firstVisibleRow)
     }
@@ -87,53 +110,64 @@ public struct SwitcherViewModel: Sendable, Equatable {
 
     // MARK: - List changes
 
-    /// Replaces the list with a fresh one, keeping the selection on its window, or on the window that followed it
-    /// when it is gone (the one before it when none after it remains). The windows of `unread` apps, which did not
-    /// answer this read, are not known to be gone: they stay listed, each after the window it followed.
-    public mutating func refreshed(_ fresh: [WindowEntry], unread: Set<pid_t> = []) {
-        let previous = entries
+    /// Replaces the list with a fresh one, keeping the selection on its item, or on the item that followed it when it
+    /// is gone (the one before it when none after it remains). The items of `unread` apps, which did not answer this
+    /// read, are not known to be gone: they stay listed, each after the item it followed. As for `init`, `fresh` is the
+    /// whole list and only the items `filter` shows are listed; a switcher that was empty opens on the previous window.
+    public mutating func refreshed(_ fresh: [SwitcherItem], unread: Set<pid_t> = []) {
+        let previous = items
         var fresh = fresh
         var next = 0
         for old in unread.isEmpty ? [] : previous {
-            if let index = fresh.firstIndex(where: { $0.ref == old.ref }) {
+            if let index = fresh.firstIndex(where: { $0.id == old.id }) {
                 next = index + 1
             } else if unread.contains(old.pid) {
                 fresh.insert(old, at: next)
                 next += 1
             }
         }
+        let all = fresh
+        fresh = fresh.filter(filter.shows)
         let selected = selection
-        entries = fresh
+        items = fresh
         layout = SwitcherLayout(count: fresh.count, available: available, metrics: layout.metrics)
         firstVisibleRow = layout.clampedFirstRow(firstVisibleRow)
         selection = nil
         guard !fresh.isEmpty else { return }
-        guard let selected else { return select(min(1, fresh.count - 1)) }
+        guard let selected else { return select(Self.openingSelection(fresh, of: all) ?? 0) }
         let followers = previous[selected...] + previous[..<selected].reversed()
         for old in followers {
-            if let index = fresh.firstIndex(where: { $0.ref == old.ref }) { return select(index) }
+            if let index = fresh.firstIndex(where: { $0.id == old.id }) { return select(index) }
         }
         select(min(selected, fresh.count - 1))
     }
 
+    /// Applies a new filter to the listed items at once, keeping the selection on its item or its follower. Items it
+    /// now shows that are not listed appear with the next refresh.
+    public mutating func apply(_ filter: SwitcherFilter) {
+        guard filter != self.filter else { return }
+        self.filter = filter
+        refreshed(items)
+    }
+
     /// Records an operation's result: sets or clears the message and, until the next refresh confirms it, shows the
-    /// windows as the operation left them (a minimized window or a hidden app flagged, a window or app found gone
-    /// removed). A close or quit that was delivered removes nothing: the app may be asking to save, so the window
+    /// items as the operation left them (a minimized window or a hidden app flagged, a window or app found gone
+    /// removed). A window just minimized, or an app just hidden, leaves the list when `filter` does not show it. A close or quit that was delivered removes nothing: the app may be asking to save, so the window
     /// stays listed and selected until a refresh no longer lists it.
     public mutating func finished(_ request: Request, result: OperationResult) {
-        message = Self.message(for: result, of: request.operation, appName: request.window.appName)
-        let ref = request.window.ref
-        let pid = request.window.pid
-        var updated = entries
+        message = Self.message(for: result, of: request.operation, appName: request.item.appName)
+        let id = request.item.id
+        let pid = request.item.pid
+        var updated = items
         switch (request.operation, result) {
         case (_, .windowGone):
-            updated.removeAll { $0.ref == ref }
+            updated.removeAll { $0.id == id }
         case (_, .appGone):
             updated.removeAll { $0.pid == pid }
         case (.minimize, .done):
-            for index in updated.indices where updated[index].ref == ref { updated[index].isMinimized = true }
+            for index in updated.indices where updated[index].id == id { updated[index].markMinimized() }
         case (.hideApp, .done):
-            for index in updated.indices where updated[index].pid == pid { updated[index].isAppHidden = true }
+            for index in updated.indices where updated[index].pid == pid { updated[index].markAppHidden() }
         case (.focus, _), (.close, .done), (.quitApp, .done), (_, .refused), (_, .notPermitted):
             return
         }
