@@ -99,7 +99,7 @@ The default mode needs only Accessibility.
 
 | Input | Idle | Switch active |
 | --- | --- | --- |
-| The shortcut (⌥Tab) | Swallowed; opens the switcher on the previous window (index 1, or 0 with one window; "No windows" with none) | Swallowed; next window |
+| The shortcut (⌥Tab) | Swallowed; opens the switcher on the previous window (index 1, or 0 with one window or when the Shown-windows settings or excluded apps leave out the current window; "No windows" with none) | Swallowed; next window |
 | The shortcut with ⇧ (⌥⇧Tab) | Swallowed; opens the switcher on the previous window too (index 1, or 0) | Swallowed; previous window |
 | → / ← with the holding modifier, optionally plus ⇧ | Passes | Swallowed; next / previous window |
 | ↓ / ↑ with the holding modifier, optionally plus ⇧ | Passes | Swallowed; the window below / above in the grid |

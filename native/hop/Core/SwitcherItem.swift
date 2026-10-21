@@ -154,7 +154,16 @@ public struct SwitcherFilter: Sendable, Equatable {
     /// without a switchable window, in its order, keeping those `shows(_:)` allows. An app whose windows an option
     /// removed is not windowless and gets no cell.
     public func items(from list: WindowList) -> [SwitcherItem] {
-        (list.windows.map(SwitcherItem.window) + list.windowlessApps.map(SwitcherItem.app)).filter(shows)
+        list.items.filter(shows)
+    }
+}
+
+extension WindowList {
+    /// Every cell for the list, before the Shown-windows options and excluded apps: its windows in recency order, the
+    /// current one first, then a cell for each app it reports without a switchable window. `SwitcherViewModel` takes
+    /// these, so it can tell whether its filter left out the current window.
+    public var items: [SwitcherItem] {
+        windows.map(SwitcherItem.window) + windowlessApps.map(SwitcherItem.app)
     }
 }
 

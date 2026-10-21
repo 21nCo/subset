@@ -443,6 +443,31 @@ final class SwitcherViewModelTests: XCTestCase {
         XCTAssertEqual(model.windows.map(\.ref), [0, 1, 4, 5].map { windows[$0].ref }, "a refresh keeps the filter")
         XCTAssertEqual(model.selectedWindow?.ref, windows[4].ref)
     }
+
+    func testWhenTheFilterLeavesOutTheCurrentWindowItOpensOnThePreviousEligibleOne() {
+        let windows = entries(6) // apps: pid 100 (0, 1), 101 (2, 3), 102 (4, 5); window 0 is the current one
+        let items = windows.map(SwitcherItem.window)
+        let excluded = SwitcherViewModel(items: items, available: wide, filter: filter { $0.exclude("com.example.app0") })
+        XCTAssertEqual(excluded.selectedWindow?.ref, windows[2].ref, "the current app is excluded")
+
+        var elsewhere = windows
+        elsewhere[0].display = 2
+        var pointer = filter { $0.shownWindows.pointerDisplayOnly = true }
+        pointer.pointerDisplay = 1
+        let onPointer = SwitcherViewModel(items: elsewhere.map(SwitcherItem.window), available: wide, filter: pointer)
+        XCTAssertEqual(onPointer.selectedWindow?.ref, windows[1].ref, "the current window is on another display")
+
+        let kept = SwitcherViewModel(items: items, available: wide, filter: filter { $0.exclude("com.example.app1") })
+        XCTAssertEqual(kept.selectedWindow?.ref, windows[1].ref, "the current window is listed, so the one after it")
+
+        // A switcher that opened empty takes its first list the same way.
+        var empty = SwitcherViewModel(items: [], available: wide, filter: filter { $0.exclude("com.example.app0") })
+        empty.refreshed(windows)
+        XCTAssertEqual(empty.selectedWindow?.ref, windows[2].ref)
+        var emptyKept = SwitcherViewModel(items: [], available: wide, filter: filter { $0.exclude("com.example.app1") })
+        emptyKept.refreshed(windows)
+        XCTAssertEqual(emptyKept.selectedWindow?.ref, windows[1].ref)
+    }
 }
 
 extension SwitcherViewModel {

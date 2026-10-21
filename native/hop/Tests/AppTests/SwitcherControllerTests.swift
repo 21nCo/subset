@@ -493,6 +493,36 @@ final class SwitcherControllerTests: XCTestCase {
         XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref], "the minimized window stays minimized")
     }
 
+    func testWithTheCurrentAppExcludedAQuickSwitchFocusesThePreviousEligibleWindow() async throws {
+        let recorder = RecordingWindowOperator()
+        let windows = bundled
+        lists = [windows]
+        var settings = Settings.default
+        settings.exclude("com.example.app0")
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: recorder, settings: { settings })
+        switcher.open()
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [1, 2, 3].map { windows[$0].ref })
+        switcher.commit()
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[1].ref], "not the one after it")
+    }
+
+    func testASwitcherThatOpenedEmptyOpensOnThePreviousEligibleWindowWhenASettingsChangeListsWindows() async throws {
+        let recorder = RecordingWindowOperator()
+        let windows = bundled
+        lists = [windows]
+        var settings = Settings.default
+        (0..<4).forEach { settings.exclude("com.example.app\($0)") }
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: recorder, settings: { settings })
+        switcher.open()
+        XCTAssertEqual(switcher.model?.items, [])
+        (1..<4).forEach { settings.include("com.example.app\($0)") }
+        switcher.settingsChanged()
+        try await wait(until: { switcher.model?.items.count == 3 }, "the read after the change")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref)
+        switcher.cancel()
+    }
+
     func testASettingsChangeAppliesToTheOpenSwitcherAtOnce() async throws {
         let recorder = RecordingWindowOperator()
         var windows = bundled

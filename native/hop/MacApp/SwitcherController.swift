@@ -91,11 +91,10 @@ final class SwitcherController {
         reset()
         let screen = Self.screenUnderPointer()
         display = screen.flatMap(Self.displayID)
-        let filter = currentFilter()
         let model = SwitcherViewModel(
-            items: filter.items(from: readWindows()),
+            items: readWindows().items,
             available: screen?.visibleFrame.size ?? .zero,
-            filter: filter
+            filter: currentFilter()
         )
         self.model = model
         self.screen = screen
@@ -228,7 +227,7 @@ final class SwitcherController {
         let filter = currentFilter()
         let list = readWindows()
         model?.apply(filter)
-        model?.refreshed(filter.items(from: list), unread: Set(list.skippedApps.map(\.pid)))
+        model?.refreshed(list.items, unread: Set(list.skippedApps.map(\.pid)))
         loadIcons()
         render()
     }

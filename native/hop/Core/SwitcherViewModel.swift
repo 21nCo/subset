@@ -34,20 +34,27 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// The usable size of the screen the switcher is on.
     public let available: CGSize
 
-    /// Opens on the previous window (index 1), the usual target, or on the only item there is, whichever direction
-    /// the shortcut started in. Only the items `filter` shows are listed.
+    /// Opens on the previous window, the usual target, or on the only item there is, whichever direction the shortcut
+    /// started in. `items` is the whole list, the current window first; only the items `filter` shows are listed.
     public init(
         items: [SwitcherItem],
         available: CGSize,
         metrics: SwitcherMetrics = .standard,
         filter: SwitcherFilter = .showingEverything
     ) {
-        let items = items.filter(filter.shows)
-        self.items = items
+        let listed = items.filter(filter.shows)
+        self.items = listed
         self.filter = filter
         self.available = available
-        layout = SwitcherLayout(count: items.count, available: available, metrics: metrics)
-        selection = items.isEmpty ? nil : min(1, items.count - 1)
+        layout = SwitcherLayout(count: listed.count, available: available, metrics: metrics)
+        selection = Self.openingSelection(listed, of: items)
+    }
+
+    /// The previous window: index 1 when the first listed item is the first of `all`, the current window, and index 0
+    /// when the filter left the current window out; or the only item there is.
+    private static func openingSelection(_ listed: [SwitcherItem], of all: [SwitcherItem]) -> Int? {
+        guard let first = listed.first else { return nil }
+        return first.id == all.first?.id ? min(1, listed.count - 1) : 0
     }
 
     public var selectedItem: SwitcherItem? {
@@ -105,8 +112,8 @@ public struct SwitcherViewModel: Sendable, Equatable {
 
     /// Replaces the list with a fresh one, keeping the selection on its item, or on the item that followed it when it
     /// is gone (the one before it when none after it remains). The items of `unread` apps, which did not answer this
-    /// read, are not known to be gone: they stay listed, each after the item it followed. Only the items `filter` shows
-    /// are listed.
+    /// read, are not known to be gone: they stay listed, each after the item it followed. As for `init`, `fresh` is the
+    /// whole list and only the items `filter` shows are listed; a switcher that was empty opens on the previous window.
     public mutating func refreshed(_ fresh: [SwitcherItem], unread: Set<pid_t> = []) {
         let previous = items
         var fresh = fresh
@@ -119,6 +126,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
                 next += 1
             }
         }
+        let all = fresh
         fresh = fresh.filter(filter.shows)
         let selected = selection
         items = fresh
@@ -126,7 +134,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
         firstVisibleRow = layout.clampedFirstRow(firstVisibleRow)
         selection = nil
         guard !fresh.isEmpty else { return }
-        guard let selected else { return select(min(1, fresh.count - 1)) }
+        guard let selected else { return select(Self.openingSelection(fresh, of: all) ?? 0) }
         let followers = previous[selected...] + previous[..<selected].reversed()
         for old in followers {
             if let index = fresh.firstIndex(where: { $0.id == old.id }) { return select(index) }
