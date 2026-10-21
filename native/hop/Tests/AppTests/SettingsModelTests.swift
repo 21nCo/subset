@@ -152,4 +152,22 @@ final class SettingsModelTests: XCTestCase {
         settings.include("com.example.mail")
         XCTAssertEqual(SettingsStore(defaults: defaults).load().excludedApps, [])
     }
+
+    func testOpenPrivacyAndSecurityOpensTheAccessibilityPaneWhetherOrNotHopIsAllowed() {
+        var trusted = true
+        var requests: [String] = []
+        let pane = AccessibilityPane(
+            isTrusted: { trusted },
+            prompt: { requests.append("prompt") },
+            open: { requests.append("open \($0.absoluteString)") }
+        )
+        let settings = SettingsModel(store: SettingsStore(defaults: defaults), loginItemService: loginItem, accessibilityPane: pane)
+        let open = "open x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        settings.openAccessibilitySettings()
+        XCTAssertEqual(requests, [open], "allowed: opens the pane without prompting")
+        trusted = false
+        requests = []
+        settings.openAccessibilitySettings()
+        XCTAssertEqual(requests, ["prompt", open], "not allowed: prompts so Hop is listed, then opens the pane")
+    }
 }

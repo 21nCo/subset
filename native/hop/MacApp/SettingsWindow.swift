@@ -219,7 +219,7 @@ private struct PermissionsSection: View {
             Text("Hop uses Accessibility to list and raise windows and to notice its shortcut.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("Open Privacy & Security") { AccessibilityPermission.openSettings() }
+            Button("Open Privacy & Security") { model.openAccessibilitySettings() }
         } header: {
             Text("Permissions")
         }

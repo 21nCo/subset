@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import HopCore
 import os
 import ServiceManagement
@@ -39,6 +40,20 @@ struct MainAppLoginItem: LoginItemService {
     }
 }
 
+/// The Accessibility pane as the Permissions section opens it. `live` is the real one; tests replace it.
+struct AccessibilityPane {
+    var isTrusted: () -> Bool
+    /// Asks with the prompt option, so macOS lists Hop in the pane.
+    var prompt: () -> Void
+    var open: (URL) -> Void
+
+    @MainActor static let live = AccessibilityPane(
+        isTrusted: { AXIsProcessTrusted() },
+        prompt: { AccessibilityPermission.prompt() },
+        open: { NSWorkspace.shared.open($0) }
+    )
+}
+
 /// An excluded app as the Settings window lists it: its bundle ID, and the name and icon of the app installed under
 /// it, when one is.
 struct ExcludedApp: Identifiable, Equatable {
@@ -76,11 +91,17 @@ final class SettingsModel: ObservableObject {
 
     private let store: SettingsStore
     private let loginItemService: any LoginItemService
+    private let accessibilityPane: AccessibilityPane
     private var monitor: Any?
 
-    init(store: SettingsStore = SettingsStore(), loginItemService: any LoginItemService = MainAppLoginItem()) {
+    init(
+        store: SettingsStore = SettingsStore(),
+        loginItemService: any LoginItemService = MainAppLoginItem(),
+        accessibilityPane: AccessibilityPane = .live
+    ) {
         self.store = store
         self.loginItemService = loginItemService
+        self.accessibilityPane = accessibilityPane
         settings = store.load()
         loginItem = loginItemService.status
     }
@@ -232,5 +253,16 @@ final class SettingsModel: ObservableObject {
 
     func openLoginItems() {
         loginItemService.openSettings()
+    }
+
+    // MARK: - Permissions
+
+    /// Opens Privacy & Security > Accessibility whether or not Hop is allowed, so the button works in both states.
+    /// When Hop is not allowed yet, it asks with the prompt option first so Hop is listed there.
+    func openAccessibilitySettings() {
+        if !accessibilityPane.isTrusted() {
+            accessibilityPane.prompt()
+        }
+        accessibilityPane.open(AccessibilityPermission.settingsURL)
     }
 }

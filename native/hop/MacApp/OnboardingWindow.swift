@@ -13,10 +13,15 @@ enum AccessibilityPermission {
     /// Adds Hop to the Accessibility list, so the user only has to switch it on, and opens that pane. macOS lists an
     /// app only after it asks with the prompt option, which may also show the system's own permission alert.
     static func openSettings() {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        if !AXIsProcessTrustedWithOptions(options) {
+        if !prompt() {
             NSWorkspace.shared.open(settingsURL)
         }
+    }
+
+    /// Asks with the prompt option, which lists Hop in the Accessibility pane, and returns whether Hop is allowed.
+    @discardableResult
+    static func prompt() -> Bool {
+        AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 }
 
