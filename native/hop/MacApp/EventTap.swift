@@ -84,11 +84,18 @@ private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
         let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
-        // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key with ⌘.
-        let character = kind == .keyDown && modifiers.contains(.command)
-            ? KeyLayout.current()?.commandCharacter(keyCode: keyCode)
+        // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key with ⌘. Only
+        // a key-down with ⌥ or ⌃ and no ⌘ can type into the switcher's search, which takes the character without them.
+        let layout = kind == .keyDown && !modifiers.isDisjoint(with: [.option, .control, .command])
+            ? KeyLayout.current()
             : nil
-        return .key(KeyEvent(kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat, character: character))
+        let character = modifiers.contains(.command) ? layout?.commandCharacter(keyCode: keyCode) : nil
+        let text = modifiers.contains(.command)
+            ? nil
+            : layout?.typedCharacter(keyCode: keyCode, shift: modifiers.contains(.shift))
+        return .key(KeyEvent(
+            kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat, character: character, text: text
+        ))
     default:
         return nil
     }

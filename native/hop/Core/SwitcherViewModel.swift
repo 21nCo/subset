@@ -1,16 +1,33 @@
 import CoreGraphics
 
-/// The open switcher: the windows (and, with `ShownWindows.windowlessApps`, windowless apps) it lists, the selection,
-/// the grid they are laid out in, the scrolled position, and the message about the last operation. Pure state; the
-/// host builds one from a fresh window list when a switch starts, feeds it the session's events and the mouse,
-/// performs the operations it asks for, and draws it.
+/// Which items a switcher goes through, before the Shown-windows options and the search.
+public enum SwitcherScope: Sendable, Equatable {
+    /// Every window, and the windowless apps' cells.
+    case allWindows
+    /// Only the windows of the app with this pid, the frontmost app when the same-app shortcut was pressed; nothing
+    /// when there is no frontmost app (nil). An app cell is not a window, so it never appears.
+    case appWindows(pid_t?)
+
+    public func includes(_ item: SwitcherItem) -> Bool {
+        switch self {
+        case .allWindows: true
+        case let .appWindows(pid): item.window != nil && item.pid == pid
+        }
+    }
+}
+
+/// The open switcher: the windows (and, with `ShownWindows.windowlessApps`, windowless apps) it lists, the search
+/// typed so far, the selection, the grid they are laid out in, the scrolled position, and the message about the last
+/// operation. Pure state; the host builds one from a fresh window list when a switch starts, feeds it the session's
+/// events and the mouse, performs the operations it asks for, and draws it.
 ///
 /// The selection is the index of a listed item, or nil when the list is empty. It follows its item, not its place:
 /// when the list changes, the selected item stays selected, and if it is gone the selection moves to the item that
-/// followed it.
+/// followed it. A change to the query moves it to the first match instead.
 ///
-/// Every listed item passes `filter`, whichever way the list changed: a fresh list, the kept items of apps that did not
-/// answer, an operation's result, or a new filter.
+/// Every listed item is in `scope`, passes `filter` and matches `query` (`SwitcherSearch`), whichever way the list
+/// changed: a fresh list, the kept items of apps that did not answer, an operation's result, a new filter, or a new
+/// query.
 public struct SwitcherViewModel: Sendable, Equatable {
     /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
@@ -23,9 +40,17 @@ public struct SwitcherViewModel: Sendable, Equatable {
         }
     }
 
+    /// The listed items: those of `candidates` that match `query`, best match first.
     public private(set) var items: [SwitcherItem]
+    /// The items in `scope` that `filter` shows, in recency order, before the search.
+    public private(set) var candidates: [SwitcherItem]
     /// The Shown-windows options and excluded apps the listed items pass.
     public private(set) var filter: SwitcherFilter
+    /// The windows this switcher goes through: all of them, or the frontmost app's.
+    public let scope: SwitcherScope
+    /// What has been typed since the switcher opened. It lives only here: never stored or logged, and gone with the
+    /// switcher.
+    public private(set) var query = ""
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
     public private(set) var firstVisibleRow = 0
@@ -35,19 +60,24 @@ public struct SwitcherViewModel: Sendable, Equatable {
     public let available: CGSize
 
     /// Opens on the previous window, the usual target, or on the only item there is, whichever direction the shortcut
-    /// started in. `items` is the whole list, the current window first; only the items `filter` shows are listed.
+    /// started in. `items` is the whole list, the current window first; only the items in `scope` that `filter` shows
+    /// are listed. With `.appWindows`, the previous window is the app's second most recent one.
     public init(
         items: [SwitcherItem],
         available: CGSize,
         metrics: SwitcherMetrics = .standard,
-        filter: SwitcherFilter = .showingEverything
+        filter: SwitcherFilter = .showingEverything,
+        scope: SwitcherScope = .allWindows
     ) {
-        let listed = items.filter(filter.shows)
+        let scoped = items.filter(scope.includes)
+        let listed = scoped.filter(filter.shows)
         self.items = listed
+        candidates = listed
         self.filter = filter
+        self.scope = scope
         self.available = available
         layout = SwitcherLayout(count: listed.count, available: available, metrics: metrics)
-        selection = Self.openingSelection(listed, of: items)
+        selection = Self.openingSelection(listed, of: scoped)
     }
 
     /// The previous window: index 1 when the first listed item is the first of `all`, the current window, and index 0
@@ -55,6 +85,13 @@ public struct SwitcherViewModel: Sendable, Equatable {
     private static func openingSelection(_ listed: [SwitcherItem], of all: [SwitcherItem]) -> Int? {
         guard let first = listed.first else { return nil }
         return first.id == all.first?.id ? min(1, listed.count - 1) : 0
+    }
+
+    /// What the switcher says in place of the grid when it lists nothing: "No matching windows" when a search left
+    /// nothing, otherwise "No windows". Nil while it lists something.
+    public var emptyText: String? {
+        guard items.isEmpty else { return nil }
+        return query.isEmpty ? "No windows" : "No matching windows"
     }
 
     public var selectedItem: SwitcherItem? {
@@ -68,14 +105,19 @@ public struct SwitcherViewModel: Sendable, Equatable {
     // MARK: - Session events
 
     /// Applies a session event: a further trigger or step moves the selection by one, wrapping around; ↑ and ↓ move it
-    /// by a row; an operation key returns the operation to perform on the selected window. An app cell has no window
-    /// to minimize or close, so only ⌘H and ⌘Q act on it. Other events change nothing here: the host ends the switcher
-    /// on them.
+    /// by a row; a typed character or Delete changes the query and selects the first match; an operation key returns
+    /// the operation to perform on the selected window. An app cell has no window to minimize or close, so only ⌘H and
+    /// ⌘Q act on it. Other events change nothing here: the host ends the switcher on them.
     @discardableResult
     public mutating func handle(_ event: SwitchSession.Event) -> Request? {
         switch event {
-        case let .trigger(direction), let .step(direction):
+        case let .trigger(direction, _), let .step(direction):
             step(direction)
+        case let .type(character):
+            search(query + String(character))
+        case .deleteBackward:
+            guard !query.isEmpty else { return nil }
+            search(String(query.dropLast()))
         case let .row(direction):
             guard let selection else { return nil }
             select(layout.index(moving: direction, from: selection))
@@ -103,6 +145,22 @@ public struct SwitcherViewModel: Sendable, Equatable {
         firstVisibleRow = layout.firstVisibleRow(showing: index, from: firstVisibleRow)
     }
 
+    /// Lists the candidates that match `query`, and selects the first match.
+    private mutating func search(_ query: String) {
+        self.query = query
+        list(SwitcherSearch.matches(query, in: candidates))
+        firstVisibleRow = 0
+        selection = nil
+        select(0)
+    }
+
+    /// Lists `items` and lays them out, keeping the scroll position where it can. The selection is the caller's.
+    private mutating func list(_ items: [SwitcherItem]) {
+        self.items = items
+        layout = SwitcherLayout(count: items.count, available: available, metrics: layout.metrics)
+        firstVisibleRow = layout.clampedFirstRow(firstVisibleRow)
+    }
+
     /// Scrolls by `rows` (positive scrolls down), as the scroll wheel does; the selection stays where it is.
     public mutating func scroll(byRows rows: Int) {
         firstVisibleRow = layout.clampedFirstRow(firstVisibleRow + rows)
@@ -113,12 +171,13 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// Replaces the list with a fresh one, keeping the selection on its item, or on the item that followed it when it
     /// is gone (the one before it when none after it remains). The items of `unread` apps, which did not answer this
     /// read, are not known to be gone: they stay listed, each after the item it followed. As for `init`, `fresh` is the
-    /// whole list and only the items `filter` shows are listed; a switcher that was empty opens on the previous window.
+    /// whole list and only the items in `scope` that `filter` shows and that match the query are listed; a switcher
+    /// that was empty opens on the previous window, or on the first match while searching.
     public mutating func refreshed(_ fresh: [SwitcherItem], unread: Set<pid_t> = []) {
         let previous = items
         var fresh = fresh
         var next = 0
-        for old in unread.isEmpty ? [] : previous {
+        for old in unread.isEmpty ? [] : candidates {
             if let index = fresh.firstIndex(where: { $0.id == old.id }) {
                 next = index + 1
             } else if unread.contains(old.pid) {
@@ -126,20 +185,20 @@ public struct SwitcherViewModel: Sendable, Equatable {
                 next += 1
             }
         }
-        let all = fresh
-        fresh = fresh.filter(filter.shows)
+        let all = fresh.filter(scope.includes)
+        candidates = all.filter(filter.shows)
         let selected = selection
-        items = fresh
-        layout = SwitcherLayout(count: fresh.count, available: available, metrics: layout.metrics)
-        firstVisibleRow = layout.clampedFirstRow(firstVisibleRow)
+        list(SwitcherSearch.matches(query, in: candidates))
         selection = nil
-        guard !fresh.isEmpty else { return }
-        guard let selected else { return select(Self.openingSelection(fresh, of: all) ?? 0) }
+        guard !items.isEmpty else { return }
+        guard let selected else {
+            return select(query.isEmpty ? Self.openingSelection(items, of: all) ?? 0 : 0)
+        }
         let followers = previous[selected...] + previous[..<selected].reversed()
         for old in followers {
-            if let index = fresh.firstIndex(where: { $0.id == old.id }) { return select(index) }
+            if let index = items.firstIndex(where: { $0.id == old.id }) { return select(index) }
         }
-        select(min(selected, fresh.count - 1))
+        select(min(selected, items.count - 1))
     }
 
     /// Applies a new filter to the listed items at once, keeping the selection on its item or its follower. Items it
@@ -147,7 +206,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
     public mutating func apply(_ filter: SwitcherFilter) {
         guard filter != self.filter else { return }
         self.filter = filter
-        refreshed(items)
+        refreshed(candidates)
     }
 
     /// Records an operation's result: sets or clears the message and, until the next refresh confirms it, shows the
@@ -158,7 +217,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
         message = Self.message(for: result, of: request.operation, appName: request.item.appName)
         let id = request.item.id
         let pid = request.item.pid
-        var updated = items
+        var updated = candidates
         switch (request.operation, result) {
         case (_, .windowGone):
             updated.removeAll { $0.id == id }

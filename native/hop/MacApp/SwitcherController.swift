@@ -2,8 +2,9 @@ import AppKit
 import HopCore
 import os
 
-/// The switcher while a switch is in progress: opens it on a fresh window list, filtered by the Shown-windows settings
-/// and excluded apps (`SwitcherFilter`), applies the session's events and the mouse to its
+/// The switcher while a switch is in progress: opens it on a fresh window list, limited to the frontmost app's windows
+/// for the same-app shortcut and filtered by the Shown-windows settings and excluded apps (`SwitcherFilter`), applies
+/// the session's events (including what is typed to search) and the mouse to its
 /// `SwitcherViewModel`, performs the operations it asks for, and on commit hides it and brings the selected window
 /// forward, or activates the selected windowless app. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
 /// that finds Hop without the Accessibility permission reopens onboarding instead. Nothing about a window, and never a
@@ -30,6 +31,8 @@ final class SwitcherController {
     private let readWindows: () -> WindowList
     private let windowOperator: any WindowOperator
     private let settings: () -> Settings
+    /// The pid of the frontmost app, whose windows the same-app shortcut goes through.
+    private let frontmostApp: () -> pid_t?
     let panel = SwitcherPanel()
     private(set) var model: SwitcherViewModel?
     private var screen: NSScreen?
@@ -61,11 +64,13 @@ final class SwitcherController {
     init(
         readWindows: @escaping () -> WindowList,
         windowOperator: any WindowOperator,
-        settings: @escaping () -> Settings = { .default }
+        settings: @escaping () -> Settings = { .default },
+        frontmostApp: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
     ) {
         self.readWindows = readWindows
         self.windowOperator = windowOperator
         self.settings = settings
+        self.frontmostApp = frontmostApp
         panel.switcherView.onHover = { [unowned self] index in
             guard let model, model.items.indices.contains(index) else { return }
             if deferred.isEmpty {
@@ -86,15 +91,17 @@ final class SwitcherController {
 
     var isOpen: Bool { model != nil }
 
-    /// Reads the window list and shows the switcher on the display under the pointer.
-    func open() {
+    /// Reads the window list and shows the switcher on the display under the pointer, over every window or only the
+    /// frontmost app's. The panel never activates Hop, so the frontmost app is the one the user was in.
+    func open(_ scope: SwitchScope = .allWindows) {
         reset()
         let screen = Self.screenUnderPointer()
         display = screen.flatMap(Self.displayID)
         let model = SwitcherViewModel(
             items: readWindows().items,
             available: screen?.visibleFrame.size ?? .zero,
-            filter: currentFilter()
+            filter: currentFilter(),
+            scope: scope == .frontmostApp ? .appWindows(frontmostApp()) : .allWindows
         )
         self.model = model
         self.screen = screen
@@ -121,8 +128,8 @@ final class SwitcherController {
         scheduleRefresh(after: .zero)
     }
 
-    /// Applies a session event: moves the selection, or performs an operation on the selected window. While an
-    /// operation is pending, an operation key, and anything after it, waits.
+    /// Applies a session event: moves the selection, types into or deletes from the search, or performs an operation on
+    /// the selected window. While an operation is pending, an operation key, and anything after it, waits.
     func apply(_ event: SwitchSession.Event) {
         guard model != nil else { return }
         if case .operation = event, pending > 0 { return deferred.append(.event(event)) }
@@ -144,7 +151,8 @@ final class SwitcherController {
     }
 
     /// Hides the switcher and brings `item` forward if it is still listed, or the selected item when it is nil: a
-    /// window is focused and a windowless app activated. While an operation is pending, the item is chosen once the
+    /// window is focused and a windowless app activated. With nothing selected (no windows, or a search that matches
+    /// none) it only hides the switcher, as a cancel does. While an operation is pending, the item is chosen once the
     /// list has been read again after it.
     private func commit(only item: SwitcherItem.ID?) {
         guard pending == 0 else {

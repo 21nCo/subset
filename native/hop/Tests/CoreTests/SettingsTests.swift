@@ -47,6 +47,38 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(settings.shortcut.displayName, "⌥Tab")
     }
 
+    func testTheSameAppShortcutFollowsTheSameRulesAndCannotBeTheSwitchShortcut() throws {
+        var settings = Settings.default
+        func press(_ code: UInt16, _ modifiers: ModifierMask) -> ShortcutRecording {
+            settings.record(KeyEvent(.keyDown, keyCode: code, modifiers: modifiers), for: .sameApp)
+        }
+        XCTAssertEqual(press(KeyCode.tab, .option), .rejected(.switchShortcut(.default)))
+        XCTAssertEqual(Shortcut.Invalid.switchShortcut(.default).reason, "⌥Tab is the switch shortcut.")
+        XCTAssertEqual(press(KeyCode.grave, [.option, .command]), .rejected(.command))
+        XCTAssertEqual(press(KeyCode.grave, [.option, .shift]), .rejected(.shift))
+        XCTAssertEqual(press(0x0E /* E */, .option), .rejected(.key(0x0E)))
+        let controlTab = try Shortcut(holdModifier: .control, keyCode: KeyCode.tab)
+        XCTAssertEqual(press(KeyCode.tab, .control), .recorded(controlTab))
+        XCTAssertThrowsError(try settings.setShortcut(.default, for: .sameApp)) { error in
+            XCTAssertEqual(error as? Shortcut.Invalid, .switchShortcut(.default))
+        }
+        XCTAssertEqual(settings.sameAppShortcut, .sameAppDefault, "a refused shortcut changes nothing")
+        try settings.setShortcut(controlTab, for: .sameApp)
+        XCTAssertEqual(settings.shortcut(for: .sameApp), controlTab)
+        XCTAssertThrowsError(try settings.setShortcut(controlTab)) { error in
+            XCTAssertEqual(error as? Shortcut.Invalid, .sameAppShortcut(controlTab), "the switch shortcut can't take it")
+        }
+        // ⌥` is free now, so the switch shortcut may take it, and then the same-app shortcut can't go back to it.
+        try settings.setShortcut(.sameAppDefault)
+        XCTAssertThrowsError(try settings.resetShortcut(.sameApp)) { error in
+            XCTAssertEqual(error as? Shortcut.Invalid, .switchShortcut(.sameAppDefault))
+        }
+        XCTAssertEqual(settings.sameAppShortcut, controlTab)
+        try settings.resetShortcut()
+        try settings.resetShortcut(.sameApp)
+        XCTAssertEqual(settings, .default)
+    }
+
     // MARK: - Excluded apps
 
     func testExcludedAppsKeepTheirOrderWithoutDuplicatesOrEmptyIDs() {
@@ -133,6 +165,16 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(json["schemaVersion"] as? Int, 1)
         XCTAssertEqual(json["shortcut"] as? [String: AnyHashable], ["holdModifier": "control", "keyCode": 0x32])
         XCTAssertEqual(json["excludedApps"] as? [String], ["com.example.mail", "com.example.music"])
+    }
+
+    func testAChangedSameAppShortcutRoundTrips() throws {
+        var settings = Settings.default
+        try settings.setShortcut(Shortcut(holdModifier: .control, keyCode: KeyCode.grave), for: .sameApp)
+        store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(defaults.data(forKey: Settings.defaultsKey)))
+            as? [String: Any])
+        XCTAssertEqual(json["sameAppShortcut"] as? [String: AnyHashable], ["holdModifier": "control", "keyCode": 0x32])
     }
 
     func testCorruptOrUnknownDataReadsTheDefaults() {

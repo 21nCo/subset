@@ -31,6 +31,8 @@ public enum KeyCode {
     public static let tab: UInt16 = 0x30
     public static let grave: UInt16 = 0x32
     public static let escape: UInt16 = 0x35
+    /// Delete (backspace), which removes the last character of the switcher's search.
+    public static let delete: UInt16 = 0x33
     public static let leftArrow: UInt16 = 0x7B
     public static let rightArrow: UInt16 = 0x7C
     public static let downArrow: UInt16 = 0x7D
@@ -56,6 +58,8 @@ public struct Shortcut: Sendable, Hashable {
         case key(UInt16)
         /// The combination is the same-app shortcut.
         case sameAppShortcut(Shortcut)
+        /// The combination is the hold-to-switch shortcut, so it can't be the same-app shortcut.
+        case switchShortcut(Shortcut)
 
         public var reason: String {
             switch self {
@@ -65,6 +69,7 @@ public struct Shortcut: Sendable, Hashable {
             case .shift: "⇧ switches backward, so it can't be part of the shortcut."
             case .key: "The key must be Tab or `."
             case let .sameAppShortcut(shortcut): "\(shortcut.displayName) is the same-app shortcut."
+            case let .switchShortcut(shortcut): "\(shortcut.displayName) is the switch shortcut."
             }
         }
     }
@@ -77,7 +82,7 @@ public struct Shortcut: Sendable, Hashable {
 
     /// The default: hold ⌥ and press Tab, or ⌥⇧Tab to go backward.
     public static let `default` = Shortcut(validated: .option, keyCode: KeyCode.tab)
-    /// The default same-app shortcut (SET-96): hold ⌥ and press `.
+    /// The default same-app shortcut: hold ⌥ and press ` to switch among the frontmost app's windows.
     public static let sameAppDefault = Shortcut(validated: .option, keyCode: KeyCode.grave)
 
     /// A shortcut from the modifiers held with the key, as a press reports them. The modifiers must be exactly ⌥ or

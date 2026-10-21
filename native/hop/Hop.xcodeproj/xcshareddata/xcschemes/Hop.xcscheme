@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F069529256BD4F4E0CC73277F4DEA97A"
+               BlueprintIdentifier = "2A31EDEF79496F47B9AC459F3C8BA298"
                BuildableName = "HopCoreTests.xctest"
                BlueprintName = "HopCoreTests"
                ReferencedContainer = "container:Hop.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F069529256BD4F4E0CC73277F4DEA97A"
+               BlueprintIdentifier = "2A31EDEF79496F47B9AC459F3C8BA298"
                BuildableName = "HopCoreTests.xctest"
                BlueprintName = "HopCoreTests"
                ReferencedContainer = "container:Hop.xcodeproj">

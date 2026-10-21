@@ -596,6 +596,70 @@ final class SwitcherControllerTests: XCTestCase {
         XCTAssertEqual(gate.calls.map(\.operation), [.close], "the clicked window is no longer listed")
     }
 
+    // MARK: - Search and the same-app shortcut
+
+    func testACommitWithNoMatchingWindowCancels() async throws {
+        let recorder = RecordingWindowOperator()
+        lists = [windows]
+        let switcher = controller(recorder)
+        switcher.open()
+        for character in "zz" { switcher.apply(.type(character)) }
+        XCTAssertEqual(switcher.model?.items.count, 0)
+        XCTAssertEqual(switcher.model?.emptyText, "No matching windows")
+        switcher.commit()
+        XCTAssertFalse(switcher.isOpen)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(recorder.calls.isEmpty, "nothing is focused")
+    }
+
+    func testTypingCommitsTheFirstMatchAndTheQueryClearsWhenTheSwitcherHides() async throws {
+        let recorder = RecordingWindowOperator()
+        lists = [windows]
+        let switcher = controller(recorder)
+        switcher.open()
+        for character in "Window 3" { switcher.apply(.type(character)) }
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "Search: Window 3")
+        switcher.commit()
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "", "the hidden panel keeps no query")
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[3].ref])
+        switcher.open()
+        XCTAssertEqual(switcher.model?.query, "", "a new switch starts with no query")
+        XCTAssertEqual(switcher.model?.items.count, 4)
+        for character in "Win" { switcher.apply(.type(character)) }
+        switcher.cancel()
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "")
+    }
+
+    func testTheSameAppShortcutListsOnlyTheFrontmostAppsWindows() async throws {
+        let recorder = RecordingWindowOperator()
+        let app = SourceApp(pid: 77, bundleIdentifier: "com.example.pages", name: "Pages")
+        let pages = (0..<3).map { index in
+            WindowEntry(
+                app: app,
+                window: SourceWindow(ref: HopCore.WindowRef(rawValue: UInt64(70 + index)), title: "Doc \(index)",
+                                     subrole: "AXStandardWindow", frame: CGRect(x: 0, y: 0, width: 400, height: 300)),
+                frame: CGRect(x: 0, y: 0, width: 400, height: 300),
+                display: nil
+            )
+        }
+        lists = [[pages[0], windows[0], pages[1], windows[1], pages[2]]]
+        var frontmost: pid_t? = 77
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: recorder, frontmostApp: { frontmost })
+        switcher.open(.frontmostApp)
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), pages.map(\.ref))
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, pages[1].ref, "the app's second most recent window")
+        switcher.commit()
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [pages[1].ref])
+        frontmost = nil
+        switcher.open(.frontmostApp)
+        XCTAssertEqual(switcher.model?.items.count, 0)
+        switcher.cancel()
+        switcher.open()
+        XCTAssertEqual(switcher.model?.items.count, 5, "the switch shortcut still lists every window")
+    }
+
     private func readWindows() -> WindowList {
         reads += 1
         let windows = lists.count > 1 ? lists.removeFirst() : lists[0]

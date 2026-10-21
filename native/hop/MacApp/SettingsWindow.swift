@@ -65,33 +65,51 @@ private struct ShortcutSection: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
-        let shortcut = model.settings.shortcut
         Section {
-            LabeledContent("Switch windows") {
-                HStack {
-                    Text(model.isRecording ? "Press a shortcut…" : shortcut.displayName)
-                        .monospaced()
-                        .foregroundStyle(model.isRecording ? .secondary : .primary)
-                    Button(model.isRecording ? "Stop" : "Record Shortcut") {
-                        model.isRecording ? model.stopRecording() : model.startRecording()
-                    }
-                }
-            }
-            if let message = model.recorderMessage {
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-            }
-            HStack {
-                Text("Hold \(shortcut.modifierSymbol) and press \(shortcut.keyName) to switch; add ⇧ to go back. Use ⌥ or ⌃ with Tab or `.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Reset to \(Shortcut.default.displayName)") { model.resetShortcut() }
-                    .disabled(shortcut == .default && !model.isRecording)
-            }
+            ShortcutRow(model: model, role: .switchWindows, label: "Switch windows")
+            ShortcutRow(model: model, role: .sameApp, label: "Switch within the app")
+            let shortcut = model.settings.shortcut
+            let sameApp = model.settings.sameAppShortcut
+            Text("""
+                Hold \(shortcut.modifierSymbol) and press \(shortcut.keyName) to switch windows, or hold \
+                \(sameApp.modifierSymbol) and press \(sameApp.keyName) to switch among the front app's windows. Add ⇧ to \
+                go back, and type to search. Use ⌥ or ⌃ with Tab or `.
+                """)
+                .font(.callout)
+                .foregroundStyle(.secondary)
         } header: {
-            Text("Shortcut")
+            Text("Shortcuts")
+        }
+    }
+}
+
+/// One shortcut: what it is, Record Shortcut (or Stop while recording), Reset, and why the last press or reset was
+/// refused.
+private struct ShortcutRow: View {
+    @ObservedObject var model: SettingsModel
+    let role: ShortcutRole
+    let label: String
+
+    var body: some View {
+        let shortcut = model.settings.shortcut(for: role)
+        let isRecording = model.recording == role
+        LabeledContent(label) {
+            HStack {
+                Text(isRecording ? "Press a shortcut…" : shortcut.displayName)
+                    .monospaced()
+                    .foregroundStyle(isRecording ? .secondary : .primary)
+                Button(isRecording ? "Stop" : "Record Shortcut") {
+                    isRecording ? model.stopRecording() : model.startRecording(role)
+                }
+                .accessibilityLabel(isRecording ? "Stop recording" : "Record \(label) shortcut")
+                Button("Reset to \(role.defaultShortcut.displayName)") { model.resetShortcut(role) }
+                    .disabled(shortcut == role.defaultShortcut && !isRecording)
+            }
+        }
+        if model.recorderMessageRole == role, let message = model.recorderMessage {
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.red)
         }
     }
 }

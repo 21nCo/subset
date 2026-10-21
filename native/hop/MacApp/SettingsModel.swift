@@ -68,17 +68,21 @@ struct ExcludedApp: Identifiable, Equatable {
 /// (`onChange`), and holds what the Settings window shows besides them: the shortcut recorder, the login item and the
 /// Accessibility permission.
 ///
-/// Recording a shortcut takes every key press in Hop (a local event monitor) and asks the app to let every key through
-/// the event tap (`onRecordingChange`) until it ends: with a new shortcut, Esc, Stop, or the Settings window closing or
-/// losing focus. A press that is not an allowed shortcut keeps recording and shows why.
+/// Recording a shortcut (the switch shortcut or the same-app shortcut) takes every key press in Hop (a local event
+/// monitor) and asks the app to let every key through the event tap (`onRecordingChange`) until it ends: with a new
+/// shortcut, Esc, Stop, or the Settings window closing or losing focus. A press that is not an allowed shortcut, or
+/// that is the other shortcut, keeps recording and shows why.
 @MainActor
 final class SettingsModel: ObservableObject {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "settings")
 
     @Published private(set) var settings: Settings
-    @Published private(set) var isRecording = false
-    /// Why the last press while recording was not taken, or nil.
+    /// The shortcut being recorded, or nil.
+    @Published private(set) var recording: ShortcutRole?
+    /// Why the last press while recording, or the last reset, was not taken, or nil.
     @Published private(set) var recorderMessage: String?
+    /// The shortcut `recorderMessage` is about.
+    @Published private(set) var recorderMessageRole = ShortcutRole.switchWindows
     @Published private(set) var loginItem: LoginItemStatus
     /// Why turning launch at login on or off failed, or nil.
     @Published private(set) var loginItemError: String?
@@ -118,12 +122,16 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - Shortcut
 
-    /// Goes back to ⌥Tab, or shows why it can't (⌥Tab is the same-app shortcut).
-    func resetShortcut() {
+    var isRecording: Bool { recording != nil }
+
+    /// Goes back to the default (⌥Tab, or ⌥` for the same-app shortcut), or shows why it can't (it is the other
+    /// shortcut).
+    func resetShortcut(_ role: ShortcutRole = .switchWindows) {
         stopRecording()
         var reset = settings
+        recorderMessageRole = role
         do {
-            try reset.resetShortcut()
+            try reset.resetShortcut(role)
             recorderMessage = nil
             update { $0 = reset }
         } catch {
@@ -131,11 +139,17 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// Starts recording: the next allowed press becomes the shortcut.
-    func startRecording() {
-        guard !isRecording else { return }
-        isRecording = true
+    /// Starts recording `role`: the next allowed press becomes that shortcut. While another one is being recorded,
+    /// recording moves to `role`.
+    func startRecording(_ role: ShortcutRole = .switchWindows) {
+        guard recording != role else { return }
         recorderMessage = nil
+        recorderMessageRole = role
+        guard recording == nil else {
+            recording = role
+            return
+        }
+        recording = role
         onRecordingChange(true)
         // Local monitors run on the main thread, before the event reaches a window.
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -159,17 +173,17 @@ final class SettingsModel: ObservableObject {
         guard isRecording else { return }
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        isRecording = false
+        recording = nil
         onRecordingChange(false)
     }
 
     /// Handles one key press while recording.
     func record(_ key: KeyEvent) {
-        guard isRecording else { return }
-        switch settings.record(key) {
+        guard let role = recording else { return }
+        switch settings.record(key, for: role) {
         case let .recorded(shortcut):
             recorderMessage = nil
-            update { try? $0.setShortcut(shortcut) }
+            update { try? $0.setShortcut(shortcut, for: role) }
             stopRecording()
             Self.log.info("Shortcut recorded: \(shortcut.displayName, privacy: .public)")
         case let .rejected(reason):

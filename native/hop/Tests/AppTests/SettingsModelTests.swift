@@ -106,6 +106,32 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).load(), stored)
     }
 
+    func testRecordingTheSameAppShortcutRefusesTheSwitchShortcut() throws {
+        let settings = model()
+        var suspended: [Bool] = []
+        var applied: [Settings] = []
+        settings.onRecordingChange = { suspended.append($0) }
+        settings.onChange = { applied.append($0) }
+        settings.startRecording()
+        settings.startRecording(.sameApp)
+        XCTAssertEqual(settings.recording, .sameApp, "recording moves to the same-app shortcut")
+        XCTAssertEqual(suspended, [true], "the tap stays suspended")
+        settings.record(press(KeyCode.tab, .option))
+        XCTAssertEqual(settings.recording, .sameApp)
+        XCTAssertEqual(settings.recorderMessage, "⌥Tab is the switch shortcut.")
+        XCTAssertEqual(settings.recorderMessageRole, .sameApp)
+        settings.record(press(KeyCode.grave, .control))
+        let controlGrave = try Shortcut(holdModifier: .control, keyCode: KeyCode.grave)
+        XCTAssertFalse(settings.isRecording)
+        XCTAssertEqual(suspended, [true, false])
+        XCTAssertEqual(settings.settings.sameAppShortcut, controlGrave)
+        XCTAssertEqual(settings.settings.shortcut, .default)
+        XCTAssertEqual(applied.map(\.sameAppShortcut), [controlGrave])
+        XCTAssertEqual(SettingsStore(defaults: defaults).load().sameAppShortcut, controlGrave)
+        settings.resetShortcut(.sameApp)
+        XCTAssertEqual(settings.settings.sameAppShortcut, .sameAppDefault)
+    }
+
     func testEscOrStopEndsRecordingAndKeepsTheShortcut() {
         let settings = model()
         var suspended: [Bool] = []

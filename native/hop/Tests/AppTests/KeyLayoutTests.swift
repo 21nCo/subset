@@ -69,6 +69,26 @@ final class KeyLayoutTests: XCTestCase {
         }
     }
 
+    func testTheSearchTakesTheCharacterTypedWithoutOption() throws {
+        let us = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.US"))
+        // ⌥E is a dead acute accent on US; the search gets the e the key types without ⌥.
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x0E, shift: false), "e")
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x0E, shift: true), "E")
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x31, shift: false), " ")
+        let french = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.French"))
+        XCTAssertEqual(french.typedCharacter(keyCode: 0x00, shift: false), "q", "AZERTY types q on the US A position")
+        XCTAssertEqual(french.typedCharacter(keyCode: 0x13, shift: false), "é")
+        let greek = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.Greek"))
+        XCTAssertEqual(greek.typedCharacter(keyCode: 0x00, shift: false), "α")
+        let classification = EventClassifier.classify(
+            .key(KeyEvent(.keyDown, keyCode: 0x13, modifiers: .option, text: french.typedCharacter(keyCode: 0x13, shift: false))),
+            session: active,
+            shortcut: .default
+        )
+        XCTAssertEqual(classification, Classification(.swallow, .type("é")))
+        XCTAssertFalse(SwitcherSearch.isSearchCharacter(try XCTUnwrap(us.typedCharacter(keyCode: KeyCode.tab, shift: false))))
+    }
+
     func testAnUnknownLayoutIsNil() {
         XCTAssertNil(KeyLayout.named("com.apple.keylayout.NoSuchLayout"))
     }
