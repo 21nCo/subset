@@ -263,7 +263,69 @@ final class DiskOriginTests: XCTestCase {
                                          applications + "/Utilities/Tool.app"])
         XCTAssertEqual(apps.app(bundleID: "com.example.agent")?.vendor, .vendor(teamID: "EXAMPLE123"), "a helper is its app's vendor's")
         XCTAssertEqual(apps.apps(group: "group.Agent.app").map(\.bundleID), ["com.example.agent"], "a helper declares its own groups")
-        XCTAssertTrue(apps.signingComplete)
+        XCTAssertEqual(apps.unread, [applications + "/Broken.app has no readable bundle identifier."])
+        XCTAssertFalse(apps.isComplete)
+        XCTAssertFalse(apps.signingComplete)
+    }
+
+    func testWrappedAppsAreReadAndAnAppThatCannotBeReadMakesNoLeftover() async throws {
+        let applications = home + "/Applications"
+        let inner = applications + "/Extra.app/Wrapper/Extra.app"
+        try FileManager.default.createDirectory(atPath: inner, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "com.buildforever.extra"], format: .xml, options: 0)
+            .write(to: URL(fileURLWithPath: inner + "/Info.plist"))
+        try FileManager.default.createSymbolicLink(atPath: applications + "/Extra.app/WrappedBundle", withDestinationPath: "Wrapper/Extra.app")
+        try bundle(applications + "/Editor.app", id: "com.example.editor", name: nil)
+        for relative in ["Containers/com.buildforever.extra", "Group Containers/group.com.buildforever.shared",
+                         "Caches/com.gone.app", "Preferences/com.gone.app.plist", "Group Containers/group.com.gone.app"] {
+            try write("Library/" + relative + "/data", bytes: 4_096)
+        }
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home + "/Library")).tree
+        var signed: [String] = []
+        func read(_ folders: [String]) -> InstalledApps {
+            InstalledApps.read(folders: folders) { path in
+                signed.append(path)
+                return AppSigning(signature: CodeSignature(signingID: "x", teamID: "EXTRA00001", isPlatformBinary: false),
+                                  appGroups: path.hasSuffix("Wrapper/Extra.app") ? ["group.com.buildforever.shared"] : [])
+            }
+        }
+        func rules(_ apps: InstalledApps) -> [String: DiskOriginRule] {
+            Dictionary(uniqueKeysWithValues: DiskOrigins.entries(in: tree, home: home, apps: apps).map {
+                (String($0.path.dropFirst(home.count + "/Library/".count)), $0.rule)
+            })
+        }
+
+        let complete = read([applications])
+        XCTAssertEqual(complete.app(bundleID: "com.buildforever.extra")?.path, applications + "/Extra.app")
+        XCTAssertTrue(signed.contains(inner), "a wrapped app is signed as its inner bundle")
+        XCTAssertTrue(complete.signingComplete)
+        XCTAssertEqual(rules(complete), [
+            "Containers/com.buildforever.extra": .bundleID, "Group Containers/group.com.buildforever.shared": .appGroup,
+            "Caches/com.gone.app": .leftover, "Preferences/com.gone.app.plist": .leftover, "Group Containers/group.com.gone.app": .leftover
+        ])
+
+        // An app whose Info.plist cannot be read or is missing, or a vendor folder that cannot be listed, may own any
+        // entry: nothing is a leftover, though installed apps' data is still theirs.
+        let locked = home + "/Locked"
+        try bundle(locked + "/Unreadable.app", id: "com.example.unreadable", name: nil)
+        XCTAssertEqual(chmod(locked + "/Unreadable.app/Contents/Info.plist", 0), 0)
+        let missing = home + "/Missing"
+        try FileManager.default.createDirectory(atPath: missing + "/Empty.app/Contents", withIntermediateDirectories: true)
+        let vendor = home + "/Vendor"
+        try bundle(vendor + "/Suite/Writer.app", id: "com.suite.writer", name: nil)
+        XCTAssertEqual(chmod(vendor + "/Suite", 0), 0)
+        defer { chmod(locked + "/Unreadable.app/Contents/Info.plist", 0o644); chmod(vendor + "/Suite", 0o755) }
+        for (folder, reason) in [(locked, "/Unreadable.app has no readable bundle identifier."),
+                                 (missing, "/Empty.app has no readable bundle identifier."),
+                                 (vendor, "/Suite could not be listed: Permission denied.")] {
+            let apps = read([applications, folder])
+            XCTAssertEqual(apps.unread, [folder + reason])
+            XCTAssertEqual(rules(apps), [
+                "Containers/com.buildforever.extra": .bundleID, "Group Containers/group.com.buildforever.shared": .appGroup,
+                "Caches/com.gone.app": .unattributed, "Preferences/com.gone.app.plist": .unattributed,
+                "Group Containers/group.com.gone.app": .unattributed
+            ], folder)
+        }
     }
 
     func testAppGroupsAreReadFromEntitlements() {

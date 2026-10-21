@@ -48,8 +48,8 @@ public struct ReclaimItem: Equatable, Sendable {
 /// The bytes a match reports.
 public enum ReclaimBytes: Equatable, Sendable {
     /// Summed from the scan over the items. `private` is at least what removing them all frees (the private size of
-    /// each), `allocated` the space they use. `complete` is false when an item's size is unknown or a lower bound,
-    /// which makes both sums lower bounds.
+    /// each), `allocated` the space they use, a hard-linked file's once. `complete` is false when an item's size is
+    /// unknown or a lower bound, or another link counts an item's blocks, which makes both sums lower bounds.
     case scanned(private: UInt64, allocated: UInt64, complete: Bool)
     /// The image space `docker system df` reports as reclaimable inside the VM and the space all images use. It
     /// counts every image no container uses, while `docker image prune -f` removes only dangling ones, so it is an
@@ -122,7 +122,10 @@ public enum ReclaimMatcher {
                 matcher.entries(rule, caches, by: { $0.app!.path }, app: { $0.app })
             case .appLeftovers:
                 let leftovers = origins.filter { $0.rule == .leftover }
-                matcher.entries(rule, leftovers, by: { $0.identifier.lowercased() }, identifier: { $0.identifier })
+                // A bundle ID names one app in every folder; a group container's other name only within its team.
+                matcher.entries(rule, leftovers, by: { entry in
+                    (DiskOrigins.isBundleID(entry.identifier) ? "" : (entry.teamID ?? "") + ".") + entry.identifier.lowercased()
+                }, identifier: { $0.identifier })
             case .deviceBackups:
                 matcher.contents(of: rule.homePaths[0], rule: rule)
             case .oldInstallers:
@@ -178,7 +181,8 @@ private struct Matching {
             }
             measured = true
             privateBytes += sizes.private
-            allocated += sizes.allocated
+            // Another hard link counts the file's blocks, so they are counted once, at most.
+            if item.flags.contains(.countedElsewhere) { complete = false } else { allocated += sizes.allocated }
             if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { complete = false }
         }
         let bytes: ReclaimBytes = measured
@@ -315,7 +319,14 @@ private struct Matching {
     /// `~/Library` and hidden folders (`~/.vscode/extensions`, `~/.nvm`, the Trash), whose project has not been
     /// touched for longer than `ReclaimRules.staleNodeModulesAge`. Only the outermost `node_modules` of a path counts.
     mutating func staleNodeModules(_ rule: ReclaimRule) {
-        guard let (start, startPath) = homeWalkStart() else { return }
+        let start: Int, startPath: String
+        switch tree.locate(context.home) {
+        case let .found(index): (start, startPath) = (index, context.home)
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case .absent:
+            guard rootInsideHome() else { return }
+            (start, startPath) = (0, tree.rootPath)
+        }
         var items: [ReclaimItem] = []
         var unjudged: [String] = []
         var stack = [(start, startPath)]
@@ -342,29 +353,24 @@ private struct Matching {
         add(rule, items: items, unjudged: unjudged)
     }
 
-    /// The tree item to search from for data under the home folder, and its path: the home folder, or the scanned root
-    /// when it is inside the home folder, outside `~/Library` and hidden folders.
-    func homeWalkStart() -> (Int, String)? {
-        if let index = tree.index(atPath: context.home) { return (index, context.home) }
+    /// The scanned root is inside the home folder, outside `~/Library`, hidden folders, and `node_modules` folders,
+    /// so the search starts there.
+    func rootInsideHome() -> Bool {
         let prefix = context.home + "/"
-        guard tree.rootPath.hasPrefix(prefix) else { return nil }
+        guard tree.rootPath.hasPrefix(prefix) else { return false }
         let relative = tree.rootPath.dropFirst(prefix.count).split(separator: "/")
-        guard relative.first != "Library", !relative.contains(where: { $0.hasPrefix(".") }) else { return nil }
-        return (0, tree.rootPath)
+        return relative.first != "Library" && !relative.contains { $0.hasPrefix(".") || $0 == "node_modules" }
     }
 
     /// The latest touch of the project folder and everything in it outside `node_modules` folders, or `nil` when
-    /// any of it has no time or was not read in full, so it may hold something newer.
+    /// any of it has no time or was not listed in full (`DiskTree.unlisted`, another volume included), so it may hold
+    /// something newer.
     func newestTouch(inProject project: Int) -> Date? {
         var newest = Date.distantPast
         var stack = [project]
         while let index = stack.popLast() {
             let item = tree[index]
-            guard let touched = item.touched, !item.flags.contains(.unreadable), !item.flags.contains(.partial) else {
-                return nil
-            }
-            // A folder that is incomplete without listed children was not read at all.
-            if item.kind == .directory, item.flags.contains(.incomplete), item.children.isEmpty { return nil }
+            guard let touched = item.touched, tree.unlisted(index) == nil else { return nil }
             newest = max(newest, touched)
             for child in item.children where !(tree[child].name == "node_modules" && tree[child].kind == .directory) {
                 stack.append(child)
@@ -427,7 +433,7 @@ extension DiskTree {
     /// full. Its contents' own sizes do not matter here, only whether every entry in it is listed.
     func unlisted(_ index: Int) -> String? {
         let item = self[index]
-        let path = path(of: index)
+        var path: String { self.path(of: index) }
         if item.flags.contains(.unreadable) { return "\(path) could not be read." }
         if item.flags.contains(.partial) { return "\(path) was not read in full." }
         switch item.kind {

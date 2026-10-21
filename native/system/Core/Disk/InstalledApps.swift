@@ -57,14 +57,19 @@ public struct AppSigning: Equatable, Sendable {
 /// inject the list; `read()` builds it from the app folders.
 public struct InstalledApps: Sendable {
     public let apps: [InstalledApp]
-    /// Every app's signature and entitlements were read, so a Team ID or app group no app has is no installed app's.
+    /// Where an app may be that could not be read: an app folder not listed, an app whose bundle ID could not be read.
+    public let unread: [String]
+    /// Every app in the app folders was read with its bundle ID, so a bundle ID no app has is no installed app's.
+    public var isComplete: Bool { unread.isEmpty }
+    /// The list is complete and every app's signature and entitlements were read, so a Team ID or app group no app
+    /// has is no installed app's.
     public let signingComplete: Bool
     private let byBundleID: [String: InstalledApp]
     private let byName: [String: [InstalledApp]]
     private let byTeam: [String: [InstalledApp]]
     private let byGroup: [String: [InstalledApp]]
 
-    public init(_ apps: [InstalledApp]) {
+    public init(_ apps: [InstalledApp], unread: [String] = []) {
         // Ordered by path so that two copies of one app (two Xcode versions) resolve the same way every time.
         let sorted = apps.sorted { ($0.path, $0.bundleID) < ($1.path, $1.bundleID) }
         self.apps = sorted
@@ -82,7 +87,8 @@ public struct InstalledApps: Sendable {
         self.byName = byName
         self.byTeam = byTeam
         self.byGroup = byGroup
-        signingComplete = sorted.allSatisfy { $0.signature != nil && $0.appGroups != nil }
+        self.unread = unread
+        signingComplete = unread.isEmpty && sorted.allSatisfy { $0.signature != nil && $0.appGroups != nil }
     }
 
     /// The app whose bundle ID is `identifier` or, component by component, its longest prefix of two components or
@@ -119,38 +125,52 @@ public struct InstalledApps: Sendable {
 
     /// Reads every app in `folders` and in their subfolders one level down (`Utilities`, a vendor's folder), plus the
     /// login items and helper apps inside each (`Contents/Library/LoginItems`, `Contents/Helpers`), which keep data
-    /// under their own bundle IDs. An app is read from its `Contents/Info.plist`; one without a bundle ID is left out.
+    /// under their own bundle IDs. An app is read from its `Contents/Info.plist`, or an iPhone or iPad app from its
+    /// wrapped bundle's (`Wrapper/<name>.app/Info.plist`). A folder that cannot be listed (one that does not exist is
+    /// empty) and an app whose bundle ID cannot be read are `unread`.
     public static func read(folders: [String] = defaultFolders(),
                             signing: (String) -> AppSigning = staticSigning) -> InstalledApps {
         var apps: [InstalledApp] = []
+        var unread: [String] = []
         for folder in folders {
-            for entry in listing(folder) {
+            for entry in listing(folder, unread: &unread) {
                 let path = folder + "/" + entry
                 if entry.hasSuffix(".app") {
-                    apps += bundle(at: path, signing: signing)
+                    apps += bundle(at: path, signing: signing, unread: &unread)
                 } else if !entry.hasPrefix("."), isDirectory(path) {
-                    for inner in listing(path) where inner.hasSuffix(".app") {
-                        apps += bundle(at: path + "/" + inner, signing: signing)
+                    for inner in listing(path, unread: &unread) where inner.hasSuffix(".app") {
+                        apps += bundle(at: path + "/" + inner, signing: signing, unread: &unread)
                     }
                 }
             }
         }
-        return InstalledApps(apps)
+        return InstalledApps(apps, unread: unread)
     }
 
     /// The app at `path` and the login items and helper apps inside it, all owned by it and placed under its vendor;
-    /// each declares its own app groups.
-    static func bundle(at path: String, signing: (String) -> AppSigning) -> [InstalledApp] {
-        guard let info = infoPlist(path + "/Contents/Info.plist"), let bundleID = info.bundleID else { return [] }
+    /// each declares its own app groups. A wrapped iPhone or iPad app is signed as its inner bundle.
+    static func bundle(at path: String, signing: (String) -> AppSigning, unread: inout [String]) -> [InstalledApp] {
         let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        let signed = signing(path)
+        var signedPath = path
+        var info = infoPlist(path + "/Contents/Info.plist")
+        if info == nil, let wrapped = listing(path + "/Wrapper", unread: &unread).first(where: { $0.hasSuffix(".app") }) {
+            signedPath = path + "/Wrapper/" + wrapped
+            info = infoPlist(signedPath + "/Info.plist")
+        }
+        guard let info, let bundleID = info.bundleID else {
+            unread.append("\(path) has no readable bundle identifier.")
+            return []
+        }
+        let signed = signing(signedPath)
         var apps = [InstalledApp(path: path, bundleID: bundleID, name: name, names: [name] + info.names,
                                  signature: signed.signature, appGroups: signed.appGroups)]
         for folder in ["/Contents/Library/LoginItems", "/Contents/Helpers"] {
-            for inner in listing(path + folder) where inner.hasSuffix(".app") {
+            for inner in listing(path + folder, unread: &unread) where inner.hasSuffix(".app") {
                 let nestedPath = path + folder + "/" + inner
-                guard let nested = infoPlist(nestedPath + "/Contents/Info.plist"), let nestedID = nested.bundleID
-                else { continue }
+                guard let nested = infoPlist(nestedPath + "/Contents/Info.plist"), let nestedID = nested.bundleID else {
+                    unread.append("\(nestedPath) has no readable bundle identifier.")
+                    continue
+                }
                 apps.append(InstalledApp(path: path, bundleID: nestedID, name: name, names: [name],
                                          signature: signed.signature, appGroups: signing(nestedPath).appGroups))
             }
@@ -203,8 +223,13 @@ public struct InstalledApps: Sendable {
         return (bundleID, names)
     }
 
-    static func listing(_ path: String) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []).sorted()
+    static func listing(_ path: String, unread: inout [String]) -> [String] {
+        switch SimulatorRuntimes.listing(path) {
+        case let .success(names): return names
+        case let .failure(failure):
+            unread.append("\(path) could not be listed: \(failure.message).")
+            return []
+        }
     }
 
     private static func isDirectory(_ path: String) -> Bool {

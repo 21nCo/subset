@@ -43,7 +43,8 @@ public enum DiskOriginRule: Equatable, Sendable {
     /// The entry's name is the one installed app's name (its file name, `CFBundleName`, or `CFBundleDisplayName`).
     case appName
     /// A bundle ID, or a group container's Team ID, that no installed app has, and in Group Containers no installed
-    /// app declares, with every installed app's signature read.
+    /// app declares, with every app in the app folders read (`InstalledApps.isComplete`), and in Group Containers
+    /// every signature too.
     case leftover
     /// Nothing matched: a name that is neither a bundle ID nor an installed app's name.
     case unattributed
@@ -95,12 +96,12 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
     public let name: String
     /// The tree indices of the items summed.
     public let items: [Int]
-    /// Summed allocated sizes. Blocks two items' clones share count once in each.
+    /// Summed allocated sizes, a hard-linked file's once. Blocks two items' clones share count once in each.
     public let allocated: UInt64
     /// Summed private sizes: at least what deleting every item would free.
     public let `private`: UInt64
-    /// An item's size is unknown or a lower bound, or the group may have items the scan did not list, so both sums are
-    /// lower bounds.
+    /// An item's size is unknown or a lower bound, another link counts an item's blocks, or the group may have items the
+    /// scan did not list, so both sums are lower bounds.
     public let isLowerBound: Bool
 }
 
@@ -212,8 +213,9 @@ public enum DiskOrigins {
                 lowerBound = true
                 continue
             }
-            allocated += sizes.allocated
             privateBytes += sizes.private
+            // Another hard link counts the file's blocks, so they are counted once, at most.
+            if item.flags.contains(.countedElsewhere) { lowerBound = true } else { allocated += sizes.allocated }
             if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { lowerBound = true }
         }
         return DiskOriginGroup(id: key, name: name, items: unique, allocated: allocated, private: privateBytes,
@@ -278,8 +280,9 @@ public enum DiskOrigins {
         if folder == .groupContainers, identifier.contains("."), let app = apps.uniqueApp(extending: identifier) {
             return make(.bundleID, app: app)
         }
-        // A group container may be an app's whose signature or entitlements could not be read.
-        let unproven = folder == .groupContainers && !apps.signingComplete
+        // The entry may be an app's that could not be read, or in Group Containers one whose signature or entitlements
+        // could not be.
+        let unproven = folder == .groupContainers ? !apps.signingComplete : !apps.isComplete
         if team != nil || shaped {
             return make(unproven ? .unattributed : .leftover, vendor: team.map { .vendor(teamID: $0) })
         }

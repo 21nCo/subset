@@ -441,6 +441,70 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(matches.first?.items.map(\.path), [path("dev/old/node_modules")])
     }
 
+    func testStaleNodeModulesNeedsTheProjectAndTheFoldersAboveHomeListedInFull() async throws {
+        try project("dev/old", untouchedFor: 40)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        func match(_ tree: DiskTree, home: String) throws -> ReclaimMatch {
+            let context = ReclaimContext(home: home, now: now, installedApps: Self.apps, simulatorRuntimes: .installed([]))
+            let found = ReclaimMatcher.matches(in: tree, origins: [], context: context).filter { $0.rule.id == .staleNodeModules }
+            XCTAssertEqual(found.count, 1)
+            return try XCTUnwrap(found.first)
+        }
+        XCTAssertEqual(try match(scanned, home: home).items.map(\.path), [path("dev/old/node_modules")])
+
+        // The project's source is another volume, which the scan did not enter: its last change is unknown.
+        var mounted = scanned
+        let source = try XCTUnwrap(scanned.index(atPath: path("dev/old/src")))
+        mounted.nodes[source].kind = .mountPoint
+        mounted.nodes[source].childCount = 0
+        let unknownAge = try match(mounted, home: home)
+        XCTAssertEqual(unknownAge.items, [])
+        guard case let .unavailable(reason) = unknownAge.bytes else { return XCTFail("\(unknownAge.bytes)") }
+        XCTAssertTrue(reason.hasPrefix("\(path("dev/old")) was not read in full, so its last change is unknown."), reason)
+
+        // A scan of a folder above home that did not list the folder holding it: unknown, not absent.
+        try project("users/me/dev/old", untouchedFor: 40)
+        let above = marking(try await DiskScanner().scan(URL(fileURLWithPath: home)).tree, "users", .partial, listing: false)
+        XCTAssertEqual(try match(above, home: path("users/me")).bytes, .unavailable("\(path("users")) was not read in full."))
+    }
+
+    func testAScanRootedInsideNodeModulesSuggestsNothing() async throws {
+        try write("dev/old/node_modules/pkg/package.json", bytes: 200)
+        try write("dev/old/node_modules/pkg/node_modules/inner/index.js", bytes: 4_096)
+        try touchTree("dev/old", daysAgo: 90)
+
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: path("dev/old/node_modules"))).tree
+
+        XCTAssertEqual(ReclaimMatcher.matches(in: tree, origins: [], context: context()).map(\.rule.id), [])
+    }
+
+    func testLeftoversOfTwoTeamsAreSeparateAndHardLinksCountOnce() async throws {
+        try write("Library/Group Containers/AAAAAAAAAA.office/data", bytes: 10_000)
+        try write("Library/Group Containers/BBBBBBBBBB.office/data", bytes: 10_000)
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 40_960)
+        try FileManager.default.createDirectory(atPath: path("Library/Logs"), withIntermediateDirectories: true)
+        XCTAssertEqual(link(path("Library/Preferences/com.removed.tool.plist"), path("Library/Logs/com.removed.tool")), 0)
+
+        let analysis = try await analyze()
+        let leftovers = analysis.matches.filter { $0.rule.id == .appLeftovers }
+
+        XCTAssertEqual(leftovers.map { $0.items.map(\.path) }, [
+            [path("Library/Group Containers/AAAAAAAAAA.office")], [path("Library/Group Containers/BBBBBBBBBB.office")],
+            [path("Library/Logs/com.removed.tool"), path("Library/Preferences/com.removed.tool.plist")]
+        ])
+        let linked = try Self.allocated(under: path("Library/Preferences/com.removed.tool.plist"))
+        let removed = try XCTUnwrap(leftovers.last)
+        guard case let .scanned(_, allocated, complete) = removed.bytes else { return XCTFail("\(removed.bytes)") }
+        XCTAssertEqual(allocated, linked, "two links to one file")
+        XCTAssertFalse(complete)
+        let report = DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                        apps: Self.apps)
+        let group = try XCTUnwrap(report.leftovers)
+        XCTAssertEqual(group.allocated, linked + (try Self.allocated(under: path("Library/Group Containers/AAAAAAAAAA.office")))
+                           + (try Self.allocated(under: path("Library/Group Containers/BBBBBBBBBB.office"))))
+        XCTAssertTrue(group.isLowerBound)
+    }
+
     func testTheScanRecordsTheLaterOfModificationAndDateAdded() async throws {
         try write("a", bytes: 10)
         try setTimes("a", modified: Date(timeIntervalSince1970: 1_600_000_000), added: Date(timeIntervalSince1970: 1_700_000_000))
