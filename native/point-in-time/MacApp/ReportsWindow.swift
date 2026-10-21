@@ -62,7 +62,10 @@ final class ReportsModel: ObservableObject {
 
     /// The selected day and the hour the hourly zoom shows.
     @Published private(set) var selection: ReportSelection
-    @Published var zoom = Zoom.day
+    /// Zooming in on a selected block shows its hour, so the block stays on the timeline and in the list.
+    @Published var zoom = Zoom.day {
+        didSet { if zoom == .hour, let selectedBlock { selection.showHour(containing: selectedBlock) } }
+    }
     @Published var selectedBlock: Date?
     @Published private(set) var day: DayReport?
     @Published private(set) var week: WeekReport?
@@ -70,6 +73,8 @@ final class ReportsModel: ObservableObject {
     @Published private(set) var readError: String?
     /// Whether the store holds any activity at all, to tell "nothing yet" from "nothing on this day".
     @Published private(set) var hasAnyActivity = false
+    /// The chosen provider needs a key and none is saved, asked of the Keychain without reading the key.
+    @Published private(set) var providerKeyMissing = false
     @Published var correctionLabel = BlockLabel.focus
     @Published var correctionNote = ""
     @Published var correctionMessage: String?
@@ -109,6 +114,7 @@ final class ReportsModel: ObservableObject {
         selection.followClock(now: now)
         if selection.interval != previousDay { selectedBlock = nil }
         defer { selection.settle(now: now, firstBlock: day?.blocks.first?.start) }
+        providerKeyMissing = classification.settings.provider == .openRouter && (try? KeychainSecret.openRouterKey.exists()) == false
         guard let store else {
             readError = storeError ?? "The activity store is unavailable."
             day = nil
@@ -218,8 +224,11 @@ final class ReportsModel: ObservableObject {
     var classificationStatus: ClassificationStatus { classification.status }
 
     /// Why blocks are not being labeled while a provider is chosen (no key, an unreadable key, a failing provider), or
-    /// why failed blocks could not be retried; nil while classification works.
+    /// why failed blocks could not be retried; nil while classification works. A missing key is named before any run fails.
     var classificationError: String? {
+        if !providerOff, providerKeyMissing {
+            return "Blocks stay unclassified until an OpenRouter API key is saved in Classification Settings."
+        }
         guard let error = classificationStatus.lastError else { return nil }
         let at = classificationStatus.lastErrorAt.map { " (\(time($0)))" } ?? ""
         return providerOff ? "Last classification error\(at): \(error)"
