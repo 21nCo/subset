@@ -18,20 +18,13 @@ const BOARD_HTML = join(PACKAGE_ROOT, 'mcp-app/board.html');
 const MIME = 'text/html;profile=mcp-app';
 const NO_DOMAINS = { connectDomains: [], resourceDomains: [], frameDomains: [] };
 
-/**
- * The view's own sources for Node: the bridge (apps/timer/src/mcp-bridge.ts), the MCP App component
- * with the board it mounts, compiled for server rendering, and the board's view model, which decides
- * what the board shows for an action's reply.
- */
-async function bundleView() {
+const VIEW_MODEL = JSON.stringify(join(REPO, 'packages/timer/src/view/view-model.ts'));
+const ZOD_JITLESS = JSON.stringify(join(REPO, 'apps/timer/src/zod-jitless.ts'));
+
+/** `entry` and everything it imports, bundled into one module for Node; returns its file. */
+async function bundleFile(entry) {
   const dir = mkdtempSync(join(tmpdir(), 'timer-mcp-app-'));
   after(() => rmSync(dir, { recursive: true, force: true }));
-  const entry = [
-    `export { createBridge, PROTOCOL_VERSION, REFRESH_MS } from ${JSON.stringify(join(REPO, 'apps/timer/src/mcp-bridge.ts'))};`,
-    `export { default as McpApp } from ${JSON.stringify(join(REPO, 'apps/timer/src/McpApp.svelte'))};`,
-    `export { failureText, readBoardResult, readOutcome } from ${JSON.stringify(join(REPO, 'packages/timer/src/view/view-model.ts'))};`,
-    `export { render } from 'svelte/server';`
-  ].join('\n');
   await build({
     cwd: PACKAGE_ROOT,
     input: 'mcp-app-view',
@@ -50,10 +43,24 @@ async function bundleView() {
     ],
     output: { dir, format: 'esm', entryFileNames: 'view.mjs' }
   });
-  return import(join(dir, 'view.mjs'));
+  return join(dir, 'view.mjs');
 }
 
-const view = await bundleView();
+const bundle = async (entry) => import(await bundleFile(entry));
+
+/**
+ * The view's own sources: the bridge (apps/timer/src/mcp-bridge.ts), the MCP App component with the
+ * board it mounts, compiled for server rendering, and the board's view model, which decides what the
+ * board shows for an action's reply.
+ */
+const view = await bundle(
+  [
+    `export * from ${JSON.stringify(join(REPO, 'apps/timer/src/mcp-bridge.ts'))};`,
+    `export { default as McpApp } from ${JSON.stringify(join(REPO, 'apps/timer/src/McpApp.svelte'))};`,
+    `export { failureText, readBoardResult, readOutcome } from ${VIEW_MODEL};`,
+    `export { render } from 'svelte/server';`
+  ].join('\n')
+);
 
 /** The Timer MCP server over an in-process daemon holding the SET-74 fixture store. */
 async function mcpSession(t) {
@@ -68,16 +75,21 @@ async function mcpSession(t) {
 /**
  * A host on postMessage: it answers `ui/initialize` with `theme` and runs each `tools/call` on the
  * Timer server, as an MCP Apps host does, unless `refuse` returns a reason (a declined approval).
+ * A call `withhold` picks still runs, but its reply waits for `release()`.
  */
 function fakeHost(mcp, { theme = 'dark' } = {}) {
   const listeners = new Set();
   const sent = [];
   const calls = [];
   const inflight = new Set();
+  const held = [];
   const host = {
     refuse: null,
+    withhold: null,
     sent,
     calls,
+    /** Sends every withheld reply, in order. */
+    release: () => held.splice(0).forEach((send) => send()),
     window: {
       postMessage(message, targetOrigin) {
         assert.equal(targetOrigin, '*');
@@ -118,29 +130,55 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
       calls.push(message.params);
       const refusal = host.refuse?.(message.params);
       if (refusal) return reply(message.id, { error: { code: -32000, message: refusal } });
-      return reply(message.id, { result: await mcp.callTool(message.params.name, message.params.arguments) });
+      const result = await mcp.callTool(message.params.name, message.params.arguments);
+      if (host.withhold?.(message.params)) return void held.push(() => reply(message.id, { result }));
+      return reply(message.id, { result });
     }
   }
   return host;
 }
 
-/** Fake interval timers: `fire()` runs every live one once. */
+/**
+ * Fake timers: `fire()` runs every live interval once; `expire(ms)` runs the live timeouts of that
+ * delay, as if that long had passed since they were set.
+ */
 function fakeIntervals() {
   const live = new Map();
+  const timeouts = new Map();
   let next = 0;
   return {
     live,
     setInterval: (callback, ms) => (live.set(++next, { callback, ms }), next),
     clearInterval: (handle) => live.delete(handle),
-    fire: () => [...live.values()].forEach(({ callback }) => callback())
+    fire: () => [...live.values()].forEach(({ callback }) => callback()),
+    setTimeout: (callback, ms) => (timeouts.set(++next, { callback, ms }), next),
+    clearTimeout: (handle) => timeouts.delete(handle),
+    delays: () => [...timeouts.values()].map(({ ms }) => ms),
+    expire(ms) {
+      for (const [handle, timeout] of [...timeouts]) {
+        if (timeout.ms !== ms) continue;
+        timeouts.delete(handle);
+        timeout.callback();
+      }
+    }
   };
 }
+
+const bridgeOptions = (host, { setInterval, clearInterval, setTimeout, clearTimeout }) => ({
+  host: host.window,
+  view: host.view,
+  appInfo: { name: 'subset-timer-board', version: '1.0.0' },
+  setInterval,
+  clearInterval,
+  setTimeout,
+  clearTimeout
+});
 
 async function connectedBridge(t, options = {}) {
   const session = await mcpSession(t);
   const host = fakeHost(session.mcp, options);
   const intervals = fakeIntervals();
-  const bridge = view.createBridge({ host: host.window, view: host.view, appInfo: { name: 'subset-timer-board', version: '1.0.0' }, setInterval: intervals.setInterval, clearInterval: intervals.clearInterval });
+  const bridge = view.createBridge(bridgeOptions(host, intervals));
   t.after(() => bridge.close());
   const connected = bridge.connect();
   await host.idle();
@@ -330,6 +368,119 @@ test('a cancelled tool call shows as cancelled', async (t) => {
   assert.equal(bridge.state().toolError, 'The tool call was cancelled.');
 });
 
+test('a tool error replaces the board until a later result or refresh succeeds, and an error never leaves a stale board', async (t) => {
+  const { host, bridge, mcp, intervals } = await connectedBridge(t);
+  const missing = await mcp.callTool('timer_get', { id: 't_00000000' });
+  const board = /<section class="board /;
+
+  // An error result, then a successful refresh: the board, with no alert left over.
+  host.notify('ui/notifications/tool-result', missing);
+  assert.equal(bridge.state().toolError, 'No timer t_00000000.');
+  intervals.fire();
+  await host.idle();
+  assert.equal(bridge.state().toolError, null);
+  assert.ok(bridge.state().result);
+  assert.match(rendered(bridge), board);
+  assert.doesNotMatch(rendered(bridge), /role="alert"/);
+
+  // A board, then an error result: the error alone, no board to act on.
+  host.notify('ui/notifications/tool-result', await mcp.callTool('timer_list', {}));
+  assert.match(rendered(bridge), board);
+  host.notify('ui/notifications/tool-result', missing);
+  assert.equal(bridge.state().result, null);
+  assert.doesNotMatch(rendered(bridge), board);
+  assert.match(rendered(bridge), /<p class="error[^"]*" role="alert">No timer t_00000000\.</);
+
+  // A successful tool result clears the error too; a cancellation after a board leaves it.
+  host.notify('ui/notifications/tool-result', await mcp.callTool('timer_list', {}));
+  assert.equal(bridge.state().toolError, null);
+  host.notify('ui/notifications/tool-cancelled', { reason: 'user' });
+  assert.equal(bridge.state().toolError, null);
+  assert.match(rendered(bridge), board);
+});
+
+test('a read issued before the host passes a newer tool result never replaces it', async (t) => {
+  const { host, bridge, mcp, intervals } = await connectedBridge(t);
+  // The refresh reads the board now; its reply arrives after the host passes timer_start's result.
+  host.withhold = ({ name }) => name === 'timer_list';
+  intervals.fire();
+  await host.idle();
+  host.withhold = null;
+  const started = await mcp.callTool('timer_start', { durationSeconds: 300, name: 'Tea' });
+  host.notify('ui/notifications/tool-result', started);
+  const fresh = bridge.state().result;
+  const hasTea = (result) => result.timers.some((snapshot) => snapshot.definition.name === 'Tea');
+  assert.ok(hasTea(fresh));
+  host.release();
+  await host.idle();
+  assert.equal(bridge.state().result, fresh);
+  assert.equal(bridge.state().refreshError, null);
+
+  // A read issued after it is taken.
+  intervals.fire();
+  await host.idle();
+  assert.notEqual(bridge.state().result, fresh);
+  assert.ok(hasTea(bridge.state().result));
+});
+
+test('a read or change the host never answers fails at its deadline, the refresh reads again, and a late reply is ignored', async (t) => {
+  const { host, bridge, intervals, timer } = await connectedBridge(t);
+  assert.deepEqual([view.READ_TIMEOUT_MS, view.CHANGE_TIMEOUT_MS], [15_000, 300_000]);
+
+  // The refresh's timer_list gets no reply: no second read while it waits, then it fails at 15 s.
+  host.withhold = ({ name }) => name === 'timer_list';
+  intervals.fire();
+  await host.idle();
+  assert.deepEqual(intervals.delays(), [view.READ_TIMEOUT_MS]);
+  intervals.fire();
+  await host.idle();
+  assert.equal(host.calls.length, 1);
+  intervals.expire(view.READ_TIMEOUT_MS);
+  await host.idle();
+  assert.equal(bridge.state().refreshError, 'The host did not reply to timer_list.');
+  assert.match(rendered(bridge), /Could not refresh the timers: The host did not reply to timer_list\./);
+
+  // The next tick reads again, and the late reply to the first read changes nothing.
+  host.withhold = null;
+  intervals.fire();
+  await host.idle();
+  assert.equal(host.calls.length, 2);
+  assert.equal(bridge.state().refreshError, null);
+  const shown = bridge.state().result;
+  host.release();
+  await host.idle();
+  assert.equal(bridge.state().result, shown);
+  assert.deepEqual(intervals.delays(), []);
+
+  // A board read through the actions has the same deadline.
+  host.withhold = ({ name }) => name === 'timer_get';
+  const got = bridge.actions.invoke('get', { id: 't_rcrt44q9' });
+  await host.idle();
+  intervals.expire(view.READ_TIMEOUT_MS);
+  await assert.rejects(got, /The host did not reply to timer_get\./);
+  host.release();
+  await host.idle();
+
+  // A change waits through an approval prompt, then fails inline once, never retried; the next
+  // refresh shows whether it happened.
+  host.withhold = ({ name }) => name === 'timer_pause';
+  const paused = bridge.actions.invoke('pause', { id: 't_adygqpxx' });
+  await host.idle();
+  assert.deepEqual(intervals.delays(), [view.CHANGE_TIMEOUT_MS]);
+  intervals.expire(view.READ_TIMEOUT_MS);
+  await host.idle();
+  intervals.expire(view.CHANGE_TIMEOUT_MS);
+  const error = await paused.then(() => assert.fail('the pause resolved'), (reason) => reason);
+  assert.equal(view.failureText(view.readOutcome('pause', 't_adygqpxx', error).failure), `Pause failed: ${view.CHANGE_TIMEOUT_MESSAGE}`);
+  host.release();
+  await host.idle();
+  assert.equal(host.calls.filter(({ name }) => name === 'timer_pause').length, 1);
+  assert.equal((await timer('t_adygqpxx')).runtime.status, 'paused');
+  intervals.fire();
+  await host.idle();
+  assert.equal(bridge.state().result.timers.find((snapshot) => snapshot.definition.id === 't_adygqpxx').runtime.status, 'paused');
+});
+
 test('the bridge reads timer_list every 10 s while the view is visible, stops while hidden and ends at teardown', async (t) => {
   const { host, bridge, intervals, op } = await connectedBridge(t);
   assert.deepEqual([...intervals.live.values()].map(({ ms }) => ms), [view.REFRESH_MS]);
@@ -391,7 +542,7 @@ test('the bridge tells the host the view size once connected, and only when it c
   const session = await mcpSession(t);
   const host = fakeHost(session.mcp);
   const intervals = fakeIntervals();
-  const bridge = view.createBridge({ host: host.window, view: host.view, appInfo: { name: 'subset-timer-board', version: '1.0.0' }, setInterval: intervals.setInterval, clearInterval: intervals.clearInterval });
+  const bridge = view.createBridge(bridgeOptions(host, intervals));
   t.after(() => bridge.close());
   bridge.sizeChanged(320, 200);
   // Nothing is scheduled or sized before the handshake.
@@ -404,4 +555,38 @@ test('the bridge tells the host the view size once connected, and only when it c
   bridge.sizeChanged(320, 200);
   bridge.sizeChanged(320, 260);
   assert.deepEqual(sizes(), [{ width: 320, height: 200 }, { width: 320, height: 260 }]);
+});
+
+test('zod is jitless before any schema is built, so the view never probes eval under a strict CSP', async (t) => {
+  const { mcp } = await mcpSession(t);
+  const { structuredContent: board } = await mcp.callTool('timer_list', {});
+  // mcp-app.ts imports zod-jitless.ts before anything else.
+  const imports = readFileSync(join(REPO, 'apps/timer/src/mcp-app.ts'), 'utf8').match(/^import .*$/gm);
+  assert.equal(imports[0], "import './zod-jitless.js';");
+  // In the built view, the setting runs before the Timer schemas are built.
+  const html = readFileSync(BOARD_HTML, 'utf8');
+  const setting = html.search(/\bjitless\s*:\s*(?:!0|true)\b/);
+  assert.ok(setting > 0 && setting < html.indexOf('must be a timer id such as'));
+
+  /** How often `Function` is constructed while the board's schemas are built and check a board. */
+  async function evals(first) {
+    const file = await bundleFile(`${first}export { readBoardResult } from ${VIEW_MODEL};`);
+    const original = globalThis.Function;
+    // zod keeps its config on globalThis, shared by every copy; each run starts from none.
+    const config = globalThis.__zod_globalConfig;
+    globalThis.__zod_globalConfig = {};
+    let count = 0;
+    globalThis.Function = new Proxy(original, { construct: (target, args) => (count++, Reflect.construct(target, args)) });
+    try {
+      const checks = await import(file);
+      assert.equal(checks.readBoardResult(board).ok, true);
+    } finally {
+      globalThis.Function = original;
+      globalThis.__zod_globalConfig = config;
+    }
+    return count;
+  }
+  assert.equal(await evals(`import ${ZOD_JITLESS};\n`), 0);
+  // Without it, zod compiles its object checks with new Function.
+  assert.ok((await evals('')) > 0);
 });

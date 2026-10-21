@@ -2,13 +2,10 @@
 // every script and style inlined (vite.mcp-app.config.ts) and served by `subset-timer mcp` as
 // `ui://subset-timer/board@1`. The bridge in mcp-bridge.ts talks to the host; this file wires it to
 // the page: the host's theme, whether the view can be seen, and its size.
+import './zod-jitless.js';
 import { mount } from 'svelte';
-import { config } from 'zod';
 import McpApp from './McpApp.svelte';
 import { createBridge } from './mcp-bridge.js';
-
-// Hosts may forbid eval in the iframe; zod then validates without compiling its checks.
-config({ jitless: true });
 
 const bridge = createBridge({ host: window.parent, view: window, appInfo: { name: 'subset-timer-board', version: '1.0.0' } });
 mount(McpApp, { target: document.getElementById('app')!, props: { bridge } });

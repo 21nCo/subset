@@ -14,15 +14,15 @@
 </script>
 
 <main>
-  {#if view.toolError}
-    <p class="error" role="alert">{view.toolError}</p>
-  {/if}
   {#if view.refreshError}
     <p class="status" role="status">Could not refresh the timers: {view.refreshError}</p>
   {/if}
-  {#if view.result}
+  <!-- The bridge holds a tool error or a board, never both: the error shows in place of the board. -->
+  {#if view.toolError}
+    <p class="error" role="alert">{view.toolError}</p>
+  {:else if view.result}
     <TimerBoard result={view.result} actions={bridge.actions} capabilities={{ create: true, destructive: true }} density="compact" />
-  {:else if !view.toolError}
+  {:else}
     <p class="status" role="status">Waiting for the timers…</p>
   {/if}
 </main>

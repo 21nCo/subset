@@ -3,7 +3,8 @@
 // It sends `ui/initialize`, reads the theme from the host context, takes the tool result the host
 // passes as the board's `result`, and runs each board action as a `tools/call` of the matching Timer
 // tool. It reads timer_list every 10 s while the view is visible, and stops for good on
-// `ui/resource-teardown`. It touches no DOM, so it runs under `node --test` with a fake host.
+// `ui/resource-teardown`. Every tool call has a deadline, so a reply the host never sends cannot stall
+// the refresh or leave a control busy. It touches no DOM, so it runs under `node --test` with a fake host.
 // `@modelcontextprotocol/ext-apps` 2.0.3 was evaluated and not used; see the README.
 import type { OperationName, TimerBoardResult, TimerError } from '@subset/timer';
 import type { TimerActionOutcome, TimerBoardActions } from '@subset/timer/view-model';
@@ -11,6 +12,11 @@ import type { TimerActionOutcome, TimerBoardActions } from '@subset/timer/view-m
 export const PROTOCOL_VERSION = '2026-01-26';
 /** How often the bridge reads timer_list while the view is visible. */
 export const REFRESH_MS = 10_000;
+/** How long a read (timer_list, timer_get, timer_presets) waits for the host's reply. */
+export const READ_TIMEOUT_MS = 15_000;
+/** How long a change waits: long enough for the host to ask the user to approve it. Never retried. */
+export const CHANGE_TIMEOUT_MS = 300_000;
+export const CHANGE_TIMEOUT_MESSAGE = 'The host did not reply; the change may still have happened, and the next refresh shows it.';
 
 export type Theme = 'light' | 'dark';
 
@@ -18,7 +24,10 @@ export type Theme = 'light' | 'dark';
 export interface BridgeState {
   /** The board's `result`: the tool result's `structuredContent`, then each timer_list read. */
   result: TimerBoardResult | null;
-  /** The tool result the host passed was an error or the call was cancelled. */
+  /**
+   * The tool result the host passed was an error, or the call was cancelled before any board: shown in
+   * place of the board until a later tool result or refresh succeeds.
+   */
   toolError: string | null;
   /** The latest timer_list read failed; the board keeps the last result. */
   refreshError: string | null;
@@ -45,6 +54,8 @@ export interface BridgeOptions {
   appInfo: { name: string; version: string };
   setInterval?: (callback: () => void, ms: number) => unknown;
   clearInterval?: (handle: unknown) => void;
+  setTimeout?: (callback: () => void, ms: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
 }
 
 export interface Bridge {
@@ -70,6 +81,9 @@ interface CallToolResult {
 type ToolCall = { name: string; arguments: Record<string, unknown> };
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The operations that only read; any other changes the timers. */
+const READS: ReadonlySet<OperationName> = new Set<OperationName>(['list', 'presets.list', 'get']);
 
 /** The tool for each operation the board runs on one timer by id. */
 const ID_TOOLS: Partial<Record<OperationName, string>> = {
@@ -168,7 +182,15 @@ function operationResult(operation: OperationName, input: Record<string, unknown
 }
 
 /** Connects the view to its host. Call `connect()` once the view listens to `subscribe`. */
-export function createBridge({ host, view, appInfo, setInterval: every = globalThis.setInterval, clearInterval: stopEvery = globalThis.clearInterval as (handle: unknown) => void }: BridgeOptions): Bridge {
+export function createBridge({
+  host,
+  view,
+  appInfo,
+  setInterval: every = globalThis.setInterval,
+  clearInterval: stopEvery = globalThis.clearInterval as (handle: unknown) => void,
+  setTimeout: after = globalThis.setTimeout,
+  clearTimeout: cancel = globalThis.clearTimeout as (handle: unknown) => void
+}: BridgeOptions): Bridge {
   let current: BridgeState = { result: null, toolError: null, refreshError: null, theme: null, closed: false };
   const listeners = new Set<(state: BridgeState) => void>();
   const update = (change: Partial<BridgeState>) => {
@@ -177,42 +199,62 @@ export function createBridge({ host, view, appInfo, setInterval: every = globalT
   };
 
   let nextId = 0;
-  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; deadline: unknown }>();
   let ready = false;
   let visible = true;
   let refreshHandle: unknown = null;
   let refreshing = false;
+  // Bumped by each tool result the host passes, so a read issued before it cannot replace it.
+  let generation = 0;
   let size: { width: number; height: number } | null = null;
   let sentSize: string | null = null;
 
   const send = (message: Record<string, unknown>) => host.postMessage({ jsonrpc: '2.0', ...message }, '*');
 
-  function request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Sends a request and waits for its reply. With a `timeout`, no reply by then rejects with its
+   * message and forgets the request, so a reply that comes later has no effect.
+   */
+  function request(method: string, params: Record<string, unknown>, timeout?: { ms: number; message: string }): Promise<unknown> {
     if (current.closed) return Promise.reject(new Error('The host closed the Timer view.'));
     const id = ++nextId;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      const deadline = timeout
+        ? after(() => {
+            if (!pending.delete(id)) return;
+            reject(new Error(timeout.message));
+          }, timeout.ms)
+        : null;
+      pending.set(id, { resolve, reject, deadline });
       send({ id, method, params });
     });
   }
 
-  async function callTool(call: ToolCall): Promise<CallToolResult> {
-    const result = await request('tools/call', call);
+  async function callTool(call: ToolCall, read: boolean): Promise<CallToolResult> {
+    const timeout = read
+      ? { ms: READ_TIMEOUT_MS, message: `The host did not reply to ${call.name}.` }
+      : { ms: CHANGE_TIMEOUT_MS, message: CHANGE_TIMEOUT_MESSAGE };
+    const result = await request('tools/call', call, timeout);
     if (!isObject(result)) throw new Error('The host returned no tool result.');
     return result as CallToolResult;
   }
 
-  /** Reads timer_list into `result`; a failure keeps the last result and says so. */
+  /**
+   * Reads timer_list into `result`; a failure keeps the last result and says so. A read the host
+   * answers after passing a newer tool result is dropped: that result is the newer board.
+   */
   async function refresh() {
     if (refreshing || current.closed || !ready) return;
     refreshing = true;
+    const issued = generation;
+    const stillNewest = () => !current.closed && issued === generation;
     try {
-      const result = await callTool({ name: 'timer_list', arguments: {} });
-      if (current.closed) return;
+      const result = await callTool({ name: 'timer_list', arguments: {} }, true);
+      if (!stillNewest()) return;
       if (result.isError || !isObject(result.structuredContent)) update({ refreshError: toolFailure(result).error.message });
-      else update({ result: boardOf(result.structuredContent), refreshError: null });
+      else update({ result: boardOf(result.structuredContent), toolError: null, refreshError: null });
     } catch (error) {
-      if (!current.closed) update({ refreshError: error instanceof Error ? error.message : String(error) });
+      if (stillNewest()) update({ refreshError: error instanceof Error ? error.message : String(error) });
     } finally {
       refreshing = false;
     }
@@ -232,13 +274,14 @@ export function createBridge({ host, view, appInfo, setInterval: every = globalT
     update({ theme: context.theme === 'light' || context.theme === 'dark' ? context.theme : null });
   }
 
-  /** The tool result the host passed: the board's first `result`, or the error it reports. */
+  /** The tool result the host passed: the board's `result`, or the error it reports in place of the board. */
   function takeToolResult(params: unknown) {
     if (!isObject(params)) return;
+    generation += 1;
     const result = params as CallToolResult;
-    if (result.isError) update({ toolError: toolFailure(result).error.message });
+    if (result.isError) update({ result: null, toolError: toolFailure(result).error.message });
     else if (isObject(result.structuredContent)) update({ result: boardOf(result.structuredContent), toolError: null });
-    else update({ toolError: 'The Timer tool returned no structured result.' });
+    else update({ result: null, toolError: 'The Timer tool returned no structured result.' });
   }
 
   function onRequest(id: unknown, method: string) {
@@ -260,6 +303,7 @@ export function createBridge({ host, view, appInfo, setInterval: every = globalT
     const waiting = typeof message.id === 'number' ? pending.get(message.id) : undefined;
     if (!waiting) return;
     pending.delete(message.id as number);
+    if (waiting.deadline !== null) cancel(waiting.deadline);
     if ('error' in message) {
       const error = message.error;
       waiting.reject(new Error(isObject(error) && typeof error.message === 'string' ? error.message : 'The host refused the request.'));
@@ -295,7 +339,10 @@ export function createBridge({ host, view, appInfo, setInterval: every = globalT
     view.removeEventListener('message', listener);
     update({ closed: true });
     schedule();
-    for (const waiting of pending.values()) waiting.reject(new Error('The host closed the Timer view.'));
+    for (const waiting of pending.values()) {
+      if (waiting.deadline !== null) cancel(waiting.deadline);
+      waiting.reject(new Error('The host closed the Timer view.'));
+    }
     pending.clear();
   }
 
@@ -309,7 +356,7 @@ export function createBridge({ host, view, appInfo, setInterval: every = globalT
         // The form's input has no tool equivalent; the board shows it as the action's failure.
         return { error: { code: 'invalid_input', message: error.message, issues: [{ path: error.path, message: error.message }] } };
       }
-      return operationResult(operation, input, await callTool(call));
+      return operationResult(operation, input, await callTool(call, READS.has(operation)));
     }
   };
 
