@@ -223,8 +223,9 @@
     display: grid;
     gap: 12px;
   }
+  /* The system's dark scheme, unless the host sets data-theme="light" on the page's root element. */
   @media (prefers-color-scheme: dark) {
-    .board {
+    :global(:root:not([data-theme='light'])) .board {
       --timer-bg: #121418;
       --timer-surface: #1c1f25;
       --timer-border: #343943;
@@ -237,6 +238,20 @@
       --phase-rest: #4ade80;
       --phase-cooldown: #93c5fd;
     }
+  }
+  /* A host that sets data-theme="dark" (the MCP App, from the host's theme) gets it whatever the system's. */
+  :global(:root[data-theme='dark']) .board {
+    --timer-bg: #121418;
+    --timer-surface: #1c1f25;
+    --timer-border: #343943;
+    --timer-text: #eceef2;
+    --timer-muted: #a3aab6;
+    --timer-accent: #7aa2ff;
+    --timer-danger: #ff8a80;
+    --phase-prep: #f2c14e;
+    --phase-work: #fb923c;
+    --phase-rest: #4ade80;
+    --phase-cooldown: #93c5fd;
   }
   .compact {
     padding: 8px;

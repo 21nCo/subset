@@ -6,6 +6,7 @@ import { TIMER_LIMITS, TIMER_SCHEMA_VERSION, schemas, timerLine } from '@subset/
 import { presetLine } from '../commands/presets.mjs';
 import { CliError, call, endsAt, findPreset, formatLocalTime, resolveName } from '../commands/shared.mjs';
 import { DurationError, parseUntil } from '../parse-duration.mjs';
+import { BOARD_TOOLS, boardToolMetadata } from './app.mjs';
 
 const { $schema: _dialect, ...SAVE_INPUT } = schemas.inputs['presets.save'];
 const TIMER_ID = schemas.inputs.get.properties.id;
@@ -61,15 +62,19 @@ const PRESET_REF_INPUT = objectSchema({
   id: { ...PRESET_ID, description: 'The id of a saved preset, such as p_ab12cd34.' },
   name: { ...NAME, description: 'The preset name, matched ignoring case; it must name one preset.' }
 });
-const START_MODES = ['preset', 'durationSeconds', 'until', 'stopwatch', 'interval'];
+const START_MODES = ['preset', 'durationSeconds', 'until', 'stopwatch', 'interval', 'id'];
+const NEW_TIMER_FIELDS = ['name', 'sound', 'laps', 'ticks'];
 const START_INPUT = objectSchema({
   preset: { type: 'string', minLength: 1, maxLength: TIMER_LIMITS.nameLength, description: 'A preset id or name: tabata, emom, hiit (hiit-40-20), pomodoro, amrap, or a saved preset (see timer_presets).' },
   durationSeconds: seconds('A countdown of this many seconds (1 second to 24 hours).'),
   until: { type: 'string', minLength: 1, maxLength: 40, description: 'A countdown to a local time of day, HH:MM or HH:MM:SS (the next one), or an ISO 8601 time with an offset, 1 second to 24 hours ahead.' },
   stopwatch: { type: 'boolean', const: true, description: 'true for a stopwatch that counts up with laps.' },
   interval: INTERVAL_INPUT,
+  id: { ...TIMER_ID, description: 'The id of an idle timer (one that was reset) to start; it keeps its name and settings.' },
   name: { ...NAME, description: 'A name for the new timer.' },
-  sound: { type: 'boolean', description: 'false to play no sounds for it; notifications still show.' }
+  sound: { type: 'boolean', description: 'false to play no sounds for it; notifications still show.' },
+  laps: { type: 'boolean', description: 'With durationSeconds or until: true to let the countdown record laps.' },
+  ticks: { type: 'boolean', description: 'Tick in the last 3 seconds of each step or countdown; on by default only for interval timers.' }
 });
 const SAVE_PRESET_INPUT = objectSchema({
   name: { ...NAME, description: 'The preset name.' },
@@ -208,23 +213,30 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
 
   async function startInput(args) {
     const mode = exactlyOne(args, START_MODES, 'timer_start');
+    if (mode === 'id') {
+      const extra = NEW_TIMER_FIELDS.find((key) => args[key] !== undefined);
+      if (extra) throw invalid(`${extra} applies only to a new timer; id starts an existing one as it is.`, extra);
+      return { id: args.id };
+    }
+    if (args.laps !== undefined && mode !== 'durationSeconds' && mode !== 'until') throw invalid('laps applies only to a countdown (durationSeconds or until).', 'laps');
     const name = args.name === undefined ? {} : { name: args.name };
-    const sound = args.sound === undefined ? {} : { sound: args.sound };
-    if (mode === 'durationSeconds') return { timer: { kind: 'countdown', durationMs: args.durationSeconds * 1_000, ...sound }, ...name };
-    if (mode === 'stopwatch') return { timer: { kind: 'stopwatch', ...sound }, ...name };
-    if (mode === 'interval') return { timer: { ...intervalSpec(args.interval, 'interval.', 'interval'), ...sound }, ...name };
+    const settings = { ...(args.sound === undefined ? {} : { sound: args.sound }), ...(args.ticks === undefined ? {} : { countdownTicks: args.ticks }) };
+    const countdown = { kind: 'countdown', ...(args.laps === undefined ? {} : { lapsEnabled: args.laps }), ...settings };
+    if (mode === 'durationSeconds') return { timer: { ...countdown, durationMs: args.durationSeconds * 1_000 }, ...name };
+    if (mode === 'stopwatch') return { timer: { kind: 'stopwatch', ...settings }, ...name };
+    if (mode === 'interval') return { timer: { ...intervalSpec(args.interval, 'interval.', 'interval'), ...settings }, ...name };
     if (mode === 'until') {
       try {
-        return { timer: { kind: 'countdown', until: parseUntil(args.until, now()), ...sound }, ...name };
+        return { timer: { ...countdown, until: parseUntil(args.until, now()) }, ...name };
       } catch (error) {
         if (error instanceof DurationError) throw invalid(`until: ${error.message}`, 'until');
         throw error;
       }
     }
     const preset = await resolvePreset(args.preset);
-    // The start input names a preset only by id; to set its sound, send the preset's timer.
-    if (args.sound === undefined) return { preset: preset.id, ...name };
-    return { timer: { ...preset.timer, name: preset.timer.name ?? preset.name, sound: args.sound }, ...name };
+    // The start input names a preset only by id; to set its sound or ticks, send the preset's timer.
+    if (!Object.keys(settings).length) return { preset: preset.id, ...name };
+    return { timer: { ...preset.timer, name: preset.timer.name ?? preset.name, ...settings }, ...name };
   }
 
   /** A write on one timer by id: the operation, then the board. */
@@ -272,7 +284,7 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
     {
       name: 'timer_start',
       title: 'Start a timer',
-      description: `Create and start a timer from exactly one of: preset, durationSeconds (a countdown), until (a countdown to a time), stopwatch: true, or interval (work and rest rounds). Optional name and sound. ${LOCAL} ${REPORT}`,
+      description: `Create and start a timer from exactly one of: preset, durationSeconds (a countdown), until (a countdown to a time), stopwatch: true, or interval (work and rest rounds), with optional name, sound, laps and ticks; or start an idle timer by id. ${LOCAL} ${REPORT}`,
       inputSchema: START_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       async handler(args) {
@@ -349,6 +361,8 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
 
   return definitions.map((definition) => ({
     ...definition,
+    // In hosts with MCP Apps, these results open the board view (SET-80); the others return no view.
+    ...(BOARD_TOOLS.includes(definition.name) ? { metadata: boardToolMetadata() } : {}),
     async handler(args) {
       try {
         return await definition.handler(args);

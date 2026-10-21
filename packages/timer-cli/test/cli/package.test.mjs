@@ -23,7 +23,7 @@ function cli(dataDir, ...argv) {
 test('the manifest is ready to publish as @subset.dev/timer 0.1.0 with the subset-timer bin', () => {
   assert.deepEqual(
     { name: manifest.name, version: manifest.version, private: manifest.private, bin: manifest.bin, files: manifest.files, engines: manifest.engines },
-    { name: '@subset.dev/timer', version: '0.1.0', private: false, bin: { 'subset-timer': 'dist/cli.mjs' }, files: ['dist', 'web', 'skills', 'README.md'], engines: { node: '>=22.13' } }
+    { name: '@subset.dev/timer', version: '0.1.0', private: false, bin: { 'subset-timer': 'dist/cli.mjs' }, files: ['dist', 'web', 'mcp-app', 'skills', 'README.md'], engines: { node: '>=22.13' } }
   );
   // Workspaces are bundled, so nothing installs at runtime.
   assert.equal(manifest.dependencies, undefined);
@@ -64,14 +64,14 @@ test('dist/THIRD_PARTY_NOTICES.md carries the licence of every bundled package',
   assert.match(notices, /Redistributions of source code must retain the above copyright\s+notice/);
 });
 
-test('npm pack ships dist/ (the CLI, its MCP server, their common chunk and the third-party notices), the built board, the skill and the README, and no sources or tests', () => {
+test('npm pack ships dist/ (the CLI, its MCP server, their common chunk and the third-party notices), the built board and its MCP App view, the skill and the README, and no sources or tests', () => {
   // prepack's check accepts the bundle it built (it throws, failing the test, when it refuses).
   execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--check'], { encoding: 'utf8' });
   const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: PACKAGE_ROOT, encoding: 'utf8' }));
   const files = packed.files.map((file) => file.path).sort();
   // The board's assets have hashed names.
   const web = files.filter((file) => file.startsWith('web/'));
-  assert.deepEqual(files.filter((file) => !file.startsWith('web/')), ['README.md', 'dist/THIRD_PARTY_NOTICES.md', 'dist/cli.mjs', 'dist/common.mjs', 'dist/mcp-server.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
+  assert.deepEqual(files.filter((file) => !file.startsWith('web/')), ['README.md', 'dist/THIRD_PARTY_NOTICES.md', 'dist/cli.mjs', 'dist/common.mjs', 'dist/mcp-server.mjs', 'mcp-app/board.html', 'package.json', 'skills/subset-timer/SKILL.md']);
   assert.ok(web.includes('web/index.html') && web.includes('web/favicon.svg'), web.join(', '));
   assert.ok(web.every((file) => /^web\/(?:index\.html|favicon\.svg|assets\/index-[\w-]+\.(?:js|css))$/.test(file)), web.join(', '));
   assert.equal(packed.name, '@subset.dev/timer');

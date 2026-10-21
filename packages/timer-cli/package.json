@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "web",
+    "mcp-app",
     "skills",
     "README.md"
   ],
@@ -39,6 +40,7 @@
     "@mcpfn/core": "0.0.5",
     "@mcpfn/testing": "0.0.5",
     "@subset/timer": "*",
-    "rolldown": "1.2.11"
+    "rolldown": "1.2.11",
+    "svelte": "^5.57.1"
   }
 }
