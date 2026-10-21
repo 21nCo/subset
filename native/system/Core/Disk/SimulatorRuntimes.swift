@@ -14,8 +14,9 @@ public enum SimulatorRuntimes: Equatable, Sendable {
 
     /// Reads the runtime disk images CoreSimulator registers (`runtimeInfo.bundleIdentifier` of each entry in
     /// `images.plist`) and the runtime bundles installed as folders: in `runtimesFolder` and in the runtime volumes
-    /// mounted under `volumesFolder`. A missing file or folder adds none; an `images.plist` that cannot be read or
-    /// parsed makes the list unknown.
+    /// mounted under `volumesFolder`. A missing file or folder adds none; one that exists but cannot be read or parsed,
+    /// a runtime bundle without a readable identifier included, makes the list unknown, since a runtime it would name
+    /// may be installed.
     public static func read(imagesPlist: String = imagesPlist, runtimesFolder: String = runtimesFolder,
                             volumesFolder: String = volumesFolder) -> SimulatorRuntimes {
         var found: Set<String> = []
@@ -35,18 +36,47 @@ public enum SimulatorRuntimes: Equatable, Sendable {
             return .unknown("\(imagesPlist) could not be read: \(failure.message).")
         }
         var folders = [runtimesFolder]
-        for volume in InstalledApps.listing(volumesFolder) where !volume.hasPrefix(".") {
-            folders.append(volumesFolder + "/" + volume + "/Library/Developer/CoreSimulator/Profiles/Runtimes")
+        switch listing(volumesFolder) {
+        case let .success(volumes):
+            for volume in volumes where !volume.hasPrefix(".") {
+                folders.append(volumesFolder + "/" + volume + "/Library/Developer/CoreSimulator/Profiles/Runtimes")
+            }
+        case let .failure(failure):
+            return .unknown("\(volumesFolder) could not be read: \(failure.message).")
         }
         for folder in folders {
-            for bundle in InstalledApps.listing(folder) where bundle.hasSuffix(".simruntime") {
-                if case let .success(info) = PropertyListFile.read(folder + "/" + bundle + "/Contents/Info.plist"),
-                   let id = info["CFBundleIdentifier"] as? String {
+            let bundles: [String]
+            switch listing(folder) {
+            case let .success(names): bundles = names.filter { $0.hasSuffix(".simruntime") }
+            case let .failure(failure): return .unknown("\(folder) could not be read: \(failure.message).")
+            }
+            for bundle in bundles {
+                let plist = folder + "/" + bundle + "/Contents/Info.plist"
+                switch PropertyListFile.read(plist) {
+                case let .success(info):
+                    guard let id = info["CFBundleIdentifier"] as? String, !id.isEmpty else {
+                        return .unknown("\(plist) has no bundle identifier.")
+                    }
                     found.insert(id)
+                case let .failure(failure):
+                    return .unknown("\(plist) could not be read: \(failure.message).")
                 }
             }
         }
         return .installed(found)
+    }
+
+    /// The names in a folder; none when it does not exist.
+    static func listing(_ path: String) -> Result<[String], PropertyListFile.Failure> {
+        do {
+            return .success(try FileManager.default.contentsOfDirectory(atPath: path).sorted())
+        } catch let error as NSError {
+            let posix = (error.userInfo[NSUnderlyingErrorKey] as? NSError).flatMap { $0.domain == NSPOSIXErrorDomain ? $0.code : nil }
+            if error.domain == NSCocoaErrorDomain, error.code == NSFileReadNoSuchFileError || posix == Int(ENOENT) || posix == Int(ENOTDIR) {
+                return .success([])
+            }
+            return .failure(.unreadable(posix.map { String(cString: strerror(Int32($0))) } ?? error.localizedDescription))
+        }
     }
 
     /// The runtime of the simulator device in `folder` (`runtime` in its `device.plist`), or `nil` when unreadable.

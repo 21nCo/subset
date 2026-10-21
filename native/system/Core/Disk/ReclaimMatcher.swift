@@ -51,18 +51,25 @@ public enum ReclaimBytes: Equatable, Sendable {
     /// each), `allocated` the space they use. `complete` is false when an item's size is unknown or a lower bound,
     /// which makes both sums lower bounds.
     case scanned(private: UInt64, allocated: UInt64, complete: Bool)
-    /// The image space `docker system df` reports as reclaimable inside the VM and the space all images use.
-    /// `docker image prune -f` removes only dangling images, so it may free less than `reclaimable`.
-    case dockerReclaimable(UInt64, total: UInt64?)
+    /// The image space `docker system df` reports as reclaimable inside the VM and the space all images use. It
+    /// counts every image no container uses, while `docker image prune -f` removes only dangling ones, so it is an
+    /// upper bound of what the rule's cleanup frees, never that amount.
+    case dockerReclaimable(upTo: UInt64, total: UInt64?)
     case unavailable(String)
 
-    /// The bytes shown for the match: the private sum, or Docker's reclaimable figure.
+    /// The bytes the match's cleanup frees at least: the private sum. `nil` when unknown or known only as an upper
+    /// bound (Docker's, in `upperBound`).
     public var bytes: UInt64? {
         switch self {
         case let .scanned(privateBytes, _, _): privateBytes
-        case let .dockerReclaimable(bytes, _): bytes
-        case .unavailable: nil
+        case .dockerReclaimable, .unavailable: nil
         }
+    }
+
+    /// The most the cleanup may free, when only that is known (Docker's reclaimable image space).
+    public var upperBound: UInt64? {
+        if case let .dockerReclaimable(bytes, _) = self { return bytes }
+        return nil
     }
 }
 
@@ -87,9 +94,11 @@ public enum ReclaimMatcher {
     /// Flags that make an item's sizes unknown or a lower bound.
     static let lowerBoundFlags: DiskItemFlags = [.unreadable, .partial, .incomplete]
 
-    /// Every match in catalog order. A rule whose folders the tree does not hold has none; a folder that could not be
-    /// read gives a match with unavailable bytes. `origins` are the Library entries `DiskOrigins.entries` attributed,
-    /// which the App caches and App leftovers rules use.
+    /// Every match in catalog order. A rule whose folders the tree does not hold, under folders it read in full, has
+    /// none. Every folder a rule searches, and the folders above its rule folders, must have been read in full:
+    /// otherwise (unreadable, cancelled, replaced, another volume) what the rule found is incomplete, and with
+    /// nothing found the match has unavailable bytes and no items. `origins` are the Library entries
+    /// `DiskOrigins.entries` attributed, which the App caches and App leftovers rules use.
     public static func matches(in tree: DiskTree, origins: [DiskOriginEntry], context: ReclaimContext) -> [ReclaimMatch] {
         var matcher = Matching(tree: tree, context: context)
         for rule in ReclaimRules.all {
@@ -110,16 +119,10 @@ public enum ReclaimMatcher {
                 matcher.docker(rule)
             case .appCaches:
                 let caches = origins.filter { $0.folder == .caches && $0.rule == .bundleID && $0.app != nil }
-                for group in Dictionary(grouping: caches, by: { $0.app!.path }).sorted(by: { $0.key < $1.key }) {
-                    matcher.add(rule, items: group.value.map { matcher.item($0.index, path: $0.path, root: matcher.homePath($0.folder.homePath)) },
-                                app: group.value[0].app)
-                }
+                matcher.entries(rule, caches, by: { $0.app!.path }, app: { $0.app })
             case .appLeftovers:
                 let leftovers = origins.filter { $0.rule == .leftover }
-                for group in Dictionary(grouping: leftovers, by: { $0.identifier.lowercased() }).sorted(by: { $0.key < $1.key }) {
-                    matcher.add(rule, items: group.value.map { matcher.item($0.index, path: $0.path, root: matcher.homePath($0.folder.homePath)) },
-                                identifier: group.value[0].identifier)
-                }
+                matcher.entries(rule, leftovers, by: { $0.identifier.lowercased() }, identifier: { $0.identifier })
             case .deviceBackups:
                 matcher.contents(of: rule.homePaths[0], rule: rule)
             case .oldInstallers:
@@ -153,15 +156,20 @@ private struct Matching {
         tree.children(of: index).map { item($0.index, path: path + "/" + $0.name, root: path) }
     }
 
-    /// Adds a match for `items`, summing their scanned sizes; no items, no match. `complete` is false when something
-    /// the rule would count could not be judged.
-    mutating func add(_ rule: ReclaimRule, items: [ReclaimItem], app: InstalledApp? = nil, identifier: String? = nil,
-                      complete judged: Bool = true) {
-        guard !items.isEmpty else { return }
+    /// Adds a match for `items`, summing their scanned sizes. `unjudged` says what the rule could not search or judge
+    /// (a folder not read in full, a device whose runtime is unknown), which makes the sums incomplete, and with no
+    /// items gives a match with unavailable bytes; with neither, no match.
+    mutating func add(_ rule: ReclaimRule, items: [ReclaimItem], unjudged: [String] = [], app: InstalledApp? = nil,
+                      identifier: String? = nil) {
+        if items.isEmpty {
+            guard let first = unjudged.first else { return }
+            let reason = unjudged.count == 1 ? first : "\(first) \(unjudged.count - 1) more places could not be searched in full."
+            return append(rule, bytes: .unavailable(reason))
+        }
         let sorted = items.sorted { $0.path < $1.path }
         var privateBytes: UInt64 = 0
         var allocated: UInt64 = 0
-        var complete = judged
+        var complete = unjudged.isEmpty
         var measured = false
         for item in sorted {
             guard let sizes = item.sizes else {
@@ -179,89 +187,128 @@ private struct Matching {
         matches.append(ReclaimMatch(rule: rule, app: app, identifier: identifier, items: sorted, bytes: bytes))
     }
 
-    /// A folder the tree holds but could not read, so its contents are unknown.
-    mutating func unreadable(_ rule: ReclaimRule, path: String) {
-        matches.append(ReclaimMatch(rule: rule, app: nil, identifier: nil, items: [],
-                                    bytes: .unavailable("\(path) could not be read.")))
+    mutating func append(_ rule: ReclaimRule, bytes: ReclaimBytes) {
+        matches.append(ReclaimMatch(rule: rule, app: nil, identifier: nil, items: [], bytes: bytes))
+    }
+
+    /// One match per group of `entries` (an app's caches, one identifier's leftovers). The Library folders the
+    /// entries come from must have been listed in full: otherwise every match is incomplete, since any app may have
+    /// had an entry there, and without one the rule's match is unavailable.
+    mutating func entries(_ rule: ReclaimRule, _ entries: [DiskOriginEntry], by key: (DiskOriginEntry) -> String,
+                          app: (DiskOriginEntry) -> InstalledApp? = { _ in nil },
+                          identifier: (DiskOriginEntry) -> String? = { _ in nil }) {
+        var unjudged: [String] = []
+        for relative in rule.homePaths {
+            switch tree.locate(homePath(relative)) {
+            case let .found(index): if let reason = tree.unlisted(index) { unjudged.append(reason) }
+            case let .unknown(reason): unjudged.append(reason)
+            case .absent: break
+            }
+        }
+        let groups = Dictionary(grouping: entries, by: key).sorted { $0.key < $1.key }
+        if groups.isEmpty { return add(rule, items: [], unjudged: unjudged) }
+        for group in groups {
+            add(rule, items: group.value.map { item($0.index, path: $0.path, root: homePath($0.folder.homePath)) },
+                unjudged: unjudged, app: app(group.value[0]), identifier: identifier(group.value[0]))
+        }
     }
 
     /// The folder's contents, each an item; the folder itself stays.
     mutating func contents(of relative: String, rule: ReclaimRule) {
         let path = homePath(relative)
-        guard let index = tree.index(atPath: path) else { return }
-        if tree[index].sizes == nil { return unreadable(rule, path: path) }
-        add(rule, items: children(of: index, path: path))
+        switch tree.locate(path) {
+        case .absent: return
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case let .found(index): add(rule, items: children(of: index, path: path), unjudged: tree.unlisted(index).map { [$0] } ?? [])
+        }
     }
 
     /// The rule's folders themselves, for a tool command that cleans them or for information.
     mutating func folders(_ rule: ReclaimRule) {
         var items: [ReclaimItem] = []
+        var unjudged: [String] = []
         for relative in rule.homePaths {
             let path = homePath(relative)
-            guard let index = tree.index(atPath: path) else { continue }
-            items.append(item(index, path: path, root: (path as NSString).deletingLastPathComponent))
+            switch tree.locate(path) {
+            case .absent: continue
+            case let .unknown(reason): unjudged.append(reason)
+            case let .found(index): items.append(item(index, path: path, root: (path as NSString).deletingLastPathComponent))
+            }
         }
-        add(rule, items: items)
+        add(rule, items: items, unjudged: unjudged)
     }
 
     /// The contents of each `* DeviceSupport` folder in `~/Library/Developer/Xcode`, one OS version each.
     mutating func deviceSupport(_ rule: ReclaimRule) {
         let xcode = homePath(rule.homePaths[0])
-        guard let index = tree.index(atPath: xcode) else { return }
-        var items: [ReclaimItem] = []
-        for child in tree.children(of: index) where child.kind == .directory && child.name.hasSuffix(" DeviceSupport") {
-            let path = xcode + "/" + child.name
-            if child.sizes == nil { unreadable(rule, path: path); continue }
-            items += children(of: child.index, path: path)
+        let index: Int
+        switch tree.locate(xcode) {
+        case .absent: return
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case let .found(found): index = found
         }
-        add(rule, items: items)
+        var items: [ReclaimItem] = []
+        var unjudged = tree.unlisted(index).map { [$0] } ?? []
+        for child in tree.children(of: index) where child.kind == .directory && child.name.hasSuffix(" DeviceSupport") {
+            if let reason = tree.unlisted(child.index) { unjudged.append(reason) }
+            items += children(of: child.index, path: xcode + "/" + child.name)
+        }
+        add(rule, items: items, unjudged: unjudged)
     }
 
     /// Simulator device folders whose `device.plist` names a runtime that is not installed. A device whose plist cannot
     /// be read is not counted and makes the sum incomplete; an unknown runtime list measures nothing.
     mutating func unavailableSimulators(_ rule: ReclaimRule) {
         let path = homePath(rule.homePaths[0])
-        guard let index = tree.index(atPath: path) else { return }
-        if tree[index].sizes == nil { return unreadable(rule, path: path) }
+        let index: Int
+        switch tree.locate(path) {
+        case .absent: return
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case let .found(found): index = found
+        }
+        var unjudged = tree.unlisted(index).map { [$0] } ?? []
         let devices = tree.children(of: index).filter { $0.kind == .directory }
-        guard !devices.isEmpty else { return }
+        guard !devices.isEmpty else { return add(rule, items: [], unjudged: unjudged) }
         let installed: Set<String>
         switch context.simulatorRuntimes {
         case let .installed(found): installed = found
-        case let .unknown(reason):
-            matches.append(ReclaimMatch(rule: rule, app: nil, identifier: nil, items: [], bytes: .unavailable(reason)))
-            return
+        case let .unknown(reason): return append(rule, bytes: .unavailable(reason))
         }
         var items: [ReclaimItem] = []
-        var unknownDevices = 0
         for device in devices {
             let devicePath = path + "/" + device.name
             guard let runtime = SimulatorRuntimes.runtime(ofDevice: devicePath) else {
-                unknownDevices += 1
+                unjudged.append("\(devicePath)/device.plist could not be read.")
                 continue
             }
             if !installed.contains(runtime) { items.append(item(device.index, path: devicePath, root: path)) }
         }
-        add(rule, items: items, complete: unknownDevices == 0)
+        add(rule, items: items, unjudged: unjudged)
     }
 
     /// Each `.xcarchive` in Archives, directly or in a date folder.
     mutating func archives(_ rule: ReclaimRule) {
         let path = homePath(rule.homePaths[0])
-        guard let index = tree.index(atPath: path) else { return }
-        if tree[index].sizes == nil { return unreadable(rule, path: path) }
+        let index: Int
+        switch tree.locate(path) {
+        case .absent: return
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case let .found(found): index = found
+        }
         var items: [ReclaimItem] = []
+        var unjudged = tree.unlisted(index).map { [$0] } ?? []
         for child in tree.children(of: index) {
             let childPath = path + "/" + child.name
             if child.name.hasSuffix(".xcarchive") {
                 items.append(item(child.index, path: childPath, root: path))
-            } else if child.kind == .directory {
+            } else if child.kind == .directory || child.kind == .mountPoint {
+                if let reason = tree.unlisted(child.index) { unjudged.append(reason) }
                 for inner in tree.children(of: child.index) where inner.name.hasSuffix(".xcarchive") {
                     items.append(item(inner.index, path: childPath + "/" + inner.name, root: path))
                 }
             }
         }
-        add(rule, items: items)
+        add(rule, items: items, unjudged: unjudged)
     }
 
     /// `node_modules` folders in project folders (one holding `package.json`) under the home folder, outside
@@ -270,16 +317,21 @@ private struct Matching {
     mutating func staleNodeModules(_ rule: ReclaimRule) {
         guard let (start, startPath) = homeWalkStart() else { return }
         var items: [ReclaimItem] = []
+        var unjudged: [String] = []
         var stack = [(start, startPath)]
         while let (index, path) = stack.popLast() {
+            if let reason = tree.unlisted(index) { unjudged.append(reason) }
             let children = tree.children(of: index)
-            for child in children where child.kind == .directory {
+            for child in children where child.kind == .directory || child.kind == .mountPoint {
                 let childPath = path + "/" + child.name
                 if child.name.hasPrefix(".") || childPath == homePath("Library") { continue }
-                if child.name == "node_modules" {
-                    if children.contains(where: { $0.name == "package.json" && $0.kind == .file }),
-                       let newest = newestTouch(inProject: index),
-                       context.now.timeIntervalSince(newest) > ReclaimRules.staleNodeModulesAge {
+                if child.name == "node_modules", child.kind == .directory {
+                    guard children.contains(where: { $0.name == "package.json" && $0.kind == .file }) else { continue }
+                    guard let newest = newestTouch(inProject: index) else {
+                        unjudged.append("\(path) was not read in full, so its last change is unknown.")
+                        continue
+                    }
+                    if context.now.timeIntervalSince(newest) > ReclaimRules.staleNodeModulesAge {
                         items.append(item(child.index, path: childPath, root: path))
                     }
                     continue
@@ -287,7 +339,7 @@ private struct Matching {
                 stack.append((child.index, childPath))
             }
         }
-        add(rule, items: items)
+        add(rule, items: items, unjudged: unjudged)
     }
 
     /// The tree item to search from for data under the home folder, and its path: the home folder, or the scanned root
@@ -322,27 +374,37 @@ private struct Matching {
     }
 
     /// `.dmg` and `.pkg` files and packages anywhere in Downloads untouched for longer than
-    /// `ReclaimRules.oldInstallerAge`. One whose time is unknown is left out.
+    /// `ReclaimRules.oldInstallerAge`. One whose time is unknown is left out and makes the sum incomplete.
     mutating func oldInstallers(_ rule: ReclaimRule) {
         let root = homePath(rule.homePaths[0])
-        guard let start = tree.index(atPath: root) else { return }
-        if tree[start].sizes == nil { return unreadable(rule, path: root) }
+        let start: Int
+        switch tree.locate(root) {
+        case .absent: return
+        case let .unknown(reason): return add(rule, items: [], unjudged: [reason])
+        case let .found(found): start = found
+        }
         var items: [ReclaimItem] = []
+        var unjudged: [String] = []
         var stack = [(start, root)]
         while let (index, path) = stack.popLast() {
+            if let reason = tree.unlisted(index) { unjudged.append(reason) }
             for child in tree.children(of: index) {
                 let childPath = path + "/" + child.name
                 let suffix = (child.name as NSString).pathExtension.lowercased()
                 if child.kind == .file || child.kind == .package, suffix == "dmg" || suffix == "pkg" {
-                    if let touched = child.touched, context.now.timeIntervalSince(touched) > ReclaimRules.oldInstallerAge {
+                    guard let touched = child.touched else {
+                        unjudged.append("\(childPath) has no modification time.")
+                        continue
+                    }
+                    if context.now.timeIntervalSince(touched) > ReclaimRules.oldInstallerAge {
                         items.append(item(child.index, path: childPath, root: root))
                     }
-                } else if child.kind == .directory {
+                } else if child.kind == .directory || child.kind == .mountPoint {
                     stack.append((child.index, childPath))
                 }
             }
         }
-        add(rule, items: items)
+        add(rule, items: items, unjudged: unjudged)
     }
 
     mutating func docker(_ rule: ReclaimRule) {
@@ -350,11 +412,58 @@ private struct Matching {
         let bytes: ReclaimBytes
         switch usage {
         case let .reported(space, _):
-            bytes = space.reclaimable.map { .dockerReclaimable($0, total: space.size) }
+            bytes = space.reclaimable.map { .dockerReclaimable(upTo: $0, total: space.size) }
                 ?? .unavailable("docker system df did not report reclaimable image space.")
         case let .unavailable(reason):
             bytes = .unavailable(reason.reason)
         }
-        matches.append(ReclaimMatch(rule: rule, app: nil, identifier: nil, items: [], bytes: bytes))
+        append(rule, bytes: bytes)
+    }
+}
+
+/// The coverage every reclaim rule and the By origin groups share: whether a folder's entries are all listed.
+extension DiskTree {
+    /// Why the folder's listing is not complete, so that it may hold more than the tree lists; `nil` when it was read in
+    /// full. Its contents' own sizes do not matter here, only whether every entry in it is listed.
+    func unlisted(_ index: Int) -> String? {
+        let item = self[index]
+        let path = path(of: index)
+        if item.flags.contains(.unreadable) { return "\(path) could not be read." }
+        if item.flags.contains(.partial) { return "\(path) was not read in full." }
+        switch item.kind {
+        case .directory:
+            // A folder is flagged incomplete when something inside could not be read, or when it was not read at all
+            // (replaced before it was opened); only the latter lists nothing.
+            return item.flags.contains(.incomplete) && item.children.isEmpty ? "\(path) was not read." : nil
+        case .mountPoint:
+            return "\(path) is another volume, which was not scanned."
+        case .file, .package, .symlink, .other:
+            return nil
+        }
+    }
+
+    enum Location {
+        case found(Int)
+        /// The tree holds the folders above it in full, without it, or the scan did not include it.
+        case absent
+        /// A folder above it was not read in full.
+        case unknown(String)
+    }
+
+    /// Finds the item at `path`. A missing item is absent only when the folder that would hold it was read in full.
+    func locate(_ path: String) -> Location {
+        let base = rootPath == "/" ? "/" : rootPath + "/"
+        guard path == rootPath || path.hasPrefix(base) else { return .absent }
+        var current = 0
+        for component in path.dropFirst(min(path.count, base.count)).split(separator: "/") {
+            if let next = self[current].children.first(where: { name(of: $0) == component }) {
+                current = next
+                continue
+            }
+            guard self[current].kind == .directory || self[current].kind == .mountPoint,
+                  let reason = unlisted(current) else { return .absent }
+            return .unknown(reason)
+        }
+        return .found(current)
     }
 }

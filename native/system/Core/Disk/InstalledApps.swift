@@ -15,13 +15,19 @@ public struct InstalledApp: Equatable, Sendable {
     public let names: [String]
     /// The outer bundle's code signature, or `nil` when it could not be read.
     public let signature: CodeSignature?
+    /// The app groups the bundle's own signature declares (`com.apple.security.application-groups`), whose containers
+    /// in `~/Library/Group Containers` are its data whatever they are called; `nil` when its entitlements could not be
+    /// read.
+    public let appGroups: [String]?
 
-    public init(path: String, bundleID: String, name: String, names: [String] = [], signature: CodeSignature?) {
+    public init(path: String, bundleID: String, name: String, names: [String] = [], signature: CodeSignature?,
+                appGroups: [String]? = []) {
         self.path = path
         self.bundleID = bundleID
         self.name = name
         self.names = names.isEmpty ? [name] : names
         self.signature = signature
+        self.appGroups = appGroups
     }
 
     /// The vendor this app's data belongs to, as the Vendor layer places a process: Apple for a platform binary, the
@@ -34,13 +40,29 @@ public struct InstalledApp: Equatable, Sendable {
     }
 }
 
-/// The installed apps entries are matched against, with lookups by bundle ID, name, and Team ID. Tests inject the
-/// list; `read()` builds it from the app folders.
+/// What a bundle's signature says: who signed it and the app groups it declares.
+public struct AppSigning: Equatable, Sendable {
+    /// `nil` when the signature could not be read.
+    public let signature: CodeSignature?
+    /// `nil` when the entitlements could not be read.
+    public let appGroups: [String]?
+
+    public init(signature: CodeSignature?, appGroups: [String]?) {
+        self.signature = signature
+        self.appGroups = appGroups
+    }
+}
+
+/// The installed apps entries are matched against, with lookups by bundle ID, name, Team ID, and app group. Tests
+/// inject the list; `read()` builds it from the app folders.
 public struct InstalledApps: Sendable {
     public let apps: [InstalledApp]
+    /// Every app's signature and entitlements were read, so a Team ID or app group no app has is no installed app's.
+    public let signingComplete: Bool
     private let byBundleID: [String: InstalledApp]
     private let byName: [String: [InstalledApp]]
     private let byTeam: [String: [InstalledApp]]
+    private let byGroup: [String: [InstalledApp]]
 
     public init(_ apps: [InstalledApp]) {
         // Ordered by path so that two copies of one app (two Xcode versions) resolve the same way every time.
@@ -49,25 +71,34 @@ public struct InstalledApps: Sendable {
         var byBundleID: [String: InstalledApp] = [:]
         var byName: [String: [InstalledApp]] = [:]
         var byTeam: [String: [InstalledApp]] = [:]
+        var byGroup: [String: [InstalledApp]] = [:]
         for app in sorted {
             if byBundleID[app.bundleID.lowercased()] == nil { byBundleID[app.bundleID.lowercased()] = app }
             for name in Set(app.names.map { $0.lowercased() }) { byName[name, default: []].append(app) }
             if let team = app.signature?.teamID { byTeam[team, default: []].append(app) }
+            for group in Set((app.appGroups ?? []).map { $0.lowercased() }) { byGroup[group, default: []].append(app) }
         }
         self.byBundleID = byBundleID
         self.byName = byName
         self.byTeam = byTeam
+        self.byGroup = byGroup
+        signingComplete = sorted.allSatisfy { $0.signature != nil && $0.appGroups != nil }
     }
 
-    /// The app whose bundle ID is `identifier` or, component by component, its longest prefix
-    /// (`com.google.Chrome.helper` is Chrome's), compared without case as bundle IDs are.
+    /// The app whose bundle ID is `identifier` or, component by component, its longest prefix of two components or
+    /// more (`com.google.Chrome.helper` is Chrome's), compared without case as bundle IDs are.
     public func app(bundleID identifier: String) -> InstalledApp? {
         var candidate = identifier.lowercased()
         while true {
             if let app = byBundleID[candidate] { return app }
-            guard let dot = candidate.lastIndex(of: ".") else { return nil }
+            guard let dot = candidate.lastIndex(of: "."), candidate[..<dot].contains(".") else { return nil }
             candidate = String(candidate[..<dot])
         }
+    }
+
+    /// The apps whose signatures declare the app group `group`, compared without case.
+    public func apps(group: String) -> [InstalledApp] {
+        byGroup[group.lowercased()] ?? []
     }
 
     /// The one app with this name, compared without case; `nil` when no app or several different apps have it.
@@ -90,16 +121,16 @@ public struct InstalledApps: Sendable {
     /// login items and helper apps inside each (`Contents/Library/LoginItems`, `Contents/Helpers`), which keep data
     /// under their own bundle IDs. An app is read from its `Contents/Info.plist`; one without a bundle ID is left out.
     public static func read(folders: [String] = defaultFolders(),
-                            signature: (String) -> CodeSignature? = staticSignature) -> InstalledApps {
+                            signing: (String) -> AppSigning = staticSigning) -> InstalledApps {
         var apps: [InstalledApp] = []
         for folder in folders {
             for entry in listing(folder) {
                 let path = folder + "/" + entry
                 if entry.hasSuffix(".app") {
-                    apps += bundle(at: path, signature: signature)
+                    apps += bundle(at: path, signing: signing)
                 } else if !entry.hasPrefix("."), isDirectory(path) {
                     for inner in listing(path) where inner.hasSuffix(".app") {
-                        apps += bundle(at: path + "/" + inner, signature: signature)
+                        apps += bundle(at: path + "/" + inner, signing: signing)
                     }
                 }
             }
@@ -107,38 +138,61 @@ public struct InstalledApps: Sendable {
         return InstalledApps(apps)
     }
 
-    /// The app at `path` and the login items and helper apps inside it, all owned by it.
-    static func bundle(at path: String, signature: (String) -> CodeSignature?) -> [InstalledApp] {
+    /// The app at `path` and the login items and helper apps inside it, all owned by it and placed under its vendor;
+    /// each declares its own app groups.
+    static func bundle(at path: String, signing: (String) -> AppSigning) -> [InstalledApp] {
         guard let info = infoPlist(path + "/Contents/Info.plist"), let bundleID = info.bundleID else { return [] }
         let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        let owner = InstalledApp(path: path, bundleID: bundleID, name: name, names: [name] + info.names,
-                                 signature: signature(path))
-        var apps = [owner]
+        let signed = signing(path)
+        var apps = [InstalledApp(path: path, bundleID: bundleID, name: name, names: [name] + info.names,
+                                 signature: signed.signature, appGroups: signed.appGroups)]
         for folder in ["/Contents/Library/LoginItems", "/Contents/Helpers"] {
             for inner in listing(path + folder) where inner.hasSuffix(".app") {
-                guard let nested = infoPlist(path + folder + "/" + inner + "/Contents/Info.plist"),
-                      let nestedID = nested.bundleID else { continue }
+                let nestedPath = path + folder + "/" + inner
+                guard let nested = infoPlist(nestedPath + "/Contents/Info.plist"), let nestedID = nested.bundleID
+                else { continue }
                 apps.append(InstalledApp(path: path, bundleID: nestedID, name: name, names: [name],
-                                         signature: owner.signature))
+                                         signature: signed.signature, appGroups: signing(nestedPath).appGroups))
             }
         }
         return apps
     }
 
     /// The Team ID and certificate name of the app's signature, checked against its certificate chain but not its
-    /// files (`kSecCSBasicValidateOnly`), without network access; `nil` when the signature is invalid or unreadable.
-    /// The signing team only groups the app's data, so its resources are not hashed.
-    public static func staticSignature(_ path: String) -> CodeSignature? {
+    /// files (`kSecCSBasicValidateOnly`), without network access, and the app groups it declares; the signature is
+    /// `nil` when invalid or unreadable, and the groups then too. The signing team only groups the app's data, so its
+    /// resources are not hashed.
+    public static func staticSigning(_ path: String) -> AppSigning {
+        let unread = AppSigning(signature: nil, appGroups: nil)
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code
-        else { return nil }
+        else { return unread }
         let validity = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSBasicValidateOnly).union(.noNetworkAccess), nil)
-        if validity == errSecCSUnsigned { return CodeSignature(signingID: nil, teamID: nil, isPlatformBinary: false) }
-        guard validity == errSecSuccess else { return nil }
+        if validity == errSecCSUnsigned {
+            return AppSigning(signature: CodeSignature(signingID: nil, teamID: nil, isPlatformBinary: false), appGroups: [])
+        }
+        guard validity == errSecSuccess else { return unread }
         var information: CFDictionary?
-        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-              let information = information as? [String: Any] else { return nil }
-        return SecCodeSignatureReader.signature(from: information)
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation | kSecCSRequirementInformation)
+        guard SecCodeCopySigningInformation(code, flags, &information) == errSecSuccess,
+              let information = information as? [String: Any] else { return unread }
+        return AppSigning(signature: SecCodeSignatureReader.signature(from: information),
+                          appGroups: appGroups(entitlements: information[kSecCodeInfoEntitlementsDict as String]))
+    }
+
+    /// The groups in an entitlements dictionary: `com.apple.security.application-groups` and its restricted variant,
+    /// which Apple's apps use (Shortcuts declares `group.is.workflow.my.app`). No dictionary declares none; one that
+    /// is not a dictionary, or groups that are not strings, cannot be read.
+    static func appGroups(entitlements: Any?) -> [String]? {
+        guard let entitlements else { return [] }
+        guard let dictionary = entitlements as? [String: Any] else { return nil }
+        var groups: [String] = []
+        for key in ["com.apple.security.application-groups", "com.apple.private.security.restricted-application-groups"] {
+            guard let value = dictionary[key] else { continue }
+            guard let list = value as? [String] else { return nil }
+            groups += list
+        }
+        return groups
     }
 
     /// The bundle ID and names in an `Info.plist` (`PropertyListFile`).

@@ -89,7 +89,7 @@ final class DiskOriginTests: XCTestCase {
         let entries = DiskOrigins.entries(in: tree, home: home, apps: Self.apps)
         let context = ReclaimContext(home: home, installedApps: Self.apps, simulatorRuntimes: .installed([]))
         let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context)
-        let report = DiskOrigins.report(entries: entries, matches: matches, tree: tree, apps: Self.apps)
+        let report = DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: home, apps: Self.apps)
 
         func bytes(_ relative: String) throws -> UInt64 { try ReclaimRulesTests.allocated(under: home + "/" + relative) }
         let editor = try bytes("Library/Application Support/com.example.editor") + bytes("Library/Caches/com.example.editor")
@@ -108,6 +108,104 @@ final class DiskOriginTests: XCTestCase {
         XCTAssertEqual(report.leftovers?.items, [tree.index(atPath: home + "/Library/Containers/com.gone.app")!])
         XCTAssertEqual(report.leftovers?.allocated, try bytes("Library/Containers/com.gone.app"))
         XCTAssertEqual(report.unattributed?.items, [tree.index(atPath: home + "/Library/Logs/DiagnosticReports")!])
+        XCTAssertEqual(report.unlistedFolders, [])
+        XCTAssertFalse(report.developerTools.contains { $0.isLowerBound })
+    }
+
+    func testGroupsAreLowerBoundsWhenAMatchOrALibraryFolderIsIncomplete() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 200_000)
+        try write("Library/Developer/CoreSimulator/Caches/dyld/cache", bytes: 100_000)
+        try write("Library/Caches/Homebrew/downloads/bottle.tar.gz", bytes: 70_000)
+        try write("Library/Application Support/com.example.editor/state.db", bytes: 300_000)
+        try write("Library/Containers/com.example.editor/Data/file", bytes: 4_096)
+        let derivedData = home + "/Library/Developer/Xcode/DerivedData"
+        let containers = home + "/Library/Containers"
+        XCTAssertEqual(chmod(derivedData, 0), 0)
+        XCTAssertEqual(chmod(containers, 0), 0)
+        defer {
+            chmod(derivedData, 0o755)
+            chmod(containers, 0o755)
+        }
+
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let entries = DiskOrigins.entries(in: tree, home: home, apps: Self.apps)
+        let space = try XCTUnwrap(DockerOutput.imageSpace(DockerOutputTests.systemDF))
+        let context = ReclaimContext(home: home, installedApps: Self.apps, simulatorRuntimes: .installed([]),
+                                     dockerImages: .reported(space, observedAt: Date()))
+        let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context)
+        let report = DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: home, apps: Self.apps)
+
+        // DerivedData could not be read, so the Xcode group is at least the simulator caches.
+        let xcode = try XCTUnwrap(report.developerTools.first { $0.name == "Xcode" })
+        XCTAssertTrue(xcode.isLowerBound)
+        XCTAssertEqual(xcode.allocated, try ReclaimRulesTests.allocated(under: home + "/Library/Developer/CoreSimulator/Caches/dyld"))
+        XCTAssertFalse(try XCTUnwrap(report.developerTools.first { $0.name == "Homebrew" }).isLowerBound)
+        // Docker's image space is inside its VM: no group, and no exact zero.
+        XCTAssertTrue(matches.contains { $0.rule.id == .dockerImages })
+        XCTAssertFalse(report.developerTools.contains { $0.name == "Docker" })
+        // Containers could not be listed, so any app's or leftover's total may be missing entries there.
+        XCTAssertEqual(report.unlistedFolders, ["\(containers) could not be read."])
+        XCTAssertEqual(report.apps.map(\.name), ["Editor"])
+        XCTAssertTrue(report.apps[0].isLowerBound)
+        XCTAssertTrue(try XCTUnwrap(report.leftovers).isLowerBound)
+    }
+
+    func testInstalledAppsAreFoundBeforeAnyHeuristicMakesALeftover() async throws {
+        // Editor's signature could not be read, so no team lists it; its bundle ID still does.
+        let editor = InstalledApp(path: "/Applications/Editor.app", bundleID: "com.example.editor", name: "Editor", signature: nil)
+        let shortcuts = InstalledApp(
+            path: "/System/Applications/Shortcuts.app", bundleID: "com.apple.shortcuts", name: "Shortcuts",
+            signature: CodeSignature(signingID: "com.apple.shortcuts", teamID: nil, isPlatformBinary: true),
+            appGroups: ["group.com.apple.shortcuts", "group.is.workflow.my.app", "group.is.workflow.shortcuts"])
+        let writer = InstalledApp(path: Self.suiteWriter.path, bundleID: Self.suiteWriter.bundleID, name: "Writer",
+                                  signature: Self.suiteWriter.signature, appGroups: ["SUITE00001.office"])
+        let sheets = InstalledApp(path: Self.suiteSheets.path, bundleID: Self.suiteSheets.bundleID, name: "Sheets",
+                                  signature: Self.suiteSheets.signature, appGroups: ["SUITE00001.office", "group.suite.docs"])
+        let signed = InstalledApps([Self.safari, shortcuts, writer, sheets])
+        for relative in ["Group Containers/EXAMPLE123.com.example.editor", "Containers/COM.EXAMPLE.EDITOR",
+                         "Group Containers/group.is.workflow.my.app", "Group Containers/group.is.workflow.shortcuts",
+                         "Group Containers/group.suite.docs", "Group Containers/SUITE00001.office",
+                         "Group Containers/group.org.example.gone.app", "Group Containers/NOSUCHTEAM.com.gone.app",
+                         "Preferences/com.gone.app.plist"] {
+            try write("Library/" + relative + "/data", bytes: 4_096)
+        }
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        func placed(_ apps: InstalledApps) -> [String: DiskOriginEntry] {
+            Dictionary(uniqueKeysWithValues: DiskOrigins.entries(in: tree, home: home, apps: apps).map {
+                (String($0.path.dropFirst(home.count + "/Library/".count)), $0)
+            })
+        }
+
+        let withEditor = placed(InstalledApps(signed.apps + [editor]))
+        for relative in ["Group Containers/EXAMPLE123.com.example.editor", "Containers/COM.EXAMPLE.EDITOR"] {
+            let entry = try XCTUnwrap(withEditor[relative])
+            XCTAssertEqual(entry.rule, .bundleID, relative)
+            XCTAssertEqual(entry.app?.path, "/Applications/Editor.app", relative)
+            XCTAssertEqual(entry.vendor, .signatureUnavailable, relative)
+            XCTAssertNil(entry.risk, relative)
+        }
+        // With one signature unread, an app group no app declares may be that app's: not attributed, never a leftover.
+        XCTAssertEqual(withEditor["Group Containers/group.org.example.gone.app"]?.rule, .unattributed)
+        XCTAssertEqual(withEditor["Group Containers/NOSUCHTEAM.com.gone.app"]?.rule, .unattributed)
+        XCTAssertEqual(withEditor["Preferences/com.gone.app.plist"]?.rule, .leftover, "outside Group Containers names say it all")
+
+        let all = placed(signed)
+        for relative in ["Group Containers/group.is.workflow.my.app", "Group Containers/group.is.workflow.shortcuts"] {
+            let entry = try XCTUnwrap(all[relative])
+            XCTAssertEqual(entry.rule, .appGroup, relative)
+            XCTAssertEqual(entry.app?.path, "/System/Applications/Shortcuts.app", relative)
+            XCTAssertEqual(entry.vendor, .apple, relative)
+        }
+        XCTAssertEqual(all["Group Containers/group.suite.docs"]?.app?.path, Self.suiteSheets.path)
+        let shared = try XCTUnwrap(all["Group Containers/SUITE00001.office"])
+        XCTAssertEqual(shared.rule, .appGroup)
+        XCTAssertNil(shared.app, "two apps declare it")
+        XCTAssertEqual(shared.vendor, .vendor(teamID: "SUITE00001"))
+        // Every signature read: what no app has or declares is a leftover.
+        for relative in ["Group Containers/group.org.example.gone.app", "Group Containers/NOSUCHTEAM.com.gone.app"] {
+            XCTAssertEqual(all[relative]?.rule, .leftover, relative)
+            XCTAssertEqual(all[relative]?.risk, .review, relative)
+        }
     }
 
     func testAmbiguousNamesMatchNoAppAndTwoCopiesOfOneAppResolveTheSameWay() {
@@ -150,7 +248,9 @@ final class DiskOriginTests: XCTestCase {
 
         let apps = InstalledApps.read(folders: [applications, home + "/missing"]) { path in
             signed.append(path)
-            return CodeSignature(signingID: "x", teamID: "EXAMPLE123", isPlatformBinary: false)
+            let team = path.hasSuffix("/Editor.app") ? "EXAMPLE123" : "OTHERTEAM1"
+            return AppSigning(signature: CodeSignature(signingID: "x", teamID: team, isPlatformBinary: false),
+                              appGroups: ["group." + (path as NSString).lastPathComponent])
         }
 
         XCTAssertEqual(apps.apps.map(\.bundleID).sorted(), ["com.example.agent", "com.example.editor", "com.example.launcher", "com.example.tool"])
@@ -158,9 +258,24 @@ final class DiskOriginTests: XCTestCase {
         XCTAssertEqual(apps.app(bundleID: "com.example.agent")?.name, "Editor")
         XCTAssertEqual(apps.app(named: "Example Editor")?.path, applications + "/Editor.app")
         XCTAssertEqual(apps.app(named: "Tool")?.path, applications + "/Utilities/Tool.app")
-        XCTAssertEqual(Set(signed), [applications + "/Editor.app", applications + "/Utilities/Tool.app"],
-                       "each outer app's signature is read once; nested apps share it")
-        XCTAssertEqual(signed.count, 2)
+        XCTAssertEqual(signed.sorted(), [applications + "/Editor.app", applications + "/Editor.app/Contents/Helpers/Agent.app",
+                                         applications + "/Editor.app/Contents/Library/LoginItems/Launcher.app",
+                                         applications + "/Utilities/Tool.app"])
+        XCTAssertEqual(apps.app(bundleID: "com.example.agent")?.vendor, .vendor(teamID: "EXAMPLE123"), "a helper is its app's vendor's")
+        XCTAssertEqual(apps.apps(group: "group.Agent.app").map(\.bundleID), ["com.example.agent"], "a helper declares its own groups")
+        XCTAssertTrue(apps.signingComplete)
+    }
+
+    func testAppGroupsAreReadFromEntitlements() {
+        XCTAssertEqual(InstalledApps.appGroups(entitlements: nil), [], "no entitlements declare no groups")
+        XCTAssertEqual(InstalledApps.appGroups(entitlements: ["com.apple.security.application-groups": ["group.a"],
+                                                              "com.apple.private.security.restricted-application-groups": ["group.b"]]),
+                       ["group.a", "group.b"])
+        XCTAssertNil(InstalledApps.appGroups(entitlements: "not a dictionary"))
+        XCTAssertNil(InstalledApps.appGroups(entitlements: ["com.apple.security.application-groups": [1]]))
+        XCTAssertFalse(InstalledApps([InstalledApp(path: "/A.app", bundleID: "com.a.app", name: "A", signature: nil)]).signingComplete)
+        XCTAssertFalse(InstalledApps([InstalledApp(path: "/A.app", bundleID: "com.a.app", name: "A", signature: Self.editor.signature,
+                                                   appGroups: nil)]).signingComplete)
     }
 
     // MARK: Live
@@ -171,6 +286,8 @@ final class DiskOriginTests: XCTestCase {
         XCTAssertFalse(apple.isEmpty, "/System/Applications holds Apple's apps")
         XCTAssertTrue(apple.contains { $0.vendor == .apple }, "\(apple.map { ($0.bundleID, $0.vendor) })")
         XCTAssertFalse(apple.contains { $0.vendor == .unsigned }, "Apple's apps are signed")
+        // Shortcuts keeps the user's library in groups not named com.apple.
+        XCTAssertEqual(apps.apps(group: "group.is.workflow.my.app").map(\.bundleID), ["com.apple.shortcuts"])
     }
 
     func testThisMacsSimulatorRuntimeListIsRead() {
@@ -194,6 +311,37 @@ final class DiskOriginTests: XCTestCase {
         try Data("not a plist".utf8).write(to: URL(fileURLWithPath: images))
         guard case .unknown = SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes")
         else { return XCTFail("an unreadable image list is unknown, not empty") }
+    }
+
+    func testARuntimeSourceThatCannotBeReadMakesTheListUnknown() throws {
+        let none = home + "/none"
+        try bundle(home + "/Runtimes/iOS 18.3.simruntime", id: "com.apple.CoreSimulator.SimRuntime.iOS-18-3", name: nil)
+        func read(runtimes: String = home + "/Runtimes", volumes: String = none) -> SimulatorRuntimes {
+            SimulatorRuntimes.read(imagesPlist: none + ".plist", runtimesFolder: runtimes, volumesFolder: volumes)
+        }
+        XCTAssertEqual(read(), .installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3"]))
+
+        // A runtime bundle whose Info.plist is malformed, missing, or names no runtime.
+        let broken = home + "/Runtimes/watchOS 11.0.simruntime/Contents"
+        try FileManager.default.createDirectory(atPath: broken, withIntermediateDirectories: true)
+        XCTAssertEqual(read(), .unknown("\(broken)/Info.plist could not be read: not found."))
+        try Data("not a plist".utf8).write(to: URL(fileURLWithPath: broken + "/Info.plist"))
+        XCTAssertEqual(read(), .unknown("\(broken)/Info.plist could not be read: not a property list dictionary."))
+        try bundle(home + "/Runtimes/watchOS 11.0.simruntime", id: nil, name: "watchOS")
+        XCTAssertEqual(read(), .unknown("\(broken)/Info.plist has no bundle identifier."))
+        try FileManager.default.removeItem(atPath: home + "/Runtimes/watchOS 11.0.simruntime")
+
+        // A runtimes or volumes folder that exists but cannot be listed.
+        for folder in [home + "/Runtimes", home + "/Volumes"] {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+            XCTAssertEqual(chmod(folder, 0), 0)
+            defer { chmod(folder, 0o755) }
+            guard case let .unknown(reason) = read(volumes: home + "/Volumes") else { return XCTFail("\(folder) is unreadable") }
+            XCTAssertTrue(reason.hasPrefix("\(folder) could not be read"), reason)
+        }
+        // A file where a folder would be is no runtime.
+        try Data().write(to: URL(fileURLWithPath: home + "/Volumes/stray"))
+        XCTAssertEqual(read(volumes: home + "/Volumes"), .installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3"]))
     }
 
     // MARK: Helpers

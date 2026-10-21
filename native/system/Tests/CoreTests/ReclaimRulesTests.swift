@@ -206,8 +206,11 @@ final class ReclaimRulesTests: XCTestCase {
         let recorded = DockerOutputTests.systemDF
         let space = try XCTUnwrap(DockerOutput.imageSpace(recorded))
         let reported = try only(.dockerImages, in: try await analyze(docker: .reported(space, observedAt: now)))
-        XCTAssertEqual(reported.bytes, .dockerReclaimable(2_064_000_000, total: 3_370_000_000))
-        XCTAssertEqual(reported.bytes.bytes, 2_064_000_000)
+        XCTAssertEqual(reported.bytes, .dockerReclaimable(upTo: 2_064_000_000, total: 3_370_000_000))
+        // Reclaimable counts every unused image, while the safe cleanup removes only dangling ones: an upper bound,
+        // never the amount freed.
+        XCTAssertNil(reported.bytes.bytes)
+        XCTAssertEqual(reported.bytes.upperBound, 2_064_000_000)
         XCTAssertEqual(reported.risk, .safe)
         XCTAssertEqual(reported.cleanup, .command(["docker", "image", "prune", "-f"]))
 
@@ -364,6 +367,70 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(match.bytes, .unavailable("\(folder) could not be read."))
     }
 
+    func testRuleFoldersTheScanDidNotReadInFullAreUnknownNotEmpty() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/DerivedData/Tool-def/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Caches/Homebrew/downloads/bottle.tar.gz", bytes: 10_000)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let derivedData = "Library/Developer/Xcode/DerivedData"
+        func match(_ id: ReclaimRuleID, _ tree: DiskTree) throws -> ReclaimMatch {
+            try only(id, in: Analysis(tree: tree, entries: [], matches: ReclaimMatcher.matches(in: tree, origins: [], context: context())))
+        }
+
+        // A cancelled scan flags each folder it had queued but not read `partial`, with nothing listed.
+        let queued = try match(.xcodeDerivedData, marking(scanned, derivedData, .partial, listing: false))
+        XCTAssertEqual(queued.items, [])
+        XCTAssertEqual(queued.bytes, .unavailable("\(path(derivedData)) was not read in full."))
+        // Cancelled partway through the folder: what was listed counts, as a lower bound.
+        let midway = try match(.xcodeDerivedData, marking(scanned, derivedData, .partial, listing: true))
+        XCTAssertEqual(midway.items.count, 2)
+        guard case .scanned(_, _, complete: false) = midway.bytes else { return XCTFail("\(midway.bytes)") }
+        // A folder replaced before it was opened is `incomplete` and lists nothing.
+        let replaced = try match(.xcodeDerivedData, marking(scanned, derivedData, .incomplete, listing: false))
+        XCTAssertEqual(replaced.bytes, .unavailable("\(path(derivedData)) was not read."))
+        // A folder above the rule's not read in full: every rule beneath is unknown, not absent.
+        let developer = marking(scanned, "Library/Developer", .partial, listing: false)
+        for id in [ReclaimRuleID.xcodeDerivedData, .xcodeDeviceSupport, .unavailableSimulators, .simulatorCaches, .xcodeArchives] {
+            XCTAssertEqual(try match(id, developer).bytes, .unavailable("\(path("Library/Developer")) was not read in full."), "\(id)")
+        }
+        // Read in full, a missing rule folder is simply absent.
+        let full = ReclaimMatcher.matches(in: scanned, origins: [], context: context())
+        XCTAssertFalse(full.contains { $0.rule.id == .xcodeDeviceSupport || $0.rule.id == .simulatorCaches })
+        // A tool's own folder cancelled: its sum is a lower bound.
+        let brew = try match(.homebrewCache, marking(scanned, "Library/Caches/Homebrew/downloads", .partial, listing: false))
+        guard case .scanned(_, _, complete: false) = brew.bytes else { return XCTFail("\(brew.bytes)") }
+    }
+
+    func testUnreadableFoldersARuleSearchesMakeItsSumIncomplete() async throws {
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/2026-10-01/Tool.xcarchive/Info.plist", bytes: 10_000)
+        try write("Downloads/Old App.dmg", bytes: 10_000)
+        try touch("Downloads/Old App.dmg", daysAgo: 120)
+        try write("Downloads/locked/Other.dmg", bytes: 10_000)
+        try touch("Downloads/locked/Other.dmg", daysAgo: 120)
+        try project("dev/old", untouchedFor: 40)
+        try write("dev/locked/app/package.json", bytes: 200)
+        let locked = ["Library/Developer/Xcode/Archives/2026-10-01", "Downloads/locked", "dev/locked"].map(path)
+        for folder in locked { XCTAssertEqual(chmod(folder, 0), 0) }
+        defer { for folder in locked { chmod(folder, 0o755) } }
+
+        let analysis = try await analyze()
+
+        for (id, found) in [(ReclaimRuleID.xcodeArchives, "Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"),
+                            (.oldInstallers, "Downloads/Old App.dmg"), (.staleNodeModules, "dev/old/node_modules")] {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items.map(\.path), [path(found)], "\(id)")
+            guard case .scanned(_, _, complete: false) = match.bytes else { return XCTFail("\(id): \(match.bytes)") }
+        }
+
+        // With nothing found, an unreadable folder still makes the rule unknown, not empty.
+        try FileManager.default.removeItem(atPath: path("Downloads/Old App.dmg"))
+        let unknown = try only(.oldInstallers, in: try await analyze())
+        XCTAssertEqual(unknown.items, [])
+        XCTAssertEqual(unknown.bytes, .unavailable("\(path("Downloads/locked")) could not be read."))
+    }
+
     func testAScanOfAFolderInsideHomeFindsItsStaleNodeModules() async throws {
         try project("dev/old", untouchedFor: 40)
 
@@ -387,6 +454,25 @@ final class ReclaimRulesTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    /// The tree with the folder at `relative` flagged as the scanner flags one it did not read in full (`partial` when
+    /// cancelled, `incomplete` when replaced), its listing dropped when it was not read at all, and every folder above
+    /// it `incomplete`, as the scanner's totals mark them.
+    func marking(_ tree: DiskTree, _ relative: String, _ flags: DiskItemFlags, listing: Bool) -> DiskTree {
+        var marked = tree
+        guard let index = tree.index(atPath: path(relative)) else {
+            XCTFail("no \(relative)")
+            return tree
+        }
+        marked.nodes[index].flags.formUnion(flags.union(.incomplete))
+        if !listing { marked.nodes[index].childCount = 0 }
+        var parent = tree[index].parent
+        while let above = parent {
+            marked.nodes[above].flags.insert(.incomplete)
+            parent = tree[above].parent
+        }
+        return marked
+    }
 
     struct Analysis {
         let tree: DiskTree

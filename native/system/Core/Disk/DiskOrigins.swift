@@ -28,6 +28,10 @@ public enum LibraryFolder: String, CaseIterable, Sendable {
 public enum DiskOriginRule: Equatable, Sendable {
     /// The entry is a folder a developer tool's reclaim rule names (`~/Library/Caches/Homebrew`).
     case developerTool
+    /// A group container an installed app's signature declares as one of its app groups
+    /// (`com.apple.security.application-groups`), whatever it is called (`group.is.workflow.my.app` is Shortcuts').
+    /// With several apps declaring it, only their vendor when they share one.
+    case appGroup
     /// The identifier is the app's bundle ID or extends it component by component (`com.example.app.helper`), or, in
     /// Group Containers, an app's bundle ID extends it (`group.com.example` for `com.example.app`).
     case bundleID
@@ -38,7 +42,8 @@ public enum DiskOriginRule: Equatable, Sendable {
     case appleIdentifier
     /// The entry's name is the one installed app's name (its file name, `CFBundleName`, or `CFBundleDisplayName`).
     case appName
-    /// A bundle ID, or a group container's Team ID, that no installed app has.
+    /// A bundle ID, or a group container's Team ID, that no installed app has, and in Group Containers no installed
+    /// app declares, with every installed app's signature read.
     case leftover
     /// Nothing matched: a name that is neither a bundle ID nor an installed app's name.
     case unattributed
@@ -56,7 +61,7 @@ public struct DiskOriginEntry: Equatable, Sendable {
     /// A group container's Team ID prefix.
     public let teamID: String?
     public let rule: DiskOriginRule
-    /// The installed app, for `bundleID`, `appName`, and a `teamID` with one app.
+    /// The installed app, for `bundleID`, `appName`, and an `appGroup` or a `teamID` with one app.
     public let app: InstalledApp?
     /// The App layer origin: the app's bundle (`Origin.app`), or `Origin.macOS` for an Apple identifier.
     public let appOrigin: Origin?
@@ -94,7 +99,8 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
     public let allocated: UInt64
     /// Summed private sizes: at least what deleting every item would free.
     public let `private`: UInt64
-    /// An item's size is unknown or a lower bound, so both sums are lower bounds.
+    /// An item's size is unknown or a lower bound, or the group may have items the scan did not list, so both sums are
+    /// lower bounds.
     public let isLowerBound: Bool
 }
 
@@ -102,6 +108,9 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
 /// and leftovers.
 public struct DiskOriginReport: Equatable, Sendable {
     public let entries: [DiskOriginEntry]
+    /// Why Library folders were not listed in full (unreadable, cancelled). Any origin may have had entries there, so
+    /// every app, vendor, leftovers, and not attributed group is then a lower bound.
+    public let unlistedFolders: [String]
     /// By app, with macOS for Apple identifiers.
     public let apps: [DiskOriginGroup]
     public let vendors: [DiskOriginGroup]
@@ -130,9 +139,18 @@ public enum DiskOrigins {
     }
 
     /// Groups the entries by app, vendor, leftovers, and unattributed, and the reclaim matches' items by developer
-    /// tool. Groups are ordered by allocated size, largest first, then by name.
-    public static func report(entries: [DiskOriginEntry], matches: [ReclaimMatch], tree: DiskTree,
+    /// tool. A tool's group is a lower bound when one of its matches is incomplete or unavailable; Docker's image space
+    /// is inside its VM, not in the tree, so it is not summed. Groups are ordered by allocated size, largest first,
+    /// then by name.
+    public static func report(entries: [DiskOriginEntry], matches: [ReclaimMatch], tree: DiskTree, home: String,
                               apps: InstalledApps) -> DiskOriginReport {
+        let unlisted = LibraryFolder.allCases.compactMap { folder -> String? in
+            switch tree.locate(home + "/" + folder.homePath) {
+            case let .found(index): tree.unlisted(index)
+            case let .unknown(reason): reason
+            case .absent: nil
+            }
+        }
         var byApp: [Origin: (name: String, items: [Int])] = [:]
         var byVendor: [Origin: [Int]] = [:]
         var leftovers: [Int] = []
@@ -148,28 +166,46 @@ public enum DiskOrigins {
             default: break
             }
         }
-        var byTool: [String: [Int]] = [:]
+        var byTool: [String: (items: [Int], incomplete: Bool)] = [:]
         for match in matches {
-            guard let tool = match.rule.developerTool else { continue }
-            byTool[tool, default: []].append(contentsOf: match.items.map(\.index))
+            guard let tool = match.rule.developerTool, match.rule.id != .dockerImages else { continue }
+            let incomplete: Bool
+            switch match.bytes {
+            case let .scanned(_, _, complete): incomplete = !complete
+            case .dockerReclaimable, .unavailable: incomplete = true
+            }
+            byTool[tool, default: ([], false)].items.append(contentsOf: match.items.map(\.index))
+            if incomplete { byTool[tool]!.incomplete = true }
         }
+        let entriesIncomplete = !unlisted.isEmpty
         func ordered(_ groups: [DiskOriginGroup]) -> [DiskOriginGroup] {
             groups.sorted { ($1.allocated, $0.name) < ($0.allocated, $1.name) }
         }
         return DiskOriginReport(
             entries: entries,
-            apps: ordered(byApp.map { group(.origin($0.key), name: $0.value.name, items: $0.value.items, tree: tree) }),
-            vendors: ordered(byVendor.map { group(.origin($0.key), name: vendorName($0.key, apps: apps), items: $0.value, tree: tree) }),
-            developerTools: ordered(byTool.map { group(.developerTool($0.key), name: $0.key, items: $0.value, tree: tree) }),
-            leftovers: leftovers.isEmpty ? nil : group(.leftovers, name: "Leftovers", items: leftovers, tree: tree),
-            unattributed: unattributed.isEmpty ? nil : group(.unattributed, name: "Not attributed", items: unattributed, tree: tree))
+            unlistedFolders: unlisted,
+            apps: ordered(byApp.map {
+                group(.origin($0.key), name: $0.value.name, items: $0.value.items, tree: tree, incomplete: entriesIncomplete)
+            }),
+            vendors: ordered(byVendor.map {
+                group(.origin($0.key), name: vendorName($0.key, apps: apps), items: $0.value, tree: tree, incomplete: entriesIncomplete)
+            }),
+            developerTools: ordered(byTool.map {
+                group(.developerTool($0.key), name: $0.key, items: $0.value.items, tree: tree, incomplete: $0.value.incomplete)
+            }),
+            leftovers: leftovers.isEmpty && !entriesIncomplete ? nil
+                : group(.leftovers, name: "Leftovers", items: leftovers, tree: tree, incomplete: entriesIncomplete),
+            unattributed: unattributed.isEmpty ? nil
+                : group(.unattributed, name: "Not attributed", items: unattributed, tree: tree, incomplete: entriesIncomplete))
     }
 
-    static func group(_ key: DiskOriginGroupKey, name: String, items: [Int], tree: DiskTree) -> DiskOriginGroup {
+    /// `incomplete`: the group may have items the tree does not list, so its sums are lower bounds.
+    static func group(_ key: DiskOriginGroupKey, name: String, items: [Int], tree: DiskTree,
+                      incomplete: Bool) -> DiskOriginGroup {
         let unique = Array(Set(items)).sorted()
         var allocated: UInt64 = 0
         var privateBytes: UInt64 = 0
-        var lowerBound = false
+        var lowerBound = incomplete
         for index in unique {
             let item = tree[index]
             guard let sizes = item.sizes else {
@@ -219,25 +255,33 @@ public enum DiskOrigins {
         }
 
         if let tool { return make(.developerTool, tool: tool) }
-        if identifier.lowercased().hasPrefix("com.apple.") {
-            if let app = apps.app(bundleID: identifier) { return make(.bundleID, app: app) }
-            return make(.appleIdentifier, appOrigin: .macOS, vendor: .apple)
+        // Installed apps' own evidence first: an app group a signature declares, then a bundle ID. A heuristic below
+        // never makes an installed app's data a leftover.
+        if folder == .groupContainers {
+            let declaring = apps.apps(group: item.name)
+            if Set(declaring.map(\.path)).count == 1 { return make(.appGroup, app: declaring[0]) }
+            if !declaring.isEmpty {
+                let vendors = Set(declaring.map(\.vendor))
+                return make(.appGroup, vendor: vendors.count == 1 ? vendors.first : nil)
+            }
         }
+        if identifier.contains("."), let app = apps.app(bundleID: identifier) { return make(.bundleID, app: app) }
+        if identifier.lowercased().hasPrefix("com.apple.") { return make(.appleIdentifier, appOrigin: .macOS, vendor: .apple) }
         let shaped = isBundleID(identifier)
         if let team {
             let signed = apps.apps(team: team)
-            guard !signed.isEmpty else { return make(.leftover, vendor: .vendor(teamID: team)) }
             if shaped, let app = signed.first(where: { related($0.bundleID, identifier) }) { return make(.bundleID, app: app) }
             if Set(signed.map(\.path)).count == 1 { return make(.teamID, app: signed[0]) }
-            return make(.teamID, vendor: .vendor(teamID: team))
+            if !signed.isEmpty { return make(.teamID, vendor: .vendor(teamID: team)) }
         }
         // An app group is often its app's bundle ID shortened (`group.com.example` for `com.example.app`).
         if folder == .groupContainers, identifier.contains("."), let app = apps.uniqueApp(extending: identifier) {
             return make(.bundleID, app: app)
         }
-        if shaped {
-            if let app = apps.app(bundleID: identifier) { return make(.bundleID, app: app) }
-            return make(.leftover)
+        // A group container may be an app's whose signature or entitlements could not be read.
+        let unproven = folder == .groupContainers && !apps.signingComplete
+        if team != nil || shaped {
+            return make(unproven ? .unattributed : .leftover, vendor: team.map { .vendor(teamID: $0) })
         }
         if let app = apps.app(named: identifier) { return make(.appName, app: app) }
         return make(.unattributed)
