@@ -72,6 +72,8 @@ public final class DiskWindowModel {
     @ObservationIgnored private var expanded: Set<DiskRowID> = []
     /// How many rows each list shows, by the list's key, when Show more raised it above `rowLimit`.
     @ObservationIgnored private var shown: [String: Int] = [:]
+    /// How many paths group and match rows asked for, so tests can tell that only shown rows build one.
+    @ObservationIgnored private(set) var itemPathsBuilt = 0
 
     public init(service: DiskScanService = .live, format: UsageFormat? = nil, home: String = DiskWindowModel.realHome,
                 rowLimit: Int = 500) {
@@ -223,8 +225,9 @@ public final class DiskWindowModel {
         }
         phase = .analyzing
         rebuild()
-        // Docker's image space is offered for a scan of the home folder, however it was picked.
-        let analysis = await service.analyze(result, scope.path(home: home) == home)
+        // Docker's image space is offered for a scan of the home folder, however it was picked or reached: the scanned
+        // root is the resolved real path, as `home` is.
+        let analysis = await service.analyze(result, result.tree.rootPath == home)
         // A cancel during analysis, or a newer scan, drops it.
         guard generation == self.generation, phase == .analyzing, let analysis else { return }
         self.analysis = analysis
@@ -554,7 +557,7 @@ public final class DiskWindowModel {
                     isNavigable: false, accessibilityLabel: "\(group.name), \(section.title), \(count)",
                     accessibilityValue: figures.accessibilityValue))
                 if open {
-                    rows += itemRows(group.items.map { (index: $0, path: tree.path(of: $0)) }, in: tree,
+                    rows += itemRows(group.items, index: { $0 }, path: { tree.path(of: $0) }, in: tree,
                                      id: { .originItem(section, group.id, item: $0) }, list: "\(id)")
                 }
             }
@@ -579,7 +582,7 @@ public final class DiskWindowModel {
                 let id = DiskRowID.match(position)
                 rows.append(matchRow(match, id: id, scale: scale))
                 if expanded.contains(id) {
-                    rows += itemRows(match.items.map { (index: $0.index, path: $0.path) }, in: tree,
+                    rows += itemRows(match.items, index: \.index, path: \.path, in: tree,
                                      id: { .matchItem(match: position, item: $0) }, list: "\(id)")
                 }
             }
@@ -624,13 +627,17 @@ public final class DiskWindowModel {
         }
     }
 
-    /// The items inside an open group or match, largest first, as many as the list shows.
-    private func itemRows(_ items: [(index: Int, path: String)], in tree: DiskTree, id: (Int) -> DiskRowID,
-                          list: String) -> [DiskRow] {
-        let sorted = items.map { (item: tree[$0.index], path: $0.path) }
-            .sorted { ($0.item.sizes?.allocated ?? 0, $1.path) > ($1.item.sizes?.allocated ?? 0, $0.path) }
+    /// The items inside an open group or match, largest first (equal sizes in scan order), as many as the list shows.
+    /// A path is asked for only for a row shown, since an origin group's paths are built from the tree and a group can
+    /// hold thousands of items.
+    private func itemRows<Item>(_ items: [Item], index: (Item) -> Int, path pathOf: (Item) -> String, in tree: DiskTree,
+                                id: (Int) -> DiskRowID, list: String) -> [DiskRow] {
+        let sorted = items.map { (item: tree[index($0)], source: $0) }
+            .sorted { ($0.item.sizes?.allocated ?? 0, $1.item.index) > ($1.item.sizes?.allocated ?? 0, $0.item.index) }
         let scale = sorted.compactMap(\.item.sizes?.allocated).max() ?? 0
-        var rows = sorted.prefix(count(of: sorted.map { id($0.item.index) }, list: list)).map { item, path in
+        var rows = sorted.prefix(count(of: sorted.map { id($0.item.index) }, list: list)).map { item, source in
+            let path = pathOf(source)
+            itemPathsBuilt += 1
             let figures = DiskFigures(item.sizes, flags: item.flags, format: format)
             let name = Self.name(item.name)
             let shown = format.path(path)

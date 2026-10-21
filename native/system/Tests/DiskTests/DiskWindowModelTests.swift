@@ -145,6 +145,46 @@ final class DiskWindowModelTests: XCTestCase {
                         fixture.path("Library/Application Support/com.example.editor")])
     }
 
+    /// An open origin group lists its largest items a page at a time, equal sizes in scan order, and builds a path only
+    /// for the items it shows, however many it holds.
+    func testAnOpenOriginGroupBuildsPathsOnlyForTheItemsItShows() async throws {
+        for number in 0..<30 {
+            try fixture.write("Library/Preferences/com.gone.app\(number).plist", bytes: number < 10 ? 4_000 : 40_000)
+        }
+        let model = try await fixture.scanned(rowLimit: 5)
+        model.tab = .origins
+        let leftovers = try XCTUnwrap(model.row(named: "Leftovers"))
+        XCTAssertEqual(leftovers.detail, "31 items")
+        let before = model.itemPathsBuilt
+        model.setExpanded(leftovers.id, true)
+        var items = model.rows.filter { $0.depth == 1 && !$0.isMore }
+        XCTAssertEqual(items.count, 5)
+        XCTAssertEqual(model.itemPathsBuilt - before, 5, "only the shown items build a path")
+        // Showing more builds the next page and the one already shown, not the hidden rest.
+        let shown = model.itemPathsBuilt
+        model.activate(try XCTUnwrap(model.rows.first { $0.isMore }).id)
+        items = model.rows.filter { $0.depth == 1 && !$0.isMore }
+        XCTAssertEqual(items.count, 10)
+        XCTAssertEqual(model.itemPathsBuilt - shown, 10)
+        XCTAssertNotNil(model.rows.first { $0.isMore })
+
+        // Every page together lists each item once, largest first and equal sizes in scan order.
+        while let more = model.rows.first(where: { $0.isMore }) { model.activate(more.id) }
+        items = model.rows.filter { $0.depth == 1 }
+        XCTAssertEqual(items.count, 31)
+        let tree = try XCTUnwrap(model.result?.tree)
+        let listed = items.map { row -> (allocated: UInt64, index: Int) in
+            guard case let .originItem(_, _, item: index) = row.id else { return (0, -1) }
+            XCTAssertEqual(row.path, tree.path(of: index))
+            return (tree[index].sizes?.allocated ?? 0, index)
+        }
+        XCTAssertEqual(Set(listed.map(\.index)).count, 31)
+        XCTAssertFalse(listed.contains { $0.index < 0 })
+        XCTAssertEqual(listed.map(\.index), listed.sorted { ($0.allocated, $1.index) > ($1.allocated, $0.index) }.map(\.index))
+        XCTAssertEqual(Set(items.prefix(20).compactMap(\.path).map { ($0 as NSString).lastPathComponent }),
+                       Set((10..<30).map { "com.gone.app\($0).plist" }))
+    }
+
     /// The selection is always a listed row, so it can be revealed and copied: going up, a breadcrumb, or a new sort
     /// shows as many pages as reach the selected folder.
     func testTheSelectedFolderIsListedAfterGoingUpOrChangingTheSort() async throws {
@@ -565,22 +605,25 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.volumes, [current])
     }
 
-    /// Docker's image space is asked for whenever the home folder is scanned, picked as Home or chosen as a folder, and
-    /// not for another folder.
+    /// Docker's image space is asked for whenever the home folder is scanned, picked as Home, chosen as a folder, or
+    /// reached through a symbolic link, and not for another folder.
     func testDockerIsAskedForAScanOfTheHomeFolderHoweverItWasPicked() async throws {
         let asked = OSAllocatedUnfairLock(initialState: [Bool]())
         let home = fixture.home
+        let link = home + "-link"
+        XCTAssertEqual(symlink(home, link), 0)
+        defer { unlink(link) }
         let model = fixture.model(service: fixture.service(analyze: { result, includeDocker in
             asked.withLock { $0.append(includeDocker) }
             return DiskFixture.analysis(result, home: home)
         }))
-        for scope in [DiskScope.home, .folder(path: home), .folder(path: fixture.path("Documents"))] {
+        for scope in [DiskScope.home, .folder(path: home), .folder(path: link), .folder(path: fixture.path("Documents"))] {
             model.scope = scope
             model.scan()
             try await DiskFixture.wait { !model.isScanning }
             XCTAssertEqual(model.phase, .completed, "\(scope)")
         }
-        XCTAssertEqual(asked.withLock { $0 }, [true, true, false])
+        XCTAssertEqual(asked.withLock { $0 }, [true, true, true, false])
     }
 
     /// A scan replaced by a new one before its analysis came back never shows that analysis.
