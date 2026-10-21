@@ -63,7 +63,15 @@ struct ProcessesView: View {
                 .accessibilityLabel("Filter by name")
                 .accessibilityValue(model.filter.isEmpty ? "No filter" : model.filter)
         }
-        .onChange(of: model.filterFocusRequest) { filterFocused = true }
+        // `initial`: ⌘F from the Disk section asks before this view exists. Focus is set on the next turn, once the
+        // field is in the window.
+        .onChange(of: model.isFilterFocusPending, initial: true) { _, pending in
+            guard pending else { return }
+            Task { @MainActor in
+                filterFocused = true
+                model.didFocusFilter()
+            }
+        }
     }
 
     private var outline: some View {
@@ -171,22 +179,29 @@ private struct ProcessRowView: View {
     }
 }
 
-/// Reveal in Finder and Copy path: the only row actions. Nothing here quits or signals a process.
+/// Reveal in Finder and Copy path: the only row actions, in Processes and Disk alike. Nothing here quits or signals a
+/// process, or changes a file.
 struct RowActions: View {
     let path: String?
 
     var body: some View {
         if let path {
-            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            Button("Reveal in Finder") { Self.reveal(path) }
                 .accessibilityLabel("Reveal \(path) in Finder")
-            Button("Copy path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            }
-            .accessibilityLabel("Copy path \(path)")
+            Button("Copy path") { Self.copy(path) }
+                .accessibilityLabel("Copy path \(path)")
         } else {
             Text("No file to reveal")
         }
+    }
+
+    static func reveal(_ path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    static func copy(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
     }
 }
 
