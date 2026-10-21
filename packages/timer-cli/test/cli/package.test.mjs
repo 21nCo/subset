@@ -31,28 +31,47 @@ test('the manifest is ready to publish as @subset.dev/timer 0.1.0 with the subse
   assert.deepEqual(releases.find((entry) => entry.slug === 'timer'), { slug: 'timer', path: 'packages/timer-cli', name: '@subset.dev/timer', inputs: ['packages/timer-cli', 'packages/timer', 'apps/timer'] });
 });
 
-test('the bundle is executable, imports only Node built-ins, and prints its version', () => {
+test('the bundle is executable, imports only Node built-ins and its own chunks, and prints its version', () => {
   const source = readFileSync(CLI, 'utf8');
   assert.ok(source.startsWith('#!/usr/bin/env node\n'));
   assert.equal(statSync(CLI).mode & 0o111, 0o111);
   // Code lines only: a JSDoc type such as import('@subset/timer').TimerDefinition is not an import.
-  const code = source.split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
-  const specifiers = [...code.matchAll(/(?:\bfrom|\bimport\()\s*["']([^"']+)["']/g)].map((match) => match[1]);
-  assert.ok(specifiers.includes('node:child_process'));
-  assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), []);
+  const imports = (file) => {
+    const code = readFileSync(join(PACKAGE_ROOT, 'dist', file), 'utf8').split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
+    return [...code.matchAll(/(?:\bfrom|\bimport\()\s*["']([^"']+)["']/g)].map((match) => match[1]);
+  };
+  assert.ok(imports('cli.mjs').includes('node:child_process'));
+  // `subset-timer mcp` alone loads the MCP server and @mcpfn/core.
+  assert.deepEqual(imports('cli.mjs').filter((specifier) => !specifier.startsWith('node:')).sort(), ['./common.mjs', './mcp-server.mjs']);
+  assert.ok(!readFileSync(join(PACKAGE_ROOT, 'dist/common.mjs'), 'utf8').includes('@modelcontextprotocol'));
+  // Relative specifiers in the chunks are the chunks themselves, or JSDoc types kept from bundled packages.
+  for (const file of ['common.mjs', 'mcp-server.mjs']) {
+    assert.deepEqual(imports(file).filter((specifier) => !/^(?:node:|\.)/.test(specifier)), [], file);
+  }
   assert.equal(execFileSync(process.execPath, [CLI, '--version'], { encoding: 'utf8' }), '0.1.0\n');
   // The bundled skill path is the package's own skills folder.
   assert.equal(execFileSync(process.execPath, [CLI, 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, 'skills', 'subset-timer')}\n`);
 });
 
-test('npm pack ships dist/cli.mjs, the built board, the skill and the README, and no sources or tests', () => {
+test('dist/THIRD_PARTY_NOTICES.md carries the licence of every bundled package', () => {
+  const notices = readFileSync(join(PACKAGE_ROOT, 'dist/THIRD_PARTY_NOTICES.md'), 'utf8');
+  const headings = [...notices.matchAll(/^## (\S+) \S+ \((.+)\)$/gm)].map(([, name, licence]) => `${name} ${licence}`);
+  for (const expected of ['zod MIT', '@mcpfn/core MIT', '@modelcontextprotocol/sdk MIT', 'ajv MIT', 'ajv-formats MIT', '@cfworker/json-schema MIT', 'fast-uri BSD-3-Clause']) {
+    assert.ok(headings.includes(expected), `${expected} in ${headings.join(', ')}`);
+  }
+  // The licence texts themselves, with BSD-3-Clause's conditions for fast-uri.
+  assert.match(notices, /Permission is hereby granted, free of charge/);
+  assert.match(notices, /Redistributions of source code must retain the above copyright\s+notice/);
+});
+
+test('npm pack ships dist/ (the CLI, its MCP server, their common chunk and the third-party notices), the built board, the skill and the README, and no sources or tests', () => {
   // prepack's check accepts the bundle it built (it throws, failing the test, when it refuses).
   execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--check'], { encoding: 'utf8' });
   const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: PACKAGE_ROOT, encoding: 'utf8' }));
   const files = packed.files.map((file) => file.path).sort();
   // The board's assets have hashed names.
   const web = files.filter((file) => file.startsWith('web/'));
-  assert.deepEqual(files.filter((file) => !file.startsWith('web/')), ['README.md', 'dist/cli.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
+  assert.deepEqual(files.filter((file) => !file.startsWith('web/')), ['README.md', 'dist/THIRD_PARTY_NOTICES.md', 'dist/cli.mjs', 'dist/common.mjs', 'dist/mcp-server.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
   assert.ok(web.includes('web/index.html') && web.includes('web/favicon.svg'), web.join(', '));
   assert.ok(web.every((file) => /^web\/(?:index\.html|favicon\.svg|assets\/index-[\w-]+\.(?:js|css))$/.test(file)), web.join(', '));
   assert.equal(packed.name, '@subset.dev/timer');

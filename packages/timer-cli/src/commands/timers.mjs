@@ -1,9 +1,7 @@
 import { TIMER_ID_PATTERN, timerLine } from '@subset/timer';
 import { parseDuration, parseUntil } from '../parse-duration.mjs';
-import { CliError, call, endsAt, formatLocalTime, resolveRef, resolveTimer, usageError } from './shared.mjs';
+import { CliError, call, endsAt, findPreset, formatLocalTime, resolveTimer, usageError } from './shared.mjs';
 
-/** Built-in preset names people use that are not a preset's id or name. */
-const PRESET_ALIASES = { hiit: 'hiit-40-20' };
 const INTERVAL_FLAGS = ['work', 'rest', 'rounds', 'prep', 'cooldown'];
 
 /** The human text for a timer result: its SET-74 line, and when it will end if it is running. */
@@ -41,12 +39,9 @@ export function intervalSpec(values) {
 /** The preset `ref` names: an exact id, a unique case-insensitive name, or an alias such as `hiit`. */
 async function resolvePreset(client, ref) {
   const { presets } = await call(client.presets());
-  const alias = Object.hasOwn(PRESET_ALIASES, ref.toLowerCase()) ? PRESET_ALIASES[ref.toLowerCase()] : null;
   try {
-    return resolveRef(presets, ref, { noun: 'preset', describe: ({ id, name }) => ({ id, name }) });
+    return findPreset(presets, ref);
   } catch (error) {
-    const aliased = error.code === 'not_found' && alias ? presets.find((preset) => preset.id === alias) : null;
-    if (aliased) return aliased;
     if (error.code === 'not_found') {
       throw new CliError('not_found', `"${ref}" is not a duration, stopwatch, interval or preset. Run subset-timer presets to list presets.`);
     }

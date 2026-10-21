@@ -32,6 +32,7 @@ After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` 
 | `daemon status` | `pid`, `data dir`, `socket`, `alerts` (the sink: `macos`, `linux (…)`, `unavailable` or `off`) and `started`. Never starts a daemon; when none runs it reports `daemon_unavailable` (exit 3). |
 | `daemon stop` | Asks the daemon to shut down and waits up to 5 s for it to go. Timers keep their timestamps and continue when it starts again. |
 | `skill path` | The absolute path of the bundled `skills/subset-timer` folder. |
+| `mcp` | Runs the MCP server on stdin and stdout for an MCP host until the host closes stdin, then exits 0. See [MCP server](#mcp-server-set-79). |
 | `serve` | Serves the Timer board on `http://127.0.0.1:4175` (or the next free port) and opens it in the browser, until Ctrl-C. `--port <n>` requires that port (a taken one is exit 2); `--no-open` only prints the URL; `--json` prints `{ url, port }`. See [Web host](#web-host-set-78). |
 | `--help`, `--version` | |
 
@@ -64,6 +65,44 @@ After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` 
 - **Guard:** a request must name the server as its `Host` (`127.0.0.1:<port>` or `localhost:<port>`), else 403. `/api/*` also needs the header `X-Subset-Timer: 1`, an `Origin`, if any, equal to the server's, and no `Sec-Fetch-Site` of `cross-site` or `same-site`; a `POST` must carry the server's `Origin`. Anything else gets 403. The server sends no CORS headers, so a cross-origin page can neither send the header (its preflight is refused) nor read a reply. Responses are `no-store` with a `default-src 'self'` Content Security Policy and `frame-ancestors 'none'`.
 - **Page:** titled "Timer" with a favicon. It mounts `TimerBoard` with `capabilities: { create: true, destructive: true }` (the person at the keyboard is the user) and `density: 'full'`; each action is a `POST /api/ops/<operation>`, and a 503 counts as the action not reaching the daemon. The state comes from `/api/events`. Because `EventSource` cannot send the required header, the page reads the event stream with `fetch`. While the stream cannot be opened, or has ended or been silent for 45 s (three heartbeats), the page shows "Daemon unavailable — retrying…" and reopens it after 1 s, doubling to at most 15 s, back to 1 s once a state arrives.
 - **Excluded:** alerts in the browser, Web Push, a service worker, PWA install, any deployment, auth and MCP.
+
+## MCP server (SET-79)
+
+`subset-timer mcp` is a local MCP server over stdio for any MCP host. It is a client of the daemon like every other command: it holds no timer state, starts the daemon on the first tool call if it is not running, and exits 0 when the host closes stdin, while the daemon and its timers keep running. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-timer` with the package version.
+
+| Tool | Class | Input |
+| --- | --- | --- |
+| `timer_list` | read-only | none |
+| `timer_get` | read-only | `id` |
+| `timer_presets` | read-only | none |
+| `timer_start` | write | exactly one of `preset` (id, or a unique name ignoring case, or `hiit` when no saved preset has that name, resolved as `start <spec>` does), `durationSeconds`, `until` (`HH:MM`, `HH:MM:SS` or ISO 8601 with an offset), `stopwatch: true` and `interval { work, rest?, rounds, prep?, cooldown? }` or `interval { segments: [{ phase, seconds, label? }], rounds, prep?, cooldown? }`; optional `name` and `sound` |
+| `timer_pause`, `timer_resume`, `timer_lap`, `timer_skip` | write | `id` |
+| `timer_reset`, `timer_remove` | destructive | exactly one of `id` and `name` (a unique timer name, ignoring case) |
+| `timer_preset_remove` | destructive | exactly one of `id` and `name`; a built-in preset is `invalid_state` |
+| `timer_preset_save` | write | `name`, the interval fields above at the top level, optional `sound` |
+
+- **Schemas:** ids, names, labels, phases and rounds use the SET-74 `schemas`; durations are whole seconds from 1 to 86,400. Every input schema is an object with `additionalProperties: false` and no top-level `oneOf`, `anyOf`, `allOf` or `not`, which some hosts refuse, so the tools check "exactly one of" themselves.
+- **Annotations:** `readOnlyHint: true` on the three reads, `destructiveHint: true` on `timer_reset`, `timer_remove` and `timer_preset_remove` (false on the other writes), and `openWorldHint: false` on all. The server adds no confirmation of its own; hosts apply their approval to write tools. Each description says that timers run locally and keep running after the conversation ends and asks the model to report the timer id and end time (the preset tools ask for the preset id, then the timer id and end time once a timer starts from it); the destructive ones say to run them only at the user's explicit request.
+- **Results:** `timer_list` returns the SET-74 agent result as `structuredContent` and its text. `timer_get` returns the same shape holding only that timer. A timer write returns the agent result read after the operation plus `affectedTimerId`, with text that starts with the change and, while the timer runs, when it ends (`Started Tea (t_ab12cd34). Ends at 17:25:00 (2026-10-21T17:25:00+02:00).`), then the board's lines. The preset tools return `{ presets }` (plus `affectedPresetId` on writes) and one line per preset.
+- **Errors:** `isError: true`, with `<code>: <message>` as text and `structuredContent.error` `{ code, message, issues?, candidates? }`. Codes are SET-74's (`invalid_input`, also for input that fails the schema, with SET-74 style `issues` such as `{ path: "durationSeconds", message: "must be >= 1" }`; `not_found`; `invalid_state`; `limit_reached`), `ambiguous` for a name that matches several timers or presets, and the daemon's (`daemon_unavailable`, `storage_failed`, `internal`). A daemon that cannot be reached or started gets a fixed message; the detail, which names the data directory, goes to stderr. When a write succeeded but reading the board afterwards failed, the error's message starts with the change that was made and carries `affectedTimerId` (or `affectedPresetId`), so the model does not repeat it.
+- **Ids, not paths:** the model receives timer and preset ids, never the data directory, the socket or any other path.
+- **Excluded:** `ui://` resources and tool UI metadata (SET-80), remote or HTTP transport, auth and any hosted server.
+
+### Host configuration
+
+The host starts the command, so `subset-timer` must be on the `PATH` the host sees (or give its absolute path, from `which subset-timer`). Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "subset-timer": { "command": "subset-timer", "args": ["mcp"] } } }
+```
+
+VS Code (`.vscode/mcp.json` in a workspace):
+
+```json
+{ "servers": { "subset-timer": { "type": "stdio", "command": "subset-timer", "args": ["mcp"] } } }
+```
+
+The macOS app (SET-81) will bundle a copy of the CLI; the path of that copy for the `command` is documented once SET-81 ships it. Use in real hosts is checked in SET-84, not here.
 
 ## Release
 
@@ -135,22 +174,22 @@ After 10 minutes with no running or paused timer, no `/v1/events` subscriber and
 
 `startDaemon({ dataDir, clock, sink, log })` runs a daemon in-process, and `runDaemonCommand({ sink })` is the foreground `daemon run`. `clock` is `{ now, monotonic, setTimeout, clearTimeout }`: production uses `Date.now()`, `performance.now()` and `setTimeout`; `createFakeClock()` keeps timeouts on a monotonic timeline apart from the wall clock, as Node does, for tests.
 
-Excluded: TCP on the daemon itself (`serve` is a separate process that proxies to its socket), MCP (SET-79), launchd and Windows named pipes.
+Excluded: TCP on the daemon itself (`serve` and `mcp` are separate processes that are its clients), launchd and Windows named pipes.
 
 ## Superfunctions
 
-The SET-73 reuse check (see `packages/timer/README.md`) covers this package. The daemon is local process infrastructure (a Unix socket, a lock file and a JSON file), which no Superfunctions package provides; it uses only Node.js built-ins and `@subset/timer`. The CLI parses arguments with Node's `util.parseArgs` and the sinks run the platform's own tools; no Superfunctions package covers either. `@mcpfn/core` is used by the later MCP host (SET-79), not here. The build bundles `@subset/timer` and `zod` with `rolldown` 1.2.11, as `@subset.dev/usage` does.
+The SET-73 reuse check (see `packages/timer/README.md`) covers this package. The daemon is local process infrastructure (a Unix socket, a lock file and a JSON file), which no Superfunctions package provides; it uses only Node.js built-ins and `@subset/timer`. The CLI parses arguments with Node's `util.parseArgs` and the sinks run the platform's own tools; no Superfunctions package covers either. The MCP server uses `@mcpfn/core` 0.0.5 for the tool registry, input validation and the stdio transport, and its tests use `@mcpfn/testing` 0.0.5 (the in-memory `McpFnTestClient`, `assertManifestContract` and `validateMcpFnSchemaPortability`); the package does not depend on `@modelcontextprotocol/sdk` directly. The gap the SET-73 check recorded stands: mcpfn bundles SDK 1.29.0, while 1.32.1 is current. The build bundles `@subset/timer`, `zod` and `@mcpfn/core` (with the SDK it inlines, Ajv and `@cfworker/json-schema`) with `rolldown` 1.2.11, as `@subset.dev/usage` does, so both are development dependencies and the published package still installs nothing: `dist/cli.mjs` loads `dist/mcp-server.mjs` only for `subset-timer mcp`, and code the two share is in `dist/common.mjs`. The build writes the name, version, licence and licence text of every bundled package (MIT, and BSD-3-Clause for `fast-uri`) to `dist/THIRD_PARTY_NOTICES.md`, which the package ships.
 
 ## Verification
 
-`npm test --workspace=@subset.dev/timer` builds `dist/cli.mjs`, copies the built board (run `npm run build --workspace=@subset/timer-web` first) and runs `node --test test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs` with temporary data directories against a real socket. CI runs it in **Verify** on Linux; it also runs on macOS. The CLI tests (`test/cli`) cover:
+`npm test --workspace=@subset.dev/timer` builds `dist/cli.mjs`, copies the built board (run `npm run build --workspace=@subset/timer-web` first) and runs `node --test test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs test/mcp/*.test.mjs` with temporary data directories against a real socket. CI runs it in **Verify** on Linux; it also runs on macOS. The CLI tests (`test/cli`) cover:
 
 - **Durations:** the parser table (`90s`, `25m`, `1h30m`, `1:30`, `1:02:03`, the 1 s and 24 h bounds) and invalid forms (bare numbers, `1h30`, units out of order or repeated, decimals, negatives, `1:60`), and `--until` today or tomorrow.
 - **Commands:** with the SET-74 fixture store loaded into an in-process daemon (fake clock, recording sink), `list`, `status`, `start`, `pause`, `resume`, `lap`, `skip`, `reset`, `rm`, `presets` and `preset rm` print the fixture's text and, with `--json`, the fixture's result; daemon refusals keep the fixture's code and message. `start` covers each `<spec>` form, aliases, `--no-sound` (which reaches the sink as the timer's `sound`) and `--until`; `preset save`; `daemon status`, `daemon stop`, `daemon run`, `skill path`, `--help` and `--version`.
 - **`<ref>` and exit codes:** exact ids, unique names ignoring case, `ambiguous` with its candidates for timers and presets, and exit statuses 0, 2, 3 (a daemon that cannot start, and `daemon status` with none) and 4.
 - **Skill:** `--help` lists every command `SKILL.md` uses and `SKILL.md` uses only commands that exist, with the rules the skill must state.
 - **Sinks:** a recording `spawn` shows each name of the closed injection set (`"`, `\`, `'`, `$( )`, backticks, `;`, newlines, 60 emoji, `end tell`, `do shell script`, `-e`, `--`) reaching `osascript` only as an argv item after `--` of the fixed script, and `notify-send` after `--`, never through a shell; only the fixed sounds play, none with `sound` off; a failing or hanging tool rejects and is stopped; the silent sink is chosen when the tools are absent or the platform is neither macOS nor Linux.
-- **Package:** the manifest, the release entry, a bundle importing only Node built-ins, `node dist/cli.mjs --version` printing 0.1.0, `npm pack` holding only `dist/cli.mjs`, the built board (`web/index.html`, `web/favicon.svg` and its hashed assets), `skills/subset-timer/SKILL.md`, `README.md` and `package.json`, and the built CLI starting its daemon on first use, reporting it and stopping it.
+- **Package:** the manifest, the release entry, a bundle importing only Node built-ins and its own chunks (only `subset-timer mcp` loading the MCP runtime), `node dist/cli.mjs --version` printing 0.1.0, `dist/THIRD_PARTY_NOTICES.md` naming every bundled package and its licence, `npm pack` holding only `dist/cli.mjs`, `dist/common.mjs`, `dist/mcp-server.mjs`, `dist/THIRD_PARTY_NOTICES.md`, the built board (`web/index.html`, `web/favicon.svg` and its hashed assets), `skills/subset-timer/SKILL.md`, `README.md` and `package.json`, and the built CLI starting its daemon on first use, reporting it and stopping it.
 
 The web host tests (`test/serve.test.mjs`) run against a daemon on a real socket in a temp data directory:
 
@@ -159,6 +198,13 @@ The web host tests (`test/serve.test.mjs`) run against a daemon on a real socket
 - **Proxy:** `start`, `pause` and `remove` through the API change the daemon's store; `/api/timers` and `/api/presets` relay; the daemon's `not_found` and a body that is not JSON come back as they are; with no daemon to reach, `/api/timers`, `/api/presets` and `/api/events` are 503 `daemon_unavailable`.
 - **Events:** the stream opens with a `state`, carries one with the new timer after an operation and no alerts, and releases the daemon subscription when the page leaves or the host closes.
 - **Static files and the command:** `/` is the board's `index.html` with its title, favicon and Content Security Policy, its assets have their types, and unknown, traversing, directory and malformed paths are 404; `serve` prints its URL (`--json`: `{ url, port }`), opens the browser unless `--no-open` and stops when asked; the built CLI serves the board, starts the daemon on the page's first change, and exits 0 on SIGINT with a stream open while the daemon keeps the timer running.
+
+The MCP tests (`test/mcp`) cover, with `@mcpfn/testing`'s in-memory client against an in-process daemon (fake clock, recording sink, optionally the SET-74 fixture store) and with the built `subset-timer mcp` as a child process against a daemon in a temp data directory:
+
+- **Tools:** `tools/list` matches the server manifest and holds exactly the 12 tools, each with an object input schema without top-level combinators that passes mcpfn's portability check, the SET-74 id, name and phase schemas, the annotations above, a title and the descriptions' local-and-keeps-running and report-the-id-and-end sentences; the server reports `subset-timer` and the package version.
+- **Success paths:** `timer_list` and `timer_get` return the daemon's agent result and the fixture text, with the end time for a running timer; `timer_start` in every mode (duration, `HH:MM` and ISO `until`, stopwatch, work and rest, segments, presets by id, name and alias, `sound: false`; a saved preset named HIIT wins over the `hiit` alias and two of them are `ambiguous`) creates a running timer in the daemon, which then finishes it and alerts its sink; pause, resume, skip, lap, reset by id and name, remove by name and id, and saving, starting and removing a preset each change the daemon's store and return the board with `affectedTimerId` or `affectedPresetId`.
+- **Errors:** two start modes, none, work with segments, a negative, too long or fractional duration, an unknown field, a missing `rounds`, a bad `until`, a name with a line break, malformed ids and both `id` and `name` are `invalid_input` with SET-74 issue paths; an unknown id, timer, preset or saved preset is `not_found`; pausing a paused timer, resuming a running one, a lap on an interval, a skip on a stopwatch and removing a built-in preset are `invalid_state`; the 51st timer is `limit_reached`; a name matching two timers is `ambiguous` with both candidates; none of these change the store. A daemon that cannot start is `daemon_unavailable` with no path in the result; a start whose later read fails reports the timer it started; no result carries the data directory.
+- **Stdio:** over a real child process, initialize, `tools/list` and two calls (the first starting the daemon) put only complete JSON-RPC frames on stdout and the log on stderr; closing stdin exits 0 while the daemon keeps running and the timer is still listed; closing stdin at once exits 0 without starting a daemon; `mcp` with an argument exits 2, and `--help` lists it.
 
 The daemon tests (`test/daemon`) cover:
 
@@ -170,4 +216,4 @@ The daemon tests (`test/daemon`) cover:
 - **Idle exit:** after 10 fake minutes with nothing running, cancelled by a subscriber and by running or paused timers.
 - **Auto-spawn:** a client starts a daemon and later clients reuse it; concurrent clients end up on one daemon; a request that meets a daemon shutting down, or a real daemon that lost its lock, runs on the daemon started after it; a start that meets a socket resetting its connections, as a closing daemon's does, keeps waiting for the daemon after it; the 3 s wait is neither cut short nor stretched when the wall clock is set an hour forward or back; a daemon that never starts is `daemon_unavailable`.
 
-Not verified here: the board in a real browser, including keyboard use and visual review (SET-85); audible sounds and visible notifications from the real sinks, and sleep and wake, on a real Mac (SET-85); the skill used by a real agent (SET-84); a published package (after SET-87); and Windows, which is not supported.
+Not verified here: the MCP server in a real host such as Claude Desktop or VS Code (SET-84); the board in a real browser, including keyboard use and visual review (SET-85); audible sounds and visible notifications from the real sinks, and sleep and wake, on a real Mac (SET-85); the skill used by a real agent (SET-84); a published package (after SET-87); and Windows, which is not supported.

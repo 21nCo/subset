@@ -8,14 +8,31 @@ import { createFakeClock, createRecordingSink, pidAlive, readLock, socketRequest
 
 export const DAEMON_ENTRY = fileURLToPath(new URL('../../src/daemon/main.mjs', import.meta.url));
 
+/** What `tempDataDir` waits for before removing each directory it made. */
+const stopsBeforeRemoval = new Map();
+
+/**
+ * Has the removal of `dataDir`, made by `tempDataDir`, first wait for `stop`, which ends a process
+ * that may still write there. `t.after` hooks run in the order they were added, so a hook a test
+ * adds after `tempDataDir` would otherwise run once the directory is already being removed.
+ */
+export function stopBeforeRemoval(dataDir, stop) {
+  stopsBeforeRemoval.get(dataDir)?.push(stop);
+}
+
 /**
  * A fresh data directory, removed after the test. Short, so the socket path fits every platform.
- * A daemon process still holding its lock is stopped first, so no test leaves one behind.
+ * The processes registered with `stopBeforeRemoval` and a daemon process still holding its lock
+ * are stopped first, so no test leaves one behind or has one write into the directory as it goes.
  */
 export function tempDataDir(t) {
   const dir = mkdtempSync(join(tmpdir(), 'std-'));
   const dataDir = join(dir, 'data');
+  const stops = [];
+  stopsBeforeRemoval.set(dataDir, stops);
   t.after(async () => {
+    stopsBeforeRemoval.delete(dataDir);
+    await Promise.all(stops.map((stop) => stop()));
     const holder = readLock(join(dataDir, 'daemon.lock'));
     if (holder?.pid && holder.pid !== process.pid && pidAlive(holder.pid)) {
       let signalled = true;
@@ -136,7 +153,13 @@ export function within(promise, timeoutMs = 5_000, what = 'the daemon to close')
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Runs `main.mjs daemon run` as a separate process. */
+/** Kills `child` unless it has ended, and resolves once it has exited. */
+export async function stopChild(child, exited) {
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  await within(exited, 10_000, 'a test process to exit');
+}
+
+/** Runs `main.mjs daemon run` as a separate process, stopped before its data directory is removed. */
 export function spawnDaemonProcess(dataDir) {
   const child = spawn(process.execPath, [DAEMON_ENTRY, 'daemon', 'run'], {
     env: { ...process.env, SUBSET_TIMER_DATA_DIR: dataDir },
@@ -148,5 +171,6 @@ export function spawnDaemonProcess(dataDir) {
     stderr += chunk;
   });
   const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+  stopBeforeRemoval(dataDir, () => stopChild(child, exited));
   return { child, exited, stderr: () => stderr };
 }

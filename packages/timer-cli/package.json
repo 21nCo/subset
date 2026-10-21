@@ -32,10 +32,12 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build.mjs && node --test --test-timeout=60000 test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs",
+    "test": "node scripts/build.mjs && node --test --test-timeout=60000 test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs test/mcp/*.test.mjs",
     "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
   },
   "devDependencies": {
+    "@mcpfn/core": "0.0.5",
+    "@mcpfn/testing": "0.0.5",
     "@subset/timer": "*",
     "rolldown": "1.2.11"
   }

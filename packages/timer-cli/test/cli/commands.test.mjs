@@ -401,7 +401,8 @@ test('--help lists every command SKILL.md uses, and SKILL.md uses only commands 
   assert.deepEqual([...skillCommands].filter((command) => !helpCommands.has(command)), []);
   // The skill teaches every timer, preset, daemon and web command.
   const expected = ['list', 'status', 'start', 'pause', 'resume', 'lap', 'skip', 'reset', 'rm', 'presets', 'preset save', 'preset rm', 'daemon run', 'daemon status', 'daemon stop', 'skill path', 'serve'];
-  assert.deepEqual([...helpCommands].sort(), [...expected].sort());
+  // `mcp` is started by an MCP host, not run by a shell agent, so the skill leaves it out.
+  assert.deepEqual([...helpCommands].sort(), [...expected, 'mcp'].sort());
   assert.deepEqual([...skillCommands].sort(), [...expected].sort());
   // The rules the issue requires.
   assert.match(skill, /Always add `--json`/);
