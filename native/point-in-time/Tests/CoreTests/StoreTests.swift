@@ -778,6 +778,28 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
         }
     }
 
+    @Test func aRetractionWideningTheQueuedHeadCountsItsDeleteAgain() throws {
+        try withStorage { storage in
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            writes.save(segment("b", 60, 80), to: storage)
+            storage.failCheckpoints = true
+            writes.retract(since: t0 + 70, until: t0 + 90, in: storage)
+            let trimmed = try storage.store.segmentCount()
+            #expect(trimmed == 2 && writes.count == 1 && writes.appliedRemovals == 1)
+            // It merges into the queued head, whose delete step already ran; the wider delete removes rows the first did not.
+            writes.retract(since: t0, until: t0 + 100, in: storage)
+            #expect(writes.queue == [.retract(from: t0, to: t0 + 100)])
+            let remaining = try storage.store.segmentCount()
+            #expect(remaining == 0 && writes.appliedRemovals == 2)
+            writes.retry(storage)
+            #expect(writes.appliedRemovals == 2)
+            storage.failCheckpoints = false
+            let drained = writes.retry(storage)
+            #expect(drained && writes.appliedRemovals == 2)
+        }
+    }
+
     @Test func aSustainedOutageKeepsTheQueueBoundedAndStillAdmitsDeletions() throws {
         try withStorage { storage in
             var writes = PendingWrites(capacity: 10, writesPerRetry: 4)
