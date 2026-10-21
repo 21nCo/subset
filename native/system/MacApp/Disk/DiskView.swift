@@ -41,9 +41,12 @@ struct DiskView: View {
         }
         .padding(12)
         .frame(minWidth: 760, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
-        .onAppear { model.setVolumes(DiskScope.mountedVolumes()) }
+        // Volumes are read off the main actor, so a stalled network mount cannot hold up the window. A volume renamed
+        // while this section was not shown is found again by its UUID.
+        .task { await model.refreshVolumes() }
         .onReceive(Self.volumesChanged) { note in
-            model.setVolumes(DiskScope.mountedVolumes(), renamed: Self.rename(in: note))
+            let renamed = Self.rename(in: note)
+            Task { await model.refreshVolumes(renamed: renamed) }
         }
     }
 

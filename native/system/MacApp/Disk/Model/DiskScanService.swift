@@ -5,14 +5,15 @@ import SystemCore
 public enum DiskScope: Hashable, Sendable {
     case home
     case folder(path: String)
-    case volume(name: String, path: String)
+    /// `id` is the volume's UUID, which stays the same when it is renamed and its mount path moves with the name.
+    case volume(name: String, path: String, id: String? = nil)
 
     /// The scope's title in the picker.
     public var title: String {
         switch self {
         case .home: "Home"
         case let .folder(path): path == "/" ? "/" : (path as NSString).lastPathComponent
-        case let .volume(name, _): name
+        case let .volume(name, _, _): name
         }
     }
 
@@ -20,23 +21,37 @@ public enum DiskScope: Hashable, Sendable {
     public func path(home: String) -> String {
         switch self {
         case .home: home
-        case let .folder(path), let .volume(_, path): path
+        case let .folder(path), let .volume(_, path, _): path
         }
     }
 
+    /// Whether this and `other` are the same mounted volume: the same UUID, or the same mount path when either has none.
+    public func isSameVolume(as other: DiskScope) -> Bool {
+        guard case let .volume(_, path, id) = self, case let .volume(_, otherPath, otherID) = other else { return false }
+        if let id, let otherID { return id == otherID }
+        return path == otherPath
+    }
+
     /// The local volumes mounted now, the startup disk first, as scopes. Hidden and network volumes are left out:
-    /// the scanner does not read them.
+    /// the scanner does not read them. Reading a mount can wait on a stalled network server, so call this off the main
+    /// actor, as `currentVolumes()` does.
     public static func mountedVolumes() -> [DiskScope] {
-        let keys: [URLResourceKey] = [.volumeLocalizedNameKey, .volumeIsLocalKey, .volumeIsRootFileSystemKey]
+        let keys: [URLResourceKey] = [.volumeLocalizedNameKey, .volumeIsLocalKey, .volumeIsRootFileSystemKey,
+                                      .volumeUUIDStringKey]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys,
                                                          options: [.skipHiddenVolumes]) ?? []
         return urls.compactMap { url -> (DiskScope, Bool)? in
             guard let values = try? url.resourceValues(forKeys: Set(keys)), values.volumeIsLocal == true else { return nil }
             let name = values.volumeLocalizedName ?? url.lastPathComponent
-            return (.volume(name: name, path: url.path), values.volumeIsRootFileSystem == true)
+            return (.volume(name: name, path: url.path, id: values.volumeUUIDString), values.volumeIsRootFileSystem == true)
         }
         .sorted { $0.1 && !$1.1 }
         .map(\.0)
+    }
+
+    /// `mountedVolumes()`, read off the caller's actor.
+    public static func currentVolumes() async -> [DiskScope] {
+        await DiskScanService.detached { mountedVolumes() }
     }
 }
 

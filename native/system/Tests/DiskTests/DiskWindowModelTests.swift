@@ -492,6 +492,84 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.scope, .home)
     }
 
+    /// A volume renamed while no rename was seen (the Disk section was not shown) is found by its UUID under its new
+    /// name and mount path; another volume mounted at the old path is not taken for it.
+    func testAVolumeRenamedUnseenStaysTheScopeByItsUUID() {
+        let model = fixture.model()
+        let main = DiskScope.volume(name: "Macintosh HD", path: "/", id: "MAIN")
+        let external = DiskScope.volume(name: "External", path: "/Volumes/External", id: "EXT")
+        model.setVolumes([main, external])
+        model.scope = external
+        let renamed = DiskScope.volume(name: "Backup", path: "/Volumes/Backup", id: "EXT")
+        model.setVolumes([main, renamed])
+        XCTAssertEqual(model.scope, renamed)
+        XCTAssertEqual(model.scope.title, "Backup")
+
+        model.setVolumes([main, .volume(name: "Backup", path: "/Volumes/Backup", id: "OTHER")])
+        XCTAssertEqual(model.scope, .home, "a different volume at the same mount path is not the one selected")
+    }
+
+    /// Volumes are read through the injected reader; a slower, older refresh does not overwrite a newer one.
+    func testTheLatestVolumeRefreshWins() async {
+        let model = fixture.model()
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        let stale = DiskScope.volume(name: "Stale", path: "/Volumes/Stale", id: "STALE")
+        let current = DiskScope.volume(name: "Current", path: "/Volumes/Current", id: "CURRENT")
+        let reading = expectation(description: "the older refresh is reading")
+        let older = Task {
+            await model.refreshVolumes {
+                reading.fulfill()
+                for await _ in gate {}
+                return [stale]
+            }
+        }
+        await fulfillment(of: [reading], timeout: 10)
+        await model.refreshVolumes { [current] }
+        XCTAssertEqual(model.volumes, [current])
+        open.finish()
+        await older.value
+        XCTAssertEqual(model.volumes, [current])
+    }
+
+    /// Docker's image space is asked for whenever the home folder is scanned, picked as Home or chosen as a folder, and
+    /// not for another folder.
+    func testDockerIsAskedForAScanOfTheHomeFolderHoweverItWasPicked() async throws {
+        let asked = OSAllocatedUnfairLock(initialState: [Bool]())
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, includeDocker in
+            asked.withLock { $0.append(includeDocker) }
+            return DiskFixture.analysis(result, home: home)
+        }))
+        for scope in [DiskScope.home, .folder(path: home), .folder(path: fixture.path("Documents"))] {
+            model.scope = scope
+            model.scan()
+            try await DiskFixture.wait { !model.isScanning }
+            XCTAssertEqual(model.phase, .completed, "\(scope)")
+        }
+        XCTAssertEqual(asked.withLock { $0 }, [true, true, false])
+    }
+
+    /// A scan replaced by a new one before its analysis came back never shows that analysis.
+    func testAReplacedScansLateAnalysisIsDropped() async throws {
+        let gate = Gate()
+        let home = fixture.home
+        let documents = fixture.path("Documents")
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            if result.tree.rootPath == home { gate.pass() }
+            return DiskFixture.analysis(result, home: home)
+        }))
+        model.scan()
+        await fulfillment(of: [gate.reached], timeout: 30)
+        model.scope = .folder(path: documents)
+        model.scan()
+        try await DiskFixture.wait { model.phase == .completed }
+        gate.open()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(model.scannedScope, .folder(path: documents))
+        XCTAssertEqual(model.result?.tree.rootPath, documents)
+        XCTAssertEqual(model.breadcrumbs.map(\.name), ["~/Documents"])
+    }
+
     /// The live analysis runs detached, off the main actor; cancelling the scan's task must reach it.
     func testCancellingTheCallerCancelsDetachedWork() async {
         let started = expectation(description: "work started")

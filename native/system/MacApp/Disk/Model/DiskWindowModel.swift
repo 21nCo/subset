@@ -67,6 +67,7 @@ public final class DiskWindowModel {
     @ObservationIgnored private let service: DiskScanService
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var volumeRefresh = 0
     @ObservationIgnored private var selections: [DiskTab: DiskRowID] = [:]
     @ObservationIgnored private var expanded: Set<DiskRowID> = []
     /// How many rows each list shows, by the list's key, when Show more raised it above `rowLimit`.
@@ -96,13 +97,27 @@ public final class DiskWindowModel {
         [.home] + (chosenFolder.map { [$0] } ?? []) + volumes
     }
 
-    /// Lists the volumes mounted now. A volume selected as the scope stays selected, under its new name and mount path
-    /// when `renamed` (its old and new mount paths) says it was renamed; one no longer mounted leaves Home selected.
+    /// Lists the volumes mounted now. A volume selected as the scope stays selected while it is mounted, under its new
+    /// name and mount path after a rename: it is found by its UUID, or, for a volume without one, by its mount path,
+    /// followed through `renamed` (the old and new mount paths) when the rename was seen. One no longer mounted leaves
+    /// Home selected.
     public func setVolumes(_ volumes: [DiskScope], renamed: (from: String, to: String)? = nil) {
         self.volumes = volumes
-        guard case let .volume(_, path) = scope else { return }
+        guard case let .volume(name, path, id) = scope else { return }
         let mountPath = renamed.map { $0.from == path ? $0.to : path } ?? path
-        scope = volumes.first { $0.path(home: home) == mountPath } ?? .home
+        let selected = DiskScope.volume(name: name, path: mountPath, id: id)
+        scope = volumes.first { $0.isSameVolume(as: selected) } ?? .home
+    }
+
+    /// Reads the volumes mounted now off the main actor and lists them, as `setVolumes`; of overlapping refreshes, the
+    /// latest started wins.
+    public func refreshVolumes(renamed: (from: String, to: String)? = nil,
+                               read: @escaping @Sendable () async -> [DiskScope] = DiskScope.currentVolumes) async {
+        volumeRefresh += 1
+        let refresh = volumeRefresh
+        let volumes = await read()
+        guard refresh == volumeRefresh else { return }
+        setVolumes(volumes, renamed: renamed)
     }
 
     /// Selects a folder from the open panel as the scope.
@@ -200,7 +215,8 @@ public final class DiskWindowModel {
         }
         phase = .analyzing
         rebuild()
-        let analysis = await service.analyze(result, scope == .home)
+        // Docker's image space is offered for a scan of the home folder, however it was picked.
+        let analysis = await service.analyze(result, scope.path(home: home) == home)
         // A cancel during analysis, or a newer scan, drops it.
         guard generation == self.generation, phase == .analyzing, let analysis else { return }
         self.analysis = analysis
