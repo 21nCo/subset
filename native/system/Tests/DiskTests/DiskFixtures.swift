@@ -76,14 +76,15 @@ final class DiskFixture {
 
     /// The real scanner, the fixture's analysis, and the fixture volume.
     func service(scan: (@Sendable (String, @escaping @Sendable (DiskScanProgress) -> Void) async -> Result<DiskScanResult, DiskScanError>)? = nil,
-                 analyze: (@Sendable (DiskScanResult, Bool) async -> DiskAnalysis)? = nil) -> DiskScanService {
+                 analyze: (@Sendable (DiskScanResult, Bool) async -> DiskAnalysis)? = nil,
+                 volume: (@Sendable (String) async -> VolumeSummary)? = nil) -> DiskScanService {
         let home = home
         return DiskScanService(
             scan: scan ?? { root, onProgress in
                 await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
             },
             analyze: analyze ?? { result, _ in Self.analysis(result, home: home) },
-            volume: { _ in Self.volume })
+            volume: volume ?? { _ in Self.volume })
     }
 
     func model(rowLimit: Int = 500, service: DiskScanService? = nil) -> DiskWindowModel {

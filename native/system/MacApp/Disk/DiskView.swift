@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import SystemCore
 import SystemDisk
@@ -41,7 +42,16 @@ struct DiskView: View {
         .padding(12)
         .frame(minWidth: 760, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
         .onAppear { model.setVolumes(DiskScope.mountedVolumes()) }
+        .onReceive(Self.volumesChanged) { _ in model.setVolumes(DiskScope.mountedVolumes()) }
     }
+
+    /// Posted when a volume is mounted, unmounted, or renamed, so the scope picker lists the volumes there are now.
+    private static let volumesChanged = {
+        let center = NSWorkspace.shared.notificationCenter
+        return center.publisher(for: NSWorkspace.didMountNotification)
+            .merge(with: center.publisher(for: NSWorkspace.didUnmountNotification),
+                   center.publisher(for: NSWorkspace.didRenameVolumeNotification))
+    }()
 
     private var statusIsError: Bool {
         if case .failed = model.phase { return true }

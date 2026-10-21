@@ -10,7 +10,8 @@ import SystemProcesses
 ///
 /// A cancelled scan keeps what it read on screen, with folders not read in full marked; origins and suggestions are
 /// worked out only for a scan that finished and was not cancelled. A list longer than `rowLimit` ends in a row that
-/// shows the next page, so every item can be reached.
+/// shows the next page, so every item can be reached, and the selection is always a listed row: a list shows as many
+/// pages as reach the selected item.
 @MainActor
 @Observable
 public final class DiskWindowModel {
@@ -108,6 +109,11 @@ public final class DiskWindowModel {
 
     public var isScanning: Bool { phase == .scanning || phase == .analyzing }
 
+    private var isFailed: Bool {
+        if case .failed = phase { return true }
+        return false
+    }
+
     /// Starts a scan of the current scope, replacing the results shown.
     public func scan() {
         task?.cancel()
@@ -132,7 +138,7 @@ public final class DiskWindowModel {
         // The header is read on its own, so cancelling the scan does not stop it.
         Task { [weak self, format] in
             let summary = await service.volume(root)
-            guard let self, self.generation == generation else { return }
+            guard let self, self.generation == generation, !self.isFailed else { return }
             volumeHeader = DiskVolumeHeader(summary, format: format)
         }
         task = Task { [weak self] in
@@ -175,6 +181,8 @@ public final class DiskWindowModel {
         switch scanned {
         case let .failure(error):
             phase = .failed(Self.message(error, format: format))
+            // There is no volume to describe for a scan that did not run.
+            volumeHeader = nil
             rebuild()
             return
         case let .success(value):
@@ -283,10 +291,9 @@ public final class DiskWindowModel {
 
     public func goUp() {
         guard tab == .folders, let tree = result?.tree, let parent = tree[folder].parent else { return }
-        let left = folder
+        selection = .item(folder)
         folder = parent
         rebuild()
-        selection = .item(left)
     }
 
     /// Goes to a folder on the breadcrumb path, selecting the folder below it that was open.
@@ -294,8 +301,8 @@ public final class DiskWindowModel {
         guard let position = breadcrumbs.firstIndex(where: { $0.id == breadcrumb }) else { return }
         let below = breadcrumbs.indices.contains(position + 1) ? breadcrumbs[position + 1].id : nil
         folder = breadcrumb
-        rebuild()
         selection = below.map(DiskRowID.item)
+        rebuild()
     }
 
     /// A double-click or the primary action: opens a folder or Show more row in the Folders tab, and expands or
@@ -319,6 +326,17 @@ public final class DiskWindowModel {
     }
 
     private func limit(_ list: String) -> Int { shown[list] ?? rowLimit }
+
+    /// How many of a list's rows to show: its pages, raised to the page holding the selection when that sorts later,
+    /// as after going up to a parent or changing the sort.
+    private func count(of ids: [DiskRowID], list: String) -> Int {
+        var count = limit(list)
+        if let selection, let position = ids.firstIndex(of: selection), position >= count {
+            count = (position / rowLimit + 1) * rowLimit
+            shown[list] = count
+        }
+        return count
+    }
 
     static func isNavigable(_ item: DiskItem) -> Bool {
         item.kind == .directory && item.sizes != nil
@@ -414,7 +432,7 @@ public final class DiskWindowModel {
         let largest = items.compactMap(\.sizes?.allocated).max() ?? 0
         let scale = max(parent.sizes?.allocated ?? 0, largest)
         let list = "folder-\(folder)"
-        var rows = items.prefix(limit(list)).map { folderRow($0, in: tree, scale: scale) }
+        var rows = items.prefix(count(of: items.map { .item($0.index) }, list: list)).map { folderRow($0, in: tree, scale: scale) }
         if items.count > rows.count {
             rows.append(moreRow(items.count - rows.count, list: list))
         }
@@ -581,7 +599,7 @@ public final class DiskWindowModel {
         let sorted = items.map { (item: tree[$0.index], path: $0.path) }
             .sorted { ($0.item.sizes?.allocated ?? 0, $1.path) > ($1.item.sizes?.allocated ?? 0, $0.path) }
         let scale = sorted.compactMap(\.item.sizes?.allocated).max() ?? 0
-        var rows = sorted.prefix(limit(list)).map { item, path in
+        var rows = sorted.prefix(count(of: sorted.map { id($0.item.index) }, list: list)).map { item, path in
             let figures = DiskFigures(item.sizes, flags: item.flags, format: format)
             let name = Self.name(item.name)
             let shown = format.path(path)

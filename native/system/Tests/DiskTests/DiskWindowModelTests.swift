@@ -145,6 +145,37 @@ final class DiskWindowModelTests: XCTestCase {
                         fixture.path("Library/Application Support/com.example.editor")])
     }
 
+    /// The selection is always a listed row, so it can be revealed and copied: going up, a breadcrumb, or a new sort
+    /// shows as many pages as reach the selected folder.
+    func testTheSelectedFolderIsListedAfterGoingUpOrChangingTheSort() async throws {
+        let sorted = try await fixture.scanned(rowLimit: 1)
+        XCTAssertEqual(sorted.rows.map(\.name), ["Documents", "Show 1 more"])
+        let documents = try XCTUnwrap(sorted.row(named: "Documents")).id
+        sorted.selection = documents
+        sorted.sortKey = .name
+        XCTAssertEqual(sorted.rows.map(\.name), [".Trash", "Documents", "Show 1 more"])
+        XCTAssertEqual(sorted.selection, documents)
+        XCTAssertEqual(sorted.path(for: documents), fixture.path("Documents"))
+
+        let model = try await fixture.scanned(rowLimit: 1)
+        model.open(documents)
+        XCTAssertEqual(model.rows.map(\.name), ["big.bin", "Show 1 more"])
+        model.open(try XCTUnwrap(model.rows.last).id)
+        let sub = try XCTUnwrap(model.row(named: "Sub")).id
+        XCTAssertEqual(model.selection, sub)
+        model.open(sub)
+        // By name Sub is third in Documents and Documents second in the home folder, past the pages shown so far.
+        model.sortKey = .name
+        model.navigate(to: try XCTUnwrap(model.breadcrumbs.dropLast().last).id)
+        XCTAssertEqual(model.rows.map(\.name), ["big.bin", "small.bin", "Sub"])
+        XCTAssertEqual(model.selection, sub)
+        XCTAssertEqual(model.path(for: sub), fixture.path("Documents/Sub"))
+        model.goUp()
+        XCTAssertEqual(model.rows.map(\.name), [".Trash", "Documents", "Show 1 more"])
+        XCTAssertEqual(model.selection, documents)
+        XCTAssertEqual(model.path(for: documents), fixture.path("Documents"))
+    }
+
     /// A folder opens to an empty list when the scan did not read its contents; only one read in full is called empty.
     func testAFolderWhoseContentsWereNotReadIsNeverCalledEmpty() async throws {
         for name in ["Cloud", "Elsewhere", "Replaced"] {
@@ -394,15 +425,50 @@ final class DiskWindowModelTests: XCTestCase {
         model.tab = .folders
     }
 
+    /// A scan that cannot start says why, with no volume header, whether the header was read before or after.
     func testAScanThatCannotStartSaysWhy() async throws {
-        let model = fixture.model()
+        let (scanGate, openScan) = AsyncStream<Void>.makeStream()
+        let (volumeGate, openVolume) = AsyncStream<Void>.makeStream()
+        let headerFirst = OSAllocatedUnfairLock(initialState: true)
+        let model = fixture.model(service: fixture.service(
+            scan: { root, onProgress in
+                if headerFirst.withLock({ $0 }) { for await _ in scanGate {} }
+                return await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            },
+            volume: { _ in
+                if !headerFirst.withLock({ $0 }) { for await _ in volumeGate {} }
+                return DiskFixture.volume
+            }))
         model.chooseFolder(fixture.path("missing"))
         XCTAssertEqual(model.scopes.map(\.title), ["Home", "missing"])
         model.scan()
+        try await DiskFixture.wait { model.volumeHeader != nil }
+        openScan.finish()
         try await DiskFixture.wait { !model.isScanning }
         guard case let .failed(message) = model.phase else { return XCTFail("\(model.phase)") }
         XCTAssertEqual(message, "~/missing could not be opened: No such file or directory.")
         XCTAssertEqual(model.sections.first?.note, "The scan did not run.")
+        XCTAssertNil(model.volumeHeader)
+
+        headerFirst.withLock { $0 = false }
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.statusText, "The scan did not run. ~/missing could not be opened: No such file or directory.")
+        openVolume.finish()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(model.volumeHeader, "a header read after the scan failed is not shown")
+    }
+
+    /// A volume that goes away leaves the picker, and a scope set to it falls back to Home.
+    func testAnUnmountedVolumeLeavesThePicker() {
+        let model = fixture.model()
+        let external = DiskScope.volume(name: "External", path: "/Volumes/External")
+        model.setVolumes([.volume(name: "Macintosh HD", path: "/"), external])
+        model.scope = external
+        XCTAssertEqual(model.scopes.map(\.title), ["Home", "Macintosh HD", "External"])
+        model.setVolumes([.volume(name: "Macintosh HD", path: "/")])
+        XCTAssertEqual(model.scopes.map(\.title), ["Home", "Macintosh HD"])
+        XCTAssertEqual(model.scope, .home)
     }
 
     // MARK: Accessibility
