@@ -43,11 +43,11 @@ private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
 
     struct Refused: Error {}
 
-    func shareableWindows() async throws -> [CaptureWindow] {
+    func shareableWindows() async throws -> [ListedWindow<CaptureWindow>] {
         try lock.withLock {
             listed += 1
             if listingRefused { throw Refused() }
-            return listedWindows
+            return listedWindows.map { ListedWindow(window: $0, handle: $0) }
         }
     }
 

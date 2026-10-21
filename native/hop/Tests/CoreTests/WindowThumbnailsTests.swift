@@ -179,10 +179,10 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
 
     struct Refused: Error {}
 
-    func shareableWindows() async throws -> [CaptureWindow] {
+    func shareableWindows() async throws -> [ListedWindow<CaptureWindow>] {
         lock.withLock { listed += 1 }
         if listingFails { throw Refused() }
-        return windows
+        return windows.map { ListedWindow(window: $0, handle: $0) }
     }
 
     func capture(_ window: CaptureWindow, size: PixelSize) async throws -> String {
@@ -197,6 +197,45 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
         lock.withLock { running -= 1 }
         if failing.contains(window.id) { throw Refused() }
         return "image \(window.id) \(size.width)x\(size.height)"
+    }
+}
+
+/// A capture source whose listings each return only when the test releases them, in any order, with handles tagged by
+/// the listing they came from; a capture records the handle it was given.
+private final class OutOfOrderListingSource: WindowCaptureSource, @unchecked Sendable {
+    struct Handle: Sendable, Equatable {
+        var listing: Int
+        var id: UInt32
+    }
+
+    private let lock = NSLock()
+    private let windowsByListing: [Int: [CaptureWindow]]
+    private var started = 0
+    private var released: Set<Int> = []
+    private var asked: [Handle] = []
+
+    /// `windowsByListing[n]` is what the nth listing (from 1) returns.
+    init(windowsByListing: [Int: [CaptureWindow]]) {
+        self.windowsByListing = windowsByListing
+    }
+
+    var listingsStarted: Int { lock.withLock { started } }
+    var captured: [Handle] { lock.withLock { asked } }
+    func releaseListing(_ number: Int) { lock.withLock { _ = released.insert(number) } }
+
+    func shareableWindows() async throws -> [ListedWindow<Handle>] {
+        let number = lock.withLock {
+            started += 1
+            return started
+        }
+        // Like ScreenCaptureKit's, a listing does not stop when its task is cancelled.
+        while !lock.withLock({ released.contains(number) }) { try? await Task.sleep(for: .milliseconds(1)) }
+        return (windowsByListing[number] ?? []).map { ListedWindow(window: $0, handle: Handle(listing: number, id: $0.id)) }
+    }
+
+    func capture(_ handle: Handle, size: PixelSize) async throws -> String {
+        lock.withLock { asked.append(handle) }
+        return "image \(handle.id) from listing \(handle.listing)"
     }
 }
 
@@ -266,6 +305,36 @@ final class ThumbnailLoaderTests: XCTestCase {
         XCTAssertEqual(source.maxInFlight, ThumbnailLoader.maxConcurrent)
         XCTAssertEqual(source.captured.count, 26, "the cancelled load started no more after its first six")
         XCTAssertEqual(limiter.inFlight, 0)
+    }
+
+    func testAnEarlierListingThatReturnsLateDoesNotChangeWhatALaterLoadCaptures() async {
+        // The earlier load's listing no longer has window 0; the later load's does.
+        let source = OutOfOrderListingSource(windowsByListing: [1: [], 2: [window(0, frame: frame(0))]])
+        let limiter = CaptureLimiter(limit: 1)
+        let occupied = await limiter.acquire()
+        XCTAssertTrue(occupied, "a capture still running holds the only slot")
+        let entries = [entry(0, frame: frame(0))]
+        let reported = Reported()
+        let first = Task { await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2, limiter: limiter) { _ in } }
+        await waitFor { source.listingsStarted == 1 }
+        first.cancel()
+        let second = Task {
+            await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2, limiter: limiter) { reported.add($0) }
+        }
+        await waitFor { source.listingsStarted == 2 }
+        source.releaseListing(2)
+        await waitFor { reported.listed == [[0]] }
+        // The later load's capture is queued for a slot when the earlier listing comes back.
+        source.releaseListing(1)
+        let firstOutcome = await first.value
+        XCTAssertEqual(firstOutcome, .cancelled)
+        XCTAssertEqual(source.captured, [])
+        limiter.release()
+        let secondOutcome = await second.value
+        XCTAssertEqual(secondOutcome, .finished(captured: 1, failed: 0))
+        XCTAssertEqual(source.captured, [.init(listing: 2, id: 0)], "captured with its own listing's window")
+        XCTAssertEqual(reported.images, [0: "image 0 from listing 2"])
+        XCTAssertEqual(reported.failed, [])
     }
 
     func testAFailedCaptureAffectsOnlyItsWindow() async {

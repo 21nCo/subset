@@ -21,16 +21,31 @@ public struct CaptureWindow: Sendable, Equatable {
     }
 }
 
+/// One window of a listing: what matching needs, and the source's own handle on it for `capture`.
+public struct ListedWindow<Handle: Sendable>: Sendable {
+    public var window: CaptureWindow
+    public var handle: Handle
+
+    public init(window: CaptureWindow, handle: Handle) {
+        self.window = window
+        self.handle = handle
+    }
+}
+
 /// Where thumbnails come from: ScreenCaptureKit in the app, a fake in tests. Neither call may show a permission prompt
 /// by itself being called; the caller only calls them while Screen Recording is granted.
 public protocol WindowCaptureSource<Image>: Sendable {
     associatedtype Image: Sendable
+    /// What `capture` takes to capture a window of a listing (ScreenCaptureKit's `SCWindow`). A load captures only
+    /// with handles from its own listing, so a listing that returns late, for an earlier load, never changes or
+    /// invalidates what a later load captures.
+    associatedtype Handle: Sendable
 
     /// The windows on the current Space that can be captured now.
-    func shareableWindows() async throws -> [CaptureWindow]
+    func shareableWindows() async throws -> [ListedWindow<Handle>]
 
-    /// An image of `window` at `size` pixels.
-    func capture(_ window: CaptureWindow, size: PixelSize) async throws -> Image
+    /// An image of the listed window `handle` at `size` pixels.
+    func capture(_ handle: Handle, size: PixelSize) async throws -> Image
 }
 
 /// A size in whole pixels.
@@ -231,7 +246,8 @@ public enum ThumbnailEvent<Image: Sendable>: Sendable {
 }
 
 /// Captures thumbnails for a switcher's windows: lists the capturable windows once, matches them to the entries
-/// (`ThumbnailMatcher`), reports which will be captured, and captures each match in the entries' order, taking a slot
+/// (`ThumbnailMatcher`), reports which will be captured, and captures each match with its handle from that same
+/// listing, in the entries' order, taking a slot
 /// from `limiter` for each, so at most its limit run at a time across loads. Each image is reported as it arrives; a
 /// window whose capture fails is reported and the others go on.
 public enum ThumbnailLoader {
@@ -254,29 +270,30 @@ public enum ThumbnailLoader {
         limiter: CaptureLimiter = CaptureLimiter(),
         report: @escaping @Sendable (ThumbnailEvent<Source.Image>) async -> Void
     ) async -> Outcome {
-        guard let windows = try? await source.shareableWindows() else {
+        guard let listing = try? await source.shareableWindows() else {
             return Task.isCancelled ? .cancelled : .unavailable
         }
         guard !Task.isCancelled else { return .cancelled }
-        let matches = ThumbnailMatcher.matches(entries, among: windows, excludingPid: ownPid)
-        let jobs: [(WindowRef, CaptureWindow, PixelSize)] = entries.compactMap { entry in
-            guard let window = matches[entry.ref],
+        let handles = Dictionary(listing.map { ($0.window.id, $0.handle) }, uniquingKeysWith: { first, _ in first })
+        let matches = ThumbnailMatcher.matches(entries, among: listing.map(\.window), excludingPid: ownPid)
+        let jobs: [(WindowRef, Source.Handle, PixelSize)] = entries.compactMap { entry in
+            guard let window = matches[entry.ref], let handle = handles[window.id],
                   let size = ThumbnailSizing.pixelSize(for: window.frame, scale: scale)
             else { return nil }
-            return (entry.ref, window, size)
+            return (entry.ref, handle, size)
         }
         await report(.listed(Set(jobs.map(\.0))))
         var captured = 0
         var failed = 0
         await withTaskGroup(of: Bool.self) { group in
-            for (ref, window, size) in jobs {
+            for (ref, handle, size) in jobs {
                 guard await limiter.acquire() else { break }
                 guard !Task.isCancelled else {
                     limiter.release()
                     break
                 }
                 group.addTask {
-                    let image = try? await source.capture(window, size: size)
+                    let image = try? await source.capture(handle, size: size)
                     limiter.release()
                     guard !Task.isCancelled else { return false }
                     guard let image else {

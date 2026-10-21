@@ -30,34 +30,28 @@ struct ScreenRecordingPane {
     )
 }
 
-/// ScreenCaptureKit as Hop's capture source: the on-screen windows of the current Space, without desktop windows,
-/// and one still image of a window at a time.
-final class ScreenCaptureSource: WindowCaptureSource, @unchecked Sendable {
-    // The last listing's windows by ID, for `capture`. SCWindow is an immutable description, read only under the lock.
-    private let lock = NSLock()
-    private var listed: [CGWindowID: SCWindow] = [:]
+/// A window of one ScreenCaptureKit listing. `SCWindow` is an immutable description of the window, so the load that
+/// listed it may hand it to its own captures.
+struct ShareableWindow: @unchecked Sendable {
+    let window: SCWindow
+}
 
-    func shareableWindows() async throws -> [CaptureWindow] {
+/// ScreenCaptureKit as Hop's capture source: the on-screen windows of the current Space, without desktop windows,
+/// and one still image of a window at a time. It keeps no listing of its own: each capture is of a window its load
+/// listed.
+final class ScreenCaptureSource: WindowCaptureSource {
+    func shareableWindows() async throws -> [ListedWindow<ShareableWindow>] {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-        let windows = content.windows.filter { $0.owningApplication != nil }
-        lock.withLock {
-            listed = Dictionary(windows.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
-        }
-        return windows.map { window in
-            CaptureWindow(
-                id: window.windowID,
-                pid: window.owningApplication?.processID ?? 0,
-                frame: window.frame,
-                title: window.title
+        return content.windows.compactMap { window in
+            guard let app = window.owningApplication else { return nil }
+            return ListedWindow(
+                window: CaptureWindow(id: window.windowID, pid: app.processID, frame: window.frame, title: window.title),
+                handle: ShareableWindow(window: window)
             )
         }
     }
 
-    /// The window was not in the last listing.
-    private struct NotListed: Error {}
-
-    func capture(_ window: CaptureWindow, size: PixelSize) async throws -> CGImage {
-        guard let scWindow = lock.withLock({ listed[window.id] }) else { throw NotListed() }
+    func capture(_ handle: ShareableWindow, size: PixelSize) async throws -> CGImage {
         let configuration = SCStreamConfiguration()
         configuration.width = size.width
         configuration.height = size.height
@@ -65,7 +59,7 @@ final class ScreenCaptureSource: WindowCaptureSource, @unchecked Sendable {
         configuration.showsCursor = false
         configuration.ignoreShadowsSingleWindow = true
         return try await SCScreenshotManager.captureImage(
-            contentFilter: SCContentFilter(desktopIndependentWindow: scWindow),
+            contentFilter: SCContentFilter(desktopIndependentWindow: handle.window),
             configuration: configuration
         )
     }
