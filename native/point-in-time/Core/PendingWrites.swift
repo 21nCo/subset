@@ -50,6 +50,9 @@ public struct PendingWrites: Sendable {
     private var head = 0
     /// The last write error, kept until every queued write has succeeded.
     public private(set) var failure: String?
+    /// How many retractions and deletions have been applied to storage. It changes exactly when stored activity was
+    /// removed, whether the removal ran at once or stayed queued and ran on a later retry, so readers can reload.
+    public private(set) var appliedRemovals = 0
     /// Saves refused because the queue was full; that time was not captured.
     private(set) var refusedSaves = 0
     /// Whether storage has reported the latest end of what it holds since the last removal was applied, and that end.
@@ -181,7 +184,10 @@ public struct PendingWrites: Sendable {
                 return false
             }
             dequeue()
-            if case .save = write {} else { forgetStoredEnd() }
+            if case .save = write {} else {
+                appliedRemovals += 1
+                forgetStoredEnd()
+            }
         }
         guard isEmpty else { return false }
         failure = nil

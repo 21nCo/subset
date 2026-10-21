@@ -521,7 +521,9 @@ public enum ReportText {
     public static func profile(_ profile: FocusProfile, clock: (Int) -> String = clock) -> String {
         var parts: [String] = []
         if let start = profile.typicalFocusStart {
-            parts.append("Focus typically starts at \(clock(start)) (\(profile.focusDays) day\(profile.focusDays == 1 ? "" : "s"))")
+            parts.append("Focus typically starts at \(clock(start)) (\(profile.focusDays) day\(profile.focusDays == 1 ? "" : "s") with a focus start)")
+        } else if profile.focusSeconds > 0 {
+            parts.append("Focus continued from before the week, with no new focus start this week")
         } else {
             parts.append("No focus this week")
         }

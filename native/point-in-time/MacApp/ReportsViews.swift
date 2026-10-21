@@ -306,9 +306,10 @@ private struct DayRings: View {
             Text(verbatim: title).font(.headline)
             HStack(spacing: 24) {
                 ForEach([TimeCategory.focus, .neutral, .drift], id: \.self) { category in
-                    let share = totals.classified > 0 ? totals[category] / totals.classified : 0
+                    // Nil with nothing classified: an empty ring with a dash, not 0%.
+                    let share = totals.classified > 0 ? totals[category] / totals.classified : nil
                     VStack {
-                        Gauge(value: share) { Text(category.title) } currentValueLabel: { Text(ReportText.percent(share)) }
+                        Gauge(value: share ?? 0) { Text(category.title) } currentValueLabel: { Text(share.map(ReportText.percent) ?? "–") }
                             .gaugeStyle(.accessoryCircularCapacity)
                             .tint(category.color)
                         Text(category.title)
@@ -316,7 +317,8 @@ private struct DayRings: View {
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(category.title)
-                    .accessibilityValue("\(ReportText.percent(share)) of classified time, \(ReportText.duration(totals[category]))")
+                    .accessibilityValue(share.map { "\(ReportText.percent($0)) of classified time, \(ReportText.duration(totals[category]))" }
+                                        ?? "No classified time")
                 }
             }
             Text(verbatim: ReportText.totals(totals)).font(.callout).fixedSize(horizontal: false, vertical: true)
@@ -403,8 +405,11 @@ private struct ProfileCards: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Focus Profile").font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .top)], alignment: .leading, spacing: 12) {
-                card("Typical focus start", profile.typicalFocusStart.map(model.clock) ?? "No focus yet",
-                     "\(profile.focusDays) day\(profile.focusDays == 1 ? "" : "s") with focus")
+                card("Typical focus start",
+                     profile.typicalFocusStart.map(model.clock) ?? (profile.focusSeconds > 0 ? "No new start" : "No focus yet"),
+                     profile.typicalFocusStart == nil && profile.focusSeconds > 0
+                        ? "Focus only continued from before the week"
+                        : "\(profile.focusDays) day\(profile.focusDays == 1 ? "" : "s") with a focus start")
                 card("Start consistency", profile.startSpread.map { "± \(Int($0.rounded())) min" } ?? "Needs two days",
                      "Spread of the days’ first focus")
                 card("Longest focus run", profile.longestFocusRun.map { ReportText.duration($0.duration) } ?? "None",

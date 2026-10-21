@@ -722,6 +722,29 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
         }
     }
 
+    @Test func appliedRemovalsCountsADeletionWhenItReachesStorageNotWhenItIsQueued() throws {
+        try withStorage { storage in
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            #expect(writes.appliedRemovals == 0)
+            writes.deleteDay(containing: t0 + 90, calendar: utc, in: storage)
+            #expect(writes.appliedRemovals == 1)
+
+            storage.failDeletes = true
+            writes.deleteAll(in: storage)
+            writes.retry(storage)
+            #expect(writes.hasPendingDeletion && writes.appliedRemovals == 1)
+            // A save behind the queued deletion succeeding alone is not a removal.
+            storage.failDeletes = false
+            writes.save(segment("b", 120, 180), to: storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 2)
+            writes.save(segment("b", 180, 240), to: storage)
+            #expect(writes.appliedRemovals == 2)
+        }
+    }
+
     @Test func aSustainedOutageKeepsTheQueueBoundedAndStillAdmitsDeletions() throws {
         try withStorage { storage in
             var writes = PendingWrites(capacity: 10, writesPerRetry: 4)

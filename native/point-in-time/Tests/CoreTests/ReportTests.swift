@@ -178,6 +178,16 @@ private func temporaryDirectory() -> URL {
         #expect(profile.longestFocusRun?.duration == 360)
         #expect(WeekReport(containing: date(cal, 19, 12), blocks: blocks, calendar: cal).totals.focus == 4 * 180)
     }
+
+    @Test func aWeekWhoseOnlyFocusContinuedFromBeforeItSaysSoInsteadOfNoFocus() {
+        let blocks = run(date(cal, 18, 23, 57), 3, .focus)
+        let profile = WeekReport(containing: date(cal, 19, 12), blocks: blocks, calendar: cal).profile
+        #expect(profile.focusSeconds == 360 && profile.typicalFocusStart == nil && profile.focusDays == 0)
+        #expect(profile.longestFocusRun?.duration == 360)
+        let summary = ReportText.profile(profile)
+        #expect(summary.hasPrefix("Focus continued from before the week, with no new focus start this week;"))
+        #expect(!summary.contains("No focus"))
+    }
 }
 
 @Suite struct DaylightSavingTests {
@@ -343,7 +353,7 @@ private func temporaryDirectory() -> URL {
         #expect(profile.driftSeconds == 180 + 360 + 300)
         #expect(profile.balance == 2_880.0 / (2_880 + 840))
         #expect(ReportText.profile(profile)
-                == "Focus typically starts at 09:00 (3 days); start times vary by about 49 min; longest focus run 30 min; 2 short drifts under 6 min; focus is 77% of focus and drift time.")
+                == "Focus typically starts at 09:00 (3 days with a focus start); start times vary by about 49 min; longest focus run 30 min; 2 short drifts under 6 min; focus is 77% of focus and drift time.")
     }
 
     @Test func anEvenNumberOfFocusDaysUsesTheMiddleTwoAndAnEmptyWeekHasNoProfile() {
