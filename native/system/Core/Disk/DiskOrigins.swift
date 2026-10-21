@@ -98,6 +98,9 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
     public let items: [Int]
     /// Summed allocated sizes, a hard-linked file's once. Blocks two items' clones share count once in each.
     public let allocated: UInt64
+    /// An item's allocated size may count blocks clones share more than once (`DiskItemFlags.allocatedUpperBound`), so
+    /// `allocated` may be more than the items use.
+    public let allocatedUpperBound: Bool
     /// Summed private sizes: at least what deleting every item would free.
     public let `private`: UInt64
     /// An item's size is unknown or a lower bound, another link counts an item's blocks, or the group may have items the
@@ -172,7 +175,7 @@ public enum DiskOrigins {
             guard let tool = match.rule.developerTool, match.rule.id != .dockerImages else { continue }
             let incomplete: Bool
             switch match.bytes {
-            case let .scanned(_, _, complete): incomplete = !complete
+            case let .scanned(_, _, complete, _): incomplete = !complete
             case .dockerReclaimable, .unavailable: incomplete = true
             }
             byTool[tool, default: ([], false)].items.append(contentsOf: match.items.map(\.index))
@@ -207,6 +210,7 @@ public enum DiskOrigins {
         var allocated: UInt64 = 0
         var privateBytes: UInt64 = 0
         var lowerBound = incomplete
+        var upperBound = false
         for index in unique {
             let item = tree[index]
             guard let sizes = item.sizes else {
@@ -217,9 +221,10 @@ public enum DiskOrigins {
             // Another hard link counts the file's blocks, so they are counted once, at most.
             if item.flags.contains(.countedElsewhere) { lowerBound = true } else { allocated += sizes.allocated }
             if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { lowerBound = true }
+            if item.flags.contains(.allocatedUpperBound) { upperBound = true }
         }
-        return DiskOriginGroup(id: key, name: name, items: unique, allocated: allocated, private: privateBytes,
-                               isLowerBound: lowerBound)
+        return DiskOriginGroup(id: key, name: name, items: unique, allocated: allocated, allocatedUpperBound: upperBound,
+                               private: privateBytes, isLowerBound: lowerBound)
     }
 
     static func vendorName(_ vendor: Origin, apps: InstalledApps) -> String {

@@ -108,7 +108,7 @@ final class ReclaimRulesTests: XCTestCase {
         try write("\(devices)/33333333-3333-3333-3333-333333333333/data/disk", bytes: 100_000)
         let partial = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
         XCTAssertEqual(partial.items.count, 1)
-        guard case .scanned(_, _, complete: false) = partial.bytes else { return XCTFail("\(partial.bytes)") }
+        guard case .scanned(_, _, complete: false, _) = partial.bytes else { return XCTFail("\(partial.bytes)") }
 
         // Without the runtime list no device is called unavailable.
         let unknown = try only(.unavailableSimulators, in: try await analyze(runtimes: .unknown("images.plist is unreadable")))
@@ -385,7 +385,7 @@ final class ReclaimRulesTests: XCTestCase {
         // Cancelled partway through the folder: what was listed counts, as a lower bound.
         let midway = try match(.xcodeDerivedData, marking(scanned, derivedData, .partial, listing: true))
         XCTAssertEqual(midway.items.count, 2)
-        guard case .scanned(_, _, complete: false) = midway.bytes else { return XCTFail("\(midway.bytes)") }
+        guard case .scanned(_, _, complete: false, _) = midway.bytes else { return XCTFail("\(midway.bytes)") }
         // A folder replaced before it was opened is `incomplete` and lists nothing.
         let replaced = try match(.xcodeDerivedData, marking(scanned, derivedData, .incomplete, listing: false))
         XCTAssertEqual(replaced.bytes, .unavailable("\(path(derivedData)) was not read."))
@@ -399,7 +399,7 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertFalse(full.contains { $0.rule.id == .xcodeDeviceSupport || $0.rule.id == .simulatorCaches })
         // A tool's own folder cancelled: its sum is a lower bound.
         let brew = try match(.homebrewCache, marking(scanned, "Library/Caches/Homebrew/downloads", .partial, listing: false))
-        guard case .scanned(_, _, complete: false) = brew.bytes else { return XCTFail("\(brew.bytes)") }
+        guard case .scanned(_, _, complete: false, _) = brew.bytes else { return XCTFail("\(brew.bytes)") }
     }
 
     func testUnreadableFoldersARuleSearchesMakeItsSumIncomplete() async throws {
@@ -421,7 +421,7 @@ final class ReclaimRulesTests: XCTestCase {
                             (.oldInstallers, "Downloads/Old App.dmg"), (.staleNodeModules, "dev/old/node_modules")] {
             let match = try only(id, in: analysis)
             XCTAssertEqual(match.items.map(\.path), [path(found)], "\(id)")
-            guard case .scanned(_, _, complete: false) = match.bytes else { return XCTFail("\(id): \(match.bytes)") }
+            guard case .scanned(_, _, complete: false, _) = match.bytes else { return XCTFail("\(id): \(match.bytes)") }
         }
 
         // With nothing found, an unreadable folder still makes the rule unknown, not empty.
@@ -494,7 +494,7 @@ final class ReclaimRulesTests: XCTestCase {
         ])
         let linked = try Self.allocated(under: path("Library/Preferences/com.removed.tool.plist"))
         let removed = try XCTUnwrap(leftovers.last)
-        guard case let .scanned(_, allocated, complete) = removed.bytes else { return XCTFail("\(removed.bytes)") }
+        guard case let .scanned(_, allocated, complete, _) = removed.bytes else { return XCTFail("\(removed.bytes)") }
         XCTAssertEqual(allocated, linked, "two links to one file")
         XCTAssertFalse(complete)
         let report = DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
@@ -503,6 +503,139 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(group.allocated, linked + (try Self.allocated(under: path("Library/Group Containers/AAAAAAAAAA.office")))
                            + (try Self.allocated(under: path("Library/Group Containers/BBBBBBBBBB.office"))))
         XCTAssertTrue(group.isLowerBound)
+    }
+
+    /// Every state the scanner leaves an entry in, placed in each folder a rule walks: an entry the search cannot see
+    /// into or tell the kind of makes the match incomplete with items and unavailable without; one listed in full
+    /// changes nothing.
+    func testEveryEntryStateInEveryWalkedFolderIsJudgedOrMakesTheMatchIncomplete() async throws {
+        enum State: CaseIterable {
+            case none, unreadable, unreadableUntyped, partial, incompleteListed, incompleteUnlisted, dataless, mountPoint,
+                 countedElsewhere
+
+            var isJudged: Bool { self == .none || self == .incompleteListed }
+        }
+        let installed = "com.apple.CoreSimulator.SimRuntime.iOS-18-3"
+        let devices = "Library/Developer/CoreSimulator/Devices"
+        try write("Downloads/Old App.dmg", bytes: 10_000)
+        try touch("Downloads/Old App.dmg", daysAgo: 120)
+        try write("Downloads/probe/readme.txt", bytes: 100)
+        try write("Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive/Info.plist", bytes: 10_000)
+        try write("Library/Developer/Xcode/Archives/probe/readme.txt", bytes: 100)
+        try write("Library/Developer/Xcode/iOS DeviceSupport/18.0/Symbols/dyld", bytes: 10_000)
+        try write("Library/Developer/Xcode/tvOS DeviceSupport/18.0/Symbols/dyld", bytes: 10_000)
+        try device("\(devices)/11111111-1111-1111-1111-111111111111", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0", bytes: 10_000)
+        try device("\(devices)/probe", runtime: installed, bytes: 10_000)
+        try write("dev/probe/readme.txt", bytes: 100)
+        try project("dev/old", untouchedFor: 31)
+        try write("dev/old/probe/readme.txt", bytes: 100)
+        try touchTree("dev/old", daysAgo: 31, skipping: "node_modules")
+        try project("dev/other", untouchedFor: 31)
+        let context = context(runtimes: .installed([installed]))
+        let found = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+
+        func placing(_ state: State, at relative: String, in tree: DiskTree) throws -> DiskTree {
+            let index = try XCTUnwrap(tree.index(atPath: path(relative)), relative)
+            var placed = tree
+            switch state {
+            case .none: return tree
+            case .unreadable: placed.nodes[index].flags.insert(.unreadable)
+            case .unreadableUntyped: (placed.nodes[index].kind, placed.nodes[index].flags) = (.other, .unreadable)
+            case .partial: return marking(tree, relative, .partial, listing: false)
+            case .incompleteListed: return marking(tree, relative, .incomplete, listing: true)
+            case .incompleteUnlisted: return marking(tree, relative, .incomplete, listing: false)
+            case .dataless: placed.nodes[index].flags = .dataless
+            case .mountPoint: placed.nodes[index].kind = .mountPoint
+            case .countedElsewhere: placed.nodes[index].flags.insert(.countedElsewhere)
+            }
+            placed.nodes[index].childCount = 0
+            return placed
+        }
+        func match(_ id: ReclaimRuleID, _ tree: DiskTree) -> ReclaimMatch? {
+            ReclaimMatcher.matches(in: tree, origins: [], context: context).first { $0.rule.id == id }
+        }
+
+        // The walked folder's probe, the rule, and what it finds with the probe judged and with it unjudged.
+        let deviceSupport = ["Library/Developer/Xcode/iOS DeviceSupport/18.0"]
+        let projects = ["dev/old/node_modules", "dev/other/node_modules"]
+        let walks: [(probe: String, rule: ReclaimRuleID, judged: [String], unjudged: [String])] = [
+            ("Downloads/probe", .oldInstallers, ["Downloads/Old App.dmg"], ["Downloads/Old App.dmg"]),
+            ("Library/Developer/Xcode/Archives/probe", .xcodeArchives, ["Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"],
+             ["Library/Developer/Xcode/Archives/2026-09-01/App.xcarchive"]),
+            ("Library/Developer/Xcode/tvOS DeviceSupport", .xcodeDeviceSupport,
+             deviceSupport + ["Library/Developer/Xcode/tvOS DeviceSupport/18.0"], deviceSupport),
+            ("\(devices)/probe", .unavailableSimulators, ["\(devices)/11111111-1111-1111-1111-111111111111"],
+             ["\(devices)/11111111-1111-1111-1111-111111111111"]),
+            ("dev/probe", .staleNodeModules, projects, projects),
+            // Inside a project its age is unknown, so that project is not stale, whatever else it holds.
+            ("dev/old/probe", .staleNodeModules, projects, ["dev/other/node_modules"])
+        ]
+        for (probe, rule, judged, unjudged) in walks {
+            for state in State.allCases {
+                let label = "\(rule) \(probe) \(state)"
+                let matched = try XCTUnwrap(match(rule, try placing(state, at: probe, in: found)), label)
+                XCTAssertEqual(matched.items.map(\.path), (state.isJudged ? judged : unjudged).map(path), label)
+                guard case let .scanned(_, _, complete, _) = matched.bytes else { XCTFail("\(label): \(matched.bytes)"); continue }
+                XCTAssertEqual(complete, state.isJudged, label)
+            }
+        }
+
+        // An iCloud placeholder of a project's source keeps it out, and the match says so.
+        let evicted = try XCTUnwrap(match(.staleNodeModules, try placing(.dataless, at: "dev/old/src", in: found)))
+        XCTAssertEqual(evicted.items.map(\.path), [path("dev/other/node_modules")])
+        guard case .scanned(_, _, complete: false, _) = evicted.bytes else { return XCTFail("\(evicted.bytes)") }
+        // A rule folder below a placeholder, or below an entry whose kind is unknown, is unknown rather than absent.
+        XCTAssertEqual(match(.xcodeArchives, try placing(.dataless, at: "Library/Developer", in: found))?.bytes,
+                       .unavailable("\(path("Library/Developer")) is not downloaded, so it was not read."))
+        XCTAssertEqual(match(.oldInstallers, try placing(.unreadableUntyped, at: "Downloads", in: found))?.bytes,
+                       .unavailable("\(path("Downloads")) could not be read."))
+        XCTAssertEqual(match(.xcodeArchives, try placing(.unreadableUntyped, at: "Library/Developer", in: found))?.bytes,
+                       .unavailable("\(path("Library/Developer")) could not be read."))
+
+        // With nothing else found, an unjudged probe makes the rule unknown rather than empty.
+        for removed in ["Downloads/Old App.dmg", "Library/Developer/Xcode/Archives/2026-09-01", "Library/Developer/Xcode/iOS DeviceSupport",
+                        "\(devices)/11111111-1111-1111-1111-111111111111", "dev/old", "dev/other"] {
+            try FileManager.default.removeItem(atPath: path(removed))
+        }
+        let nothingFound = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        for (probe, rule, _, _) in walks where probe != "dev/old/probe" {
+            for state in State.allCases {
+                let label = "\(rule) \(probe) \(state) alone"
+                let alone = match(rule, try placing(state, at: probe, in: nothingFound))
+                switch (state.isJudged, alone?.bytes) {
+                case (true, nil), (true, .scanned(_, _, true, _)?): break
+                case let (false, .unavailable(reason)?):
+                    XCTAssertEqual(alone?.items, [], label)
+                    if state == .unreadableUntyped {
+                        XCTAssertEqual(reason, "\(path(probe)) could not be read, so what it is is unknown.", label)
+                    }
+                default: XCTFail("\(label): \(String(describing: alone?.bytes))")
+                }
+            }
+        }
+    }
+
+    func testAnAllocatedSizeThatMayCountClonedBlocksTwiceMakesItsSumsUpperBounds() async throws {
+        try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
+        try write("Library/Developer/Xcode/DerivedData/Tool-def/data", bytes: 10_000)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let app = try XCTUnwrap(scanned.index(atPath: path("Library/Developer/Xcode/DerivedData/App-abc")))
+        let tool = try XCTUnwrap(scanned.index(atPath: path("Library/Developer/Xcode/DerivedData/Tool-def")))
+        var flagged = scanned
+        flagged.nodes[app].flags.insert(.allocatedUpperBound)
+        func upperBound(_ tree: DiskTree) throws -> Bool {
+            let match = try only(.xcodeDerivedData, in: Analysis(tree: tree, entries: [],
+                                                                  matches: ReclaimMatcher.matches(in: tree, origins: [], context: context())))
+            guard case let .scanned(_, _, true, upperBound) = match.bytes else { XCTFail("\(match.bytes)"); return false }
+            return upperBound
+        }
+
+        XCTAssertFalse(try upperBound(scanned))
+        XCTAssertTrue(try upperBound(flagged))
+        XCTAssertFalse(DiskOrigins.group(.leftovers, name: "", items: [app, tool], tree: scanned, incomplete: false).allocatedUpperBound)
+        let group = DiskOrigins.group(.leftovers, name: "", items: [app, tool], tree: flagged, incomplete: false)
+        XCTAssertTrue(group.allocatedUpperBound)
+        XCTAssertFalse(group.isLowerBound)
     }
 
     func testTheScanRecordsTheLaterOfModificationAndDateAdded() async throws {
@@ -581,7 +714,7 @@ final class ReclaimRulesTests: XCTestCase {
     private func assertBytes(_ match: ReclaimMatch, file: StaticString = #filePath, line: UInt = #line) throws {
         let expected = try match.items.reduce(UInt64(0)) { $0 + (try Self.allocated(under: $1.path)) }
         XCTAssertGreaterThan(expected, 0, file: file, line: line)
-        XCTAssertEqual(match.bytes, .scanned(private: expected, allocated: expected, complete: true), file: file, line: line)
+        XCTAssertEqual(match.bytes, .scanned(private: expected, allocated: expected, complete: true, allocatedUpperBound: false), file: file, line: line)
         XCTAssertEqual(match.bytes.bytes, expected, file: file, line: line)
     }
 

@@ -50,7 +50,9 @@ public enum ReclaimBytes: Equatable, Sendable {
     /// Summed from the scan over the items. `private` is at least what removing them all frees (the private size of
     /// each), `allocated` the space they use, a hard-linked file's once. `complete` is false when an item's size is
     /// unknown or a lower bound, or another link counts an item's blocks, which makes both sums lower bounds.
-    case scanned(private: UInt64, allocated: UInt64, complete: Bool)
+    /// `allocatedUpperBound` is true when an item's allocated size may count blocks clones share more than once
+    /// (`DiskItemFlags.allocatedUpperBound`), so the allocated sum may be more than the items use.
+    case scanned(private: UInt64, allocated: UInt64, complete: Bool, allocatedUpperBound: Bool)
     /// The image space `docker system df` reports as reclaimable inside the VM and the space all images use. It
     /// counts every image no container uses, while `docker image prune -f` removes only dangling ones, so it is an
     /// upper bound of what the rule's cleanup frees, never that amount.
@@ -61,7 +63,7 @@ public enum ReclaimBytes: Equatable, Sendable {
     /// bound (Docker's, in `upperBound`).
     public var bytes: UInt64? {
         switch self {
-        case let .scanned(privateBytes, _, _): privateBytes
+        case let .scanned(privateBytes, _, _, _): privateBytes
         case .dockerReclaimable, .unavailable: nil
         }
     }
@@ -96,7 +98,8 @@ public enum ReclaimMatcher {
 
     /// Every match in catalog order. A rule whose folders the tree does not hold, under folders it read in full, has
     /// none. Every folder a rule searches, and the folders above its rule folders, must have been read in full:
-    /// otherwise (unreadable, cancelled, replaced, another volume) what the rule found is incomplete, and with
+    /// otherwise (unreadable, cancelled, replaced, another volume, not downloaded), or when an entry in one could not be
+    /// read and its type is unknown (`DiskTree.searched`), what the rule found is incomplete, and with
     /// nothing found the match has unavailable bytes and no items. `origins` are the Library entries
     /// `DiskOrigins.entries` attributed, which the App caches and App leftovers rules use.
     public static func matches(in tree: DiskTree, origins: [DiskOriginEntry], context: ReclaimContext) -> [ReclaimMatch] {
@@ -173,6 +176,7 @@ private struct Matching {
         var privateBytes: UInt64 = 0
         var allocated: UInt64 = 0
         var complete = unjudged.isEmpty
+        var upperBound = false
         var measured = false
         for item in sorted {
             guard let sizes = item.sizes else {
@@ -184,9 +188,10 @@ private struct Matching {
             // Another hard link counts the file's blocks, so they are counted once, at most.
             if item.flags.contains(.countedElsewhere) { complete = false } else { allocated += sizes.allocated }
             if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { complete = false }
+            if item.flags.contains(.allocatedUpperBound) { upperBound = true }
         }
         let bytes: ReclaimBytes = measured
-            ? .scanned(private: privateBytes, allocated: allocated, complete: complete)
+            ? .scanned(private: privateBytes, allocated: allocated, complete: complete, allocatedUpperBound: upperBound)
             : .unavailable(sorted.count == 1 ? "\(sorted[0].path) could not be read." : "None of the \(sorted.count) items could be read.")
         matches.append(ReclaimMatch(rule: rule, app: app, identifier: identifier, items: sorted, bytes: bytes))
     }
@@ -253,15 +258,21 @@ private struct Matching {
         }
         var items: [ReclaimItem] = []
         var unjudged = tree.unlisted(index).map { [$0] } ?? []
-        for child in tree.children(of: index) where child.kind == .directory && child.name.hasSuffix(" DeviceSupport") {
-            if let reason = tree.unlisted(child.index) { unjudged.append(reason) }
-            items += children(of: child.index, path: xcode + "/" + child.name)
+        for child in tree.children(of: index) {
+            switch tree.searched(child.index) {
+            case let .unknown(reason): unjudged.append(reason)
+            case .folder where child.name.hasSuffix(" DeviceSupport"):
+                if let reason = tree.unlisted(child.index) { unjudged.append(reason) }
+                items += children(of: child.index, path: xcode + "/" + child.name)
+            case .folder, .item: continue
+            }
         }
         add(rule, items: items, unjudged: unjudged)
     }
 
     /// Simulator device folders whose `device.plist` names a runtime that is not installed. A device whose plist cannot
-    /// be read is not counted and makes the sum incomplete; an unknown runtime list measures nothing.
+    /// be read, or whose folder was not listed in full, is not counted and makes the sum incomplete; an unknown runtime
+    /// list measures nothing.
     mutating func unavailableSimulators(_ rule: ReclaimRule) {
         let path = homePath(rule.homePaths[0])
         let index: Int
@@ -271,7 +282,15 @@ private struct Matching {
         case let .found(found): index = found
         }
         var unjudged = tree.unlisted(index).map { [$0] } ?? []
-        let devices = tree.children(of: index).filter { $0.kind == .directory }
+        var devices: [DiskItem] = []
+        for child in tree.children(of: index) {
+            switch tree.searched(child.index) {
+            case let .unknown(reason): unjudged.append(reason)
+            // A dataless device's plist is not on this Mac, and reading it would download it.
+            case .folder: if let reason = tree.unlisted(child.index) { unjudged.append(reason) } else { devices.append(child) }
+            case .item: continue
+            }
+        }
         guard !devices.isEmpty else { return add(rule, items: [], unjudged: unjudged) }
         let installed: Set<String>
         switch context.simulatorRuntimes {
@@ -303,13 +322,20 @@ private struct Matching {
         var unjudged = tree.unlisted(index).map { [$0] } ?? []
         for child in tree.children(of: index) {
             let childPath = path + "/" + child.name
-            if child.name.hasSuffix(".xcarchive") {
-                items.append(item(child.index, path: childPath, root: path))
-            } else if child.kind == .directory || child.kind == .mountPoint {
+            switch tree.searched(child.index) {
+            case let .unknown(reason): unjudged.append(reason)
+            case _ where child.name.hasSuffix(".xcarchive"): items.append(item(child.index, path: childPath, root: path))
+            case .folder:
                 if let reason = tree.unlisted(child.index) { unjudged.append(reason) }
-                for inner in tree.children(of: child.index) where inner.name.hasSuffix(".xcarchive") {
-                    items.append(item(inner.index, path: childPath + "/" + inner.name, root: path))
+                for inner in tree.children(of: child.index) {
+                    switch tree.searched(inner.index) {
+                    case let .unknown(reason): unjudged.append(reason)
+                    case _ where inner.name.hasSuffix(".xcarchive"):
+                        items.append(item(inner.index, path: childPath + "/" + inner.name, root: path))
+                    case .folder, .item: continue
+                    }
                 }
+            case .item: continue
             }
         }
         add(rule, items: items, unjudged: unjudged)
@@ -333,9 +359,17 @@ private struct Matching {
         while let (index, path) = stack.popLast() {
             if let reason = tree.unlisted(index) { unjudged.append(reason) }
             let children = tree.children(of: index)
-            for child in children where child.kind == .directory || child.kind == .mountPoint {
+            for child in children {
                 let childPath = path + "/" + child.name
                 if child.name.hasPrefix(".") || childPath == homePath("Library") { continue }
+                switch tree.searched(child.index) {
+                case let .unknown(reason):
+                    // It may be a folder holding projects, a project's `package.json`, or its `node_modules`.
+                    unjudged.append(reason)
+                    continue
+                case .item: continue
+                case .folder: break
+                }
                 if child.name == "node_modules", child.kind == .directory {
                     guard children.contains(where: { $0.name == "package.json" && $0.kind == .file }) else { continue }
                     guard let newest = newestTouch(inProject: index) else {
@@ -397,7 +431,9 @@ private struct Matching {
             for child in tree.children(of: index) {
                 let childPath = path + "/" + child.name
                 let suffix = (child.name as NSString).pathExtension.lowercased()
-                if child.kind == .file || child.kind == .package, suffix == "dmg" || suffix == "pkg" {
+                if case let .unknown(reason) = tree.searched(child.index) {
+                    unjudged.append(reason)
+                } else if child.kind == .file || child.kind == .package, suffix == "dmg" || suffix == "pkg" {
                     guard let touched = child.touched else {
                         unjudged.append("\(childPath) has no modification time.")
                         continue
@@ -427,7 +463,8 @@ private struct Matching {
     }
 }
 
-/// The coverage every reclaim rule and the By origin groups share: whether a folder's entries are all listed.
+/// The coverage every reclaim rule and the By origin groups share: whether a folder's entries are all listed, and what
+/// each entry of a searched folder is.
 extension DiskTree {
     /// Why the folder's listing is not complete, so that it may hold more than the tree lists; `nil` when it was read in
     /// full. Its contents' own sizes do not matter here, only whether every entry in it is listed.
@@ -438,6 +475,10 @@ extension DiskTree {
         if item.flags.contains(.partial) { return "\(path) was not read in full." }
         switch item.kind {
         case .directory:
+            // An iCloud placeholder is not read, since that would download it.
+            if item.flags.contains(.dataless) { return "\(path) is not downloaded, so it was not read." }
+            // A folder reached a second way (a directory hard link) is read only where it was reached first.
+            if item.flags.contains(.countedElsewhere) { return "\(path) was read at another path, not here." }
             // A folder is flagged incomplete when something inside could not be read, or when it was not read at all
             // (replaced before it was opened); only the latter lists nothing.
             return item.flags.contains(.incomplete) && item.children.isEmpty ? "\(path) was not read." : nil
@@ -446,6 +487,25 @@ extension DiskTree {
         case .file, .package, .symlink, .other:
             return nil
         }
+    }
+
+    /// What an entry of a folder a rule searches is, the same for every rule.
+    enum SearchedEntry {
+        /// A folder or another volume's mount point, which a search looks in only after `unlisted`.
+        case folder
+        /// A file, package, symbolic link, or special file, judged by its name and kind.
+        case item
+        /// An entry that could not be read and whose type or name did not come back: it may be anything a rule looks
+        /// for (a folder, an installer, a `package.json`), so the search cannot judge it.
+        case unknown(String)
+    }
+
+    func searched(_ index: Int) -> SearchedEntry {
+        let item = self[index]
+        if item.flags.contains(.unreadable), item.kind == .other || item.name.isEmpty {
+            return .unknown("\(path(of: index)) could not be read, so what it is is unknown.")
+        }
+        return item.kind == .directory || item.kind == .mountPoint ? .folder : .item
     }
 
     enum Location {
@@ -466,9 +526,8 @@ extension DiskTree {
                 current = next
                 continue
             }
-            guard self[current].kind == .directory || self[current].kind == .mountPoint,
-                  let reason = unlisted(current) else { return .absent }
-            return .unknown(reason)
+            if case .item = searched(current) { return .absent }
+            return unlisted(current).map { .unknown($0) } ?? .absent
         }
         return .found(current)
     }
