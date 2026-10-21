@@ -34,9 +34,10 @@ final class ShortcutTests: XCTestCase {
     }
 
     func testTheArrowsThatStepASwitchAreRejected() {
-        // While a switch is active ← and → step it; as the shortcut key one of them would step both ways at once.
+        // While a switch is active ← and → step it and ↑ and ↓ move by row; as the shortcut key one of them would mean
+        // two things at once.
         for modifier: ModifierMask in [.option, .control] {
-            for code in [KeyCode.leftArrow, KeyCode.rightArrow] {
+            for code in [KeyCode.leftArrow, KeyCode.rightArrow, KeyCode.upArrow, KeyCode.downArrow] {
                 XCTAssertThrowsError(try Shortcut(holdModifier: modifier, keyCode: code)) { error in
                     XCTAssertEqual(error as? Shortcut.Invalid, .keyCode(code))
                 }
@@ -94,6 +95,7 @@ final class ShortcutStoreTests: XCTestCase {
             (ModifierMask.option.rawValue, Int(KeyCode.escape)),
             (ModifierMask.option.rawValue, Int(KeyCode.leftArrow)),
             (ModifierMask.control.rawValue, Int(KeyCode.rightArrow)),
+            (ModifierMask.option.rawValue, Int(KeyCode.downArrow)),
             (ModifierMask.option.rawValue, -1),
             (ModifierMask.option.rawValue, 70_000),
             ("option", Int(KeyCode.grave)),
@@ -111,7 +113,7 @@ final class ShortcutStoreTests: XCTestCase {
         defaults.set(Int(KeyCode.leftArrow), forKey: ShortcutStore.keyCodeKey)
         let shortcut = ShortcutStore(defaults: defaults).shortcut
         XCTAssertEqual(shortcut, .default)
-        var session = SwitchSession(count: 3)
+        var session = SwitchSession()
         session.handle(.trigger(.forward))
         let left = TapInput.key(KeyEvent(.keyDown, keyCode: KeyCode.leftArrow, modifiers: .option))
         let right = TapInput.key(KeyEvent(.keyDown, keyCode: KeyCode.rightArrow, modifiers: .option))

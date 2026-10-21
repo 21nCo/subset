@@ -2,109 +2,57 @@ import HopCore
 import XCTest
 
 final class SwitchSessionTests: XCTestCase {
-    private func session(count: Int, trigger direction: SwitchDirection = .forward) -> SwitchSession {
-        var session = SwitchSession(count: count)
-        XCTAssertNil(session.handle(.trigger(direction)))
+    private func active(_ direction: SwitchDirection = .forward) -> SwitchSession {
+        var session = SwitchSession()
+        XCTAssertEqual(session.handle(.trigger(direction)).accepted, true)
         return session
     }
 
-    func testForwardTriggerStartsOnThePreviousWindow() {
-        XCTAssertEqual(session(count: 5).state, .active(selection: 1))
-        XCTAssertEqual(session(count: 2).state, .active(selection: 1))
+    func testEitherTriggerStartsASession() {
+        XCTAssertTrue(active(.forward).isActive)
+        XCTAssertTrue(active(.backward).isActive)
     }
 
-    func testTriggerWithOneWindowSelectsIt() {
-        XCTAssertEqual(session(count: 1).state, .active(selection: 0))
-        XCTAssertEqual(session(count: 1, trigger: .backward).state, .active(selection: 0))
-    }
-
-    func testBackwardTriggerAlsoStartsOnThePreviousWindow() {
-        XCTAssertEqual(session(count: 5, trigger: .backward).state, .active(selection: 1))
-        XCTAssertEqual(session(count: 2, trigger: .backward).state, .active(selection: 1))
-    }
-
-    func testTriggerWithNoWindowsStaysIdle() {
-        var empty = SwitchSession(count: 0)
-        XCTAssertNil(empty.handle(.trigger(.forward)))
-        XCTAssertNil(empty.handle(.trigger(.backward)))
-        XCTAssertEqual(empty.state, .idle)
-        // Nothing that follows can commit a selection that never existed.
-        XCTAssertNil(empty.handle(.step(.forward)))
-        XCTAssertNil(empty.handle(.modifierReleased))
-        XCTAssertEqual(empty.state, .idle)
-    }
-
-    func testStepsWrapAroundForward() {
-        var session = session(count: 3)
-        session.handle(.step(.forward))
-        XCTAssertEqual(session.state, .active(selection: 2))
-        session.handle(.step(.forward))
-        XCTAssertEqual(session.state, .active(selection: 0))
-        session.handle(.trigger(.forward))
-        XCTAssertEqual(session.state, .active(selection: 1), "a repeated trigger while active steps like Tab")
-    }
-
-    func testStepsWrapAroundBackward() {
-        var session = session(count: 3)
-        session.handle(.step(.backward))
-        XCTAssertEqual(session.state, .active(selection: 0))
-        session.handle(.step(.backward))
-        XCTAssertEqual(session.state, .active(selection: 2))
-    }
-
-    func testReleasingTheModifierCommitsTheSelection() {
-        var session = session(count: 4)
-        session.handle(.step(.forward))
-        XCTAssertEqual(session.handle(.modifierReleased), .commit(index: 2))
-        XCTAssertEqual(session.state, .idle)
-        XCTAssertNil(session.handle(.modifierReleased), "a second release has no session to end")
-    }
-
-    func testEscapeCancels() {
-        var session = session(count: 4)
-        XCTAssertEqual(session.handle(.escape), .cancel)
-        XCTAssertEqual(session.state, .idle)
-        XCTAssertNil(session.handle(.modifierReleased), "the release after Esc commits nothing")
-    }
-
-    func testInterruptionCancels() {
-        var session = session(count: 4)
-        XCTAssertEqual(session.handle(.interrupted), .cancel)
+    func testIdleIgnoresEverythingButTheTrigger() {
+        var session = SwitchSession()
+        for event: SwitchSession.Event in [
+            .step(.forward), .row(.down), .operation(.close), .modifierReleased, .escape, .interrupted,
+        ] {
+            XCTAssertEqual(session.handle(event).accepted, false, "\(event)")
+            XCTAssertNil(session.handle(event).outcome)
+        }
         XCTAssertEqual(session.state, .idle)
     }
 
-    func testListShrinkingBelowTheSelectionClampsIt() {
-        var session = session(count: 5, trigger: .backward)
-        session.handle(.step(.backward))
-        session.handle(.step(.backward))
-        XCTAssertEqual(session.state, .active(selection: 4))
-        XCTAssertNil(session.handle(.listChanged(count: 3)))
-        XCTAssertEqual(session.state, .active(selection: 2))
-        session.handle(.step(.forward))
-        XCTAssertEqual(session.state, .active(selection: 0), "steps wrap at the new count")
-        XCTAssertEqual(session.handle(.modifierReleased), .commit(index: 0))
+    func testMovesAndOperationsKeepTheSessionActive() {
+        var session = active()
+        for event: SwitchSession.Event in [.step(.backward), .row(.up), .operation(.minimize), .trigger(.forward)] {
+            XCTAssertEqual(session.handle(event).accepted, true, "\(event)")
+            XCTAssertTrue(session.isActive)
+        }
     }
 
-    func testListGrowingKeepsTheSelection() {
-        var session = session(count: 2)
-        session.handle(.listChanged(count: 6))
-        XCTAssertEqual(session.state, .active(selection: 1))
-    }
-
-    func testListEmptyingCancelsAnActiveSession() {
-        var session = session(count: 2)
-        XCTAssertEqual(session.handle(.listChanged(count: 0)), .cancel)
+    func testReleasingTheModifierCommits() {
+        var session = active()
+        XCTAssertEqual(session.handle(.modifierReleased).outcome, .commit)
         XCTAssertEqual(session.state, .idle)
+        XCTAssertNil(session.handle(.modifierReleased).outcome, "a second release has no session to end")
     }
 
-    func testListChangesWhileIdleSetTheCountForTheNextTrigger() {
-        var session = SwitchSession(count: 0)
-        session.handle(.listChanged(count: 3))
-        session.handle(.trigger(.backward))
-        XCTAssertEqual(session.state, .active(selection: 1))
-        var negative = SwitchSession(count: 3)
-        negative.handle(.listChanged(count: -1))
-        XCTAssertEqual(negative.count, 0)
-        XCTAssertFalse(negative.canStart)
+    func testEscapeAndInterruptionCancel() {
+        var escaped = active()
+        XCTAssertEqual(escaped.handle(.escape).outcome, .cancel)
+        XCTAssertNil(escaped.handle(.modifierReleased).outcome, "the release after Esc commits nothing")
+        var interrupted = active()
+        XCTAssertEqual(interrupted.handle(.interrupted).outcome, .cancel)
+        XCTAssertEqual(interrupted.state, .idle)
+    }
+
+    func testEndingTheSessionMakesTheReleaseCommitNothing() {
+        // A click chose a window while the modifier was still held.
+        var session = active()
+        XCTAssertTrue(session.end())
+        XCTAssertNil(session.handle(.modifierReleased).outcome)
+        XCTAssertFalse(session.end())
     }
 }

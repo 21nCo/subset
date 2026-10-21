@@ -8,8 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let settingsWindow = SettingsWindowController()
     private var statusMenu: StatusMenuController?
-    private let switchShortcut = SwitchShortcutController()
     private let windowList = WindowListController()
+    private lazy var switchShortcut = SwitchShortcutController(windowList: windowList)
     private var accessibility = AccessibilityGate()
     private lazy var onboarding = OnboardingWindowController(
         shortcutPhrase: {
@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.make(perform: perform)
         statusMenu = StatusMenuController(perform: perform, state: .needsPermission)
         switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
+        switchShortcut.onNeedsPermission = { [unowned self] in
+            refreshAccessibility()
+            onboarding.show()
+        }
         refreshAccessibility()
 
         let defaults = UserDefaults.standard

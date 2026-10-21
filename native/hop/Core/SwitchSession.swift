@@ -4,85 +4,82 @@ public enum SwitchDirection: Sendable, Equatable {
     case backward
 }
 
-/// One hold-to-switch session: the shortcut starts it, each further press moves the selection, and releasing the
-/// holding modifier ends it. Pure state; the host feeds it events from the event tap and acts on its outcomes.
+/// The direction ↑ and ↓ move the selection through the switcher's grid.
+public enum RowDirection: Sendable, Equatable {
+    case up
+    case down
+}
+
+/// One hold-to-switch session: the shortcut starts it, further keys move the selection or act on the selected
+/// window, and releasing the holding modifier ends it. Pure state; the host feeds it events from the event tap and acts
+/// on the events it accepts and on how it ends.
 ///
-/// Indices refer to the window list in recency order, where index 0 is the frontmost window. The session only knows
-/// the list's size (`count`), which the host reports with `listChanged` whenever the list changes, idle or not.
+/// The session only knows whether a switch is in progress. The window list and the selection belong to the switcher
+/// (`SwitcherViewModel`), which the host opens when a session starts, so a switch starts even when there are no
+/// windows and the switcher says so.
 public struct SwitchSession: Sendable, Equatable {
     public enum State: Sendable, Equatable {
         case idle
-        case active(selection: Int)
+        case active
     }
 
     public enum Event: Sendable, Equatable {
         /// The shortcut was pressed while idle.
         case trigger(SwitchDirection)
-        /// The shortcut key or an arrow key was pressed while active.
+        /// The shortcut key or ← or → was pressed while active.
         case step(SwitchDirection)
+        /// ↑ or ↓ was pressed while active.
+        case row(RowDirection)
+        /// An operation key (⌘M, ⌘W, ⌘H, ⌘Q, with the holding modifier) was pressed while active.
+        case operation(WindowOperation)
         /// The holding modifier was released.
         case modifierReleased
         /// Esc was pressed.
         case escape
-        /// The window list now has `count` windows.
-        case listChanged(count: Int)
         /// The host stopped receiving key events (the event tap was disabled or removed), so the release of the
         /// holding modifier may never arrive. Cancels like Esc.
         case interrupted
     }
 
     public enum Outcome: Sendable, Equatable {
-        /// Switch to the window at this index.
-        case commit(index: Int)
+        /// Switch to the selected window.
+        case commit
         /// Leave the windows as they were.
         case cancel
     }
 
     public private(set) var state: State = .idle
-    /// The number of windows in the list; never negative.
-    public private(set) var count: Int
 
-    public init(count: Int = 0) {
-        self.count = max(0, count)
-    }
+    public init() {}
 
-    public var isActive: Bool {
-        if case .active = state { true } else { false }
-    }
+    public var isActive: Bool { state == .active }
 
-    /// Whether `trigger` would start a session now: there must be a window to select.
-    public var canStart: Bool { count > 0 }
-
-    /// Applies one event and returns the outcome that ended the session, if this event ended one.
+    /// Applies one event. Returns whether the session took it (a trigger while idle, or any event while active) and,
+    /// when the event ended the session, how.
     @discardableResult
-    public mutating func handle(_ event: Event) -> Outcome? {
+    public mutating func handle(_ event: Event) -> (accepted: Bool, outcome: Outcome?) {
         switch (state, event) {
         case (.idle, .trigger):
-            guard count > 0 else { return nil }
-            // Either direction starts on the previous window, the usual target, or on the only window there is.
-            state = .active(selection: count == 1 ? 0 : 1)
-            return nil
-        case let (.active(selection), .trigger(direction)), let (.active(selection), .step(direction)):
-            let offset = direction == .forward ? 1 : -1
-            state = .active(selection: ((selection + offset) % count + count) % count)
-            return nil
-        case let (.active(selection), .modifierReleased):
+            state = .active
+            return (true, nil)
+        case (.idle, _):
+            return (false, nil)
+        case (.active, .modifierReleased):
             state = .idle
-            return .commit(index: selection)
+            return (true, .commit)
         case (.active, .escape), (.active, .interrupted):
             state = .idle
-            return .cancel
-        case let (_, .listChanged(newCount)):
-            count = max(0, newCount)
-            guard case let .active(selection) = state else { return nil }
-            if count == 0 {
-                state = .idle
-                return .cancel
-            }
-            state = .active(selection: min(selection, count - 1))
-            return nil
-        case (.idle, _):
-            return nil
+            return (true, .cancel)
+        case (.active, .trigger), (.active, .step), (.active, .row), (.active, .operation):
+            return (true, nil)
         }
+    }
+
+    /// Ends an active session that the switcher ended by itself, such as with a click on a window; the release of the
+    /// holding modifier that follows then changes nothing. Returns whether a session was active.
+    @discardableResult
+    public mutating func end() -> Bool {
+        defer { state = .idle }
+        return isActive
     }
 }
