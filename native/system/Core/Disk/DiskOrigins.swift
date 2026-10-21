@@ -262,7 +262,13 @@ public enum DiskOrigins {
         // Installed apps' own evidence first: an app group a signature declares, then a bundle ID. A heuristic below
         // never makes an installed app's data a leftover.
         if folder == .groupContainers {
-            let declaring = apps.apps(group: item.name)
+            // macOS can prefix the container of a declared group with the declaring app's Team ID
+            // (`TEAMID.group.com.example` for `group.com.example`).
+            var declaring = apps.apps(group: item.name)
+            if let team, let dot = item.name.firstIndex(of: ".") {
+                declaring += apps.apps(group: String(item.name[item.name.index(after: dot)...]))
+                    .filter { $0.signature?.teamID == team }
+            }
             if Set(declaring.map(\.path)).count == 1 { return make(.appGroup, app: declaring[0]) }
             if !declaring.isEmpty {
                 let vendors = Set(declaring.map(\.vendor))

@@ -213,6 +213,42 @@ final class DiskOriginTests: XCTestCase {
         }
     }
 
+    func testAGroupContainerPrefixedWithItsTeamIDBelongsToTheAppThatDeclaresTheGroup() async throws {
+        let writer = InstalledApp(path: Self.suiteWriter.path, bundleID: Self.suiteWriter.bundleID, name: "Writer",
+                                  signature: Self.suiteWriter.signature,
+                                  appGroups: ["group.com.suite.sheets", "group.org.unrelated.sync"])
+        let sheets = InstalledApp(path: Self.suiteSheets.path, bundleID: Self.suiteSheets.bundleID, name: "Sheets",
+                                  signature: Self.suiteSheets.signature, appGroups: [])
+        let helm = InstalledApp(
+            path: "/Applications/Helm.app", bundleID: "com.modumhq.Helm", name: "Helm",
+            signature: CodeSignature(signingID: "com.modumhq.Helm", teamID: "WSJXBQB984", isPlatformBinary: false),
+            appGroups: ["group.com.modumhq.Helm"])
+        let apps = InstalledApps([writer, sheets, helm])
+        for relative in ["SUITE00001.group.com.suite.sheets", "SUITE00001.group.org.unrelated.sync",
+                         "WSJXBQB984.group.com.modumhq.Helm", "OTHERTEAM1.group.com.suite.sheets",
+                         "OTHERTEAM1.group.org.unrelated.sync", "group.com.suite.sheets"] {
+            try write("Library/Group Containers/" + relative + "/data", bytes: 4_096)
+        }
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        let placed = Dictionary(uniqueKeysWithValues: DiskOrigins.entries(in: tree, home: home, apps: apps).map {
+            (String($0.path.dropFirst(home.count + "/Library/Group Containers/".count)), $0)
+        })
+
+        for (name, path) in [("SUITE00001.group.com.suite.sheets", writer.path),
+                             ("SUITE00001.group.org.unrelated.sync", writer.path),
+                             ("WSJXBQB984.group.com.modumhq.Helm", helm.path),
+                             ("group.com.suite.sheets", writer.path)] {
+            let entry = try XCTUnwrap(placed[name], name)
+            XCTAssertEqual(entry.rule, .appGroup, name)
+            XCTAssertEqual(entry.app?.path, path, name)
+        }
+        // Another team's container is not the group of an app of this team.
+        let other = try XCTUnwrap(placed["OTHERTEAM1.group.com.suite.sheets"])
+        XCTAssertEqual(other.rule, .bundleID)
+        XCTAssertEqual(other.app?.path, sheets.path)
+        XCTAssertEqual(placed["OTHERTEAM1.group.org.unrelated.sync"]?.rule, .leftover)
+    }
+
     func testAnAppGroupAppsOfDifferentVendorsDeclareIsNotAttributedWithItsBytes() async throws {
         let writer = InstalledApp(path: Self.suiteWriter.path, bundleID: Self.suiteWriter.bundleID, name: "Writer",
                                   signature: Self.suiteWriter.signature, appGroups: ["group.shared.sync"])
