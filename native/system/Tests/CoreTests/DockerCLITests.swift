@@ -111,6 +111,36 @@ final class DockerCLITests: XCTestCase {
         XCTAssertEqual(report.status(of: .dockerDesktop), .otherContext(name: "default-like", runtime: .orbStack))
     }
 
+    func testSystemDFIsPinnedToTheCheckedSocketAndGivesTheImageSpace() async throws {
+        let stub = try makeStub("""
+        echo "$*" >> '\(runLog)'
+        echo '{"Active":"2","Reclaimable":"2.064GB (61%)","Size":"3.37GB","TotalCount":"7","Type":"Images"}'
+        echo '{"Active":"0","Reclaimable":"0B","Size":"0B","TotalCount":"0","Type":"Build Cache"}'
+        """)
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let usage = await cli([stub]).imageUsage(at: date)
+
+        XCTAssertEqual(try runs(), ["system df --format json"])
+        XCTAssertEqual(try hosts(), [colimaEndpoint])
+        XCTAssertEqual(usage, .reported(DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_000_000),
+                                        observedAt: date))
+    }
+
+    func testSystemDFIsUnavailableWithoutACLIOrWithUnreadableOutputOrAStoppedDaemon() async throws {
+        let missing = await cli([folder.appendingPathComponent("absent").path]).imageUsage()
+        XCTAssertEqual(missing, .unavailable(.cliNotFound))
+
+        let garbage = try makeStub("echo 'not json'")
+        let unreadable = await cli([garbage]).imageUsage()
+        XCTAssertEqual(unreadable, .unavailable(.unparsableOutput(command: "docker system df")))
+
+        try FileManager.default.removeItem(atPath: home + "/.colima/default/docker.sock")
+        let stub = try makeStub("echo \"$1\" >> '\(runLog)'", name: "docker2")
+        guard case .unavailable(.daemonNotRunning) = await cli([stub]).imageUsage() else { return XCTFail("the daemon is not running") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runLog), "a missing socket is not asked")
+    }
+
     func testAContextWhoseSocketDoesNotExistIsNotAsked() async throws {
         try FileManager.default.removeItem(atPath: home + "/.colima/default/docker.sock")
         let stub = try makeStub("echo \"$1\" >> '\(runLog)'")

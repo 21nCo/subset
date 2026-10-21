@@ -114,7 +114,8 @@ struct TreeBuilder {
         let bytes = Array(name.utf8.prefix(Int(UInt16.max)))
         nodes.append(DiskTree.Node(
             nameStart: UInt32(names.count), nameLength: UInt16(bytes.count), kind: facts.kind, flags: facts.flags,
-            parent: parent, firstChild: index + 1, childCount: 0, sizes: facts.sizes))
+            parent: parent, firstChild: index + 1, childCount: 0, sizes: facts.sizes,
+            touched: facts.touched ?? DiskTree.Node.unknownTime))
         names.append(contentsOf: bytes)
         contributions.append(facts.contribution)
         return index

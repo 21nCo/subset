@@ -42,6 +42,8 @@ struct EntryFacts: Equatable, Sendable {
     var opensAs: FileKey? { flags.contains(.firmlink) ? nil : directory }
     /// The errno that made the entry unreadable.
     var error: Int32 = 0
+    /// When the item was last changed or put in its folder, in seconds since 1970; `nil` when neither was returned.
+    var touched: Int64?
 
     /// The Finder flag that makes a folder a package.
     static let hasBundleBit: UInt16 = 0x2000
@@ -49,6 +51,20 @@ struct EntryFacts: Equatable, Sendable {
     /// Classifies an entry. `isPackage` asks Launch Services about a folder whose name has an extension and that lacks
     /// the bundle bit; it is not called otherwise.
     init(_ entry: DirectoryEntry, isPackage: () -> Bool) {
+        self.init(classifying: entry, isPackage: isPackage)
+        touched = Self.touched(entry)
+    }
+
+    /// The later of the modification time and the date added: a file downloaded with its server's modification time,
+    /// or a project folder moved into place, counts from when it arrived.
+    static func touched(_ entry: DirectoryEntry) -> Int64? {
+        switch (entry.modified, entry.added) {
+        case let (modified?, added?): max(modified, added)
+        case let (modified, added): modified ?? added
+        }
+    }
+
+    private init(classifying entry: DirectoryEntry, isPackage: () -> Bool) {
         let type = entry.objectType
         let device = entry.realDevice ?? 0
         let flags = entry.flags ?? 0
