@@ -123,7 +123,7 @@ final class DockerCLITests: XCTestCase {
 
         XCTAssertEqual(try runs(), ["system df --format json"])
         XCTAssertEqual(try hosts(), [colimaEndpoint])
-        XCTAssertEqual(usage, .reported(DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_000_000),
+        XCTAssertEqual(usage, .reported(DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_500_000),
                                         observedAt: date))
     }
 

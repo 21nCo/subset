@@ -159,7 +159,7 @@ final class DockerOutputTests: XCTestCase {
 
     func testSystemDFGivesTheImagesRow() {
         XCTAssertEqual(DockerOutput.imageSpace(Self.systemDF),
-                       DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_000_000))
+                       DockerImageSpace(count: 7, active: 2, size: 3_370_000_000, reclaimable: 2_064_500_000))
         // Only the Images row counts, wherever it is, and a count may be a number.
         let reordered = """
         {"Active":"0","Reclaimable":"1GB","Size":"1GB","TotalCount":"3","Type":"Build Cache"}
@@ -167,6 +167,19 @@ final class DockerOutputTests: XCTestCase {
         {"Active":0,"Reclaimable":"0B (0%)","Size":"12.5MB","TotalCount":1,"Type":"Images"}
         """
         XCTAssertEqual(DockerOutput.imageSpace(reordered), DockerImageSpace(count: 1, active: 0, size: 12_500_000, reclaimable: 0))
+    }
+
+    func testReclaimableIsTheMostItsRoundedFigureMayBe() {
+        // Docker prints four significant digits, so 2,064,499,999 bytes reads 2.064GB: half a unit in the last digit
+        // shown is added, as it is to a whole number.
+        for (text, ceiling) in [("2.064GB", 2_064_500_000), ("999.9MB", 999_950_000), ("1GB", 1_500_000_000),
+                                ("1.5kB", 1_550), ("0B", 0), ("512B", 512)] as [(String, UInt64)] {
+            XCTAssertEqual(DockerOutput.ceiling(text), ceiling, text)
+            let row = #"{"Type":"Images","Size":"9GB","Reclaimable":"\#(text) (10%)"}"#
+            XCTAssertEqual(DockerOutput.imageSpace(row)?.reclaimable, ceiling, text)
+        }
+        XCTAssertGreaterThanOrEqual(DockerOutput.ceiling("2.064GB") ?? 0, 2_064_499_999)
+        for text in ["lots", "1e3GB", "1..2GB", ".5GB", "GB"] { XCTAssertNil(DockerOutput.ceiling(text), text) }
     }
 
     func testSystemDFWithoutAReadableImagesRowIsNothing() {

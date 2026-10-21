@@ -48,7 +48,8 @@ public struct ReclaimItem: Equatable, Sendable {
 /// The bytes a match reports.
 public enum ReclaimBytes: Equatable, Sendable {
     /// Summed from the scan over the items. `private` is at least what removing them all frees (the private size of
-    /// each), `allocated` the space they use, a hard-linked file's once. `complete` is false when an item's size is
+    /// each), `allocated` the space they use, a hard-linked file's once. Whether the rule's cleanup removes them all is
+    /// the rule's `yield` (`ReclaimMatch.freedAtLeast`). `complete` is false when an item's size is
     /// unknown or a lower bound, or another link counts an item's blocks, which makes both sums lower bounds.
     /// `allocatedUpperBound` is true when an item's allocated size may count blocks clones share more than once
     /// (`DiskItemFlags.allocatedUpperBound`), or two or more items may hold clones, whose shared blocks each item
@@ -60,8 +61,8 @@ public enum ReclaimBytes: Equatable, Sendable {
     case dockerReclaimable(upTo: UInt64, total: UInt64?)
     case unavailable(String)
 
-    /// The bytes the match's cleanup frees at least: the private sum. `nil` when unknown or known only as an upper
-    /// bound (Docker's, in `upperBound`).
+    /// The measured private sum: what removing every item frees at least. `nil` when unknown or known only as an
+    /// upper bound (Docker's, in `upperBound`).
     public var bytes: UInt64? {
         switch self {
         case let .scanned(privateBytes, _, _, _): privateBytes
@@ -89,6 +90,13 @@ public struct ReclaimMatch: Equatable, Sendable {
 
     public var risk: ReclaimRisk { rule.risk }
     public var cleanup: ReclaimCleanup { rule.cleanup }
+
+    /// What the rule's cleanup frees at least: the private sum when it removes every item (`ReclaimYield.allMeasured`).
+    /// `nil` when that is unknown: the cleanup keeps part of what was measured (`pnpm store prune`, `brew cleanup`),
+    /// only an upper bound is known (Docker's, in `bytes.upperBound`), or no cleanup is offered (the Trash).
+    public var freedAtLeast: UInt64? {
+        rule.yield == .allMeasured ? bytes.bytes : nil
+    }
 }
 
 /// Applies the catalog to one scan's tree. Rules only describe: nothing is deleted, moved, or run, and the only files
@@ -98,8 +106,9 @@ public enum ReclaimMatcher {
     static let lowerBoundFlags: DiskItemFlags = [.unreadable, .partial, .incomplete]
 
     /// Every match in catalog order. A rule whose folders the tree does not hold, under folders it read in full, has
-    /// none. Every folder a rule searches, and the folders above its rule folders, must have been read in full:
-    /// otherwise (unreadable, cancelled, replaced, another volume, not downloaded, a link), or when an entry in one
+    /// none. Every folder a rule searches must have been read in full, and so must the folders above a rule folder it
+    /// did not find, since only then is it absent; a found rule folder is judged by its own listing. Otherwise
+    /// (unreadable, cancelled, replaced, another volume, not downloaded, a link), or when an entry in a searched folder
     /// could not be read and its type is unknown (`DiskTree.searched`), what the rule found is incomplete, and with
     /// nothing found the match has unavailable bytes and no items. `origins` are the Library entries
     /// `DiskOrigins.entries` attributed, which the App caches and App leftovers rules use.
@@ -394,15 +403,17 @@ private struct Matching {
         return relative.first != "Library" && !relative.contains { $0.hasPrefix(".") || $0 == "node_modules" }
     }
 
-    /// The latest touch of the project folder and everything in it outside `node_modules` folders, or `nil` when
-    /// any of it has no time or was not listed in full (`DiskTree.unlisted`, another volume included), so it may hold
-    /// something newer.
+    /// The latest touch of the project folder and everything in it outside `node_modules` folders, a package's
+    /// contents included (`DiskTree.newestTouch`), or `nil` when any of it has no time or was not read in full
+    /// (`DiskTree.unlisted`, another volume included, or a package something inside of which was not read or is not
+    /// downloaded), so it may hold something newer.
     func newestTouch(inProject project: Int) -> Date? {
         var newest = Date.distantPast
         var stack = [project]
         while let index = stack.popLast() {
             let item = tree[index]
-            guard let touched = item.touched, tree.unlisted(index) == nil else { return nil }
+            guard let touched = tree.newestTouch(index), tree.unlisted(index) == nil,
+                  item.kind != .package || item.flags.isDisjoint(with: [.incomplete, .containsDataless]) else { return nil }
             newest = max(newest, touched)
             for child in item.children where !(tree[child].name == "node_modules" && tree[child].kind == .directory) {
                 stack.append(child)
@@ -454,6 +465,8 @@ private struct Matching {
         case let .reported(space, _):
             bytes = space.reclaimable.map { .dockerReclaimable(upTo: $0, total: space.size) }
                 ?? .unavailable("docker system df did not report reclaimable image space.")
+        case .unavailable(.cancelled):
+            bytes = .unavailable("docker system df was stopped before it finished, so the images were not measured.")
         case let .unavailable(reason):
             bytes = .unavailable(reason.reason)
         }

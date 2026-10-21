@@ -7,8 +7,9 @@ public struct DockerImageSpace: Equatable, Sendable {
     public let active: Int?
     /// The space all images use.
     public let size: UInt64?
-    /// The space of images no container uses. `docker image prune -f` removes only dangling ones (untagged), so it may
-    /// free less.
+    /// The most the space of images no container uses may be: Docker rounds it to four significant digits, so this is
+    /// the printed figure plus half a unit in its last digit (`ceiling`). `docker image prune -f` removes only dangling
+    /// ones (untagged), so it may free less.
     public let reclaimable: UInt64?
 
     public init(count: Int?, active: Int?, size: UInt64?, reclaimable: UInt64?) {
@@ -53,7 +54,7 @@ extension DockerCLI {
 extension DockerOutput {
     /// The `Images` row of `docker system df --format json`, one JSON object per line (`Type`, `TotalCount`,
     /// `Active`, `Size`, `Reclaimable` such as `1.2GB (45%)`), or `nil` when no line is a readable `Images` row. A
-    /// value that is missing or not a known size is `nil`.
+    /// value that is missing or not a known size is `nil`; `Reclaimable` is read as its `ceiling`.
     public static func imageSpace(_ output: String) -> DockerImageSpace? {
         for line in output.split(whereSeparator: \.isNewline) {
             guard let object = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
@@ -64,11 +65,29 @@ extension DockerOutput {
             }
             let space = DockerImageSpace(count: count(object["TotalCount"]), active: count(object["Active"]),
                                          size: (object["Size"] as? String).flatMap(bytes),
-                                         reclaimable: reclaimable.flatMap(bytes))
+                                         reclaimable: reclaimable.flatMap(ceiling))
             guard space.size != nil || space.reclaimable != nil else { return nil }
             return space
         }
         return nil
+    }
+
+    /// The most a size the CLI rounded for display may be: its value plus half a unit in the last digit shown, so
+    /// `2.064GB` is at most 2,064,500,000 bytes and `1GB` 1,500,000,000. A size in bytes is exact.
+    static func ceiling(_ text: String) -> UInt64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let value = bytes(trimmed), let unitStart = trimmed.firstIndex(where: \.isLetter) else { return nil }
+        let number = trimmed[..<unitStart].trimmingCharacters(in: .whitespaces)
+        let parts = number.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count <= 2, parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+              let unit = bytes("1" + trimmed[unitStart...]) else { return nil }
+        guard unit > 1 else { return value }
+        let decimals = parts.count == 2 ? parts[1].count : 0
+        // Half a unit in the last digit, rounded up: the unit over 2 × 10^decimals.
+        var divisor: UInt64 = 2
+        for _ in 0..<min(decimals, 18) { divisor *= 10 }
+        let (ceiling, overflow) = value.addingReportingOverflow(unit / divisor + (unit % divisor == 0 ? 0 : 1))
+        return overflow ? nil : ceiling
     }
 
     /// A count the CLI prints as a string (`"12"`) or a number.

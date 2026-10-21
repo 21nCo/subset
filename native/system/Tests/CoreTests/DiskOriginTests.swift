@@ -464,29 +464,73 @@ final class DiskOriginTests: XCTestCase {
         try bundle(home + "/Volumes/tvOS_22J/Library/Developer/CoreSimulator/Profiles/Runtimes/tvOS 18.0.simruntime",
                    id: "com.apple.CoreSimulator.SimRuntime.tvOS-18-0", name: nil)
 
-        XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes"),
+        XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes",
+                                              cryptexBundlesFolder: home + "/none"),
                        .installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3", "com.apple.CoreSimulator.SimRuntime.watchOS-11-0",
                                    "com.apple.CoreSimulator.SimRuntime.tvOS-18-0"]))
-        XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: home + "/none.plist", runtimesFolder: home + "/none", volumesFolder: home + "/none"),
+        XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: home + "/none.plist", runtimesFolder: home + "/none", volumesFolder: home + "/none",
+                                              cryptexBundlesFolder: home + "/none"),
                        .installed([]), "no list and no bundles: nothing is installed")
         try Data("not a plist".utf8).write(to: URL(fileURLWithPath: images))
-        guard case .unknown = SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes")
+        guard case .unknown = SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes",
+                                                     cryptexBundlesFolder: home + "/none")
         else { return XCTFail("an unreadable image list is unknown, not empty") }
 
         // A runtime image whose identifier is not a name may be any runtime.
         for identifier: Any in [123, "", ["iOS"]] {
             let odd: [String: Any] = ["images": [["runtimeInfo": ["bundleIdentifier": identifier]]]]
             try PropertyListSerialization.data(fromPropertyList: odd, format: .xml, options: 0).write(to: URL(fileURLWithPath: images))
-            XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/none", volumesFolder: home + "/none"),
+            XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/none", volumesFolder: home + "/none",
+                                                  cryptexBundlesFolder: home + "/none"),
                            .unknown("\(images) has a runtime without a bundle identifier."), "\(identifier)")
         }
+    }
+
+    func testStandaloneAndDownloadedRuntimesAreReadOrMakeTheListUnknown() throws {
+        let images = home + "/images.plist", bundles = home + "/bundle"
+        func read(_ plist: [String: Any]) throws -> SimulatorRuntimes {
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: images))
+            return SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/none", volumesFolder: home + "/none",
+                                          cryptexBundlesFolder: bundles)
+        }
+        // A runtime registered only as a standalone bundle is installed.
+        let standalone = ["runtimeInfo": ["bundleIdentifier": "com.apple.CoreSimulator.SimRuntime.visionOS-2-0"]]
+        XCTAssertEqual(try read(["images": [], "standaloneBundles": [standalone]]),
+                       .installed(["com.apple.CoreSimulator.SimRuntime.visionOS-2-0"]))
+        XCTAssertEqual(try read(["images": [], "standaloneBundles": [["path": "somewhere"]]]),
+                       .unknown("\(images) has a standalone runtime without a bundle identifier."))
+
+        // This Mac's layout: the downloaded bundle is the source of the image naming its runtime.
+        let uuid = "924AFDB9-9F35-483F-89F3-599563E56A0E"
+        try FileManager.default.createDirectory(atPath: "\(bundles)/SimRuntimeBundle-\(uuid)/Restore", withIntermediateDirectories: true)
+        try Data().write(to: URL(fileURLWithPath: bundles + "/.DS_Store"))
+        let image: [String: Any] = ["runtimeInfo": ["bundleIdentifier": "com.apple.CoreSimulator.SimRuntime.iOS-18-3"],
+                                    "sourceParentUUID": uuid, "sourceParentBundleMountURL":
+                                        ["relative": "file://\(bundles)/SimRuntimeBundle-\(uuid)/"]]
+        let installed = SimulatorRuntimes.installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3"])
+        XCTAssertEqual(try read(["images": [image], "standaloneBundles": []]), installed)
+        XCTAssertEqual(try read(["images": [image.filter { $0.key != "sourceParentBundleMountURL" }]]), installed)
+        XCTAssertEqual(try read(["images": [image.filter { $0.key != "sourceParentUUID" }]]), installed)
+        // A downloaded runtime no image comes from may be registered elsewhere (a MobileAsset), so its devices are not
+        // called unavailable.
+        let unknown = SimulatorRuntimes.unknown("\(bundles)/SimRuntimeBundle-\(uuid) is a runtime \(images) does not list.")
+        XCTAssertEqual(try read(["images": [image.filter { !$0.key.hasPrefix("sourceParent") }]]), unknown)
+        XCTAssertEqual(try read(["images": [image.filter { $0.key != "runtimeInfo" }]]), unknown, "its image names no runtime")
+        try FileManager.default.removeItem(atPath: images)
+        XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/none", volumesFolder: home + "/none",
+                                              cryptexBundlesFolder: bundles), unknown)
+        // A downloads folder that cannot be listed may hold any runtime.
+        XCTAssertEqual(chmod(bundles, 0), 0)
+        defer { chmod(bundles, 0o755) }
+        guard case let .unknown(reason) = try read(["images": [image]]) else { return XCTFail("an unlisted downloads folder is unknown") }
+        XCTAssertTrue(reason.hasPrefix("\(bundles) could not be read"), reason)
     }
 
     func testARuntimeSourceThatCannotBeReadMakesTheListUnknown() throws {
         let none = home + "/none"
         try bundle(home + "/Runtimes/iOS 18.3.simruntime", id: "com.apple.CoreSimulator.SimRuntime.iOS-18-3", name: nil)
         func read(runtimes: String = home + "/Runtimes", volumes: String = none) -> SimulatorRuntimes {
-            SimulatorRuntimes.read(imagesPlist: none + ".plist", runtimesFolder: runtimes, volumesFolder: volumes)
+            SimulatorRuntimes.read(imagesPlist: none + ".plist", runtimesFolder: runtimes, volumesFolder: volumes, cryptexBundlesFolder: none)
         }
         XCTAssertEqual(read(), .installed(["com.apple.CoreSimulator.SimRuntime.iOS-18-3"]))
 

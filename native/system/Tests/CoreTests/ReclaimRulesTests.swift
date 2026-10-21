@@ -33,32 +33,35 @@ final class ReclaimRulesTests: XCTestCase {
 
     func testTheCatalogIsVersionOneWithExactlyTheIssuesRules() {
         XCTAssertEqual(ReclaimRules.catalogVersion, 1)
-        let table: [(ReclaimRuleID, ReclaimRisk, ReclaimCleanup)] = [
-            (.xcodeDerivedData, .safe, .trash),
-            (.xcodeDeviceSupport, .safe, .trash),
-            (.unavailableSimulators, .safe, .command(["xcrun", "simctl", "delete", "unavailable"])),
-            (.simulatorCaches, .safe, .trash),
-            (.xcodeArchives, .review, .trashEachItem),
-            (.staleNodeModules, .safe, .trash),
-            (.npmCache, .safe, .command(["npm", "cache", "clean", "--force"])),
-            (.pnpmStore, .safe, .command(["pnpm", "store", "prune"])),
-            (.yarnCache, .safe, .command(["yarn", "cache", "clean"])),
-            (.homebrewCache, .safe, .command(["brew", "cleanup"])),
-            (.dockerImages, .safe, .command(["docker", "image", "prune", "-f"])),
-            (.cargoRegistryCache, .safe, .trash),
-            (.gradleCaches, .safe, .trash),
-            (.pipCache, .safe, .trash),
-            (.appCaches, .safe, .trashPerApp),
-            (.deviceBackups, .review, .trashEachItem),
-            (.oldInstallers, .review, .trashEachItem),
-            (.appLeftovers, .review, .trashEachItem),
-            (.trash, .info, .none)
+        // Only a cleanup that removes every measured item has a known yield: pnpm and Homebrew prune part of their
+        // folders, Docker reports an upper bound, and System never empties the Trash.
+        let table: [(ReclaimRuleID, ReclaimRisk, ReclaimCleanup, ReclaimYield)] = [
+            (.xcodeDerivedData, .safe, .trash, .allMeasured),
+            (.xcodeDeviceSupport, .safe, .trash, .allMeasured),
+            (.unavailableSimulators, .safe, .command(["xcrun", "simctl", "delete", "unavailable"]), .allMeasured),
+            (.simulatorCaches, .safe, .trash, .allMeasured),
+            (.xcodeArchives, .review, .trashEachItem, .allMeasured),
+            (.staleNodeModules, .safe, .trash, .allMeasured),
+            (.npmCache, .safe, .command(["npm", "cache", "clean", "--force"]), .allMeasured),
+            (.pnpmStore, .safe, .command(["pnpm", "store", "prune"]), .partOfMeasured),
+            (.yarnCache, .safe, .command(["yarn", "cache", "clean"]), .allMeasured),
+            (.homebrewCache, .safe, .command(["brew", "cleanup"]), .partOfMeasured),
+            (.dockerImages, .safe, .command(["docker", "image", "prune", "-f"]), .reportedUpperBound),
+            (.cargoRegistryCache, .safe, .trash, .allMeasured),
+            (.gradleCaches, .safe, .trash, .allMeasured),
+            (.pipCache, .safe, .trash, .allMeasured),
+            (.appCaches, .safe, .trashPerApp, .allMeasured),
+            (.deviceBackups, .review, .trashEachItem, .allMeasured),
+            (.oldInstallers, .review, .trashEachItem, .allMeasured),
+            (.appLeftovers, .review, .trashEachItem, .allMeasured),
+            (.trash, .info, .none, .noCleanup)
         ]
         XCTAssertEqual(ReclaimRules.all.map(\.id), table.map(\.0))
         XCTAssertEqual(ReclaimRules.all.map(\.id), ReclaimRuleID.allCases)
         for (rule, expected) in zip(ReclaimRules.all, table) {
             XCTAssertEqual(rule.risk, expected.1, "\(rule.id)")
             XCTAssertEqual(rule.cleanup, expected.2, "\(rule.id)")
+            XCTAssertEqual(rule.yield, expected.3, "\(rule.id)")
             XCTAssertFalse(rule.explanation.isEmpty || rule.rebuild.isEmpty || rule.name.isEmpty || rule.location.isEmpty)
         }
     }
@@ -176,6 +179,30 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(match.cleanup, .trash)
     }
 
+    func testAChangeInsideAPackageKeepsItsProjectFreshAndAnUnreadPackageLeavesItUnjudged() async throws {
+        // Saving a file inside an Xcode project leaves the package's own time alone.
+        for name in ["old", "edited", "locked"] {
+            try project("dev/\(name)", untouchedFor: 31)
+            try write("dev/\(name)/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata", bytes: 4_096)
+            try touchTree("dev/\(name)", daysAgo: 31, skipping: "node_modules")
+        }
+        try touch("dev/edited/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata", daysAgo: 2)
+
+        let analysis = try await analyze()
+        XCTAssertEqual(analysis.tree.item(at: "dev/edited/App.xcodeproj")?.kind, .package)
+        let match = try only(.staleNodeModules, in: analysis)
+        XCTAssertEqual(match.items.map(\.path), [path("dev/locked/node_modules"), path("dev/old/node_modules")])
+        try assertBytes(match)
+
+        // A folder inside the package that cannot be read may hold something newer.
+        let locked = path("dev/locked/App.xcodeproj/project.xcworkspace")
+        XCTAssertEqual(chmod(locked, 0), 0)
+        defer { chmod(locked, 0o755) }
+        let unjudged = try only(.staleNodeModules, in: try await analyze())
+        XCTAssertEqual(unjudged.items.map(\.path), [path("dev/old/node_modules")])
+        guard case .scanned(_, _, complete: false, _) = unjudged.bytes else { return XCTFail("\(unjudged.bytes)") }
+    }
+
     func testNpmCacheIsTheCacacheFolder() async throws {
         try write(".npm/_cacache/content-v2/sha512/ab/cd/blob", bytes: 250_000)
         try write(".npm/_logs/debug.log", bytes: 4_096)
@@ -195,6 +222,9 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(match.items.map(\.path), [path(".pnpm-store"), path("Library/pnpm/store")])
         try assertBytes(match)
         XCTAssertEqual(match.cleanup, .command(["pnpm", "store", "prune"]))
+        // The prune keeps every package a project references, so the stores' usage is not what it frees.
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertNil(match.freedAtLeast)
     }
 
     func testYarnCacheIsItsCachesFolderAndYarnsOrigin() async throws {
@@ -218,17 +248,21 @@ final class ReclaimRulesTests: XCTestCase {
 
         try assertItems(match, ["Library/Caches/Homebrew"], root: "Library/Caches")
         XCTAssertEqual(match.cleanup, .command(["brew", "cleanup"]))
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertNil(match.freedAtLeast, "brew cleanup keeps current downloads")
     }
 
     func testDockerImagesComeFromSystemDFAndAreUnavailableWithoutTheCLI() async throws {
         let recorded = DockerOutputTests.systemDF
         let space = try XCTUnwrap(DockerOutput.imageSpace(recorded))
         let reported = try only(.dockerImages, in: try await analyze(docker: .reported(space, observedAt: now)))
-        XCTAssertEqual(reported.bytes, .dockerReclaimable(upTo: 2_064_000_000, total: 3_370_000_000))
+        // Docker's 2.064GB may be up to 2,064,500,000 bytes before rounding.
+        XCTAssertEqual(reported.bytes, .dockerReclaimable(upTo: 2_064_500_000, total: 3_370_000_000))
         // Reclaimable counts every unused image, while the safe cleanup removes only dangling ones: an upper bound,
         // never the amount freed.
         XCTAssertNil(reported.bytes.bytes)
-        XCTAssertEqual(reported.bytes.upperBound, 2_064_000_000)
+        XCTAssertNil(reported.freedAtLeast)
+        XCTAssertEqual(reported.bytes.upperBound, 2_064_500_000)
         XCTAssertEqual(reported.risk, .safe)
         XCTAssertEqual(reported.cleanup, .command(["docker", "image", "prune", "-f"]))
 
@@ -236,6 +270,9 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertEqual(missing, .unavailable(.cliNotFound))
         let unavailable = try only(.dockerImages, in: try await analyze(docker: missing))
         XCTAssertEqual(unavailable.bytes, .unavailable(ContainerUnavailable.cliNotFound.reason))
+        // A run stopped before it finished says so, not why the container poll stops.
+        let cancelled = try only(.dockerImages, in: try await analyze(docker: .unavailable(.cancelled)))
+        XCTAssertEqual(cancelled.bytes, .unavailable("docker system df was stopped before it finished, so the images were not measured."))
 
         // Without a report the rule is left out.
         let notAsked = try await analyze()
@@ -425,6 +462,8 @@ final class ReclaimRulesTests: XCTestCase {
         try assertItems(match, [".Trash"], root: "")
         XCTAssertEqual(match.risk, .info)
         XCTAssertEqual(match.cleanup, .none)
+        XCTAssertNotNil(match.bytes.bytes)
+        XCTAssertNil(match.freedAtLeast, "System frees nothing from the Trash")
     }
 
     // MARK: Boundaries
@@ -951,6 +990,9 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertGreaterThan(expected, 0, file: file, line: line)
         XCTAssertEqual(match.bytes, .scanned(private: expected, allocated: expected, complete: true, allocatedUpperBound: false), file: file, line: line)
         XCTAssertEqual(match.bytes.bytes, expected, file: file, line: line)
+        // A selective prune keeps part of its folder, and the Trash has no cleanup: they measure usage, not a yield.
+        let yieldUnknown: Set<ReclaimRuleID> = [.pnpmStore, .homebrewCache, .trash]
+        XCTAssertEqual(match.freedAtLeast, yieldUnknown.contains(match.rule.id) ? nil : expected, file: file, line: line)
     }
 
     static func allocated(under path: String) throws -> UInt64 {

@@ -114,6 +114,9 @@ public struct DiskTree: Sendable {
     public let rootPath: String
     var nodes: [Node]
     var names: [UInt8]
+    /// The latest `touched` of the entries read inside each package with any, by the package's index, which the tree
+    /// does not list; `Node.unknownTime` when one had no time.
+    var newestInPackages: [Int32: Int64] = [:]
 
     public var count: Int { nodes.count }
     public var root: DiskItem { self[0] }
@@ -152,6 +155,14 @@ public struct DiskTree: Sendable {
             current = next
         }
         return self[current]
+    }
+
+    /// The latest time the item, or for a package an entry read inside it, was touched; `nil` when one has no time.
+    /// A package's own time does not change when a file inside it is written.
+    func newestTouch(_ index: Int) -> Date? {
+        let own = nodes[index].touched
+        let newest = newestInPackages[Int32(index)].map { $0 == Node.unknownTime ? $0 : max($0, own) } ?? own
+        return own == Node.unknownTime || newest == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(newest))
     }
 
     func name(of index: Int) -> String {

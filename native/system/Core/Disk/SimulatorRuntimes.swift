@@ -11,19 +11,27 @@ public enum SimulatorRuntimes: Equatable, Sendable {
     public static let imagesPlist = "/Library/Developer/CoreSimulator/Images/images.plist"
     public static let runtimesFolder = "/Library/Developer/CoreSimulator/Profiles/Runtimes"
     public static let volumesFolder = "/Library/Developer/CoreSimulator/Volumes"
+    public static let cryptexBundlesFolder = "/Library/Developer/CoreSimulator/Cryptex/Images/bundle"
 
-    /// Reads the runtime disk images CoreSimulator registers (`runtimeInfo.bundleIdentifier` of each entry in
-    /// `images.plist`) and the runtime bundles installed as folders: in `runtimesFolder` and in the runtime volumes
-    /// mounted under `volumesFolder`. A missing file or folder adds none; one that exists but cannot be read or parsed,
-    /// a runtime image or bundle without a readable identifier included, makes the list unknown, since a runtime it would name
-    /// may be installed.
+    /// Reads the runtimes CoreSimulator registers in `images.plist` (`runtimeInfo.bundleIdentifier` of each disk image,
+    /// and of each entry of `standaloneBundles`) and the runtime bundles installed as folders: in `runtimesFolder` and in
+    /// the runtime volumes mounted under `volumesFolder`. A missing file or folder adds none; one that exists but cannot
+    /// be read or parsed, a registered runtime or bundle without a readable identifier included, makes the list unknown,
+    /// since a runtime it would name may be installed. So does a downloaded runtime in `cryptexBundlesFolder` that no
+    /// image naming a runtime comes from (`sourceParentUUID`, `sourceParentBundleMountURL`), since such a runtime may
+    /// be registered where this does not read (a MobileAsset), and its devices would look unavailable.
     public static func read(imagesPlist: String = imagesPlist, runtimesFolder: String = runtimesFolder,
-                            volumesFolder: String = volumesFolder) -> SimulatorRuntimes {
+                            volumesFolder: String = volumesFolder,
+                            cryptexBundlesFolder: String = cryptexBundlesFolder) -> SimulatorRuntimes {
         var found: Set<String> = []
+        var sources: Set<String> = []
         switch PropertyListFile.read(imagesPlist) {
         case let .success(plist):
             guard let images = plist["images"] as? [[String: Any]] else {
                 return .unknown("\(imagesPlist) has no list of images.")
+            }
+            guard let standalone = (plist["standaloneBundles"] ?? [Any]()) as? [Any] else {
+                return .unknown("\(imagesPlist) has an unreadable list of standalone runtimes.")
             }
             for image in images {
                 guard let info = image["runtimeInfo"] else { continue }
@@ -31,11 +39,35 @@ public enum SimulatorRuntimes: Equatable, Sendable {
                     return .unknown("\(imagesPlist) has a runtime without a bundle identifier.")
                 }
                 found.insert(id)
+                // The downloaded bundle the image comes from, whose runtime it names.
+                if let uuid = image["sourceParentUUID"] as? String { sources.insert(uuid.uppercased()) }
+                if let url = (image["sourceParentBundleMountURL"] as? [String: Any])?["relative"] as? String,
+                   let name = URL(string: url)?.lastPathComponent { sources.insert(name.uppercased()) }
+            }
+            for entry in standalone {
+                let entry = entry as? [String: Any]
+                let info = entry?["runtimeInfo"] as? [String: Any] ?? entry
+                guard let id = info?["bundleIdentifier"] as? String, !id.isEmpty else {
+                    return .unknown("\(imagesPlist) has a standalone runtime without a bundle identifier.")
+                }
+                found.insert(id)
             }
         case .failure(.missing):
             break
         case let .failure(failure):
             return .unknown("\(imagesPlist) could not be read: \(failure.message).")
+        }
+        switch listing(cryptexBundlesFolder) {
+        case let .success(bundles):
+            let prefix = "SimRuntimeBundle-"
+            for bundle in bundles where !bundle.hasPrefix(".") {
+                let uuid = bundle.hasPrefix(prefix) ? String(bundle.dropFirst(prefix.count)) : bundle
+                guard sources.contains(bundle.uppercased()) || sources.contains(uuid.uppercased()) else {
+                    return .unknown("\(cryptexBundlesFolder)/\(bundle) is a runtime \(imagesPlist) does not list.")
+                }
+            }
+        case let .failure(failure):
+            return .unknown("\(cryptexBundlesFolder) could not be read: \(failure.message).")
         }
         var folders = [runtimesFolder]
         switch listing(volumesFolder) {
