@@ -40,7 +40,7 @@ public struct CleanupResult: Identifiable, Equatable, Sendable {
         return freeAfter - freeBefore
     }
 
-    /// Something was moved to the Trash, or the command ran; a cleanup that did nothing can be tried again.
+    /// Something was moved to the Trash, or the command was started; a cleanup that did nothing can be tried again.
     public var didAct: Bool {
         switch outcome {
         case let .trash(items): items.contains { if case .moved = $0.status { true } else { false } }

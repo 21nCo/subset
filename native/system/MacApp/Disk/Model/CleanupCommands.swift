@@ -122,22 +122,35 @@ public struct CommandExcerpt: Equatable, Sendable {
 public enum CommandCleanupOutcome: Equatable, Sendable {
     /// It exited; a status other than 0 is a failure.
     case exited(status: Int32, output: CommandExcerpt)
+    /// It ran past the timeout and was stopped.
     case timedOut(seconds: Int, output: CommandExcerpt)
+    /// The program could not be started.
     case launchFailed(String)
+    /// It printed more than System reads, and was stopped.
     case outputTooLarge(output: CommandExcerpt)
+    /// It was stopped while it ran.
     case cancelled(output: CommandExcerpt)
+    /// It was stopped before it started, so it was not run.
+    case notStarted
     /// It was not run: the program is no longer the one the preview showed, or the command is not allowed.
     case refused(String)
 
+    /// What it printed, for a command that was started.
     public var output: CommandExcerpt? {
         switch self {
         case let .exited(_, output), let .timedOut(_, output), let .outputTooLarge(output), let .cancelled(output): output
-        case .launchFailed, .refused: nil
+        case .launchFailed, .notStarted, .refused: nil
         }
     }
 
-    /// The command ran, so it may have changed something; refused and unstarted commands did nothing.
-    public var ran: Bool { output != nil }
+    /// The command was started, so it may have changed something, however it ended; a command refused, stopped
+    /// before it started, or that could not be started did nothing.
+    public var ran: Bool {
+        switch self {
+        case .exited, .timedOut, .outputTooLarge, .cancelled: true
+        case .launchFailed, .notStarted, .refused: false
+        }
+    }
 }
 
 /// Finds and runs the allowlisted tool commands.
@@ -194,13 +207,17 @@ public struct CleanupCommands: Sendable {
     }
 
     /// Runs a command the preview showed, after finding it again: one no longer at the same path, no longer the same
-    /// files there, or no longer leading to the same program or socket, is not run.
+    /// files there, or no longer leading to the same program or socket, is not run. Stopped before the launch, it is
+    /// not started (`notStarted`).
     func run(_ command: ResolvedCommand) async -> CommandCleanupOutcome {
         guard CleanupTool.allowed(command.tool.vector) == command.tool,
               candidates(command.tool).contains(command.executable) else {
             return .refused("\(command.commandLine) is not an allowed command.")
         }
-        switch resolve(command.tool) {
+        // Finding Docker's again runs its CLI, which a Stop meanwhile interrupts; that is a stop, not a refusal.
+        let found = resolve(command.tool)
+        guard !Task.isCancelled else { return .notStarted }
+        switch found {
         case let .failure(reason):
             return .refused(reason.text)
         case let .success(now) where now != command:
@@ -209,7 +226,6 @@ public struct CleanupCommands: Sendable {
         case .success:
             break
         }
-        guard !Task.isCancelled else { return .cancelled(output: .none) }
         let result = await runner.run(command.executable, arguments: command.arguments,
                                       environment: environment(for: command), workingDirectory: Self.workingDirectory,
                                       timeout: timeout)
@@ -219,7 +235,7 @@ public struct CleanupCommands: Sendable {
         case .failure(.timedOut): return .timedOut(seconds: Int(timeout.components.seconds), output: output)
         case let .failure(.launchFailed(message)): return .launchFailed(message)
         case .failure(.outputTooLarge): return .outputTooLarge(output: output)
-        case .failure(.cancelled): return .cancelled(output: output)
+        case .failure(.cancelled): return result.launched ? .cancelled(output: output) : .notStarted
         }
     }
 

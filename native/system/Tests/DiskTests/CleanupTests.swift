@@ -313,7 +313,8 @@ final class CleanupTests: XCTestCase {
         // Between the check and the move, each item is put aside and something else takes its path: another folder, a
         // link, or another folder that, once in the Trash, finds its path taken again.
         let trash: @Sendable (URL) throws -> URL? = { url in
-            let manager = FileManager.default, name = url.lastPathComponent
+            let manager = FileManager.default
+            let name = url.lastPathComponent
             try manager.moveItem(atPath: url.path, toPath: aside + "/" + name)
             if name == "Link-2" {
                 try manager.createSymbolicLink(atPath: url.path, withDestinationPath: aside + "/" + name)
@@ -348,7 +349,9 @@ final class CleanupTests: XCTestCase {
         try fixture.write("Library/Developer/Xcode/DerivedData/A-1/Build/app", bytes: 4_000)
         let match = try await match(.xcodeDerivedData)
         let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
-        let rule = fixture.path("Library/Developer/Xcode/DerivedData"), real = fixture.path("Real"), decoy = fixture.path("Decoy")
+        let rule = fixture.path("Library/Developer/Xcode/DerivedData")
+        let real = fixture.path("Real")
+        let decoy = fixture.path("Decoy")
         let move = mover()
         let trash: @Sendable (URL) throws -> URL? = { url in
             let manager = FileManager.default
@@ -404,6 +407,38 @@ final class CleanupTests: XCTestCase {
         ]))
         XCTAssertEqual(recorder.moved, [derivedData("Kept-2")])
         XCTAssertTrue(result.summary(fixture.format).hasPrefix("Moved 1 to the Trash, skipped 1, failed 0."))
+    }
+
+    func testStopBetweenItemsSkipsTheRestAndOnlyAMovedItemCountsAsActing() async throws {
+        for name in ["A-1", "B-2", "C-3"] {
+            try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 4_000)
+        }
+        let match = try await match(.xcodeDerivedData)
+        // Stop is pressed while the first item moves.
+        let move = mover()
+        let stopping: @Sendable (URL) throws -> URL? = { url in
+            defer { withUnsafeCurrentTask { $0?.cancel() } }
+            return try move(url)
+        }
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: stopping, freeSpace: { nil })
+        let result = await Task { await executor.perform(preview, confirmation: CleanupConfirmation(preview)) }.value
+        guard case let .trash(items) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertEqual(items.map(\.status), [.moved(trashPath: fixture.path("Bin/A-1")), .skipped(.stopped), .skipped(.stopped)])
+        XCTAssertEqual(recorder.moved, [derivedData("A-1")])
+        XCTAssertTrue(result.didAct)
+
+        // Stopped before the first item: nothing moved, so nothing was done.
+        let again = try CleanupPreview.make(try await self.match(.xcodeDerivedData), selection: .all, commands: commands(),
+                                            protection: protection)
+        let stopped = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await executor.perform(again, confirmation: CleanupConfirmation(again))
+        }.value
+        guard case let .trash(skipped) = stopped.outcome else { return XCTFail("\(stopped.outcome)") }
+        XCTAssertEqual(skipped.map(\.status), [.skipped(.stopped), .skipped(.stopped)])
+        XCTAssertFalse(stopped.didAct)
+        XCTAssertEqual(recorder.moved, [derivedData("A-1")])
     }
 
     // MARK: Confirmation
@@ -538,7 +573,9 @@ final class CleanupTests: XCTestCase {
     }
 
     func testAStoppedCommandStillShowsWhatItPrinted() async throws {
-        try stub("yarn", "echo before; echo trouble >&2; sleep 20")
+        try stub("yarn", "[ \"$1\" = warm ] && exit 0\necho before; echo trouble >&2; sleep 20")
+        // Run once already, so the first run's malware scan cannot hold it past the short timeout.
+        _ = await ProcessGroupRunner().run(fixture.path("Bin/yarn"), arguments: ["warm"], environment: [:], timeout: .seconds(30))
         let slow = commands(runner: ProcessGroupRunner(grace: .milliseconds(300)), timeout: .milliseconds(500))
         let timedOut = await slow.run(try slow.resolve(.yarn).get())
         XCTAssertEqual(timedOut.output?.lines, ["before", "trouble"], "\(timedOut)")
@@ -677,6 +714,9 @@ final class CleanupTests: XCTestCase {
         guard case let .finished(result) = model.cleanupSheet?.phase else { return XCTFail("not finished") }
         XCTAssertEqual(result.outcome, .command(try commands().resolve(.brew).get(), .cancelled(output: .none)))
         XCTAssertEqual(model.cleanupResults, [result])
+        // It ran, so the suggestion is cleaned up for this scan.
+        XCTAssertTrue(result.didAct)
+        XCTAssertFalse(model.canCleanUp(.match(homebrew)))
         XCTAssertEqual(alive.last, [], "the free space was read after both exited")
 
         // The same at the timeout.
@@ -822,7 +862,8 @@ final class CleanupTests: XCTestCase {
         XCTAssertEqual(model.cleanupResults.count, 2)
         XCTAssertTrue(recorder.moved.isEmpty)
 
-        // A command that could not be started did nothing either; one that ran did something, however it ended.
+        // A command that could not be started, or was stopped before it started, did nothing either; one that ran did
+        // something, however it ended.
         let estimate = CleanupEstimate(items: [])
         func result(_ outcome: CommandCleanupOutcome) -> CleanupResult {
             CleanupResult(id: UUID(), title: "", estimate: estimate, outcome: .command(nil, outcome), finishedAt: Date(),
@@ -832,6 +873,61 @@ final class CleanupTests: XCTestCase {
         XCTAssertFalse(result(.refused("Not allowed")).didAct)
         XCTAssertTrue(result(.exited(status: 1, output: .none)).didAct)
         XCTAssertTrue(result(.timedOut(seconds: 600, output: .none)).didAct)
+        XCTAssertTrue(result(.cancelled(output: .none)).didAct)
+        XCTAssertFalse(result(.notStarted).didAct)
+    }
+
+    func testACommandStoppedBeforeItStartedCanBeTriedAgain() async throws {
+        try fixture.populate()
+        try stub("brew", "exit 0")
+        // Finding the program again just before the run waits, once armed, until Stop has been pressed.
+        let gate = RunGate()
+        let bin = fixture.path("Bin")
+        let commands = CleanupCommands(home: fixture.home, runner: RecordingRunner(recorder: recorder),
+                                       timeout: CleanupCommands.timeout,
+                                       candidates: { tool in
+                                           gate.pass()
+                                           return [bin + "/" + tool.rawValue]
+                                       },
+                                       dockerTarget: { .failure(.cliNotFound) })
+        let service = DiskCleanupService(
+            protection: protection, commands: commands,
+            executor: CleanupExecutor(protection: protection, commands: commands, trash: mover(), freeSpace: { nil }))
+        let model = DiskWindowModel(service: fixture.service(), cleanup: service, format: fixture.format, home: fixture.home)
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        model.tab = .suggestions
+        let homebrew = try XCTUnwrap(model.analysis?.matches.firstIndex { $0.rule.id == .homebrewCache })
+        model.beginCleanup(.match(homebrew))
+        let confirmation = try XCTUnwrap(model.cleanupSheet?.confirm())
+        gate.arm()
+        model.perform(confirmation)
+        try await DiskFixture.wait { gate.entered }
+        model.stopCleanup()
+        gate.release()
+        try await DiskFixture.wait { !model.isCleaning }
+        guard case let .finished(result) = model.cleanupSheet?.phase else { return XCTFail("not finished") }
+        XCTAssertTrue(recorder.runs.isEmpty, "nothing was launched")
+        XCTAssertFalse(result.didAct, "\(result.outcome)")
+        model.dismissCleanup()
+        XCTAssertTrue(model.canCleanUp(.match(homebrew)), "\(result.outcome)")
+        XCTAssertNotEqual(model.rows.first { $0.id == .match(homebrew) }?.explanation?.hasPrefix("Cleaned up this session"),
+                          true)
+        XCTAssertEqual(result.outcome, .command(try commands.resolve(.brew).get(), .notStarted))
+        XCTAssertTrue(result.summary(fixture.format).hasPrefix("Not run: "), result.summary(fixture.format))
+        XCTAssertEqual(result.outputLines, [])
+
+        // A runner stopped before it launched the program says so; one stopped while it ran keeps what it printed.
+        let printed = Data("before\n".utf8)
+        for (launched, expected) in [(false, CommandCleanupOutcome.notStarted),
+                                     (true, .cancelled(output: CommandExcerpt(stdout: printed, stderr: Data())))] {
+            let stopped = GroupCommandResult(ending: .failure(.cancelled), launched: launched,
+                                             stdout: launched ? printed : Data())
+            let runner = self.commands(runner: FixedRunner(result: stopped))
+            let outcome = await runner.run(try runner.resolve(.brew).get())
+            XCTAssertEqual(outcome, expected)
+            XCTAssertEqual(outcome.ran, launched)
+        }
     }
 
     // MARK: Helpers
@@ -865,7 +961,8 @@ final class CleanupTests: XCTestCase {
 
     /// A Trash stand-in: moves the item into the fixture's `Bin` folder and records it.
     private func mover() -> @Sendable (URL) throws -> URL? {
-        let recorder = recorder!, bin = fixture.path("Bin")
+        let recorder = recorder!
+        let bin = fixture.path("Bin")
         return { url in
             recorder.record(url.path)
             let target = bin + "/" + url.lastPathComponent
@@ -908,7 +1005,7 @@ private struct RecordingRunner: GroupCommandRunning {
              timeout _: Duration) async -> GroupCommandResult {
         recorder.record(.init(executable: executable, arguments: arguments, environment: environment,
                               workingDirectory: workingDirectory))
-        return GroupCommandResult(ending: .success(0))
+        return GroupCommandResult(ending: .success(0), launched: true)
     }
 }
 
@@ -931,5 +1028,38 @@ private final class Counter: @unchecked Sendable {
 
     func next() -> Int64? {
         lock.withLock { values.isEmpty ? nil : values.removeFirst() }
+    }
+}
+
+/// Holds a caller, once armed, until released, noting that one arrived. It blocks the caller's thread, so it is only
+/// for a short hold of a synchronous closure the test releases.
+private final class RunGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    private var released = false
+    private var arrived = false
+
+    var entered: Bool { lock.withLock { arrived } }
+
+    func arm() { lock.withLock { armed = true } }
+    func release() { lock.withLock { released = true } }
+
+    func pass() {
+        guard lock.withLock({ () -> Bool in
+            guard armed, !released else { return false }
+            arrived = true
+            return true
+        }) else { return }
+        while !lock.withLock({ released }) { usleep(1_000) }
+    }
+}
+
+/// Answers every run with the same result, launching nothing.
+private struct FixedRunner: GroupCommandRunning {
+    let result: GroupCommandResult
+
+    func run(_: String, arguments _: [String], environment _: [String: String], workingDirectory _: String,
+             timeout _: Duration) async -> GroupCommandResult {
+        result
     }
 }

@@ -5,12 +5,16 @@ import Foundation
 public struct GroupCommandResult: Equatable, Sendable {
     /// Its exit status (the signal's number when a signal ended it), or why it was stopped or never started.
     public let ending: Result<Int32, CommandFailure>
+    /// Whether the program was started. A run stopped before the launch, refused after a shutdown, or that failed to
+    /// launch did nothing, whatever its `ending` says.
+    public let launched: Bool
     /// What it printed, at most one byte past the runner's limit in all, kept when it was stopped too.
     public let stdout: Data
     public let stderr: Data
 
-    public init(ending: Result<Int32, CommandFailure>, stdout: Data = Data(), stderr: Data = Data()) {
+    public init(ending: Result<Int32, CommandFailure>, launched: Bool, stdout: Data = Data(), stderr: Data = Data()) {
         self.ending = ending
+        self.launched = launched
         self.stdout = stdout
         self.stderr = stderr
     }
@@ -27,7 +31,8 @@ public protocol GroupCommandRunning: Sendable {
 /// in its group: for a command that changes the disk, whose result, and whatever runs after it, must not overlap with
 /// the command or a program it started. At the timeout, once the output passes `outputLimit`, or when the calling task
 /// is cancelled, it sends the group `SIGTERM`, then `SIGKILL` after `grace`, and keeps waiting until they have exited.
-/// A process that leaves the group (`setsid`, `setpgid`) is not followed. A task already cancelled starts nothing.
+/// A process that leaves the group (`setsid`, `setpgid`) is not followed. A task already cancelled starts nothing, and
+/// the result says nothing was launched.
 public struct ProcessGroupRunner: GroupCommandRunning, CommandRunning {
     public static let defaultGrace: Duration = .seconds(3)
     /// The most read from one stream in one turn.
@@ -111,7 +116,9 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
 
     func start(_ executable: String, arguments: [String], environment: [String: String], workingDirectory: String,
                timeout: Duration, continuation: CheckedContinuation<GroupCommandResult, Never>) {
-        guard registry.register(self) else { return continuation.resume(returning: .init(ending: .failure(.cancelled))) }
+        guard registry.register(self) else {
+            return continuation.resume(returning: .init(ending: .failure(.cancelled), launched: false))
+        }
         // Launched under the lock, so a cancellation or shutdown either comes first and nothing launches, or finds the
         // pid to signal.
         let launch: Result<(stdout: Int32, stderr: Int32), CommandFailure> = lock.withLock {
@@ -125,7 +132,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         switch launch {
         case let .failure(failure):
             registry.remove(self)
-            continuation.resume(returning: .init(ending: .failure(failure)))
+            continuation.resume(returning: .init(ending: .failure(failure), launched: false))
         case let .success(pipes):
             let thread = Thread { [self] in
                 let result = monitor(stdout: pipes.stdout, stderr: pipes.stderr, deadline: .now + timeout)
@@ -196,7 +203,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
             }
         }
         return GroupCommandResult(ending: reason.map { .failure($0) } ?? .success(Self.terminationStatus(status ?? -1)),
-                                  stdout: output[0], stderr: output[1])
+                                  launched: true, stdout: output[0], stderr: output[1])
     }
 
     /// Whether a process the runner can signal is left in the group. Once none is, the group's ID is free and is never

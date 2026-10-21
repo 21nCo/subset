@@ -233,6 +233,7 @@ extension CleanupResult {
             case let .launchFailed(message): "\(name) could not be started: \(message)"
             case .outputTooLarge: "\(name) printed more than System reads, so it was stopped."
             case .cancelled: "\(name) was stopped."
+            case .notStarted: "Not run: \(name) was stopped before it started."
             case let .refused(reason): "Not run: \(reason)"
             }
         }

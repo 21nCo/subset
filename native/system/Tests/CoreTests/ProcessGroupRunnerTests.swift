@@ -199,6 +199,42 @@ final class ProcessGroupRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "SUBSET_TEST=1\n", "nothing is inherited")
     }
 
+    func testOnlyARunThatStartedTheProgramSaysItLaunched() async throws {
+        let stub = try await warmedStub(stubborn)
+        // Cancelled before the launch, and refused after a shutdown: nothing starts, and the result says so.
+        let never = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await ProcessGroupRunner().run(stub, arguments: [], environment: [:], workingDirectory: "/",
+                                                  timeout: .seconds(5))
+        }
+        let cancelled = await never.value
+        XCTAssertEqual(cancelled, GroupCommandResult(ending: .failure(.cancelled), launched: false))
+        let registry = CommandRegistry()
+        registry.shutDown()
+        let refused = await ProcessGroupRunner(registry: registry).run(stub, arguments: [], environment: [:],
+                                                                       workingDirectory: "/", timeout: .seconds(5))
+        XCTAssertEqual(refused, GroupCommandResult(ending: .failure(.cancelled), launched: false))
+        let missing = await ProcessGroupRunner().run(folder.appendingPathComponent("missing").path, arguments: [],
+                                                     environment: [:], workingDirectory: "/", timeout: .seconds(5))
+        guard case .failure(.launchFailed) = missing.ending else { return XCTFail("\(missing)") }
+        XCTAssertFalse(missing.launched)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "nothing was started")
+
+        // Stopped while it runs: it was launched.
+        let run = Task {
+            await ProcessGroupRunner(grace: .milliseconds(300)).run(stub, arguments: [], environment: [:],
+                                                                    workingDirectory: "/", timeout: .seconds(30))
+        }
+        let pids = try await waitForPIDs()
+        run.cancel()
+        let stopped = await run.value
+        XCTAssertEqual(stopped.ending, .failure(.cancelled))
+        XCTAssertTrue(stopped.launched)
+        assertGone(pids.command, "the command")
+        assertGone(pids.child, "its child")
+    }
+
     func testTheCommandRunsInTheWorkingDirectoryGiven() async throws {
         let inside = folder.appendingPathComponent("inside").path
         try FileManager.default.createDirectory(atPath: inside, withIntermediateDirectories: true)
