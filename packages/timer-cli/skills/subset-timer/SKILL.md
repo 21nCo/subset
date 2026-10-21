@@ -59,6 +59,16 @@ subset-timer rm t_ab12cd34 --json     # only when the user asks
 
 `list` with `--json` gives `structuredContent.timers`, one `{ definition, runtime, projection }` per timer, and `text`, one line per timer that you can quote to the user.
 
+## Show the timers in a browser
+
+Only when the user asks to see or control their timers in a browser:
+
+```sh
+subset-timer serve --json   # prints { "url", "port" }, opens http://127.0.0.1:4175 (or the next free port) and runs until stopped
+```
+
+`serve` does not exit by itself, so run it in the background or ask the user to run it in their own terminal, and give them the `url`. It is only a view: timers keep running without it.
+
 ## Errors
 
 A failure prints `{ "error": { "code", "message" } }` on stdout and exits non-zero:

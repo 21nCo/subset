@@ -23,12 +23,12 @@ function cli(dataDir, ...argv) {
 test('the manifest is ready to publish as @subset.dev/timer 0.1.0 with the subset-timer bin', () => {
   assert.deepEqual(
     { name: manifest.name, version: manifest.version, private: manifest.private, bin: manifest.bin, files: manifest.files, engines: manifest.engines },
-    { name: '@subset.dev/timer', version: '0.1.0', private: false, bin: { 'subset-timer': 'dist/cli.mjs' }, files: ['dist', 'skills', 'README.md'], engines: { node: '>=22.13' } }
+    { name: '@subset.dev/timer', version: '0.1.0', private: false, bin: { 'subset-timer': 'dist/cli.mjs' }, files: ['dist', 'web', 'skills', 'README.md'], engines: { node: '>=22.13' } }
   );
   // Workspaces are bundled, so nothing installs at runtime.
   assert.equal(manifest.dependencies, undefined);
   const releases = JSON.parse(readFileSync(join(PACKAGE_ROOT, '../../release-packages.json'), 'utf8'));
-  assert.deepEqual(releases.find((entry) => entry.slug === 'timer'), { slug: 'timer', path: 'packages/timer-cli', name: '@subset.dev/timer', inputs: ['packages/timer-cli', 'packages/timer'] });
+  assert.deepEqual(releases.find((entry) => entry.slug === 'timer'), { slug: 'timer', path: 'packages/timer-cli', name: '@subset.dev/timer', inputs: ['packages/timer-cli', 'packages/timer', 'apps/timer'] });
 });
 
 test('the bundle is executable, imports only Node built-ins, and prints its version', () => {
@@ -45,12 +45,16 @@ test('the bundle is executable, imports only Node built-ins, and prints its vers
   assert.equal(execFileSync(process.execPath, [CLI, 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, 'skills', 'subset-timer')}\n`);
 });
 
-test('npm pack ships dist/cli.mjs, the skill and the README, and no sources or tests', () => {
+test('npm pack ships dist/cli.mjs, the built board, the skill and the README, and no sources or tests', () => {
   // prepack's check accepts the bundle it built (it throws, failing the test, when it refuses).
   execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--check'], { encoding: 'utf8' });
   const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: PACKAGE_ROOT, encoding: 'utf8' }));
   const files = packed.files.map((file) => file.path).sort();
-  assert.deepEqual(files, ['README.md', 'dist/cli.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
+  // The board's assets have hashed names.
+  const web = files.filter((file) => file.startsWith('web/'));
+  assert.deepEqual(files.filter((file) => !file.startsWith('web/')), ['README.md', 'dist/cli.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
+  assert.ok(web.includes('web/index.html') && web.includes('web/favicon.svg'), web.join(', '));
+  assert.ok(web.every((file) => /^web\/(?:index\.html|favicon\.svg|assets\/index-[\w-]+\.(?:js|css))$/.test(file)), web.join(', '));
   assert.equal(packed.name, '@subset.dev/timer');
   assert.equal(packed.version, '0.1.0');
 });

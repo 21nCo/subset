@@ -32,6 +32,7 @@ After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` 
 | `daemon status` | `pid`, `data dir`, `socket`, `alerts` (the sink: `macos`, `linux (…)`, `unavailable` or `off`) and `started`. Never starts a daemon; when none runs it reports `daemon_unavailable` (exit 3). |
 | `daemon stop` | Asks the daemon to shut down and waits up to 5 s for it to go. Timers keep their timestamps and continue when it starts again. |
 | `skill path` | The absolute path of the bundled `skills/subset-timer` folder. |
+| `serve` | Serves the Timer board on `http://127.0.0.1:4175` (or the next free port) and opens it in the browser, until Ctrl-C. `--port <n>` requires that port (a taken one is exit 2); `--no-open` only prints the URL; `--json` prints `{ url, port }`. See [Web host](#web-host-set-78). |
 | `--help`, `--version` | |
 
 - **`<ref>`:** an exact id, else a unique name ignoring case. Several matches are `ambiguous` (exit 2) and list the candidates (`candidates` in JSON).
@@ -52,11 +53,21 @@ After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` 
 
 ## Agent skill
 
-`skills/subset-timer/SKILL.md` teaches a shell-capable agent when to use Timer, to always pass `--json`, to report the timer id and end time, that timers keep running after its turn, and that `reset` and `rm` need the user's explicit request. `subset-timer skill path` prints its folder, for example to copy or link it into an agent's skills directory. Its use by a real agent is checked in SET-84.
+`skills/subset-timer/SKILL.md` teaches a shell-capable agent when to use Timer, to always pass `--json`, to report the timer id and end time, that timers keep running after its turn, that `reset` and `rm` need the user's explicit request, and that `serve` is only for a user who asks for the browser board and does not exit by itself. `subset-timer skill path` prints its folder, for example to copy or link it into an agent's skills directory. Its use by a real agent is checked in SET-84.
+
+## Web host (SET-78)
+
+`subset-timer serve` is the standalone local web surface: the board from `@subset/timer/view` in the private Vite app `apps/timer` (`@subset/timer-web`), whose build `scripts/build.mjs` copies into `web/`. It is not a deployed site. `src/serve.mjs` holds no timer state; it serves `web/` and proxies to the daemon socket with the same client as every other command, so the first page request starts the daemon if it is not running, and a page left open keeps it from idling out.
+
+- **Listening:** `127.0.0.1` only, never `0.0.0.0` or `::`, whatever the flags. Port 4175, else each next port up to 20 tries; `--port <n>` takes only that port. Ctrl-C or SIGTERM ends the open event streams and connections and exits 0; the daemon and its timers keep running.
+- **API:** `GET /api/timers` and `GET /api/presets` relay `/v1/timers` and `/v1/presets`; `POST /api/ops/<operation>` relays a known operation's JSON body (up to 1 MiB) to `/v1/ops/<operation>`; `GET /api/events` relays the daemon's `state` and `heartbeat` events (alerts stay with the daemon). The daemon's status and body pass through unchanged. A daemon that cannot be reached or started is `503 daemon_unavailable`, a body that is not JSON `400 invalid_input`, an unknown operation or path `404`, another method `405`.
+- **Guard:** a request must name the server as its `Host` (`127.0.0.1:<port>` or `localhost:<port>`), else 403. `/api/*` also needs the header `X-Subset-Timer: 1`, an `Origin`, if any, equal to the server's, and no `Sec-Fetch-Site` of `cross-site` or `same-site`; a `POST` must carry the server's `Origin`. Anything else gets 403. The server sends no CORS headers, so a cross-origin page can neither send the header (its preflight is refused) nor read a reply. Responses are `no-store` with a `default-src 'self'` Content Security Policy and `frame-ancestors 'none'`.
+- **Page:** titled "Timer" with a favicon. It mounts `TimerBoard` with `capabilities: { create: true, destructive: true }` (the person at the keyboard is the user) and `density: 'full'`; each action is a `POST /api/ops/<operation>`, and a 503 counts as the action not reaching the daemon. The state comes from `/api/events`. Because `EventSource` cannot send the required header, the page reads the event stream with `fetch`. While the stream cannot be opened, or has ended or been silent for 45 s (three heartbeats), the page shows "Daemon unavailable — retrying…" and reopens it after 1 s, doubling to at most 15 s, back to 1 s once a state arrives.
+- **Excluded:** alerts in the browser, Web Push, a service worker, PWA install, any deployment, auth and MCP.
 
 ## Release
 
-`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli` and `packages/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
+`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
 
 ## Daemon (SET-76)
 
@@ -124,7 +135,7 @@ After 10 minutes with no running or paused timer, no `/v1/events` subscriber and
 
 `startDaemon({ dataDir, clock, sink, log })` runs a daemon in-process, and `runDaemonCommand({ sink })` is the foreground `daemon run`. `clock` is `{ now, monotonic, setTimeout, clearTimeout }`: production uses `Date.now()`, `performance.now()` and `setTimeout`; `createFakeClock()` keeps timeouts on a monotonic timeline apart from the wall clock, as Node does, for tests.
 
-Excluded: TCP or a web host (SET-78), MCP (SET-79), launchd and Windows named pipes.
+Excluded: TCP on the daemon itself (`serve` is a separate process that proxies to its socket), MCP (SET-79), launchd and Windows named pipes.
 
 ## Superfunctions
 
@@ -132,14 +143,22 @@ The SET-73 reuse check (see `packages/timer/README.md`) covers this package. The
 
 ## Verification
 
-`npm test --workspace=@subset.dev/timer` builds `dist/cli.mjs` and runs `node --test test/daemon/*.test.mjs test/cli/*.test.mjs` with temporary data directories against a real socket. CI runs it in **Verify** on Linux; it also runs on macOS. The CLI tests (`test/cli`) cover:
+`npm test --workspace=@subset.dev/timer` builds `dist/cli.mjs`, copies the built board (run `npm run build --workspace=@subset/timer-web` first) and runs `node --test test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs` with temporary data directories against a real socket. CI runs it in **Verify** on Linux; it also runs on macOS. The CLI tests (`test/cli`) cover:
 
 - **Durations:** the parser table (`90s`, `25m`, `1h30m`, `1:30`, `1:02:03`, the 1 s and 24 h bounds) and invalid forms (bare numbers, `1h30`, units out of order or repeated, decimals, negatives, `1:60`), and `--until` today or tomorrow.
 - **Commands:** with the SET-74 fixture store loaded into an in-process daemon (fake clock, recording sink), `list`, `status`, `start`, `pause`, `resume`, `lap`, `skip`, `reset`, `rm`, `presets` and `preset rm` print the fixture's text and, with `--json`, the fixture's result; daemon refusals keep the fixture's code and message. `start` covers each `<spec>` form, aliases, `--no-sound` (which reaches the sink as the timer's `sound`) and `--until`; `preset save`; `daemon status`, `daemon stop`, `daemon run`, `skill path`, `--help` and `--version`.
 - **`<ref>` and exit codes:** exact ids, unique names ignoring case, `ambiguous` with its candidates for timers and presets, and exit statuses 0, 2, 3 (a daemon that cannot start, and `daemon status` with none) and 4.
 - **Skill:** `--help` lists every command `SKILL.md` uses and `SKILL.md` uses only commands that exist, with the rules the skill must state.
 - **Sinks:** a recording `spawn` shows each name of the closed injection set (`"`, `\`, `'`, `$( )`, backticks, `;`, newlines, 60 emoji, `end tell`, `do shell script`, `-e`, `--`) reaching `osascript` only as an argv item after `--` of the fixed script, and `notify-send` after `--`, never through a shell; only the fixed sounds play, none with `sound` off; a failing or hanging tool rejects and is stopped; the silent sink is chosen when the tools are absent or the platform is neither macOS nor Linux.
-- **Package:** the manifest, the release entry, a bundle importing only Node built-ins, `node dist/cli.mjs --version` printing 0.1.0, `npm pack` holding only `dist/cli.mjs`, `skills/subset-timer/SKILL.md`, `README.md` and `package.json`, and the built CLI starting its daemon on first use, reporting it and stopping it.
+- **Package:** the manifest, the release entry, a bundle importing only Node built-ins, `node dist/cli.mjs --version` printing 0.1.0, `npm pack` holding only `dist/cli.mjs`, the built board (`web/index.html`, `web/favicon.svg` and its hashed assets), `skills/subset-timer/SKILL.md`, `README.md` and `package.json`, and the built CLI starting its daemon on first use, reporting it and stopping it.
+
+The web host tests (`test/serve.test.mjs`) run against a daemon on a real socket in a temp data directory:
+
+- **Listening:** the server is bound to `127.0.0.1`; a taken first port moves to a later one, while a required one fails; `serve --port` with a taken port, `0`, `65536`, `abc` or `80.5` exits 2, also from the built CLI.
+- **Guard:** no header, a cross-origin `Origin`, a cross-site `Sec-Fetch-Site`, another `Host`, a `POST` without or with another `Origin`, a preflight and an event stream without the header all get 403 with no CORS headers and change nothing; unknown API paths and operations are 404 and another method 405.
+- **Proxy:** `start`, `pause` and `remove` through the API change the daemon's store; `/api/timers` and `/api/presets` relay; the daemon's `not_found` and a body that is not JSON come back as they are; with no daemon to reach, `/api/timers`, `/api/presets` and `/api/events` are 503 `daemon_unavailable`.
+- **Events:** the stream opens with a `state`, carries one with the new timer after an operation and no alerts, and releases the daemon subscription when the page leaves or the host closes.
+- **Static files and the command:** `/` is the board's `index.html` with its title, favicon and Content Security Policy, its assets have their types, and unknown, traversing, directory and malformed paths are 404; `serve` prints its URL (`--json`: `{ url, port }`), opens the browser unless `--no-open` and stops when asked; the built CLI serves the board, starts the daemon on the page's first change, and exits 0 on SIGINT with a stream open while the daemon keeps the timer running.
 
 The daemon tests (`test/daemon`) cover:
 
@@ -151,4 +170,4 @@ The daemon tests (`test/daemon`) cover:
 - **Idle exit:** after 10 fake minutes with nothing running, cancelled by a subscriber and by running or paused timers.
 - **Auto-spawn:** a client starts a daemon and later clients reuse it; concurrent clients end up on one daemon; a request that meets a daemon shutting down, or a real daemon that lost its lock, runs on the daemon started after it; a start that meets a socket resetting its connections, as a closing daemon's does, keeps waiting for the daemon after it; the 3 s wait is neither cut short nor stretched when the wall clock is set an hour forward or back; a daemon that never starts is `daemon_unavailable`.
 
-Not verified here: audible sounds and visible notifications from the real sinks, and sleep and wake, on a real Mac (SET-85); the skill used by a real agent (SET-84); a published package (after SET-87); and Windows, which is not supported.
+Not verified here: the board in a real browser, including keyboard use and visual review (SET-85); audible sounds and visible notifications from the real sinks, and sleep and wake, on a real Mac (SET-85); the skill used by a real agent (SET-84); a published package (after SET-87); and Windows, which is not supported.

@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "web",
     "skills",
     "README.md"
   ],
@@ -31,7 +32,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build.mjs && node --test --test-timeout=60000 test/daemon/*.test.mjs test/cli/*.test.mjs",
+    "test": "node scripts/build.mjs && node --test --test-timeout=60000 test/daemon/*.test.mjs test/cli/*.test.mjs test/serve.test.mjs",
     "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
   },
   "devDependencies": {

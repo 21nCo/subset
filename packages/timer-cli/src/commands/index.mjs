@@ -5,6 +5,7 @@ import { createClient } from '../daemon/client.mjs';
 import { checkSocketPath, resolveDataDir } from '../daemon/paths.mjs';
 import { daemonCommands } from './daemon.mjs';
 import { presetCommands } from './presets.mjs';
+import { serveCommands } from './serve.mjs';
 import { CliError, EXIT } from './shared.mjs';
 import { timerCommands } from './timers.mjs';
 
@@ -45,6 +46,11 @@ Daemon and agent skill
   daemon stop             Stop the daemon; timers keep their place and continue when it starts again
   skill path              Print the folder of the bundled agent skill
 
+Web
+  serve                   Open the Timer board in the browser, served on 127.0.0.1 until Ctrl-C
+    --port <n>            Use this port, failing when it is taken (default: 4175, or the next free one)
+    --no-open             Print the URL without opening the browser
+
 Options
   --json                  Print the result, or {"error":{"code","message"}}, as JSON on stdout
   --help, --version
@@ -54,7 +60,7 @@ Data: ~/.local/share/subset/timer, or SUBSET_TIMER_DATA_DIR. SUBSET_TIMER_ALERTS
 Exit status: 0 ok, 2 invalid input or an ambiguous <ref>, 3 daemon unavailable, 4 not found or invalid state.
 `;
 
-const COMMANDS = { ...timerCommands, ...presetCommands, ...daemonCommands };
+const COMMANDS = { ...timerCommands, ...presetCommands, ...daemonCommands, ...serveCommands };
 const GROUPS = new Set(Object.keys(COMMANDS).filter((name) => name.includes(' ')).map((name) => name.split(' ')[0]));
 
 /** The command `argv` names and the arguments after it. No command, or only options, is `list`. */
@@ -116,6 +122,8 @@ function errorText(error) {
  * @param {() => number} [io.now] Epoch milliseconds, for `--until`.
  * @param {Function} [io.startDaemon] Starts the daemon for `daemon run` (tests replace it).
  * @param {Function} [io.foreground] Runs the started daemon until it exits (tests replace it).
+ * @param {(url: string) => void} [io.openUrl] Opens the `serve` URL in a browser (tests replace it).
+ * @param {() => Promise<void>} [io.untilStopped] Resolves when `serve` should stop; Ctrl-C by default.
  * @returns {Promise<number>} The exit status.
  */
 export async function main(io) {
@@ -140,6 +148,7 @@ export async function main(io) {
       throw new CliError('invalid_input', `${error.message} Run subset-timer --help.`);
     }
     json = parsed.values.json === true;
+    const print = (output) => stdout(`${json ? JSON.stringify(output.json) : output.text}\n`);
     const [min, max] = command.positionals;
     if (parsed.positionals.length < min || parsed.positionals.length > max) {
       throw new CliError('invalid_input', `Wrong number of arguments for ${name}. Run subset-timer --help.`);
@@ -155,9 +164,12 @@ export async function main(io) {
       now: io.now ?? Date.now,
       packageRoot: io.packageRoot,
       startDaemon: io.startDaemon,
-      foreground: io.foreground
+      foreground: io.foreground,
+      openUrl: io.openUrl,
+      untilStopped: io.untilStopped,
+      print
     });
-    if (output) stdout(`${json ? JSON.stringify(output.json) : output.text}\n`);
+    if (output) print(output);
     return EXIT.ok;
   } catch (caught) {
     const error = caught instanceof CliError ? caught : Object.assign(new CliError('internal', caught?.message ?? String(caught)), { exitCode: 1 });
