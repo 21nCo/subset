@@ -49,7 +49,7 @@ public struct ReclaimItem: Equatable, Sendable {
 public enum ReclaimBytes: Equatable, Sendable {
     /// Summed from the scan over the items: their usage. `private` is the sum of each item's private size, which
     /// deleting them all frees at least, `allocated` the space they use, a hard-linked file's once. Whether and when
-    /// the rule's cleanup frees it is the rule's `yield` (`ReclaimMatch.freedAtLeast`, `ReclaimMatch.movedToTrash`).
+    /// the rule's cleanup frees it is the rule's `yield` (`ReclaimMatch.movedToTrash`).
     /// `complete` is false when an item's size is unknown or a lower bound, or another link counts an item's blocks,
     /// which makes both sums lower bounds.
     /// `allocatedUpperBound` is true when an item's allocated size may count blocks clones share more than once
@@ -91,15 +91,6 @@ public struct ReclaimMatch: Equatable, Sendable {
 
     public var risk: ReclaimRisk { rule.risk }
     public var cleanup: ReclaimCleanup { rule.cleanup }
-
-    /// What running the rule's cleanup frees at least, at once: the private sum when its command deletes every item
-    /// (`ReclaimYield.deletesAllMeasured`: npm and Yarn caches). `nil` when no such amount is guaranteed: the cleanup
-    /// moves the items to the Trash (see `movedToTrash`), keeps part of what was measured (`pnpm store prune`,
-    /// `brew cleanup`), decides itself what it deletes (`simctl delete unavailable`), only an upper bound is known
-    /// (Docker's, in `bytes.upperBound`), or no cleanup is offered (the Trash).
-    public var freedAtLeast: UInt64? {
-        rule.yield == .deletesAllMeasured ? bytes.bytes : nil
-    }
 
     /// What the rule's cleanup moves to the Trash: the private sum when it moves every item there
     /// (`ReclaimYield.movesAllMeasuredToTrash`). That frees nothing until the Trash is emptied, which System never

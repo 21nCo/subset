@@ -26,19 +26,21 @@ public enum ReclaimCleanup: Equatable, Sendable {
 }
 
 /// How much of what a match measures its cleanup frees, and when, so that a measured size is never shown as a yield it
-/// is not.
+/// is not. No yield guarantees an amount freed at once: a Trash cleanup frees nothing until the Trash is emptied, and
+/// every command decides for itself what it deletes.
 public enum ReclaimYield: String, CaseIterable, Sendable {
-    /// The cleanup's command deletes every item the match measures, so running it frees at least their private sum.
-    case deletesAllMeasured
     /// The cleanup moves every item the match measures to the Trash on the same volume. That frees nothing until the
     /// Trash is emptied, which System never does; emptying it then frees at least their private sum.
     case movesAllMeasuredToTrash
     /// The cleanup keeps part of what the match measures (a tool's prune of what nothing uses), so what it frees is
     /// unknown: the size is the folder's usage.
     case partOfMeasured
-    /// The cleanup's command decides for itself what it deletes (`simctl delete unavailable` asks CoreSimulator, which
-    /// may judge a device's runtime differently from the runtime list System reads), so the measured size is an
-    /// estimate of what it frees, not a guarantee.
+    /// The cleanup's command decides for itself what it deletes, from the tool's own configuration and version, which
+    /// System does not read, so the measured size is an estimate of what it frees, not a guarantee. `npm cache clean
+    /// --force` empties the folder npm's `cache` setting names; `yarn cache clean` empties Yarn 1's `cacheFolder` (the
+    /// `v6` folder inside the measured one, or wherever `YARN_CACHE_FOLDER` points), and Yarn 2 or later the
+    /// project's cache; `simctl delete unavailable` asks CoreSimulator, which may judge a device's runtime differently
+    /// from the runtime list System reads.
     case estimated
     /// The cleanup frees at most the space the tool reports (Docker's reclaimable image space).
     case reportedUpperBound
@@ -140,7 +142,7 @@ public enum ReclaimRules {
             developerTool: "Node.js", homePaths: []),
         ReclaimRule(
             id: .npmCache, name: "npm cache", location: "~/.npm/_cacache",
-            risk: .safe, cleanup: .command(["npm", "cache", "clean", "--force"]), yield: .deletesAllMeasured,
+            risk: .safe, cleanup: .command(["npm", "cache", "clean", "--force"]), yield: .estimated,
             explanation: "Packages npm has downloaded, kept so that later installs need not download them again.",
             rebuild: "npm downloads packages again as installs need them.",
             developerTool: "npm", homePaths: [".npm/_cacache"]),
@@ -153,7 +155,7 @@ public enum ReclaimRules {
             developerTool: "pnpm", homePaths: ["Library/pnpm/store", ".local/share/pnpm/store", ".pnpm-store"]),
         ReclaimRule(
             id: .yarnCache, name: "Yarn cache", location: "~/Library/Caches/Yarn",
-            risk: .safe, cleanup: .command(["yarn", "cache", "clean"]), yield: .deletesAllMeasured,
+            risk: .safe, cleanup: .command(["yarn", "cache", "clean"]), yield: .estimated,
             explanation: "Packages Yarn has downloaded, kept so that later installs need not download them again.",
             rebuild: "Yarn downloads packages again as installs need them.",
             developerTool: "Yarn", homePaths: ["Library/Caches/Yarn"]),
