@@ -4,18 +4,17 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { pidAlive, readLock } from '../../src/daemon/index.mjs';
 import { PACKAGE_ROOT } from '../cli/helpers.mjs';
-import { tempDataDir, within } from '../daemon/helpers.mjs';
+import { stopBeforeRemoval, stopChild, tempDataDir, within } from '../daemon/helpers.mjs';
 
 // The package test script builds dist/cli.mjs first.
 const CLI = join(PACKAGE_ROOT, 'dist/cli.mjs');
 
 /** `subset-timer mcp` as a child process speaking newline-delimited JSON-RPC on its stdin and stdout. */
-function startMcp(t, dataDir) {
+function startMcp(dataDir) {
   const child = spawn(process.execPath, [CLI, 'mcp'], {
     env: { ...process.env, SUBSET_TIMER_DATA_DIR: dataDir, SUBSET_TIMER_ALERTS: 'off' },
     stdio: ['pipe', 'pipe', 'pipe']
   });
-  t.after(() => child.exitCode === null && child.kill());
   let stdout = '';
   let stderr = '';
   const frames = [];
@@ -38,6 +37,8 @@ function startMcp(t, dataDir) {
     stderr += chunk;
   });
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+  // A client can start a daemon, so it ends before its data directory is removed.
+  stopBeforeRemoval(dataDir, () => stopChild(child, exited));
   let nextId = 0;
   const send = (frame) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...frame })}\n`);
   const request = (method, params) => {
@@ -51,7 +52,7 @@ function startMcp(t, dataDir) {
 
 test('subset-timer mcp speaks MCP on stdio, exits 0 when stdin closes, and leaves the daemon running', async (t) => {
   const dataDir = tempDataDir(t);
-  const mcp = startMcp(t, dataDir);
+  const mcp = startMcp(dataDir);
   const init = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
   assert.deepEqual(init.result.serverInfo, { name: 'subset-timer', version: '0.1.0' });
   assert.ok(init.result.capabilities.tools);
@@ -86,7 +87,7 @@ test('subset-timer mcp speaks MCP on stdio, exits 0 when stdin closes, and leave
 
 test('subset-timer mcp exits 0 at once when stdin closes before anything was sent, starting no daemon', async (t) => {
   const dataDir = tempDataDir(t);
-  const mcp = startMcp(t, dataDir);
+  const mcp = startMcp(dataDir);
   mcp.child.stdin.end();
   assert.deepEqual(await within(mcp.exited, 10_000, 'the MCP server to exit'), { code: 0, signal: null });
   assert.deepEqual(mcp.frames, []);

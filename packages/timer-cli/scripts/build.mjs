@@ -8,6 +8,7 @@ import { chmod, cp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promi
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'rolldown';
+import { notices } from './notices.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const webSource = fileURLToPath(new URL('../../../apps/timer/dist/', import.meta.url));
@@ -51,31 +52,3 @@ await chmod(cliFile, 0o755);
 await writeFile(path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), await notices(output));
 await rm(path.join(root, 'web'), { recursive: true, force: true });
 await cp(webSource, path.join(root, 'web'), { recursive: true });
-
-/**
- * The name, version, licence and licence text of every package in the bundle, read from the module
- * paths rolldown bundled. @mcpfn/core's own build inlines @modelcontextprotocol/sdk (and zod, listed
- * already), so the SDK is added from the copy installed as its dependency.
- */
-async function notices(chunks) {
-  const roots = new Set([path.join(root, '../../node_modules/@modelcontextprotocol/sdk')]);
-  for (const chunk of chunks) {
-    for (const id of Object.keys(chunk.modules ?? {})) {
-      const match = /^(.*node_modules\/(?:@[^/]+\/)?[^/]+)\//.exec(id);
-      if (match) roots.add(match[1]);
-    }
-  }
-  const entries = [];
-  for (const dir of roots) {
-    const manifest = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));
-    const licenceFile = (await readdir(dir)).find((name) => /^(?:licen[cs]e|copying)(?:\.\w+)?$/i.test(name));
-    const author = typeof manifest.author === 'string' ? manifest.author : manifest.author?.name;
-    const text = licenceFile
-      ? (await readFile(path.join(dir, licenceFile), 'utf8')).trim()
-      : `${manifest.license}${author ? `, copyright ${author}` : ''}. The package ships no licence file.`;
-    entries.push({ heading: `${manifest.name} ${manifest.version} (${manifest.license})`, text });
-  }
-  entries.sort((a, b) => a.heading.localeCompare(b.heading));
-  const sections = entries.map(({ heading, text }) => `## ${heading}\n\n\`\`\`\n${text}\n\`\`\`\n`);
-  return `# Third-party notices\n\nThe files in dist/ bundle these packages.\n\n${sections.join('\n')}`;
-}
