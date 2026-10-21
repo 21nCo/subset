@@ -161,12 +161,15 @@ final class DiskOriginTests: XCTestCase {
                                   signature: Self.suiteWriter.signature, appGroups: ["SUITE00001.office"])
         let sheets = InstalledApp(path: Self.suiteSheets.path, bundleID: Self.suiteSheets.bundleID, name: "Sheets",
                                   signature: Self.suiteSheets.signature, appGroups: ["SUITE00001.office", "group.suite.docs"])
-        let signed = InstalledApps([Self.safari, shortcuts, writer, sheets])
+        // An app whose name is shaped like another bundle ID.
+        let named = InstalledApp(path: "/Applications/com.vendor.Editor.app", bundleID: "org.vendor.editor", name: "com.vendor.Editor",
+                                 signature: Self.editor.signature)
+        let signed = InstalledApps([Self.safari, shortcuts, writer, sheets, named])
         for relative in ["Group Containers/EXAMPLE123.com.example.editor", "Containers/COM.EXAMPLE.EDITOR",
                          "Group Containers/group.is.workflow.my.app", "Group Containers/group.is.workflow.shortcuts",
                          "Group Containers/group.suite.docs", "Group Containers/SUITE00001.office",
                          "Group Containers/group.org.example.gone.app", "Group Containers/NOSUCHTEAM.com.gone.app",
-                         "Preferences/com.gone.app.plist"] {
+                         "Preferences/com.gone.app.plist", "Application Support/com.vendor.Editor"] {
             try write("Library/" + relative + "/data", bytes: 4_096)
         }
         let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
@@ -184,10 +187,12 @@ final class DiskOriginTests: XCTestCase {
             XCTAssertEqual(entry.vendor, .signatureUnavailable, relative)
             XCTAssertNil(entry.risk, relative)
         }
-        // With one signature unread, an app group no app declares may be that app's: not attributed, never a leftover.
-        XCTAssertEqual(withEditor["Group Containers/group.org.example.gone.app"]?.rule, .unattributed)
-        XCTAssertEqual(withEditor["Group Containers/NOSUCHTEAM.com.gone.app"]?.rule, .unattributed)
+        // With one signature unread, an app group no app declares may be that app's: a possible leftover, never one.
+        XCTAssertEqual(withEditor["Group Containers/group.org.example.gone.app"]?.rule, .possibleLeftover)
+        XCTAssertEqual(withEditor["Group Containers/NOSUCHTEAM.com.gone.app"]?.rule, .possibleLeftover)
         XCTAssertEqual(withEditor["Preferences/com.gone.app.plist"]?.rule, .leftover, "outside Group Containers names say it all")
+        XCTAssertEqual(withEditor["Application Support/com.vendor.Editor"]?.rule, .appName, "an installed app's name is never a leftover")
+        XCTAssertEqual(withEditor["Application Support/com.vendor.Editor"]?.app?.path, named.path)
 
         let all = placed(signed)
         for relative in ["Group Containers/group.is.workflow.my.app", "Group Containers/group.is.workflow.shortcuts"] {
@@ -322,8 +327,8 @@ final class DiskOriginTests: XCTestCase {
             XCTAssertEqual(apps.unread, [folder + reason])
             XCTAssertEqual(rules(apps), [
                 "Containers/com.buildforever.extra": .bundleID, "Group Containers/group.com.buildforever.shared": .appGroup,
-                "Caches/com.gone.app": .unattributed, "Preferences/com.gone.app.plist": .unattributed,
-                "Group Containers/group.com.gone.app": .unattributed
+                "Caches/com.gone.app": .possibleLeftover, "Preferences/com.gone.app.plist": .possibleLeftover,
+                "Group Containers/group.com.gone.app": .possibleLeftover
             ], folder)
         }
     }
@@ -350,6 +355,16 @@ final class DiskOriginTests: XCTestCase {
         XCTAssertFalse(apple.contains { $0.vendor == .unsigned }, "Apple's apps are signed")
         // Shortcuts keeps the user's library in groups not named com.apple.
         XCTAssertEqual(apps.apps(group: "group.is.workflow.my.app").map(\.bundleID), ["com.apple.shortcuts"])
+    }
+
+    func testMetadataIsReadWithoutDownloadingAndTheThreadPolicyIsRestored() {
+        let policy = { getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD) }
+        let before = policy()
+        defer { setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, before) }
+        XCTAssertEqual(setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_ON), 0)
+        XCTAssertEqual(PropertyListFile.withoutDownloading(policy), IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+        XCTAssertEqual(PropertyListFile.read(home + "/none.plist").failure, .missing)
+        XCTAssertEqual(policy(), IOPOL_MATERIALIZE_DATALESS_FILES_ON, "the thread's own policy is restored")
     }
 
     func testThisMacsSimulatorRuntimeListIsRead() {
@@ -423,5 +438,12 @@ final class DiskOriginTests: XCTestCase {
         if let name { info["CFBundleName"] = name }
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: URL(fileURLWithPath: path + "/Contents/Info.plist"))
+    }
+}
+
+private extension Result {
+    var failure: Failure? {
+        if case let .failure(failure) = self { return failure }
+        return nil
     }
 }

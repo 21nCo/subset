@@ -46,6 +46,10 @@ public enum DiskOriginRule: Equatable, Sendable {
     /// app declares, with every app in the app folders read (`InstalledApps.isComplete`), and in Group Containers
     /// every signature too.
     case leftover
+    /// What would be a leftover, while an app, or in Group Containers an app's signature, could not be read
+    /// (`InstalledApps.unread`, `unreadSigning`): it may be that app's, so it is not attributed, and the leftovers it
+    /// may be are unknown.
+    case possibleLeftover
     /// Nothing matched: a name that is neither a bundle ID nor an installed app's name.
     case unattributed
 }
@@ -86,7 +90,7 @@ public enum DiskOriginGroupKey: Hashable, Sendable {
     case developerTool(String)
     /// Entries named for apps that are not installed.
     case leftovers
-    /// Entries nothing attributed.
+    /// Entries nothing attributed, possible leftovers included.
     case unattributed
 }
 
@@ -120,6 +124,7 @@ public struct DiskOriginReport: Equatable, Sendable {
     public let vendors: [DiskOriginGroup]
     /// By the developer tool of each reclaim match's items (Xcode, npm, Homebrew…).
     public let developerTools: [DiskOriginGroup]
+    /// A lower bound, even when empty, with possible leftovers (`DiskOriginRule.possibleLeftover`).
     public let leftovers: DiskOriginGroup?
     public let unattributed: DiskOriginGroup?
 }
@@ -166,7 +171,7 @@ public enum DiskOrigins {
             if let vendor = entry.vendor { byVendor[vendor, default: []].append(entry.index) }
             switch entry.rule {
             case .leftover: leftovers.append(entry.index)
-            case .unattributed: unattributed.append(entry.index)
+            case .unattributed, .possibleLeftover: unattributed.append(entry.index)
             default: break
             }
         }
@@ -182,6 +187,7 @@ public enum DiskOrigins {
             if incomplete { byTool[tool]!.incomplete = true }
         }
         let entriesIncomplete = !unlisted.isEmpty
+        let leftoversIncomplete = entriesIncomplete || entries.contains { $0.rule == .possibleLeftover }
         func ordered(_ groups: [DiskOriginGroup]) -> [DiskOriginGroup] {
             groups.sorted { ($1.allocated, $0.name) < ($0.allocated, $1.name) }
         }
@@ -197,8 +203,8 @@ public enum DiskOrigins {
             developerTools: ordered(byTool.map {
                 group(.developerTool($0.key), name: $0.key, items: $0.value.items, tree: tree, incomplete: $0.value.incomplete)
             }),
-            leftovers: leftovers.isEmpty && !entriesIncomplete ? nil
-                : group(.leftovers, name: "Leftovers", items: leftovers, tree: tree, incomplete: entriesIncomplete),
+            leftovers: leftovers.isEmpty && !leftoversIncomplete ? nil
+                : group(.leftovers, name: "Leftovers", items: leftovers, tree: tree, incomplete: leftoversIncomplete),
             unattributed: unattributed.isEmpty ? nil
                 : group(.unattributed, name: "Not attributed", items: unattributed, tree: tree, incomplete: entriesIncomplete))
     }
@@ -285,13 +291,13 @@ public enum DiskOrigins {
         if folder == .groupContainers, identifier.contains("."), let app = apps.uniqueApp(extending: identifier) {
             return make(.bundleID, app: app)
         }
+        if let app = apps.app(named: identifier) { return make(.appName, app: app) }
         // The entry may be an app's that could not be read, or in Group Containers one whose signature or entitlements
         // could not be.
         let unproven = folder == .groupContainers ? !apps.signingComplete : !apps.isComplete
         if team != nil || shaped {
-            return make(unproven ? .unattributed : .leftover, vendor: team.map { .vendor(teamID: $0) })
+            return make(unproven ? .possibleLeftover : .leftover, vendor: team.map { .vendor(teamID: $0) })
         }
-        if let app = apps.app(named: identifier) { return make(.appName, app: app) }
         return make(.unattributed)
     }
 
@@ -305,6 +311,17 @@ public enum DiskOrigins {
         return components.allSatisfy { component in
             !component.isEmpty && component.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
         }
+    }
+
+    /// Why the leftovers among `entries` are not all known: what was not read that makes its possible leftovers
+    /// (`DiskOriginRule.possibleLeftover`) unproven; `nil` with none.
+    static func unprovenLeftovers(_ entries: [DiskOriginEntry], apps: InstalledApps) -> String? {
+        let possible = entries.filter { $0.rule == .possibleLeftover }
+        guard let first = possible.first else { return nil }
+        let unread = possible.contains { $0.folder == .groupContainers } ? apps.unreadSigning : apps.unread
+        let named = possible.count == 1 ? first.path : "\(first.path) and \(possible.count - 1) more entries"
+        let sources = unread.count > 1 ? "\(unread[0]) \(unread.count - 1) more apps or app folders could not be read." : unread.first ?? ""
+        return "\(named) may be leftovers or an installed app's data: \(sources)"
     }
 
     /// A Team ID: ten uppercase ASCII letters and digits.

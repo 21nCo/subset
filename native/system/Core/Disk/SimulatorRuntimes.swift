@@ -66,10 +66,12 @@ public enum SimulatorRuntimes: Equatable, Sendable {
         return .installed(found)
     }
 
-    /// The names in a folder; none when it does not exist.
+    /// The names in a folder; none when it does not exist. A folder that is not downloaded is not.
     static func listing(_ path: String) -> Result<[String], PropertyListFile.Failure> {
         do {
-            return .success(try FileManager.default.contentsOfDirectory(atPath: path).sorted())
+            return .success(try PropertyListFile.withoutDownloading {
+                try FileManager.default.contentsOfDirectory(atPath: path)
+            }.sorted())
         } catch let error as NSError {
             let posix = (error.userInfo[NSUnderlyingErrorKey] as? NSError).flatMap { $0.domain == NSPOSIXErrorDomain ? $0.code : nil }
             if error.domain == NSCocoaErrorDomain, error.code == NSFileReadNoSuchFileError || posix == Int(ENOENT) || posix == Int(ENOTDIR) {
@@ -87,7 +89,7 @@ public enum SimulatorRuntimes: Equatable, Sendable {
 }
 
 /// Reads a small property list file safely: a regular file of at most 1 MiB, opened without following a link or
-/// blocking on a FIFO.
+/// blocking on a FIFO, and never downloaded when it is an iCloud placeholder.
 enum PropertyListFile {
     static let limit = 1 << 20
 
@@ -104,20 +106,40 @@ enum PropertyListFile {
     }
 
     static func read(_ path: String) -> Result<[String: Any], Failure> {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard descriptor >= 0 else {
-            return .failure(errno == ENOENT || errno == ENOTDIR ? .missing : .unreadable(String(cString: strerror(errno))))
+        let read = withoutDownloading { () -> Result<Data, Failure> in
+            let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard descriptor >= 0 else {
+                return .failure(errno == ENOENT || errno == ENOTDIR ? .missing : .unreadable(String(cString: strerror(errno))))
+            }
+            defer { close(descriptor) }
+            var info = stat()
+            guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .failure(.unreadable("not a regular file")) }
+            guard info.st_flags & UInt32(bitPattern: SF_DATALESS) == 0 else { return .failure(.unreadable("not downloaded")) }
+            guard info.st_size <= limit else { return .failure(.unreadable("larger than 1 MiB")) }
+            var data = Data(count: Int(info.st_size))
+            let count = data.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+            return count == data.count ? .success(data) : .failure(.unreadable("could not be read"))
         }
-        defer { close(descriptor) }
-        var info = stat()
-        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .failure(.unreadable("not a regular file")) }
-        guard info.st_size <= limit else { return .failure(.unreadable("larger than 1 MiB")) }
-        var data = Data(count: Int(info.st_size))
-        let count = data.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-        guard count == data.count else { return .failure(.unreadable("could not be read")) }
+        let data: Data
+        switch read {
+        case let .success(found): data = found
+        case let .failure(failure): return .failure(failure)
+        }
         guard let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] else {
             return .failure(.unreadable("not a property list dictionary"))
         }
         return .success(plist)
+    }
+
+    /// Runs `body` with this thread's reads of a dataless file or folder failing instead of downloading it, as the
+    /// scan's threads read, then restores the thread's policy.
+    static func withoutDownloading<T>(_ body: () throws -> T) rethrows -> T {
+        let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+        setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+        defer {
+            setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD,
+                           previous >= 0 ? previous : IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT)
+        }
+        return try body()
     }
 }

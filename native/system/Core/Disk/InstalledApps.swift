@@ -64,6 +64,12 @@ public struct InstalledApps: Sendable {
     /// The list is complete and every app's signature and entitlements were read, so a Team ID or app group no app
     /// has is no installed app's.
     public let signingComplete: Bool
+    /// Why `signingComplete` is false: `unread`, then each app whose signature or entitlements could not be read.
+    public var unreadSigning: [String] {
+        unread + Set(apps.filter { $0.signature == nil || $0.appGroups == nil }.map(\.path)).sorted().map {
+            "\($0) has no readable signature."
+        }
+    }
     private let byBundleID: [String: InstalledApp]
     private let byName: [String: [InstalledApp]]
     private let byTeam: [String: [InstalledApp]]
@@ -181,8 +187,12 @@ public struct InstalledApps: Sendable {
     /// The Team ID and certificate name of the app's signature, checked against its certificate chain but not its
     /// files (`kSecCSBasicValidateOnly`), without network access, and the app groups it declares; the signature is
     /// `nil` when invalid or unreadable, and the groups then too. The signing team only groups the app's data, so its
-    /// resources are not hashed.
+    /// resources are not hashed. A bundle that is not downloaded is not.
     public static func staticSigning(_ path: String) -> AppSigning {
+        PropertyListFile.withoutDownloading { signing(path) }
+    }
+
+    private static func signing(_ path: String) -> AppSigning {
         let unread = AppSigning(signature: nil, appGroups: nil)
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code

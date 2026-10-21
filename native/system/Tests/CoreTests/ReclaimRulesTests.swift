@@ -104,6 +104,17 @@ final class ReclaimRulesTests: XCTestCase {
         try assertItems(match, ["\(devices)/11111111-1111-1111-1111-111111111111"], root: devices)
         XCTAssertEqual(match.cleanup, .command(["xcrun", "simctl", "delete", "unavailable"]))
 
+        // A plist the scan found not downloaded or unreadable is not read, so its device is not judged.
+        let scanned = try await analyze(runtimes: runtimes).tree
+        let plist = try XCTUnwrap(scanned.index(atPath: path("\(devices)/11111111-1111-1111-1111-111111111111/device.plist")))
+        for flags in [DiskItemFlags.dataless, .unreadable] {
+            var tree = scanned
+            tree.nodes[plist].flags = flags
+            let unread = try only(.unavailableSimulators, in: Analysis(
+                tree: tree, entries: [], matches: ReclaimMatcher.matches(in: tree, origins: [], context: context(runtimes: runtimes))))
+            XCTAssertEqual(unread.bytes, .unavailable(path("\(devices)/11111111-1111-1111-1111-111111111111/device.plist was not read.")))
+        }
+
         // A device whose plist cannot be read is not counted, and the sum says it is incomplete.
         try write("\(devices)/33333333-3333-3333-3333-333333333333/data/disk", bytes: 100_000)
         let partial = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
@@ -343,6 +354,46 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertTrue(again.entries.filter { $0.identifier == "com.removed.tool" }.allSatisfy { $0.app?.path == "/Applications/Tool.app" })
     }
 
+    func testLeftoversAnUnreadAppMayOwnAreUnknownRatherThanNone() async throws {
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 4_096)
+        let unreadApp = "/Applications/Broken.app has no readable bundle identifier."
+        let incomplete = InstalledApps(Self.apps.apps, unread: [unreadApp])
+        func report(_ analysis: Analysis, _ apps: InstalledApps) -> DiskOriginReport {
+            DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home, apps: apps)
+        }
+
+        // With an app unread the fake ID may be its: a possible leftover, so the leftovers are unknown, not none.
+        let unknown = try await analyze(apps: incomplete)
+        XCTAssertEqual(unknown.entries.map(\.rule), [.possibleLeftover])
+        let match = try only(.appLeftovers, in: unknown)
+        XCTAssertEqual(match.items, [])
+        XCTAssertEqual(match.bytes, .unavailable(
+            "\(path("Library/Preferences/com.removed.tool.plist")) may be leftovers or an installed app's data: \(unreadApp)"))
+        let unknownReport = report(unknown, incomplete)
+        XCTAssertEqual(unknownReport.leftovers?.items, [])
+        XCTAssertEqual(unknownReport.leftovers?.isLowerBound, true)
+        XCTAssertEqual(unknownReport.unattributed?.items, unknown.entries.map(\.index))
+
+        // A group container may be the data of an app whose signature was not read, so the leftovers found elsewhere
+        // are not all there are.
+        try write("Library/Group Containers/group.com.gone.app/data", bytes: 4_096)
+        let unsigned = InstalledApps(Self.apps.apps + [InstalledApp(path: "/Applications/Odd.app", bundleID: "org.odd.app",
+                                                                    name: "Odd", signature: nil)])
+        XCTAssertTrue(unsigned.isComplete)
+        let partial = try await analyze(apps: unsigned)
+        let found = try only(.appLeftovers, in: partial)
+        XCTAssertEqual(found.items.map(\.path), [path("Library/Preferences/com.removed.tool.plist")])
+        guard case .scanned(_, _, complete: false, _) = found.bytes else { return XCTFail("\(found.bytes)") }
+        XCTAssertEqual(report(partial, unsigned).leftovers?.isLowerBound, true)
+
+        // With every app and signature read, both are leftovers and the sums are exact.
+        let complete = try await analyze()
+        let leftovers = complete.matches.filter { $0.rule.id == .appLeftovers }
+        XCTAssertEqual(leftovers.map(\.identifier), ["com.gone.app", "com.removed.tool"])
+        for leftover in leftovers { try assertBytes(leftover) }
+        XCTAssertEqual(report(complete, Self.apps).leftovers?.isLowerBound, false)
+    }
+
     func testTheTrashIsInformationOnly() async throws {
         try write(".Trash/Old Project/file", bytes: 200_000)
 
@@ -365,6 +416,23 @@ final class ReclaimRulesTests: XCTestCase {
 
         XCTAssertEqual(match.items, [])
         XCTAssertEqual(match.bytes, .unavailable("\(folder) could not be read."))
+    }
+
+    func testARuleFolderThatIsALinkIsNotFollowed() async throws {
+        try write("elsewhere/Homebrew/downloads/bottle.tar.gz", bytes: 10_000)
+        try write("elsewhere/DerivedData/App-abc/data", bytes: 10_000)
+        for (link, target) in [("Library/Caches/Homebrew", "elsewhere/Homebrew"), ("Library/Developer/Xcode/DerivedData", "elsewhere/DerivedData")] {
+            try FileManager.default.createDirectory(atPath: (path(link) as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(atPath: path(link), withDestinationPath: path(target))
+        }
+
+        let analysis = try await analyze()
+
+        for (id, link) in [(ReclaimRuleID.homebrewCache, "Library/Caches/Homebrew"), (.xcodeDerivedData, "Library/Developer/Xcode/DerivedData")] {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items, [], link)
+            XCTAssertEqual(match.bytes, .unavailable("\(path(link)) is a link, so it was not read."), link)
+        }
     }
 
     func testRuleFoldersTheScanDidNotReadInFullAreUnknownNotEmpty() async throws {
