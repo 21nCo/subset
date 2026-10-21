@@ -4,7 +4,7 @@
 // so the rules between fields (exactly one start mode, `id` or `name`) are checked here.
 import { TIMER_LIMITS, TIMER_SCHEMA_VERSION, schemas, timerLine } from '@subset/timer';
 import { presetLine } from '../commands/presets.mjs';
-import { CliError, call, endsAt, formatLocalTime } from '../commands/shared.mjs';
+import { CliError, call, endsAt, findPreset, formatLocalTime, resolveName } from '../commands/shared.mjs';
 import { DurationError, parseUntil } from '../parse-duration.mjs';
 
 const { $schema: _dialect, ...SAVE_INPUT } = schemas.inputs['presets.save'];
@@ -20,6 +20,7 @@ const seconds = (description) => ({ type: 'integer', minimum: MIN_SECONDS, maxim
 
 const LOCAL = 'Timers run locally in the subset-timer daemon on this computer and keep running after the conversation ends.';
 const REPORT = 'Tell the user the timer id and, while it runs, when it ends.';
+const PRESET_REPORT = 'Tell the user the preset id; once timer_start starts a timer from it, tell them the timer id and when it ends.';
 const BY_ID_OR_NAME = 'Give exactly one of id (from timer_list) and name (a unique timer name, ignoring case).';
 
 /** The interval fields of timer_start's `interval` and of timer_preset_save, in seconds. */
@@ -100,18 +101,8 @@ function intervalSpec(fields, prefix, tool) {
   return spec;
 }
 
-const fold = (text) => text.normalize('NFC').toLowerCase();
-
-/** The one entry named `name` ignoring case; none is `not_found`, several `ambiguous` with the candidates. */
-function byName(entries, name, noun, hint) {
-  const matches = entries.filter((entry) => fold(entry.name) === fold(name));
-  if (matches.length === 1) return matches[0];
-  if (!matches.length) throw new CliError('not_found', `No ${noun} named "${name}". ${hint}`);
-  throw new CliError('ambiguous', `"${name}" names ${matches.length} ${noun}s; use an id.`, { candidates: matches.map(({ id, name: entryName }) => ({ id, name: entryName })) });
-}
-
-/** Built-in preset names people use that are not a preset's id or name. */
-const PRESET_ALIASES = { hiit: 'hiit-40-20' };
+/** The one entry named `name` ignoring case, with the CLI's matching; none is `not_found` with `hint`. */
+const byName = (entries, name, noun, hint) => resolveName(entries, name, { noun, describe: ({ id, name: entryName }) => ({ id, name: entryName }), missing: `No ${noun} named "${name}". ${hint}` });
 
 /** Local ISO 8601 with the offset, for example 2026-10-21T17:25:00+02:00. */
 function localIso(ms) {
@@ -197,12 +188,15 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
     }
   }
 
+  /** The preset `ref` names, resolved as the CLI does. */
   async function resolvePreset(ref) {
     const { presets } = await call(client.presets());
-    const exact = presets.find((preset) => preset.id === ref);
-    if (exact) return exact;
-    const alias = Object.hasOwn(PRESET_ALIASES, ref.toLowerCase()) ? presets.find((preset) => preset.id === PRESET_ALIASES[ref.toLowerCase()]) : null;
-    return alias ?? byName(presets, ref, 'preset', 'Call timer_presets to list presets.');
+    try {
+      return findPreset(presets, ref);
+    } catch (error) {
+      if (error.code === 'not_found') throw new CliError('not_found', `No preset with the id or name "${ref}". Call timer_presets to list presets.`);
+      throw error;
+    }
   }
 
   async function timerRef(args, tool) {
@@ -267,7 +261,7 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
     {
       name: 'timer_presets',
       title: 'List presets',
-      description: `List the built-in presets (tabata, emom, hiit-40-20, pomodoro, amrap) and saved ones, for timer_start. ${LOCAL}`,
+      description: `List the built-in presets (tabata, emom, hiit-40-20, pomodoro, amrap) and saved ones, for timer_start. ${LOCAL} ${PRESET_REPORT}`,
       inputSchema: objectSchema(),
       annotations: { readOnlyHint: true, openWorldHint: false },
       async handler() {
@@ -325,7 +319,7 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
     {
       name: 'timer_preset_save',
       title: 'Save a preset',
-      description: `Save an interval workout as a named preset for timer_start: work (with optional rest) or segments, rounds, optional prep and cooldown, in seconds. ${LOCAL} Tell the user the preset id.`,
+      description: `Save an interval workout as a named preset for timer_start: work (with optional rest) or segments, rounds, optional prep and cooldown, in seconds. ${LOCAL} ${PRESET_REPORT}`,
       inputSchema: SAVE_PRESET_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       async handler(args) {
@@ -337,7 +331,7 @@ export function timerTools({ client, now = Date.now, log = () => {} }) {
     {
       name: 'timer_preset_remove',
       title: 'Remove a preset',
-      description: `Remove a saved preset; built-in presets cannot be removed. Only at the user's explicit request. Give exactly one of id and name (ignoring case). ${LOCAL}`,
+      description: `Remove a saved preset; built-in presets cannot be removed. Only at the user's explicit request. Give exactly one of id and name (ignoring case). ${LOCAL} Tell the user the id of the removed preset; timers already started from it keep running, so report their timer ids and end times from timer_list if asked.`,
       inputSchema: PRESET_REF_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       async handler(args) {

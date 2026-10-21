@@ -51,17 +51,43 @@ export async function call(promise) {
 const fold = (text) => text.normalize('NFC').toLowerCase();
 
 /**
+ * The only entry whose name matches `name` ignoring case. No match is `not_found` with `missing`
+ * as its message; several are `ambiguous`, listing the candidates.
+ */
+export function resolveName(entries, name, { noun, describe, missing = `No ${noun} named "${name}".` }) {
+  const key = fold(name);
+  const matches = entries.filter((entry) => fold(entry.name) === key);
+  if (matches.length === 1) return matches[0];
+  if (!matches.length) throw new CliError('not_found', missing);
+  throw new CliError('ambiguous', `"${name}" matches ${matches.length} ${noun}s; use an id.`, { candidates: matches.map(describe) });
+}
+
+/**
  * The entry `ref` names: the one whose id is exactly `ref`, else the only one whose name matches
  * it ignoring case. No match is `not_found`; several are `ambiguous`, listing the candidates.
  */
 export function resolveRef(entries, ref, { noun, describe }) {
   const exact = entries.find((entry) => entry.id === ref);
   if (exact) return exact;
-  const key = fold(ref);
-  const matches = entries.filter((entry) => fold(entry.name) === key);
-  if (matches.length === 1) return matches[0];
-  if (!matches.length) throw new CliError('not_found', `No ${noun} with the id or name "${ref}".`);
-  throw new CliError('ambiguous', `"${ref}" matches ${matches.length} ${noun}s; use an id.`, { candidates: matches.map(describe) });
+  return resolveName(entries, ref, { noun, describe, missing: `No ${noun} with the id or name "${ref}".` });
+}
+
+/** Built-in preset names people use that are not a preset's id or name. */
+const PRESET_ALIASES = { hiit: 'hiit-40-20' };
+
+/**
+ * The preset `ref` names among `presets`, for the CLI and the MCP server alike: an exact id, else a
+ * unique name ignoring case (several are `ambiguous`), and only when neither matches an alias such
+ * as `hiit`, so a saved preset named HIIT is not shadowed by the built-in one.
+ */
+export function findPreset(presets, ref) {
+  try {
+    return resolveRef(presets, ref, { noun: 'preset', describe: ({ id, name }) => ({ id, name }) });
+  } catch (error) {
+    const alias = Object.hasOwn(PRESET_ALIASES, fold(ref)) ? presets.find((preset) => preset.id === PRESET_ALIASES[fold(ref)]) : undefined;
+    if (error.code === 'not_found' && alias) return alias;
+    throw error;
+  }
 }
 
 /** The timer `ref` names, as `{ id, name, status }`. */

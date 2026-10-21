@@ -63,7 +63,9 @@ test('tools/list returns the 12 tools with their schemas, annotations and descri
     assert.equal(annotations.readOnlyHint, READS.includes(tool.name), tool.name);
     if (!READS.includes(tool.name)) assert.equal(annotations.destructiveHint, DESTRUCTIVE.includes(tool.name), tool.name);
     assert.match(description, /run locally .* keep running after the conversation ends/, tool.name);
-    if (!tool.name.includes('preset')) assert.match(description, /timer id and, while it runs, when it ends/, tool.name);
+    // Every tool says what to report: the timer id and its end, or for the preset tools the preset id too.
+    assert.match(description, /Tell the user the (?:timer id|preset id|id of the removed preset)/, tool.name);
+    assert.match(description, /timer ids? and[^.]*(?:when it ends|end times)/, tool.name);
     assert.ok(tool.title, tool.name);
   }
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
@@ -212,6 +214,30 @@ test('the preset tools save and remove presets in the daemon', async (t) => {
   presets = (await op('presets.list', {})).body.presets;
   assert.ok(!presets.some((preset) => preset.id === id));
   assert.equal((await call('timer_preset_remove', { id: 'p_xja3zjdj' })).isError, undefined);
+});
+
+test('timer_start resolves a preset as the CLI does: id, then a unique name, then an alias', async (t) => {
+  const { call, op, timer } = await mcpSession(t);
+  const save = async (name) => (await op('presets.save', { name, timer: { kind: 'interval', segments: [{ label: 'Work', phase: 'work', durationMs: 5_000 }], rounds: 1 } })).body.preset.id;
+  const startedRounds = async (preset) => {
+    const result = await call('timer_start', { preset });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    return (await timer(result.structuredContent.affectedTimerId)).definition.rounds;
+  };
+
+  // With no saved preset named hiit, the alias starts the built-in hiit-40-20.
+  assert.equal(await startedRounds('hiit'), 10);
+  // A saved preset named HIIT is what hiit names; the alias does not shadow it.
+  const first = await save('HIIT');
+  assert.equal(await startedRounds('hiit'), 1);
+  // Two saved presets named hiit are ambiguous, list both and start nothing.
+  const second = await save('hiit');
+  const count = (await op('list', {})).body.timers.length;
+  const error = assertError(await call('timer_start', { preset: 'hiit' }), 'ambiguous');
+  assert.deepEqual(error.candidates, [{ id: first, name: 'HIIT' }, { id: second, name: 'hiit' }]);
+  assert.equal((await op('list', {})).body.timers.length, count);
+  // An exact id still wins.
+  assert.equal(await startedRounds('hiit-40-20'), 10);
 });
 
 test('invalid inputs return isError with the SET-74 or daemon code and change nothing', async (t) => {
