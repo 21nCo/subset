@@ -3,8 +3,9 @@ import { TIMER_LIMITS } from '@subset/timer';
 const UNIT_MS = { h: 3_600_000, m: 60_000, s: 1_000 };
 // Units in descending order, each at most once: 90s, 25m, 1h30m, 1h0m30s.
 const UNITS = /^(?:(\d{1,6})h)?(?:(\d{1,6})m)?(?:(\d{1,6})s)?$/i;
-// m:ss or h:mm:ss; the later fields have two digits below 60.
-const CLOCK = /^(\d{1,6})(?::([0-5]\d))?:([0-5]\d)$/;
+// m:ss and h:mm:ss; the later fields have two digits below 60.
+const CLOCK_MS = /^(\d{1,6}):([0-5]\d)$/;
+const CLOCK_HMS = /^(\d{1,6}):([0-5]\d):([0-5]\d)$/;
 
 export class DurationError extends Error {
   constructor(message) {
@@ -25,12 +26,14 @@ export function parseDuration(text) {
     const [, hours = '0', minutes = '0', seconds = '0'] = units;
     ms = Number(hours) * UNIT_MS.h + Number(minutes) * UNIT_MS.m + Number(seconds) * UNIT_MS.s;
   } else {
-    const clock = CLOCK.exec(value);
-    if (clock) {
-      const [, first, middle, last] = clock;
-      ms = middle === undefined
-        ? Number(first) * UNIT_MS.m + Number(last) * UNIT_MS.s
-        : Number(first) * UNIT_MS.h + Number(middle) * UNIT_MS.m + Number(last) * UNIT_MS.s;
+    const minutesSeconds = CLOCK_MS.exec(value);
+    const hoursMinutesSeconds = CLOCK_HMS.exec(value);
+    if (minutesSeconds) {
+      const [, minutes, seconds] = minutesSeconds;
+      ms = Number(minutes) * UNIT_MS.m + Number(seconds) * UNIT_MS.s;
+    } else if (hoursMinutesSeconds) {
+      const [, hours, minutes, seconds] = hoursMinutesSeconds;
+      ms = Number(hours) * UNIT_MS.h + Number(minutes) * UNIT_MS.m + Number(seconds) * UNIT_MS.s;
     }
   }
   if (ms === null) {

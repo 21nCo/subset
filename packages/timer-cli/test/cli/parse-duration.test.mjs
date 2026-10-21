@@ -15,6 +15,7 @@ test('durations in units and clock forms', () => {
     ['0:01', 1_000],
     ['90:00', 5_400_000],
     ['1:02:03', 3_723_000],
+    ['0:01:30', 90_000],
     ['24:00:00', 86_400_000],
     ['1s', 1_000],
     ['24h', 86_400_000],
@@ -41,6 +42,8 @@ test('invalid durations are refused with a DurationError', () => {
     ['1:5', /not a duration/],
     ['1:02:60', /not a duration/],
     ['1::30', /not a duration/],
+    ['1:60:00', /not a duration/],
+    ['1:02:03:04', /not a duration/],
     ['5 m', /not a duration/],
     ['1d', /not a duration/],
     ['tabata', /not a duration/]
