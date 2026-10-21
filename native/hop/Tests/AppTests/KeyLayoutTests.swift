@@ -89,6 +89,27 @@ final class KeyLayoutTests: XCTestCase {
         XCTAssertFalse(SwitcherSearch.isSearchCharacter(try XCTUnwrap(us.typedCharacter(keyCode: KeyCode.tab, shift: false))))
     }
 
+    func testTheTapReadsTheTypedCharacterOnlyDuringASwitch() throws {
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 0x0E, keyDown: true))
+        event.flags = .maskAlternate
+        guard case let .key(idle) = tapInput(type: .keyDown, event: event, readsText: false) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(idle.text, "an ⌥ chord outside a switch never consults the layout")
+        guard case let .key(active) = tapInput(type: .keyDown, event: event, readsText: true) else {
+            return XCTFail("a key-down is a key")
+        }
+        let layout = try XCTUnwrap(KeyLayout.current())
+        XCTAssertNotNil(active.text)
+        XCTAssertEqual(active.text, layout.typedCharacter(keyCode: 0x0E, shift: false))
+        event.flags = [.maskAlternate, .maskCommand]
+        guard case let .key(command) = tapInput(type: .keyDown, event: event, readsText: true) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(command.text, "a ⌘ chord never types")
+        XCTAssertEqual(command.character, layout.commandCharacter(keyCode: 0x0E))
+    }
+
     func testAnUnknownLayoutIsNil() {
         XCTAssertNil(KeyLayout.named("com.apple.keylayout.NoSuchLayout"))
     }

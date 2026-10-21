@@ -97,7 +97,9 @@ final class SwitchShortcutController {
     @discardableResult
     func install() -> Bool {
         if isInstalled { return true }
-        let tap = EventTap { [unowned self] input in handle(input) }
+        let tap = EventTap(readsText: { [unowned self] in recognizer.session.isActive }) { [unowned self] input in
+            handle(input)
+        }
         guard tap.install() else {
             Self.log.error("The system refused the keyboard event tap")
             return false

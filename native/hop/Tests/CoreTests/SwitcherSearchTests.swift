@@ -187,6 +187,29 @@ final class SwitcherViewModelSearchTests: XCTestCase {
         XCTAssertEqual(model.items.map(\.displayTitle), ["Front", "Inbox", "Report draft", "Release notes"])
     }
 
+    func testAnEndedSearchDropsTheQueryAndListsOnlyWhatItListed() {
+        var model = SwitcherViewModel(items: items, available: wide)
+        typing("re", into: &model)
+        model.handle(.step(.forward)) // Report draft
+        model.endSearch()
+        XCTAssertEqual(model.query, "")
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Q3 report", "Report draft", "Release notes"])
+        XCTAssertEqual(model.selectedItem?.displayTitle, "Report draft")
+        model.refreshed([items[0], items[1], window(5, "Recent", app: "Numbers"), items[2], items[4]])
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Q3 report", "Release notes"],
+                       "a new window that would have matched is not listed")
+        XCTAssertEqual(model.selectedItem?.displayTitle, "Release notes", "the closed window's follower")
+        model.refreshed([items[0], window(5, "Recent", app: "Numbers")])
+        XCTAssertNil(model.selectedItem, "nothing it listed is left to commit")
+    }
+
+    func testEndingASearchWithoutAQueryChangesNothing() {
+        var model = SwitcherViewModel(items: items, available: wide)
+        let before = model
+        model.endSearch()
+        XCTAssertEqual(model, before)
+    }
+
     // MARK: - Same-app scope
 
     private func appWindows(_ count: Int, pid: pid_t) -> [SwitcherItem] {

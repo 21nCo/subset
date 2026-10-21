@@ -11,13 +11,16 @@ import HopCore
 @MainActor
 final class EventTap {
     private let handle: (TapInput) -> Disposition
+    /// Whether a key's typed character can matter: only while a switch is active, whose search takes it.
+    fileprivate let readsText: () -> Bool
     private var port: CFMachPort?
     private var source: CFRunLoopSource?
     /// The retained reference the C callback receives; released when the tap is removed, so the callback can never
     /// see a deallocated tap.
     private var context: Unmanaged<EventTap>?
 
-    init(handle: @escaping (TapInput) -> Disposition) {
+    init(readsText: @escaping () -> Bool, handle: @escaping (TapInput) -> Disposition) {
+        self.readsText = readsText
         self.handle = handle
     }
 
@@ -74,8 +77,9 @@ final class EventTap {
     }
 }
 
-/// The input an event delivers to the tap, or nil for an event type the tap does not handle.
-private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
+/// The input an event delivers to the tap, or nil for an event type the tap does not handle. The typed character is
+/// read only when `readsText`, so ⌥ and ⌃ chords outside a switch never consult the keyboard layout.
+func tapInput(type: CGEventType, event: CGEvent, readsText: Bool) -> TapInput? {
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
         return .tapDisabled
@@ -85,14 +89,13 @@ private func tapInput(type: CGEventType, event: CGEvent) -> TapInput? {
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
         // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key with ⌘. Only
-        // a key-down with ⌥ or ⌃ and no ⌘ can type into the switcher's search, which takes the character without them.
-        let layout = kind == .keyDown && !modifiers.isDisjoint(with: [.option, .control, .command])
-            ? KeyLayout.current()
-            : nil
-        let character = modifiers.contains(.command) ? layout?.commandCharacter(keyCode: keyCode) : nil
-        let text = modifiers.contains(.command)
-            ? nil
-            : layout?.typedCharacter(keyCode: keyCode, shift: modifiers.contains(.shift))
+        // a key-down with ⌥ or ⌃ and no ⌘ during a switch can type into its search, which takes the character without
+        // them.
+        let command = modifiers.contains(.command)
+        let types = readsText && !command && !modifiers.isDisjoint(with: [.option, .control])
+        let layout = kind == .keyDown && (command || types) ? KeyLayout.current() : nil
+        let character = command ? layout?.commandCharacter(keyCode: keyCode) : nil
+        let text = types ? layout?.typedCharacter(keyCode: keyCode, shift: modifiers.contains(.shift)) : nil
         return .key(KeyEvent(
             kind, keyCode: keyCode, modifiers: modifiers, isRepeat: isRepeat, character: character, text: text
         ))
@@ -109,8 +112,11 @@ private func eventTapCallback(
     userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     guard let userInfo else { return Unmanaged.passUnretained(event) }
-    guard let input = tapInput(type: type, event: event) else { return Unmanaged.passUnretained(event) }
     let tap = Unmanaged<EventTap>.fromOpaque(userInfo).takeUnretainedValue()
+    let readsText = MainActor.assumeIsolated { tap.readsText() }
+    guard let input = tapInput(type: type, event: event, readsText: readsText) else {
+        return Unmanaged.passUnretained(event)
+    }
     let swallow = MainActor.assumeIsolated { tap.receive(input) }
     return swallow ? nil : Unmanaged.passUnretained(event)
 }

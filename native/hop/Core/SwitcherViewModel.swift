@@ -27,7 +27,7 @@ public enum SwitcherScope: Sendable, Equatable {
 ///
 /// Every listed item is in `scope`, passes `filter` and matches `query` (`SwitcherSearch`), whichever way the list
 /// changed: a fresh list, the kept items of apps that did not answer, an operation's result, a new filter, or a new
-/// query.
+/// query. Once a search has ended (`endSearch()`), the query is gone and only the items it listed then can be listed.
 public struct SwitcherViewModel: Sendable, Equatable {
     /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
@@ -51,6 +51,8 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// What has been typed since the switcher opened. It lives only here: never stored or logged, and gone with the
     /// switcher.
     public private(set) var query = ""
+    /// The items a search listed when it ended, the only ones that can be listed after it; nil while none has ended.
+    private var searched: Set<SwitcherItem.ID>?
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
     public private(set) var firstVisibleRow = 0
@@ -148,10 +150,29 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// Lists the candidates that match `query`, and selects the first match.
     private mutating func search(_ query: String) {
         self.query = query
-        list(SwitcherSearch.matches(query, in: candidates))
+        list(matches())
         firstVisibleRow = 0
         selection = nil
         select(0)
+    }
+
+    /// The candidates that match the query, best match first, or those the ended search listed, in recency order.
+    private func matches() -> [SwitcherItem] {
+        guard let searched else { return SwitcherSearch.matches(query, in: candidates) }
+        return candidates.filter { searched.contains($0.id) }
+    }
+
+    /// Ends the search when the switch ends while an operation is still pending, so the commit that waits for it
+    /// chooses among what the user saw: the query is dropped, and from now on only the items listed now can be listed,
+    /// in recency order, with the selection on its item. Without a query this changes nothing.
+    public mutating func endSearch() {
+        guard !query.isEmpty else { return }
+        searched = Set(items.map(\.id))
+        query = ""
+        let selected = selectedItem?.id
+        list(matches())
+        selection = nil
+        if let index = items.firstIndex(where: { $0.id == selected }) { select(index) }
     }
 
     /// Lists `items` and lays them out, keeping the scroll position where it can. The selection is the caller's.
@@ -188,11 +209,11 @@ public struct SwitcherViewModel: Sendable, Equatable {
         let all = fresh.filter(scope.includes)
         candidates = all.filter(filter.shows)
         let selected = selection
-        list(SwitcherSearch.matches(query, in: candidates))
+        list(matches())
         selection = nil
         guard !items.isEmpty else { return }
         guard let selected else {
-            return select(query.isEmpty ? Self.openingSelection(items, of: all) ?? 0 : 0)
+            return select(query.isEmpty && searched == nil ? Self.openingSelection(items, of: all) ?? 0 : 0)
         }
         let followers = previous[selected...] + previous[..<selected].reversed()
         for old in followers {

@@ -13,7 +13,9 @@ import os
 /// An operation is pending until the list has been read again after its result: only that read shows whether a closed
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
-/// switcher at once. A hover after a waiting key waits behind it too, and selects the window it was over, not the place.
+/// switcher at once, and nothing draws it again. A hover after a waiting key waits behind it too, and selects the
+/// window it was over, not the place. A waiting commit ends the search once what came before it has been applied: it
+/// cancels if the search then lists nothing, and otherwise chooses only among what it listed.
 /// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. Every listed
 /// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
 /// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
@@ -38,7 +40,7 @@ final class SwitcherController {
     private var screen: NSScreen?
     /// The display the switcher opened on, for `ShownWindows.pointerDisplayOnly`; it stays the same while it is open.
     private var display: DisplayID?
-    private var icons: [pid_t: NSImage] = [:]
+    private(set) var icons: [pid_t: NSImage] = [:]
     /// Bumped whenever the switcher opens or closes, so late results of an earlier switcher change nothing.
     private var generation = 0
     private var messageTask: Task<Void, Never>?
@@ -47,6 +49,8 @@ final class SwitcherController {
     private var pending = 0
     /// What came while an operation was pending, carried out in order once none is.
     private var deferred: [Deferred] = []
+    /// The switch has ended and the panel is hidden, but a commit waits for a pending operation: nothing is drawn.
+    private var isReleased = false
 
     private enum Deferred {
         case event(SwitchSession.Event)
@@ -157,7 +161,9 @@ final class SwitcherController {
     private func commit(only item: SwitcherItem.ID?) {
         guard pending == 0 else {
             deferred.append(.commit(item))
+            isReleased = true
             panel.hide()
+            if deferred.count == 1 { endSearch() }
             return
         }
         let target = if let item { model?.items.first { $0.id == item } } else { model?.selectedItem }
@@ -205,10 +211,20 @@ final class SwitcherController {
         }
     }
 
+    /// The switch ended with a query while a commit waits: once everything typed before the release has been applied,
+    /// the search ends, and a search that lists nothing cancels, as releasing on "No matching windows" does.
+    private func endSearch() {
+        guard let model, !model.query.isEmpty else { return }
+        guard !model.items.isEmpty else { return cancel() }
+        update { $0.endSearch() }
+    }
+
     /// An operation's result has been reconciled with the list; once none is pending, carries out what waited.
     private func settle() {
         pending -= 1
-        while pending == 0, !deferred.isEmpty {
+        while !deferred.isEmpty {
+            if case .commit = deferred.first { endSearch() }
+            guard pending == 0, !deferred.isEmpty else { break }
             switch deferred.removeFirst() {
             case let .event(event): run(event)
             case let .select(item):
@@ -226,7 +242,7 @@ final class SwitcherController {
     }
 
     private func render() {
-        guard let model, let screen else { return }
+        guard let model, let screen, !isReleased else { return }
         panel.update(.switcher(model, icons: icons), on: screen)
     }
 
@@ -269,6 +285,7 @@ final class SwitcherController {
         model = nil
         pending = 0
         deferred = []
+        isReleased = false
         messageTask?.cancel()
         messageTask = nil
         if let terminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver) }
@@ -289,7 +306,8 @@ final class SwitcherController {
 
     private func loadIcons() {
         guard let model else { return }
-        let pids = Set(model.items.map(\.pid))
+        // Every candidate's, not only the listed matches': deleting from the query lists them again without a read.
+        let pids = Set(model.candidates.map(\.pid))
         icons = icons.filter { pids.contains($0.key) }
         for pid in pids where icons[pid] == nil {
             icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon
