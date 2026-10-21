@@ -170,9 +170,17 @@ public final class DiskWindowModel {
     }
 
     /// Stops the scan, keeping what it read; during analysis, or once the scan has finished reading, keeps the whole
-    /// tree without origins or suggestions.
+    /// tree without origins or suggestions. A scan that has reported nothing yet, which may still be looking up a
+    /// stalled root on a network share, is abandoned at once: whatever it returns later is dropped, so the section is
+    /// usable again without waiting for it.
     public func cancel() {
         switch phase {
+        case .scanning where progress == nil:
+            task?.cancel()
+            generation += 1
+            isCancelling = false
+            phase = .cancelled
+            rebuild()
         case .scanning:
             isCancelling = true
             task?.cancel()
@@ -250,6 +258,8 @@ public final class DiskWindowModel {
             return "Scanned \(read) in \(place). Working out origins and suggestions…"
         case .completed:
             return "Scanned \(read) in \(place)."
+        case .cancelled where result == nil:
+            return "Scan of \(place) cancelled before anything was read."
         case .cancelled where isTreeWhole:
             return "Scanned \(read) in \(place). Cancelled before origins and suggestions were worked out; the whole "
                 + "folder tree is shown."
@@ -421,6 +431,7 @@ public final class DiskWindowModel {
         case (.failed, _): note = "The scan did not run."
         case (.scanning, _): note = "Results appear when the scan finishes or is cancelled."
         case (.analyzing, _): note = "Working out origins and suggestions…"
+        case (.cancelled, _) where result == nil: note = "The scan was cancelled before anything was read."
         case (.cancelled, _) where isTreeWhole:
             note = "The scan finished reading, but was cancelled before origins and suggestions were worked out. Scan again "
                 + "to see them."

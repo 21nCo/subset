@@ -359,10 +359,10 @@ final class DiskWindowModelTests: XCTestCase {
     }
 
     func testCancellingWhileSuggestionsAreWorkedOutKeepsTheWholeTreeAndDropsTheLateAnalysis() async throws {
-        let gate = Gate()
+        let gate = AsyncGate()
         let home = fixture.home
         let model = fixture.model(service: fixture.service(analyze: { result, _ in
-            gate.pass()
+            await gate.pass()
             return DiskFixture.analysis(result, home: home)
         }))
         model.scan()
@@ -383,12 +383,12 @@ final class DiskWindowModelTests: XCTestCase {
     /// Cancel pressed after the scanner finished reading, before the model takes the result: the whole tree is shown
     /// as cancelled, and nothing is analyzed in the cancelled task.
     func testCancellingAfterTheScanFinishedReadingDoesNotAnalyze() async throws {
-        let gate = Gate()
+        let gate = AsyncGate()
         let analyzed = OSAllocatedUnfairLock(initialState: 0)
         let home = fixture.home
         let model = fixture.model(service: fixture.service(scan: { root, onProgress in
             let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
-            gate.pass()
+            await gate.pass()
             return scanned
         }, analyze: { result, _ in
             analyzed.withLock { $0 += 1 }
@@ -408,6 +408,40 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertFalse(model.isCancelling)
         XCTAssertEqual(Set(model.rows.map(\.name)), [".Trash", "Documents", "Library"])
         Self.assertWholeTreeCancelled(model)
+    }
+
+    /// A scan cancelled before it reported anything, perhaps stuck looking up a stalled root, is abandoned at once:
+    /// the section is usable again, the late result is dropped, and a new scan runs normally.
+    func testCancellingAScanThatHasReportedNothingAbandonsItAtOnce() async throws {
+        let gate = AsyncGate()
+        let model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            await gate.pass()
+            return await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+        }))
+        model.scan()
+        await fulfillment(of: [gate.reached], timeout: 30)
+        XCTAssertEqual(model.phase, .scanning)
+        XCTAssertNil(model.progress)
+
+        model.cancel()
+        XCTAssertFalse(model.isScanning)
+        XCTAssertFalse(model.isCancelling)
+        XCTAssertEqual(model.phase, .cancelled)
+        XCTAssertNil(model.result)
+        XCTAssertEqual(model.statusText, "Scan of ~ cancelled before anything was read.")
+        XCTAssertEqual(model.sections.first?.note, "The scan was cancelled before anything was read.")
+
+        gate.open()
+        // Let the abandoned scan come back; it must not be shown.
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(model.phase, .cancelled)
+        XCTAssertNil(model.result)
+        XCTAssertNil(model.progress)
+
+        model.scan()
+        try await DiskFixture.wait { model.phase == .completed }
+        XCTAssertEqual(model.result?.outcome, .completed)
+        XCTAssertEqual(Set(model.rows.map(\.name)), [".Trash", "Documents", "Library"])
     }
 
     /// A tree read in full and cancelled before its analysis says so, without the partial scan's wording.
@@ -551,11 +585,11 @@ final class DiskWindowModelTests: XCTestCase {
 
     /// A scan replaced by a new one before its analysis came back never shows that analysis.
     func testAReplacedScansLateAnalysisIsDropped() async throws {
-        let gate = Gate()
+        let gate = AsyncGate()
         let home = fixture.home
         let documents = fixture.path("Documents")
         let model = fixture.model(service: fixture.service(analyze: { result, _ in
-            if result.tree.rootPath == home { gate.pass() }
+            if result.tree.rootPath == home { await gate.pass() }
             return DiskFixture.analysis(result, home: home)
         }))
         model.scan()

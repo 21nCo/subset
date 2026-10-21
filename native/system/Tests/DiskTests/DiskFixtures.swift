@@ -111,7 +111,8 @@ final class DiskFixture {
 
 struct TimedOut: Error {}
 
-/// A one-shot gate a scan thread blocks on until the test opens it.
+/// A one-shot gate a scan thread blocks on until the test opens it. Only for callbacks on the scanner's own threads:
+/// an async closure waits on an `AsyncGate`, so no cooperative thread is parked.
 final class Gate: @unchecked Sendable {
     private let semaphore = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -131,6 +132,43 @@ final class Gate: @unchecked Sendable {
     }
 
     func open() { semaphore.signal() }
+}
+
+/// A one-shot gate an async service closure suspends on, without blocking its thread, until the test opens it.
+final class AsyncGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var passed = false
+    private var isOpen = false
+    private var waiting: CheckedContinuation<Void, Never>?
+    /// Fulfilled when a caller first reaches the gate.
+    let reached = XCTestExpectation(description: "reached the gate")
+
+    /// Suspends the first caller until `open`; later callers pass.
+    func pass() async {
+        let first = lock.withLock {
+            defer { passed = true }
+            return !passed
+        }
+        guard first else { return }
+        reached.fulfill()
+        await withCheckedContinuation { continuation in
+            let resume = lock.withLock {
+                if isOpen { return true }
+                waiting = continuation
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let continuation = lock.withLock {
+            isOpen = true
+            defer { waiting = nil }
+            return waiting
+        }
+        continuation?.resume()
+    }
 }
 
 extension DiskWindowModel {
