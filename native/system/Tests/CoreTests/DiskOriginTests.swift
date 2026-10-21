@@ -356,6 +356,31 @@ final class DiskOriginTests: XCTestCase {
         }
     }
 
+    func testEntriesNamedLikeAppsThatAreNotAppsAreSkipped() async throws {
+        let applications = home + "/Applications"
+        try bundle(applications + "/Editor.app", id: "com.example.editor", name: nil)
+        try bundle(home + "/Elsewhere/Writer.app", id: "com.suite.writer", name: nil)
+        try FileManager.default.createSymbolicLink(atPath: applications + "/Writer.app", withDestinationPath: home + "/Elsewhere/Writer.app")
+        // A file (an alias), a link to nothing, and a folder with neither Contents nor a wrapped app.
+        try Data("alias".utf8).write(to: URL(fileURLWithPath: applications + "/Stray.app"))
+        try FileManager.default.createSymbolicLink(atPath: applications + "/Gone.app", withDestinationPath: home + "/nowhere.app")
+        try FileManager.default.createDirectory(atPath: applications + "/Empty.app", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: applications + "/Editor.app/Contents/Helpers/Empty.app", withIntermediateDirectories: true)
+        let cache = home + "/Library/Caches/com.gone.app"
+        try FileManager.default.createDirectory(atPath: cache, withIntermediateDirectories: true)
+        try Data(count: 4_096).write(to: URL(fileURLWithPath: cache + "/data"))
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home + "/Library")).tree
+
+        let apps = InstalledApps.read(folders: [applications]) { _ in
+            AppSigning(signature: CodeSignature(signingID: "x", teamID: "EXAMPLE123", isPlatformBinary: false), appGroups: [])
+        }
+
+        XCTAssertEqual(apps.unread, [])
+        XCTAssertTrue(apps.isComplete)
+        XCTAssertEqual(apps.apps.map(\.bundleID).sorted(), ["com.example.editor", "com.suite.writer"], "a link to an app is read")
+        XCTAssertEqual(DiskOrigins.entries(in: tree, home: home, apps: apps).map(\.rule), [.leftover])
+    }
+
     func testAppGroupsAreReadFromEntitlements() {
         XCTAssertEqual(InstalledApps.appGroups(entitlements: nil), [], "no entitlements declare no groups")
         XCTAssertEqual(InstalledApps.appGroups(entitlements: ["com.apple.security.application-groups": ["group.a"],

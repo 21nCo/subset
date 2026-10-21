@@ -824,6 +824,55 @@ final class ReclaimRulesTests: XCTestCase {
         XCTAssertFalse(group.isLowerBound)
     }
 
+    /// Each item's total counts its own clones' blocks once, but a sum over two items holding clones of each other
+    /// counts the shared blocks in each, so it is flagged.
+    func testClonesSharedAcrossItemsMakeTheAllocatedSumsUpperBounds() async throws {
+        let derivedData = "Library/Developer/Xcode/DerivedData"
+        try write(derivedData + "/A/f", bytes: 200_000)
+        try write(derivedData + "/B/g", bytes: 200_000)
+        try write("Library/Caches/com.example.editor/blob", bytes: 200_000)
+        try write("Library/Application Support/com.example.editor/other", bytes: 200_000)
+        let fileBytes = try Self.allocated(under: path(derivedData + "/A/f"))
+        func sums() async throws -> (match: ReclaimMatch, report: DiskOriginReport) {
+            let analysis = try await analyze()
+            return (try only(.xcodeDerivedData, in: analysis),
+                    DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                       apps: Self.apps))
+        }
+        func flags(_ report: DiskOriginReport) -> [String: Bool] {
+            Dictionary(uniqueKeysWithValues: (report.apps + report.vendors + report.developerTools).map {
+                ($0.name, $0.allocatedUpperBound)
+            })
+        }
+
+        // No clones: exact.
+        var (match, report) = try await sums()
+        try assertBytes(match)
+        XCTAssertEqual(flags(report), ["Editor": false, "Example Ltd": false, "Xcode": false])
+
+        // B's file and the Editor's Application Support file become clones of A's file and the Editor's cache.
+        for (original, copy) in [(derivedData + "/A/f", derivedData + "/B/g"),
+                                 ("Library/Caches/com.example.editor/blob", "Library/Application Support/com.example.editor/other")] {
+            try FileManager.default.removeItem(atPath: path(copy))
+            XCTAssertEqual(clonefile(path(original), path(copy), 0), 0)
+        }
+        (match, report) = try await sums()
+        guard case let .scanned(privateBytes, allocated, complete, upperBound) = match.bytes else { return XCTFail("\(match.bytes)") }
+        XCTAssertGreaterThanOrEqual(allocated, 2 * fileBytes, "each folder counts the shared blocks")
+        XCTAssertLessThan(privateBytes, fileBytes, "shared blocks are never private")
+        XCTAssertTrue(complete)
+        XCTAssertTrue(upperBound)
+        XCTAssertEqual(flags(report), ["Editor": true, "Example Ltd": true, "Xcode": true])
+        XCTAssertFalse(report.apps[0].isLowerBound)
+
+        // One item holding both clones counts their blocks once, exactly.
+        try FileManager.default.removeItem(atPath: path(derivedData + "/B"))
+        XCTAssertEqual(clonefile(path(derivedData + "/A/f"), path(derivedData + "/A/g"), 0), 0)
+        (match, _) = try await sums()
+        guard case let .scanned(_, allocated, true, false) = match.bytes else { return XCTFail("\(match.bytes)") }
+        XCTAssertEqual(allocated, try Self.allocated(under: path(derivedData + "/A")) - fileBytes)
+    }
+
     func testTheScanRecordsTheLaterOfModificationAndDateAdded() async throws {
         try write("a", bytes: 10)
         try setTimes("a", modified: Date(timeIntervalSince1970: 1_600_000_000), added: Date(timeIntervalSince1970: 1_700_000_000))

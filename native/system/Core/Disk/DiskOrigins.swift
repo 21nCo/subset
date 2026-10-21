@@ -101,10 +101,11 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
     public let name: String
     /// The tree indices of the items summed.
     public let items: [Int]
-    /// Summed allocated sizes, a hard-linked file's once. Blocks two items' clones share count once in each.
+    /// Summed allocated sizes, a hard-linked file's once. Blocks two items' clones share count once in each, which
+    /// `allocatedUpperBound` then says.
     public let allocated: UInt64
-    /// An item's allocated size may count blocks clones share more than once (`DiskItemFlags.allocatedUpperBound`), so
-    /// `allocated` may be more than the items use.
+    /// An item's allocated size may count blocks clones share more than once (`DiskItemFlags.allocatedUpperBound`), or
+    /// two or more items may hold clones (`DiskTree.sum`), so `allocated` may be more than the items use.
     public let allocatedUpperBound: Bool
     /// Summed private sizes: at least what deleting every item would free.
     public let `private`: UInt64
@@ -217,24 +218,10 @@ public enum DiskOrigins {
     static func group(_ key: DiskOriginGroupKey, name: String, items: [Int], tree: DiskTree,
                       incomplete: Bool) -> DiskOriginGroup {
         let unique = Array(Set(items)).sorted()
-        var allocated: UInt64 = 0
-        var privateBytes: UInt64 = 0
-        var lowerBound = incomplete
-        var upperBound = false
-        for index in unique {
-            let item = tree[index]
-            guard let sizes = item.sizes else {
-                lowerBound = true
-                continue
-            }
-            privateBytes += sizes.private
-            // Another hard link counts the file's blocks, so they are counted once, at most.
-            if item.flags.contains(.countedElsewhere) { lowerBound = true } else { allocated += sizes.allocated }
-            if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { lowerBound = true }
-            if item.flags.contains(.allocatedUpperBound) { upperBound = true }
-        }
-        return DiskOriginGroup(id: key, name: name, items: unique, allocated: allocated, allocatedUpperBound: upperBound,
-                               private: privateBytes, isLowerBound: lowerBound)
+        let sum = tree.sum(unique)
+        return DiskOriginGroup(id: key, name: name, items: unique, allocated: sum.allocated,
+                               allocatedUpperBound: sum.allocatedUpperBound, private: sum.private,
+                               isLowerBound: incomplete || sum.lowerBound)
     }
 
     static func vendorName(_ vendor: Origin, apps: InstalledApps) -> String {

@@ -51,7 +51,8 @@ public enum ReclaimBytes: Equatable, Sendable {
     /// each), `allocated` the space they use, a hard-linked file's once. `complete` is false when an item's size is
     /// unknown or a lower bound, or another link counts an item's blocks, which makes both sums lower bounds.
     /// `allocatedUpperBound` is true when an item's allocated size may count blocks clones share more than once
-    /// (`DiskItemFlags.allocatedUpperBound`), so the allocated sum may be more than the items use.
+    /// (`DiskItemFlags.allocatedUpperBound`), or two or more items may hold clones, whose shared blocks each item
+    /// counts (`DiskTree.sum`), so the allocated sum may be more than the items use.
     case scanned(private: UInt64, allocated: UInt64, complete: Bool, allocatedUpperBound: Bool)
     /// The image space `docker system df` reports as reclaimable inside the VM and the space all images use. It
     /// counts every image no container uses, while `docker image prune -f` removes only dangling ones, so it is an
@@ -177,25 +178,10 @@ private struct Matching {
             return append(rule, bytes: .unavailable(reason))
         }
         let sorted = items.sorted { $0.path < $1.path }
-        var privateBytes: UInt64 = 0
-        var allocated: UInt64 = 0
-        var complete = unjudged.isEmpty
-        var upperBound = false
-        var measured = false
-        for item in sorted {
-            guard let sizes = item.sizes else {
-                complete = false
-                continue
-            }
-            measured = true
-            privateBytes += sizes.private
-            // Another hard link counts the file's blocks, so they are counted once, at most.
-            if item.flags.contains(.countedElsewhere) { complete = false } else { allocated += sizes.allocated }
-            if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { complete = false }
-            if item.flags.contains(.allocatedUpperBound) { upperBound = true }
-        }
-        let bytes: ReclaimBytes = measured
-            ? .scanned(private: privateBytes, allocated: allocated, complete: complete, allocatedUpperBound: upperBound)
+        let sum = tree.sum(sorted.map(\.index))
+        let bytes: ReclaimBytes = sum.measured
+            ? .scanned(private: sum.private, allocated: sum.allocated, complete: unjudged.isEmpty && !sum.lowerBound,
+                       allocatedUpperBound: sum.allocatedUpperBound)
             : .unavailable(sorted.count == 1 ? "\(sorted[0].path) could not be read." : "None of the \(sorted.count) items could be read.")
         matches.append(ReclaimMatch(rule: rule, app: app, identifier: identifier, items: sorted, bytes: bytes))
     }
@@ -517,6 +503,63 @@ extension DiskTree {
             if case let .unknown(reason) = searched(child) { return reason }
         }
         return nil
+    }
+
+    /// Summed scanned sizes of distinct items, none inside another, with the bounds a match and a By origin group
+    /// report.
+    struct SizeSum {
+        var `private`: UInt64 = 0
+        var allocated: UInt64 = 0
+        /// An item's size is unknown or a lower bound, or another link counts an item's blocks.
+        var lowerBound = false
+        /// `allocated` may count blocks clones share more than once: an item is flagged `allocatedUpperBound`, or two
+        /// or more items may hold clones (`mayHoldClones`), whose shared blocks each item's own total counts.
+        var allocatedUpperBound = false
+        /// An item's sizes were read.
+        var measured = false
+    }
+
+    /// Sums the items' sizes. Each item's total counts its own clones' blocks once, but the tree does not say which
+    /// blocks two items share, so a sum over two items that may both hold clones is conservatively an upper bound.
+    func sum(_ indices: [Int]) -> SizeSum {
+        var sum = SizeSum()
+        var holdingClones = 0
+        for index in indices {
+            let item = self[index]
+            guard let sizes = item.sizes else {
+                sum.lowerBound = true
+                continue
+            }
+            sum.measured = true
+            sum.private += sizes.private
+            if !item.flags.isDisjoint(with: ReclaimMatcher.lowerBoundFlags) { sum.lowerBound = true }
+            if item.flags.contains(.allocatedUpperBound) { sum.allocatedUpperBound = true }
+            // Another hard link counts the file's blocks, so they are counted once, at most.
+            if item.flags.contains(.countedElsewhere) {
+                sum.lowerBound = true
+                continue
+            }
+            sum.allocated += sizes.allocated
+            if holdingClones < 2, mayHoldClones(index) { holdingClones += 1 }
+        }
+        if holdingClones >= 2 { sum.allocatedUpperBound = true }
+        return sum
+    }
+
+    /// Whether the item may share blocks with a clone in another item: it is, or a folder below it lists, a file flagged
+    /// `sharesBlocks`, or a package, whose contents are not listed, with a private size below its allocated size.
+    func mayHoldClones(_ index: Int) -> Bool {
+        var pending = [index]
+        while let current = pending.popLast() {
+            let node = nodes[current]
+            switch node.kind {
+            case .file: if node.flags.contains(.sharesBlocks) { return true }
+            case .package: if node.sizes.private < node.sizes.allocated { return true }
+            case .directory: pending.append(contentsOf: self[current].children)
+            case .symlink, .other, .mountPoint: break
+            }
+        }
+        return false
     }
 
     /// Why a rule's own folder cannot be searched: it was not read (`unread`), or it is not a folder; `nil` when it can
