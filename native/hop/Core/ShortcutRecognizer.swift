@@ -18,19 +18,25 @@ public struct KeyEvent: Sendable, Equatable {
     /// do; only a key without an ASCII character (a layout whose ⌘ map is non-Latin, or none) falls back to its US
     /// position.
     public var character: Character?
+    /// The character the key types on the current keyboard layout with ⇧ when it is held, ignoring ⌥, ⌃ and ⌘, or nil
+    /// when it is unknown or the key types none. The switcher's search takes it, so holding ⌥ does not turn E into a
+    /// dead accent. Never logged.
+    public var text: Character?
 
     public init(
         _ kind: Kind,
         keyCode: UInt16,
         modifiers: ModifierMask = [],
         isRepeat: Bool = false,
-        character: Character? = nil
+        character: Character? = nil,
+        text: Character? = nil
     ) {
         self.kind = kind
         self.keyCode = keyCode
         self.modifiers = modifiers.intersection(.all)
         self.isRepeat = kind == .keyDown && isRepeat
         self.character = character.map { $0.isASCII ? Character($0.lowercased()) : $0 }
+        self.text = text
     }
 }
 
@@ -83,31 +89,50 @@ public struct Classification: Sendable, Equatable {
 /// session. Only a press that starts a switch and key presses that belong to an active switch are swallowed; modifier
 /// changes and key-ups always pass here, so apps never see a modifier stuck down.
 ///
-/// Modifiers match exactly: the shortcut starts or steps a switch only with the holding modifier alone (forward) or
-/// with ⇧ (backward); while a switch is active the arrows and Esc count only with the holding modifier, optionally plus
-/// ⇧, and the operation keys (M, W, H, Q) only with the holding modifier plus ⌘. Any other modifier set (⌥⌘Tab, ⌥⌃→,
-/// ⌥⇧⌘W) passes and changes nothing.
+/// Two shortcuts start a switch: the switch shortcut (⌥Tab) over every window, and the same-app shortcut (⌥`) over the
+/// frontmost app's windows. While a switch is active, the holding modifier is that of the shortcut that started it.
+///
+/// Modifiers match exactly: a shortcut starts or steps a switch only with its holding modifier alone (forward) or with
+/// ⇧ (backward); while a switch is active the arrows, Esc, Delete and the search's printable keys count only with the
+/// holding modifier, optionally plus ⇧, and the operation keys (M, W, H, Q) only with the holding modifier plus ⌘. Any
+/// other modifier set (⌥⌘Tab, ⌥⌃→, ⌥⇧⌘W, ⌥⌃E) passes and changes nothing. A printable key with ⌃ never types, so a
+/// switch held with ⌃ has no search and ⌃E passes. The other shortcut's key steps too when it has the same holding
+/// modifier, so ⌥` in a ⌥Tab switch moves rather than searching for a `.
 ///
 /// The classifier sees one event at a time. Which press a key-up or an auto-repeat belongs to is
 /// `ShortcutRecognizer`'s job.
 public enum EventClassifier {
-    public static func classify(_ input: TapInput, session: SwitchSession, shortcut: Shortcut) -> Classification {
+    /// `sameAppShortcut` nil means there is none: only `shortcut` starts a switch.
+    public static func classify(
+        _ input: TapInput,
+        session: SwitchSession,
+        shortcut: Shortcut,
+        sameAppShortcut: Shortcut? = nil
+    ) -> Classification {
         guard case let .key(key) = input else {
             return session.isActive ? Classification(.pass, .interrupted) : .pass
         }
-        return session.isActive ? classifyActive(key, shortcut: shortcut) : classifyIdle(key, shortcut: shortcut)
+        guard session.isActive else { return classifyIdle(key, shortcut: shortcut, sameAppShortcut: sameAppShortcut) }
+        let (active, other) = session.scope == .frontmostApp
+            ? (sameAppShortcut ?? shortcut, shortcut)
+            : (shortcut, sameAppShortcut)
+        return classifyActive(key, shortcut: active, other: other)
     }
 
-    private static func classifyIdle(_ key: KeyEvent, shortcut: Shortcut) -> Classification {
-        guard key.kind == .keyDown, key.keyCode == shortcut.keyCode else { return .pass }
-        switch key.modifiers {
-        case shortcut.forwardModifiers: return Classification(.swallow, .trigger(.forward))
-        case shortcut.backwardModifiers: return Classification(.swallow, .trigger(.backward))
-        default: return .pass
+    private static func classifyIdle(_ key: KeyEvent, shortcut: Shortcut, sameAppShortcut: Shortcut?) -> Classification {
+        guard key.kind == .keyDown else { return .pass }
+        let shortcuts: [(Shortcut?, SwitchScope)] = [(shortcut, .allWindows), (sameAppShortcut, .frontmostApp)]
+        for case let (shortcut?, scope) in shortcuts where key.keyCode == shortcut.keyCode {
+            switch key.modifiers {
+            case shortcut.forwardModifiers: return Classification(.swallow, .trigger(.forward, scope: scope))
+            case shortcut.backwardModifiers: return Classification(.swallow, .trigger(.backward, scope: scope))
+            default: continue
+            }
         }
+        return .pass
     }
 
-    private static func classifyActive(_ key: KeyEvent, shortcut: Shortcut) -> Classification {
+    private static func classifyActive(_ key: KeyEvent, shortcut: Shortcut, other: Shortcut?) -> Classification {
         // The holding modifier is gone: it was released, possibly without a flags event the tap saw. The release
         // ends the switch; the event itself is the user's next keystroke and goes through.
         guard key.modifiers.contains(shortcut.holdModifier) else { return Classification(.pass, .modifierReleased) }
@@ -117,15 +142,24 @@ public enum EventClassifier {
             return Classification(.swallow, .operation(operation))
         }
         guard key.modifiers == shortcut.forwardModifiers || key.modifiers == shortcut.backwardModifiers else { return .pass }
+        let direction: SwitchDirection = key.modifiers == shortcut.backwardModifiers ? .backward : .forward
+        if key.keyCode == shortcut.keyCode { return Classification(.swallow, .step(direction)) }
+        if let other, other.holdModifier == shortcut.holdModifier, key.keyCode == other.keyCode {
+            return Classification(.swallow, .step(direction))
+        }
         switch key.keyCode {
-        case shortcut.keyCode:
-            return Classification(.swallow, .step(key.modifiers == shortcut.backwardModifiers ? .backward : .forward))
         case KeyCode.leftArrow: return Classification(.swallow, .step(.backward))
         case KeyCode.rightArrow: return Classification(.swallow, .step(.forward))
         case KeyCode.upArrow: return Classification(.swallow, .row(.up))
         case KeyCode.downArrow: return Classification(.swallow, .row(.down))
         case KeyCode.escape: return Classification(.swallow, .escape)
-        default: return .pass
+        case KeyCode.delete: return Classification(.swallow, .deleteBackward)
+        default:
+            // A ⌃ chord is never typing, even in a switch held with ⌃: such a switch has no search.
+            guard !key.modifiers.contains(.control), let text = key.text, SwitcherSearch.isSearchCharacter(text) else {
+                return .pass
+            }
+            return Classification(.swallow, .type(text))
         }
     }
 }
@@ -137,14 +171,14 @@ public enum EventClassifier {
 /// goes up; the press's auto-repeats and its key-up get the same disposition, even after the session has ended (Tab
 /// released after ⌥, for example). So an app sees all of a press or none of it: it never receives a key-up without
 /// its key-down, or misses the release of a key it saw go down. A swallowed press's repeats keep moving the selection of
-/// an active switch (holding Tab or ↓ moves on) but never start or cancel one or repeat an operation; a press the app
-/// saw never moves, cancels or acts in a switch.
+/// an active switch (holding Tab or ↓ moves on, holding a letter or Delete types or deletes again) but never start or
+/// cancel one or repeat an operation; a press the app saw never moves, cancels or acts in a switch.
 /// Any key event without the holding modifier still ends an active switch, because it shows the modifier is up.
 public struct ShortcutRecognizer: Sendable {
     public struct Result: Sendable, Equatable {
         public var disposition: Disposition
         /// The event the session took from this input, for the host to apply to the switcher: a trigger that started
-        /// a session, or a step, row move or operation in an active one.
+        /// a session, or a step, row move, operation, typed character or Delete in an active one.
         public var event: SwitchSession.Event?
         /// How the session ended, when this input ended it.
         public var outcome: SwitchSession.Outcome?
@@ -158,16 +192,21 @@ public struct ShortcutRecognizer: Sendable {
 
     public private(set) var session: SwitchSession
     public var shortcut: Shortcut
+    /// The shortcut that switches among the frontmost app's windows, or nil for none.
+    public var sameAppShortcut: Shortcut?
     /// The disposition of each key's current press, from its key-down until its key-up.
     private var presses: [UInt16: Disposition] = [:]
 
-    public init(shortcut: Shortcut) {
+    public init(shortcut: Shortcut, sameAppShortcut: Shortcut? = nil) {
         self.shortcut = shortcut
+        self.sameAppShortcut = sameAppShortcut
         session = SwitchSession()
     }
 
     public mutating func handle(_ input: TapInput) -> Result {
-        let classification = EventClassifier.classify(input, session: session, shortcut: shortcut)
+        let classification = EventClassifier.classify(
+            input, session: session, shortcut: shortcut, sameAppShortcut: sameAppShortcut
+        )
         let disposition: Disposition
         var event = classification.event
         switch input {
@@ -183,7 +222,9 @@ public struct ShortcutRecognizer: Sendable {
             // A press that began before the tap saw it belongs to its app.
             disposition = presses[key.keyCode] ?? .pass
             switch event {
-            case .step where disposition == .swallow, .row where disposition == .swallow, .modifierReleased: break
+            case .step where disposition == .swallow, .row where disposition == .swallow,
+                 .type where disposition == .swallow, .deleteBackward where disposition == .swallow, .modifierReleased:
+                break
             default: event = nil
             }
         case let .key(key):
@@ -194,7 +235,7 @@ public struct ShortcutRecognizer: Sendable {
         guard let event else { return Result(disposition: disposition, outcome: nil) }
         let (accepted, outcome) = session.handle(event)
         let applied: SwitchSession.Event? = switch event {
-        case .trigger, .step, .row, .operation: accepted ? event : nil
+        case .trigger, .step, .row, .operation, .type, .deleteBackward: accepted ? event : nil
         case .modifierReleased, .escape, .interrupted: nil
         }
         return Result(disposition: disposition, event: applied, outcome: outcome)

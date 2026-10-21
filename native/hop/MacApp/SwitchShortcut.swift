@@ -3,16 +3,17 @@ import ApplicationServices
 import HopCore
 import os
 
-/// Runs the hold-to-switch shortcut while Hop has the Accessibility permission: owns the event tap and the
-/// `ShortcutRecognizer` it drives, and hands the switch to the `SwitcherController`: the trigger opens the switcher,
-/// steps, row moves and operation keys go to it, releasing the holding modifier commits and Esc or an interruption
-/// cancels.
+/// Runs the hold-to-switch and same-app shortcuts while Hop has the Accessibility permission: owns the event tap and
+/// the `ShortcutRecognizer` it drives, and hands the switch to the `SwitcherController`: the trigger opens the switcher
+/// over every window or the frontmost app's, steps, row moves, operation keys and the search's keys go to it, releasing
+/// the holding modifier commits and Esc or an interruption cancels.
 ///
 /// The tap's callback must return quickly and never reads the window list, so the trigger only marks the switcher to
 /// open, on the next pass of the main run loop. What the session does before then is held and applied in order once it
 /// has opened, so every key is applied to the list it was meant for; a switch cancelled before then never opens.
 ///
-/// Changed settings apply at once (`settingsChanged(_:)`): a new shortcut, and the shown windows in an open switcher; and while the Settings window records one the tap passes
+/// Changed settings apply at once (`settingsChanged(_:)`): new shortcuts, and the shown windows in an open switcher; and
+/// while the Settings window records one the tap passes
 /// every event (`isSuspended`), so the recorder sees the keys a switch would otherwise take.
 @MainActor
 final class SwitchShortcutController {
@@ -39,13 +40,19 @@ final class SwitchShortcutController {
                 windowOperator: windowList.windowOperator,
                 settings: settings
             ),
-            shortcut: settings().shortcut
+            shortcut: settings().shortcut,
+            sameAppShortcut: settings().sameAppShortcut
         )
     }
 
-    init(switcher: SwitcherController, shortcut: Shortcut, isTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }) {
+    init(
+        switcher: SwitcherController,
+        shortcut: Shortcut,
+        sameAppShortcut: Shortcut? = .sameAppDefault,
+        isTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }
+    ) {
         self.isTrusted = isTrusted
-        recognizer = ShortcutRecognizer(shortcut: shortcut)
+        recognizer = ShortcutRecognizer(shortcut: shortcut, sameAppShortcut: sameAppShortcut)
         self.switcher = switcher
         switcher.onSessionEnded = { [unowned self] in recognizer.endSession() }
         switcher.onNotPermitted = { [unowned self] in onNeedsPermission() }
@@ -55,6 +62,8 @@ final class SwitchShortcutController {
 
     /// The shortcut the tap recognizes.
     var shortcut: Shortcut { recognizer.shortcut }
+    /// The same-app shortcut the tap recognizes.
+    var sameAppShortcut: Shortcut? { recognizer.sameAppShortcut }
 
     /// While true, the tap passes every event and no switch starts: the Settings window is recording a shortcut.
     /// Suspending cancels any switch in progress.
@@ -64,19 +73,23 @@ final class SwitchShortcutController {
         }
     }
 
-    /// Switches to `shortcut` at once. A switch in progress under the old shortcut is cancelled, since its holding
-    /// modifier may no longer be the one held.
-    func use(_ shortcut: Shortcut) {
-        guard shortcut != recognizer.shortcut else { return }
+    /// Switches to `shortcut` and `sameAppShortcut` at once. A switch in progress under the old shortcuts is cancelled,
+    /// since its holding modifier may no longer be the one held.
+    func use(_ shortcut: Shortcut, sameApp sameAppShortcut: Shortcut?) {
+        guard shortcut != recognizer.shortcut || sameAppShortcut != recognizer.sameAppShortcut else { return }
         interrupt()
         recognizer.shortcut = shortcut
-        Self.log.info("Switch shortcut changed to \(shortcut.displayName, privacy: .public)")
+        recognizer.sameAppShortcut = sameAppShortcut
+        Self.log.info("""
+            Shortcuts changed to \(shortcut.displayName, privacy: .public), and \
+            \(sameAppShortcut?.displayName ?? "none", privacy: .public) for the same app
+            """)
     }
 
-    /// Applies changed settings at once: a new shortcut (`use(_:)`), and the Shown-windows options and excluded apps to
-    /// an open switcher.
+    /// Applies changed settings at once: new shortcuts (`use(_:sameApp:)`), and the Shown-windows options and excluded
+    /// apps to an open switcher.
     func settingsChanged(_ settings: Settings) {
-        use(settings.shortcut)
+        use(settings.shortcut, sameApp: settings.sameAppShortcut)
         switcher.settingsChanged()
     }
 
@@ -84,13 +97,18 @@ final class SwitchShortcutController {
     @discardableResult
     func install() -> Bool {
         if isInstalled { return true }
-        let tap = EventTap { [unowned self] input in handle(input) }
+        let tap = EventTap(readsText: { [unowned self] in recognizer.session.isActive }) { [unowned self] input in
+            handle(input)
+        }
         guard tap.install() else {
             Self.log.error("The system refused the keyboard event tap")
             return false
         }
         self.tap = tap
-        Self.log.info("Switch shortcut \(self.recognizer.shortcut.displayName, privacy: .public) installed")
+        Self.log.info("""
+            Switch shortcut \(self.recognizer.shortcut.displayName, privacy: .public) and same-app shortcut \
+            \(self.recognizer.sameAppShortcut?.displayName ?? "none", privacy: .public) installed
+            """)
         return true
     }
 
@@ -162,11 +180,11 @@ final class SwitchShortcutController {
         let results = held
         held = []
         for (index, result) in results.enumerated() {
-            guard case .trigger = result.event else {
+            guard case let .trigger(_, scope) = result.event else {
                 apply(result)
                 continue
             }
-            if results[(index + 1)...].lazy.compactMap(\.outcome).first != .cancel { switcher.open() }
+            if results[(index + 1)...].lazy.compactMap(\.outcome).first != .cancel { switcher.open(scope) }
         }
     }
 }

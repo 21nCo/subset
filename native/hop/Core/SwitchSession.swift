@@ -10,6 +10,13 @@ public enum RowDirection: Sendable, Equatable {
     case down
 }
 
+/// Which windows a switch goes through: every listed window (the switch shortcut, ⌥Tab), or only the frontmost app's
+/// (the same-app shortcut, ⌥`).
+public enum SwitchScope: Sendable, Equatable {
+    case allWindows
+    case frontmostApp
+}
+
 /// One hold-to-switch session: the shortcut starts it, further keys move the selection or act on the selected
 /// window, and releasing the holding modifier ends it. Pure state; the host feeds it events from the event tap and acts
 /// on the events it accepts and on how it ends.
@@ -24,10 +31,14 @@ public struct SwitchSession: Sendable, Equatable {
     }
 
     public enum Event: Sendable, Equatable {
-        /// The shortcut was pressed while idle.
-        case trigger(SwitchDirection)
+        /// The switch shortcut, or the same-app shortcut for `.frontmostApp`, was pressed while idle.
+        case trigger(SwitchDirection, scope: SwitchScope = .allWindows)
         /// The shortcut key or ← or → was pressed while active.
         case step(SwitchDirection)
+        /// A printable key was pressed while active: the character it types, for the switcher's search. Never logged.
+        case type(Character)
+        /// Delete was pressed while active: removes the search's last character.
+        case deleteBackward
         /// ↑ or ↓ was pressed while active.
         case row(RowDirection)
         /// An operation key (⌘M, ⌘W, ⌘H, ⌘Q, with the holding modifier) was pressed while active.
@@ -49,6 +60,8 @@ public struct SwitchSession: Sendable, Equatable {
     }
 
     public private(set) var state: State = .idle
+    /// The scope of the trigger that started the active session; `.allWindows` while idle.
+    public private(set) var scope: SwitchScope = .allWindows
 
     public init() {}
 
@@ -59,18 +72,20 @@ public struct SwitchSession: Sendable, Equatable {
     @discardableResult
     public mutating func handle(_ event: Event) -> (accepted: Bool, outcome: Outcome?) {
         switch (state, event) {
-        case (.idle, .trigger):
+        case let (.idle, .trigger(_, scope)):
             state = .active
+            self.scope = scope
             return (true, nil)
         case (.idle, _):
             return (false, nil)
         case (.active, .modifierReleased):
-            state = .idle
+            end()
             return (true, .commit)
         case (.active, .escape), (.active, .interrupted):
-            state = .idle
+            end()
             return (true, .cancel)
-        case (.active, .trigger), (.active, .step), (.active, .row), (.active, .operation):
+        case (.active, .trigger), (.active, .step), (.active, .row), (.active, .operation), (.active, .type),
+             (.active, .deleteBackward):
             return (true, nil)
         }
     }
@@ -79,7 +94,10 @@ public struct SwitchSession: Sendable, Equatable {
     /// holding modifier that follows then changes nothing. Returns whether a session was active.
     @discardableResult
     public mutating func end() -> Bool {
-        defer { state = .idle }
+        defer {
+            state = .idle
+            scope = .allWindows
+        }
         return isActive
     }
 }

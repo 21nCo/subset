@@ -6,6 +6,9 @@ import Foundation
 /// Operation keys (⌘W) match the character a key gives with ⌘ held, which is what menu key equivalents match: a
 /// Hebrew, Greek or Russian layout gives Q, W, H and M under ⌘ on the US positions, and "Dvorak - QWERTY ⌘" gives the
 /// QWERTY letters, while plain AZERTY and Dvorak give their own letters and punctuation under ⌘ too.
+///
+/// The switcher's search takes the character a key types with ⇧ alone or no modifier (`typedCharacter`), so the ⌥
+/// held for the switch does not change it.
 struct KeyLayout {
     /// The layout's `UCKeyboardLayout` bytes.
     private let data: Data
@@ -35,6 +38,17 @@ struct KeyLayout {
     /// The character the key gives with ⌘ alone, or nil when it gives none. A dead key gives its own character rather
     /// than waiting for the next key.
     func commandCharacter(keyCode: UInt16) -> Character? {
+        character(keyCode: keyCode, modifierKeyState: UInt32((cmdKey >> 8) & 0xFF))
+    }
+
+    /// The character the key types with ⇧ when `shift`, and with no modifier otherwise, or nil when it types none. A
+    /// dead key gives its own character.
+    func typedCharacter(keyCode: UInt16, shift: Bool) -> Character? {
+        character(keyCode: keyCode, modifierKeyState: shift ? UInt32((shiftKey >> 8) & 0xFF) : 0)
+    }
+
+    /// `UCKeyTranslate` for a key-down with the Carbon modifier state shifted right by 8, as it takes it.
+    private func character(keyCode: UInt16, modifierKeyState: UInt32) -> Character? {
         var deadKeyState: UInt32 = 0
         var length = 0
         var characters = [UniChar](repeating: 0, count: 4)
@@ -44,7 +58,7 @@ struct KeyLayout {
                 layout,
                 keyCode,
                 UInt16(kUCKeyActionDown),
-                UInt32((cmdKey >> 8) & 0xFF),
+                modifierKeyState,
                 UInt32(LMGetKbdType()),
                 OptionBits(kUCKeyTranslateNoDeadKeysMask),
                 &deadKeyState,

@@ -2,8 +2,9 @@ import AppKit
 import HopCore
 import os
 
-/// The switcher while a switch is in progress: opens it on a fresh window list, filtered by the Shown-windows settings
-/// and excluded apps (`SwitcherFilter`), applies the session's events and the mouse to its
+/// The switcher while a switch is in progress: opens it on a fresh window list, limited to the frontmost app's windows
+/// for the same-app shortcut and filtered by the Shown-windows settings and excluded apps (`SwitcherFilter`), applies
+/// the session's events (including what is typed to search) and the mouse to its
 /// `SwitcherViewModel`, performs the operations it asks for, and on commit hides it and brings the selected window
 /// forward, or activates the selected windowless app. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
 /// that finds Hop without the Accessibility permission reopens onboarding instead. Nothing about a window, and never a
@@ -12,7 +13,12 @@ import os
 /// An operation is pending until the list has been read again after its result: only that read shows whether a closed
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
-/// switcher at once. A hover after a waiting key waits behind it too, and selects the window it was over, not the place.
+/// switcher at once, and nothing draws it again. A hover after a waiting key waits behind it too, and selects the
+/// window it was over, not the place. While anything waits, a read can neither add an item to a search's list nor
+/// reorder it (`SwitcherViewModel.hold()`), so a waiting key or commit never acts on a window the search did not show.
+/// A commit that waits ends the search at once (`SwitcherViewModel.endSearch(before:)`): no text outlives the panel, as
+/// what each waiting character or Delete will list is worked out then and applied in its turn, so the commit chooses
+/// only among what the search listed, in its order, and with nothing listed it does nothing, as a cancel.
 /// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. Every listed
 /// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
 /// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
@@ -30,12 +36,14 @@ final class SwitcherController {
     private let readWindows: () -> WindowList
     private let windowOperator: any WindowOperator
     private let settings: () -> Settings
+    /// The pid of the frontmost app, whose windows the same-app shortcut goes through.
+    private let frontmostApp: () -> pid_t?
     let panel = SwitcherPanel()
     private(set) var model: SwitcherViewModel?
     private var screen: NSScreen?
     /// The display the switcher opened on, for `ShownWindows.pointerDisplayOnly`; it stays the same while it is open.
     private var display: DisplayID?
-    private var icons: [pid_t: NSImage] = [:]
+    private(set) var icons: [pid_t: NSImage] = [:]
     /// Bumped whenever the switcher opens or closes, so late results of an earlier switcher change nothing.
     private var generation = 0
     private var messageTask: Task<Void, Never>?
@@ -44,13 +52,26 @@ final class SwitcherController {
     private var pending = 0
     /// What came while an operation was pending, carried out in order once none is.
     private var deferred: [Deferred] = []
+    /// The switch has ended and the panel is hidden, but a commit waits for a pending operation: nothing is drawn.
+    private var isReleased = false
 
     private enum Deferred {
         case event(SwitchSession.Event)
+        /// List what a character or Delete that waited searched for, worked out when the switch ended.
+        case search(SwitcherViewModel.SearchResult)
         /// Select this item, as a hover over it did, if it is still listed.
         case select(SwitcherItem.ID)
         /// Commit the selection, or only this item (a click chose it) if it is still listed.
         case commit(SwitcherItem.ID?)
+
+        /// The character or Delete that waits, if this is one.
+        var typed: SwitchSession.Event? {
+            guard case let .event(event) = self else { return nil }
+            switch event {
+            case .type, .deleteBackward: return event
+            default: return nil
+            }
+        }
     }
 
     /// The switcher ended the session itself (a click chose a window), so the host's session must end too.
@@ -61,11 +82,13 @@ final class SwitcherController {
     init(
         readWindows: @escaping () -> WindowList,
         windowOperator: any WindowOperator,
-        settings: @escaping () -> Settings = { .default }
+        settings: @escaping () -> Settings = { .default },
+        frontmostApp: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
     ) {
         self.readWindows = readWindows
         self.windowOperator = windowOperator
         self.settings = settings
+        self.frontmostApp = frontmostApp
         panel.switcherView.onHover = { [unowned self] index in
             guard let model, model.items.indices.contains(index) else { return }
             if deferred.isEmpty {
@@ -74,7 +97,7 @@ final class SwitcherController {
             }
             // Only the last hover matters once it waits.
             if case .select = deferred.last { deferred.removeLast() }
-            deferred.append(.select(model.items[index].id))
+            wait(.select(model.items[index].id))
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
         panel.switcherView.onChoose = { [unowned self] item in
@@ -86,15 +109,17 @@ final class SwitcherController {
 
     var isOpen: Bool { model != nil }
 
-    /// Reads the window list and shows the switcher on the display under the pointer.
-    func open() {
+    /// Reads the window list and shows the switcher on the display under the pointer, over every window or only the
+    /// frontmost app's. The panel never activates Hop, so the frontmost app is the one the user was in.
+    func open(_ scope: SwitchScope = .allWindows) {
         reset()
         let screen = Self.screenUnderPointer()
         display = screen.flatMap(Self.displayID)
         let model = SwitcherViewModel(
             items: readWindows().items,
             available: screen?.visibleFrame.size ?? .zero,
-            filter: currentFilter()
+            filter: currentFilter(),
+            scope: scope == .frontmostApp ? .appWindows(frontmostApp()) : .allWindows
         )
         self.model = model
         self.screen = screen
@@ -121,13 +146,19 @@ final class SwitcherController {
         scheduleRefresh(after: .zero)
     }
 
-    /// Applies a session event: moves the selection, or performs an operation on the selected window. While an
-    /// operation is pending, an operation key, and anything after it, waits.
+    /// Applies a session event: moves the selection, types into or deletes from the search, or performs an operation on
+    /// the selected window. While an operation is pending, an operation key, and anything after it, waits.
     func apply(_ event: SwitchSession.Event) {
         guard model != nil else { return }
-        if case .operation = event, pending > 0 { return deferred.append(.event(event)) }
-        if !deferred.isEmpty { return deferred.append(.event(event)) }
+        if case .operation = event, pending > 0 { return wait(.event(event)) }
+        if !deferred.isEmpty { return wait(.event(event)) }
         run(event)
+    }
+
+    /// Makes `next` wait for the pending operation. The first to wait holds the search's list as it is shown.
+    private func wait(_ next: Deferred) {
+        if deferred.isEmpty { model?.hold() }
+        deferred.append(next)
     }
 
     private func run(_ event: SwitchSession.Event) {
@@ -144,13 +175,15 @@ final class SwitcherController {
     }
 
     /// Hides the switcher and brings `item` forward if it is still listed, or the selected item when it is nil: a
-    /// window is focused and a windowless app activated. While an operation is pending, the item is chosen once the
+    /// window is focused and a windowless app activated. With nothing selected (no windows, or a search that matches
+    /// none) it only hides the switcher, as a cancel does. While an operation is pending, the item is chosen once the
     /// list has been read again after it.
     private func commit(only item: SwitcherItem.ID?) {
         guard pending == 0 else {
-            deferred.append(.commit(item))
+            wait(.commit(item))
+            isReleased = true
             panel.hide()
-            return
+            return endSearch()
         }
         let target = if let item { model?.items.first { $0.id == item } } else { model?.selectedItem }
         reset()
@@ -197,17 +230,32 @@ final class SwitcherController {
         }
     }
 
-    /// An operation's result has been reconciled with the list; once none is pending, carries out what waited.
+    /// The switch ended while a commit waits: ends the search, and puts in place of each character or Delete that waits
+    /// what it will list, so no text is left once the panel hides. One that changes nothing is dropped.
+    private func endSearch() {
+        guard var model else { return }
+        var results = model.endSearch(before: deferred.compactMap(\.typed))[...]
+        self.model = model
+        deferred = deferred.compactMap { next in
+            guard next.typed != nil else { return next }
+            return results.removeFirst().map(Deferred.search)
+        }
+    }
+
+    /// An operation's result has been reconciled with the list; once none is pending, carries out what waited. Once
+    /// nothing waits, the search lists whatever matches again.
     private func settle() {
         pending -= 1
         while pending == 0, !deferred.isEmpty {
             switch deferred.removeFirst() {
             case let .event(event): run(event)
+            case let .search(result): update { $0.show(result) }
             case let .select(item):
                 if let index = model?.items.firstIndex(where: { $0.id == item }) { update { $0.select(index) } }
             case let .commit(item): commit(only: item)
             }
         }
+        if deferred.isEmpty { update { $0.stopHolding() } }
     }
 
     private func update(_ change: (inout SwitcherViewModel) -> Void) {
@@ -218,7 +266,7 @@ final class SwitcherController {
     }
 
     private func render() {
-        guard let model, let screen else { return }
+        guard let model, let screen, !isReleased else { return }
         panel.update(.switcher(model, icons: icons), on: screen)
     }
 
@@ -261,6 +309,7 @@ final class SwitcherController {
         model = nil
         pending = 0
         deferred = []
+        isReleased = false
         messageTask?.cancel()
         messageTask = nil
         if let terminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver) }
@@ -281,7 +330,8 @@ final class SwitcherController {
 
     private func loadIcons() {
         guard let model else { return }
-        let pids = Set(model.items.map(\.pid))
+        // Every candidate's, not only the listed matches': deleting from the query lists them again without a read.
+        let pids = Set(model.candidates.map(\.pid))
         icons = icons.filter { pids.contains($0.key) }
         for pid in pids where icons[pid] == nil {
             icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon

@@ -52,8 +52,10 @@ final class SwitcherPanel: NSPanel {
         setFrame(NSRect(origin: origin, size: size), display: true)
     }
 
+    /// Hides the panel and drops what it showed, including the search, so nothing typed outlives the switcher.
     func hide() {
         orderOut(nil)
+        switcherView.clear()
     }
 }
 
@@ -70,6 +72,8 @@ final class SwitcherContentView: NSView {
     var onScroll: (Int) -> Void = { _ in }
 
     static let footerHeight: CGFloat = 36
+    /// The height of the search line above the grid, shown while there is a query.
+    static let queryHeight: CGFloat = 36
     static let minimumWidth: CGFloat = 300
     static let emptyHeight: CGFloat = 96
 
@@ -77,6 +81,7 @@ final class SwitcherContentView: NSView {
     private let hosting = NSHostingView(rootView: SwitcherView(content: .message("")))
     private let accessibilityList = SwitcherAccessibilityList()
     private let accessibilityText = SwitcherAccessibilityText()
+    private let accessibilityQuery = SwitcherAccessibilityText()
     private var model: SwitcherViewModel?
     private var message: String?
     /// The grid's top left corner in this view, which is wider than the grid when the message needs the room.
@@ -104,6 +109,8 @@ final class SwitcherContentView: NSView {
         accessibilityList.view = self
         accessibilityText.setAccessibilityParent(self)
         accessibilityText.view = self
+        accessibilityQuery.setAccessibilityParent(self)
+        accessibilityQuery.view = self
         addTrackingArea(NSTrackingArea(
             rect: .zero,
             options: [.activeAlways, .mouseMoved, .inVisibleRect],
@@ -129,9 +136,10 @@ final class SwitcherContentView: NSView {
             let grid = model.items.isEmpty
                 ? NSSize(width: Self.minimumWidth, height: Self.emptyHeight)
                 : model.layout.size
-            let width = message == nil ? grid.width : max(grid.width, Self.minimumWidth)
-            size = NSSize(width: width, height: grid.height + (message == nil ? 0 : Self.footerHeight))
-            gridOrigin = CGPoint(x: ((width - grid.width) / 2).rounded(), y: 0)
+            let header = model.query.isEmpty ? 0 : Self.queryHeight
+            let width = message == nil && header == 0 ? grid.width : max(grid.width, Self.minimumWidth)
+            size = NSSize(width: width, height: header + grid.height + (message == nil ? 0 : Self.footerHeight))
+            gridOrigin = CGPoint(x: ((width - grid.width) / 2).rounded(), y: header)
         case let .message(text):
             model = nil
             message = text
@@ -144,6 +152,15 @@ final class SwitcherContentView: NSView {
         updateAccessibility()
         announceChanges(previousSelection: previous, previousMessage: previousMessage)
         return size
+    }
+
+    /// Drops the switcher it showed, with its search, when the panel hides.
+    func clear() {
+        model = nil
+        message = nil
+        pressedItem = nil
+        hosting.rootView = SwitcherView(content: .message(""))
+        updateAccessibility()
     }
 
     /// Forgets the previous showing, so the first selection and message are announced and the pointer must move before
@@ -220,6 +237,7 @@ final class SwitcherContentView: NSView {
 
     override func accessibilityChildren() -> [Any]? {
         var children: [Any] = []
+        if model?.query.isEmpty == false { children.append(accessibilityQuery) }
         if let model, !model.items.isEmpty { children.append(accessibilityList) }
         if model?.items.isEmpty == true || message != nil { children.append(accessibilityText) }
         return children
@@ -229,10 +247,14 @@ final class SwitcherContentView: NSView {
     /// its title, app name and badges, with the selected one marked.
     var accessibilityListElement: NSAccessibilityElement { accessibilityList }
 
+    /// The search line as Accessibility sees it, such as "Search: rep"; empty without a query.
+    var accessibilityQueryText: String { accessibilityQuery.text }
+
     private func updateAccessibility() {
-        accessibilityText.text = [model?.items.isEmpty == true ? "No windows" : nil, message]
-            .compactMap { $0 }.joined(separator: ". ")
+        accessibilityText.text = [model?.emptyText, message].compactMap { $0 }.joined(separator: ". ")
         accessibilityText.frameInView = bounds
+        accessibilityQuery.text = model.map { $0.query.isEmpty ? "" : "Search: \($0.query)" } ?? ""
+        accessibilityQuery.frameInView = NSRect(x: 0, y: 0, width: bounds.width, height: gridOrigin.y)
         guard let model else {
             cells.removeAll()
             accessibilityList.cells = []
@@ -330,7 +352,7 @@ final class SwitcherAccessibilityCell: NSAccessibilityElement {
     }
 }
 
-/// "No windows" and the message, as one static text.
+/// "No windows" or "No matching windows" and the message, as one static text; or the search line.
 final class SwitcherAccessibilityText: NSAccessibilityElement {
     var text = ""
     var frameInView = NSRect.zero
@@ -348,8 +370,9 @@ final class SwitcherAccessibilityText: NSAccessibilityElement {
 
 // MARK: - SwiftUI
 
-/// Draws the switcher: the visible rows of the grid (or "No windows") and the message beneath. It draws only; the
-/// content view handles the mouse and Accessibility, so the whole view is hidden from Accessibility.
+/// Draws the switcher: the search typed so far, if any, above the visible rows of the grid (or "No windows" or "No
+/// matching windows") and the message beneath. It draws only; the content view handles the mouse and Accessibility, so
+/// the whole view is hidden from Accessibility.
 struct SwitcherView: View {
     let content: SwitcherContent
     var gridOrigin: CGPoint = .zero
@@ -358,8 +381,12 @@ struct SwitcherView: View {
         VStack(alignment: .leading, spacing: 0) {
             switch content {
             case let .switcher(model, icons):
-                if model.items.isEmpty {
-                    Text("No windows")
+                if !model.query.isEmpty {
+                    QueryText(model.query)
+                        .frame(maxWidth: .infinity, minHeight: SwitcherContentView.queryHeight, maxHeight: SwitcherContentView.queryHeight)
+                }
+                if let empty = model.emptyText {
+                    Text(empty)
                         .font(.title3)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, minHeight: SwitcherContentView.emptyHeight)
@@ -378,6 +405,28 @@ struct SwitcherView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityHidden(true)
+    }
+}
+
+/// The search typed so far, on one line, truncated at its start so the latest characters stay in view.
+private struct QueryText: View {
+    let query: String
+
+    init(_ query: String) {
+        self.query = query
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            Text(query)
+                .font(.system(size: 15, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.head)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 }
 

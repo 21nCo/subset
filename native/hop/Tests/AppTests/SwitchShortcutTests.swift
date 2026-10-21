@@ -74,7 +74,7 @@ final class SwitchShortcutTests: XCTestCase {
         XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .swallow)
         try await wait(until: { switcher.isOpen })
         let controlGrave = try Shortcut(holdModifier: .control, keyCode: KeyCode.grave)
-        tap.use(controlGrave)
+        tap.use(controlGrave, sameApp: .sameAppDefault)
         XCTAssertFalse(switcher.isOpen, "the switch under ⌥Tab is cancelled")
         XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3A, [])), .pass)
         XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .pass, "⌥Tab is no longer the shortcut")
@@ -83,6 +83,45 @@ final class SwitchShortcutTests: XCTestCase {
         XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3B, [])), .pass)
         try await wait(until: { !recorder.calls.isEmpty })
         XCTAssertEqual(recorder.calls.map(\.operation), [.focus], "only the ⌃` switch committed")
+    }
+
+    func testTypingBeforeTheSwitcherOpensIsHeldAndSearches() async throws {
+        let recorder = RecordingWindowOperator()
+        let (tap, switcher) = shortcut(recorder)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.tab, .option)), .swallow)
+        for (code, text) in [(UInt16(0x0D), Character("w")), (0x07, "x"), (KeyCode.delete, "\u{7F}"), (0x31, " "),
+                             (0x14, "3")] {
+            let press = TapInput.key(KeyEvent(.keyDown, keyCode: code, modifiers: .option, text: text))
+            XCTAssertEqual(tap.handle(press), .swallow, "typed keys are swallowed while the switch is active")
+        }
+        XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3A, [])), .pass)
+        XCTAssertEqual(reads, 0)
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[3].ref], "\"w 3\" matched only Window 3")
+        XCTAssertEqual(tap.handle(TapInput.key(KeyEvent(.keyDown, keyCode: 0x0D, modifiers: .option, text: "w"))), .pass,
+                       "once the switch ended, ⌥W reaches the app")
+        XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testTheSameAppShortcutOpensTheSwitcherOnTheFrontmostApp() async throws {
+        let recorder = RecordingWindowOperator()
+        let switcher = SwitcherController(readWindows: { WindowList(windows: self.windows) }, windowOperator: recorder,
+                                          frontmostApp: { 12 })
+        let tap = SwitchShortcutController(switcher: switcher, shortcut: .default, isTrusted: { true })
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.grave, .option)), .swallow)
+        try await wait(until: { switcher.isOpen })
+        XCTAssertEqual(switcher.model?.items.map(\.pid), [12], "only App 2's window")
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.grave, .option)), .swallow, "⌥` steps")
+        XCTAssertEqual(tap.handle(key(.flagsChanged, 0x3A, [])), .pass)
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[2].ref])
+        let controlGrave = try Shortcut(holdModifier: .control, keyCode: KeyCode.grave)
+        tap.use(.default, sameApp: controlGrave)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.grave, .option)), .pass, "⌥` is no longer a shortcut")
+        XCTAssertEqual(tap.handle(key(.keyUp, KeyCode.grave, .option)), .pass)
+        XCTAssertEqual(tap.handle(key(.keyDown, KeyCode.grave, .control)), .swallow)
+        try await wait(until: { switcher.isOpen })
+        switcher.cancel()
     }
 
     func testWhileSuspendedEveryEventPassesAndASwitchInProgressIsCancelled() async throws {

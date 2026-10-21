@@ -83,4 +83,32 @@ final class SwitcherPanelTests: XCTestCase {
         let labels = view.accessibilityChildren()?.compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
         XCTAssertEqual(labels, ["Windows", "Couldn't minimize the Xcode window"])
     }
+
+    func testTheQueryIsShownAboveTheGridAndNoMatchesIsSaid() throws {
+        let view = SwitcherContentView()
+        let windows = [entry(1, title: "One", app: "Xcode"), entry(2, title: "Two", app: "Mail")]
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: CGSize(width: 1440, height: 900))
+        let plain = view.update(.switcher(model, icons: [:]))
+        model.handle(.type("t"))
+        let searching = view.update(.switcher(model, icons: [:]))
+        XCTAssertEqual(searching.height, plain.height + SwitcherContentView.queryHeight)
+        var labels = view.accessibilityChildren()?.compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        XCTAssertEqual(labels, ["Search: t", "Windows"])
+        XCTAssertEqual(children(of: view.accessibilityListElement).map { $0.accessibilityLabel() ?? "" }, ["Two, Mail"])
+        model.handle(.type("q"))
+        view.update(.switcher(model, icons: [:]))
+        labels = view.accessibilityChildren()?.compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        XCTAssertEqual(labels, ["Search: tq", "No matching windows"])
+    }
+
+    func testHidingThePanelDropsTheQuery() {
+        let panel = SwitcherPanel()
+        var model = SwitcherViewModel(items: [.window(entry(1, title: "One", app: "Xcode"))], available: CGSize(width: 1440, height: 900))
+        model.handle(.type("o"))
+        panel.switcherView.update(.switcher(model, icons: [:]))
+        XCTAssertEqual(panel.switcherView.accessibilityQueryText, "Search: o")
+        panel.hide()
+        XCTAssertEqual(panel.switcherView.accessibilityQueryText, "")
+        XCTAssertEqual(panel.switcherView.accessibilityChildren()?.count, 0)
+    }
 }

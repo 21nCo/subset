@@ -69,6 +69,59 @@ final class KeyLayoutTests: XCTestCase {
         }
     }
 
+    func testTheSearchTakesTheCharacterTypedWithoutOption() throws {
+        let us = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.US"))
+        // ⌥E is a dead acute accent on US; the search gets the e the key types without ⌥.
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x0E, shift: false), "e")
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x0E, shift: true), "E")
+        XCTAssertEqual(us.typedCharacter(keyCode: 0x31, shift: false), " ")
+        let french = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.French"))
+        XCTAssertEqual(french.typedCharacter(keyCode: 0x00, shift: false), "q", "AZERTY types q on the US A position")
+        XCTAssertEqual(french.typedCharacter(keyCode: 0x13, shift: false), "é")
+        let greek = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.Greek"))
+        XCTAssertEqual(greek.typedCharacter(keyCode: 0x00, shift: false), "α")
+        let classification = EventClassifier.classify(
+            .key(KeyEvent(.keyDown, keyCode: 0x13, modifiers: .option, text: french.typedCharacter(keyCode: 0x13, shift: false))),
+            session: active,
+            shortcut: .default
+        )
+        XCTAssertEqual(classification, Classification(.swallow, .type("é")))
+        XCTAssertFalse(SwitcherSearch.isSearchCharacter(try XCTUnwrap(us.typedCharacter(keyCode: KeyCode.tab, shift: false))))
+    }
+
+    func testTheTapReadsTheTypedCharacterOnlyDuringASwitch() throws {
+        let us = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.US"))
+        var lookups = 0
+        let layout = { () -> KeyLayout? in
+            lookups += 1
+            return us
+        }
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 0x0E, keyDown: true))
+        event.flags = .maskAlternate
+        guard case let .key(idle) = tapInput(type: .keyDown, event: event, readsText: false, layout: layout) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(idle.text)
+        XCTAssertEqual(lookups, 0, "an ⌥ chord outside a switch never consults the layout")
+        guard case let .key(active) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertEqual(active.text, "e", "the e the key types without ⌥")
+        event.flags = [.maskAlternate, .maskCommand]
+        guard case let .key(command) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(command.text, "a ⌘ chord never types")
+        XCTAssertEqual(command.character, "e")
+        event.flags = .maskControl
+        let before = lookups
+        guard case let .key(control) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(control.text, "a ⌃ chord never types")
+        XCTAssertEqual(lookups, before, "nor consults the layout")
+    }
+
     func testAnUnknownLayoutIsNil() {
         XCTAssertNil(KeyLayout.named("com.apple.keylayout.NoSuchLayout"))
     }

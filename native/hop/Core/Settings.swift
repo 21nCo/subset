@@ -45,7 +45,7 @@ public struct Settings: Sendable, Equatable {
 
     /// The hold-to-switch shortcut.
     public private(set) var shortcut: Shortcut = .default
-    /// The same-app shortcut, which SET-96 puts to use; the hold-to-switch shortcut may not equal it.
+    /// The same-app shortcut, which switches among the frontmost app's windows; the two shortcuts are never equal.
     public private(set) var sameAppShortcut: Shortcut = .sameAppDefault
     public var shownWindows = ShownWindows()
     /// The bundle IDs of apps whose windows never appear, in the order they were added, without duplicates.
@@ -53,35 +53,59 @@ public struct Settings: Sendable, Equatable {
 
     public init() {}
 
-    /// Checks a shortcut pressed with `modifiers` and `keyCode` for use as the hold-to-switch shortcut: the
-    /// combination must be allowed (`Shortcut.init`) and must not be the same-app shortcut.
-    public func validateShortcut(modifiers: ModifierMask, keyCode: UInt16) throws(Shortcut.Invalid) -> Shortcut {
+    /// The shortcut in `role`.
+    public func shortcut(for role: ShortcutRole) -> Shortcut {
+        switch role {
+        case .switchWindows: shortcut
+        case .sameApp: sameAppShortcut
+        }
+    }
+
+    /// Checks a shortcut pressed with `modifiers` and `keyCode` for use in `role`: the combination must be allowed
+    /// (`Shortcut.init`) and must not be the other role's shortcut.
+    public func validateShortcut(
+        modifiers: ModifierMask,
+        keyCode: UInt16,
+        for role: ShortcutRole = .switchWindows
+    ) throws(Shortcut.Invalid) -> Shortcut {
         let shortcut = try Shortcut(holdModifier: modifiers, keyCode: keyCode)
-        if shortcut == sameAppShortcut { throw .sameAppShortcut(sameAppShortcut) }
+        try check(shortcut, for: role)
         return shortcut
     }
 
-    /// What the shortcut recorder makes of a key press: a new shortcut, a refusal with its reason, or Esc (with no
-    /// modifier) to stop recording. Key-ups, modifier changes and auto-repeats are ignored.
-    public func record(_ key: KeyEvent) -> ShortcutRecording {
+    private func check(_ shortcut: Shortcut, for role: ShortcutRole) throws(Shortcut.Invalid) {
+        switch role {
+        case .switchWindows where shortcut == sameAppShortcut: throw .sameAppShortcut(sameAppShortcut)
+        case .sameApp where shortcut == self.shortcut: throw .switchShortcut(self.shortcut)
+        case .switchWindows, .sameApp: break
+        }
+    }
+
+    /// What the shortcut recorder makes of a key press for `role`: a new shortcut, a refusal with its reason, or Esc
+    /// (with no modifier) to stop recording. Key-ups, modifier changes and auto-repeats are ignored.
+    public func record(_ key: KeyEvent, for role: ShortcutRole = .switchWindows) -> ShortcutRecording {
         guard key.kind == .keyDown, !key.isRepeat else { return .ignored }
         if key.keyCode == KeyCode.escape, key.modifiers.isEmpty { return .cancelled }
         do {
-            return try .recorded(validateShortcut(modifiers: key.modifiers, keyCode: key.keyCode))
+            return try .recorded(validateShortcut(modifiers: key.modifiers, keyCode: key.keyCode, for: role))
         } catch {
             return .rejected(error)
         }
     }
 
-    /// Sets the hold-to-switch shortcut, unless it is the same-app shortcut.
-    public mutating func setShortcut(_ shortcut: Shortcut) throws(Shortcut.Invalid) {
-        if shortcut == sameAppShortcut { throw .sameAppShortcut(sameAppShortcut) }
-        self.shortcut = shortcut
+    /// Sets the shortcut in `role`, unless it is the other role's shortcut.
+    public mutating func setShortcut(_ shortcut: Shortcut, for role: ShortcutRole = .switchWindows) throws(Shortcut.Invalid) {
+        try check(shortcut, for: role)
+        switch role {
+        case .switchWindows: self.shortcut = shortcut
+        case .sameApp: sameAppShortcut = shortcut
+        }
     }
 
-    /// Back to ⌥Tab, unless ⌥Tab is the same-app shortcut; then the shortcut stays as it is.
-    public mutating func resetShortcut() throws(Shortcut.Invalid) {
-        try setShortcut(.default)
+    /// Back to the role's default (⌥Tab, or ⌥` for the same-app shortcut), unless that is the other role's shortcut;
+    /// then the shortcut stays as it is.
+    public mutating func resetShortcut(_ role: ShortcutRole = .switchWindows) throws(Shortcut.Invalid) {
+        try setShortcut(role.defaultShortcut, for: role)
     }
 
     /// Adds an app to the excluded list, unless it is already there. An empty bundle ID is ignored.
@@ -99,6 +123,21 @@ public struct Settings: Sendable, Equatable {
     public func allows(bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return true }
         return !excludedApps.contains(bundleIdentifier)
+    }
+}
+
+/// The two shortcuts a user sets: hold-to-switch over every window, and the same-app shortcut over the frontmost
+/// app's windows. Both follow `Shortcut`'s rules, and they may not be equal.
+public enum ShortcutRole: Sendable, Equatable, CaseIterable {
+    case switchWindows
+    case sameApp
+
+    /// ⌥Tab, or ⌥` for the same-app shortcut.
+    public var defaultShortcut: Shortcut {
+        switch self {
+        case .switchWindows: .default
+        case .sameApp: .sameAppDefault
+        }
     }
 }
 
