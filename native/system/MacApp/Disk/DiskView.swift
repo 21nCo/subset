@@ -42,7 +42,17 @@ struct DiskView: View {
         .padding(12)
         .frame(minWidth: 760, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
         .onAppear { model.setVolumes(DiskScope.mountedVolumes()) }
-        .onReceive(Self.volumesChanged) { _ in model.setVolumes(DiskScope.mountedVolumes()) }
+        .onReceive(Self.volumesChanged) { note in
+            model.setVolumes(DiskScope.mountedVolumes(), renamed: Self.rename(in: note))
+        }
+    }
+
+    /// A renamed volume's old and new mount paths, which macOS changes with the name.
+    private static func rename(in note: Notification) -> (from: String, to: String)? {
+        guard note.name == NSWorkspace.didRenameVolumeNotification,
+              let old = note.userInfo?[NSWorkspace.oldVolumeURLUserInfoKey] as? URL,
+              let new = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL else { return nil }
+        return (old.path, new.path)
     }
 
     /// Posted when a volume is mounted, unmounted, or renamed, so the scope picker lists the volumes there are now.
@@ -126,12 +136,23 @@ struct DiskView: View {
     }
 
     private var list: some View {
+        ScrollViewReader { proxy in
+            rowList
+                // Selections the model sets (going up, a breadcrumb, Show more, switching tabs) may be off screen.
+                .onChange(of: model.selection, initial: true) { _, selection in
+                    if let selection { proxy.scrollTo(selection) }
+                }
+        }
+    }
+
+    private var rowList: some View {
         List(selection: $model.selection) {
             ForEach(model.sections) { section in
                 Section {
                     ForEach(section.rows) { row in
                         DiskRowView(row: row, toggle: { model.toggle(row.id) }, open: { model.open(row.id) })
                             .tag(Optional(row.id))
+                            .id(row.id)
                     }
                 } header: {
                     if let title = section.title { Text(title) }

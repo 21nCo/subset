@@ -471,6 +471,44 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.scope, .home)
     }
 
+    /// A renamed volume stays the scope under its new name, whether its mount path stayed (the startup disk) or moved
+    /// with the name; only unmounting falls back to Home.
+    func testARenamedVolumeStaysTheScope() {
+        let model = fixture.model()
+        model.setVolumes([.volume(name: "Macintosh HD", path: "/")])
+        model.scope = .volume(name: "Macintosh HD", path: "/")
+        model.setVolumes([.volume(name: "Main", path: "/")])
+        XCTAssertEqual(model.scope, .volume(name: "Main", path: "/"))
+
+        model.setVolumes([.volume(name: "Main", path: "/"), .volume(name: "External", path: "/Volumes/External")])
+        model.scope = .volume(name: "External", path: "/Volumes/External")
+        let renamed = DiskScope.volume(name: "Backup", path: "/Volumes/Backup")
+        model.setVolumes([.volume(name: "Main", path: "/"), renamed],
+                         renamed: (from: "/Volumes/External", to: "/Volumes/Backup"))
+        XCTAssertEqual(model.scope, renamed)
+        XCTAssertEqual(model.scopes.map(\.title), ["Home", "Main", "Backup"])
+
+        model.setVolumes([.volume(name: "Main", path: "/")])
+        XCTAssertEqual(model.scope, .home)
+    }
+
+    /// The live analysis runs detached, off the main actor; cancelling the scan's task must reach it.
+    func testCancellingTheCallerCancelsDetachedWork() async {
+        let started = expectation(description: "work started")
+        let caller = Task {
+            await DiskScanService.detached { () -> Bool in
+                started.fulfill()
+                let deadline = Date().addingTimeInterval(10)
+                while !Task.isCancelled, Date() < deadline { usleep(1_000) }
+                return Task.isCancelled
+            }
+        }
+        await fulfillment(of: [started], timeout: 10)
+        caller.cancel()
+        let sawCancel = await caller.value
+        XCTAssertTrue(sawCancel, "the detached work ran to its deadline without seeing Cancel")
+    }
+
     // MARK: Accessibility
 
     func testEveryRowBreadcrumbAndHeaderHasASpokenLabel() async throws {

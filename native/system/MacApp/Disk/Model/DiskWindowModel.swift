@@ -96,9 +96,13 @@ public final class DiskWindowModel {
         [.home] + (chosenFolder.map { [$0] } ?? []) + volumes
     }
 
-    public func setVolumes(_ volumes: [DiskScope]) {
+    /// Lists the volumes mounted now. A volume selected as the scope stays selected, under its new name and mount path
+    /// when `renamed` (its old and new mount paths) says it was renamed; one no longer mounted leaves Home selected.
+    public func setVolumes(_ volumes: [DiskScope], renamed: (from: String, to: String)? = nil) {
         self.volumes = volumes
-        if case .volume = scope, !volumes.contains(scope) { scope = .home }
+        guard case let .volume(_, path) = scope else { return }
+        let mountPath = renamed.map { $0.from == path ? $0.to : path } ?? path
+        scope = volumes.first { $0.path(home: home) == mountPath } ?? .home
     }
 
     /// Selects a folder from the open panel as the scope.
@@ -198,7 +202,7 @@ public final class DiskWindowModel {
         rebuild()
         let analysis = await service.analyze(result, scope == .home)
         // A cancel during analysis, or a newer scan, drops it.
-        guard generation == self.generation, phase == .analyzing else { return }
+        guard generation == self.generation, phase == .analyzing, let analysis else { return }
         self.analysis = analysis
         phase = .completed
         rebuild()

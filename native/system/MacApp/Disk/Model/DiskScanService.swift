@@ -67,15 +67,15 @@ public struct DiskScanService: Sendable {
     /// `Result` rather than a typed throw, whose function types need macOS 15.
     public var scan: @Sendable (_ root: String, _ onProgress: @escaping @Sendable (DiskScanProgress) -> Void) async
         -> Result<DiskScanResult, DiskScanError>
-    /// Works out origins and suggestions for a scan. `includeDocker` asks the Docker-compatible CLI for its image space,
-    /// which no folder holds.
-    public var analyze: @Sendable (_ result: DiskScanResult, _ includeDocker: Bool) async -> DiskAnalysis
+    /// Works out origins and suggestions for a scan; `nil` when the calling task was cancelled first. `includeDocker`
+    /// asks the Docker-compatible CLI for its image space, which no folder holds.
+    public var analyze: @Sendable (_ result: DiskScanResult, _ includeDocker: Bool) async -> DiskAnalysis?
     /// The summary of the volume holding a folder.
     public var volume: @Sendable (_ root: String) async -> VolumeSummary
 
     public init(scan: @escaping @Sendable (String, @escaping @Sendable (DiskScanProgress) -> Void) async
                     -> Result<DiskScanResult, DiskScanError>,
-                analyze: @escaping @Sendable (DiskScanResult, Bool) async -> DiskAnalysis,
+                analyze: @escaping @Sendable (DiskScanResult, Bool) async -> DiskAnalysis?,
                 volume: @escaping @Sendable (String) async -> VolumeSummary) {
         self.scan = scan
         self.analyze = analyze
@@ -88,13 +88,24 @@ public struct DiskScanService: Sendable {
             await DiskScanService.scan(DiskScanner(), root: root, onProgress: onProgress)
         },
         analyze: { result, includeDocker in
-            let docker = includeDocker ? await DockerCLI().imageUsage() : nil
-            // Reading apps checks each one's signature, so it runs off the caller's actor.
-            return await Task.detached(priority: .utility) {
-                DiskAnalysis(tree: result.tree, context: .live(dockerImages: docker))
-            }.value
+            let docker = includeDocker && !Task.isCancelled ? await DockerCLI().imageUsage() : nil
+            // Reading apps checks each one's signature, so it runs off the caller's actor. Cancel stops it between
+            // steps: a read of the apps under way finishes, and the matching after it is skipped.
+            return await DiskScanService.detached {
+                guard !Task.isCancelled else { return nil }
+                let context = ReclaimContext.live(dockerImages: docker)
+                guard !Task.isCancelled else { return nil }
+                return DiskAnalysis(tree: result.tree, context: context)
+            }
         },
         volume: { root in await VolumeSummary.read(volumeOf: URL(fileURLWithPath: root)) })
+
+    /// Runs `work` off the caller's actor, cancelling it when the calling task is cancelled, which a detached task alone
+    /// does not.
+    public static func detached<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        let task = Task.detached(priority: .utility, operation: work)
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
 
     /// Runs `scanner` on `root`, its error as a `Result`.
     public static func scan(_ scanner: DiskScanner, root: String,

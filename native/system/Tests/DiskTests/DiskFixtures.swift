@@ -76,7 +76,7 @@ final class DiskFixture {
 
     /// The real scanner, the fixture's analysis, and the fixture volume.
     func service(scan: (@Sendable (String, @escaping @Sendable (DiskScanProgress) -> Void) async -> Result<DiskScanResult, DiskScanError>)? = nil,
-                 analyze: (@Sendable (DiskScanResult, Bool) async -> DiskAnalysis)? = nil,
+                 analyze: (@Sendable (DiskScanResult, Bool) async -> DiskAnalysis?)? = nil,
                  volume: (@Sendable (String) async -> VolumeSummary)? = nil) -> DiskScanService {
         let home = home
         return DiskScanService(
