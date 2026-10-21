@@ -19,6 +19,9 @@ jobs:
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
       - run: npm test --workspace=@subset/usage
+      # The Timer daemon tests run against a real Unix socket and use the built @subset/timer.
+      - run: npm test --workspace=@subset.dev/timer
+        timeout-minutes: 10
 
   # Builds the Breaks menu bar app and runs its unit tests. Only the macOS scheme: the runner image has no
   # matching iOS Simulator runtime, so the iOS targets are left out on purpose. No secrets and no signing.
