@@ -74,7 +74,7 @@ test('tools/list returns the 12 tools with their schemas, annotations and descri
   assert.deepEqual(byName.timer_pause.required, ['id']);
   assert.equal(byName.timer_reset.properties.name.allOf.length, schemas.inputs.create.properties.name.allOf.length);
   assert.equal(byName.timer_preset_remove.properties.id.pattern, schemas.inputs['presets.remove'].properties.id.pattern);
-  assert.deepEqual(Object.keys(byName.timer_start.properties), ['preset', 'durationSeconds', 'until', 'stopwatch', 'interval', 'name', 'sound']);
+  assert.deepEqual(Object.keys(byName.timer_start.properties), ['preset', 'durationSeconds', 'until', 'stopwatch', 'interval', 'id', 'name', 'sound', 'laps', 'ticks']);
   assert.deepEqual(Object.keys(byName.timer_start.properties.interval.properties), ['work', 'rest', 'rounds', 'prep', 'cooldown', 'segments']);
   assert.deepEqual(byName.timer_start.properties.interval.properties.segments.items.properties.phase.enum, ['prep', 'work', 'rest', 'cooldown']);
   assert.deepEqual(byName.timer_preset_save.required, ['name', 'rounds']);
@@ -157,6 +157,38 @@ test('timer_start creates and starts a timer in each mode', async (t) => {
   clock.advance(91_000);
   assert.ok(sink.received.some(({ alert }) => alert.timerId === tea.stored.definition.id && alert.kind === 'finish'));
   assert.equal((await timer(tea.stored.definition.id)).runtime.status, 'finished');
+});
+
+test('timer_start starts an idle timer by id, and sets laps and ticks on a new one', async (t) => {
+  const { call, timer, op } = await mcpSession(t, { fixture: true });
+  // The board's Start on a reset timer: it keeps its definition.
+  const before = (await timer('t_ac50bvkp')).definition;
+  const started = await call('timer_start', { id: 't_ac50bvkp' });
+  assertWrite(started, 't_ac50bvkp');
+  assert.match(started.content[0].text, /^Started Pomodoro \(t_ac50bvkp\)\. Ends at /);
+  assert.deepEqual((await timer('t_ac50bvkp')).definition, before);
+  assert.equal((await timer('t_ac50bvkp')).runtime.status, 'running');
+
+  const laps = await call('timer_start', { durationSeconds: 600, laps: true, ticks: false, name: 'Laps' });
+  const lapped = await timer(laps.structuredContent.affectedTimerId);
+  assert.deepEqual([lapped.definition.lapsEnabled, lapped.definition.countdownTicks], [true, false]);
+  const quiet = await call('timer_start', { preset: 'tabata', ticks: false });
+  const ticked = await timer(quiet.structuredContent.affectedTimerId);
+  assert.deepEqual([ticked.definition.name, ticked.definition.countdownTicks, ticked.definition.rounds], ['Tabata', false, 8]);
+  // Ticks are on by default only for intervals.
+  assert.equal((await timer((await call('timer_start', { durationSeconds: 60, ticks: true })).structuredContent.affectedTimerId)).definition.countdownTicks, true);
+
+  const store = async () => (await op('list', {})).body.timers.map((snapshot) => snapshot.runtime);
+  const unchanged = await store();
+  // id starts a timer as it is, so the fields of a new timer are refused with it.
+  assert.deepEqual(assertError(await call('timer_start', { id: 't_v9pdg8p9', name: 'Other' }), 'invalid_input').issues, [{ path: 'name', message: 'name applies only to a new timer; id starts an existing one as it is.' }]);
+  assertError(await call('timer_start', { id: 't_v9pdg8p9', ticks: true }), 'invalid_input');
+  assertError(await call('timer_start', { id: 't_v9pdg8p9', durationSeconds: 60 }), 'invalid_input');
+  assert.deepEqual(assertError(await call('timer_start', { stopwatch: true, laps: true }), 'invalid_input').issues, [{ path: 'laps', message: 'laps applies only to a countdown (durationSeconds or until).' }]);
+  // Only an idle timer starts; the daemon refuses the others.
+  assertError(await call('timer_start', { id: 't_adygqpxx' }), 'invalid_state');
+  assertError(await call('timer_start', { id: 't_00000000' }), 'not_found');
+  assert.deepEqual(await store(), unchanged);
 });
 
 test('each write tool changes the daemon state and returns the board with the affected timer', async (t) => {
@@ -246,7 +278,7 @@ test('invalid inputs return isError with the SET-74 or daemon code and change no
   const unchanged = await store();
 
   let error = assertError(await call('timer_start', { durationSeconds: 60, stopwatch: true }), 'invalid_input');
-  assert.match(error.message, /exactly one of preset, durationSeconds, until, stopwatch, and interval, not durationSeconds and stopwatch/);
+  assert.match(error.message, /exactly one of preset, durationSeconds, until, stopwatch, interval, and id, not durationSeconds and stopwatch/);
   assertError(await call('timer_start', {}), 'invalid_input');
   assertError(await call('timer_start', { interval: { work: 20, segments: [{ phase: 'work', seconds: 20 }], rounds: 2 } }), 'invalid_input');
   assert.deepEqual(assertError(await call('timer_start', { interval: { rest: 20, rounds: 2 } }), 'invalid_input').issues, [{ path: 'interval', message: 'interval needs exactly one of work and segments.' }]);

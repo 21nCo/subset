@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "web",
+    "mcp-app",
     "skills",
     "README.md"
   ],

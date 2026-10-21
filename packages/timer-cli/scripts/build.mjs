@@ -1,6 +1,6 @@
 // Bundles the CLI, its daemon and alert sinks with the private @subset/timer package (and its zod
 // dependency) inlined into dist/cli.mjs, and copies the built board from apps/timer/dist into web/
-// for `serve`. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
+// for `serve`. The apps/timer build writes the MCP App view to mcp-app/board.html itself. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
 // dist/mcp-server.mjs, and code both use to dist/common.mjs. The published package has no runtime dependencies,
 // so dist/THIRD_PARTY_NOTICES.md carries the licences of the packages bundled into it.
 import { builtinModules } from 'node:module';
@@ -17,7 +17,7 @@ const exists = (file) => stat(file).then(() => true, () => false);
 if (process.argv.includes('--check')) {
   // prepack runs the build first; this refuses to pack an incomplete package.
   const cli = path.join(root, 'dist/cli.mjs');
-  for (const file of [cli, path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), path.join(root, 'web/index.html'), path.join(root, 'skills/subset-timer/SKILL.md'), path.join(root, 'README.md')]) {
+  for (const file of [cli, path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), path.join(root, 'web/index.html'), path.join(root, 'mcp-app/board.html'), path.join(root, 'skills/subset-timer/SKILL.md'), path.join(root, 'README.md')]) {
     if (!(await exists(file))) { console.error(`Missing ${path.relative(root, file)}. Run npm run build at the repository root first.`); process.exit(1); }
   }
   if (!(await readFile(cli, 'utf8')).startsWith('#!/usr/bin/env node')) { console.error('dist/cli.mjs has no shebang.'); process.exit(1); }
@@ -29,7 +29,7 @@ if (process.argv.includes('--check')) {
   process.exit(0);
 }
 
-if (!(await exists(path.join(webSource, 'index.html')))) { console.error('apps/timer/dist is missing. Build @subset/timer-web first.'); process.exit(1); }
+if (!(await exists(path.join(webSource, 'index.html'))) || !(await exists(path.join(root, 'mcp-app/board.html')))) { console.error('apps/timer/dist or mcp-app/board.html is missing. Build @subset/timer-web first.'); process.exit(1); }
 await rm(path.join(root, 'dist'), { recursive: true, force: true });
 const { output } = await build({
   input: { cli: path.join(root, 'src/cli.mjs') },

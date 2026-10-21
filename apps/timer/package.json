@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
-    "build": "vite build"
+    "build": "vite build && vite build --config vite.mcp-app.config.ts"
   },
   "dependencies": {
     "@subset/timer": "*",
-    "svelte": "^5.57.1"
+    "svelte": "^5.57.1",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

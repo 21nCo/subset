@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pidAlive, readLock } from '../../src/daemon/index.mjs';
@@ -60,6 +61,10 @@ test('subset-timer mcp speaks MCP on stdio, exits 0 when stdin closes, and leave
 
   const listed = await mcp.request('tools/list', {});
   assert.equal(listed.result.tools.length, 12);
+  // The installed package serves its built MCP App view (SET-80).
+  const board = await mcp.request('resources/read', { uri: 'ui://subset-timer/board@1' });
+  assert.equal(board.result.contents[0].mimeType, 'text/html;profile=mcp-app');
+  assert.equal(board.result.contents[0].text, readFileSync(join(PACKAGE_ROOT, 'mcp-app/board.html'), 'utf8'));
 
   // The first call starts the daemon.
   const started = await mcp.request('tools/call', { name: 'timer_start', arguments: { durationSeconds: 1500, name: 'Tea' } });
@@ -76,7 +81,7 @@ test('subset-timer mcp speaks MCP on stdio, exits 0 when stdin closes, and leave
   assert.deepEqual(await within(mcp.exited, 10_000, 'the MCP server to exit'), { code: 0, signal: null });
   // stdout held only complete JSON-RPC frames; logs went to stderr.
   assert.equal(mcp.rest(), '');
-  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]), [1, 2, 3, 4].map((id) => ['2.0', id, true]));
+  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]), [1, 2, 3, 4, 5].map((id) => ['2.0', id, true]));
   assert.match(mcp.stderr(), /^subset-timer mcp: 0\.1\.0 serving on stdio$/m);
 
   // The daemon and the timer outlive the session.
