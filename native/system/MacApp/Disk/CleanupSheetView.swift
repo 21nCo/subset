@@ -130,8 +130,9 @@ struct CleanupSheetView: View {
     private var buttons: some View {
         HStack {
             if sheet.isRunning {
-                ProgressView().controlSize(.small).accessibilityLabel("Cleaning up")
-                Text("Cleaning up…").foregroundStyle(.secondary)
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(model.isStoppingCleanup ? "Stopping" : "Cleaning up")
+                Text(model.isStoppingCleanup ? "Stopping…" : "Cleaning up…").foregroundStyle(.secondary)
             }
             Spacer()
             switch sheet.phase {
@@ -145,6 +146,7 @@ struct CleanupSheetView: View {
             case .running:
                 Button("Stop") { model.stopCleanup() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(model.isStoppingCleanup)
             case .finished:
                 Button("Done") { model.dismissCleanup() }
                     .keyboardShortcut(.defaultAction)

@@ -106,7 +106,9 @@ public struct CleanupCommands: Sendable {
     /// The Docker CLI and its current local socket, or why there are none.
     let dockerTarget: @Sendable () -> Result<(executable: String, endpoint: String), ContainerUnavailable>
 
-    public init(home: String, runner: any CommandRunning = ProcessCommandRunner()) {
+    /// Commands run in a process group of their own (`ProcessGroupRunner`), so a result comes only once the tool and
+    /// every program it started have exited.
+    public init(home: String, runner: any CommandRunning = ProcessGroupRunner()) {
         self.init(home: home, runner: runner, timeout: Self.timeout, candidates: { $0.candidatePaths(home: home) },
                   dockerTarget: { DockerCLI(home: home).localTarget() })
     }

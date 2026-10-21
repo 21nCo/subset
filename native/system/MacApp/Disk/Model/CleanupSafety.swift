@@ -76,7 +76,7 @@ public struct CleanupItem: Hashable, Sendable {
     public let path: String
     /// The rule's folder that holds it, which a cleanup never removes.
     public let root: String
-    /// The volume and inode the scan read; an item without them is never moved.
+    /// The volume and inode the scan read; an item without both is never moved.
     public let identity: DiskItemIdentity?
     /// Its private size when scanned: what emptying the Trash frees at least once it is there. `nil` when unknown.
     public let privateBytes: UInt64?
@@ -99,19 +99,21 @@ public struct CleanupItem: Hashable, Sendable {
 
     /// Checks, just before the move, that the item may still be moved: it is not protected, it is inside its rule's
     /// folder and not that folder, no folder above it has become a link elsewhere, it is not a link itself, and it is
-    /// still the file the scan read. Returns why it is skipped, or `nil`.
-    func revalidate(_ protection: CleanupProtection) -> CleanupSkipReason? {
+    /// still the file the scan read: the same volume and inode, both read then and now. Returns why it is skipped, or
+    /// `nil`. `identify` reads what is at a path now (`DiskItemIdentity.current`).
+    func revalidate(_ protection: CleanupProtection,
+                    identify: (String) -> DiskItemCurrent = DiskItemIdentity.current) -> CleanupSkipReason? {
         if let reason = protection.refusal(path) { return .protected(reason) }
         guard CleanupProtection.isPlain(root) else { return .outsideRoot }
         if CleanupProtection.key(path) == CleanupProtection.key(root) { return .isRoot }
         guard path.hasPrefix(root == "/" ? "/" : root + "/") else { return .outsideRoot }
-        guard let identity else { return .notIdentified }
+        guard let identity, identity.isComplete else { return .notIdentified }
         // Every folder above it, its rule's folder included, must still be the folder of that name: one replaced by a
         // link would lead the move somewhere else.
         let parent = (path as NSString).deletingLastPathComponent
         guard let real = Self.realPath(parent) else { return .missing }
         guard real == parent else { return .outsideRoot }
-        switch DiskItemIdentity.current(atPath: path) {
+        switch identify(path) {
         case .missing: return .missing
         case .symlink: return .symlink
         case let .unreadable(code): return .unreadable(code)
@@ -138,7 +140,9 @@ public enum CleanupSkipReason: Equatable, Sendable {
     case isRoot
     /// Another file is at its path now.
     case replaced
-    /// The scan did not read its volume and inode, so it cannot be checked.
+    /// Another file took its place between the check and the move; it was moved back from the Trash.
+    case replacedWhileMoving
+    /// The scan did not read both its volume and its inode, so it cannot be checked.
     case notIdentified
     case unreadable(Int32)
     /// The cleanup was stopped before this item.
@@ -152,6 +156,8 @@ public enum CleanupSkipReason: Equatable, Sendable {
         case .outsideRoot: "Its path no longer leads inside the rule's folder."
         case .isRoot: "It is the rule's folder itself, which is never removed."
         case .replaced: "Another item has taken its place since the scan."
+        case .replacedWhileMoving:
+            "Another item took its place just before the move; it was put back from the Trash, and this item was not moved."
         case .notIdentified: "The scan could not read which file it was, so it cannot be checked."
         case let .unreadable(code): "It could not be checked: \(String(cString: strerror(code)))."
         case .stopped: "The cleanup was stopped before this item."

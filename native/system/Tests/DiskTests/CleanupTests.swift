@@ -198,6 +198,132 @@ final class CleanupTests: XCTestCase {
             .revalidate(protection), .notIdentified)
     }
 
+    func testCleanupNeedsTheVolumeAndTheInodeBothReadAndEqual() async throws {
+        XCTAssertTrue(DiskItemIdentity(device: 1, inode: 10).isSameFile(as: DiskItemIdentity(device: 1, inode: 10)))
+        for (a, b) in [((1, 10), (0, 10)), ((0, 10), (1, 10)), ((0, 10), (0, 10)), ((1, 10), (2, 10)), ((1, 10), (1, 11))] {
+            XCTAssertFalse(DiskItemIdentity(device: UInt32(a.0), inode: UInt64(a.1))
+                .isSameFile(as: DiskItemIdentity(device: UInt32(b.0), inode: UInt64(b.1))), "\(a) \(b)")
+        }
+
+        try fixture.write("Library/Developer/Xcode/DerivedData/A-1/Build/app", bytes: 4_000)
+        let match = try await match(.xcodeDerivedData)
+        let item = CleanupItem(try XCTUnwrap(match.items.first))
+        let scanned = try XCTUnwrap(item.identity)
+        XCTAssertNil(item.revalidate(protection))
+        // The scan read no volume.
+        let unknownVolume = CleanupItem(path: item.path, root: item.root, identity: DiskItemIdentity(device: 0, inode: scanned.inode),
+                                        privateBytes: 1, isLowerBound: false)
+        XCTAssertEqual(unknownVolume.revalidate(protection), .notIdentified)
+        // The volume cannot be read now.
+        XCTAssertEqual(item.revalidate(protection) { _ in .unreadable(ENOTSUP) }, .unreadable(ENOTSUP))
+        // The same inode on another volume.
+        let otherVolume = DiskItemIdentity(device: scanned.device &+ 1, inode: scanned.inode)
+        XCTAssertEqual(item.revalidate(protection) { _ in .item(otherVolume, isDirectory: true) }, .replaced)
+
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: mover(), freeSpace: { nil },
+                                       identify: { _ in .unreadable(ENOTSUP) })
+        let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        XCTAssertEqual(result.outcome, .trash([.init(path: item.path, status: .skipped(.unreadable(ENOTSUP)))]))
+        XCTAssertEqual(recorder.moved, [])
+    }
+
+    func testOnlyTheScannedItemFoundInTheTrashCountsAsMoved() async throws {
+        for name in ["Nil-1", "Gone-2", "Unread-3", "Kept-4"] {
+            try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 4_000)
+        }
+        let match = try await match(.xcodeDerivedData)
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        let bin = fixture.path("Bin")
+        let move = mover()
+        // The Trash says nothing, names a place where nothing is, or holds what cannot be read.
+        let trash: @Sendable (URL) throws -> URL? = { url in
+            let moved = try move(url)
+            switch url.lastPathComponent {
+            case "Nil-1": return nil
+            case "Gone-2": return URL(fileURLWithPath: bin + "/nothing-here")
+            default: return moved
+            }
+        }
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: trash, freeSpace: { nil },
+                                       identify: { path in
+                                           path == bin + "/Unread-3" ? .unreadable(ENOTSUP) : DiskItemIdentity.current(atPath: path)
+                                       })
+        let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        guard case let .trash(outcomes) = result.outcome else { return XCTFail("\(result.outcome)") }
+        let status = Dictionary(uniqueKeysWithValues: outcomes.map { (($0.path as NSString).lastPathComponent, $0.status) })
+        XCTAssertEqual(status["Kept-4"], .moved(trashPath: bin + "/Kept-4"))
+        for (name, mention) in [("Nil-1", "did not say where"), ("Gone-2", bin + "/nothing-here"), ("Unread-3", bin + "/Unread-3")] {
+            guard case let .failed(message) = status[name] else { return XCTFail("\(name): \(String(describing: status[name]))") }
+            XCTAssertTrue(message.contains(mention), message)
+        }
+    }
+
+    func testAnItemSwappedInJustBeforeTheMoveIsPutBackFromTheTrash() async throws {
+        for name in ["Other-1", "Link-2", "Stuck-3"] {
+            try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 4_000)
+        }
+        let match = try await match(.xcodeDerivedData)
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        let aside = fixture.path("Aside")
+        try FileManager.default.createDirectory(atPath: aside, withIntermediateDirectories: true)
+        let move = mover()
+        // Between the check and the move, each item is put aside and something else takes its path: another folder, a
+        // link, or another folder that, once in the Trash, finds its path taken again.
+        let trash: @Sendable (URL) throws -> URL? = { url in
+            let manager = FileManager.default, name = url.lastPathComponent
+            try manager.moveItem(atPath: url.path, toPath: aside + "/" + name)
+            if name == "Link-2" {
+                try manager.createSymbolicLink(atPath: url.path, withDestinationPath: aside + "/" + name)
+            } else {
+                try manager.createDirectory(atPath: url.path, withIntermediateDirectories: false)
+                manager.createFile(atPath: url.path + "/swapped", contents: Data())
+            }
+            let moved = try move(url)
+            if name == "Stuck-3" { try manager.createDirectory(atPath: url.path, withIntermediateDirectories: false) }
+            return moved
+        }
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: trash, freeSpace: { nil })
+        let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        guard case let .trash(outcomes) = result.outcome else { return XCTFail("\(result.outcome)") }
+        let status = Dictionary(uniqueKeysWithValues: outcomes.map { (($0.path as NSString).lastPathComponent, $0.status) })
+        let manager = FileManager.default
+        XCTAssertEqual(status["Other-1"], .skipped(.replacedWhileMoving))
+        XCTAssertTrue(manager.fileExists(atPath: derivedData("Other-1/swapped")), "the other folder is back")
+        XCTAssertEqual(status["Link-2"], .skipped(.replacedWhileMoving))
+        XCTAssertEqual(DiskItemIdentity.current(atPath: derivedData("Link-2")), .symlink, "the link is back")
+        guard case let .failed(message) = status["Stuck-3"] else { return XCTFail("\(String(describing: status["Stuck-3"]))") }
+        XCTAssertTrue(message.contains(fixture.path("Bin/Stuck-3")), message)
+        XCTAssertTrue(manager.fileExists(atPath: fixture.path("Bin/Stuck-3/swapped")), "nothing was put over the new folder")
+        // The confirmed items themselves were never moved to the Trash.
+        for name in ["Other-1", "Link-2", "Stuck-3"] {
+            XCTAssertTrue(manager.fileExists(atPath: aside + "/\(name)/Build/app"), name)
+            XCTAssertFalse(manager.fileExists(atPath: fixture.path("Bin/\(name)/Build/app")), name)
+        }
+    }
+
+    func testAFolderAboveTheItemTurnedIntoALinkJustBeforeTheMovePutsTheOtherItemBack() async throws {
+        try fixture.write("Library/Developer/Xcode/DerivedData/A-1/Build/app", bytes: 4_000)
+        let match = try await match(.xcodeDerivedData)
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        let rule = fixture.path("Library/Developer/Xcode/DerivedData"), real = fixture.path("Real"), decoy = fixture.path("Decoy")
+        let move = mover()
+        let trash: @Sendable (URL) throws -> URL? = { url in
+            let manager = FileManager.default
+            try manager.moveItem(atPath: rule, toPath: real)
+            try manager.createDirectory(atPath: decoy + "/A-1", withIntermediateDirectories: true)
+            try manager.createSymbolicLink(atPath: rule, withDestinationPath: decoy)
+            return try move(url)
+        }
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: trash, freeSpace: { nil })
+        let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        XCTAssertEqual(result.outcome, .trash([.init(path: derivedData("A-1"), status: .skipped(.replacedWhileMoving))]))
+        // Put back through the same path, so where the link leads.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: decoy + "/A-1"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.path("Bin/A-1")))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: real + "/A-1/Build/app"), "the confirmed item stayed")
+    }
+
     func testSkippedItemsAreReportedAndTheRestMoved() async throws {
         for name in ["Gone-1", "Kept-2"] {
             try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 4_000)
@@ -321,7 +447,7 @@ final class CleanupTests: XCTestCase {
     func testAStubCommandsExitStatusOutputAndTimeoutAreReported() async throws {
         // A real process: the stub prints its path and arguments, then fails.
         try stub("npm", "echo \"$0 $*\"; echo warning >&2; exit 3")
-        let commands = commands(runner: ProcessCommandRunner())
+        let commands = commands(runner: ProcessGroupRunner())
         let npm = try commands.resolve(.npm).get()
         XCTAssertEqual(npm.executable, fixture.path("Bin/npm"))
         guard case let .exited(3, failed) = await commands.run(npm) else { return XCTFail("npm stub did not exit 3") }
@@ -341,9 +467,103 @@ final class CleanupTests: XCTestCase {
         XCTAssertEqual(output.omitted, 50)
 
         try stub("yarn", "sleep 20")
-        let slow = self.commands(runner: ProcessCommandRunner(), timeout: .milliseconds(300))
+        let slow = self.commands(runner: ProcessGroupRunner(), timeout: .milliseconds(300))
         let timedOut = await slow.run(try slow.resolve(.yarn).get())
         XCTAssertEqual(timedOut, .timedOut(seconds: 0))
+    }
+
+    func testTheLiveCommandsStopAfterTenMinutesAndRunInProcessGroups() {
+        let live = CleanupCommands(home: fixture.home)
+        XCTAssertEqual(live.timeout, .seconds(600))
+        XCTAssertEqual(CleanupCommands.timeout, .seconds(600))
+        XCTAssertTrue(live.runner is ProcessGroupRunner)
+    }
+
+    func testADockerCommandWithoutALocalDaemonOrFromAnotherPathIsNotRun() async throws {
+        try stub("docker", "exit 0")
+        let bin = fixture.path("Bin")
+        let match = ReclaimMatch(rule: ReclaimRules.rule(.dockerImages), app: nil, identifier: nil, items: [],
+                                 bytes: .unavailable("x"))
+        let cases: [(Result<(executable: String, endpoint: String), ContainerUnavailable>, CleanupCommandUnavailable)] = [
+            (.failure(.remoteContext(name: "cloud", host: "tcp://example:2376")),
+             .docker(ContainerUnavailable.remoteContext(name: "cloud", host: "tcp://example:2376").reason)),
+            (.failure(.cliNotFound), .docker(ContainerUnavailable.cliNotFound.reason)),
+            // A CLI the context names that is not one of the fixed paths.
+            (.success((fixture.path("Elsewhere/docker"), "unix:///fixture/docker.sock")),
+             .notFound(tool: .docker, paths: [bin + "/docker"])),
+        ]
+        for (target, reason) in cases {
+            let runner = RecordingRunner(recorder: recorder)
+            let commands = CleanupCommands(home: fixture.home, runner: runner, timeout: CleanupCommands.timeout,
+                                           candidates: { [bin + "/" + $0.rawValue] }, dockerTarget: { target })
+            let preview = try CleanupPreview.make(match, selection: .all, commands: commands, protection: protection)
+            XCTAssertFalse(preview.canConfirm)
+            XCTAssertEqual(preview.action, .command(.docker, .failure(reason)))
+            let executor = CleanupExecutor(protection: protection, commands: commands, trash: mover(), freeSpace: { nil })
+            let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+            XCTAssertEqual(result.outcome, .command(nil, .refused(reason.text)))
+        }
+        XCTAssertTrue(recorder.runs.isEmpty)
+    }
+
+    func testAStoppedOrTimedOutCommandFinishesOnlyOnceItAndItsChildHaveExited() async throws {
+        try fixture.populate()
+        let pids = fixture.path("pids")
+        // Ignores SIGTERM, as does its child.
+        try stub("brew", "[ \"$1\" = warm ] && exit 0\ntrap '' TERM\nsleep 30 &\necho $$ $! > '\(pids)'\nwait")
+        _ = await ProcessGroupRunner().run(fixture.path("Bin/brew"), arguments: ["warm"], environment: [:], timeout: .seconds(30))
+        let alive = Readings()
+        // The free space after is read only once both have exited: each reading notes which of them still run.
+        let freeSpace: @Sendable () -> Int64? = {
+            let running = (try? String(contentsOfFile: pids, encoding: .utf8))?.split(separator: " ")
+                .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                .filter { kill($0, 0) == 0 } ?? []
+            alive.append(running)
+            return 1_000
+        }
+        let runner = ProcessGroupRunner(grace: .milliseconds(500))
+        let service = DiskCleanupService(
+            protection: protection, commands: commands(runner: runner),
+            executor: CleanupExecutor(protection: protection, commands: commands(runner: runner), trash: mover(),
+                                      freeSpace: freeSpace))
+        let model = DiskWindowModel(service: fixture.service(), cleanup: service, format: fixture.format, home: fixture.home)
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        model.tab = .suggestions
+        let homebrew = try XCTUnwrap(model.analysis?.matches.firstIndex { $0.rule.id == .homebrewCache })
+        model.beginCleanup(.match(homebrew))
+        model.perform(try XCTUnwrap(model.cleanupSheet?.confirm()))
+        try await DiskFixture.wait { FileManager.default.fileExists(atPath: pids) }
+        try await Task.sleep(for: .milliseconds(100))
+        let both = try String(contentsOfFile: pids, encoding: .utf8).split(separator: " ")
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        XCTAssertEqual(both.count, 2)
+
+        model.stopCleanup()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(model.isCleaning, "still cleaning while the command ignores SIGTERM")
+        XCTAssertTrue(model.isStoppingCleanup)
+        XCTAssertFalse(model.canCleanUp(.match(homebrew)))
+        try await DiskFixture.wait { !model.isCleaning }
+        XCTAssertFalse(model.isStoppingCleanup)
+        for pid in both { XCTAssertEqual(kill(pid, 0), -1, "\(pid) is still running") }
+        guard case let .finished(result) = model.cleanupSheet?.phase else { return XCTFail("not finished") }
+        XCTAssertEqual(result.outcome, .command(try commands().resolve(.brew).get(), .cancelled))
+        XCTAssertEqual(alive.last, [], "the free space was read after both exited")
+
+        // The same at the timeout.
+        try FileManager.default.removeItem(atPath: pids)
+        let slow = commands(runner: runner, timeout: .milliseconds(300))
+        let executor = CleanupExecutor(protection: protection, commands: slow, trash: mover(), freeSpace: freeSpace)
+        let match = ReclaimMatch(rule: ReclaimRules.rule(.homebrewCache), app: nil, identifier: nil, items: [],
+                                 bytes: .unavailable("x"))
+        let preview = try CleanupPreview.make(match, selection: .all, commands: slow, protection: protection)
+        let timedOut = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        guard case .command(_, .timedOut) = timedOut.outcome else { return XCTFail("\(timedOut.outcome)") }
+        XCTAssertEqual(alive.last, [], "the free space was read after both exited")
+        let second = try String(contentsOfFile: pids, encoding: .utf8).split(separator: " ")
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        for pid in second { XCTAssertEqual(kill(pid, 0), -1, "\(pid) is still running") }
     }
 
     func testACommandWhoseProgramChangedSinceThePreviewIsNotRun() async throws {
@@ -495,6 +715,16 @@ private struct RecordingRunner: CommandRunning {
         recorder.record(.init(executable: executable, arguments: arguments, environment: environment))
         return .success(CommandOutput(status: 0, stdout: Data(), stderr: Data()))
     }
+}
+
+/// Which processes were still running at each reading.
+private final class Readings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var readings: [[pid_t]] = []
+
+    var last: [pid_t]? { lock.withLock { readings.last } }
+
+    func append(_ running: [pid_t]) { lock.withLock { readings.append(running) } }
 }
 
 /// Hands out the given values in turn, then `nil`.

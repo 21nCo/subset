@@ -74,8 +74,11 @@ public final class DiskWindowModel {
 
     @ObservationIgnored private let service: DiskScanService
     @ObservationIgnored let cleanup: DiskCleanupService
-    /// The cleanup running, observed so the window knows when one is.
+    /// The cleanup running, observed so the window knows when one is. Cleared only once it has finished: every item
+    /// checked, or the command and the programs it started exited.
     var cleanupTask: Task<Void, Never>?
+    /// Stop was chosen for the running cleanup, which has not finished yet.
+    public internal(set) var isStoppingCleanup = false
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var volumeRefresh = 0

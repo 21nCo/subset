@@ -107,10 +107,13 @@ public struct DiskItemIdentity: Hashable, Sendable {
         self.inode = inode
     }
 
-    /// Whether `other` is the same file. A volume that did not report its device (0) is compared by inode alone, as
-    /// the scanner compares a folder it opens.
+    /// Whether both the volume and the inode were read: only such an identity says which file it is.
+    public var isComplete: Bool { device != 0 && inode != 0 }
+
+    /// Whether `other` is the same file: both identities complete, with the same volume and the same inode. An
+    /// identity whose volume was not read matches nothing, not even itself.
     public func isSameFile(as other: DiskItemIdentity) -> Bool {
-        inode == other.inode && (device == 0 || other.device == 0 || device == other.device)
+        isComplete && other.isComplete && device == other.device && inode == other.inode
     }
 
     /// What is at `path` now, without following a symbolic link at its end (`lstat`, then `getattrlist` for the
@@ -125,7 +128,9 @@ public struct DiskItemIdentity: Hashable, Sendable {
         let entry = BulkAttributes.read(path: path)
         // Both reads must describe the same file: one replaced between them is not judged.
         if let id = entry?.fileID, id != UInt64(info.st_ino) { return .unreadable(EAGAIN) }
-        return .item(DiskItemIdentity(device: entry?.realDevice ?? 0, inode: UInt64(info.st_ino)),
+        // Without the volume the file cannot be told from one with the same inode on another volume.
+        guard let entry, let device = entry.realDevice, device != 0 else { return .unreadable(ENOTSUP) }
+        return .item(DiskItemIdentity(device: device, inode: UInt64(info.st_ino)),
                      isDirectory: info.st_mode & S_IFMT == S_IFDIR)
     }
 }
@@ -135,8 +140,10 @@ public enum DiskItemCurrent: Equatable, Sendable {
     case missing
     /// A symbolic link, which a cleanup never follows or moves.
     case symlink
+    /// A file or folder, with its volume and inode both read.
     case item(DiskItemIdentity, isDirectory: Bool)
-    /// `lstat` failed with this `errno`.
+    /// It could not be read with this `errno`: `lstat` failed, the volume was not returned (`ENOTSUP`), or the file
+    /// changed between the two reads (`EAGAIN`).
     case unreadable(Int32)
 }
 
@@ -180,7 +187,7 @@ public struct DiskTree: Sendable {
             sizes: node.flags.contains(.unreadable) ? nil : node.sizes,
             parent: node.parent < 0 ? nil : Int(node.parent), children: first..<(first + Int(node.childCount)),
             touched: node.touched == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(node.touched)),
-            identity: node.fileID == 0 ? nil : DiskItemIdentity(device: node.device, inode: node.fileID))
+            identity: node.fileID == 0 || node.device == 0 ? nil : DiskItemIdentity(device: node.device, inode: node.fileID))
     }
 
     public func children(of index: Int) -> [DiskItem] {

@@ -1,0 +1,170 @@
+import Darwin
+import Foundation
+@testable import SystemCore
+import XCTest
+
+/// `ProcessGroupRunner` with stub `/bin/sh` scripts that start a child of their own: an answer comes only once the
+/// command and its child have exited, after a normal exit, a timeout, a cancellation, or a shutdown, and the group is
+/// sent `SIGKILL` when it ignores `SIGTERM`.
+final class ProcessGroupRunnerTests: XCTestCase {
+    private var folder: URL!
+    private var pidFile: String { folder.appendingPathComponent("pid").path }
+    private var childFile: String { folder.appendingPathComponent("child").path }
+
+    /// A script that ignores `SIGTERM`, as does the `sleep` it starts (an ignored signal stays ignored across exec), and
+    /// writes both pids.
+    private var stubborn: String {
+        "trap '' TERM\nsleep 30 &\necho $! > '\(childFile)'\necho $$ > '\(pidFile)'\nwait"
+    }
+
+    override func setUpWithError() throws {
+        folder = FileManager.default.temporaryDirectory.appendingPathComponent("ProcessGroupRunnerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        for file in [pidFile, childFile] {
+            if let pid = try? pid(file) { kill(pid, SIGKILL) }
+        }
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    func testACommandAnswersOnlyOnceAProgramItLeftRunningHasExited() async throws {
+        let stub = try await warmedStub("""
+        echo out; echo err >&2
+        (sleep 1; echo done > '\(folder.appendingPathComponent("marker").path)') &
+        echo $! > '\(childFile)'
+        exit 4
+        """)
+
+        let result = await ProcessGroupRunner().run(stub, arguments: [], environment: [:], timeout: .seconds(30))
+
+        let output = try result.get()
+        XCTAssertEqual(output.status, 4)
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "out\n")
+        XCTAssertEqual(String(decoding: output.stderr, as: UTF8.self), "err\n")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("marker").path),
+                      "the background child finished before the answer")
+        assertGone(try pid(childFile), "the child")
+    }
+
+    func testATimedOutCommandThatIgnoresSIGTERMIsKilledWithItsChildBeforeItAnswers() async throws {
+        let stub = try await warmedStub(stubborn)
+        let started = ContinuousClock.now
+
+        let result = await ProcessGroupRunner(grace: .milliseconds(400)).run(stub, arguments: [], environment: [:],
+                                                                            timeout: .milliseconds(300))
+
+        XCTAssertEqual(result, .failure(.timedOut))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, .milliseconds(700), "SIGTERM alone did not stop them")
+        assertGone(try pid(pidFile), "the command")
+        assertGone(try pid(childFile), "its child")
+    }
+
+    func testACancelledCommandAnswersOnlyOnceItAndItsChildHaveExited() async throws {
+        let stub = try await warmedStub(stubborn)
+        let run = Task {
+            await ProcessGroupRunner(grace: .milliseconds(500)).run(stub, arguments: [], environment: [:], timeout: .seconds(30))
+        }
+        let pids = try await waitForPIDs()
+        let cancelled = ContinuousClock.now
+        run.cancel()
+
+        let result = await run.value
+
+        XCTAssertEqual(result, .failure(.cancelled))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - cancelled, .milliseconds(500), "it waited for SIGKILL")
+        assertGone(pids.command, "the command")
+        assertGone(pids.child, "its child")
+    }
+
+    func testShuttingDownKillsTheWholeGroupAtOnceAndStartsNoMore() async throws {
+        let stub = try await warmedStub(stubborn)
+        let registry = CommandRegistry()
+        let run = Task {
+            await ProcessGroupRunner(grace: .seconds(30), registry: registry).run(stub, arguments: [], environment: [:],
+                                                                                 timeout: .seconds(30))
+        }
+        let pids = try await waitForPIDs()
+        let started = ContinuousClock.now
+
+        registry.shutDown()
+
+        let result = await run.value
+        XCTAssertEqual(result, .failure(.cancelled))
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(5), "SIGKILL was sent at once, not after the grace")
+        assertGone(pids.command, "the command")
+        assertGone(pids.child, "its child")
+        try FileManager.default.removeItem(atPath: pidFile)
+        let after = await ProcessGroupRunner(registry: registry).run(stub, arguments: [], environment: [:], timeout: .seconds(5))
+        XCTAssertEqual(after, .failure(.cancelled))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "the refused command was never started")
+    }
+
+    func testALaunchFailureRunawayOutputAndAnAlreadyCancelledTask() async throws {
+        let plain = folder.appendingPathComponent("plain").path
+        try "echo nope".write(toFile: plain, atomically: true, encoding: .utf8)
+        guard case .failure(.launchFailed) = await ProcessGroupRunner().run(plain, arguments: [], environment: [:],
+                                                                           timeout: .seconds(5)) else {
+            return XCTFail("a file that is not executable launched")
+        }
+
+        let chatty = try await warmedStub("echo $$ > '\(pidFile)'\nexec yes")
+        let flood = await ProcessGroupRunner(outputLimit: 64 << 10).run(chatty, arguments: [], environment: [:],
+                                                                       timeout: .seconds(10))
+        XCTAssertEqual(flood, .failure(.outputTooLarge))
+        assertGone(try pid(pidFile), "the command stopped past the cap")
+
+        try FileManager.default.removeItem(atPath: pidFile)
+        let never = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await ProcessGroupRunner().run(chatty, arguments: [], environment: [:], timeout: .seconds(5))
+        }
+        let notStarted = await never.value
+        XCTAssertEqual(notStarted, .failure(.cancelled))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "nothing was started")
+    }
+
+    func testTheEnvironmentIsExactlyTheOneGiven() async throws {
+        let stub = try await warmedStub("/usr/bin/env")
+        let output = try await ProcessGroupRunner().run(stub, arguments: [], environment: ["ONLY": "this"],
+                                                        timeout: .seconds(10)).get()
+        // `sh` adds its own `PWD`, `SHLVL`, and `_`; nothing is inherited.
+        let lines = String(decoding: output.stdout, as: UTF8.self).split(separator: "\n")
+            .filter { !["PWD", "SHLVL", "_"].contains($0.prefix { $0 != "=" }) }
+        XCTAssertEqual(lines, ["ONLY=this"])
+    }
+
+    // MARK: Helpers
+
+    /// The process is gone right now, not merely on its way out.
+    private func assertGone(_ pid: pid_t, _ name: String) {
+        XCTAssertEqual(kill(pid, 0), -1, "\(name) is still running")
+        XCTAssertEqual(errno, ESRCH, name)
+    }
+
+    private func pid(_ file: String) throws -> pid_t {
+        let text = try String(contentsOfFile: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try XCTUnwrap(pid_t(text))
+    }
+
+    private func waitForPIDs() async throws -> (command: pid_t, child: pid_t) {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !FileManager.default.fileExists(atPath: pidFile), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        return (try pid(pidFile), try pid(childFile))
+    }
+
+    /// A stub run once already, so the first run's malware scan cannot hold it past a short timeout.
+    private func warmedStub(_ body: String) async throws -> String {
+        let path = folder.appendingPathComponent("stub-\(UUID().uuidString)").path
+        try "#!/bin/sh\n[ \"$1\" = warm ] && exit 0\n\(body)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(path, 0o755), 0)
+        let warm = await ProcessGroupRunner().run(path, arguments: ["warm"], environment: [:], timeout: .seconds(30))
+        XCTAssertEqual(try warm.get().status, 0)
+        return path
+    }
+}

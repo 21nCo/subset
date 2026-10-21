@@ -48,6 +48,8 @@ public actor CleanupExecutor {
     let commands: CleanupCommands
     let trash: @Sendable (URL) throws -> URL?
     let freeSpace: @Sendable () -> Int64?
+    /// Reads what is at a path now (`DiskItemIdentity.current`).
+    let identify: @Sendable (String) -> DiskItemCurrent
     private var used: Set<UUID> = []
 
     /// This Mac's: the Finder's Trash (`FileManager.trashItem`) and the free space of `home`'s volume.
@@ -57,11 +59,13 @@ public actor CleanupExecutor {
     }
 
     init(protection: CleanupProtection, commands: CleanupCommands, trash: @escaping @Sendable (URL) throws -> URL?,
-         freeSpace: @escaping @Sendable () -> Int64?) {
+         freeSpace: @escaping @Sendable () -> Int64?,
+         identify: @escaping @Sendable (String) -> DiskItemCurrent = { DiskItemIdentity.current(atPath: $0) }) {
         self.protection = protection
         self.commands = commands
         self.trash = trash
         self.freeSpace = freeSpace
+        self.identify = identify
     }
 
     /// Carries out `preview` when `confirmation` was issued for exactly it and not used before; otherwise does
@@ -89,23 +93,47 @@ public actor CleanupExecutor {
                       finishedAt: Date(), freeBefore: before, freeAfter: after)
     }
 
-    /// Checks the item again and moves it to the Trash. The check and the move are separate calls, so an item swapped
-    /// in between is moved; the Trash keeps it, and the moved item is compared with the scanned one afterwards.
+    /// Checks the item again and moves it to the Trash. The check and the move are separate calls, so another item can
+    /// take its place in between. So what reached the Trash is compared with the scanned item afterwards: only that
+    /// item counts as moved; another is put back where it was, never over what is there now; and what cannot be checked
+    /// is reported failed, with where it is in the Trash.
     private func move(_ item: CleanupItem) -> CleanupResult.ItemOutcome {
         if Task.isCancelled { return .init(path: item.path, status: .skipped(.stopped)) }
-        if let reason = item.revalidate(protection) { return .init(path: item.path, status: .skipped(reason)) }
+        if let reason = item.revalidate(protection, identify: identify) {
+            return .init(path: item.path, status: .skipped(reason))
+        }
+        guard let identity = item.identity else { return .init(path: item.path, status: .skipped(.notIdentified)) }
         let moved: URL?
         do {
             moved = try trash(URL(fileURLWithPath: item.path))
         } catch {
             return .init(path: item.path, status: .failed(error.localizedDescription))
         }
-        if let moved, let identity = item.identity, case let .item(now, _) = DiskItemIdentity.current(atPath: moved.path),
-           !now.isSameFile(as: identity) {
+        guard let moved else {
             return .init(path: item.path, status: .failed(
-                "What was moved to the Trash, at \(moved.path), is not the item the scan read; it is still in the Trash."))
+                "It was moved to the Trash, which did not say where, so System could not check that it was the item the scan read."))
         }
-        return .init(path: item.path, status: .moved(trashPath: moved?.path))
+        let trashPath = moved.path
+        switch identify(trashPath) {
+        case let .item(now, _) where now.isSameFile(as: identity):
+            return .init(path: item.path, status: .moved(trashPath: trashPath))
+        case .item, .symlink:
+            // Back along the same path, so a folder above it that is now a link leads it back where it was.
+            guard renamex_np(trashPath, item.path, UInt32(RENAME_EXCL)) == 0 else {
+                let error = errno
+                return .init(path: item.path, status: .failed(
+                    "Another item took its place just before the move and is in the Trash, at \(trashPath); it could not "
+                        + "be put back: \(String(cString: strerror(error)))."))
+            }
+            return .init(path: item.path, status: .skipped(.replacedWhileMoving))
+        case .missing:
+            return .init(path: item.path, status: .failed(
+                "It was moved to the Trash, but nothing is at \(trashPath), so System could not check what was moved."))
+        case let .unreadable(code):
+            return .init(path: item.path, status: .failed(
+                "What was moved to the Trash, at \(trashPath), could not be checked (\(String(cString: strerror(code)))); "
+                    + "it is still there."))
+        }
     }
 
     @Sendable static func moveToTrash(_ url: URL) throws -> URL? {

@@ -136,13 +136,17 @@ extension DiskWindowModel {
             if result.outcome != .notConfirmed { cleanedMatches.insert(sheet.matchIndex) }
             cleanupResults.append(result)
             cleanupTask = nil
+            isStoppingCleanup = false
             rebuild()
         }
     }
 
-    /// Stops a running cleanup: items not moved yet are skipped, and a command is stopped.
+    /// Stops a running cleanup: items not moved yet are skipped, and a command is stopped. The cleanup still runs, and
+    /// `isStoppingCleanup` is set, until the command and the programs it started have exited.
     public func stopCleanup() {
-        cleanupTask?.cancel()
+        guard let cleanupTask, !isStoppingCleanup else { return }
+        isStoppingCleanup = true
+        cleanupTask.cancel()
     }
 
     public var isCleaning: Bool { cleanupTask != nil }
