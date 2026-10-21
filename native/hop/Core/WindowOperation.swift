@@ -35,6 +35,9 @@ public protocol WindowOperator: Sendable {
     /// Performs the operation away from the calling thread and returns its result; the caller, such as the switcher on
     /// the main thread, is never blocked while the app answers.
     func perform(_ operation: WindowOperation, on window: WindowEntry) async -> OperationResult
+    /// Performs an operation on an app the switcher lists without windows: `.focus` activates it, `.hideApp` and
+    /// `.quitApp` act as on a window's app, and `.minimize` and `.close`, which need a window, are refused.
+    func perform(_ operation: WindowOperation, onApp app: AppEntry) async -> OperationResult
 }
 
 /// Records each operation it is asked to perform and answers with a fixed result per operation (`.done` unless set),
@@ -42,7 +45,8 @@ public protocol WindowOperator: Sendable {
 public final class RecordingWindowOperator: WindowOperator, @unchecked Sendable {
     public struct Call: Sendable, Equatable {
         public var operation: WindowOperation
-        public var window: WindowRef
+        /// The window, or nil for an operation on an app cell's app.
+        public var window: WindowRef?
         public var pid: pid_t
     }
 
@@ -64,9 +68,17 @@ public final class RecordingWindowOperator: WindowOperator, @unchecked Sendable 
     }
 
     public func perform(_ operation: WindowOperation, on window: WindowEntry) async -> OperationResult {
+        record(Call(operation: operation, window: window.ref, pid: window.pid))
+    }
+
+    public func perform(_ operation: WindowOperation, onApp app: AppEntry) async -> OperationResult {
+        record(Call(operation: operation, window: nil, pid: app.pid))
+    }
+
+    private func record(_ call: Call) -> OperationResult {
         lock.withLock {
-            recorded.append(Call(operation: operation, window: window.ref, pid: window.pid))
-            return results[operation] ?? .done
+            recorded.append(call)
+            return results[call.operation] ?? .done
         }
     }
 }

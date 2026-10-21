@@ -74,8 +74,8 @@ final class SwitcherControllerTests: XCTestCase {
         view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 2, of: switcher))
         // ⌘W closes the selected window 1 before the release, so the pressed spot now shows window 3.
         switcher.apply(.operation(.close))
-        try await wait(until: { switcher.model?.entries.count == 3 }, "the closed window leaves the list")
-        XCTAssertEqual(switcher.model?.entries[2].ref, windows[3].ref)
+        try await wait(until: { switcher.model?.windows.count == 3 }, "the closed window leaves the list")
+        XCTAssertEqual(switcher.model?.windows[2].ref, windows[3].ref)
         view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 2, of: switcher))
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertTrue(switcher.isOpen, "the click is dropped")
@@ -95,15 +95,15 @@ final class SwitcherControllerTests: XCTestCase {
         lists = [windows, [windows[0], windows[2], windows[3]]]
         let switcher = controller(recorder)
         switcher.open()
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref)
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref)
         switcher.apply(.operation(.close))
-        try await wait(until: { switcher.model?.entries.count == 3 }, "the closed window leaves the list")
+        try await wait(until: { switcher.model?.windows.count == 3 }, "the closed window leaves the list")
         XCTAssertEqual(recorder.calls.map(\.operation), [.close])
         XCTAssertEqual(recorder.calls.map(\.window), [windows[1].ref])
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[2].ref)
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[2].ref)
         try await wait(until: { reads == 2 }, "the list is read again")
         XCTAssertTrue(switcher.isOpen)
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[2].ref, "the refresh keeps the next window selected")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[2].ref, "the refresh keeps the next window selected")
         XCTAssertNil(switcher.model?.message)
         switcher.cancel()
     }
@@ -118,7 +118,7 @@ final class SwitcherControllerTests: XCTestCase {
         try await wait(until: { switcher.model?.message != nil })
         XCTAssertEqual(recorder.calls.map(\.window), [windows[2].ref])
         XCTAssertEqual(switcher.model?.message, "Couldn't minimize the App 2 window")
-        XCTAssertEqual(switcher.model?.entries, windows)
+        XCTAssertEqual(switcher.model?.windows, windows)
         switcher.cancel()
     }
 
@@ -185,7 +185,7 @@ final class SwitcherControllerTests: XCTestCase {
         lists = [[]]
         let switcher = controller(recorder)
         switcher.open()
-        XCTAssertEqual(switcher.model?.entries, [])
+        XCTAssertEqual(switcher.model?.windows, [])
         switcher.apply(.operation(.quitApp))
         switcher.commit()
         try await Task.sleep(for: .milliseconds(50))
@@ -219,10 +219,10 @@ final class SwitcherControllerTests: XCTestCase {
         switcher.open()
         switcher.apply(.operation(.close))
         try await wait(until: { !recorder.calls.isEmpty })
-        XCTAssertEqual(switcher.model?.entries, windows, "a delivered close is not taken as the window gone")
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref)
+        XCTAssertEqual(switcher.model?.windows, windows, "a delivered close is not taken as the window gone")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref)
         try await wait(until: { reads == 2 }, "the list is read again")
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref, "the prompting window stays selected")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref, "the prompting window stays selected")
         switcher.apply(.operation(.close))
         try await wait(until: { reads == 3 })
         switcher.commit()
@@ -305,7 +305,7 @@ final class SwitcherControllerTests: XCTestCase {
         XCTAssertEqual(gate.calls.map(\.operation), [.minimize, .close])
         XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "⌘W was pressed on window 1")
         try await wait(until: { reads == 3 }, "the close is read")
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[2].ref, "the hover applies after the close")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[2].ref, "the hover applies after the close")
         switcher.cancel()
     }
 
@@ -373,7 +373,7 @@ final class SwitcherControllerTests: XCTestCase {
         gate.release(.refused("timed out"))
         try await wait(until: { gate.calls.count == 2 }, "the waiting close runs after the read")
         XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[1].ref], "window 2 is never closed")
-        XCTAssertEqual(switcher.model?.entries, windows, "window 1 stays listed where it was")
+        XCTAssertEqual(switcher.model?.windows, windows, "window 1 stays listed where it was")
         gate.release(.done)
         switcher.cancel()
     }
@@ -418,9 +418,53 @@ final class SwitcherControllerTests: XCTestCase {
         switcher.open()
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         try await wait(until: { reads == 2 }, "an app quitting reads the list again")
-        XCTAssertEqual(switcher.model?.entries, [windows[0], windows[1], windows[2]], "only the quit app's window leaves")
-        XCTAssertEqual(switcher.model?.selectedEntry?.ref, windows[1].ref)
+        XCTAssertEqual(switcher.model?.windows, [windows[0], windows[1], windows[2]], "only the quit app's window leaves")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref)
         switcher.cancel()
+    }
+
+    // MARK: - Settings
+
+    func testTheShownWindowsSettingsFilterEachReadAndAChangeAppliesFromTheNextRead() async throws {
+        let recorder = RecordingWindowOperator()
+        var minimized = windows[1]
+        minimized.isMinimized = true
+        let notes = AppEntry(SourceApp(pid: 30, bundleIdentifier: "com.example.notes", name: "Notes"))
+        var settings = Settings.default
+        settings.shownWindows.minimized = false
+        let switcher = SwitcherController(
+            readWindows: { [windows] in WindowList(windows: [windows[0], minimized, windows[2]], windowlessApps: [notes]) },
+            windowOperator: recorder,
+            settings: { settings }
+        )
+        switcher.open()
+        XCTAssertEqual(switcher.model?.items.map(\.id), [.window(windows[0].ref), .window(windows[2].ref)])
+        settings.shownWindows.minimized = true
+        settings.shownWindows.windowlessApps = true
+        switcher.apply(.operation(.hideApp))
+        try await wait(until: { switcher.model?.items.count == 4 }, "the read after the operation uses the new settings")
+        XCTAssertEqual(switcher.model?.items.last, .app(notes))
+        switcher.cancel()
+    }
+
+    func testCommittingAnAppCellActivatesItsApp() async throws {
+        let recorder = RecordingWindowOperator()
+        let notes = AppEntry(SourceApp(pid: 30, bundleIdentifier: "com.example.notes", name: "Notes"))
+        var settings = Settings.default
+        settings.shownWindows.windowlessApps = true
+        let switcher = SwitcherController(
+            readWindows: { [windows] in WindowList(windows: [windows[0]], windowlessApps: [notes]) },
+            windowOperator: recorder,
+            settings: { settings }
+        )
+        switcher.open()
+        XCTAssertEqual(switcher.model?.selectedItem, .app(notes))
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.operation), [.focus], "⌘W does nothing on an app cell")
+        XCTAssertEqual(recorder.calls.map(\.window), [nil])
+        XCTAssertEqual(recorder.calls.map(\.pid), [30])
     }
 
     private func readWindows() -> WindowList {
@@ -437,7 +481,7 @@ private final class GatedWindowOperator: WindowOperator, @unchecked Sendable {
     private let holding: Set<WindowOperation>
     struct Call: Equatable {
         var operation: WindowOperation
-        var window: HopCore.WindowRef
+        var window: HopCore.WindowRef?
     }
 
     private var recorded: [Call] = []
@@ -456,11 +500,25 @@ private final class GatedWindowOperator: WindowOperator, @unchecked Sendable {
     }
 
     func perform(_ operation: WindowOperation, on window: WindowEntry) async -> OperationResult {
+        await perform(Call(operation: operation, window: window.ref))
+    }
+
+    func perform(_ operation: WindowOperation, onApp _: AppEntry) async -> OperationResult {
+        await perform(Call(operation: operation, window: nil))
+    }
+
+    private func perform(_ call: Call) async -> OperationResult {
         await withCheckedContinuation { continuation in
             lock.withLock {
-                recorded.append(Call(operation: operation, window: window.ref))
-                if holding.contains(operation) { waiting.append(continuation) } else { continuation.resume(returning: .done) }
+                recorded.append(call)
+                if holding.contains(call.operation) { waiting.append(continuation) } else { continuation.resume(returning: .done) }
             }
         }
     }
+}
+
+extension SwitcherViewModel {
+    /// The listed windows, for tests whose lists have no app cells.
+    var windows: [WindowEntry] { items.compactMap(\.window) }
+    var selectedWindow: WindowEntry? { selectedItem?.window }
 }

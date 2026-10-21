@@ -6,14 +6,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set once the onboarding window has opened on its own, so it opens unasked only on the first launch.
     private static let onboardingShownKey = "onboarding.shown"
 
-    private let settingsWindow = SettingsWindowController()
+    private let settings = SettingsModel()
+    private lazy var settingsWindow = SettingsWindowController(model: settings)
     private var statusMenu: StatusMenuController?
     private let windowList = WindowListController()
-    private lazy var switchShortcut = SwitchShortcutController(windowList: windowList)
+    private lazy var switchShortcut = SwitchShortcutController(
+        windowList: windowList,
+        settings: { [unowned self] in settings.settings }
+    )
     private var accessibility = AccessibilityGate()
     private lazy var onboarding = OnboardingWindowController(
-        shortcutPhrase: {
-            let shortcut = ShortcutStore().shortcut
+        shortcutPhrase: { [unowned self] in
+            let shortcut = settings.settings.shortcut
             return "\(shortcut.modifierSymbol) and press \(shortcut.keyName)"
         },
         onTick: { [unowned self] in refreshAccessibility() }
@@ -25,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = MainMenu.make(perform: perform)
         statusMenu = StatusMenuController(perform: perform, state: .needsPermission)
+        // Settings apply at once: the shortcut here, and the shown windows each time the switcher reads the list.
+        settings.onChange = { [unowned self] in switchShortcut.use($0.shortcut) }
+        settings.onRecordingChange = { [unowned self] in switchShortcut.isSuspended = $0 }
         switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
         switchShortcut.onNeedsPermission = { [unowned self] in
             refreshAccessibility()
@@ -42,9 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Trust is re-checked whenever Hop becomes active, for example when a window of its own comes to the front.
+    /// Trust and the login item are re-checked whenever Hop becomes active, for example when a window of its own comes
+    /// to the front after the user changed them in System Settings.
     func applicationDidBecomeActive(_: Notification) {
         refreshAccessibility()
+        settings.refreshLoginItem()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
@@ -77,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             windowList.stop()
         }
         let trusted = accessibility.isTrusted == true
+        settings.isAccessibilityTrusted = trusted
         if trusted {
             onboarding.close()
             windowList.start()

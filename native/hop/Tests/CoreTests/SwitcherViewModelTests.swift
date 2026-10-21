@@ -109,27 +109,27 @@ final class SwitcherLayoutTests: XCTestCase {
 
 final class SwitcherViewModelTests: XCTestCase {
     func testOpensOnThePreviousWindowOrTheOnlyOne() {
-        XCTAssertEqual(SwitcherViewModel(entries: entries(5), available: wide).selection, 1)
-        XCTAssertEqual(SwitcherViewModel(entries: entries(1), available: wide).selection, 0)
-        XCTAssertNil(SwitcherViewModel(entries: [], available: wide).selection, "an empty list shows No windows")
+        XCTAssertEqual(SwitcherViewModel(items: entries(5).map(SwitcherItem.window), available: wide).selection, 1)
+        XCTAssertEqual(SwitcherViewModel(items: entries(1).map(SwitcherItem.window), available: wide).selection, 0)
+        XCTAssertNil(SwitcherViewModel(items: [], available: wide).selection, "an empty list shows No windows")
     }
 
     func testStepsWrapBothWays() {
-        var model = SwitcherViewModel(entries: entries(3), available: wide)
+        var model = SwitcherViewModel(items: entries(3).map(SwitcherItem.window), available: wide)
         model.handle(.step(.forward))
         XCTAssertEqual(model.selection, 2)
         model.handle(.trigger(.forward))
         XCTAssertEqual(model.selection, 0, "a repeated shortcut steps like Tab")
         model.handle(.step(.backward))
         XCTAssertEqual(model.selection, 2)
-        var empty = SwitcherViewModel(entries: [], available: wide)
+        var empty = SwitcherViewModel(items: [], available: wide)
         XCTAssertNil(empty.handle(.step(.forward)))
         XCTAssertNil(empty.handle(.row(.down)))
         XCTAssertNil(empty.selection)
     }
 
     func testRowKeysMoveTheSelectionThroughTheRaggedLastRow() {
-        var model = SwitcherViewModel(entries: entries(7), available: narrow)
+        var model = SwitcherViewModel(items: entries(7).map(SwitcherItem.window), available: narrow)
         model.select(3)
         model.handle(.row(.down))
         XCTAssertEqual(model.selection, 6)
@@ -140,7 +140,7 @@ final class SwitcherViewModelTests: XCTestCase {
     }
 
     func testTheSelectionIsScrolledIntoView() {
-        var model = SwitcherViewModel(entries: entries(60), available: wide)
+        var model = SwitcherViewModel(items: entries(60).map(SwitcherItem.window), available: wide)
         XCTAssertEqual(model.firstVisibleRow, 0)
         XCTAssertEqual(model.visibleIndices, 0..<35)
         model.select(40) // row 5, just below the visible rows
@@ -158,7 +158,7 @@ final class SwitcherViewModelTests: XCTestCase {
     }
 
     func testScrollingIsClampedAndKeepsTheSelection() {
-        var model = SwitcherViewModel(entries: entries(60), available: wide)
+        var model = SwitcherViewModel(items: entries(60).map(SwitcherItem.window), available: wide)
         model.scroll(byRows: 3)
         XCTAssertEqual(model.firstVisibleRow, 3)
         model.scroll(byRows: 10)
@@ -166,13 +166,13 @@ final class SwitcherViewModelTests: XCTestCase {
         model.scroll(byRows: -10)
         XCTAssertEqual(model.firstVisibleRow, 0)
         XCTAssertEqual(model.selection, 1)
-        var short = SwitcherViewModel(entries: entries(3), available: wide)
+        var short = SwitcherViewModel(items: entries(3).map(SwitcherItem.window), available: wide)
         short.scroll(byRows: 1)
         XCTAssertEqual(short.firstVisibleRow, 0)
     }
 
     func testHoveringSelectsOnlyAListedWindow() {
-        var model = SwitcherViewModel(entries: entries(4), available: wide)
+        var model = SwitcherViewModel(items: entries(4).map(SwitcherItem.window), available: wide)
         model.select(3)
         XCTAssertEqual(model.selection, 3)
         model.select(4)
@@ -182,47 +182,47 @@ final class SwitcherViewModelTests: XCTestCase {
 
     func testOperationKeysActOnTheSelectedWindow() {
         let windows = entries(4)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.select(2)
         for operation in [WindowOperation.minimize, .close, .hideApp, .quitApp] {
             XCTAssertEqual(model.handle(.operation(operation)), .init(operation, on: windows[2]))
         }
         XCTAssertEqual(model.selection, 2, "asking for an operation moves nothing")
-        var empty = SwitcherViewModel(entries: [], available: wide)
+        var empty = SwitcherViewModel(items: [], available: wide)
         XCTAssertNil(empty.handle(.operation(.close)), "nothing to act on")
     }
 
     func testClosingTheSelectedWindowSelectsTheNextOne() {
         let windows = entries(4)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.select(1)
         let request = model.handle(.operation(.close))!
         model.finished(request, result: .done)
-        XCTAssertEqual(model.entries, windows, "a delivered close may be waiting on a save prompt")
-        XCTAssertEqual(model.selectedEntry?.ref, windows[1].ref)
+        XCTAssertEqual(model.windows, windows, "a delivered close may be waiting on a save prompt")
+        XCTAssertEqual(model.selectedWindow?.ref, windows[1].ref)
         XCTAssertNil(model.message)
         // The refresh that follows no longer lists it; the selection moves to the window that followed it.
         model.refreshed([windows[0], windows[2], windows[3]])
-        XCTAssertEqual(model.selectedEntry?.ref, windows[2].ref)
+        XCTAssertEqual(model.selectedWindow?.ref, windows[2].ref)
     }
 
     func testARefreshKeepsTheSelectedWindowWhereverItMoved() {
         let windows = entries(4)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.select(1)
         // An app asked to save instead of closing: the window is still listed, now first.
         model.refreshed([windows[1], windows[0], windows[2], windows[3]])
         XCTAssertEqual(model.selection, 0)
-        XCTAssertEqual(model.selectedEntry?.ref, windows[1].ref)
+        XCTAssertEqual(model.selectedWindow?.ref, windows[1].ref)
     }
 
     func testARefreshWithoutTheSelectedWindowOrItsFollowersSelectsTheOneBefore() {
         let windows = entries(4)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.select(2)
         model.refreshed([windows[0], windows[1]])
-        XCTAssertEqual(model.selectedEntry?.ref, windows[1].ref)
-        model.refreshed([])
+        XCTAssertEqual(model.selectedWindow?.ref, windows[1].ref)
+        model.refreshed([WindowEntry]())
         XCTAssertNil(model.selection)
         XCTAssertEqual(model.layout.rows, 0)
         model.refreshed(windows)
@@ -231,20 +231,20 @@ final class SwitcherViewModelTests: XCTestCase {
 
     func testARefreshKeepsTheWindowsOfAppsThatDidNotAnswerWhereTheyWere() {
         let windows = entries(6)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.select(2)
         // App 1 (windows 2 and 3) timed out; App 0's window 1 closed.
         model.refreshed([windows[0], windows[4], windows[5]], unread: [windows[2].pid])
-        XCTAssertEqual(model.entries, [windows[0], windows[2], windows[3], windows[4], windows[5]])
-        XCTAssertEqual(model.selectedEntry?.ref, windows[2].ref, "an unread window is not taken as gone")
+        XCTAssertEqual(model.windows, [windows[0], windows[2], windows[3], windows[4], windows[5]])
+        XCTAssertEqual(model.selectedWindow?.ref, windows[2].ref, "an unread window is not taken as gone")
         // A read that answers for App 1 settles it.
         model.refreshed([windows[0], windows[4], windows[5]])
-        XCTAssertEqual(model.entries, [windows[0], windows[4], windows[5]])
-        XCTAssertEqual(model.selectedEntry?.ref, windows[4].ref)
+        XCTAssertEqual(model.windows, [windows[0], windows[4], windows[5]])
+        XCTAssertEqual(model.selectedWindow?.ref, windows[4].ref)
     }
 
     func testARefreshRelaysOutTheGrid() {
-        var model = SwitcherViewModel(entries: entries(60), available: wide)
+        var model = SwitcherViewModel(items: entries(60).map(SwitcherItem.window), available: wide)
         model.select(59)
         XCTAssertEqual(model.firstVisibleRow, 4)
         model.refreshed(Array(entries(60).prefix(10)))
@@ -255,30 +255,30 @@ final class SwitcherViewModelTests: XCTestCase {
 
     func testOperationsShowTheirEffectUntilTheRefresh() {
         let windows = entries(6) // apps: pid 100 (0, 1), 101 (2, 3), 102 (4, 5)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.finished(.init(.minimize, on: windows[0]), result: .done)
-        XCTAssertEqual(model.entries.map(\.isMinimized), [true, false, false, false, false, false])
+        XCTAssertEqual(model.windows.map(\.isMinimized), [true, false, false, false, false, false])
         model.finished(.init(.hideApp, on: windows[2]), result: .done)
-        XCTAssertEqual(model.entries.map(\.isAppHidden), [false, false, true, true, false, false])
+        XCTAssertEqual(model.windows.map(\.isAppHidden), [false, false, true, true, false, false])
         model.select(4)
         model.finished(.init(.quitApp, on: windows[4]), result: .done)
-        XCTAssertEqual(model.entries.map(\.ref), windows.map(\.ref), "a delivered quit may be waiting on a save prompt")
+        XCTAssertEqual(model.windows.map(\.ref), windows.map(\.ref), "a delivered quit may be waiting on a save prompt")
         model.finished(.init(.quitApp, on: windows[4]), result: .appGone)
-        XCTAssertEqual(model.entries.map(\.ref), windows.prefix(4).map(\.ref))
-        XCTAssertEqual(model.selectedEntry?.ref, windows[3].ref, "nothing follows the quit app's windows")
+        XCTAssertEqual(model.windows.map(\.ref), windows.prefix(4).map(\.ref))
+        XCTAssertEqual(model.selectedWindow?.ref, windows[3].ref, "nothing follows the quit app's windows")
     }
 
     func testAFailedOperationChangesNoWindowAndSaysWhy() {
         let windows = entries(3)
-        var model = SwitcherViewModel(entries: windows, available: wide)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window), available: wide)
         model.finished(.init(.close, on: windows[1]), result: .refused("can't be closed"))
-        XCTAssertEqual(model.entries, windows)
+        XCTAssertEqual(model.windows, windows)
         XCTAssertEqual(model.message, "Couldn't close the App 0 window")
         model.finished(.init(.minimize, on: windows[1]), result: .done)
         XCTAssertNil(model.message, "a later success clears it")
         model.finished(.init(.minimize, on: windows[2]), result: .windowGone)
         XCTAssertEqual(model.message, "That App 1 window has closed")
-        XCTAssertEqual(model.entries.count, 2, "a window found gone leaves the list")
+        XCTAssertEqual(model.windows.count, 2, "a window found gone leaves the list")
         model.clearMessage()
         XCTAssertNil(model.message)
     }
@@ -311,7 +311,7 @@ final class SwitcherViewModelTests: XCTestCase {
             frame: .zero,
             display: nil
         )
-        var model = SwitcherViewModel(entries: [secret], available: wide)
+        var model = SwitcherViewModel(items: [secret].map(SwitcherItem.window), available: wide)
         for result in [OperationResult.refused("x"), .windowGone, .appGone] {
             model.finished(.init(.focus, on: secret), result: result)
             XCTAssertFalse(model.message?.contains("Secret") ?? false)
@@ -329,5 +329,53 @@ final class SwitcherViewModelTests: XCTestCase {
         entry.title = ""
         XCTAssertEqual(entry.displayTitle, "App 0", "a window without a title shows its app's name")
         XCTAssertEqual(entry.accessibilityLabel, "App 0, minimized, hidden")
+    }
+
+    // MARK: - App cells
+
+    private let notes = AppEntry(SourceApp(pid: 300, bundleIdentifier: "com.example.notes", name: "Notes"))
+
+    func testAnAppCellTakesOnlyTheAppOperations() {
+        var model = SwitcherViewModel(items: [.window(entries(1)[0]), .app(notes)], available: wide)
+        XCTAssertEqual(model.selectedItem, .app(notes))
+        XCTAssertNil(model.handle(.operation(.minimize)), "an app cell has no window to minimize")
+        XCTAssertNil(model.handle(.operation(.close)), "an app cell has no window to close")
+        XCTAssertEqual(model.handle(.operation(.hideApp)), SwitcherViewModel.Request(.hideApp, on: .app(notes)))
+        XCTAssertEqual(model.handle(.operation(.quitApp)), SwitcherViewModel.Request(.quitApp, on: .app(notes)))
+    }
+
+    func testTheSelectionStaysOnAnAppCellAcrossARefresh() {
+        let windows = entries(3)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window) + [.app(notes)], available: wide)
+        model.select(3)
+        model.refreshed([.window(windows[1]), .app(notes), .window(windows[2])])
+        XCTAssertEqual(model.selectedItem?.id, .app(300))
+    }
+
+    func testHidingAnAppCellsAppFlagsItAndQuittingItRemovesIt() {
+        var model = SwitcherViewModel(items: [.window(entries(1)[0]), .app(notes)], available: wide)
+        model.finished(.init(.hideApp, on: SwitcherItem.app(notes)), result: .done)
+        XCTAssertEqual(model.selectedItem?.isAppHidden, true)
+        XCTAssertEqual(model.selectedItem?.accessibilityLabel, "Notes, no open windows, hidden")
+        model.finished(.init(.focus, on: SwitcherItem.app(notes)), result: .refused("did not come to front"))
+        XCTAssertEqual(model.message, "Couldn't bring Notes forward")
+        model.finished(.init(.quitApp, on: SwitcherItem.app(notes)), result: .appGone)
+        XCTAssertEqual(model.items.map(\.id), [.window(WindowRef(rawValue: 0))])
+    }
+}
+
+extension SwitcherViewModel {
+    /// The listed windows, for tests whose lists have no app cells.
+    var windows: [WindowEntry] { items.compactMap(\.window) }
+    var selectedWindow: WindowEntry? { selectedItem?.window }
+
+    mutating func refreshed(_ windows: [WindowEntry], unread: Set<pid_t> = []) {
+        refreshed(windows.map(SwitcherItem.window), unread: unread)
+    }
+}
+
+extension SwitcherViewModel.Request {
+    init(_ operation: WindowOperation, on window: WindowEntry) {
+        self.init(operation, on: .window(window))
     }
 }

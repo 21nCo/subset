@@ -64,8 +64,8 @@ final class SwitcherPanel: NSPanel {
 final class SwitcherContentView: NSView {
     /// The pointer moved over the cell at this index.
     var onHover: (Int) -> Void = { _ in }
-    /// This window's cell was clicked: pressed and released while it was under the pointer.
-    var onChoose: (HopCore.WindowRef) -> Void = { _ in }
+    /// This item's cell was clicked: pressed and released while it was under the pointer.
+    var onChoose: (SwitcherItem.ID) -> Void = { _ in }
     /// The scroll wheel or trackpad scrolled by this many rows (positive is down).
     var onScroll: (Int) -> Void = { _ in }
 
@@ -81,13 +81,13 @@ final class SwitcherContentView: NSView {
     private var message: String?
     /// The grid's top left corner in this view, which is wider than the grid when the message needs the room.
     private var gridOrigin = CGPoint.zero
-    private var cells: [HopCore.WindowRef: SwitcherAccessibilityCell] = [:]
+    private var cells: [SwitcherItem.ID: SwitcherAccessibilityCell] = [:]
     /// Where the pointer was when the panel appeared: a panel appearing under a resting pointer must not take the
     /// selection from the keyboard, so hovering counts only once the pointer has moved.
     private var pointerAtShow: NSPoint?
-    /// The window whose cell the mouse went down on. A click commits it only if the cell under the pointer on release
-    /// still shows it, so a list that changed in between (after an operation, or a refresh) never commits another window.
-    private var pressedWindow: HopCore.WindowRef?
+    /// The item whose cell the mouse went down on. A click commits it only if the cell under the pointer on release
+    /// still shows it, so a list that changed in between (after an operation, or a refresh) never commits another one.
+    private var pressedItem: SwitcherItem.ID?
     private var scrollAccumulator: CGFloat = 0
 
     override init(frame: NSRect) {
@@ -119,14 +119,14 @@ final class SwitcherContentView: NSView {
     /// Draws `content` and returns the size the panel needs for it.
     @discardableResult
     func update(_ content: SwitcherContent) -> NSSize {
-        let previous = model?.selectedEntry?.ref
+        let previous = model?.selectedItem?.id
         let previousMessage = message
         let size: NSSize
         switch content {
         case let .switcher(model, _):
             self.model = model
             message = model.message
-            let grid = model.entries.isEmpty
+            let grid = model.items.isEmpty
                 ? NSSize(width: Self.minimumWidth, height: Self.emptyHeight)
                 : model.layout.size
             let width = message == nil ? grid.width : max(grid.width, Self.minimumWidth)
@@ -152,7 +152,7 @@ final class SwitcherContentView: NSView {
         model = nil
         message = nil
         pointerAtShow = NSEvent.mouseLocation
-        pressedWindow = nil
+        pressedItem = nil
         scrollAccumulator = 0
     }
 
@@ -175,12 +175,12 @@ final class SwitcherContentView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        pressedWindow = window(atWindowPoint: event.locationInWindow)
+        pressedItem = item(atWindowPoint: event.locationInWindow)
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { pressedWindow = nil }
-        guard let pressed = pressedWindow, window(atWindowPoint: event.locationInWindow) == pressed else { return }
+        defer { pressedItem = nil }
+        guard let pressed = pressedItem, item(atWindowPoint: event.locationInWindow) == pressed else { return }
         onChoose(pressed)
     }
 
@@ -198,9 +198,9 @@ final class SwitcherContentView: NSView {
         onScroll(rows)
     }
 
-    private func window(atWindowPoint point: NSPoint) -> HopCore.WindowRef? {
+    private func item(atWindowPoint point: NSPoint) -> SwitcherItem.ID? {
         guard let model, let index = index(atWindowPoint: point) else { return nil }
-        return model.entries[index].ref
+        return model.items[index].id
     }
 
     private func index(atWindowPoint point: NSPoint?) -> Int? {
@@ -220,17 +220,17 @@ final class SwitcherContentView: NSView {
 
     override func accessibilityChildren() -> [Any]? {
         var children: [Any] = []
-        if let model, !model.entries.isEmpty { children.append(accessibilityList) }
-        if model?.entries.isEmpty == true || message != nil { children.append(accessibilityText) }
+        if let model, !model.items.isEmpty { children.append(accessibilityList) }
+        if model?.items.isEmpty == true || message != nil { children.append(accessibilityText) }
         return children
     }
 
-    /// The grid as Accessibility sees it: an `AXList` of the listed windows, each labelled with its title, app name
-    /// and badges, with the selected one marked.
+    /// The grid as Accessibility sees it: an `AXList` of the listed windows (and windowless apps), each labelled with
+    /// its title, app name and badges, with the selected one marked.
     var accessibilityListElement: NSAccessibilityElement { accessibilityList }
 
     private func updateAccessibility() {
-        accessibilityText.text = [model?.entries.isEmpty == true ? "No windows" : nil, message]
+        accessibilityText.text = [model?.items.isEmpty == true ? "No windows" : nil, message]
             .compactMap { $0 }.joined(separator: ". ")
         accessibilityText.frameInView = bounds
         guard let model else {
@@ -238,25 +238,25 @@ final class SwitcherContentView: NSView {
             accessibilityList.cells = []
             return
         }
-        var updated: [HopCore.WindowRef: SwitcherAccessibilityCell] = [:]
+        var updated: [SwitcherItem.ID: SwitcherAccessibilityCell] = [:]
         var ordered: [SwitcherAccessibilityCell] = []
-        for (index, entry) in model.entries.enumerated() {
-            let cell = cells[entry.ref] ?? SwitcherAccessibilityCell(list: accessibilityList, view: self)
-            cell.label = entry.accessibilityLabel
+        for (index, item) in model.items.enumerated() {
+            let cell = cells[item.id] ?? SwitcherAccessibilityCell(list: accessibilityList, view: self)
+            cell.label = item.accessibilityLabel
             cell.selected = index == model.selection
             cell.frameInView = model.layout.frame(of: index, firstVisibleRow: model.firstVisibleRow)
                 .map { $0.offsetBy(dx: gridOrigin.x, dy: gridOrigin.y) }
-            updated[entry.ref] = cell
+            updated[item.id] = cell
             ordered.append(cell)
         }
         cells = updated
         accessibilityList.cells = ordered
-        accessibilityList.frameInView = NSRect(origin: gridOrigin, size: model.entries.isEmpty ? .zero : model.layout.size)
+        accessibilityList.frameInView = NSRect(origin: gridOrigin, size: model.items.isEmpty ? .zero : model.layout.size)
     }
 
-    private func announceChanges(previousSelection: HopCore.WindowRef?, previousMessage: String?) {
+    private func announceChanges(previousSelection: SwitcherItem.ID?, previousMessage: String?) {
         if let message, message != previousMessage { announce(message) }
-        guard let model, let selected = model.selectedEntry, selected.ref != previousSelection else { return }
+        guard let model, let selected = model.selectedItem, selected.id != previousSelection else { return }
         NSAccessibility.post(element: accessibilityList, notification: .selectedChildrenChanged)
         announce(selected.accessibilityLabel)
     }
@@ -358,7 +358,7 @@ struct SwitcherView: View {
         VStack(alignment: .leading, spacing: 0) {
             switch content {
             case let .switcher(model, icons):
-                if model.entries.isEmpty {
+                if model.items.isEmpty {
                     Text("No windows")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -413,8 +413,8 @@ private struct SwitcherGrid: View {
                 HStack(spacing: metrics.spacing) {
                     ForEach(start..<min(start + layout.columns, visible.upperBound), id: \.self) { index in
                         SwitcherCell(
-                            entry: model.entries[index],
-                            icon: icons[model.entries[index].pid],
+                            item: model.items[index],
+                            icon: icons[model.items[index].pid],
                             isSelected: index == model.selection
                         )
                         .frame(width: metrics.cellSize.width, height: metrics.cellSize.height)
@@ -428,10 +428,10 @@ private struct SwitcherGrid: View {
 }
 
 /// One window: its app's icon at 64 pt with the minimized and hidden badges, and its title (or app name) on one line,
-/// truncated in the middle. The selection is a rounded highlight that thickens with Increase Contrast and does not
-/// animate with Reduce Motion.
+/// truncated in the middle. A windowless app's cell shows its icon and name with a dashed-window badge. The selection
+/// is a rounded highlight that thickens with Increase Contrast and does not animate with Reduce Motion.
 private struct SwitcherCell: View {
-    let entry: WindowEntry
+    let item: SwitcherItem
     let icon: NSImage?
     let isSelected: Bool
 
@@ -450,14 +450,15 @@ private struct SwitcherCell: View {
                     }
                 }
                 .frame(width: 64, height: 64)
-                .opacity(entry.isMinimized || entry.isAppHidden ? 0.6 : 1)
+                .opacity(item.isMinimized || item.isAppHidden ? 0.6 : 1)
                 HStack(spacing: 2) {
-                    if entry.isMinimized { Badge(symbol: "minus") }
-                    if entry.isAppHidden { Badge(symbol: "eye.slash") }
+                    if item.window == nil { Badge(symbol: "rectangle.dashed") }
+                    if item.isMinimized { Badge(symbol: "minus") }
+                    if item.isAppHidden { Badge(symbol: "eye.slash") }
                 }
                 .offset(x: 4, y: 4)
             }
-            Text(entry.displayTitle)
+            Text(item.displayTitle)
                 .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)

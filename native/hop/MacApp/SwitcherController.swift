@@ -2,9 +2,10 @@ import AppKit
 import HopCore
 import os
 
-/// The switcher while a switch is in progress: opens it on a fresh window list, applies the session's events and the
-/// mouse to its `SwitcherViewModel`, performs the operations it asks for, and on commit hides it and brings the
-/// selected window forward. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
+/// The switcher while a switch is in progress: opens it on a fresh window list, filtered by the Shown-windows settings
+/// and excluded apps (`Settings.items(from:pointerDisplay:)`), applies the session's events and the mouse to its
+/// `SwitcherViewModel`, performs the operations it asks for, and on commit hides it and brings the selected window
+/// forward, or activates the selected windowless app. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
 /// that finds Hop without the Accessibility permission reopens onboarding instead. Nothing about a window, and never a
 /// title, is logged.
 ///
@@ -12,7 +13,8 @@ import os
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
 /// switcher at once. A hover after a waiting key waits behind it too, and selects the window it was over, not the place.
-/// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone.
+/// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. The settings
+/// are read each time the list is, so a change applies from the next read.
 @MainActor
 final class SwitcherController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switcher")
@@ -25,9 +27,12 @@ final class SwitcherController {
     /// (`WindowListController.refresh()`).
     private let readWindows: () -> WindowList
     private let windowOperator: any WindowOperator
+    private let settings: () -> Settings
     let panel = SwitcherPanel()
     private(set) var model: SwitcherViewModel?
     private var screen: NSScreen?
+    /// The display the switcher opened on, for `ShownWindows.pointerDisplayOnly`; it stays the same while it is open.
+    private var display: DisplayID?
     private var icons: [pid_t: NSImage] = [:]
     /// Bumped whenever the switcher opens or closes, so late results of an earlier switcher change nothing.
     private var generation = 0
@@ -40,10 +45,10 @@ final class SwitcherController {
 
     private enum Deferred {
         case event(SwitchSession.Event)
-        /// Select this window, as a hover over it did, if it is still listed.
-        case select(HopCore.WindowRef)
-        /// Commit the selection, or only this window (a click chose it) if it is still listed.
-        case commit(HopCore.WindowRef?)
+        /// Select this item, as a hover over it did, if it is still listed.
+        case select(SwitcherItem.ID)
+        /// Commit the selection, or only this item (a click chose it) if it is still listed.
+        case commit(SwitcherItem.ID?)
     }
 
     /// The switcher ended the session itself (a click chose a window), so the host's session must end too.
@@ -51,24 +56,29 @@ final class SwitcherController {
     /// An operation found Hop without the Accessibility permission.
     var onNotPermitted: () -> Void = {}
 
-    init(readWindows: @escaping () -> WindowList, windowOperator: any WindowOperator) {
+    init(
+        readWindows: @escaping () -> WindowList,
+        windowOperator: any WindowOperator,
+        settings: @escaping () -> Settings = { .default }
+    ) {
         self.readWindows = readWindows
         self.windowOperator = windowOperator
+        self.settings = settings
         panel.switcherView.onHover = { [unowned self] index in
-            guard let model, model.entries.indices.contains(index) else { return }
+            guard let model, model.items.indices.contains(index) else { return }
             if deferred.isEmpty {
                 if model.selection != index { update { $0.select(index) } }
                 return
             }
             // Only the last hover matters once it waits.
             if case .select = deferred.last { deferred.removeLast() }
-            deferred.append(.select(model.entries[index].ref))
+            deferred.append(.select(model.items[index].id))
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
-        panel.switcherView.onChoose = { [unowned self] window in
-            guard model?.entries.contains(where: { $0.ref == window }) == true else { return }
+        panel.switcherView.onChoose = { [unowned self] item in
+            guard model?.items.contains(where: { $0.id == item }) == true else { return }
             onSessionEnded()
-            commit(only: window)
+            commit(only: item)
         }
     }
 
@@ -78,14 +88,20 @@ final class SwitcherController {
     func open() {
         reset()
         let screen = Self.screenUnderPointer()
-        let model = SwitcherViewModel(entries: readWindows().windows, available: screen?.visibleFrame.size ?? .zero)
+        display = screen.flatMap(Self.displayID)
+        let model = SwitcherViewModel(items: items(in: readWindows()), available: screen?.visibleFrame.size ?? .zero)
         self.model = model
         self.screen = screen
         loadIcons()
         observeTerminations()
         guard let screen else { return }
         panel.show(.switcher(model, icons: icons), on: screen)
-        Self.log.debug("Switcher opened with \(model.entries.count, privacy: .public) windows")
+        Self.log.debug("Switcher opened with \(model.items.count, privacy: .public) items")
+    }
+
+    /// The cells for a list, as the current settings show it on the switcher's display.
+    private func items(in list: WindowList) -> [SwitcherItem] {
+        settings().items(from: list, pointerDisplay: display)
     }
 
     /// Applies a session event: moves the selection, or performs an operation on the selected window. While an
@@ -110,20 +126,21 @@ final class SwitcherController {
         commit(only: nil)
     }
 
-    /// Hides the switcher and brings `window` forward if it is still listed, or the selected window when it is nil.
-    /// While an operation is pending, the window is chosen once the list has been read again after it.
-    private func commit(only window: HopCore.WindowRef?) {
+    /// Hides the switcher and brings `item` forward if it is still listed, or the selected item when it is nil: a
+    /// window is focused and a windowless app activated. While an operation is pending, the item is chosen once the
+    /// list has been read again after it.
+    private func commit(only item: SwitcherItem.ID?) {
         guard pending == 0 else {
-            deferred.append(.commit(window))
+            deferred.append(.commit(item))
             panel.hide()
             return
         }
-        let target = if let window { model?.entries.first { $0.ref == window } } else { model?.selectedEntry }
+        let target = if let item { model?.items.first { $0.id == item } } else { model?.selectedItem }
         reset()
         guard let target else { return }
         let generation = generation
         Task { [windowOperator] in
-            let result = await windowOperator.perform(.focus, on: target)
+            let result = await Self.perform(.focus, on: target, with: windowOperator)
             Self.log.debug("Focus finished: \(String(describing: Self.kind(of: result)), privacy: .public)")
             if result == .notPermitted { return self.onNotPermitted() }
             // A switcher opened since then replaces the message.
@@ -149,7 +166,7 @@ final class SwitcherController {
         let generation = generation
         pending += 1
         Task { [windowOperator] in
-            let result = await windowOperator.perform(request.operation, on: request.window)
+            let result = await Self.perform(request.operation, on: request.item, with: windowOperator)
             Self.log.debug("""
                 \(String(describing: request.operation), privacy: .public) finished: \
                 \(String(describing: Self.kind(of: result)), privacy: .public)
@@ -169,9 +186,9 @@ final class SwitcherController {
         while pending == 0, !deferred.isEmpty {
             switch deferred.removeFirst() {
             case let .event(event): run(event)
-            case let .select(window):
-                if let index = model?.entries.firstIndex(where: { $0.ref == window }) { update { $0.select(index) } }
-            case let .commit(window): commit(only: window)
+            case let .select(item):
+                if let index = model?.items.firstIndex(where: { $0.id == item }) { update { $0.select(index) } }
+            case let .commit(item): commit(only: item)
             }
         }
     }
@@ -191,7 +208,7 @@ final class SwitcherController {
     private func refresh() {
         guard model != nil else { return }
         let list = readWindows()
-        model?.refreshed(list.windows, unread: Set(list.skippedApps.map(\.pid)))
+        model?.refreshed(items(in: list), unread: Set(list.skippedApps.map(\.pid)))
         loadIcons()
         render()
     }
@@ -245,11 +262,26 @@ final class SwitcherController {
 
     private func loadIcons() {
         guard let model else { return }
-        let pids = Set(model.entries.map(\.pid))
+        let pids = Set(model.items.map(\.pid))
         icons = icons.filter { pids.contains($0.key) }
         for pid in pids where icons[pid] == nil {
             icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon
         }
+    }
+
+    private static func perform(
+        _ operation: WindowOperation,
+        on item: SwitcherItem,
+        with windowOperator: any WindowOperator
+    ) async -> OperationResult {
+        switch item {
+        case let .window(window): await windowOperator.perform(operation, on: window)
+        case let .app(app): await windowOperator.perform(operation, onApp: app)
+        }
+    }
+
+    private static func displayID(of screen: NSScreen) -> DisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
     private static func screenUnderPointer() -> NSScreen? {

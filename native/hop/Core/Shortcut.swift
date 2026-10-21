@@ -29,47 +29,68 @@ public struct ModifierMask: OptionSet, Sendable, Hashable {
 /// Virtual key codes (the hardware-independent codes macOS reports for the US layout positions) that Hop handles.
 public enum KeyCode {
     public static let tab: UInt16 = 0x30
-    public static let space: UInt16 = 0x31
     public static let grave: UInt16 = 0x32
     public static let escape: UInt16 = 0x35
     public static let leftArrow: UInt16 = 0x7B
     public static let rightArrow: UInt16 = 0x7C
     public static let downArrow: UInt16 = 0x7D
     public static let upArrow: UInt16 = 0x7E
-
-    /// The modifier keys themselves (Command, Shift, Caps Lock, Option, Control, their right-hand twins, and Fn).
-    /// They arrive as flag changes, not key presses, so none of them can be a shortcut key.
-    public static let modifierKeys: Set<UInt16> = [0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F]
-
-    /// The keys an active switch already gives a meaning with the holding modifier (Esc cancels, ← and → step, ↑ and ↓
-    /// move by row), so none of them can be the shortcut key.
-    public static let reserved: Set<UInt16> = [escape, leftArrow, rightArrow, upArrow, downArrow]
 }
 
 /// The hold-to-switch shortcut: hold `holdModifier` and press `keyCode` to switch forward; add Shift to switch
-/// backward. Only Option or Control may be held. Command is not allowed because taking over ⌘Tab needs a private API,
-/// and Shift is reserved for the backward direction.
+/// backward. Only Option or Control may be held, and only Tab or ` (the key left of 1 on a US keyboard) pressed.
+/// Command is not allowed because taking over ⌘Tab needs a private API, and Shift is reserved for the backward
+/// direction.
 public struct Shortcut: Sendable, Hashable {
-    public enum Invalid: Error, Equatable {
-        /// The holding modifier is not exactly Option or exactly Control.
-        case holdModifier(ModifierMask)
-        /// The key is a modifier key, Esc (which cancels a switch), or an arrow key (which moves its selection).
-        case keyCode(UInt16)
+    /// Why a combination cannot be a shortcut. `reason` says so in the Settings window.
+    public enum Invalid: Error, Equatable, Sendable {
+        /// ⌘ is among the modifiers.
+        case command
+        /// Neither ⌥ nor ⌃ is held.
+        case noHoldModifier
+        /// Both ⌥ and ⌃ are held.
+        case bothHoldModifiers
+        /// ⇧ is held; it reverses the direction, so it cannot be part of the shortcut.
+        case shift
+        /// The key is not Tab or `.
+        case key(UInt16)
+        /// The combination is the same-app shortcut.
+        case sameAppShortcut(Shortcut)
+
+        public var reason: String {
+            switch self {
+            case .command: "⌘ can't be used: switching with ⌘Tab needs a private macOS API."
+            case .noHoldModifier: "Hold ⌥ or ⌃ while you press the key."
+            case .bothHoldModifiers: "Hold either ⌥ or ⌃, not both."
+            case .shift: "⇧ switches backward, so it can't be part of the shortcut."
+            case .key: "The key must be Tab or `."
+            case let .sameAppShortcut(shortcut): "\(shortcut.displayName) is the same-app shortcut."
+            }
+        }
     }
 
     public let holdModifier: ModifierMask
     public let keyCode: UInt16
 
+    /// The keys a shortcut may use.
+    public static let allowedKeys: Set<UInt16> = [KeyCode.tab, KeyCode.grave]
+
     /// The default: hold ⌥ and press Tab, or ⌥⇧Tab to go backward.
     public static let `default` = Shortcut(validated: .option, keyCode: KeyCode.tab)
+    /// The default same-app shortcut (SET-96): hold ⌥ and press `.
+    public static let sameAppDefault = Shortcut(validated: .option, keyCode: KeyCode.grave)
 
-    public init(holdModifier: ModifierMask, keyCode: UInt16) throws(Invalid) {
-        guard holdModifier == .option || holdModifier == .control else { throw .holdModifier(holdModifier) }
-        // Key codes are 7-bit on every Mac keyboard; a larger value cannot come from a key press.
-        guard keyCode < 0x80, !KeyCode.reserved.contains(keyCode), !KeyCode.modifierKeys.contains(keyCode) else {
-            throw .keyCode(keyCode)
-        }
-        self.holdModifier = holdModifier
+    /// A shortcut from the modifiers held with the key, as a press reports them. The modifiers must be exactly ⌥ or
+    /// exactly ⌃: the checks run in the order of `Invalid`'s cases, so ⌘⇧Tab is refused for its ⌘.
+    public init(holdModifier modifiers: ModifierMask, keyCode: UInt16) throws(Invalid) {
+        let modifiers = modifiers.intersection(.all)
+        if modifiers.contains(.command) { throw .command }
+        let held = modifiers.intersection([.option, .control])
+        if held.isEmpty { throw .noHoldModifier }
+        if held == [.option, .control] { throw .bothHoldModifiers }
+        if modifiers.contains(.shift) { throw .shift }
+        guard Self.allowedKeys.contains(keyCode) else { throw .key(keyCode) }
+        self.holdModifier = held
         self.keyCode = keyCode
     }
 
@@ -86,41 +107,40 @@ public struct Shortcut: Sendable, Hashable {
     /// The holding modifier's symbol: "⌥" or "⌃".
     public var modifierSymbol: String { holdModifier == .control ? "⌃" : "⌥" }
 
-    /// The key's name, such as "Tab". Keys without a name here (the Settings window, SET-95, names the rest) show
-    /// their code.
-    public var keyName: String {
-        switch keyCode {
-        case KeyCode.tab: "Tab"
-        case KeyCode.space: "Space"
-        case KeyCode.grave: "`"
-        default: "key \(keyCode)"
-        }
-    }
+    /// The key's name: "Tab" or "`".
+    public var keyName: String { keyCode == KeyCode.grave ? "`" : "Tab" }
 
     /// The shortcut as menus write it, such as "⌥Tab".
     public var displayName: String { modifierSymbol + keyName }
 }
 
-/// Reads the shortcut from the app's user defaults. The Settings window (SET-95) writes these keys; until then they
-/// are absent and the default applies. A missing, malformed or disallowed stored value also yields the default, so a
-/// bad setting can never leave Hop without a shortcut or holding ⌘.
-public struct ShortcutStore {
-    public static let holdModifierKey = "shortcut.holdModifier"
-    public static let keyCodeKey = "shortcut.keyCode"
-
-    private let defaults: UserDefaults
-
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+extension Shortcut: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case holdModifier
+        case keyCode
     }
 
-    public var shortcut: Shortcut {
-        guard
-            let modifier = defaults.object(forKey: Self.holdModifierKey) as? Int,
-            let code = defaults.object(forKey: Self.keyCodeKey) as? Int,
-            let keyCode = UInt16(exactly: code),
-            let stored = try? Shortcut(holdModifier: ModifierMask(rawValue: modifier), keyCode: keyCode)
-        else { return .default }
-        return stored
+    /// Stored as `{"holdModifier": "option" | "control", "keyCode": <virtual key code>}`. A value that is not an
+    /// allowed shortcut does not decode.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let modifier: ModifierMask = switch try container.decode(String.self, forKey: .holdModifier) {
+        case "option": .option
+        case "control": .control
+        default: throw DecodingError.dataCorruptedError(
+            forKey: .holdModifier, in: container, debugDescription: "unknown holding modifier"
+        )
+        }
+        do {
+            try self.init(holdModifier: modifier, keyCode: container.decode(UInt16.self, forKey: .keyCode))
+        } catch let error as Invalid {
+            throw DecodingError.dataCorruptedError(forKey: .keyCode, in: container, debugDescription: error.reason)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(holdModifier == .control ? "control" : "option", forKey: .holdModifier)
+        try container.encode(keyCode, forKey: .keyCode)
     }
 }
