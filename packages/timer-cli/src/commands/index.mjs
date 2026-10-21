@@ -4,6 +4,7 @@ import manifest from '../../package.json' with { type: 'json' };
 import { createClient } from '../daemon/client.mjs';
 import { checkSocketPath, resolveDataDir } from '../daemon/paths.mjs';
 import { daemonCommands } from './daemon.mjs';
+import { mcpCommands } from './mcp.mjs';
 import { presetCommands } from './presets.mjs';
 import { serveCommands } from './serve.mjs';
 import { CliError, EXIT } from './shared.mjs';
@@ -46,6 +47,9 @@ Daemon and agent skill
   daemon stop             Stop the daemon; timers keep their place and continue when it starts again
   skill path              Print the folder of the bundled agent skill
 
+Agents
+  mcp                     Run the MCP server on stdin and stdout for an MCP host, until stdin closes
+
 Web
   serve                   Open the Timer board in the browser, served on 127.0.0.1 until Ctrl-C
     --port <n>            Use this port, failing when it is taken (default: 4175, or the next free one)
@@ -60,7 +64,7 @@ Data: ~/.local/share/subset/timer, or SUBSET_TIMER_DATA_DIR. SUBSET_TIMER_ALERTS
 Exit status: 0 ok, 2 invalid input or an ambiguous <ref>, 3 daemon unavailable, 4 not found or invalid state.
 `;
 
-const COMMANDS = { ...timerCommands, ...presetCommands, ...daemonCommands, ...serveCommands };
+const COMMANDS = { ...timerCommands, ...presetCommands, ...daemonCommands, ...serveCommands, ...mcpCommands };
 const GROUPS = new Set(Object.keys(COMMANDS).filter((name) => name.includes(' ')).map((name) => name.split(' ')[0]));
 
 /** The command `argv` names and the arguments after it. No command, or only options, is `list`. */
@@ -124,6 +128,7 @@ function errorText(error) {
  * @param {Function} [io.foreground] Runs the started daemon until it exits (tests replace it).
  * @param {(url: string) => void} [io.openUrl] Opens the `serve` URL in a browser (tests replace it).
  * @param {() => Promise<void>} [io.untilStopped] Resolves when `serve` should stop; Ctrl-C by default.
+ * @param {Function} [io.serveMcp] Serves `mcp` (tests replace it).
  * @returns {Promise<number>} The exit status.
  */
 export async function main(io) {
@@ -167,6 +172,7 @@ export async function main(io) {
       foreground: io.foreground,
       openUrl: io.openUrl,
       untilStopped: io.untilStopped,
+      serveMcp: io.serveMcp,
       print
     });
     if (output) print(output);

@@ -1,6 +1,8 @@
 // Bundles the CLI, its daemon and alert sinks with the private @subset/timer package (and its zod
 // dependency) inlined into dist/cli.mjs, and copies the built board from apps/timer/dist into web/
-// for `serve`. The published package has no runtime dependencies.
+// for `serve`. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
+// dist/mcp-server.mjs, and code both use to dist/common.mjs. The published package has no runtime dependencies.
+import { builtinModules } from 'node:module';
 import { chmod, cp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +33,14 @@ await build({
   input: { cli: path.join(root, 'src/cli.mjs') },
   platform: 'node',
   external: [/^node:/],
-  output: { dir: path.join(root, 'dist'), format: 'esm', entryFileNames: '[name].mjs', chunkFileNames: '[name].mjs' }
+  // Bundled packages (the MCP SDK) import some built-ins without the node: prefix.
+  plugins: [{ name: 'node-prefix', resolveId: (id) => (builtinModules.includes(id) ? { id: `node:${id}`, external: true } : null) }],
+  output: {
+    dir: path.join(root, 'dist'),
+    format: 'esm',
+    entryFileNames: '[name].mjs',
+    chunkFileNames: (chunk) => (chunk.isDynamicEntry ? 'mcp-server.mjs' : 'common.mjs')
+  }
 });
 // src/cli.mjs starts with a shebang; make sure the bundle does too, once, and is executable.
 const cliFile = path.join(root, 'dist/cli.mjs');
