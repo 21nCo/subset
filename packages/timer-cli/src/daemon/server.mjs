@@ -509,6 +509,11 @@ export async function runDaemonCommand({ env = process.env, sink, log = stderrLo
     process.stderr.write(`subset-timer daemon: ${error.message}\n`);
     process.exit(1);
   }
+  await runInForeground(daemon);
+}
+
+/** Shuts a started daemon down on SIGINT, SIGTERM or SIGHUP, and exits the process with its code once it closes. */
+export async function runInForeground(daemon) {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => daemon.shutdown(0));
   process.exit(await daemon.closed);
 }
