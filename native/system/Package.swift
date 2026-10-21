@@ -21,11 +21,17 @@ let package = Package(
             dependencies: ["SystemCore"],
             path: "MacApp/Processes/Model"
         ),
+        // The Disk section's view models, likewise free of AppKit and SwiftUI.
+        .target(
+            name: "SystemDisk",
+            dependencies: ["SystemCore", "SystemProcesses"],
+            path: "MacApp/Disk/Model"
+        ),
         .executableTarget(
             name: "SubsetSystem",
-            dependencies: ["SystemCore", "SystemProcesses"],
+            dependencies: ["SystemCore", "SystemProcesses", "SystemDisk"],
             path: "MacApp",
-            exclude: ["Info.plist", "SubsetSystem.entitlements", "Processes/Model"]
+            exclude: ["Info.plist", "SubsetSystem.entitlements", "Processes/Model", "Disk/Model"]
         ),
         .testTarget(
             name: "SystemCoreTests",
@@ -36,6 +42,11 @@ let package = Package(
             name: "SystemProcessesTests",
             dependencies: ["SystemCore", "SystemProcesses"],
             path: "Tests/ProcessesTests"
+        ),
+        .testTarget(
+            name: "SystemDiskTests",
+            dependencies: ["SystemCore", "SystemProcesses", "SystemDisk"],
+            path: "Tests/DiskTests"
         )
     ]
 )

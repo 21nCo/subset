@@ -1,11 +1,14 @@
 import AppKit
 import SystemCore
+import SystemDisk
 import SystemProcesses
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = SystemMonitor()
     private let processes = ProcessesWindowModel()
+    private let disk = DiskWindowModel()
+    private let mainWindowState = MainWindowState()
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
     /// Created on first open: a list updated while its window has never been on screen trips AppKit's
@@ -16,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             title: "System",
             autosaveName: "SystemMainWindow",
             size: NSSize(width: 980, height: 640),
-            content: ProcessesView(model: processes, monitor: monitor)
+            content: MainWindowView(state: mainWindowState, processes: processes, disk: disk, monitor: monitor)
         )
         controller.onVisibilityChange = { [monitor, processes] visible in
             monitor.setMainWindowVisible(visible)
@@ -36,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the
         // policy here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
-        NSApp.mainMenu = MainMenu.make(perform: perform, processes: processes) { [weak self] in
+        NSApp.mainMenu = MainMenu.make(perform: perform, processes: processes, window: mainWindowState) { [weak self] in
             guard let self, mainWindowCreated else { return false }
             return mainWindow.isKey
         }
@@ -71,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Opens the window on one group, from the menu bar's top groups.
     private func open(_ group: OriginGroupID) {
+        mainWindowState.section = .processes
         processes.reveal(group)
         mainWindow.show()
     }

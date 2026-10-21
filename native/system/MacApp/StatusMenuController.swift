@@ -117,10 +117,12 @@ final class ActionMenuItem: NSMenuItem, NSMenuItemValidation {
     private let handler: () -> Void
     private let isAvailable: () -> Bool
 
-    init(title: String, keyEquivalent: String = "", enabled: @escaping () -> Bool = { true }, action: @escaping () -> Void) {
+    init(title: String, keyEquivalent: String = "", modifiers: NSEvent.ModifierFlags = .command,
+         enabled: @escaping () -> Bool = { true }, action: @escaping () -> Void) {
         handler = action
         isAvailable = enabled
         super.init(title: title, action: #selector(run), keyEquivalent: keyEquivalent)
+        keyEquivalentModifierMask = modifiers
         target = self
     }
 
@@ -132,11 +134,11 @@ final class ActionMenuItem: NSMenuItem, NSMenuItemValidation {
 }
 
 /// The application menu. An accessory app shows no menu bar, but its key equivalents (⌘, ⌘Q ⌘W ⌘M, and the View
-/// menu's ⌘1–⌘4 and ⌘F) still work while one of its windows is key.
+/// menu's ⌥⌘1 ⌥⌘2, ⌘1–⌘4, and ⌘F) still work while one of its windows is key.
 @MainActor
 enum MainMenu {
     /// `mainWindowIsKey` keeps the View menu's shortcuts to the System window, so ⌘F typed in Settings does nothing.
-    static func make(perform: @escaping (ShellCommand) -> Void, processes: ProcessesWindowModel,
+    static func make(perform: @escaping (ShellCommand) -> Void, processes: ProcessesWindowModel, window: MainWindowState,
                      mainWindowIsKey: @escaping () -> Bool) -> NSMenu {
         let appMenu = NSMenu(title: SystemIdentity.appName)
         appMenu.addItem(CommandMenuItem(command: .about, perform: perform))
@@ -150,13 +152,23 @@ enum MainMenu {
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
 
         let viewMenu = NSMenu(title: "View")
+        for (index, section) in MainWindowSection.allCases.enumerated() {
+            viewMenu.addItem(ActionMenuItem(title: section.title, keyEquivalent: String(index + 1), modifiers: [.command, .option],
+                                            enabled: mainWindowIsKey) {
+                window.section = section
+            })
+        }
+        viewMenu.addItem(.separator())
+        // The layer and filter belong to Processes, so they show it.
         for (index, layer) in AttributionLayer.allCases.enumerated() {
             viewMenu.addItem(ActionMenuItem(title: "By \(layer.title)", keyEquivalent: String(index + 1), enabled: mainWindowIsKey) {
+                window.section = .processes
                 processes.layer = layer
             })
         }
         viewMenu.addItem(.separator())
         viewMenu.addItem(ActionMenuItem(title: "Filter by Name", keyEquivalent: "f", enabled: mainWindowIsKey) {
+            window.section = .processes
             processes.focusFilter()
         })
 
