@@ -248,7 +248,11 @@ final class ReportsModel: ObservableObject {
 
     // MARK: Formatting
 
-    func time(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
+    /// A local time of day; one in the hour repeated when the clocks go back names its zone. `asEnd` reads the instant
+    /// they go back as the end of the first pass.
+    func time(_ date: Date, asEnd: Bool = false) -> String {
+        ReportText.time(date, calendar: calendar, locale: .autoupdatingCurrent, asEnd: asEnd)
+    }
 
     /// A local clock time, given in minutes after midnight, whether or not today has that time.
     func clock(_ minuteOfDay: Int) -> String { ReportText.clock(minuteOfDay, locale: .autoupdatingCurrent) }

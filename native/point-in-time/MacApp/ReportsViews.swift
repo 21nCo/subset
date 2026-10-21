@@ -154,7 +154,7 @@ private struct TimelineSection: View {
                     Button { model.moveHour(by: -1) } label: { Label("Previous Hour", systemImage: "chevron.left") }
                         .labelStyle(.iconOnly)
                         .disabled(model.hours.first == model.hour)
-                    Text(verbatim: "\(model.time(model.hour)) to \(model.time(model.hour.addingTimeInterval(3_600)))")
+                    Text(verbatim: "\(model.time(model.hour)) to \(model.time(model.hour.addingTimeInterval(3_600), asEnd: true))")
                     Button { model.moveHour(by: 1) } label: { Label("Next Hour", systemImage: "chevron.right") }
                         .labelStyle(.iconOnly)
                         .disabled(model.hours.last == model.hour)
@@ -238,7 +238,7 @@ private struct BlockInspector: View {
         GroupBox("Block") {
             if let block = model.block {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(verbatim: "\(model.time(block.start)) to \(model.time(block.end))").font(.headline)
+                    Text(verbatim: "\(model.time(block.start)) to \(model.time(block.end, asEnd: true))").font(.headline)
                     row("Label", "\(block.category.title) (\(state(block)))")
                     if let reason = block.labeling.reason { row(block.labeling.state == .corrected ? "Note" : "Reason", reason) }
                     if let provider = block.labeling.provider {
@@ -540,7 +540,7 @@ private struct WeekCalendar: View {
                         .annotation(position: .overlay) {
                             if span.duration >= 1_800 { Text(span.category.initial).font(.caption2) }
                         }
-                        .accessibilityLabel(Text(verbatim: "\(model.dayName(day.interval.start, wide: true)) \(model.time(span.start)) to \(model.time(span.end))"))
+                        .accessibilityLabel(Text(verbatim: "\(model.dayName(day.interval.start, wide: true)) \(model.time(span.start)) to \(model.time(span.end, asEnd: true))"))
                         .accessibilityValue(Text(span.category.title))
                 }
             }

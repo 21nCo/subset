@@ -186,9 +186,10 @@ public enum ReportPeriod {
     }
 
     /// Where a span of `day` sits on a clock-time axis, in minutes after midnight: from its start's clock time to its
-    /// end's, the day's end being 1440. When the clocks go back inside the span, it reaches at least the latest clock
-    /// time it passed, so the repeated hour is not drawn twice and the span never ends before it starts. When they go
-    /// forward, the skipped hour is not drawn.
+    /// end's, the day's end being 1440. When the clocks go back inside the span or at its end, it reaches at least the
+    /// latest clock time it passed, so the repeated hour is not drawn twice and the span never ends before it starts:
+    /// the instant they go back closes the first pass through the hour. When they go forward, the skipped hour is not
+    /// drawn.
     public static func clockMinutes(of span: LabeledSpan, day: DateInterval, calendar: Calendar) -> ClosedRange<Double> {
         func minutes(_ date: Date) -> Double {
             let parts = calendar.dateComponents([.hour, .minute, .second], from: date)
@@ -197,7 +198,7 @@ public enum ReportPeriod {
         let start = minutes(span.start)
         var end = span.end >= day.end ? 1_440 : minutes(span.end)
         var date = span.start
-        while let change = calendar.timeZone.nextDaylightSavingTimeTransition(after: date), change < span.end {
+        while let change = calendar.timeZone.nextDaylightSavingTimeTransition(after: date), change <= span.end {
             // The clock just before the change: its reading at the change plus the hour (or so) it went back.
             let back = calendar.timeZone.secondsFromGMT(for: change.addingTimeInterval(-1)) - calendar.timeZone.secondsFromGMT(for: change)
             if back > 0 { end = max(end, minutes(change) + Double(back) / 60) }
@@ -450,6 +451,32 @@ public enum ReportText {
         calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
         let date = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: minuteOfDay / 60 % 24, minute: minuteOfDay % 60)) ?? .distantPast
         return date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar, timeZone: calendar.timeZone))
+    }
+
+    /// A time of day in `calendar`'s zone and `locale`'s style, "2:30 PM" or "14:30". A wall time the clocks show twice,
+    /// in the hour repeated when they go back, names its zone ("1:30 AM EDT", "1:30 AM EST") so the two passes read
+    /// differently. As the end of a span (`asEnd`), the instant the clocks go back closes the first pass and reads as
+    /// that pass's clock ("2:00 AM EDT"), not as the start of the second.
+    public static func time(_ date: Date, calendar: Calendar, locale: Locale, asEnd: Bool = false) -> String {
+        let zone = calendar.timeZone
+        var shown: (offset: Int, abbreviation: String)?
+        var next = zone.nextDaylightSavingTimeTransition(after: date.addingTimeInterval(-2 * 86_400))
+        while let change = next, change <= date.addingTimeInterval(2 * 86_400) {
+            let before = change.addingTimeInterval(-1)
+            let back = zone.secondsFromGMT(for: before) - zone.secondsFromGMT(for: change)
+            next = zone.nextDaylightSavingTimeTransition(after: change)
+            // Going forward repeats nothing.
+            guard back > 0 else { continue }
+            if asEnd, date == change {
+                shown = (zone.secondsFromGMT(for: before), zone.abbreviation(for: before) ?? "")
+            } else if (change.addingTimeInterval(-Double(back))..<change.addingTimeInterval(Double(back))).contains(date) {
+                shown = (zone.secondsFromGMT(for: date), zone.abbreviation(for: date) ?? "")
+            }
+        }
+        let display = shown.flatMap { TimeZone(secondsFromGMT: $0.offset) } ?? zone
+        let text = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar, timeZone: display))
+        guard let shown, !shown.abbreviation.isEmpty else { return text }
+        return text + " " + shown.abbreviation
     }
 
     /// Every category with time, then focus as a share of classified time.

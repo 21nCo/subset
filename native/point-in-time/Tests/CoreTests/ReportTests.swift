@@ -238,6 +238,51 @@ private func temporaryDirectory() -> URL {
         #expect(ReportPeriod.clockMinutes(of: late.spans[0], day: late.interval, calendar: cal) == 1_380...1_440)
     }
 
+    @Test func spansEndingAtTheFallBackInstantCoverTheFirstPassThroughTheRepeatedHour() {
+        // The clocks go back at 02:00 EDT, which is 01:00 EST: a span ending there ends the first pass, at 02:00.
+        let fall = date(cal, 1, 0, month: 11)
+        let change = cal.timeZone.nextDaylightSavingTimeTransition(after: fall)!
+        func minutes(from start: Date, to end: Date) -> ClosedRange<Double> {
+            let blocks = run(start, Int(end.timeIntervalSince(start) / Block.length), .focus)
+            let day = DayReport(day: fall, blocks: blocks, calendar: cal)
+            #expect(day.spans.count == 1)
+            return ReportPeriod.clockMinutes(of: day.spans[0], day: day.interval, calendar: cal)
+        }
+        #expect(minutes(from: fall, to: change) == 0...120)
+        #expect(minutes(from: change.addingTimeInterval(-3_600), to: change) == 60...120)
+        #expect(minutes(from: change.addingTimeInterval(-1_800), to: change) == 90...120)
+        // The second pass starts at the change, at 01:00 again.
+        #expect(minutes(from: change, to: change.addingTimeInterval(3_600)) == 60...120)
+    }
+
+    @Test func timesInTheRepeatedHourNameTheirPass() {
+        let gb = Locale(identifier: "en_GB")
+        let fall = date(cal, 1, 0, month: 11)
+        let change = cal.timeZone.nextDaylightSavingTimeTransition(after: fall)!
+        let firstHour = change.addingTimeInterval(-3_600), secondHour = change
+        func time(_ date: Date, asEnd: Bool = false) -> String { ReportText.time(date, calendar: cal, locale: gb, asEnd: asEnd) }
+        // Both hours start at 01:00 by the clock, but their labels differ.
+        #expect(time(firstHour).hasSuffix("1:00 EDT"))
+        #expect(time(secondHour).hasSuffix("1:00 EST"))
+        #expect(time(firstHour.addingTimeInterval(1_620)).hasSuffix("1:27 EDT"))
+        #expect(time(secondHour.addingTimeInterval(1_620)).hasSuffix("1:27 EST"))
+        // The first hour ends at the change, which closes it at 02:00 EDT; the second ends at a plain 02:00.
+        #expect(time(change, asEnd: true).hasSuffix("2:00 EDT"))
+        #expect(time(change.addingTimeInterval(3_600), asEnd: true).hasSuffix("2:00"))
+        #expect(!time(change.addingTimeInterval(3_600), asEnd: true).contains("E"))
+        #expect("\(time(firstHour)) to \(time(change, asEnd: true))" != "\(time(secondHour)) to \(time(change.addingTimeInterval(3_600), asEnd: true))")
+        // Outside the repeated hour, and on an ordinary day, times carry no zone.
+        #expect(!time(fall).contains("E"))
+        #expect(!time(change.addingTimeInterval(-3_660)).contains("E"))
+        #expect(time(date(cal, 20, 9, 30)).hasSuffix("9:30"))
+        #expect(time(date(cal, 20, 9, 30), asEnd: true).hasSuffix("9:30"))
+        // The skipped hour on the spring-forward day is never shown, and the times around it carry no zone.
+        let spring = date(cal, 8, 0, month: 3)
+        let forward = cal.timeZone.nextDaylightSavingTimeTransition(after: spring)!
+        #expect(time(forward).hasSuffix("3:00"))
+        #expect(time(forward, asEnd: true).hasSuffix("3:00"))
+    }
+
     @Test func clockLabelsNameWallTimesTheDayMayNotHave() {
         // 02:30 does not exist on 8 March in New York, but the label is the wall time itself, not a shifted one.
         // (Whether the hour has a leading zero depends on the system's locale data.)
