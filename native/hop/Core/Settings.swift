@@ -79,9 +79,9 @@ public struct Settings: Sendable, Equatable {
         self.shortcut = shortcut
     }
 
-    /// Back to ⌥Tab.
-    public mutating func resetShortcut() {
-        shortcut = .default
+    /// Back to ⌥Tab, unless ⌥Tab is the same-app shortcut; then the shortcut stays as it is.
+    public mutating func resetShortcut() throws(Shortcut.Invalid) {
+        try setShortcut(.default)
     }
 
     /// Adds an app to the excluded list, unless it is already there. An empty bundle ID is ignored.

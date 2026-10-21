@@ -89,6 +89,23 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(settings.settings.shortcut, .default)
     }
 
+    func testResetShowsWhyWhenOptionTabIsTheSameAppShortcut() throws {
+        defaults.set(Data(#"""
+            {"schemaVersion": 1, "shortcut": {"holdModifier": "control", "keyCode": 48},
+             "sameAppShortcut": {"holdModifier": "option", "keyCode": 48}}
+            """#.utf8), forKey: Settings.defaultsKey)
+        let settings = model()
+        var applied: [Settings] = []
+        settings.onChange = { applied.append($0) }
+        let stored = settings.settings
+        XCTAssertNotEqual(stored, .default)
+        settings.resetShortcut()
+        XCTAssertEqual(settings.recorderMessage, "⌥Tab is the same-app shortcut.")
+        XCTAssertEqual(settings.settings, stored)
+        XCTAssertEqual(applied, [])
+        XCTAssertEqual(SettingsStore(defaults: defaults).load(), stored)
+    }
+
     func testEscOrStopEndsRecordingAndKeepsTheShortcut() {
         let settings = model()
         var suspended: [Bool] = []

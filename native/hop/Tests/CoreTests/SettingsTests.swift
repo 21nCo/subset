@@ -43,7 +43,7 @@ final class SettingsTests: XCTestCase {
     func testResetGoesBackToOptionTab() throws {
         var settings = Settings.default
         try settings.setShortcut(Shortcut(holdModifier: .control, keyCode: KeyCode.grave))
-        settings.resetShortcut()
+        try settings.resetShortcut()
         XCTAssertEqual(settings.shortcut.displayName, "⌥Tab")
     }
 
@@ -159,6 +159,24 @@ final class SettingsStoreTests: XCTestCase {
             defaults.set(value, forKey: Settings.defaultsKey)
             XCTAssertEqual(store.load(), .default, name)
         }
+    }
+
+    func testResetIsRefusedWhenOptionTabIsTheSameAppShortcutSoSavedSettingsStillRead() throws {
+        storeJSON(#"""
+            {"schemaVersion": 1, "shortcut": {"holdModifier": "control", "keyCode": 48},
+             "sameAppShortcut": {"holdModifier": "option", "keyCode": 48}}
+            """#)
+        var settings = store.load()
+        let controlTab = try Shortcut(holdModifier: .control, keyCode: KeyCode.tab)
+        XCTAssertEqual(settings.shortcut, controlTab)
+        XCTAssertEqual(settings.sameAppShortcut, .default)
+        XCTAssertThrowsError(try settings.resetShortcut()) { error in
+            XCTAssertEqual(error as? Shortcut.Invalid, .sameAppShortcut(.default))
+        }
+        XCTAssertEqual(settings.shortcut, controlTab)
+        store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        XCTAssertNotEqual(store.load(), .default)
     }
 
     func testAbsentKeysInVersionOneTakeTheirDefaults() {

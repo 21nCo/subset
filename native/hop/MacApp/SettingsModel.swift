@@ -97,9 +97,17 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - Shortcut
 
+    /// Goes back to ⌥Tab, or shows why it can't (⌥Tab is the same-app shortcut).
     func resetShortcut() {
         stopRecording()
-        update { $0.resetShortcut() }
+        var reset = settings
+        do {
+            try reset.resetShortcut()
+            recorderMessage = nil
+            update { $0 = reset }
+        } catch {
+            recorderMessage = error.reason
+        }
     }
 
     /// Starts recording: the next allowed press becomes the shortcut.
