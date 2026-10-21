@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "BD0250A986926C929EF4EABB1B553ACA"
+               BlueprintIdentifier = "A8C9D2A76F41446F61BDD73F860030BE"
                BuildableName = "pointInTime.app"
                BlueprintName = "PointInTime"
                ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "B018E94468EC0135FA7E55B6372327C7"
+               BlueprintIdentifier = "09C8BAE32F0D593A5A4D72E0D8274057"
                BuildableName = "PointInTimeCoreTests.xctest"
                BlueprintName = "PointInTimeCoreTests"
                ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "BD0250A986926C929EF4EABB1B553ACA"
+            BlueprintIdentifier = "A8C9D2A76F41446F61BDD73F860030BE"
             BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "B018E94468EC0135FA7E55B6372327C7"
+               BlueprintIdentifier = "09C8BAE32F0D593A5A4D72E0D8274057"
                BuildableName = "PointInTimeCoreTests.xctest"
                BlueprintName = "PointInTimeCoreTests"
                ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -77,7 +77,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "BD0250A986926C929EF4EABB1B553ACA"
+            BlueprintIdentifier = "A8C9D2A76F41446F61BDD73F860030BE"
             BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -94,7 +94,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "BD0250A986926C929EF4EABB1B553ACA"
+            BlueprintIdentifier = "A8C9D2A76F41446F61BDD73F860030BE"
             BuildableName = "pointInTime.app"
             BlueprintName = "PointInTime"
             ReferencedContainer = "container:PointInTime.xcodeproj">
