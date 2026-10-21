@@ -126,9 +126,8 @@ public struct CleanupPreview: Identifiable, Equatable, Sendable {
             case .all:
                 items = match.items
             case let .items(paths):
-                if let stray = paths.sorted().first(where: { path in !match.items.contains { $0.path == path } }) {
-                    throw .notInMatch(stray)
-                }
+                let inMatch = Set(match.items.map(\.path))
+                if let stray = paths.subtracting(inMatch).min() { throw .notInMatch(stray) }
                 items = match.items.filter { paths.contains($0.path) }
             }
             guard !items.isEmpty else { throw .nothingSelected }

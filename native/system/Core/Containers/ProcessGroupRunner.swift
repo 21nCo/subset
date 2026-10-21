@@ -1,12 +1,34 @@
 import Darwin
 import Foundation
 
+/// How a command run in a process group of its own ended, with what it printed however it ended.
+public struct GroupCommandResult: Equatable, Sendable {
+    /// Its exit status (the signal's number when a signal ended it), or why it was stopped or never started.
+    public let ending: Result<Int32, CommandFailure>
+    /// What it printed, at most one byte past the runner's limit in all, kept when it was stopped too.
+    public let stdout: Data
+    public let stderr: Data
+
+    public init(ending: Result<Int32, CommandFailure>, stdout: Data = Data(), stderr: Data = Data()) {
+        self.ending = ending
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+}
+
+/// Runs a command in a process group of its own, in the given working directory, and answers only once no process is
+/// left in the group.
+public protocol GroupCommandRunning: Sendable {
+    func run(_ executable: String, arguments: [String], environment: [String: String], workingDirectory: String,
+             timeout: Duration) async -> GroupCommandResult
+}
+
 /// Runs a command in a process group of its own and answers only once the command has exited and no process is left
 /// in its group: for a command that changes the disk, whose result, and whatever runs after it, must not overlap with
 /// the command or a program it started. At the timeout, once the output passes `outputLimit`, or when the calling task
 /// is cancelled, it sends the group `SIGTERM`, then `SIGKILL` after `grace`, and keeps waiting until they have exited.
 /// A process that leaves the group (`setsid`, `setpgid`) is not followed. A task already cancelled starts nothing.
-public struct ProcessGroupRunner: CommandRunning {
+public struct ProcessGroupRunner: GroupCommandRunning, CommandRunning {
     public static let defaultGrace: Duration = .seconds(3)
     /// The most read from one stream in one turn.
     static let chunkSize = 64 << 10
@@ -26,17 +48,25 @@ public struct ProcessGroupRunner: CommandRunning {
         self.registry = registry
     }
 
-    public func run(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration) async
-        -> Result<CommandOutput, CommandFailure> {
+    public func run(_ executable: String, arguments: [String], environment: [String: String], workingDirectory: String,
+                    timeout: Duration) async -> GroupCommandResult {
         let run = GroupRun(limit: outputLimit, grace: grace, registry: registry, onTurn: onTurn)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                run.start(executable, arguments: arguments, environment: environment, timeout: timeout,
-                          continuation: continuation)
+                run.start(executable, arguments: arguments, environment: environment, workingDirectory: workingDirectory,
+                          timeout: timeout, continuation: continuation)
             }
         } onCancel: {
             run.cancel()
         }
+    }
+
+    /// Runs the command in `/`, dropping what it printed when it was stopped.
+    public func run(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration) async
+        -> Result<CommandOutput, CommandFailure> {
+        let result = await run(executable, arguments: arguments, environment: environment, workingDirectory: "/",
+                               timeout: timeout)
+        return result.ending.map { CommandOutput(status: $0, stdout: result.stdout, stderr: result.stderr) }
     }
 }
 
@@ -79,14 +109,15 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         }
     }
 
-    func start(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration,
-               continuation: CheckedContinuation<Result<CommandOutput, CommandFailure>, Never>) {
-        guard registry.register(self) else { return continuation.resume(returning: .failure(.cancelled)) }
+    func start(_ executable: String, arguments: [String], environment: [String: String], workingDirectory: String,
+               timeout: Duration, continuation: CheckedContinuation<GroupCommandResult, Never>) {
+        guard registry.register(self) else { return continuation.resume(returning: .init(ending: .failure(.cancelled))) }
         // Launched under the lock, so a cancellation or shutdown either comes first and nothing launches, or finds the
         // pid to signal.
         let launch: Result<(stdout: Int32, stderr: Int32), CommandFailure> = lock.withLock {
             guard stopRequest == nil else { return .failure(.cancelled) }
-            return Self.spawn(executable, arguments: arguments, environment: environment).map { launched in
+            return Self.spawn(executable, arguments: arguments, environment: environment,
+                              workingDirectory: workingDirectory).map { launched in
                 pid = launched.pid
                 return (launched.stdout, launched.stderr)
             }
@@ -94,7 +125,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         switch launch {
         case let .failure(failure):
             registry.remove(self)
-            continuation.resume(returning: .failure(failure))
+            continuation.resume(returning: .init(ending: .failure(failure)))
         case let .success(pipes):
             let thread = Thread { [self] in
                 let result = monitor(stdout: pipes.stdout, stderr: pipes.stderr, deadline: .now + timeout)
@@ -109,7 +140,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
     /// Reads the output, reaps the command, and stops the group when asked, at the deadline, or when the output is too
     /// large; returns once the command has exited and its group is gone.
     private func monitor(stdout outFD: Int32, stderr errFD: Int32, deadline: ContinuousClock.Instant)
-        -> Result<CommandOutput, CommandFailure> {
+        -> GroupCommandResult {
         let pid = lock.withLock { self.pid }
         var output = [Data(), Data()]
         var open = [outFD, errFD]
@@ -164,8 +195,8 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
                 killed = true
             }
         }
-        if let reason { return .failure(reason) }
-        return .success(CommandOutput(status: Self.terminationStatus(status ?? -1), stdout: output[0], stderr: output[1]))
+        return GroupCommandResult(ending: reason.map { .failure($0) } ?? .success(Self.terminationStatus(status ?? -1)),
+                                  stdout: output[0], stderr: output[1])
     }
 
     /// Whether a process the runner can signal is left in the group. Once none is, the group's ID is free and is never
@@ -204,11 +235,13 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         return signal == 0 ? (raw >> 8) & 0xff : signal
     }
 
-    /// Launches the command in a new process group, without a shell, with standard input from `/dev/null`, default
-    /// signal handling, and only its standard input, output, and error open.
-    private static func spawn(_ executable: String, arguments: [String], environment: [String: String])
+    /// Launches the command in a new process group, in `workingDirectory`, without a shell, with standard input from
+    /// `/dev/null`, default signal handling, and only its standard input, output, and error open.
+    private static func spawn(_ executable: String, arguments: [String], environment: [String: String],
+                              workingDirectory: String)
         -> Result<(pid: pid_t, stdout: Int32, stderr: Int32), CommandFailure> {
-        var out: [Int32] = [-1, -1], err: [Int32] = [-1, -1]
+        var out: [Int32] = [-1, -1]
+        var err: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { return .failure(.launchFailed(String(cString: strerror(errno)))) }
         guard pipe(&err) == 0 else {
             let error = errno
@@ -221,6 +254,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
         posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&actions, err[1], STDERR_FILENO)
@@ -231,7 +265,8 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
                                                     | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
-        var all = sigset_t(), none = sigset_t()
+        var all = sigset_t()
+        var none = sigset_t()
         sigfillset(&all)
         sigemptyset(&none)
         posix_spawnattr_setsigdefault(&attributes, &all)

@@ -39,6 +39,15 @@ public struct CleanupResult: Identifiable, Equatable, Sendable {
         guard let freeBefore, let freeAfter else { return nil }
         return freeAfter - freeBefore
     }
+
+    /// Something was moved to the Trash, or the command ran; a cleanup that did nothing can be tried again.
+    public var didAct: Bool {
+        switch outcome {
+        case let .trash(items): items.contains { if case .moved = $0.status { true } else { false } }
+        case let .command(_, result): result.ran
+        case .notConfirmed: false
+        }
+    }
 }
 
 /// Carries out confirmed previews: moves items to the Trash after checking each again, or runs an allowlisted
@@ -94,13 +103,18 @@ public actor CleanupExecutor {
     }
 
     /// Checks the item again and moves it to the Trash. The check and the move are separate calls, so another item can
-    /// take its place in between. So what reached the Trash is compared with the scanned item afterwards: only that
-    /// item counts as moved; another is put back where it was, never over what is there now; and what cannot be checked
-    /// is reported failed, with where it is in the Trash.
+    /// take its place in between, or the folder holding it can be moved elsewhere, into a protected folder say, with a
+    /// link left at its path. So afterwards what reached the Trash is compared with the scanned item, and the folder at
+    /// the item's path with the one checked: only the scanned item, taken from that folder, counts as moved; anything
+    /// else is put back where it was, never over what is there now; and what cannot be checked or put back is reported
+    /// failed, with where it is in the Trash. A change undone before the second check is not seen, but then the item
+    /// moved is still the scanned one, from a folder that was at its path at both checks.
     private func move(_ item: CleanupItem) -> CleanupResult.ItemOutcome {
         if Task.isCancelled { return .init(path: item.path, status: .skipped(.stopped)) }
-        if let reason = item.revalidate(protection, identify: identify) {
-            return .init(path: item.path, status: .skipped(reason))
+        let folder: FolderIdentity
+        switch item.check(protection, identify: identify) {
+        case let .failure(reason): return .init(path: item.path, status: .skipped(reason))
+        case let .success(checked): folder = checked
         }
         guard let identity = item.identity else { return .init(path: item.path, status: .skipped(.notIdentified)) }
         let moved: URL?
@@ -116,16 +130,14 @@ public actor CleanupExecutor {
         let trashPath = moved.path
         switch identify(trashPath) {
         case let .item(now, _) where now.isSameFile(as: identity):
-            return .init(path: item.path, status: .moved(trashPath: trashPath))
-        case .item, .symlink:
-            // Back along the same path, so a folder above it that is now a link leads it back where it was.
-            guard renamex_np(trashPath, item.path, UInt32(RENAME_EXCL)) == 0 else {
-                let error = errno
-                return .init(path: item.path, status: .failed(
-                    "Another item took its place just before the move and is in the Trash, at \(trashPath); it could not "
-                        + "be put back: \(String(cString: strerror(error)))."))
+            if FolderIdentity.read((item.path as NSString).deletingLastPathComponent) == .success(folder) {
+                return .init(path: item.path, status: .moved(trashPath: trashPath))
             }
-            return .init(path: item.path, status: .skipped(.replacedWhileMoving))
+            return putBack(item, from: trashPath, reason: .folderChangedWhileMoving,
+                           failure: "The folder holding it moved or became a link during the move")
+        case .item, .symlink:
+            return putBack(item, from: trashPath, reason: .replacedWhileMoving,
+                           failure: "Another item took its place just before the move")
         case .missing:
             return .init(path: item.path, status: .failed(
                 "It was moved to the Trash, but nothing is at \(trashPath), so System could not check what was moved."))
@@ -134,6 +146,19 @@ public actor CleanupExecutor {
                 "What was moved to the Trash, at \(trashPath), could not be checked (\(String(cString: strerror(code)))); "
                     + "it is still there."))
         }
+    }
+
+    /// Moves what reached the Trash back along the item's path, so a folder above it that is now a link leads it back
+    /// where it was taken from, and never over what is there now.
+    private func putBack(_ item: CleanupItem, from trashPath: String, reason: CleanupSkipReason, failure: String)
+        -> CleanupResult.ItemOutcome {
+        guard renamex_np(trashPath, item.path, UInt32(RENAME_EXCL)) == 0 else {
+            let error = errno
+            return .init(path: item.path, status: .failed(
+                "\(failure); what was moved is in the Trash, at \(trashPath), and could not be put back: "
+                    + "\(String(cString: strerror(error)))."))
+        }
+        return .init(path: item.path, status: .skipped(reason))
     }
 
     @Sendable static func moveToTrash(_ url: URL) throws -> URL? {

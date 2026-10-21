@@ -194,22 +194,28 @@ final class ProcessGroupRunnerTests: XCTestCase {
     }
 
     func testTheEnvironmentIsExactlyTheOneGiven() async throws {
-        let stub = try await warmedStub("/usr/bin/env")
-        let output = try await ProcessGroupRunner().run(stub, arguments: [], environment: ["ONLY": "this"],
+        let output = try await ProcessGroupRunner().run("/usr/bin/env", arguments: [], environment: ["SUBSET_TEST": "1"],
                                                         timeout: .seconds(10)).get()
-        // `sh` adds its own `PWD`, `SHLVL`, and `_`; nothing is inherited.
-        let lines = String(decoding: output.stdout, as: UTF8.self).split(separator: "\n")
-            .filter { !["PWD", "SHLVL", "_"].contains($0.prefix { $0 != "=" }) }
-        XCTAssertEqual(lines, ["ONLY=this"])
+        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "SUBSET_TEST=1\n", "nothing is inherited")
+    }
+
+    func testTheCommandRunsInTheWorkingDirectoryGiven() async throws {
+        let inside = folder.appendingPathComponent("inside").path
+        try FileManager.default.createDirectory(atPath: inside, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: inside + "/only-file", contents: Data())
+        let result = await ProcessGroupRunner().run("/bin/ls", arguments: [], environment: [:], workingDirectory: inside,
+                                                    timeout: .seconds(10))
+        XCTAssertEqual(result.ending, .success(0))
+        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "only-file\n")
     }
 
     // MARK: Helpers
 
     private final class Turns: @unchecked Sendable {
         private let lock = NSLock()
-        private var turns: [(read: Int, kept: Int)] = []
-        func add(_ read: Int, _ kept: Int) { lock.withLock { turns.append((read, kept)) } }
-        var all: [(read: Int, kept: Int)] { lock.withLock { turns } }
+        private var recorded: [(read: Int, kept: Int)] = []
+        func add(_ read: Int, _ kept: Int) { lock.withLock { recorded.append((read, kept)) } }
+        var all: [(read: Int, kept: Int)] { lock.withLock { recorded } }
     }
 
     /// The process is gone right now, not merely on its way out.

@@ -111,6 +111,19 @@ public struct CleanupItem: Hashable, Sendable {
     /// `nil`. `identify` reads what is at a path now (`DiskItemIdentity.current`).
     func revalidate(_ protection: CleanupProtection,
                     identify: (String) -> DiskItemCurrent = DiskItemIdentity.current) -> CleanupSkipReason? {
+        if case let .failure(reason) = check(protection, identify: identify) { return reason }
+        return nil
+    }
+
+    /// `revalidate`, returning, when the item may be moved, the folder holding it, which must still be the folder at
+    /// that path once it has been moved.
+    func check(_ protection: CleanupProtection,
+               identify: (String) -> DiskItemCurrent) -> Result<FolderIdentity, CleanupSkipReason> {
+        if let reason = recheck(protection, identify: identify) { return .failure(reason) }
+        return FolderIdentity.read((path as NSString).deletingLastPathComponent)
+    }
+
+    private func recheck(_ protection: CleanupProtection, identify: (String) -> DiskItemCurrent) -> CleanupSkipReason? {
         if let reason = protection.refusal(path) { return .protected(reason) }
         guard CleanupProtection.isPlain(root) else { return .outsideRoot }
         if CleanupProtection.key(path) == CleanupProtection.key(root) { return .isRoot }
@@ -136,8 +149,32 @@ public struct CleanupItem: Hashable, Sendable {
     }
 }
 
+/// Which folder is at a path, reached without following any link: its volume and inode (`fstat`). A folder has one
+/// place, so the same folder found at the same path again, with no link on the way, is the folder that was there.
+struct FolderIdentity: Equatable, Sendable {
+    let device: dev_t
+    let inode: ino_t
+
+    /// The folder at `path` now; a link anywhere on the way, or a file, is `outsideRoot`.
+    static func read(_ path: String) -> Result<FolderIdentity, CleanupSkipReason> {
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY)
+        guard fd >= 0 else {
+            let error = errno
+            switch error {
+            case ENOENT: return .failure(.missing)
+            case ELOOP, ENOTDIR: return .failure(.outsideRoot)
+            default: return .failure(.unreadable(error))
+            }
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return .failure(.unreadable(errno)) }
+        return .success(FolderIdentity(device: info.st_dev, inode: info.st_ino))
+    }
+}
+
 /// Why an item was not moved.
-public enum CleanupSkipReason: Equatable, Sendable {
+public enum CleanupSkipReason: Error, Equatable, Sendable {
     /// A protected place (`CleanupProtection`).
     case protected(String)
     case missing
@@ -150,6 +187,9 @@ public enum CleanupSkipReason: Equatable, Sendable {
     case replaced
     /// Another file took its place between the check and the move; it was moved back from the Trash.
     case replacedWhileMoving
+    /// The folder holding it moved or became a link during the move, so it may have been taken from elsewhere; it was
+    /// moved back from the Trash.
+    case folderChangedWhileMoving
     /// The scan did not read both its volume and its inode, so it cannot be checked.
     case notIdentified
     case unreadable(Int32)
@@ -166,6 +206,8 @@ public enum CleanupSkipReason: Equatable, Sendable {
         case .replaced: "Another item has taken its place since the scan."
         case .replacedWhileMoving:
             "Another item took its place just before the move; it was put back from the Trash, and this item was not moved."
+        case .folderChangedWhileMoving:
+            "The folder holding it moved or became a link during the move, so it was put back from the Trash."
         case .notIdentified: "The scan could not read which file it was, so it cannot be checked."
         case let .unreadable(code): "It could not be checked: \(String(cString: strerror(code)))."
         case .stopped: "The cleanup was stopped before this item."

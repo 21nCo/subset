@@ -124,16 +124,17 @@ extension DiskWindowModel {
         cleanupSheet = nil
     }
 
-    /// Carries out the sheet's preview with the confirmation the sheet issued for it. The result is shown in the sheet
-    /// and kept in `cleanupResults` for the session.
+    /// Carries out the sheet's preview with the confirmation the sheet issued for it, unless a cleanup is running
+    /// already. The result is shown in the sheet and kept in `cleanupResults` for the session.
     public func perform(_ confirmation: CleanupConfirmation) {
-        guard let sheet = cleanupSheet, sheet.isRunning, case let .success(preview) = sheet.preview else { return }
+        guard cleanupTask == nil, let sheet = cleanupSheet, sheet.isRunning, case let .success(preview) = sheet.preview
+        else { return }
         let executor = cleanup.executor
         cleanupTask = Task { [weak self] in
             let result = await executor.perform(preview, confirmation: confirmation)
             guard let self else { return }
             sheet.finish(result)
-            if result.outcome != .notConfirmed { cleanedMatches.insert(sheet.matchIndex) }
+            if result.didAct { cleanedMatches.insert(sheet.matchIndex) }
             cleanupResults.append(result)
             cleanupTask = nil
             isStoppingCleanup = false
@@ -195,7 +196,8 @@ extension CleanupEstimate {
     /// "≥ 1.2 MB", "≤ 300 MB", or "Unknown".
     public func text(_ format: UsageFormat) -> String {
         guard let bytes else { return "Unknown" }
-        return (isLowerBound ? "≥ " : isUpperBound ? "≤ " : "") + format.diskBytes(bytes)
+        let bound = if isLowerBound { "≥ " } else if isUpperBound { "≤ " } else { "" }
+        return bound + format.diskBytes(bytes)
     }
 }
 
@@ -227,7 +229,7 @@ extension CleanupResult {
             what = switch result {
             case .exited(0, _): "\(name) finished."
             case let .exited(status, _): "\(name) failed with exit status \(status)."
-            case let .timedOut(seconds): "\(name) was stopped after \(seconds / 60) minutes without finishing."
+            case let .timedOut(seconds, _): "\(name) was stopped after \(seconds / 60) minutes without finishing."
             case let .launchFailed(message): "\(name) could not be started: \(message)"
             case .outputTooLarge: "\(name) printed more than System reads, so it was stopped."
             case .cancelled: "\(name) was stopped."
@@ -240,9 +242,10 @@ extension CleanupResult {
         return "\(what) \(freed) (estimate \(estimate.text(format)))."
     }
 
-    /// The command's printed lines shown, at most `CleanupCommands.outputLineLimit`, with a note of those left out.
+    /// The command's printed lines shown, at most `CleanupCommands.outputLineLimit`, with a note of those left out;
+    /// for a command that was stopped too, what it printed until then.
     public var outputLines: [String] {
-        guard case let .command(_, .exited(_, output)) = outcome else { return [] }
+        guard case let .command(_, result) = outcome, let output = result.output else { return [] }
         return (output.omitted > 0 ? ["… \(output.omitted) earlier lines not shown"] : []) + output.lines
     }
 }
