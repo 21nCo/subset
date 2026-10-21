@@ -187,9 +187,9 @@ public enum ReportPeriod {
 
     /// Where a span of `day` sits on a clock-time axis, in minutes after midnight: from its start's clock time to its
     /// end's, the day's end being 1440. When the clocks go back inside the span or at its end, it reaches at least the
-    /// latest clock time it passed, so the repeated hour is not drawn twice and the span never ends before it starts:
-    /// the instant they go back closes the first pass through the hour. When they go forward, the skipped hour is not
-    /// drawn.
+    /// latest clock time it passed, so it never ends before it starts: the instant they go back closes the first pass
+    /// through the hour. Spans are placed one at a time, so a span in the second pass overlaps one in the first. A span
+    /// across the hour the clocks skip forward is drawn across it, from its start's clock time to its end's.
     public static func clockMinutes(of span: LabeledSpan, day: DateInterval, calendar: Calendar) -> ClosedRange<Double> {
         func minutes(_ date: Date) -> Double {
             let parts = calendar.dateComponents([.hour, .minute, .second], from: date)

@@ -637,7 +637,8 @@ private final class FlakyStorage: CaptureStorage {
         try fail(failDeletes); try store.deleteData(from: from, to: to)
     }
     func checkpoint() throws { calls.append("checkpoint"); try fail(failCheckpoints); try store.checkpoint() }
-    func deleteAll() throws { calls.append("deleteAll"); try fail(failDeletes); try store.deleteAll() }
+    func removeAll() throws { calls.append("deleteAll"); try fail(failDeletes); try store.removeAll() }
+    func compact() throws { calls.append("compact"); try fail(failCheckpoints); try store.compact() }
     func latestSegmentEnd() throws -> Date? { try fail(failReads); return try store.latestSegmentEnd() }
 }
 
@@ -742,6 +743,38 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 2)
             writes.save(segment("b", 180, 240), to: storage)
             #expect(writes.appliedRemovals == 2)
+        }
+    }
+
+    @Test func appliedRemovalsCountsADeletionOnceItsRowsAreGoneEvenWhenTheCheckpointAfterItFails() throws {
+        try withStorage { storage in
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            storage.failCheckpoints = true
+            writes.deleteDay(containing: t0 + 90, calendar: utc, in: storage)
+            #expect(writes.hasPendingDeletion)
+            let stored = try storage.store.segmentCount()
+            #expect(stored == 0)
+            #expect(writes.appliedRemovals == 1)
+            // Retrying the delete step while the checkpoint still fails removes nothing new and is not counted again.
+            writes.retry(storage)
+            #expect(writes.appliedRemovals == 1)
+            storage.failCheckpoints = false
+            writes.retry(storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 1)
+
+            writes.save(segment("b", 120, 180), to: storage)
+            storage.failCheckpoints = true
+            writes.deleteAll(in: storage)
+            #expect(writes.hasPendingDeletion)
+            let remaining = try storage.store.segmentCount()
+            #expect(remaining == 0)
+            #expect(writes.appliedRemovals == 2)
+            storage.failCheckpoints = false
+            writes.retry(storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 2)
         }
     }
 
