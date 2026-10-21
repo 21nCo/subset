@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmodSync } from 'node:fs';
 import test from 'node:test';
 import { BUILT_IN_PRESETS, project, transitionsBetween } from '@subset/timer';
-import { LATE_MS, REARM_MS, createFakeClock, createScheduler } from '../../src/daemon/index.mjs';
+import { LATE_MS, REARM_MS, RECORDING_LIMIT, createFakeClock, createRecordingSink, createScheduler, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { startTestDaemon, tempDataDir } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
@@ -46,6 +46,29 @@ test('a Tabata run fires every segment and tick alert exactly once, each at its 
 
   const { body } = await context.call('GET', '/v1/timers');
   assert.equal(body.structuredContent.timers[0].runtime.status, 'finished');
+});
+
+test('the default sink keeps only the latest alerts, however many runs and removals the daemon sees', async (t) => {
+  const clock = createFakeClock();
+  const daemon = await startDaemon({ dataDir: tempDataDir(t), clock, log: () => {} });
+  t.after(() => daemon.shutdown());
+  const op = (name, input) => socketRequest(daemon.paths.socket, 'POST', `/v1/ops/${name}`, input);
+  const started = await op('start', { preset: 'tabata' });
+  clock.advance(TABATA_MS + 1_000);
+  assert.equal((await op('remove', { id: started.body.timer.definition.id })).status, 200);
+  assert.deepEqual([daemon.sink.name, daemon.sink.limit, daemon.sink.received.length], ['recording', RECORDING_LIMIT, 68]);
+
+  // What the daemon would record over 100 timers' runs, each removed after it: only the latest stay.
+  const sink = createRecordingSink();
+  const definition = started.body.timer.definition;
+  for (let run = 0; run < 100; run++) {
+    for (let at = 0; at < 68; at++) sink.alert({ timerId: `t_${run}`, kind: 'tick', secondsLeft: 1, at: run * 68 + at }, { ...definition, id: `t_${run}` });
+  }
+  assert.equal(sink.received.length, RECORDING_LIMIT);
+  assert.deepEqual(sink.received.map(({ alert }) => alert.at), Array.from({ length: RECORDING_LIMIT }, (_, index) => 6_800 - RECORDING_LIMIT + index));
+  const small = createRecordingSink({ limit: 2 });
+  for (const at of [1, 2, 3]) small.alert({ timerId: 't', kind: 'finish', at }, definition);
+  assert.deepEqual(small.received.map(({ alert }) => alert.at), [2, 3]);
 });
 
 test('a paused timer fires nothing until it resumes, then continues without repeats', async (t) => {

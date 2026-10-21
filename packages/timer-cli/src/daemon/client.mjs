@@ -144,7 +144,7 @@ function openDaemonLog(logPath) {
  * A client of the per-user daemon. Each call connects to `daemon.sock`; when the socket is missing
  * or refuses, the client spawns `node <cliPath> daemon run` detached and unreferenced, waits up to
  * `START_TIMEOUT_MS` for the socket, and otherwise rejects with `DaemonUnavailableError`
- * (`code: 'daemon_unavailable'`).
+ * (`code: 'daemon_unavailable'`). `monotonic` (milliseconds, `performance.now` by default) times that wait.
  */
 export function createClient({
   dataDir = resolveDataDir(),
@@ -152,7 +152,8 @@ export function createClient({
   execPath = process.execPath,
   env = process.env,
   spawn = nodeSpawn,
-  startTimeoutMs = START_TIMEOUT_MS
+  startTimeoutMs = START_TIMEOUT_MS,
+  monotonic = () => performance.now()
 } = {}) {
   const paths = daemonPaths(dataDir);
   let starting = null;
@@ -209,17 +210,19 @@ export function createClient({
     };
     let child = spawnOrFail();
     let spawns = 1;
-    const deadline = Date.now() + startTimeoutMs;
+    // Measured on a monotonic clock, so setting the wall clock neither cuts the wait short nor stretches it.
+    const deadline = monotonic() + startTimeoutMs;
     let lastError;
-    while (Date.now() < deadline) {
+    while (monotonic() < deadline) {
       await sleep(POLL_MS);
       try {
-        const reply = await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: Math.max(1, deadline - Date.now()) });
+        const reply = await socketRequest(paths.socket, 'GET', '/v1/daemon', undefined, { timeoutMs: Math.max(1, deadline - monotonic()) });
         if (!isShuttingDown(reply)) return;
         lastError = new ShuttingDownError();
       } catch (error) {
+        // The probe only reads, so any failure (a reset or broken pipe from a daemon closing as well
+        // as no socket) is retried until the deadline.
         lastError = error;
-        if (!isNotListening(error)) break;
       }
       if (child.exited && spawns < MAX_SPAWNS && !lockHeld()) {
         child = spawnOrFail();

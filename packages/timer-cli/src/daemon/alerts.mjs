@@ -40,14 +40,22 @@ export function alertFromTransition(transition, definition) {
   throw new Error(`Unknown transition ${transition.type}`);
 }
 
-/** The default sink until SET-77 adds sound and notifications: it records every alert in memory. */
-export function createRecordingSink() {
+/** How many alerts the recording sink keeps; a daemon that runs for weeks holds no more than this. */
+export const RECORDING_LIMIT = 1_000;
+
+/**
+ * The default sink until SET-77 adds sound and notifications: it records alerts in memory, keeping
+ * only the latest `limit` in `received`, oldest first.
+ */
+export function createRecordingSink({ limit = RECORDING_LIMIT } = {}) {
   const received = [];
   return {
     name: 'recording',
     received,
+    limit,
     alert(alert, timer) {
       received.push({ alert, timer });
+      if (received.length > limit) received.splice(0, received.length - limit);
     }
   };
 }

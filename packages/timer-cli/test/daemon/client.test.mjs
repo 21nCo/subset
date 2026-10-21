@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { createClient, pidAlive, startDaemon } from '../../src/daemon/index.mjs';
-import { eventually, tempDataDir, within } from './helpers.mjs';
+import { eventually, startTestDaemon, tempDataDir, within } from './helpers.mjs';
 
 /**
  * Counts the daemons a client starts, using the real spawn. Once the test ends, a daemon that is
@@ -83,6 +85,51 @@ test('a daemon that never comes up is reported as daemon_unavailable', async (t)
   await assert.rejects(client.timers(), (error) => error.code === 'daemon_unavailable' && /did not start within 0\.3 s/.test(error.message));
   assert.ok(Date.now() - startedAt >= 300);
   assert.equal(existsSync(join(dataDir, 'daemon.sock')), false);
+});
+
+/** A spawn whose daemon never starts or exits; `started` runs in its place. */
+function idleSpawn(started = () => {}) {
+  return () => {
+    started();
+    return Object.assign(new EventEmitter(), { unref() {} });
+  };
+}
+
+for (const [direction, stepMs] of [['forward', 3_600_000], ['back', -3_600_000]]) {
+  test(`the start wait lasts its budget when the wall clock is set an hour ${direction} during it`, async (t) => {
+    const dataDir = tempDataDir(t);
+    const wallNow = Date.now;
+    let offset = 0;
+    t.mock.method(Date, 'now', () => wallNow() + offset);
+    const client = createClient({ dataDir, spawn: idleSpawn(() => setTimeout(() => (offset = stepMs), 100)), startTimeoutMs: 600 });
+    const startedAt = performance.now();
+    const outcome = await within(client.timers().then(() => 'resolved', (error) => error.code), 5_000, 'the start wait to end');
+    const elapsed = performance.now() - startedAt;
+    assert.equal(outcome, 'daemon_unavailable');
+    assert.ok(elapsed >= 600 && elapsed < 2_000, `${Math.round(elapsed)} ms`);
+  });
+}
+
+test('a start that meets a socket resetting its connections, as a closing daemon does, keeps waiting for the daemon after it', async (t) => {
+  const dataDir = tempDataDir(t);
+  const socket = join(dataDir, 'daemon.sock');
+  let resets = 0;
+  const closing = createNetServer((connection) => {
+    resets++;
+    connection.destroy();
+  });
+  let next;
+  const spawn = idleSpawn(() => {
+    closing.listen(socket);
+    // The closing daemon goes and the next one starts while the client is still waiting.
+    next = new Promise((resolve) => setTimeout(() => closing.close(() => resolve(startTestDaemon(t, { dataDir }))), 400));
+  });
+  const client = createClient({ dataDir, spawn });
+  const reply = await client.op('create', { timer: { kind: 'stopwatch', name: 'After' } });
+  await next;
+  assert.equal(reply.status, 200);
+  assert.ok(resets >= 2, `${resets} resets`);
+  assert.deepEqual((await client.timers()).body.structuredContent.timers.map((timer) => timer.definition.name), ['After']);
 });
 
 test('the event stream delivers state from a started daemon', async (t) => {

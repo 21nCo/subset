@@ -76,7 +76,7 @@ const newToken = () => randomBytes(16).toString('hex');
  * any later one, and its birth when it can be told, so a process later given the pid is told apart
  * from it.
  */
-const ownerContent = (context, token) => `${context.pid}\n${token}\n${context.birth === null ? '' : `${context.birth}\n`}`;
+const ownerContent = (context, token) => [context.pid, token, context.birth].filter((line) => line !== null).map((line) => `${line}\n`).join('');
 
 /**
  * The holder of the lock (or of a takeover marker), or null when there is no such file. `raw` is
@@ -258,6 +258,19 @@ function removeLeftovers(lockPath, { isAlive, fs }) {
 }
 
 /**
+ * Runs `removeLeftovers` once the lock is published. The sweep is housekeeping: failing the
+ * acquisition there would leave a published lock that no handle can release, so its errors are
+ * ignored and what it could not remove is left for a later sweep.
+ */
+function sweepLeftovers(lockPath, context) {
+  try {
+    removeLeftovers(lockPath, context);
+  } catch {
+    // Best effort; see above.
+  }
+}
+
+/**
  * Takes `daemon.lock`, created exclusively and holding the pid, a token of this acquisition and the
  * process birth. A lock whose holder is gone (its pid is not alive or now belongs to a process born
  * otherwise), or that holds no valid pid, is stale and replaced. Resolves
@@ -270,7 +283,7 @@ export async function acquireLock(lockPath, options = {}) {
   const token = newToken();
   for (let tries = 1; ; tries++) {
     if (createExclusive(lockPath, ownerContent(context, token), context.pid, context.fs)) {
-      removeLeftovers(lockPath, context);
+      sweepLeftovers(lockPath, context);
       return { acquired: true, token, release: () => releaseLock(lockPath, token, options), isHeld: () => holdsLock(lockPath, token) };
     }
     const current = readLock(lockPath);

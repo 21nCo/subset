@@ -360,6 +360,32 @@ test('a lock file that cannot be written reports why, even when its cleanup fail
   await assert.rejects(acquireLock(path, { fs }), (error) => error.code === 'EIO');
 });
 
+test('a sweep of leftovers that fails once the lock is created still returns a lock that can be released and taken again', async (t) => {
+  const path = lockPath(t);
+  // A marker nobody acts on again, which this process may not remove.
+  const inert = `${path}.takeover.${'c'.repeat(32)}`;
+  writeFileSync(inert, `${deadPid()}\n${OTHER}\n`);
+  const fs = {
+    ...nodeFs,
+    unlinkSync(file) {
+      if (file === inert) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      return nodeFs.unlinkSync(file);
+    }
+  };
+  const first = await acquireLock(path, { fs });
+  assert.equal(first.acquired, true);
+  assert.equal(first.isHeld(), true);
+  first.release();
+  assert.equal(existsSync(path), false);
+  const again = await acquireLock(path, { fs });
+  assert.equal(again.acquired, true);
+  // The earlier acquisition never removes the later one's lock.
+  first.release();
+  assert.equal(again.isHeld(), true);
+  assert.equal(existsSync(inert), true);
+  again.release();
+});
+
 test('a process that removes a stale lock on its last try still creates its own', async (t) => {
   const path = lockPath(t);
   writeFileSync(path, `${deadPid()}\n${TOKEN}\n`);
