@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
-import { createServer } from 'node:net';
+import { createServer, Server } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createClient } from '../src/daemon/index.mjs';
@@ -127,6 +127,7 @@ test('/api/* needs the page header, its own host and origin, and sends no CORS h
     'cross-origin Origin': await send(port, { path: '/api/timers', headers: { ...PAGE, origin: 'http://evil.example' } }),
     'cross-site fetch metadata': await send(port, { path: '/api/timers', headers: { ...PAGE, 'sec-fetch-site': 'cross-site' } }),
     'another host name (DNS rebinding)': await send(port, { path: '/api/timers', headers: { ...PAGE, host: `evil.example:${port}` } }),
+    'a Host without the port': await send(port, { path: '/api/timers', headers: { ...PAGE, host: '127.0.0.1' } }),
     'a change without Origin': await send(port, { method: 'POST', path: '/api/ops/create', headers: PAGE, body: { timer: { kind: 'stopwatch' } } }),
     'a change from another origin': await send(port, { method: 'POST', path: '/api/ops/create', headers: { ...PAGE, origin: 'http://localhost:1' }, body: { timer: { kind: 'stopwatch' } } }),
     'a preflight': await send(port, { method: 'OPTIONS', path: '/api/ops/create', headers: { origin: 'http://evil.example', 'access-control-request-method': 'POST', 'access-control-request-headers': 'x-subset-timer' } }),
@@ -145,6 +146,36 @@ test('/api/* needs the page header, its own host and origin, and sends no CORS h
   assert.equal((await send(port, { path: '/api/nope', headers: PAGE })).status, 404);
   assert.equal((await send(port, { path: '/api/ops/constructor', method: 'POST', headers: { ...PAGE, origin: own } })).status, 404);
   assert.equal((await send(port, { path: '/api/timers', method: 'DELETE', headers: { ...PAGE, origin: own } })).status, 405);
+});
+
+test('a host on port 80 accepts the portless Host and Origin browsers send, and still refuses others', async (t) => {
+  // Binding 80 needs privileges, so only the socket moves to a free port; the host is configured for 80.
+  const listen = Server.prototype.listen;
+  Server.prototype.listen = function (port, ...rest) {
+    return listen.call(this, port === 80 ? 0 : port, ...rest);
+  };
+  let host;
+  try {
+    host = await startWebServer({ client: createClient({ dataDir: tempDataDir(t), spawn: refuseSpawn }), webDir: WEB_DIR, port: 80, strictPort: true });
+  } finally {
+    Server.prototype.listen = listen;
+  }
+  t.after(() => host.close());
+  assert.equal(host.port, 80);
+  const port = host.server.address().port;
+  // http://127.0.0.1/ sends Host 127.0.0.1 and Origin http://127.0.0.1: browsers drop the default port.
+  for (const name of ['127.0.0.1', '127.0.0.1:80', 'localhost', 'localhost:80']) {
+    assert.equal((await send(port, { headers: { host: name } })).status, 200, name);
+    const origin = `http://${name.replace(':80', '')}`;
+    const change = await send(port, { method: 'POST', path: '/api/ops/pause', headers: { ...PAGE, host: name, origin, 'content-type': 'application/json' }, body: { id: 'none' } });
+    assert.equal(change.status, 503, `${name} with ${origin} reaches the proxy (no daemon runs here)`);
+  }
+  for (const [name, origin] of [['127.0.0.1', 'http://evil.example'], ['127.0.0.1', 'http://127.0.0.1:4175'], ['127.0.0.1:80', 'http://localhost']]) {
+    assert.equal((await send(port, { method: 'POST', path: '/api/ops/pause', headers: { ...PAGE, host: name, origin }, body: { id: 'none' } })).status, 403, `${name} with ${origin}`);
+  }
+  for (const name of ['evil.example', 'evil.example:80', '127.0.0.1:4175']) {
+    assert.equal((await send(port, { headers: { host: name } })).status, 403, name);
+  }
 });
 
 test('operations proxied end to end change the daemon state, and its errors pass through', async (t) => {
@@ -248,6 +279,20 @@ test('serve prints its URL, opens the browser unless --no-open, and stops when a
     assert.deepEqual(result.json(), { url: `http://127.0.0.1:${port}`, port });
     assert.deepEqual(opened, noOpen ? [] : [`http://127.0.0.1:${port}`]);
     await assert.rejects(send(port), { code: 'ECONNREFUSED' });
+  }
+});
+
+test('serve closes its host when opening the browser or waiting for Ctrl-C fails', async (t) => {
+  const client = createClient({ dataDir: tempDataDir(t), spawn: refuseSpawn });
+  const failures = {
+    'the browser opener throws': (port) => ({ openUrl: () => { throw new Error('no opener'); }, untilStopped: () => new Promise(() => {}), port }),
+    'waiting for Ctrl-C rejects': (port) => ({ openUrl: () => {}, untilStopped: async () => { assert.equal((await send(port)).status, 200); throw new Error('no signals'); }, port })
+  };
+  for (const [name, io] of Object.entries(failures)) {
+    const { port, ...callbacks } = io(await freePort());
+    const result = await within(runCli(['serve', '--port', String(port), '--json'], { client, ...callbacks }), 5_000, name);
+    assert.notEqual(result.code, 0, name);
+    await assert.rejects(send(port), { code: 'ECONNREFUSED' }, name);
   }
 });
 

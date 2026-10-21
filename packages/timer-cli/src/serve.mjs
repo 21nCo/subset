@@ -79,6 +79,16 @@ function allowedApiRequest(request, origin) {
   return request.method === 'GET' || sent === origin;
 }
 
+/**
+ * The page origin for a request's `Host` when it names this server on `port`, else `null` (no DNS
+ * rebinding). Browsers leave out the default HTTP port, so on port 80 the portless forms count too.
+ */
+function pageOrigin(requestHost, port) {
+  const names = [`${HOST}:${port}`, `localhost:${port}`];
+  if (port === 80) names.push(HOST, 'localhost');
+  return names.includes(requestHost) ? new URL(`http://${requestHost}`).origin : null;
+}
+
 function listenOnce(server, port) {
   return new Promise((resolveListen, reject) => {
     const onError = (error) => reject(error);
@@ -103,7 +113,6 @@ export async function startWebServer({ client, webDir, port = DEFAULT_PORT, stri
   const web = resolve(webDir);
   /** Each open event stream, closed on shutdown. */
   const streams = new Set();
-  let host = '';
 
   async function proxy(response, reply) {
     let answer;
@@ -247,15 +256,15 @@ export async function startWebServer({ client, webDir, port = DEFAULT_PORT, stri
   }
 
   async function handle(request, response) {
-    const requestHost = request.headers.host;
-    if (requestHost !== host && requestHost !== `localhost:${port}`) {
+    const origin = pageOrigin(request.headers.host, port);
+    if (!origin) {
       response.writeHead(403).end();
       return;
     }
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
     const pathname = (request.url ?? '/').split('?')[0];
     if (pathname === '/api' || pathname.startsWith('/api/')) {
-      if (!allowedApiRequest(request, `http://${requestHost}`)) return fail(response, 403, 'forbidden', 'Only the Timer page can use this API.');
+      if (!allowedApiRequest(request, origin)) return fail(response, 403, 'forbidden', 'Only the Timer page can use this API.');
       return api(request, response, pathname);
     }
     return staticFile(request, response, pathname);
@@ -278,7 +287,6 @@ export async function startWebServer({ client, webDir, port = DEFAULT_PORT, stri
       port++;
     }
   }
-  host = `${HOST}:${port}`;
 
   let closing = null;
   function close() {
@@ -295,5 +303,5 @@ export async function startWebServer({ client, webDir, port = DEFAULT_PORT, stri
     return closing;
   }
 
-  return { port, url: `http://${host}`, server, close };
+  return { port, url: `http://${HOST}:${port}`, server, close };
 }

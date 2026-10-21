@@ -46,10 +46,14 @@ export const serveCommands = {
         if (error instanceof PortInUseError) throw usageError(`${error.message} Choose another with --port, or leave it out to use the next free port.`);
         throw Object.assign(new CliError('internal', `Could not start the Timer web host: ${error.message}`), { exitCode: 1 });
       }
-      print({ json: { url: host.url, port: host.port }, text: `Timer is at ${host.url}\nPress Ctrl-C to stop.` });
-      if (!values['no-open']) openUrl(host.url);
-      await untilStopped();
-      await host.close();
+      // A failure after the host is up still closes it, so the port and the process are let go.
+      try {
+        print({ json: { url: host.url, port: host.port }, text: `Timer is at ${host.url}\nPress Ctrl-C to stop.` });
+        if (!values['no-open']) openUrl(host.url);
+        await untilStopped();
+      } finally {
+        await host.close();
+      }
       return null;
     }
   }
