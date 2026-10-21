@@ -90,6 +90,54 @@ public struct DiskItem: Equatable, Sendable {
     /// the file system returned neither. A folder's own time, which changes when an entry in it is added, removed,
     /// or renamed, not when a file deeper down is written.
     public let touched: Date?
+    /// The volume and inode the item had when it was scanned; `nil` when they were not read.
+    public let identity: DiskItemIdentity?
+}
+
+/// Which file an item was when it was scanned: its volume and inode. A cleanup acts on an item only while its path still
+/// leads to the same one.
+public struct DiskItemIdentity: Hashable, Sendable {
+    /// The volume's ID (`ATTR_CMNEXT_REALDEVID`, the file system ID `statfs` reports), which keeps the startup disk's
+    /// system and data volumes apart; 0 when the volume did not report it.
+    public let device: UInt32
+    public let inode: UInt64
+
+    public init(device: UInt32, inode: UInt64) {
+        self.device = device
+        self.inode = inode
+    }
+
+    /// Whether `other` is the same file. A volume that did not report its device (0) is compared by inode alone, as
+    /// the scanner compares a folder it opens.
+    public func isSameFile(as other: DiskItemIdentity) -> Bool {
+        inode == other.inode && (device == 0 || other.device == 0 || device == other.device)
+    }
+
+    /// What is at `path` now, without following a symbolic link at its end (`lstat`, then `getattrlist` for the
+    /// volume).
+    public static func current(atPath path: String) -> DiskItemCurrent {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            let error = errno
+            return error == ENOENT || error == ENOTDIR ? .missing : .unreadable(error)
+        }
+        if info.st_mode & S_IFMT == S_IFLNK { return .symlink }
+        let entry = BulkAttributes.read(path: path)
+        // Both reads must describe the same file: one replaced between them is not judged.
+        if let id = entry?.fileID, id != UInt64(info.st_ino) { return .unreadable(EAGAIN) }
+        return .item(DiskItemIdentity(device: entry?.realDevice ?? 0, inode: UInt64(info.st_ino)),
+                     isDirectory: info.st_mode & S_IFMT == S_IFDIR)
+    }
+}
+
+/// What a path leads to now, for `DiskItemIdentity.current(atPath:)`.
+public enum DiskItemCurrent: Equatable, Sendable {
+    case missing
+    /// A symbolic link, which a cleanup never follows or moves.
+    case symlink
+    case item(DiskItemIdentity, isDirectory: Bool)
+    /// `lstat` failed with this `errno`.
+    case unreadable(Int32)
 }
 
 /// A scan's items, packed for memory: one fixed-size record per item and one buffer for all names. Children of a
@@ -106,6 +154,9 @@ public struct DiskTree: Sendable {
         var sizes: DiskSizes
         /// Seconds since 1970, `Node.unknownTime` when unknown.
         var touched: Int64
+        /// The volume (`ATTR_CMNEXT_REALDEVID`, 0 when not reported) and inode the entry had; `fileID` 0 when unknown.
+        var device: UInt32
+        var fileID: UInt64
 
         static let unknownTime = Int64.min
     }
@@ -128,7 +179,8 @@ public struct DiskTree: Sendable {
             index: index, name: name(of: index), kind: node.kind, flags: node.flags,
             sizes: node.flags.contains(.unreadable) ? nil : node.sizes,
             parent: node.parent < 0 ? nil : Int(node.parent), children: first..<(first + Int(node.childCount)),
-            touched: node.touched == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(node.touched)))
+            touched: node.touched == Node.unknownTime ? nil : Date(timeIntervalSince1970: TimeInterval(node.touched)),
+            identity: node.fileID == 0 ? nil : DiskItemIdentity(device: node.device, inode: node.fileID))
     }
 
     public func children(of index: Int) -> [DiskItem] {

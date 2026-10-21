@@ -6,7 +6,8 @@ import SystemProcesses
 
 /// The Disk section's state, testable without the UI: the scope, the scan and its progress, the volume header, the
 /// Folders tab's current folder, sort, and breadcrumbs, the By origin and Suggestions tabs' groups, expansion, and
-/// selection, and the unreadable-folder banner. The section only reads: nothing here deletes, moves, or runs a cleanup.
+/// selection, and the unreadable-folder banner. Its only change to the disk is a cleanup the user confirmed in the
+/// cleanup sheet (`CleanupSheet`), which moves items to the Trash or runs an allowlisted tool command.
 ///
 /// A cancelled scan keeps what it read on screen, with folders not read in full marked; origins and suggestions are
 /// worked out only for a scan that finished and was not cancelled. A list longer than `rowLimit` ends in a row that
@@ -58,6 +59,13 @@ public final class DiskWindowModel {
     /// The Folders tab's path, the scanned root first and the current folder last.
     public private(set) var breadcrumbs: [DiskBreadcrumb] = []
 
+    /// The open cleanup sheet, for one suggestion.
+    public internal(set) var cleanupSheet: CleanupSheet?
+    /// What each cleanup this session did, oldest first. Kept in memory only.
+    public internal(set) var cleanupResults: [CleanupResult] = []
+    /// The matches of the scan shown that a cleanup ran for, which offer no other until the next scan.
+    public internal(set) var cleanedMatches: Set<Int> = []
+
     public let format: UsageFormat
     /// The home folder's real path, as the scanner reports paths.
     public let home: String
@@ -65,6 +73,9 @@ public final class DiskWindowModel {
     public let rowLimit: Int
 
     @ObservationIgnored private let service: DiskScanService
+    @ObservationIgnored let cleanup: DiskCleanupService
+    /// The cleanup running, observed so the window knows when one is.
+    var cleanupTask: Task<Void, Never>?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var volumeRefresh = 0
@@ -75,9 +86,10 @@ public final class DiskWindowModel {
     /// How many paths group and match rows asked for, so tests can tell that only shown rows build one.
     @ObservationIgnored private(set) var itemPathsBuilt = 0
 
-    public init(service: DiskScanService = .live, format: UsageFormat? = nil, home: String = DiskWindowModel.realHome,
-                rowLimit: Int = 500) {
+    public init(service: DiskScanService = .live, cleanup: DiskCleanupService? = nil, format: UsageFormat? = nil,
+                home: String = DiskWindowModel.realHome, rowLimit: Int = 500) {
         self.service = service
+        self.cleanup = cleanup ?? .live(home: home)
         self.home = home
         self.format = format ?? UsageFormat(home: home)
         self.rowLimit = max(1, rowLimit)
@@ -135,8 +147,12 @@ public final class DiskWindowModel {
         return false
     }
 
-    /// Starts a scan of the current scope, replacing the results shown.
+    /// Starts a scan of the current scope, replacing the results shown and closing a cleanup sheet; not while a
+    /// cleanup runs.
     public func scan() {
+        guard !isCleaning else { return }
+        cleanupSheet = nil
+        cleanedMatches = []
         task?.cancel()
         generation += 1
         let generation = self.generation
@@ -413,7 +429,7 @@ public final class DiskWindowModel {
 
     // MARK: Rows
 
-    private func rebuild() {
+    func rebuild() {
         let tree = result?.tree
         breadcrumbs = tree.map(breadcrumbs(in:)) ?? []
         switch tab {
@@ -606,6 +622,9 @@ public final class DiskWindowModel {
         case let .unavailable(reason):
             figures = DiskFigures(allocated: nil, private: nil, lowerBound: false, upperBound: false, format: format)
             explanation = "Not measured: \(reason) \(explanation)"
+        }
+        if case let .match(position) = id, cleanedMatches.contains(position) {
+            explanation = "Cleaned up this session; scan again to see what is left. " + explanation
         }
         let count = match.items.isEmpty ? nil : "\(format.count(match.items.count)) item\(match.items.count == 1 ? "" : "s")"
         return DiskRow(

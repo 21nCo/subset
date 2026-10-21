@@ -5,8 +5,8 @@ import SystemCore
 import SystemDisk
 
 /// The Disk section: the scope picker, Scan and Cancel, progress, the volume header, the unreadable-folder banner, and
-/// the Folders, By origin, and Suggestions tabs. It only reads; its row actions reveal or copy a path. Its state lives
-/// in `DiskWindowModel`.
+/// the Folders, By origin, and Suggestions tabs. Its row actions reveal or copy a path; a suggestion's Clean Up opens the
+/// confirmation sheet, the only way it changes anything. Its state lives in `DiskWindowModel`.
 struct DiskView: View {
     @Bindable var model: DiskWindowModel
 
@@ -36,8 +36,14 @@ struct DiskView: View {
             if model.tab == .folders, !model.breadcrumbs.isEmpty {
                 folderBar
             }
+            if model.tab == .suggestions, !model.cleanupResults.isEmpty {
+                CleanupHistoryView(results: model.cleanupResults, format: model.format)
+            }
             list
             actionBar
+        }
+        .sheet(item: Binding(get: { model.cleanupSheet }, set: { if $0 == nil { model.dismissCleanup() } })) { sheet in
+            CleanupSheetView(sheet: sheet, model: model)
         }
         .padding(12)
         .frame(minWidth: 760, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
@@ -97,6 +103,7 @@ struct DiskView: View {
             } else {
                 Button("Scan", action: model.scan)
                     .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.isCleaning)
                     .help("Scan \(model.scope.title) (⌘R)")
             }
         }
@@ -153,7 +160,8 @@ struct DiskView: View {
             ForEach(model.sections) { section in
                 Section {
                     ForEach(section.rows) { row in
-                        DiskRowView(row: row, toggle: { model.toggle(row.id) }, open: { model.open(row.id) })
+                        DiskRowView(row: row, toggle: { model.toggle(row.id) }, open: { model.open(row.id) },
+                                    cleanUp: model.canCleanUp(row.id) ? { model.beginCleanup(row.id) } : nil)
                             .tag(Optional(row.id))
                             .id(row.id)
                     }
@@ -186,9 +194,11 @@ struct DiskView: View {
         .accessibilityLabel("\(model.tab.title) list")
     }
 
-    /// Reveal in Finder and Copy path for the selected row, also reachable from the keyboard.
+    /// Reveal in Finder and Copy path for the selected row, and Clean Up for a suggestion, also reachable from the
+    /// keyboard.
     private var actionBar: some View {
         let path = model.selection.flatMap(model.path(for:))
+        let cleanable = model.selection.map(model.canCleanUp) ?? false
         return HStack {
             Text(path.map(model.format.path) ?? "Select an item to reveal it in Finder or copy its path.")
                 .font(.caption)
@@ -205,6 +215,11 @@ struct DiskView: View {
                 .keyboardShortcut("c", modifiers: [.command, .option])
                 .disabled(path == nil)
                 .help("Copy the selected item's path (⌥⌘C)")
+            if model.tab == .suggestions {
+                Button("Clean Up…") { if let selection = model.selection { model.beginCleanup(selection) } }
+                    .disabled(!cleanable)
+                    .help("Preview and confirm a cleanup of the selected suggestion")
+            }
         }
     }
 
@@ -227,6 +242,8 @@ private struct DiskRowView: View {
     let row: DiskRow
     let toggle: () -> Void
     let open: () -> Void
+    /// Opens the cleanup sheet; `nil` when the row offers no cleanup now.
+    let cleanUp: (() -> Void)?
 
     var body: some View {
         if row.isMore {
@@ -311,6 +328,9 @@ private struct DiskRowView: View {
             }
             if row.isNavigable {
                 Button("Open folder", action: open)
+            }
+            if let cleanUp {
+                Button("Clean up…", action: cleanUp)
             }
             if let path = row.path {
                 Button("Reveal in Finder") { RowActions.reveal(path) }

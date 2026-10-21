@@ -1,0 +1,160 @@
+import Darwin
+import Foundation
+import SystemCore
+
+/// The places a cleanup never moves anything from, checked for every item even when a rule matched it. Only the home
+/// folder's contents may be moved to the Trash; a tool command acts on its tool's own folders, which it chooses.
+public struct CleanupProtection: Sendable {
+    /// Folders of macOS that are refused with everything inside them. `/usr/local` is not one of them, but it is outside
+    /// the home folder, so it is refused too.
+    public static let systemFolders = ["/System", "/usr", "/bin", "/sbin", "/private/var"]
+    static let systemExceptions = ["/usr/local"]
+    /// Folders in the home folder refused with everything inside them. The Trash is among them: System never moves,
+    /// empties, or deletes what is already there.
+    public static let homeFolders = ["Library/Mobile Documents", "Library/Keychains", "Library/Mail", ".Trash"]
+
+    /// The home folder's real path.
+    public let home: String
+    let systemFolders: [String]
+
+    public init(home: String) {
+        self.init(home: home, systemFolders: Self.systemFolders)
+    }
+
+    /// Tests keep their fixture home folder in the temporary folder, which is inside `/private/var`, and so leave that
+    /// folder out here.
+    init(home: String, systemFolders: [String]) {
+        self.home = home
+        self.systemFolders = systemFolders
+    }
+
+    /// Why `path` must not be moved, or `nil` when it may be. Names are compared folded for case and Unicode
+    /// normalization, as APFS compares them by default, so another spelling of a protected folder is refused too.
+    public func refusal(_ path: String) -> String? {
+        guard Self.isPlain(path) else { return "\(path) is not a plain absolute path." }
+        let key = Self.key(path)
+        let exempt = Self.systemExceptions.contains { Self.isInside(key, Self.key($0)) }
+        if !exempt, let folder = systemFolders.first(where: { Self.isInside(key, Self.key($0)) }) {
+            return "\(path) is in \(folder), which System never changes."
+        }
+        let home = Self.key(self.home)
+        guard Self.isPlain(self.home), home != "/", Self.isInside(key, home) else {
+            return "\(path) is outside your home folder."
+        }
+        if key == home { return "Your home folder itself is never removed." }
+        let relative = String(key.dropFirst(home.count + 1))
+        if relative == "library" { return "Your Library folder itself is never removed." }
+        if let folder = Self.homeFolders.first(where: { Self.isInside(relative, Self.key($0)) }) {
+            return "\(path) is in ~/\(folder), which System never changes."
+        }
+        let components = relative.split(separator: "/")
+        if components.count >= 2, components[0] == "pictures", components[1].hasSuffix(".photoslibrary") {
+            return "\(path) is a Photos library in ~/Pictures or inside one, which System never changes."
+        }
+        return nil
+    }
+
+    /// An absolute path without empty, `.`, or `..` components, so that comparing it as text compares the place.
+    static func isPlain(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else { return false }
+        if path == "/" { return true }
+        return !path.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+            .contains { $0.isEmpty || $0 == "." || $0 == ".." }
+    }
+
+    static func key(_ path: String) -> String {
+        path.decomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    static func isInside(_ path: String, _ folder: String) -> Bool {
+        path == folder || path.hasPrefix(folder == "/" ? "/" : folder + "/")
+    }
+}
+
+/// One item a Trash cleanup would move, as the scan found it.
+public struct CleanupItem: Hashable, Sendable {
+    public let path: String
+    /// The rule's folder that holds it, which a cleanup never removes.
+    public let root: String
+    /// The volume and inode the scan read; an item without them is never moved.
+    public let identity: DiskItemIdentity?
+    /// Its private size when scanned: what emptying the Trash frees at least once it is there. `nil` when unknown.
+    public let privateBytes: UInt64?
+    /// The size is a lower bound (something inside could not be read, or another hard link counts its blocks).
+    public let isLowerBound: Bool
+
+    public init(path: String, root: String, identity: DiskItemIdentity?, privateBytes: UInt64?, isLowerBound: Bool) {
+        self.path = path
+        self.root = root
+        self.identity = identity
+        self.privateBytes = privateBytes
+        self.isLowerBound = isLowerBound
+    }
+
+    init(_ item: ReclaimItem) {
+        let lowerBound: DiskItemFlags = [.unreadable, .partial, .incomplete, .countedElsewhere]
+        self.init(path: item.path, root: item.root, identity: item.identity, privateBytes: item.sizes?.private,
+                  isLowerBound: item.sizes == nil || !item.flags.isDisjoint(with: lowerBound))
+    }
+
+    /// Checks, just before the move, that the item may still be moved: it is not protected, it is inside its rule's
+    /// folder and not that folder, no folder above it has become a link elsewhere, it is not a link itself, and it is
+    /// still the file the scan read. Returns why it is skipped, or `nil`.
+    func revalidate(_ protection: CleanupProtection) -> CleanupSkipReason? {
+        if let reason = protection.refusal(path) { return .protected(reason) }
+        guard CleanupProtection.isPlain(root) else { return .outsideRoot }
+        if CleanupProtection.key(path) == CleanupProtection.key(root) { return .isRoot }
+        guard path.hasPrefix(root == "/" ? "/" : root + "/") else { return .outsideRoot }
+        guard let identity else { return .notIdentified }
+        // Every folder above it, its rule's folder included, must still be the folder of that name: one replaced by a
+        // link would lead the move somewhere else.
+        let parent = (path as NSString).deletingLastPathComponent
+        guard let real = Self.realPath(parent) else { return .missing }
+        guard real == parent else { return .outsideRoot }
+        switch DiskItemIdentity.current(atPath: path) {
+        case .missing: return .missing
+        case .symlink: return .symlink
+        case let .unreadable(code): return .unreadable(code)
+        case let .item(now, _): return now.isSameFile(as: identity) ? nil : .replaced
+        }
+    }
+
+    static func realPath(_ path: String) -> String? {
+        guard let real = realpath(path, nil) else { return nil }
+        defer { free(real) }
+        return String(cString: real)
+    }
+}
+
+/// Why an item was not moved.
+public enum CleanupSkipReason: Equatable, Sendable {
+    /// A protected place (`CleanupProtection`).
+    case protected(String)
+    case missing
+    case symlink
+    /// Its path no longer leads inside its rule's folder.
+    case outsideRoot
+    /// It is the rule's folder itself.
+    case isRoot
+    /// Another file is at its path now.
+    case replaced
+    /// The scan did not read its volume and inode, so it cannot be checked.
+    case notIdentified
+    case unreadable(Int32)
+    /// The cleanup was stopped before this item.
+    case stopped
+
+    public var text: String {
+        switch self {
+        case let .protected(reason): reason
+        case .missing: "It is no longer there."
+        case .symlink: "It is now a symbolic link, which System never follows or moves."
+        case .outsideRoot: "Its path no longer leads inside the rule's folder."
+        case .isRoot: "It is the rule's folder itself, which is never removed."
+        case .replaced: "Another item has taken its place since the scan."
+        case .notIdentified: "The scan could not read which file it was, so it cannot be checked."
+        case let .unreadable(code): "It could not be checked: \(String(cString: strerror(code)))."
+        case .stopped: "The cleanup was stopped before this item."
+        }
+    }
+}
