@@ -115,6 +115,13 @@ final class ReclaimRulesTests: XCTestCase {
             XCTAssertEqual(unread.bytes, .unavailable(path("\(devices)/11111111-1111-1111-1111-111111111111/device.plist was not read.")))
         }
 
+        // A device that names no runtime is not judged.
+        try device("\(devices)/44444444-4444-4444-4444-444444444444", runtime: "", bytes: 100_000)
+        let unnamed = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
+        XCTAssertEqual(unnamed.items.count, 1)
+        guard case .scanned(_, _, complete: false, _) = unnamed.bytes else { return XCTFail("\(unnamed.bytes)") }
+        try FileManager.default.removeItem(atPath: path("\(devices)/44444444-4444-4444-4444-444444444444"))
+
         // A device whose plist cannot be read is not counted, and the sum says it is incomplete.
         try write("\(devices)/33333333-3333-3333-3333-333333333333/data/disk", bytes: 100_000)
         let partial = try only(.unavailableSimulators, in: try await analyze(runtimes: runtimes))
@@ -281,6 +288,22 @@ final class ReclaimRulesTests: XCTestCase {
         // macOS's own cache is neither an app cache nor a leftover; a removed app's is a leftover.
         XCTAssertFalse(analysis.matches.contains { $0.items.contains { $0.path.hasSuffix("com.apple.akd") } })
         XCTAssertEqual(analysis.matches.filter { $0.rule.id == .appLeftovers }.map(\.identifier), ["com.removed.player"])
+
+        // With an app unread, the removed app's cache may be that app's, so the app caches found are not all there are.
+        let unreadApp = "/Applications/Broken.app has no readable bundle identifier."
+        let incomplete = try await analyze(apps: InstalledApps(Self.apps.apps, unread: [unreadApp]))
+        let found = incomplete.matches.filter { $0.rule.id == .appCaches }
+        XCTAssertEqual(found.map(\.app?.path), ["/Applications/Editor.app", "/Applications/Safari.app"])
+        for match in found {
+            guard case .scanned(_, _, complete: false, _) = match.bytes else { return XCTFail("\(match.bytes)") }
+        }
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.example.editor"))
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.example.editor.ShipIt"))
+        try FileManager.default.removeItem(atPath: path("Library/Caches/com.apple.Safari"))
+        let none = try only(.appCaches, in: try await analyze(apps: InstalledApps(Self.apps.apps, unread: [unreadApp])))
+        XCTAssertEqual(none.items, [])
+        XCTAssertEqual(none.bytes, .unavailable(
+            "\(path("Library/Caches/com.removed.player")) may be leftovers or an installed app's data: \(unreadApp)"))
     }
 
     func testDeviceBackupsAreEachBackupForReview() async throws {
@@ -433,6 +456,58 @@ final class ReclaimRulesTests: XCTestCase {
             XCTAssertEqual(match.items, [], link)
             XCTAssertEqual(match.bytes, .unavailable("\(path(link)) is a link, so it was not read."), link)
         }
+    }
+
+    func testALinkAboveARuleFolderOrInPlaceOfALibraryFolderIsNotRead() async throws {
+        for relative in ["Developer/Xcode/DerivedData/App-abc/data", "Developer/Xcode/iOS DeviceSupport/18.0 (22A)/Symbols/lib",
+                         "Developer/Xcode/Archives/2026-01-01/App.xcarchive/Info.plist", "Developer/CoreSimulator/Caches/dyld/cache",
+                         "Caches/Homebrew/downloads/bottle", "Caches/Yarn/v6/pkg", "Caches/pip/http/blob",
+                         "Caches/com.example.editor/Cache.db", "Caches/com.gone.app/cache",
+                         "Application Support/MobileSync/Backup/0000-0000/Manifest.db", "Application Support/com.example.editor/data"] {
+            try write("elsewhere/" + relative, bytes: 4_096)
+        }
+        try device("elsewhere/Developer/CoreSimulator/Devices/11111111-1111-1111-1111-111111111111", runtime: "gone", bytes: 4_096)
+        try write("Library/Preferences/com.removed.tool.plist", bytes: 4_096)
+        try write("Library/Preferences/settings.plist", bytes: 4_096)
+        try write("Library/Containers/com.example.editor/Data/file", bytes: 4_096)
+        for folder in ["Developer", "Caches", "Application Support"] {
+            try FileManager.default.createSymbolicLink(atPath: path("Library/" + folder), withDestinationPath: path("elsewhere/" + folder))
+        }
+        func link(_ folder: String) -> String { "\(path("Library/" + folder)) is a link, so it was not read." }
+
+        let analysis = try await analyze()
+
+        let below: [(ReclaimRuleID, String)] = [
+            (.xcodeDerivedData, "Developer"), (.xcodeDeviceSupport, "Developer"), (.xcodeArchives, "Developer"),
+            (.unavailableSimulators, "Developer"), (.simulatorCaches, "Developer"), (.homebrewCache, "Caches"),
+            (.yarnCache, "Caches"), (.pipCache, "Caches"), (.appCaches, "Caches"), (.deviceBackups, "Application Support"),
+        ]
+        for (id, folder) in below {
+            let match = try only(id, in: analysis)
+            XCTAssertEqual(match.items, [], "\(id)")
+            XCTAssertEqual(match.bytes, .unavailable(link(folder)), "\(id)")
+        }
+        // The leftover found elsewhere is not all there are.
+        let leftovers = try only(.appLeftovers, in: analysis)
+        XCTAssertEqual(leftovers.items.map(\.path), [path("Library/Preferences/com.removed.tool.plist")])
+        guard case .scanned(_, _, complete: false, _) = leftovers.bytes else { return XCTFail("\(leftovers.bytes)") }
+        let report = DiskOrigins.report(entries: analysis.entries, matches: analysis.matches, tree: analysis.tree, home: home,
+                                        apps: Self.apps)
+        XCTAssertEqual(report.unlistedFolders, [link("Application Support"), link("Caches")])
+        let groups = report.apps + report.vendors + [report.leftovers, report.unattributed].compactMap { $0 }
+        XCTAssertEqual(groups.map(\.name), ["Editor", "Example Ltd", "Leftovers", "Not attributed"])
+        XCTAssertTrue(groups.allSatisfy(\.isLowerBound))
+        XCTAssertEqual(report.developerTools.first { $0.name == "Xcode" }?.isLowerBound, true)
+
+        // A regular file holds no folder, so nothing below it is there.
+        try FileManager.default.removeItem(atPath: path("Library/Caches"))
+        try Data().write(to: URL(fileURLWithPath: path("Library/Caches")))
+        let file = try await analyze()
+        for id in [ReclaimRuleID.homebrewCache, .yarnCache, .pipCache, .appCaches] {
+            XCTAssertFalse(file.matches.contains { $0.rule.id == id }, "\(id)")
+        }
+        XCTAssertEqual(DiskOrigins.report(entries: file.entries, matches: file.matches, tree: file.tree, home: home,
+                                          apps: Self.apps).unlistedFolders, [link("Application Support")])
     }
 
     func testRuleFoldersTheScanDidNotReadInFullAreUnknownNotEmpty() async throws {

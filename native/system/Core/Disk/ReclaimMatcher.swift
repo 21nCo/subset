@@ -122,7 +122,9 @@ public enum ReclaimMatcher {
                 matcher.docker(rule)
             case .appCaches:
                 let caches = origins.filter { $0.folder == .caches && $0.rule == .bundleID && $0.app != nil }
-                matcher.entries(rule, caches, by: { $0.app!.path }, app: { $0.app })
+                // A cache of an app that could not be read is not judged, so the caches found are not all there are.
+                matcher.entries(rule, caches, by: { $0.app!.path }, app: { $0.app }, unjudged: DiskOrigins.unprovenLeftovers(
+                    origins.filter { $0.folder == .caches }, apps: context.installedApps).map { [$0] } ?? [])
             case .appLeftovers:
                 let leftovers = origins.filter { $0.rule == .leftover }
                 // A bundle ID names one app in every folder; a group container's other name only within its team.
@@ -211,7 +213,7 @@ private struct Matching {
         var unjudged = unjudged
         for relative in rule.homePaths {
             switch tree.locate(homePath(relative)) {
-            case let .found(index): if let reason = tree.unlisted(index) { unjudged.append(reason) }
+            case let .found(index): if let reason = tree.unread(index) { unjudged.append(reason) }
             case let .unknown(reason): unjudged.append(reason)
             case .absent: break
             }
@@ -367,7 +369,7 @@ private struct Matching {
         var unjudged: [String] = []
         var stack = [(start, startPath)]
         while let (index, path) = stack.popLast() {
-            if let reason = tree.unlisted(index) { unjudged.append(reason) }
+            if let reason = index == start ? tree.unread(index) : tree.unlisted(index) { unjudged.append(reason) }
             let children = tree.children(of: index)
             for child in children {
                 let childPath = path + "/" + child.name
@@ -499,15 +501,18 @@ extension DiskTree {
         }
     }
 
-    /// Why a rule's own folder cannot be searched: it was not listed in full (`unlisted`), or it is not a folder (a
-    /// link to one elsewhere is not followed); `nil` when it can be.
-    func ruleFolder(_ index: Int) -> String? {
+    /// Why a folder the search must look in was not read: it was not listed in full (`unlisted`), or it is a link,
+    /// which is not followed, to a folder elsewhere; `nil` when it was read, or is a file.
+    func unread(_ index: Int) -> String? {
         if let reason = unlisted(index) { return reason }
-        switch self[index].kind {
-        case .directory: return nil
-        case .symlink: return "\(path(of: index)) is a link, so it was not read."
-        case .file, .package, .other, .mountPoint: return "\(path(of: index)) is not a folder."
-        }
+        return self[index].kind == .symlink ? "\(path(of: index)) is a link, so it was not read." : nil
+    }
+
+    /// Why a rule's own folder cannot be searched: it was not read (`unread`), or it is not a folder; `nil` when it can
+    /// be.
+    func ruleFolder(_ index: Int) -> String? {
+        if let reason = unread(index) { return reason }
+        return self[index].kind == .directory ? nil : "\(path(of: index)) is not a folder."
     }
 
     /// What an entry of a folder a rule searches is, the same for every rule.
@@ -537,7 +542,8 @@ extension DiskTree {
         case unknown(String)
     }
 
-    /// Finds the item at `path`. A missing item is absent only when the folder that would hold it was read in full.
+    /// Finds the item at `path`. A missing item is absent only when the folder that would hold it was read in full,
+    /// or a file or package is there instead; below a link (`unread`) it is unknown.
     func locate(_ path: String) -> Location {
         let base = rootPath == "/" ? "/" : rootPath + "/"
         guard path == rootPath || path.hasPrefix(base) else { return .absent }
@@ -547,8 +553,8 @@ extension DiskTree {
                 current = next
                 continue
             }
-            if case .item = searched(current) { return .absent }
-            return unlisted(current).map { .unknown($0) } ?? .absent
+            if case .item = searched(current), self[current].kind != .symlink { return .absent }
+            return unread(current).map { .unknown($0) } ?? .absent
         }
         return .found(current)
     }

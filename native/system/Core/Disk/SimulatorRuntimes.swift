@@ -15,7 +15,7 @@ public enum SimulatorRuntimes: Equatable, Sendable {
     /// Reads the runtime disk images CoreSimulator registers (`runtimeInfo.bundleIdentifier` of each entry in
     /// `images.plist`) and the runtime bundles installed as folders: in `runtimesFolder` and in the runtime volumes
     /// mounted under `volumesFolder`. A missing file or folder adds none; one that exists but cannot be read or parsed,
-    /// a runtime bundle without a readable identifier included, makes the list unknown, since a runtime it would name
+    /// a runtime image or bundle without a readable identifier included, makes the list unknown, since a runtime it would name
     /// may be installed.
     public static func read(imagesPlist: String = imagesPlist, runtimesFolder: String = runtimesFolder,
                             volumesFolder: String = volumesFolder) -> SimulatorRuntimes {
@@ -26,9 +26,11 @@ public enum SimulatorRuntimes: Equatable, Sendable {
                 return .unknown("\(imagesPlist) has no list of images.")
             }
             for image in images {
-                if let info = image["runtimeInfo"] as? [String: Any], let id = info["bundleIdentifier"] as? String {
-                    found.insert(id)
+                guard let info = image["runtimeInfo"] else { continue }
+                guard let id = (info as? [String: Any])?["bundleIdentifier"] as? String, !id.isEmpty else {
+                    return .unknown("\(imagesPlist) has a runtime without a bundle identifier.")
                 }
+                found.insert(id)
             }
         case .failure(.missing):
             break
@@ -81,10 +83,12 @@ public enum SimulatorRuntimes: Equatable, Sendable {
         }
     }
 
-    /// The runtime of the simulator device in `folder` (`runtime` in its `device.plist`), or `nil` when unreadable.
+    /// The runtime of the simulator device in `folder` (`runtime` in its `device.plist`), or `nil` when unreadable or
+    /// empty.
     static func runtime(ofDevice folder: String) -> String? {
-        guard case let .success(plist) = PropertyListFile.read(folder + "/device.plist") else { return nil }
-        return plist["runtime"] as? String
+        guard case let .success(plist) = PropertyListFile.read(folder + "/device.plist"),
+              let runtime = plist["runtime"] as? String, !runtime.isEmpty else { return nil }
+        return runtime
     }
 }
 

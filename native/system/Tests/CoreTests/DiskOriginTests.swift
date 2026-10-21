@@ -388,6 +388,14 @@ final class DiskOriginTests: XCTestCase {
         try Data("not a plist".utf8).write(to: URL(fileURLWithPath: images))
         guard case .unknown = SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/Runtimes", volumesFolder: home + "/Volumes")
         else { return XCTFail("an unreadable image list is unknown, not empty") }
+
+        // A runtime image whose identifier is not a name may be any runtime.
+        for identifier: Any in [123, "", ["iOS"]] {
+            let odd: [String: Any] = ["images": [["runtimeInfo": ["bundleIdentifier": identifier]]]]
+            try PropertyListSerialization.data(fromPropertyList: odd, format: .xml, options: 0).write(to: URL(fileURLWithPath: images))
+            XCTAssertEqual(SimulatorRuntimes.read(imagesPlist: images, runtimesFolder: home + "/none", volumesFolder: home + "/none"),
+                           .unknown("\(images) has a runtime without a bundle identifier."), "\(identifier)")
+        }
     }
 
     func testARuntimeSourceThatCannotBeReadMakesTheListUnknown() throws {

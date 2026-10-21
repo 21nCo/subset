@@ -155,7 +155,7 @@ public enum DiskOrigins {
                               apps: InstalledApps) -> DiskOriginReport {
         let unlisted = LibraryFolder.allCases.compactMap { folder -> String? in
             switch tree.locate(home + "/" + folder.homePath) {
-            case let .found(index): tree.unlisted(index)
+            case let .found(index): tree.unread(index)
             case let .unknown(reason): reason
             case .absent: nil
             }
