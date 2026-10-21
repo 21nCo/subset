@@ -153,9 +153,30 @@ private func temporaryDirectory() -> URL {
         #expect(wednesday.spans.first?.start == date(cal, 21, 0))
         #expect(week.profile.longestFocusRun?.start == start)
         #expect(week.profile.longestFocusRun?.duration == 1_080)
-        // Each day's first focus is its own: 23:51 on Tuesday, 00:00 on Wednesday.
-        #expect(week.profile.focusDays == 2)
-        #expect(week.profile.typicalFocusStart == (23 * 60 + 51) / 2)
+        // The run starts on Tuesday; continuing past midnight does not make 00:00 a Wednesday focus start.
+        #expect(week.profile.focusDays == 1)
+        #expect(week.profile.typicalFocusStart == 23 * 60 + 51)
+        #expect(week.profile.startSpread == nil)
+    }
+
+    @Test func aDayWithAContinuedRunAndItsOwnLaterStartCountsTheLaterStart() {
+        let blocks = run(date(cal, 20, 23, 51), 6, .focus) + run(date(cal, 21, 10), 2, .focus)
+        let profile = WeekReport(containing: date(cal, 20, 12), blocks: blocks, calendar: cal).profile
+        #expect(profile.focusDays == 2)
+        #expect(profile.typicalFocusStart == (10 * 60 + 23 * 60 + 51) / 2)
+        #expect(profile.longestFocusRun?.start == date(cal, 20, 23, 51))
+    }
+
+    @Test func aRunContinuingIntoTheWeekFromTheSundayBeforeIsNotAMondayStart() {
+        // The window reads the block that ends as the week starts, so Monday's 00:00 is known to continue Sunday's run.
+        let blocks = run(date(cal, 18, 23, 57), 3, .focus) + run(date(cal, 19, 9), 2, .focus)
+        let profile = WeekReport(containing: date(cal, 19, 12), blocks: blocks, calendar: cal).profile
+        #expect(profile.focusDays == 1)
+        #expect(profile.typicalFocusStart == 540)
+        // Only the week's part of that run is in it.
+        #expect(profile.longestFocusRun?.start == date(cal, 19, 0))
+        #expect(profile.longestFocusRun?.duration == 360)
+        #expect(WeekReport(containing: date(cal, 19, 12), blocks: blocks, calendar: cal).totals.focus == 4 * 180)
     }
 }
 
@@ -196,6 +217,34 @@ private func temporaryDirectory() -> URL {
         #expect(report.rhythm[4].seconds.drift == 0)
         #expect(report.rhythm[5].seconds.drift == 0)
         #expect(report.rhythm[6].seconds.drift == 1_800)
+    }
+
+    @Test func calendarSpansRunFromTheirStartClockTimeToTheirEndClockTime() {
+        // Spring forward: 40 blocks from 01:00 take two hours of elapsed time and end at 04:00 by the clock.
+        let spring = date(cal, 8, 0, month: 3)
+        let springDay = DayReport(day: spring, blocks: run(date(cal, 8, 1, month: 3), 40, .focus), calendar: cal)
+        #expect(springDay.spans.count == 1)
+        #expect(ReportPeriod.clockMinutes(of: springDay.spans[0], day: springDay.interval, calendar: cal) == 60...240)
+        // Fall back: 80 blocks from the first 01:00 take four hours and end at 04:00 by the clock, after passing
+        // 01:00–02:00 twice.
+        let fall = date(cal, 1, 0, month: 11)
+        let fallDay = DayReport(day: fall, blocks: run(date(cal, 1, 1, month: 11), 80, .focus), calendar: cal)
+        #expect(ReportPeriod.clockMinutes(of: fallDay.spans[0], day: fallDay.interval, calendar: cal) == 60...240)
+        // A span inside the repeated hour that ends at a lower clock time reaches the latest time it passed, 02:00.
+        let repeated = DayReport(day: fall, blocks: run(date(cal, 1, 1, 30, month: 11), 15, .drift), calendar: cal)
+        #expect(ReportPeriod.clockMinutes(of: repeated.spans[0], day: repeated.interval, calendar: cal) == 90...120)
+        // A span ending at the next midnight ends at 1440, on a 25-hour day too.
+        let late = DayReport(day: fall, blocks: run(date(cal, 1, 23, month: 11), 20, .neutral), calendar: cal)
+        #expect(ReportPeriod.clockMinutes(of: late.spans[0], day: late.interval, calendar: cal) == 1_380...1_440)
+    }
+
+    @Test func clockLabelsNameWallTimesTheDayMayNotHave() {
+        // 02:30 does not exist on 8 March in New York, but the label is the wall time itself, not a shifted one.
+        // (Whether the hour has a leading zero depends on the system's locale data.)
+        #expect(ReportText.clock(150, locale: Locale(identifier: "en_GB")).hasSuffix("2:30"))
+        #expect(ReportText.clock(870, locale: Locale(identifier: "en_GB")) == "14:30")
+        #expect(ReportText.clock(150, locale: Locale(identifier: "en_US")).hasPrefix("2:30"))
+        #expect(ReportText.clock(1_440, locale: Locale(identifier: "en_GB")).hasSuffix("0:00"))
     }
 
     @Test func focusStartsAreClockTimesAcrossTheChange() {
@@ -289,6 +338,75 @@ private func temporaryDirectory() -> URL {
         #expect(week.profile.longestFocusRun?.start == start.addingTimeInterval(180))
         #expect(week.profile.shortDrifts == 2)
         #expect(week.heatmap[1 * 24 + 9].seconds.focus == 180)
+    }
+}
+
+@Suite struct ReportSelectionTests {
+    private let cal = calendar()
+
+    @Test func openingSelectsTodayAndTheCurrentHourWhateverWasSelectedBefore() {
+        // The model was built on Monday and the user browsed to the Sunday before; the window opens on Wednesday.
+        var launched = ReportSelection(now: date(cal, 19, 8, 10), calendar: cal)
+        launched.moveDay(by: -1, now: date(cal, 19, 8, 11))
+        #expect(cal.isDate(launched.day, inSameDayAs: date(cal, 18, 12)))
+        let opened = ReportSelection(now: date(cal, 21, 15, 20), calendar: cal)
+        #expect(opened.isToday(at: date(cal, 21, 15, 20)))
+        #expect(opened.hour == date(cal, 21, 15))
+    }
+
+    @Test func todayFollowsMidnightAndABrowsedDayStays() {
+        var selection = ReportSelection(now: date(cal, 20, 23, 30), calendar: cal)
+        selection.followClock(now: date(cal, 21, 0, 1))
+        selection.settle(now: date(cal, 21, 0, 1), firstBlock: nil)
+        #expect(selection.interval.start == date(cal, 21, 0))
+        #expect(selection.hour == date(cal, 21, 0))
+        // A day the user chose stays when the clock passes midnight.
+        selection.choose(day: date(cal, 19, 12), now: date(cal, 21, 23, 50))
+        selection.settle(now: date(cal, 21, 23, 50), firstBlock: date(cal, 19, 9, 3))
+        #expect(selection.hour == date(cal, 19, 9))
+        selection.followClock(now: date(cal, 22, 0, 5))
+        #expect(selection.interval.start == date(cal, 19, 0))
+        // Choosing a later day than today selects today.
+        selection.choose(day: date(cal, 25, 12), now: date(cal, 22, 0, 6))
+        #expect(selection.isToday(at: date(cal, 22, 0, 6)))
+    }
+
+    @Test func theMidnightHourThenThePreviousDaySnapsToThatDaysHours() {
+        var selection = ReportSelection(now: date(cal, 21, 0, 10), calendar: cal)
+        #expect(selection.hour == date(cal, 21, 0))
+        // Wednesday's 00:00 is Tuesday's end, which is not one of Tuesday's hours.
+        selection.moveDay(by: -1, now: date(cal, 21, 0, 11))
+        selection.settle(now: date(cal, 21, 0, 11), firstBlock: date(cal, 20, 13, 30))
+        #expect(selection.hour == date(cal, 20, 13))
+        selection.moveHour(by: 1)
+        #expect(selection.hour == date(cal, 20, 14))
+        selection.moveDay(by: -1, now: date(cal, 21, 0, 12))
+        selection.settle(now: date(cal, 21, 0, 12), firstBlock: nil)
+        #expect(selection.hour == date(cal, 19, 0))
+        // No day after today.
+        var today = ReportSelection(now: date(cal, 21, 10), calendar: cal)
+        today.moveDay(by: 1, now: date(cal, 21, 10))
+        #expect(today.isToday(at: date(cal, 21, 10)))
+    }
+
+    @Test func aClockChangeDayHasItsOwnHours() {
+        var selection = ReportSelection(now: date(cal, 2, 9, month: 11), calendar: cal)
+        selection.moveDay(by: -1, now: date(cal, 2, 9, month: 11))
+        selection.settle(now: date(cal, 2, 9, month: 11), firstBlock: nil)
+        #expect(selection.hours.count == 25)
+        #expect(selection.hour == date(cal, 1, 0, month: 11))
+        selection.moveHour(by: 24)
+        #expect(selection.hour == date(cal, 1, 23, month: 11))
+        selection.moveHour(by: 1)
+        #expect(selection.hour == date(cal, 1, 23, month: 11))
+        // The hourly zoom follows a selected block into the repeated hour, by elapsed time.
+        selection.showHour(containing: date(cal, 1, 0, month: 11).addingTimeInterval(2.5 * 3_600))
+        #expect(selection.hour == date(cal, 1, 0, month: 11).addingTimeInterval(2 * 3_600))
+        var spring = ReportSelection(now: date(cal, 8, 20, month: 3), calendar: cal)
+        #expect(spring.hours.count == 23)
+        #expect(spring.hour == date(cal, 8, 20, month: 3))
+        spring.showHour(containing: date(cal, 9, 0, month: 3))
+        #expect(spring.hour == date(cal, 8, 20, month: 3))
     }
 }
 

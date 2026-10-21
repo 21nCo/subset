@@ -24,7 +24,8 @@ final class ReportsWindowController: NSObject, NSWindowDelegate {
             window.center()
             self.window = window
         }
-        model.reload()
+        // Opening shows today and the current hour; bringing an open window forward keeps what it shows.
+        if window?.isVisible == true { model.reload() } else { model.open() }
         // While shown, new blocks and labels appear within a minute.
         if timer == nil {
             let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.model.reload() } }
@@ -55,10 +56,9 @@ final class ReportsModel: ObservableObject {
         var id: String { rawValue }
     }
 
-    @Published var selectedDay: Date { didSet { if !calendar.isDate(selectedDay, inSameDayAs: oldValue) { selectedBlock = nil; reload() } } }
+    /// The selected day and the hour the hourly zoom shows.
+    @Published private(set) var selection: ReportSelection
     @Published var zoom = Zoom.day
-    /// The start of the hour the hourly zoom shows.
-    @Published var hour: Date
     @Published var selectedBlock: Date?
     @Published private(set) var day: DayReport?
     @Published private(set) var week: WeekReport?
@@ -84,14 +84,27 @@ final class ReportsModel: ObservableObject {
         self.classification = classification
         self.captureState = captureState
         self.showClassification = showClassification
-        let now = Date()
-        selectedDay = now
-        hour = Calendar.autoupdatingCurrent.dateInterval(of: .hour, for: now)?.start ?? now
+        selection = ReportSelection(now: Date(), calendar: calendar)
     }
 
-    /// Reads the selected day's week from the store. A failed read keeps nothing stale on screen.
+    var selectedDay: Date { selection.day }
+    var hour: Date { selection.hour }
+
+    /// As the window opens: today and the current hour.
+    func open() {
+        selection = ReportSelection(now: Date(), calendar: calendar)
+        selectedBlock = nil
+        reload()
+    }
+
+    /// Reads the selected day's week from the store, after moving a selection on today past midnight. A failed read
+    /// keeps nothing stale on screen.
     func reload() {
         let now = Date()
+        let previousDay = selection.interval
+        selection.followClock(now: now)
+        if selection.interval != previousDay { selectedBlock = nil }
+        defer { selection.settle(now: now, firstBlock: day?.blocks.first?.start) }
         guard let store else {
             readError = storeError ?? "The activity store is unavailable."
             day = nil
@@ -100,7 +113,8 @@ final class ReportsModel: ObservableObject {
         }
         let interval = ReportPeriod.week(containing: selectedDay, calendar: calendar)
         do {
-            let blocks = try store.blocks(from: interval.start, to: interval.end)
+            // The block before the week tells whether a focus run continues into its first day.
+            let blocks = try store.blocks(from: interval.start.addingTimeInterval(-Block.length), to: interval.end)
             hasAnyActivity = try !blocks.isEmpty || store.latestSegmentEnd() != nil
             week = WeekReport(containing: selectedDay, blocks: blocks, calendar: calendar)
             day = DayReport(day: selectedDay, blocks: blocks, calendar: calendar)
@@ -111,35 +125,36 @@ final class ReportsModel: ObservableObject {
             day = nil
             week = nil
         }
-        // On another day, the hourly zoom opens at the day's first block.
-        if let day, !day.interval.contains(hour) {
-            let first = day.blocks.first?.start ?? day.interval.start
-            hour = hours.last { $0 <= first } ?? day.interval.start
-        }
         if let selectedBlock, day?.blocks.contains(where: { $0.start == selectedBlock }) != true { self.selectedBlock = nil }
     }
 
     // MARK: Day navigation
 
-    var isToday: Bool { calendar.isDateInToday(selectedDay) }
+    var isToday: Bool { selection.isToday(at: Date()) }
+
+    /// Selects the day holding `date` (today for a later one) and reads it.
+    func choose(day date: Date) {
+        let previous = selection.interval
+        selection.choose(day: date, now: Date())
+        changedDay(from: previous)
+    }
 
     func moveDay(by days: Int) {
-        let now = Date()
-        guard let next = calendar.date(byAdding: .day, value: days, to: selectedDay), calendar.startOfDay(for: next) <= now else { return }
-        selectedDay = min(next, now)
+        let previous = selection.interval
+        selection.moveDay(by: days, now: Date())
+        changedDay(from: previous)
+    }
+
+    private func changedDay(from previous: DateInterval) {
+        guard selection.interval != previous else { return }
+        selectedBlock = nil
+        reload()
     }
 
     /// The day's hours by elapsed time, so a day the clocks change has 23 or 25 of them.
-    var hours: [Date] {
-        guard let interval = day?.interval else { return [] }
-        return Array(stride(from: interval.start, to: interval.end, by: 3_600))
-    }
+    var hours: [Date] { selection.hours }
 
-    func moveHour(by offset: Int) {
-        let hours = hours
-        guard let index = hours.firstIndex(of: hour), hours.indices.contains(index + offset) else { return }
-        hour = hours[index + offset]
-    }
+    func moveHour(by offset: Int) { selection.moveHour(by: offset) }
 
     /// The span the timeline shows.
     var visibleInterval: DateInterval? {
@@ -166,7 +181,7 @@ final class ReportsModel: ObservableObject {
         correctionMessage = nil
         correctionNote = ""
         if let label = block?.reportLabel { correctionLabel = label }
-        if let start, zoom == .hour, let containing = hours.last(where: { $0 <= start }) { hour = containing }
+        if let start, zoom == .hour { selection.showHour(containing: start) }
     }
 
     /// Moves the selection to the previous or next visible block.
@@ -198,6 +213,15 @@ final class ReportsModel: ObservableObject {
     var providerOff: Bool { classification.settings.provider == .off }
     var classificationStatus: ClassificationStatus { classification.status }
 
+    /// Why blocks are not being labeled while a provider is chosen (no key, an unreadable key, a failing provider), or
+    /// why failed blocks could not be retried; nil while classification works.
+    var classificationError: String? {
+        guard let error = classificationStatus.lastError else { return nil }
+        let at = classificationStatus.lastErrorAt.map { " (\(time($0)))" } ?? ""
+        return providerOff ? "Last classification error\(at): \(error)"
+            : "Blocks stay unclassified while the provider is not set up or is failing. Last error\(at): \(error)"
+    }
+
     func retryFailed() {
         classification.retryFailed()
         reload()
@@ -226,12 +250,8 @@ final class ReportsModel: ObservableObject {
 
     func time(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
 
-    /// A local clock time, given in minutes after midnight.
-    func clock(_ minuteOfDay: Int) -> String {
-        let base = calendar.startOfDay(for: Date())
-        let date = calendar.date(bySettingHour: minuteOfDay / 60 % 24, minute: minuteOfDay % 60, second: 0, of: base) ?? base
-        return time(date)
-    }
+    /// A local clock time, given in minutes after midnight, whether or not today has that time.
+    func clock(_ minuteOfDay: Int) -> String { ReportText.clock(minuteOfDay, locale: .autoupdatingCurrent) }
 
     func dayName(_ date: Date, wide: Bool = false) -> String {
         date.formatted(.dateTime.weekday(wide ? .wide : .abbreviated))

@@ -173,10 +173,37 @@ public enum ReportPeriod {
         }
     }
 
+    /// The starts of a day's hours by elapsed time, so a day the clocks change has 23 or 25 of them. The day's end is
+    /// not one of them.
+    public static func hours(of day: DateInterval) -> [Date] {
+        Array(stride(from: day.start, to: day.end, by: 3_600))
+    }
+
     /// Minutes after local midnight as the clock shows them, so 09:00 is 540 on a day the clocks changed too.
     static func minuteOfDay(_ date: Date, calendar: Calendar) -> Int {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
         return (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+    }
+
+    /// Where a span of `day` sits on a clock-time axis, in minutes after midnight: from its start's clock time to its
+    /// end's, the day's end being 1440. When the clocks go back inside the span, it reaches at least the latest clock
+    /// time it passed, so the repeated hour is not drawn twice and the span never ends before it starts. When they go
+    /// forward, the skipped hour is not drawn.
+    public static func clockMinutes(of span: LabeledSpan, day: DateInterval, calendar: Calendar) -> ClosedRange<Double> {
+        func minutes(_ date: Date) -> Double {
+            let parts = calendar.dateComponents([.hour, .minute, .second], from: date)
+            return Double((parts.hour ?? 0) * 60 + (parts.minute ?? 0)) + Double(parts.second ?? 0) / 60
+        }
+        let start = minutes(span.start)
+        var end = span.end >= day.end ? 1_440 : minutes(span.end)
+        var date = span.start
+        while let change = calendar.timeZone.nextDaylightSavingTimeTransition(after: date), change < span.end {
+            // The clock just before the change: its reading at the change plus the hour (or so) it went back.
+            let back = calendar.timeZone.secondsFromGMT(for: change.addingTimeInterval(-1)) - calendar.timeZone.secondsFromGMT(for: change)
+            if back > 0 { end = max(end, minutes(change) + Double(back) / 60) }
+            date = change
+        }
+        return start...max(start, end)
     }
 
     static func rhythm(of blocks: [Block], calendar: Calendar) -> [RhythmSlot] {
@@ -188,6 +215,77 @@ public enum ReportPeriod {
             slots[slot].seconds += block.categorySeconds
         }
         return slots
+    }
+}
+
+/// The day and hour the reports window shows. Opening it selects today and the current hour; a selection on today
+/// follows the clock past midnight; a day the user chose stays while the window is open; and the hourly zoom always
+/// shows one of the selected day's hours.
+public struct ReportSelection: Equatable, Sendable {
+    public let calendar: Calendar
+    /// An instant in the selected day, never after the last time the selection was brought up to date.
+    public private(set) var day: Date
+    /// The start of the hour the hourly zoom shows, one of `hours`.
+    public private(set) var hour: Date
+    /// When the selection was last brought up to date, to tell whether it was on that day's today.
+    private var checkedAt: Date
+
+    /// Today and the current hour, as the window opens.
+    public init(now: Date, calendar: Calendar) {
+        self.calendar = calendar
+        day = now
+        checkedAt = now
+        hour = now
+        snapHour(now: now, firstBlock: nil, current: true)
+    }
+
+    public var interval: DateInterval { ReportPeriod.day(containing: day, calendar: calendar) }
+    public var hours: [Date] { ReportPeriod.hours(of: interval) }
+
+    public func isToday(at now: Date) -> Bool { calendar.isDate(day, inSameDayAs: now) }
+
+    /// Selects the day holding `date`, or today for a later one. Its hour is set by the next `settle`.
+    public mutating func choose(day date: Date, now: Date) {
+        day = min(date, now)
+        checkedAt = now
+    }
+
+    /// The day `days` before or after the selected one, up to today.
+    public mutating func moveDay(by days: Int, now: Date) {
+        guard let next = calendar.date(byAdding: .day, value: days, to: day), calendar.startOfDay(for: next) <= now else { return }
+        choose(day: next, now: now)
+    }
+
+    /// Brings the day up to date before a read: a selection on today moves to the new today after midnight.
+    public mutating func followClock(now: Date) {
+        if calendar.isDate(day, inSameDayAs: checkedAt) || day > now { day = now }
+        checkedAt = now
+    }
+
+    /// After a read of the selected day: keeps the hour when it is one of the day's hours, otherwise moves it to the
+    /// current hour on today and to the hour of the day's first block, or its first hour, on another day.
+    public mutating func settle(now: Date, firstBlock: Date?) {
+        snapHour(now: now, firstBlock: firstBlock, current: false)
+    }
+
+    public mutating func moveHour(by offset: Int) {
+        let hours = hours
+        guard let index = hours.firstIndex(of: hour), hours.indices.contains(index + offset) else { return }
+        hour = hours[index + offset]
+    }
+
+    /// The hour of the selected day that holds `date`, so the hourly zoom follows a selected block.
+    public mutating func showHour(containing date: Date) {
+        let interval = interval
+        guard interval.start <= date, date < interval.end, let containing = hours.last(where: { $0 <= date }) else { return }
+        hour = containing
+    }
+
+    private mutating func snapHour(now: Date, firstBlock: Date?, current: Bool) {
+        let interval = interval, hours = hours
+        if !current, hours.contains(hour) { return }
+        let anchor = interval.start <= now && now < interval.end ? now : firstBlock ?? interval.start
+        hour = hours.last { $0 <= anchor } ?? interval.start
     }
 }
 
@@ -241,13 +339,15 @@ public struct DayReport: Sendable {
 
 /// The week's focus habits.
 public struct FocusProfile: Equatable, Sendable {
-    /// The median of each day's first focus block, in minutes after local midnight; nil when no day had focus.
+    /// The median of each day's focus start, in minutes after local midnight; nil when no day had one. A day's focus
+    /// start is the start of the first focus run that begins on it: a run continuing from the evening before is that
+    /// evening's.
     public var typicalFocusStart: Int?
-    /// The days with a focus block.
+    /// The days on which a focus run begins.
     public var focusDays: Int
     /// How far the days' first focus starts spread: their standard deviation in minutes, nil with fewer than two days.
     public var startSpread: Double?
-    /// The longest run of consecutive focus blocks, by clock time. Runs continue across midnight.
+    /// The longest run of consecutive focus blocks in the week, by elapsed time. Runs continue across midnight.
     public var longestFocusRun: LabeledSpan?
     /// Drift runs with less than six minutes of drift time.
     public var shortDrifts: Int
@@ -259,9 +359,11 @@ public struct FocusProfile: Equatable, Sendable {
 
     public var balance: Double? { focusSeconds + driftSeconds > 0 ? focusSeconds / (focusSeconds + driftSeconds) : nil }
 
-    init(days: [DayReport], calendar: Calendar) {
+    /// `before` holds blocks before the week, so a run continuing into its first day is not counted as a start there.
+    init(days: [DayReport], before: [Block], calendar: Calendar) {
+        let runs = LabeledSpan.spans(of: before.sorted { $0.start < $1.start } + days.flatMap(\.blocks)).filter { $0.category == .focus }
         let starts = days.compactMap { day in
-            day.blocks.first { $0.category == .focus }.map { ReportPeriod.minuteOfDay($0.start, calendar: calendar) }
+            runs.first { day.interval.start <= $0.start && $0.start < day.interval.end }.map { ReportPeriod.minuteOfDay($0.start, calendar: calendar) }
         }.sorted()
         focusDays = starts.count
         if starts.isEmpty {
@@ -297,8 +399,11 @@ public struct WeekReport: Sendable {
     public let heatmap: [HeatmapCell]
     public let profile: FocusProfile
 
+    /// `blocks` may include the block that ends as the week starts, so a focus run continuing into its first day is
+    /// told from one that starts there.
     public init(containing date: Date, blocks: [Block], calendar: Calendar) {
-        interval = ReportPeriod.week(containing: date, calendar: calendar)
+        let interval = ReportPeriod.week(containing: date, calendar: calendar)
+        self.interval = interval
         let days = ReportPeriod.days(ofWeekContaining: date, calendar: calendar).map { DayReport(day: $0.start, blocks: blocks, calendar: calendar) }
         self.days = days
         totals = days.reduce(CategorySeconds()) { $0 + $1.totals }
@@ -313,7 +418,7 @@ public struct WeekReport: Sendable {
         }
         self.rhythm = rhythm
         self.heatmap = heatmap
-        profile = FocusProfile(days: days, calendar: calendar)
+        profile = FocusProfile(days: days, before: blocks.filter { $0.start < interval.start }, calendar: calendar)
     }
 
     public var latestBlockEnd: Date? { days.compactMap(\.latestBlockEnd).max() }
@@ -336,6 +441,15 @@ public enum ReportText {
     /// "09:30" for 570.
     public static func clock(_ minuteOfDay: Int) -> String {
         String(format: "%02d:%02d", minuteOfDay / 60, minuteOfDay % 60)
+    }
+
+    /// A clock time in minutes after midnight in `locale`'s style, "2:30 PM" or "14:30". It names the wall time alone,
+    /// so it reads the same on a day that skipped or repeated that time.
+    public static func clock(_ minuteOfDay: Int, locale: Locale) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
+        let date = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: minuteOfDay / 60 % 24, minute: minuteOfDay % 60)) ?? .distantPast
+        return date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar, timeZone: calendar.timeZone))
     }
 
     /// Every category with time, then focus as a share of classified time.

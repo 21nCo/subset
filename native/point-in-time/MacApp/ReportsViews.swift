@@ -50,12 +50,12 @@ private struct DayPicker: View {
         HStack {
             Button { model.moveDay(by: -1) } label: { Label("Previous Day", systemImage: "chevron.left") }
                 .keyboardShortcut("[", modifiers: .command)
-            DatePicker("Day", selection: $model.selectedDay, in: ...Date(), displayedComponents: .date)
+            DatePicker("Day", selection: Binding { model.selectedDay } set: { model.choose(day: $0) }, in: ...Date(), displayedComponents: .date)
                 .fixedSize()
             Button { model.moveDay(by: 1) } label: { Label("Next Day", systemImage: "chevron.right") }
                 .keyboardShortcut("]", modifiers: .command)
                 .disabled(model.isToday)
-            Button("Today") { model.selectedDay = Date() }.disabled(model.isToday)
+            Button("Today") { model.choose(day: Date()) }.disabled(model.isToday)
             Spacer()
             Button { model.reload() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 .keyboardShortcut("r", modifiers: .command)
@@ -64,7 +64,7 @@ private struct DayPicker: View {
     }
 }
 
-/// Read errors, tracking off or paused, no provider, and failed blocks with their retry.
+/// Read errors, tracking off or paused, no provider or a failing one, and failed blocks with their retry.
 private struct StatusBanners: View {
     @ObservedObject var model: ReportsModel
 
@@ -84,6 +84,12 @@ private struct StatusBanners: View {
                 HStack {
                     Label("Classification is off, so blocks are shown unclassified.", systemImage: "tag.slash")
                     Button("Choose a Provider…", action: model.showClassification)
+                }
+            }
+            if let error = model.classificationError {
+                HStack {
+                    Label { Text(verbatim: error) } icon: { Image(systemName: "exclamationmark.triangle") }
+                    if !model.providerOff { Button("Classification Settings…", action: model.showClassification) }
                 }
             }
             let failed = model.classificationStatus.failed
@@ -116,7 +122,8 @@ private struct DayTab: View {
                     BlockList(model: model).frame(minWidth: 260, maxWidth: 340, minHeight: 280, maxHeight: 360)
                     BlockInspector(model: model)
                 }
-                DayRings(totals: day.totals)
+                DayRings(title: model.isToday ? "Today’s Balance" : "Balance on \(day.interval.start.formatted(date: .abbreviated, time: .omitted))",
+                         totals: day.totals)
                 HStack(alignment: .top, spacing: 16) {
                     UsageList(title: "Top Apps", totals: day.apps, empty: "No app time recorded.")
                     UsageList(title: "Top Sites", totals: day.hosts, empty: "No sites recorded.")
@@ -291,11 +298,12 @@ private struct BlockInspector: View {
 
 /// Focus, neutral, and drift as shares of classified time, each named and given as a number.
 private struct DayRings: View {
+    let title: String
     let totals: CategorySeconds
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Today’s Balance").font(.headline)
+            Text(verbatim: title).font(.headline)
             HStack(spacing: 24) {
                 ForEach([TimeCategory.focus, .neutral, .drift], id: \.self) { category in
                     let share = totals.classified > 0 ? totals[category] / totals.classified : 0
@@ -523,10 +531,10 @@ private struct WeekCalendar: View {
         Chart {
             ForEach(week.days, id: \.interval.start) { day in
                 ForEach(day.spans, id: \.start) { span in
-                    // Plotted as minutes before midnight, so the morning is at the top.
-                    let start = model.minuteOfDay(span.start)
+                    // Plotted as minutes before midnight, so the morning is at the top, from the start's clock time to the end's.
+                    let minutes = ReportPeriod.clockMinutes(of: span, day: day.interval, calendar: model.calendar)
                     BarMark(x: .value("Day", model.dayName(day.interval.start)),
-                            yStart: .value("Start", 1_440 - start), yEnd: .value("End", max(0, 1_440 - start - span.duration / 60)))
+                            yStart: .value("Start", 1_440 - minutes.lowerBound), yEnd: .value("End", 1_440 - minutes.upperBound))
                         .position(by: .value("Category", span.category.title))
                         .foregroundStyle(by: .value("Category", span.category.title))
                         .annotation(position: .overlay) {
@@ -551,12 +559,4 @@ private struct WeekCalendar: View {
 
 private extension HeatmapCell {
     var key: Int { dayIndex * 24 + hour }
-}
-
-extension ReportsModel {
-    /// Minutes after the day's start by the clock, for the calendar's vertical axis.
-    func minuteOfDay(_ date: Date) -> Double {
-        let parts = calendar.dateComponents([.hour, .minute, .second], from: date)
-        return Double((parts.hour ?? 0) * 60 + (parts.minute ?? 0)) + Double(parts.second ?? 0) / 60
-    }
 }
