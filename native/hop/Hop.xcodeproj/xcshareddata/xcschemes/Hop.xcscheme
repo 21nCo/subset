@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "55B4D7BEF077C9F1F387FCF27C6331BF"
+               BlueprintIdentifier = "7C99B8DD96406F28F431331599458BF2"
                BuildableName = "Hop.app"
                BlueprintName = "Hop"
                ReferencedContainer = "container:Hop.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2A31EDEF79496F47B9AC459F3C8BA298"
+               BlueprintIdentifier = "85372C2389F034245C73FD2A578941E4"
                BuildableName = "HopCoreTests.xctest"
                BlueprintName = "HopCoreTests"
                ReferencedContainer = "container:Hop.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "55B4D7BEF077C9F1F387FCF27C6331BF"
+            BlueprintIdentifier = "7C99B8DD96406F28F431331599458BF2"
             BuildableName = "Hop.app"
             BlueprintName = "Hop"
             ReferencedContainer = "container:Hop.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "2A31EDEF79496F47B9AC459F3C8BA298"
+               BlueprintIdentifier = "85372C2389F034245C73FD2A578941E4"
                BuildableName = "HopCoreTests.xctest"
                BlueprintName = "HopCoreTests"
                ReferencedContainer = "container:Hop.xcodeproj">
@@ -77,7 +77,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "55B4D7BEF077C9F1F387FCF27C6331BF"
+            BlueprintIdentifier = "7C99B8DD96406F28F431331599458BF2"
             BuildableName = "Hop.app"
             BlueprintName = "Hop"
             ReferencedContainer = "container:Hop.xcodeproj">
@@ -94,7 +94,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "55B4D7BEF077C9F1F387FCF27C6331BF"
+            BlueprintIdentifier = "7C99B8DD96406F28F431331599458BF2"
             BuildableName = "Hop.app"
             BlueprintName = "Hop"
             ReferencedContainer = "container:Hop.xcodeproj">

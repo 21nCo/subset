@@ -12,7 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowList = WindowListController()
     private lazy var switchShortcut = SwitchShortcutController(
         windowList: windowList,
-        settings: { [unowned self] in settings.settings }
+        settings: { [unowned self] in settings.settings },
+        capturesThumbnails: { [unowned self] in settings.capturesThumbnails() }
     )
     private var accessibility = AccessibilityGate()
     private lazy var onboarding = OnboardingWindowController(
@@ -49,11 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Trust and the login item are re-checked whenever Hop becomes active, for example when a window of its own comes
-    /// to the front after the user changed them in System Settings.
+    /// Trust, the login item and Screen Recording are re-checked whenever Hop becomes active, for example when a window
+    /// of its own comes to the front after the user changed them in System Settings.
     func applicationDidBecomeActive(_: Notification) {
         refreshAccessibility()
         settings.refreshLoginItem()
+        settings.refreshScreenRecording()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }

@@ -153,6 +153,19 @@ final class SettingsStoreTests: XCTestCase {
             [true, true, false, false]
         )
         XCTAssertEqual(settings.excludedApps, [])
+        XCTAssertFalse(settings.showWindowPreviews, "previews are opt-in")
+    }
+
+    func testWindowPreviewsRoundTripAndAnAbsentKeyIsOff() throws {
+        var settings = Settings.default
+        settings.showWindowPreviews = true
+        store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(defaults.data(forKey: Settings.defaultsKey)))
+            as? [String: Any])
+        XCTAssertEqual(json["showWindowPreviews"] as? Bool, true)
+        storeJSON(#"{"schemaVersion": 1, "shownWindows": {"minimized": true}}"#)
+        XCTAssertFalse(store.load().showWindowPreviews)
     }
 
     func testSettingsRoundTripUnderTheirKeyWithSchemaVersionOne() throws {
@@ -186,6 +199,7 @@ final class SettingsStoreTests: XCTestCase {
             ("a later version", Data(#"{"schemaVersion": 2, "shownWindows": {"minimized": false}}"#.utf8)),
             ("a version of the wrong type", Data(#"{"schemaVersion": "1"}"#.utf8)),
             ("an option of the wrong type", Data(#"{"schemaVersion": 1, "shownWindows": {"minimized": "no"}}"#.utf8)),
+            ("previews not a boolean", Data(#"{"schemaVersion": 1, "showWindowPreviews": "yes"}"#.utf8)),
             ("excluded apps not a list", Data(#"{"schemaVersion": 1, "excludedApps": "com.example.mail"}"#.utf8)),
             ("a ⌘ shortcut", Data(#"{"schemaVersion": 1, "shortcut": {"holdModifier": "command", "keyCode": 48}}"#.utf8)),
             ("an arrow shortcut", Data(#"{"schemaVersion": 1, "shortcut": {"holdModifier": "option", "keyCode": 123}}"#.utf8)),

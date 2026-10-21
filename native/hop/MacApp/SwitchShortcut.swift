@@ -33,12 +33,18 @@ final class SwitchShortcutController {
     /// permission again and shows onboarding.
     var onNeedsPermission: () -> Void = {}
 
-    convenience init(windowList: WindowListController, settings: @escaping () -> Settings) {
+    convenience init(
+        windowList: WindowListController,
+        settings: @escaping () -> Settings,
+        capturesThumbnails: @escaping () -> Bool
+    ) {
         self.init(
             switcher: SwitcherController(
                 readWindows: { windowList.refresh() },
                 windowOperator: windowList.windowOperator,
-                settings: settings
+                settings: settings,
+                thumbnails: ThumbnailProvider(),
+                capturesThumbnails: capturesThumbnails
             ),
             shortcut: settings().shortcut,
             sameAppShortcut: settings().sameAppShortcut

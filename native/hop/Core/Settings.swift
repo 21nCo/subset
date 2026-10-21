@@ -50,6 +50,9 @@ public struct Settings: Sendable, Equatable {
     public var shownWindows = ShownWindows()
     /// The bundle IDs of apps whose windows never appear, in the order they were added, without duplicates.
     public private(set) var excludedApps: [String] = []
+    /// Show a recent image of each window in its cell, under the Screen Recording permission. Off by default; the
+    /// images stay in memory only.
+    public var showWindowPreviews = false
 
     public init() {}
 
@@ -158,6 +161,7 @@ extension Settings: Codable {
         case sameAppShortcut
         case shownWindows
         case excludedApps
+        case showWindowPreviews
     }
 
     public init(from decoder: any Decoder) throws {
@@ -179,6 +183,7 @@ extension Settings: Codable {
         for bundleIdentifier in try container.decodeIfPresent([String].self, forKey: .excludedApps) ?? [] {
             exclude(bundleIdentifier)
         }
+        showWindowPreviews = try container.decodeIfPresent(Bool.self, forKey: .showWindowPreviews) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -188,6 +193,7 @@ extension Settings: Codable {
         try container.encode(sameAppShortcut, forKey: .sameAppShortcut)
         try container.encode(shownWindows, forKey: .shownWindows)
         try container.encode(excludedApps, forKey: .excludedApps)
+        try container.encode(showWindowPreviews, forKey: .showWindowPreviews)
     }
 }
 
