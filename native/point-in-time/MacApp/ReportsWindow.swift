@@ -7,6 +7,8 @@ import SwiftUI
 final class ReportsWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var timer: Timer?
+    /// Shown and not yet closed, including while miniaturized, which `isVisible` reports as hidden.
+    private var isOpen = false
     let model: ReportsModel
 
     init(model: ReportsModel) {
@@ -25,7 +27,8 @@ final class ReportsWindowController: NSObject, NSWindowDelegate {
             self.window = window
         }
         // Opening shows today and the current hour; bringing an open window forward keeps what it shows.
-        if window?.isVisible == true { model.reload() } else { model.open() }
+        if isOpen { model.reload() } else { model.open() }
+        isOpen = true
         // While shown, new blocks and labels appear within a minute.
         if timer == nil {
             let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.model.reload() } }
@@ -37,12 +40,13 @@ final class ReportsWindowController: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// After a classification run or a settings change; nothing is read while the window is closed.
-    func refreshIfVisible() {
-        if window?.isVisible == true { model.reload() }
+    /// After a classification run, a settings change or a deletion; nothing is read while the window is closed.
+    func refreshIfOpen() {
+        if isOpen { model.reload() }
     }
 
     func windowWillClose(_ notification: Notification) {
+        isOpen = false
         timer?.invalidate()
         timer = nil
     }

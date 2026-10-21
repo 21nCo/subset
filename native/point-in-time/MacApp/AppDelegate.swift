@@ -32,12 +32,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusMenu = StatusMenuController(settings: settings, capture: capture, store: store, classification: classification,
                                               showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() },
                                               showReports: { reportsWindow.show() })
-        capture.onStateChange = { statusMenu.refreshIcon(); reportsWindow.refreshIfVisible() }
-        capture.onActivityRemoved = { classificationWindow.model.refresh(); reportsWindow.refreshIfVisible() }
+        capture.onStateChange = { statusMenu.refreshIcon(); reportsWindow.refreshIfOpen() }
+        capture.onActivityRemoved = { classificationWindow.model.refresh(); reportsWindow.refreshIfOpen() }
         // Excluded apps also decide what classification may send, so a change re-runs both.
         settings.onChange = { capture.tick(); classification.captureSettingsChanged() }
         classification.settings.onChange = { classification.settingsChanged(providerChanged: $0) }
-        classification.onChange = { classificationWindow.model.refresh(); reportsWindow.refreshIfVisible() }
+        classification.onChange = { classificationWindow.model.refresh(); reportsWindow.refreshIfOpen() }
         self.capture = capture
         self.welcome = welcome
         self.statusMenu = statusMenu
