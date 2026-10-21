@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { selectSink } from '../alerts/index.mjs';
-import { runDaemonCommand } from '../daemon/server.mjs';
+import { resolveDataDir } from '../daemon/paths.mjs';
+import { DaemonRunningError, runInForeground, startDaemon as startDaemonServer } from '../daemon/server.mjs';
 import { CliError } from './shared.mjs';
 
 /** How long `daemon stop` waits for the daemon to close its socket. */
@@ -21,10 +22,17 @@ export const daemonCommands = {
   'daemon run': {
     options: {},
     positionals: [0, 0],
-    json: false,
-    async run({ env, runDaemon = runDaemonCommand }) {
+    client: false,
+    async run({ env, startDaemon = startDaemonServer, foreground = runInForeground }) {
+      let daemon;
+      try {
+        daemon = await startDaemon({ dataDir: resolveDataDir(env), sink: selectSink({ env }) });
+      } catch (error) {
+        const reason = error instanceof DaemonRunningError ? `The Timer daemon is ${error.message}.` : `Could not start the Timer daemon: ${error.message}`;
+        throw new CliError('daemon_unavailable', reason);
+      }
       // Runs in the foreground until shutdown or the idle exit, then exits the process itself.
-      await runDaemon({ env, sink: selectSink({ env }) });
+      await foreground(daemon);
       return null;
     }
   },
@@ -65,6 +73,7 @@ export const daemonCommands = {
   'skill path': {
     options: {},
     positionals: [0, 0],
+    client: false,
     async run({ packageRoot }) {
       const path = join(packageRoot, 'skills', 'subset-timer');
       return { json: { path }, text: path };

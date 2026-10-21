@@ -147,8 +147,12 @@ test('the silent sink is selected when the tools are absent, and SUBSET_TIMER_AL
   // macOS needs both afplay and osascript.
   assert.equal(selectSink({ platform: 'darwin', env, spawn, executable: (path) => path === AFPLAY }).name, 'unavailable');
   assert.equal(selectSink({ platform: 'darwin', env, spawn, executable: all }).name, 'macos');
-  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: all }).name, 'linux (notify-send, paplay)');
-  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: (path) => path === '/usr/bin/paplay' }).name, 'linux (paplay)');
+  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: all, soundExists: all }).name, 'linux (notify-send, paplay)');
+  const paplayOnly = (path) => path === '/usr/bin/paplay';
+  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: paplayOnly, soundExists: (path) => path.endsWith('/complete.oga') }).name, 'linux (paplay)');
+  // paplay with none of the freedesktop sounds to play cannot alert.
+  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: paplayOnly, soundExists: none }).name, 'unavailable');
+  assert.equal(selectSink({ platform: 'linux', env, spawn, executable: all, soundExists: none }).name, 'linux (notify-send)');
   for (const platform of ['darwin', 'linux']) assert.equal(selectSink({ platform, env: { ...env, SUBSET_TIMER_ALERTS: 'off' }, spawn, executable: all }).name, 'off');
   assert.deepEqual(calls, []);
 

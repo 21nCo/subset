@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createSilentSink } from '../../src/alerts/index.mjs';
-import { createClient } from '../../src/daemon/index.mjs';
+import { createClient, socketRequest } from '../../src/daemon/index.mjs';
 import { HELP, VERSION } from '../../src/commands/index.mjs';
-import { FIXTURES, PACKAGE_ROOT, cliDaemon, runCli } from './helpers.mjs';
+import { FIXTURES, PACKAGE_ROOT, cliDaemon, refuseSpawn, runCli } from './helpers.mjs';
 import { tempDataDir } from '../daemon/helpers.mjs';
 
 // "Ends at" lines are local times; the fixtures' 09:00 UTC reads the same everywhere this runs.
@@ -318,17 +318,54 @@ test('daemon status reports the pid, data directory and alert sink; daemon stop 
   assert.deepEqual({ code: again.code, stdout: again.stdout }, { code: 0, stdout: 'The Timer daemon is not running.\n' });
 });
 
-test('daemon run runs the daemon with the selected sink', async (t) => {
-  const calls = [];
+test('daemon run runs the daemon with the selected sink in the foreground', async () => {
+  const started = [];
+  const daemon = { closed: Promise.resolve(0) };
+  const foreground = [];
   const result = await runCli(['daemon', 'run'], {
     env: { SUBSET_TIMER_ALERTS: 'off', SUBSET_TIMER_DATA_DIR: '/nonexistent' },
     client: {},
-    runDaemon: async (options) => calls.push(options)
+    startDaemon: async (options) => {
+      started.push(options);
+      return daemon;
+    },
+    foreground: async (handle) => foreground.push(handle)
   });
   assert.deepEqual({ code: result.code, stdout: result.stdout }, { code: 0, stdout: '' });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].sink.name, 'off');
-  assert.equal(calls[0].env.SUBSET_TIMER_DATA_DIR, '/nonexistent');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].sink.name, 'off');
+  assert.equal(started[0].dataDir, '/nonexistent');
+  assert.deepEqual(foreground, [daemon]);
+});
+
+test('a daemon that cannot start or be reached is daemon_unavailable, exit 3, never a crash', async (t) => {
+  const noForeground = () => assert.fail('daemon run went to the foreground.');
+  // daemon.sock under this directory is longer than any platform's socket path limit.
+  const longDir = join(tempDataDir(t), 'x'.repeat(120));
+  const env = { SUBSET_TIMER_ALERTS: 'off', SUBSET_TIMER_DATA_DIR: longDir };
+  for (const argv of [['list'], ['status', 'Tea'], ['start', '5m'], ['daemon', 'status'], ['daemon', 'stop'], ['daemon', 'run']]) {
+    const result = await runCli([...argv, '--json'], { env, foreground: noForeground });
+    assert.deepEqual({ code: result.code, error: result.json().error.code, stderr: result.stderr }, { code: 3, error: 'daemon_unavailable', stderr: '' }, argv.join(' '));
+    assert.match(result.json().error.message, /longer than 103 bytes; set SUBSET_TIMER_DATA_DIR to a shorter directory\.$/);
+    const human = await runCli(argv, { env, foreground: noForeground });
+    assert.equal(human.code, 3);
+    assert.match(human.stderr, /^subset-timer: .+\n$/);
+  }
+
+  // The client rejects, rather than raising an uncaught socket error, for a path it cannot connect to.
+  const longSocket = join(longDir, 'daemon.sock');
+  await assert.rejects(socketRequest(longSocket, 'GET', '/v1/daemon'));
+  const client = createClient({ dataDir: longDir, spawn: refuseSpawn, startTimeoutMs: 200 });
+  await assert.rejects(client.timers(), { code: 'daemon_unavailable' });
+  await assert.rejects(client.events(() => {}), { code: 'daemon_unavailable' });
+
+  // A second daemon run while one holds the data directory.
+  const { dataDir } = await cliDaemon(t);
+  const second = await runCli(['daemon', 'run', '--json'], { env: { SUBSET_TIMER_ALERTS: 'off', SUBSET_TIMER_DATA_DIR: dataDir }, foreground: noForeground });
+  assert.deepEqual(
+    { code: second.code, json: second.json() },
+    { code: 3, json: { error: { code: 'daemon_unavailable', message: `The Timer daemon is already running (pid ${process.pid}).` } } }
+  );
 });
 
 test('skill path, --version and --help need no daemon', async () => {
@@ -341,10 +378,19 @@ test('skill path, --version and --help need no daemon', async () => {
   const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
   assert.equal(VERSION, manifest.version);
   for (const flag of ['--version', '-v']) assert.equal((await runCli([flag], { client })).stdout, `${manifest.version}\n`);
-  for (const argv of [['--help'], ['-h'], ['start', '--help']]) {
+  for (const argv of [['--help'], ['-h'], ['start', '--help'], ['status', 'Tea', '-h'], ['frobnicate', '--help']]) {
     const help = await runCli(argv, { client });
     assert.deepEqual({ code: help.code, stdout: help.stdout }, { code: 0, stdout: HELP });
   }
+});
+
+test('--help is help only as an option, not as a value or after --', async (t) => {
+  const { run } = await cliDaemon(t);
+  const id = (await run(['start', '5m', '--name=--help', '--json'])).json().timer.definition.id;
+  const status = await run(['status', '--json', '--', '--help']);
+  assert.deepEqual({ code: status.code, id: status.json().timer.definition.id }, { code: 0, id });
+  assert.equal((await run(['pause', '--', '-h'])).code, 4);
+  assert.equal((await run(['pause', '--', '--help'])).code, 0);
 });
 
 test('--help lists every command SKILL.md uses, and SKILL.md uses only commands that exist', () => {

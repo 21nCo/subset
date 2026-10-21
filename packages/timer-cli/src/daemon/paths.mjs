@@ -31,16 +31,21 @@ export class DataDirError extends Error {
   }
 }
 
+/** Throws `DataDirError` when `dataDir` puts `daemon.sock` beyond `MAX_SOCKET_PATH_BYTES`. */
+export function checkSocketPath(dataDir) {
+  const { socket } = daemonPaths(dataDir);
+  if (Buffer.byteLength(socket) > MAX_SOCKET_PATH_BYTES) {
+    throw new DataDirError(`The socket path ${socket} is longer than ${MAX_SOCKET_PATH_BYTES} bytes; set SUBSET_TIMER_DATA_DIR to a shorter directory.`);
+  }
+}
+
 /**
  * Creates the data directory with mode 0700, or tightens an existing one to 0700. Refuses a
  * directory another user owns, a symbolic link, or a path too long for its socket, so only the
  * owning user can reach `daemon.sock`.
  */
 export function ensureDataDir(dataDir) {
-  const { socket } = daemonPaths(dataDir);
-  if (Buffer.byteLength(socket) > MAX_SOCKET_PATH_BYTES) {
-    throw new DataDirError(`The socket path ${socket} is longer than ${MAX_SOCKET_PATH_BYTES} bytes; set SUBSET_TIMER_DATA_DIR to a shorter directory.`);
-  }
+  checkSocketPath(dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const stat = lstatSync(dataDir);
   if (!stat.isDirectory()) throw new DataDirError(`${dataDir} is not a directory.`);

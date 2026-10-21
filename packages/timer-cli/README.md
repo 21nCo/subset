@@ -45,7 +45,7 @@ After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` 
 | Platform | Sink | Sound (only when the timer's `sound` is on) | Notification |
 | --- | --- | --- | --- |
 | macOS, with `/usr/bin/afplay` and `/usr/bin/osascript` | `macos` | `afplay` with the built-in `Tink` for ticks, `Pop` for a new step, `Glass` three times for the finish | `osascript` for the finish and for alerts missed while away |
-| Linux, with `notify-send` or `paplay` on `PATH` | `linux (notify-send, paplay)` | `paplay` with the freedesktop theme's `audio-volume-change`, `message` and `complete` (×3) sounds, when the files exist | `notify-send` for the finish and missed alerts |
+| Linux, with `notify-send` on `PATH`, or `paplay` there and at least one of its sound files | `linux (notify-send, paplay)` | `paplay` with the freedesktop theme's `audio-volume-change`, `message` and `complete` (×3) sounds, when the files exist | `notify-send` for the finish and missed alerts |
 | Anything else | `unavailable` | none | none |
 
 `SUBSET_TIMER_ALERTS=off` selects a silent sink named `off`. Sinks start each tool with an argument array and never through a shell, play only those fixed system sound files (no path comes from a timer or a user), and stop a tool after 10 s. A timer's name reaches `osascript` only as an `argv` item of a fixed `on run argv` script, after `--`, so it is never part of the script text or read as an option; `notify-send` gets it after `--` as well.

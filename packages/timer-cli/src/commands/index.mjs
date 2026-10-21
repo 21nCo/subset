@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import manifest from '../../package.json' with { type: 'json' };
 import { createClient } from '../daemon/client.mjs';
-import { resolveDataDir } from '../daemon/paths.mjs';
+import { checkSocketPath, resolveDataDir } from '../daemon/paths.mjs';
 import { daemonCommands } from './daemon.mjs';
 import { presetCommands } from './presets.mjs';
 import { CliError, EXIT } from './shared.mjs';
@@ -70,6 +70,32 @@ function findCommand(argv) {
   return { name, rest: argv.slice(name.split(' ').length) };
 }
 
+/**
+ * True when `--help` or `-h` is an option of the command line: not an option's value, such as
+ * `--name=--help`, nor an argument after `--`.
+ */
+function wantsHelp(argv) {
+  let options = {};
+  try {
+    options = COMMANDS[findCommand(argv).name].options;
+  } catch {
+    // An unknown command still shows help when asked.
+  }
+  const { tokens } = parseArgs({ args: argv, options: { ...options, help: { type: 'boolean', short: 'h' } }, allowPositionals: true, strict: false, tokens: true });
+  return tokens.some((token) => token.kind === 'option' && token.name === 'help');
+}
+
+/** A client of the daemon for `env`'s data directory, refusing one whose socket path no daemon could use. */
+function connect(env, cliPath) {
+  const dataDir = resolveDataDir(env);
+  try {
+    checkSocketPath(dataDir);
+  } catch (error) {
+    throw new CliError('daemon_unavailable', error.message);
+  }
+  return createClient({ dataDir, cliPath, env });
+}
+
 function errorText(error) {
   const lines = [`subset-timer: ${error.message}`];
   for (const candidate of error.details.candidates ?? []) {
@@ -88,14 +114,15 @@ function errorText(error) {
  * @param {string} io.packageRoot The installed package folder, which holds `skills/`.
  * @param {object} [io.client] A daemon client (tests pass one bound to a test daemon).
  * @param {() => number} [io.now] Epoch milliseconds, for `--until`.
- * @param {Function} [io.runDaemon] Runs `daemon run` (tests replace it).
+ * @param {Function} [io.startDaemon] Starts the daemon for `daemon run` (tests replace it).
+ * @param {Function} [io.foreground] Runs the started daemon until it exits (tests replace it).
  * @returns {Promise<number>} The exit status.
  */
 export async function main(io) {
   const { argv, stdout, stderr, env = process.env } = io;
   // Until the arguments parse, any --json asks for a JSON error; after that, only the parsed option counts.
   let json = argv.includes('--json');
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (wantsHelp(argv)) {
     stdout(HELP);
     return EXIT.ok;
   }
@@ -118,7 +145,8 @@ export async function main(io) {
       throw new CliError('invalid_input', `Wrong number of arguments for ${name}. Run subset-timer --help.`);
     }
     if (parsed.positionals.some((value) => !value.trim())) throw new CliError('invalid_input', `${name} needs a non-empty argument.`);
-    const client = io.client ?? createClient({ dataDir: resolveDataDir(env), cliPath: io.cliPath, env });
+    // Commands that need no daemon client never check the data directory.
+    const client = command.client === false ? undefined : (io.client ?? connect(env, io.cliPath));
     const output = await command.run({
       client,
       env,
@@ -126,7 +154,8 @@ export async function main(io) {
       positionals: parsed.positionals,
       now: io.now ?? Date.now,
       packageRoot: io.packageRoot,
-      runDaemon: io.runDaemon
+      startDaemon: io.startDaemon,
+      foreground: io.foreground
     });
     if (output) stdout(`${json ? JSON.stringify(output.json) : output.text}\n`);
     return EXIT.ok;

@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { closeSync, openSync, renameSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
+import { createConnection } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { holderAlive, readLock } from './lock.mjs';
@@ -41,6 +42,15 @@ class ShuttingDownError extends Error {
 }
 
 /**
+ * Connects to `socketPath` with `onError` listening from the start: a connect that fails at once (an
+ * over-long path is EINVAL) emits its error before `http.request` attaches a listener, which would
+ * otherwise be an uncaught 'error' event.
+ */
+function connectTo(socketPath, onError) {
+  return () => createConnection(socketPath).on('error', onError);
+}
+
+/**
  * One HTTP/1.1 request over the Unix socket. Resolves `{ status, body }` with the JSON body
  * parsed; rejects with the socket error (for example `ENOENT` or `ECONNREFUSED`).
  */
@@ -48,7 +58,7 @@ export function socketRequest(socketPath, method, path, body, { timeoutMs = 10_0
   return new Promise((resolve, reject) => {
     const text = body === undefined ? undefined : JSON.stringify(body);
     const headers = text === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) };
-    const request = httpRequest({ socketPath, method, path, headers, agent: false }, (response) => {
+    const request = httpRequest({ createConnection: connectTo(socketPath, reject), method, path, headers }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('error', reject);
@@ -114,7 +124,7 @@ function streamDone(response) {
 /** Opens `/v1/events`, resolving `{ close, done }` once the daemon accepts the stream. */
 function openEventStream(socketPath, onEvent) {
   return new Promise((resolve, reject) => {
-    const outgoing = httpRequest({ socketPath, method: 'GET', path: '/v1/events', agent: false }, (response) => {
+    const outgoing = httpRequest({ createConnection: connectTo(socketPath, reject), method: 'GET', path: '/v1/events' }, (response) => {
       if (response.statusCode !== 200) {
         response.resume();
         reject(response.statusCode === 503 ? new ShuttingDownError() : new DaemonUnavailableError(`The daemon refused the event stream (HTTP ${response.statusCode}).`));
