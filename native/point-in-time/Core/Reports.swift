@@ -350,7 +350,8 @@ public struct FocusProfile: Equatable, Sendable {
     public var startSpread: Double?
     /// The longest run of consecutive focus blocks in the week, by elapsed time. Runs continue across midnight.
     public var longestFocusRun: LabeledSpan?
-    /// Drift runs with less than six minutes of drift time.
+    /// Drift runs starting in the week with less than six minutes of drift time; one continuing from before the week is
+    /// never short, and one still running at the week's end is judged by its time up to that end.
     public var shortDrifts: Int
     /// Focus and drift time; their balance is focus over both.
     public var focusSeconds: Double
@@ -362,7 +363,9 @@ public struct FocusProfile: Equatable, Sendable {
 
     /// `before` holds blocks before the week, so a run continuing into its first day is not counted as a start there.
     init(days: [DayReport], before: [Block], calendar: Calendar) {
-        let runs = LabeledSpan.spans(of: before.sorted { $0.start < $1.start } + days.flatMap(\.blocks)).filter { $0.category == .focus }
+        let weekStart = days.first?.interval.start ?? .distantPast
+        let throughWeek = LabeledSpan.spans(of: before.sorted { $0.start < $1.start } + days.flatMap(\.blocks))
+        let runs = throughWeek.filter { $0.category == .focus }
         let starts = days.compactMap { day in
             runs.first { day.interval.start <= $0.start && $0.start < day.interval.end }.map { ReportPeriod.minuteOfDay($0.start, calendar: calendar) }
         }.sorted()
@@ -381,7 +384,8 @@ public struct FocusProfile: Equatable, Sendable {
         }
         let spans = LabeledSpan.spans(of: days.flatMap(\.blocks))
         longestFocusRun = spans.filter { $0.category == .focus }.max { $0.duration != $1.duration ? $0.duration < $1.duration : $0.start > $1.start }
-        shortDrifts = spans.filter { $0.category == .drift && $0.seconds < Self.shortDriftLimit }.count
+        // A drift continuing from before the week is not short however little of it falls in the week.
+        shortDrifts = throughWeek.filter { $0.category == .drift && $0.start >= weekStart && $0.seconds < Self.shortDriftLimit }.count
         let totals = days.reduce(CategorySeconds()) { $0 + $1.totals }
         focusSeconds = totals.focus
         driftSeconds = totals.drift

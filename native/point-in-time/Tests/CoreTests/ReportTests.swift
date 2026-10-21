@@ -188,6 +188,17 @@ private func temporaryDirectory() -> URL {
         #expect(summary.hasPrefix("Focus continued from before the week, with no new focus start this week;"))
         #expect(!summary.contains("No focus"))
     }
+
+    @Test func aDriftContinuingFromBeforeTheWeekIsNotAShortDrift() {
+        // Sunday 23:00 to Monday 00:03 is one long drift with three minutes in the week; Monday 10:00 to 10:03 is short.
+        let blocks = run(date(cal, 18, 23), 21, .drift) + run(date(cal, 19, 9, 57), 1, .focus) + run(date(cal, 19, 10), 1, .drift)
+            + run(date(cal, 19, 10, 3), 1, .focus)
+        let profile = WeekReport(containing: date(cal, 19, 12), blocks: blocks, calendar: cal).profile
+        #expect(profile.shortDrifts == 1)
+        // Without the blocks before the week the boundary drift would look short too.
+        let weekOnly = WeekReport(containing: date(cal, 19, 12), blocks: blocks.filter { $0.start >= date(cal, 19, 0) }, calendar: cal)
+        #expect(weekOnly.profile.shortDrifts == 2)
+    }
 }
 
 @Suite struct DaylightSavingTests {

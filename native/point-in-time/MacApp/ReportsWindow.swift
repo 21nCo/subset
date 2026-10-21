@@ -184,7 +184,7 @@ final class ReportsModel: ObservableObject {
         selectedBlock = start
         correctionMessage = nil
         correctionNote = ""
-        if let label = block?.reportLabel { correctionLabel = label }
+        correctionLabel = block?.reportLabel ?? .focus
         if let start, zoom == .hour { selection.showHour(containing: start) }
     }
 
