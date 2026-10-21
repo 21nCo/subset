@@ -140,118 +140,192 @@ final class ThumbnailCacheTests: XCTestCase {
     }
 }
 
-/// A capture source that records its calls, fails where told, and counts captures in flight.
+/// A capture source that records its calls, fails where told, and counts captures in flight. A held capture waits until
+/// its task is cancelled, or, like ScreenCaptureKit's, until the test releases it whether or not it was cancelled.
 private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable {
     private let lock = NSLock()
     private let windows: [CaptureWindow]
     private let listingFails: Bool
     private let failing: Set<UInt32>
     private let delay: Duration
-    /// Each capture waits until its task is cancelled.
     private let holdsUntilCancelled: Bool
-    private var inFlight = 0
-    private(set) var maxInFlight = 0
-    private(set) var captured: [UInt32] = []
-    private(set) var listings = 0
+    private var held: Bool
+    private var running = 0
+    private var peak = 0
+    private var asked: [UInt32] = []
+    private var listed = 0
 
     init(
         windows: [CaptureWindow],
         listingFails: Bool = false,
         failing: Set<UInt32> = [],
         delay: Duration = .zero,
-        holdsUntilCancelled: Bool = false
+        holdsUntilCancelled: Bool = false,
+        holdsUntilReleased: Bool = false
     ) {
         self.windows = windows
         self.listingFails = listingFails
         self.failing = failing
         self.delay = delay
         self.holdsUntilCancelled = holdsUntilCancelled
+        held = holdsUntilReleased
     }
+
+    var inFlight: Int { lock.withLock { running } }
+    var maxInFlight: Int { lock.withLock { peak } }
+    var captured: [UInt32] { lock.withLock { asked } }
+    var listings: Int { lock.withLock { listed } }
+    func release() { lock.withLock { held = false } }
 
     struct Refused: Error {}
 
     func shareableWindows() async throws -> [CaptureWindow] {
-        lock.withLock { listings += 1 }
+        lock.withLock { listed += 1 }
         if listingFails { throw Refused() }
         return windows
     }
 
     func capture(_ window: CaptureWindow, size: PixelSize) async throws -> String {
         lock.withLock {
-            captured.append(window.id)
-            inFlight += 1
-            maxInFlight = max(maxInFlight, inFlight)
+            asked.append(window.id)
+            running += 1
+            peak = max(peak, running)
         }
         try? await Task.sleep(for: delay)
         while holdsUntilCancelled, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(1)) }
-        lock.withLock { inFlight -= 1 }
+        while lock.withLock({ held }) { try? await Task.sleep(for: .milliseconds(1)) }
+        lock.withLock { running -= 1 }
         if failing.contains(window.id) { throw Refused() }
         return "image \(window.id) \(size.width)x\(size.height)"
     }
 }
 
-private final class Delivered: @unchecked Sendable {
+/// What a load reported, in order.
+private final class Reported: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [UInt64: String] = [:]
+    private var failures: [UInt64] = []
+    private var matched: [Set<UInt64>] = []
     var images: [UInt64: String] { lock.withLock { values } }
-    func add(_ ref: HopCore.WindowRef, _ image: String) { lock.withLock { values[ref.rawValue] = image } }
+    var failed: [UInt64] { lock.withLock { failures } }
+    var listed: [Set<UInt64>] { lock.withLock { matched } }
+
+    func add(_ event: ThumbnailEvent<String>) {
+        lock.withLock {
+            switch event {
+            case let .listed(refs): matched.append(Set(refs.map(\.rawValue)))
+            case let .captured(ref, image): values[ref.rawValue] = image
+            case let .failed(ref): failures.append(ref.rawValue)
+            }
+        }
+    }
+}
+
+private func waitFor(_ condition: () -> Bool) async {
+    let deadline = ContinuousClock.now + .seconds(3)
+    while !condition(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(1)) }
 }
 
 final class ThumbnailLoaderTests: XCTestCase {
     private func frame(_ index: Int) -> CGRect { CGRect(x: CGFloat(index) * 10, y: 0, width: 640, height: 480) }
 
+    private func twenty() -> ([WindowEntry], [CaptureWindow]) {
+        ((0..<20).map { entry(UInt64($0), frame: frame($0)) }, (0..<20).map { window(UInt32($0), frame: frame($0)) })
+    }
+
     func testCapturesRunAtMostSixAtATime() async {
-        let entries = (0..<20).map { entry(UInt64($0), frame: frame($0)) }
-        let source = FakeCaptureSource(windows: (0..<20).map { window(UInt32($0), frame: frame($0)) },
-                                       delay: .milliseconds(20))
-        let delivered = Delivered()
-        let outcome = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { delivered.add($0, $1) }
+        let (entries, windows) = twenty()
+        let source = FakeCaptureSource(windows: windows, delay: .milliseconds(20))
+        let reported = Reported()
+        let outcome = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { reported.add($0) }
         XCTAssertEqual(outcome, .finished(captured: 20, failed: 0))
-        XCTAssertEqual(delivered.images.count, 20)
+        XCTAssertEqual(reported.images.count, 20)
         XCTAssertEqual(source.maxInFlight, ThumbnailLoader.maxConcurrent)
         XCTAssertEqual(Set(source.captured.prefix(6)), Set(0..<6), "the most recent windows start first")
+    }
+
+    func testCapturesStillRunningFromACancelledLoadCountTowardTheLimitOfTheNext() async {
+        let (entries, windows) = twenty()
+        let source = FakeCaptureSource(windows: windows, holdsUntilReleased: true)
+        let limiter = CaptureLimiter()
+        let reported = Reported()
+        let first = Task { await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2, limiter: limiter) { _ in } }
+        await waitFor { source.captured.count == 6 }
+        first.cancel()
+        let second = Task {
+            await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2, limiter: limiter) { reported.add($0) }
+        }
+        await waitFor { source.listings == 2 }
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(source.captured.count, 6, "the reopened load waits for the earlier captures still running")
+        XCTAssertEqual(limiter.inFlight, 6)
+        source.release()
+        let outcomes = await (first.value, second.value)
+        XCTAssertEqual(outcomes.0, .cancelled)
+        XCTAssertEqual(outcomes.1, .finished(captured: 20, failed: 0))
+        XCTAssertEqual(source.maxInFlight, ThumbnailLoader.maxConcurrent)
+        XCTAssertEqual(source.captured.count, 26, "the cancelled load started no more after its first six")
+        XCTAssertEqual(limiter.inFlight, 0)
     }
 
     func testAFailedCaptureAffectsOnlyItsWindow() async {
         let entries = (0..<3).map { entry(UInt64($0), frame: frame($0)) }
         let source = FakeCaptureSource(windows: (0..<3).map { window(UInt32($0), frame: frame($0)) }, failing: [1])
-        let delivered = Delivered()
-        let outcome = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { delivered.add($0, $1) }
+        let reported = Reported()
+        let outcome = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { reported.add($0) }
         XCTAssertEqual(outcome, .finished(captured: 2, failed: 1))
-        XCTAssertEqual(delivered.images, [0: "image 0 171x128", 2: "image 2 171x128"])
+        XCTAssertEqual(reported.images, [0: "image 0 171x128", 2: "image 2 171x128"])
+        XCTAssertEqual(reported.failed, [1])
     }
 
-    func testMinimizedAndUnmatchedWindowsAreNotCaptured() async {
+    func testMinimizedAndUnmatchedWindowsAreNotCapturedAndAreReportedAsSuch() async {
         let entries = [entry(0, frame: frame(0), minimized: true), entry(1, frame: frame(1)), entry(2, frame: frame(9))]
         let source = FakeCaptureSource(windows: [window(0, frame: frame(0)), window(1, frame: frame(1))])
-        let delivered = Delivered()
-        _ = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { delivered.add($0, $1) }
+        let reported = Reported()
+        _ = await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { reported.add($0) }
         XCTAssertEqual(source.captured, [1])
-        XCTAssertEqual(Array(delivered.images.keys), [1])
+        XCTAssertEqual(reported.listed, [[1]], "only the matched window will be captured")
+        XCTAssertEqual(Array(reported.images.keys), [1])
     }
 
     func testAListingThatFailsCapturesNothingAndDoesNotThrow() async {
         let source = FakeCaptureSource(windows: [window(0)], listingFails: true)
-        let delivered = Delivered()
-        let outcome = await ThumbnailLoader.load([entry(0)], from: source, excludingPid: 99, scale: 2) { delivered.add($0, $1) }
+        let reported = Reported()
+        let outcome = await ThumbnailLoader.load([entry(0)], from: source, excludingPid: 99, scale: 2) { reported.add($0) }
         XCTAssertEqual(outcome, .unavailable)
         XCTAssertEqual(source.captured, [])
-        XCTAssertEqual(delivered.images, [:])
+        XCTAssertEqual(reported.images, [:])
+        XCTAssertEqual(reported.listed, [])
     }
 
     func testACancelledLoadStartsNoMoreCapturesAndDeliversNothingLate() async {
-        let entries = (0..<20).map { entry(UInt64($0), frame: frame($0)) }
-        let source = FakeCaptureSource(windows: (0..<20).map { window(UInt32($0), frame: frame($0)) },
-                                       holdsUntilCancelled: true)
-        let delivered = Delivered()
-        let task = Task { await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { delivered.add($0, $1) } }
-        let deadline = ContinuousClock.now + .seconds(3)
-        while source.captured.count < 6, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(1)) }
+        let (entries, windows) = twenty()
+        let source = FakeCaptureSource(windows: windows, holdsUntilCancelled: true)
+        let reported = Reported()
+        let task = Task { await ThumbnailLoader.load(entries, from: source, excludingPid: 99, scale: 2) { reported.add($0) } }
+        await waitFor { source.captured.count == 6 }
         task.cancel()
         let outcome = await task.value
         XCTAssertEqual(outcome, .cancelled)
         XCTAssertEqual(source.captured.count, 6, "only the first six had started")
-        XCTAssertEqual(delivered.images, [:])
+        XCTAssertEqual(reported.images, [:])
+        XCTAssertEqual(reported.failed, [])
+    }
+}
+
+final class CaptureLimiterTests: XCTestCase {
+    func testAWaiterCancelledBeforeASlotFreesGetsNone() async {
+        let limiter = CaptureLimiter(limit: 1)
+        let first = await limiter.acquire()
+        XCTAssertTrue(first)
+        let waiter = Task { await limiter.acquire() }
+        try? await Task.sleep(for: .milliseconds(20))
+        waiter.cancel()
+        let second = await waiter.value
+        XCTAssertFalse(second)
+        XCTAssertEqual(limiter.inFlight, 1)
+        limiter.release()
+        XCTAssertEqual(limiter.inFlight, 0, "the cancelled waiter took no slot")
     }
 }
 

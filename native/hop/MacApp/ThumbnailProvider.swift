@@ -71,21 +71,30 @@ final class ScreenCaptureSource: WindowCaptureSource, @unchecked Sendable {
     }
 }
 
-/// The switcher's window thumbnails: captures them when the switcher opens (`ThumbnailLoader`, at most 6 at a time),
-/// keeps them in memory by `WindowRef` up to 64 MB with least-recently-used eviction (`ThumbnailCache`), drops a
-/// window's once it leaves the list, and tells the switcher (`onUpdate`) as each arrives so its cell swaps the icon
-/// for the image. Nothing is written to disk and no title is logged.
+/// The switcher's window thumbnails: captures them when the switcher opens (`ThumbnailLoader`, at most 6 at a time across
+/// openings, counting captures of an earlier opening that are still running), keeps them in memory by `WindowRef` up to
+/// 64 MB with least-recently-used eviction (`ThumbnailCache`), and tells the switcher (`onUpdate`) as each arrives or
+/// goes so its cell swaps between the icon and the image. Nothing is written to disk and no title is logged.
+///
+/// An image is kept only for a window that is listed now and that the latest load matched: a listed window may show
+/// its earlier image until its new one arrives, but loses it when the load does not match it or its capture fails, and
+/// every image goes when the listing fails. A window that leaves the list loses its image, and a capture of it still
+/// running is dropped when it returns.
 @MainActor
 final class ThumbnailProvider {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "thumbnails")
 
     private let source: any WindowCaptureSource<CGImage>
     private let ownPid: pid_t
+    private let limiter = CaptureLimiter(limit: ThumbnailLoader.maxConcurrent)
     private var cache: ThumbnailCache<CGImage>
     private var task: Task<Void, Never>?
-    /// Bumped by each load and cancel, so a late image of an earlier load is dropped.
+    /// Bumped by each load and cancel, so a late event of an earlier load is dropped.
     private var generation = 0
-    /// A new thumbnail arrived.
+    /// The windows the load in progress may still deliver an image for: listed now, and once the listing is back,
+    /// matched and not yet delivered.
+    private var pending: Set<HopCore.WindowRef> = []
+    /// A thumbnail arrived or went.
     var onUpdate: () -> Void = {}
 
     init(
@@ -100,6 +109,8 @@ final class ThumbnailProvider {
 
     var cachedRefs: Set<HopCore.WindowRef> { cache.refs }
     var cachedBytes: Int { cache.totalCost }
+    /// Captures running now, including those of a load that was replaced or cancelled.
+    var capturesInFlight: Int { limiter.inFlight }
 
     /// The thumbnails of `refs` that are in memory.
     func images(for refs: some Sequence<HopCore.WindowRef>) -> [HopCore.WindowRef: CGImage] {
@@ -115,25 +126,34 @@ final class ThumbnailProvider {
     func load(_ entries: [WindowEntry], scale: CGFloat) {
         cancel()
         retain(entries)
+        pending = Set(entries.map(\.ref))
         let generation = generation
         let source = source
         let ownPid = ownPid
+        let limiter = limiter
         task = Task {
-            let outcome = await ThumbnailLoader.load(entries, from: source, excludingPid: ownPid, scale: scale) { ref, image in
-                await self.insert(image, for: ref, generation: generation)
+            let outcome = await ThumbnailLoader.load(
+                entries, from: source, excludingPid: ownPid, scale: scale, limiter: limiter
+            ) { event in
+                await self.handle(event, generation: generation)
             }
+            if outcome == .unavailable { listingFailed(generation: generation) }
             Self.log.debug("Thumbnails: \(String(describing: outcome), privacy: .public)")
         }
     }
 
-    /// Drops the thumbnails of windows not in `entries`: they have left the list.
+    /// Drops the thumbnails of windows not in `entries`, and any image of theirs still being captured: they have left
+    /// the list.
     func retain(_ entries: [WindowEntry]) {
-        cache.retain(Set(entries.map(\.ref)))
+        let refs = Set(entries.map(\.ref))
+        cache.retain(refs)
+        pending.formIntersection(refs)
     }
 
-    /// Stops the load in progress; what it captured stays.
+    /// Stops the load in progress; what it captured stays, and nothing it still captures is kept.
     func cancel() {
         generation += 1
+        pending = []
         task?.cancel()
         task = nil
     }
@@ -144,9 +164,34 @@ final class ThumbnailProvider {
         cache.removeAll()
     }
 
-    private func insert(_ image: CGImage, for ref: HopCore.WindowRef, generation: Int) {
+    private func handle(_ event: ThumbnailEvent<CGImage>, generation: Int) {
         guard generation == self.generation else { return }
-        cache.insert(image, cost: image.bytesPerRow * image.height, for: ref)
+        switch event {
+        case let .listed(matched):
+            // A listed window this load does not match shows its icon from now on.
+            pending.formIntersection(matched)
+            let before = cache.count
+            cache.retain(pending)
+            if cache.count != before { onUpdate() }
+        case let .captured(ref, image):
+            guard pending.remove(ref) != nil else { return }
+            cache.insert(image, cost: image.bytesPerRow * image.height, for: ref)
+            onUpdate()
+        case let .failed(ref):
+            pending.remove(ref)
+            guard cache.refs.contains(ref) else { return }
+            cache.remove(ref)
+            onUpdate()
+        }
+    }
+
+    /// The windows could not be listed (for example, Screen Recording was refused although it read as granted), so
+    /// every cell shows its icon.
+    private func listingFailed(generation: Int) {
+        guard generation == self.generation else { return }
+        pending = []
+        guard cache.count > 0 else { return }
+        cache.removeAll()
         onUpdate()
     }
 }

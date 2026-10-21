@@ -157,14 +157,83 @@ public struct ThumbnailCache<Image> {
         totalCost = 0
     }
 
-    private mutating func remove(_ ref: WindowRef) {
+    public mutating func remove(_ ref: WindowRef) {
         if let old = entries.removeValue(forKey: ref) { totalCost -= old.cost }
     }
 }
 
+/// At most `limit` captures at a time, across every load that shares it. A slot is taken before a capture starts and
+/// given back only when the capture returns, so a cancelled load's captures that are still running (ScreenCaptureKit's
+/// do not stop when their task is cancelled) keep counting until they end. Waiters get slots in the order they asked.
+public final class CaptureLimiter: @unchecked Sendable {
+    public let limit: Int
+    private let lock = NSLock()
+    private var running = 0
+    private var waiters: [(id: UInt64, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var nextID: UInt64 = 0
+
+    public init(limit: Int = ThumbnailLoader.maxConcurrent) {
+        self.limit = max(1, limit)
+    }
+
+    /// The captures holding a slot now.
+    public var inFlight: Int { lock.withLock { running } }
+
+    /// Waits for a slot: true once it has one, which `release()` gives back; false, without a slot, when the task is
+    /// cancelled first.
+    public func acquire() async -> Bool {
+        let id = lock.withLock {
+            nextID += 1
+            return nextID
+        }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let now: Bool? = lock.withLock {
+                    if Task.isCancelled { return false }
+                    if running < limit {
+                        running += 1
+                        return true
+                    }
+                    waiters.append((id, continuation))
+                    return nil
+                }
+                if let now { continuation.resume(returning: now) }
+            }
+        } onCancel: {
+            let waiter = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+                guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                return waiters.remove(at: index).continuation
+            }
+            waiter?.resume(returning: false)
+        }
+    }
+
+    /// Gives back a slot taken by `acquire()`, handing it to the first waiter if there is one.
+    public func release() {
+        let next = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+            guard !waiters.isEmpty else {
+                running -= 1
+                return nil
+            }
+            return waiters.removeFirst().continuation
+        }
+        next?.resume(returning: true)
+    }
+}
+
+/// What a load tells its host as it goes.
+public enum ThumbnailEvent<Image: Sendable>: Sendable {
+    /// The windows were listed and matched: only these will be captured, so every other window shows its icon.
+    case listed(Set<WindowRef>)
+    case captured(WindowRef, Image)
+    /// The window's capture failed: it shows its icon, and the others go on.
+    case failed(WindowRef)
+}
+
 /// Captures thumbnails for a switcher's windows: lists the capturable windows once, matches them to the entries
-/// (`ThumbnailMatcher`), and captures each match, at most `maxConcurrent` at a time, in the entries' order. Each image
-/// is handed to `deliver` as it arrives; a window whose capture fails is skipped and the others go on.
+/// (`ThumbnailMatcher`), reports which will be captured, and captures each match in the entries' order, taking a slot
+/// from `limiter` for each, so at most its limit run at a time across loads. Each image is reported as it arrives; a
+/// window whose capture fails is reported and the others go on.
 public enum ThumbnailLoader {
     public static let maxConcurrent = 6
 
@@ -182,12 +251,13 @@ public enum ThumbnailLoader {
         from source: Source,
         excludingPid ownPid: pid_t,
         scale: CGFloat,
-        maxConcurrent: Int = maxConcurrent,
-        deliver: @escaping @Sendable (WindowRef, Source.Image) async -> Void
+        limiter: CaptureLimiter = CaptureLimiter(),
+        report: @escaping @Sendable (ThumbnailEvent<Source.Image>) async -> Void
     ) async -> Outcome {
         guard let windows = try? await source.shareableWindows() else {
             return Task.isCancelled ? .cancelled : .unavailable
         }
+        guard !Task.isCancelled else { return .cancelled }
         let matches = ThumbnailMatcher.matches(entries, among: windows, excludingPid: ownPid)
         let jobs: [(WindowRef, CaptureWindow, PixelSize)] = entries.compactMap { entry in
             guard let window = matches[entry.ref],
@@ -195,25 +265,30 @@ public enum ThumbnailLoader {
             else { return nil }
             return (entry.ref, window, size)
         }
+        await report(.listed(Set(jobs.map(\.0))))
         var captured = 0
         var failed = 0
         await withTaskGroup(of: Bool.self) { group in
-            var next = jobs.makeIterator()
-            func start() -> Bool {
-                guard !Task.isCancelled, let (ref, window, size) = next.next() else { return false }
+            for (ref, window, size) in jobs {
+                guard await limiter.acquire() else { break }
+                guard !Task.isCancelled else {
+                    limiter.release()
+                    break
+                }
                 group.addTask {
-                    guard let image = try? await source.capture(window, size: size), !Task.isCancelled else { return false }
-                    await deliver(ref, image)
+                    let image = try? await source.capture(window, size: size)
+                    limiter.release()
+                    guard !Task.isCancelled else { return false }
+                    guard let image else {
+                        await report(.failed(ref))
+                        return false
+                    }
+                    await report(.captured(ref, image))
                     return true
                 }
-                return true
             }
-            for _ in 0..<max(1, maxConcurrent) {
-                guard start() else { break }
-            }
-            while let delivered = await group.next() {
+            for await delivered in group {
                 if delivered { captured += 1 } else { failed += 1 }
-                _ = start()
             }
         }
         return Task.isCancelled ? .cancelled : .finished(captured: captured, failed: failed)

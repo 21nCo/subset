@@ -4,35 +4,61 @@ import HopCore
 import XCTest
 
 /// A capture source that lists the windows it is given and captures a blank image of the asked size; it fails the
-/// windows it is told to, and can hold every capture until the test releases it.
+/// listing or the windows it is told to, and can hold every capture until the test releases it, as ScreenCaptureKit's
+/// do not stop when their task is cancelled. The test can change each of these between openings.
 private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
     private let lock = NSLock()
-    private let windows: [CaptureWindow]
-    private let failing: Set<UInt32>
+    private var listedWindows: [CaptureWindow]
+    private var failingIDs: Set<UInt32>
+    private var listingRefused = false
     private var held: Bool
     private var listed = 0
     private var asked: [UInt32] = []
+    private var running = 0
+    private var peak = 0
 
     init(windows: [CaptureWindow], failing: Set<UInt32> = [], holds: Bool = false) {
-        self.windows = windows
-        self.failing = failing
+        listedWindows = windows
+        failingIDs = failing
         held = holds
     }
 
     var listings: Int { lock.withLock { listed } }
     var captures: [UInt32] { lock.withLock { asked } }
+    var maxInFlight: Int { lock.withLock { peak } }
+    var windows: [CaptureWindow] {
+        get { lock.withLock { listedWindows } }
+        set { lock.withLock { listedWindows = newValue } }
+    }
+    var failing: Set<UInt32> {
+        get { lock.withLock { failingIDs } }
+        set { lock.withLock { failingIDs = newValue } }
+    }
+    var listingFails: Bool {
+        get { lock.withLock { listingRefused } }
+        set { lock.withLock { listingRefused = newValue } }
+    }
+    func hold() { lock.withLock { held = true } }
     func release() { lock.withLock { held = false } }
 
     struct Refused: Error {}
 
     func shareableWindows() async throws -> [CaptureWindow] {
-        lock.withLock { listed += 1 }
-        return windows
+        try lock.withLock {
+            listed += 1
+            if listingRefused { throw Refused() }
+            return listedWindows
+        }
     }
 
     func capture(_ window: CaptureWindow, size: PixelSize) async throws -> CGImage {
-        lock.withLock { asked.append(window.id) }
+        lock.withLock {
+            asked.append(window.id)
+            running += 1
+            peak = max(peak, running)
+        }
         while lock.withLock({ held }) { try? await Task.sleep(for: .milliseconds(5)) }
+        lock.withLock { running -= 1 }
         if failing.contains(window.id) { throw Refused() }
         let context = CGContext(
             data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0,
@@ -47,21 +73,29 @@ private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
 @MainActor
 final class SwitcherThumbnailTests: XCTestCase {
     private let frame = CGRect(x: 0, y: 0, width: 400, height: 300)
-    private lazy var windows = (0..<3).map { index in
-        WindowEntry(
-            app: SourceApp(pid: pid_t(10 + index), bundleIdentifier: nil, name: "App \(index)"),
-            window: SourceWindow(ref: HopCore.WindowRef(rawValue: UInt64(index)), title: "Window \(index)",
-                                 subrole: "AXStandardWindow", frame: frame),
-            frame: frame,
-            display: nil
-        )
-    }
-    private lazy var captureWindows = windows.enumerated().map { index, entry in
-        CaptureWindow(id: UInt32(100 + index), pid: entry.pid, frame: frame, title: entry.title)
-    }
+    private lazy var windows = entries(3)
+    private lazy var captureWindows = captureWindows(for: windows)
     private var lists: [[WindowEntry]] = []
     private var settings = Settings.default
     private var granted = true
+
+    private func entries(_ count: Int) -> [WindowEntry] {
+        (0..<count).map { index in
+            WindowEntry(
+                app: SourceApp(pid: pid_t(10 + index), bundleIdentifier: nil, name: "App \(index)"),
+                window: SourceWindow(ref: HopCore.WindowRef(rawValue: UInt64(index)), title: "Window \(index)",
+                                     subrole: "AXStandardWindow", frame: frame),
+                frame: frame,
+                display: nil
+            )
+        }
+    }
+
+    private func captureWindows(for entries: [WindowEntry]) -> [CaptureWindow] {
+        entries.enumerated().map { index, entry in
+            CaptureWindow(id: UInt32(100 + index), pid: entry.pid, frame: frame, title: entry.title)
+        }
+    }
 
     override func setUp() async throws {
         settings.showWindowPreviews = true
@@ -158,6 +192,94 @@ final class SwitcherThumbnailTests: XCTestCase {
         switcher.apply(.operation(.close))
         try await wait(until: { switcher.model?.windows.count == 2 }, "the read after the close")
         XCTAssertEqual(thumbnails.cachedRefs, refs(0, 2))
+    }
+
+    func testAWindowClosedWhileItsCaptureRunsNeverGetsItsImageBack() async throws {
+        let source = FakeImageSource(windows: captureWindows, holds: true)
+        let (switcher, thumbnails) = switcher(source)
+        lists = [windows, [windows[0], windows[2]]]
+        switcher.open()
+        try await wait(until: { source.captures.count == 3 })
+        // ⌘W closes the selected window 1 while its capture is still running.
+        switcher.apply(.operation(.close))
+        try await wait(until: { switcher.model?.windows.count == 2 }, "the read after the close")
+        source.release()
+        try await wait(until: { thumbnails.cachedRefs == refs(0, 2) })
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(thumbnails.cachedRefs, refs(0, 2), "the closed window's late image is dropped")
+    }
+
+    /// Opens, waits for every window's image, and closes again.
+    private func openAndCapture(_ switcher: SwitcherController, _ thumbnails: ThumbnailProvider) async throws {
+        lists = [windows]
+        switcher.open()
+        try await wait(until: { thumbnails.cachedRefs == refs(0, 1, 2) }, "the first opening's images")
+        switcher.cancel()
+    }
+
+    func testAListingThatFailsOnReopeningDropsEveryImage() async throws {
+        let source = FakeImageSource(windows: captureWindows)
+        let (switcher, thumbnails) = switcher(source)
+        try await openAndCapture(switcher, thumbnails)
+        // Screen Recording still reads as granted, but ScreenCaptureKit refuses.
+        source.listingFails = true
+        switcher.open()
+        try await wait(until: { source.listings == 2 })
+        try await wait(until: { thumbnails.cachedRefs.isEmpty }, "every cell back on its icon")
+        XCTAssertEqual(switcher.currentThumbnails().count, 0)
+        XCTAssertEqual(thumbnails.cachedBytes, 0)
+    }
+
+    func testAWindowNoLongerMatchedOnReopeningShowsItsIconAndTheOthersKeepTheirImages() async throws {
+        let source = FakeImageSource(windows: captureWindows)
+        let (switcher, thumbnails) = switcher(source)
+        try await openAndCapture(switcher, thumbnails)
+        // Window 1's captured frame is now 5 pt off the listed one, so it no longer matches.
+        var moved = captureWindows
+        moved[1].frame = frame.offsetBy(dx: 5, dy: 0)
+        source.windows = moved
+        source.hold()
+        switcher.open()
+        try await wait(until: { thumbnails.cachedRefs == refs(0, 2) }, "the unmatched window's image goes")
+        XCTAssertEqual(Set(switcher.currentThumbnails().keys), refs(0, 2), "the matched ones show their earlier images")
+        XCTAssertEqual(source.captures.count, 5, "the matched windows are being captured again")
+        source.release()
+        try await wait(until: { thumbnails.capturesInFlight == 0 })
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(thumbnails.cachedRefs, refs(0, 2))
+    }
+
+    func testACaptureThatFailsOnReopeningLeavesOnlyItsCellOnTheIcon() async throws {
+        let source = FakeImageSource(windows: captureWindows)
+        let (switcher, thumbnails) = switcher(source)
+        try await openAndCapture(switcher, thumbnails)
+        source.failing = [101]
+        switcher.open()
+        try await wait(until: { source.captures.count == 6 })
+        try await wait(until: { thumbnails.cachedRefs == refs(0, 2) }, "the failed window's earlier image goes")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(thumbnails.cachedRefs, refs(0, 2))
+    }
+
+    func testReopeningWhileCapturesStillRunKeepsAtMostSixInFlight() async throws {
+        windows = entries(8)
+        captureWindows = captureWindows(for: windows)
+        let source = FakeImageSource(windows: captureWindows, holds: true)
+        let (switcher, thumbnails) = switcher(source)
+        lists = [windows]
+        switcher.open()
+        try await wait(until: { source.captures.count == 6 })
+        // A quick close and reopen: the six captures of the first opening are still running.
+        switcher.cancel()
+        switcher.open()
+        try await wait(until: { source.listings == 2 })
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(source.captures.count, 6, "no capture starts until a slot is free")
+        XCTAssertEqual(thumbnails.capturesInFlight, 6)
+        source.release()
+        try await wait(until: { thumbnails.cachedRefs.count == 8 }, "the reopened switcher's images")
+        XCTAssertEqual(source.maxInFlight, ThumbnailLoader.maxConcurrent)
+        XCTAssertEqual(source.captures.count, 14, "the first opening started no more after it closed")
     }
 
     func testAWindowMinimizedWhileTheSwitcherIsOpenShowsItsIcon() async throws {
