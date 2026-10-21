@@ -213,7 +213,7 @@ private struct Matching {
         var unjudged = unjudged
         for relative in rule.homePaths {
             switch tree.locate(homePath(relative)) {
-            case let .found(index): if let reason = tree.unread(index) { unjudged.append(reason) }
+            case let .found(index): if let reason = tree.libraryFolder(index) { unjudged.append(reason) }
             case let .unknown(reason): unjudged.append(reason)
             case .absent: break
             }
@@ -506,6 +506,17 @@ extension DiskTree {
     func unread(_ index: Int) -> String? {
         if let reason = unlisted(index) { return reason }
         return self[index].kind == .symlink ? "\(path(of: index)) is a link, so it was not read." : nil
+    }
+
+    /// Why a Library folder whose entries are judged by name (App caches, App leftovers, the By origin groups) may hold
+    /// more than is known: it was not read (`unread`), or an entry's name did not come back (`searched` cannot judge
+    /// it), so it may be any app's; `nil` when every entry was judged.
+    func libraryFolder(_ index: Int) -> String? {
+        if let reason = unread(index) { return reason }
+        for child in self[index].children where self[child].name.isEmpty {
+            if case let .unknown(reason) = searched(child) { return reason }
+        }
+        return nil
     }
 
     /// Why a rule's own folder cannot be searched: it was not read (`unread`), or it is not a folder; `nil` when it can

@@ -30,7 +30,8 @@ public enum DiskOriginRule: Equatable, Sendable {
     case developerTool
     /// A group container an installed app's signature declares as one of its app groups
     /// (`com.apple.security.application-groups`), whatever it is called (`group.is.workflow.my.app` is Shortcuts').
-    /// With several apps declaring it, only their vendor when they share one.
+    /// With several apps declaring it, only their vendor when they share one; with several vendors it is not
+    /// attributed.
     case appGroup
     /// The identifier is the app's bundle ID or extends it component by component (`com.example.app.helper`), or, in
     /// Group Containers, an app's bundle ID extends it (`group.com.example` for `com.example.app`).
@@ -116,8 +117,9 @@ public struct DiskOriginGroup: Equatable, Sendable, Identifiable {
 /// and leftovers.
 public struct DiskOriginReport: Equatable, Sendable {
     public let entries: [DiskOriginEntry]
-    /// Why Library folders were not listed in full (unreadable, cancelled). Any origin may have had entries there, so
-    /// every app, vendor, leftovers, and not attributed group is then a lower bound.
+    /// Why Library folders were not listed in full (unreadable, cancelled, a link) or an entry's name did not come back.
+    /// Any origin may have had entries there, so every app, vendor, leftovers, and not attributed group is then a lower
+    /// bound.
     public let unlistedFolders: [String]
     /// By app, with macOS for Apple identifiers.
     public let apps: [DiskOriginGroup]
@@ -155,7 +157,7 @@ public enum DiskOrigins {
                               apps: InstalledApps) -> DiskOriginReport {
         let unlisted = LibraryFolder.allCases.compactMap { folder -> String? in
             switch tree.locate(home + "/" + folder.homePath) {
-            case let .found(index): tree.unread(index)
+            case let .found(index): tree.libraryFolder(index)
             case let .unknown(reason): reason
             case .absent: nil
             }
@@ -172,6 +174,8 @@ public enum DiskOrigins {
             switch entry.rule {
             case .leftover: leftovers.append(entry.index)
             case .unattributed, .possibleLeftover: unattributed.append(entry.index)
+            // A group several vendors' apps declare is no one app's or vendor's.
+            case .appGroup where entry.appOrigin == nil && entry.vendor == nil: unattributed.append(entry.index)
             default: break
             }
         }

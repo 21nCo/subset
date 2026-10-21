@@ -510,6 +510,49 @@ final class ReclaimRulesTests: XCTestCase {
                                           apps: Self.apps).unlistedFolders, [link("Application Support")])
     }
 
+    /// The scanner gives an entry whose name is not UTF-8 no name, no type, and `unreadable`: it may be any app's data
+    /// or a leftover, so the Library folder holding it is not judged in full. A named unreadable entry is judged by its
+    /// name like any other.
+    func testANamelessUnreadableLibraryEntryLeavesItsFolderNotJudgedInFull() async throws {
+        try write("Library/Caches/com.example.editor/Cache.db", bytes: 100_000)
+        try write("Library/Caches/nameless/data", bytes: 4_096)
+        try write("Library/Caches/Google/data", bytes: 4_096)
+        let scanned = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+        func analysis(_ relative: String, keepingName: Bool) throws -> (Analysis, DiskOriginReport) {
+            var tree = scanned
+            let index = try XCTUnwrap(tree.index(atPath: path(relative)))
+            if !keepingName { tree.nodes[index].nameLength = 0 }
+            (tree.nodes[index].kind, tree.nodes[index].flags, tree.nodes[index].childCount) = (.other, .unreadable, 0)
+            let entries = DiskOrigins.entries(in: tree, home: home, apps: Self.apps)
+            let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context())
+            return (Analysis(tree: tree, entries: entries, matches: matches),
+                    DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: home, apps: Self.apps))
+        }
+
+        let (nameless, report) = try analysis("Library/Caches/nameless", keepingName: false)
+        let reason = "\(path("Library/Caches"))/ could not be read, so what it is is unknown."
+        let caches = try only(.appCaches, in: nameless)
+        XCTAssertEqual(caches.items.map(\.path), [path("Library/Caches/com.example.editor")])
+        guard case .scanned(_, _, complete: false, _) = caches.bytes else { return XCTFail("\(caches.bytes)") }
+        XCTAssertEqual(try only(.appLeftovers, in: nameless).bytes, .unavailable(reason))
+        XCTAssertEqual(report.unlistedFolders, [reason])
+        XCTAssertEqual(report.leftovers?.items, [])
+        XCTAssertEqual(report.leftovers?.isLowerBound, true)
+        XCTAssertEqual(report.apps.map(\.name), ["Editor"])
+        XCTAssertTrue(report.apps.allSatisfy(\.isLowerBound))
+
+        let (named, namedReport) = try analysis("Library/Caches/Google", keepingName: true)
+        XCTAssertEqual(named.entries.first { $0.path == path("Library/Caches/Google") }?.rule, .unattributed)
+        XCTAssertEqual(try only(.appCaches, in: named).bytes,
+                       .scanned(private: try Self.allocated(under: path("Library/Caches/com.example.editor")),
+                                allocated: try Self.allocated(under: path("Library/Caches/com.example.editor")),
+                                complete: true, allocatedUpperBound: false))
+        XCTAssertFalse(named.matches.contains { $0.rule.id == .appLeftovers })
+        XCTAssertEqual(namedReport.unlistedFolders, [])
+        XCTAssertNil(namedReport.leftovers)
+        XCTAssertFalse(namedReport.apps.contains(where: \.isLowerBound))
+    }
+
     func testRuleFoldersTheScanDidNotReadInFullAreUnknownNotEmpty() async throws {
         try write("Library/Developer/Xcode/DerivedData/App-abc/data", bytes: 10_000)
         try write("Library/Developer/Xcode/DerivedData/Tool-def/data", bytes: 10_000)

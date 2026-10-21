@@ -213,6 +213,29 @@ final class DiskOriginTests: XCTestCase {
         }
     }
 
+    func testAnAppGroupAppsOfDifferentVendorsDeclareIsNotAttributedWithItsBytes() async throws {
+        let writer = InstalledApp(path: Self.suiteWriter.path, bundleID: Self.suiteWriter.bundleID, name: "Writer",
+                                  signature: Self.suiteWriter.signature, appGroups: ["group.shared.sync"])
+        let editor = InstalledApp(path: Self.editor.path, bundleID: Self.editor.bundleID, name: "Editor",
+                                  signature: Self.editor.signature, appGroups: ["group.shared.sync"])
+        let apps = InstalledApps([writer, editor])
+        try write("Library/Group Containers/group.shared.sync/data", bytes: 40_000)
+        let tree = try await DiskScanner().scan(URL(fileURLWithPath: home)).tree
+
+        let entries = DiskOrigins.entries(in: tree, home: home, apps: apps)
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entry.rule, .appGroup)
+        XCTAssertNil(entry.appOrigin)
+        XCTAssertNil(entry.vendor)
+        let report = DiskOrigins.report(entries: entries, matches: [], tree: tree, home: home, apps: apps)
+        let unattributed = try XCTUnwrap(report.unattributed)
+        XCTAssertEqual(unattributed.items, [entry.index])
+        XCTAssertEqual(unattributed.allocated, try ReclaimRulesTests.allocated(under: entry.path))
+        XCTAssertFalse(unattributed.isLowerBound)
+        XCTAssertEqual(report.apps, [])
+        XCTAssertEqual(report.vendors, [])
+    }
+
     func testAmbiguousNamesMatchNoAppAndTwoCopiesOfOneAppResolveTheSameWay() {
         let first = InstalledApp(path: "/Applications/Xcode.app", bundleID: "com.apple.dt.Xcode", name: "Xcode", signature: nil)
         let second = InstalledApp(path: "/Applications/Xcode-26.4.0.app", bundleID: "com.apple.dt.Xcode", name: "Xcode-26.4.0",
