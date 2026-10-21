@@ -8,10 +8,16 @@ import Foundation
 /// A process that leaves the group (`setsid`, `setpgid`) is not followed. A task already cancelled starts nothing.
 public struct ProcessGroupRunner: CommandRunning {
     public static let defaultGrace: Duration = .seconds(3)
+    /// The most read from one stream in one turn.
+    static let chunkSize = 64 << 10
+    /// How many chunks of each stream are read once the group is gone.
+    static let finalChunks = 16
     public let outputLimit: Int
     /// How long the group has after `SIGTERM` before `SIGKILL`.
     public let grace: Duration
     public let registry: CommandRegistry
+    /// Told after each turn of reading, and after the last read, how many bytes that turn read and how many are kept.
+    var onTurn: (@Sendable (_ read: Int, _ kept: Int) -> Void)?
 
     public init(outputLimit: Int = ProcessCommandRunner.defaultOutputLimit, grace: Duration = ProcessGroupRunner.defaultGrace,
                 registry: CommandRegistry = .shared) {
@@ -22,7 +28,7 @@ public struct ProcessGroupRunner: CommandRunning {
 
     public func run(_ executable: String, arguments: [String], environment: [String: String], timeout: Duration) async
         -> Result<CommandOutput, CommandFailure> {
-        let run = GroupRun(limit: outputLimit, grace: grace, registry: registry)
+        let run = GroupRun(limit: outputLimit, grace: grace, registry: registry, onTurn: onTurn)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 run.start(executable, arguments: arguments, environment: environment, timeout: timeout,
@@ -41,6 +47,7 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
     private let limit: Int
     private let grace: Duration
     private let registry: CommandRegistry
+    private let onTurn: (@Sendable (Int, Int) -> Void)?
     /// Why the command is being stopped, set by the first of a cancellation and a shutdown.
     private var stopRequest: CommandFailure?
     /// The command's pid, which is also its group's ID; 0 until it has launched.
@@ -50,10 +57,11 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
     /// A shutdown sent the group `SIGKILL`, so however it ended, the run was stopped.
     private var killedNow = false
 
-    init(limit: Int, grace: Duration, registry: CommandRegistry) {
+    init(limit: Int, grace: Duration, registry: CommandRegistry, onTurn: (@Sendable (Int, Int) -> Void)?) {
         self.limit = limit
         self.grace = grace
         self.registry = registry
+        self.onTurn = onTurn
     }
 
     func cancel() {
@@ -113,10 +121,18 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         while true {
             var polled = open.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
             if polled.isEmpty { usleep(50_000) } else { _ = poll(&polled, nfds_t(polled.count), 50) }
-            for fd in open where !Self.drain(fd, into: &output[fd == outFD ? 0 : 1], keeping: reason == nil) {
-                close(fd)
-                open.removeAll { $0 == fd }
+            // One chunk from each stream a turn, so however fast the group writes, a stop, the deadline, and the
+            // escalation to `SIGKILL` below are checked every turn.
+            var turn = 0
+            for fd in open {
+                let chunk = read(fd, into: &output, outFD: outFD, keeping: reason == nil)
+                turn += chunk.count
+                if !chunk.open {
+                    close(fd)
+                    open.removeAll { $0 == fd }
+                }
             }
+            onTurn?(turn, output[0].count + output[1].count)
             if reason == nil, output[0].count + output[1].count > limit { reason = .outputTooLarge }
             if status == nil {
                 var raw: Int32 = 0
@@ -124,8 +140,18 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
                 if reaped == pid { status = raw } else if reaped == -1, errno != EINTR { status = -1 }
             }
             if status != nil, !groupAlive(pid) {
-                // Whatever a process outside the group still holds open is not waited for.
-                for fd in open { _ = Self.drain(fd, into: &output[fd == outFD ? 0 : 1], keeping: reason == nil) }
+                // What is left in the pipes, up to a bound: whatever a process outside the group still holds open, and
+                // may keep writing to, is not waited for.
+                var last = 0
+                for fd in open {
+                    for _ in 0 ..< ProcessGroupRunner.finalChunks {
+                        let chunk = read(fd, into: &output, outFD: outFD, keeping: reason == nil)
+                        last += chunk.count
+                        if !chunk.open || chunk.count == 0 { break }
+                    }
+                }
+                onTurn?(last, output[0].count + output[1].count)
+                if reason == nil, output[0].count + output[1].count > limit { reason = .outputTooLarge }
                 if reason == nil, lock.withLock({ killedNow }) { reason = .cancelled }
                 break
             }
@@ -157,19 +183,19 @@ private final class GroupRun: RegisteredRun, @unchecked Sendable {
         lock.withLock { if !groupGone { killpg(pid, signal) } }
     }
 
-    /// Reads what is available; returns `false` at the end of the output. Output past a stop is read and dropped.
-    private static func drain(_ fd: Int32, into data: inout Data, keeping: Bool) -> Bool {
-        var buffer = [UInt8](repeating: 0, count: 64 << 10)
-        while true {
-            let count = read(fd, &buffer, buffer.count)
-            if count > 0 {
-                if keeping { data.append(contentsOf: buffer[..<count]) }
-            } else if count == 0 {
-                return false
-            } else {
-                return errno == EAGAIN || errno == EINTR
-            }
+    /// Reads at most one chunk of `fd` into its stream's output; `open` is `false` at the end of the output. It keeps
+    /// no more than one byte past `limit` in all, which is enough to tell the output is too large; output past that or
+    /// past a stop is read and dropped.
+    private func read(_ fd: Int32, into output: inout [Data], outFD: Int32, keeping: Bool) -> (open: Bool, count: Int) {
+        var buffer = [UInt8](repeating: 0, count: ProcessGroupRunner.chunkSize)
+        let count = Darwin.read(fd, &buffer, buffer.count)
+        if count > 0 {
+            let room = keeping ? max(0, limit + 1 - output[0].count - output[1].count) : 0
+            if room > 0 { output[fd == outFD ? 0 : 1].append(contentsOf: buffer[..<min(count, room)]) }
+            return (true, count)
         }
+        if count == 0 { return (false, 0) }
+        return (errno == EAGAIN || errno == EINTR, 0)
     }
 
     /// The exit status, or the signal's number for a command a signal ended, as `Process.terminationStatus` gives.

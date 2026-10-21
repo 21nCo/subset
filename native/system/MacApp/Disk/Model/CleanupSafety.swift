@@ -28,8 +28,10 @@ public struct CleanupProtection: Sendable {
         self.systemFolders = systemFolders
     }
 
-    /// Why `path` must not be moved, or `nil` when it may be. Names are compared folded for case and Unicode
-    /// normalization, as APFS compares them by default, so another spelling of a protected folder is refused too.
+    /// Why `path` must not be moved, or `nil` when it may be. Every refusal of a protected folder compares names folded
+    /// for case and Unicode normalization, as APFS compares them by default, so another spelling of one is refused too.
+    /// Being inside the home folder is the one thing that allows, so it is decided on the exact spelling: on a
+    /// case-sensitive volume another spelling of the home folder is another folder.
     public func refusal(_ path: String) -> String? {
         guard Self.isPlain(path) else { return "\(path) is not a plain absolute path." }
         let key = Self.key(path)
@@ -37,12 +39,12 @@ public struct CleanupProtection: Sendable {
         if !exempt, let folder = systemFolders.first(where: { Self.isInside(key, Self.key($0)) }) {
             return "\(path) is in \(folder), which System never changes."
         }
-        let home = Self.key(self.home)
-        guard Self.isPlain(self.home), home != "/", Self.isInside(key, home) else {
+        let homeKey = Self.key(home)
+        if key == homeKey { return "Your home folder itself is never removed." }
+        guard Self.isPlain(home), home != "/", Self.isExactlyInside(path, home) else {
             return "\(path) is outside your home folder."
         }
-        if key == home { return "Your home folder itself is never removed." }
-        let relative = String(key.dropFirst(home.count + 1))
+        let relative = Self.key(String(decoding: path.utf8.dropFirst(home.utf8.count + 1), as: UTF8.self))
         if relative == "library" { return "Your Library folder itself is never removed." }
         if let folder = Self.homeFolders.first(where: { Self.isInside(relative, Self.key($0)) }) {
             return "\(path) is in ~/\(folder), which System never changes."
@@ -68,6 +70,12 @@ public struct CleanupProtection: Sendable {
 
     static func isInside(_ path: String, _ folder: String) -> Bool {
         path == folder || path.hasPrefix(folder == "/" ? "/" : folder + "/")
+    }
+
+    /// `path` is strictly inside `folder`, comparing their bytes: Swift's own comparison treats canonically equivalent
+    /// spellings as equal, which a file system need not.
+    static func isExactlyInside(_ path: String, _ folder: String) -> Bool {
+        path.utf8.starts(with: (folder == "/" ? "/" : folder + "/").utf8) && path.utf8.count > folder.utf8.count + 1
     }
 }
 
@@ -106,13 +114,13 @@ public struct CleanupItem: Hashable, Sendable {
         if let reason = protection.refusal(path) { return .protected(reason) }
         guard CleanupProtection.isPlain(root) else { return .outsideRoot }
         if CleanupProtection.key(path) == CleanupProtection.key(root) { return .isRoot }
-        guard path.hasPrefix(root == "/" ? "/" : root + "/") else { return .outsideRoot }
+        guard CleanupProtection.isExactlyInside(path, root) else { return .outsideRoot }
         guard let identity, identity.isComplete else { return .notIdentified }
         // Every folder above it, its rule's folder included, must still be the folder of that name: one replaced by a
         // link would lead the move somewhere else.
         let parent = (path as NSString).deletingLastPathComponent
         guard let real = Self.realPath(parent) else { return .missing }
-        guard real == parent else { return .outsideRoot }
+        guard real.utf8.elementsEqual(parent.utf8) else { return .outsideRoot }
         switch identify(path) {
         case .missing: return .missing
         case .symlink: return .symlink

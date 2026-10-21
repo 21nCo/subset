@@ -81,6 +81,48 @@ final class CleanupTests: XCTestCase {
         XCTAssertEqual(recorder.moved, [])
     }
 
+    /// Only an exact spelling of the home folder allows a move: on a case-sensitive volume `/X/HOME` is another folder,
+    /// and Swift's own comparison would take canonically equivalent spellings for the same bytes. Protected folders are
+    /// still refused in every spelling.
+    func testOnlyTheExactSpellingOfTheHomeFolderAllowsAMove() async throws {
+        let protection = CleanupProtection(home: "/X/home", systemFolders: [])
+        for path in ["/X/HOME/Library/Caches/pip/item", "/x/home/Library/Caches/pip/item", "/X/HOME",
+                     "/X/home/LIBRARY/keychains/x", "/X/home/library", "/X/home/pictures/A.PHOTOSLIBRARY",
+                     "/X/home/.TRASH/x"] {
+            XCTAssertNotNil(protection.refusal(path), path)
+        }
+        XCTAssertNil(protection.refusal("/X/home/Library/Caches/pip/item"))
+        let composed = CleanupProtection(home: "/X/caf\u{E9}", systemFolders: [])
+        XCTAssertNotNil(composed.refusal("/X/cafe\u{301}/Library/Caches/x"), "a decomposed spelling of the home folder")
+        XCTAssertNil(composed.refusal("/X/caf\u{E9}/Library/Caches/x"))
+        let decomposed = CleanupProtection(home: "/X/cafe\u{301}", systemFolders: [])
+        XCTAssertNotNil(decomposed.refusal("/X/caf\u{E9}/Library/Caches/x"), "a composed spelling of the home folder")
+        // The rule's folder is matched on its exact spelling too.
+        let item = CleanupItem(path: "/X/home/caf\u{E9}/x", root: "/X/home/cafe\u{301}",
+                               identity: DiskItemIdentity(device: 1, inode: 2), privateBytes: 1, isLowerBound: false)
+        XCTAssertEqual(item.revalidate(protection) { _ in .item(DiskItemIdentity(device: 1, inode: 2), isDirectory: false) },
+                       .outsideRoot)
+
+        // A match injected in another spelling of the home folder, whose identity still checks out, is never moved.
+        let identity = DiskItemIdentity(device: 1, inode: 7)
+        let match = ReclaimMatch(
+            rule: ReclaimRules.rule(.xcodeDerivedData), app: nil, identifier: nil,
+            items: [ReclaimItem(path: "/X/HOME/Library/Caches/pip/item", index: 0, root: "/X/HOME/Library/Caches/pip",
+                                sizes: DiskSizes(logical: 1, allocated: 1, private: 1), flags: [], touched: nil,
+                                identity: identity)],
+            bytes: .scanned(private: 1, allocated: 1, complete: true, allocatedUpperBound: false))
+        let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+        XCTAssertFalse(preview.canConfirm)
+        let executor = CleanupExecutor(protection: protection, commands: commands(), trash: mover(), freeSpace: { nil },
+                                       identify: { _ in .item(identity, isDirectory: true) })
+        let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+        guard case let .trash(items) = result.outcome, let status = items.first?.status,
+              case .skipped(.protected) = status else {
+            return XCTFail("\(result.outcome)")
+        }
+        XCTAssertEqual(recorder.moved, [])
+    }
+
     // MARK: Trash cleanups
 
     func testOnlyTheSelectedItemsAreMovedToTheTrash() async throws {

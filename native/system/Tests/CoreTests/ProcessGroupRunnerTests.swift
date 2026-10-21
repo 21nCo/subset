@@ -17,6 +17,12 @@ final class ProcessGroupRunnerTests: XCTestCase {
         "trap '' TERM\nsleep 30 &\necho $! > '\(childFile)'\necho $$ > '\(pidFile)'\nwait"
     }
 
+    /// A script that ignores `SIGTERM` and starts four `yes` writers, which ignore it too, and writes its pid and the
+    /// last writer's.
+    private var flood: String {
+        "trap '' TERM\nfor i in 1 2 3 4; do yes & done\necho $! > '\(childFile)'\necho $$ > '\(pidFile)'\nwait"
+    }
+
     override func setUpWithError() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("ProcessGroupRunnerTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -126,6 +132,67 @@ final class ProcessGroupRunnerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: pidFile), "nothing was started")
     }
 
+    /// Several writers that ignore `SIGTERM` keep the pipe full: a stop, the deadline, and the output cap are still
+    /// noticed, and the group is sent `SIGKILL` after the grace, rather than the output being read for as long as it lasts.
+    func testAFloodPastTheCapIsKilledAfterTheGrace() async throws {
+        let stub = try await warmedStub(flood)
+        let started = ContinuousClock.now
+
+        let turns = Turns()
+        var runner = ProcessGroupRunner(outputLimit: 64 << 10, grace: .milliseconds(300))
+        runner.onTurn = { turns.add($0, $1) }
+
+        let result = await answer(within: .seconds(10)) { [runner] in
+            await runner.run(stub, arguments: [], environment: [:], timeout: .seconds(60))
+        }
+
+        XCTAssertEqual(result, .failure(.outputTooLarge))
+        // A turn reads one chunk of each stream, the last read a bounded number, and no more than a byte past the cap
+        // is ever kept, however much the writers produce.
+        let all = turns.all
+        XCTAssertGreaterThan(all.count, 1)
+        XCTAssertLessThanOrEqual(all.dropLast().map(\.read).max() ?? 0, 2 * ProcessGroupRunner.chunkSize)
+        XCTAssertLessThanOrEqual(all.last?.read ?? 0, 2 * ProcessGroupRunner.finalChunks * ProcessGroupRunner.chunkSize)
+        XCTAssertLessThanOrEqual(all.map(\.kept).max() ?? 0, (64 << 10) + 1)
+        XCTAssertGreaterThan(all.map(\.read).reduce(0, +), 64 << 10, "the output past the cap was read and dropped")
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, .milliseconds(300), "SIGTERM alone did not stop them")
+        assertGone(try pid(pidFile), "the command")
+        assertGone(try pid(childFile), "a writer")
+    }
+
+    func testACancelledFloodAnswersOnceTheGroupIsKilled() async throws {
+        let stub = try await warmedStub(flood)
+        let run = Task {
+            await ProcessGroupRunner(outputLimit: 1 << 30, grace: .milliseconds(300))
+                .run(stub, arguments: [], environment: [:], timeout: .seconds(60))
+        }
+        let pids = try await waitForPIDs()
+        let cancelled = ContinuousClock.now
+        run.cancel()
+
+        let result = await answer(within: .seconds(5)) { await run.value }
+
+        XCTAssertEqual(result, .failure(.cancelled))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - cancelled, .milliseconds(300), "it waited for SIGKILL")
+        assertGone(pids.command, "the command")
+        assertGone(pids.child, "a writer")
+    }
+
+    func testATimedOutFloodAnswersOnceTheGroupIsKilled() async throws {
+        let stub = try await warmedStub(flood)
+        let started = ContinuousClock.now
+
+        let result = await answer(within: .seconds(5)) {
+            await ProcessGroupRunner(outputLimit: 1 << 30, grace: .milliseconds(300))
+                .run(stub, arguments: [], environment: [:], timeout: .milliseconds(300))
+        }
+
+        XCTAssertEqual(result, .failure(.timedOut))
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, .milliseconds(600), "SIGTERM alone did not stop them")
+        assertGone(try pid(pidFile), "the command")
+        assertGone(try pid(childFile), "a writer")
+    }
+
     func testTheEnvironmentIsExactlyTheOneGiven() async throws {
         let stub = try await warmedStub("/usr/bin/env")
         let output = try await ProcessGroupRunner().run(stub, arguments: [], environment: ["ONLY": "this"],
@@ -137,6 +204,13 @@ final class ProcessGroupRunnerTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    private final class Turns: @unchecked Sendable {
+        private let lock = NSLock()
+        private var turns: [(read: Int, kept: Int)] = []
+        func add(_ read: Int, _ kept: Int) { lock.withLock { turns.append((read, kept)) } }
+        var all: [(read: Int, kept: Int)] { lock.withLock { turns } }
+    }
 
     /// The process is gone right now, not merely on its way out.
     private func assertGone(_ pid: pid_t, _ name: String) {
@@ -156,6 +230,24 @@ final class ProcessGroupRunnerTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(50))
         return (try pid(pidFile), try pid(childFile))
+    }
+
+    /// The run's answer; if it has not answered within `bound`, the test fails and the group is killed so that it ends.
+    private func answer(within bound: Duration,
+                        _ run: @escaping @Sendable () async -> Result<CommandOutput, CommandFailure>) async
+        -> Result<CommandOutput, CommandFailure> {
+        let pidFile = pidFile
+        let watchdog = Task {
+            try await Task.sleep(for: bound)
+            if let text = try? String(contentsOfFile: pidFile, encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                killpg(pid, SIGKILL)
+            }
+        }
+        let result = await run()
+        watchdog.cancel()
+        if (try? await watchdog.value) != nil { XCTFail("no answer within \(bound)") }
+        return result
     }
 
     /// A stub run once already, so the first run's malware scan cannot hold it past a short timeout.
