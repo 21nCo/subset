@@ -6,6 +6,7 @@ import './zod-jitless.js';
 import { mount } from 'svelte';
 import McpApp from './McpApp.svelte';
 import { createBridge } from './mcp-bridge.js';
+import { watchVisibility } from './mcp-visibility.js';
 
 const bridge = createBridge({ host: window.parent, view: window, appInfo: { name: 'subset-timer-board', version: '1.0.0' } });
 mount(McpApp, { target: document.getElementById('app')!, props: { bridge } });
@@ -18,18 +19,8 @@ bridge.subscribe(({ theme }) => {
   root.style.colorScheme = theme ?? '';
 });
 
-// Refresh runs only while the page is shown and the view is on screen.
-let pageShown = document.visibilityState === 'visible';
-let onScreen = true;
-const visibility = () => bridge.setVisible(pageShown && onScreen);
-document.addEventListener('visibilitychange', () => {
-  pageShown = document.visibilityState === 'visible';
-  visibility();
-});
-new IntersectionObserver((entries) => {
-  onScreen = entries.some((entry) => entry.isIntersecting);
-  visibility();
-}).observe(root);
+// Refresh runs only while the page is shown and the view is on screen; a view loaded hidden starts hidden.
+watchVisibility((visible) => bridge.setVisible(visible), document, (callback) => new IntersectionObserver(callback).observe(root));
 
 // The host sizes the iframe to the content's height, measured as ext-apps does.
 let measuring = false;

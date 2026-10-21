@@ -274,14 +274,17 @@ export function createBridge({
     update({ theme: context.theme === 'light' || context.theme === 'dark' ? context.theme : null });
   }
 
-  /** The tool result the host passed: the board's `result`, or the error it reports in place of the board. */
+  /**
+   * The tool result the host passed: the board's `result`, or the error it reports in place of the board.
+   * It is newer than any read that failed before it, so that read's notice goes.
+   */
   function takeToolResult(params: unknown) {
     if (!isObject(params)) return;
     generation += 1;
     const result = params as CallToolResult;
-    if (result.isError) update({ result: null, toolError: toolFailure(result).error.message });
-    else if (isObject(result.structuredContent)) update({ result: boardOf(result.structuredContent), toolError: null });
-    else update({ result: null, toolError: 'The Timer tool returned no structured result.' });
+    if (result.isError) update({ result: null, toolError: toolFailure(result).error.message, refreshError: null });
+    else if (isObject(result.structuredContent)) update({ result: boardOf(result.structuredContent), toolError: null, refreshError: null });
+    else update({ result: null, toolError: 'The Timer tool returned no structured result.', refreshError: null });
   }
 
   function onRequest(id: unknown, method: string) {

@@ -49,13 +49,15 @@ async function bundleFile(entry) {
 const bundle = async (entry) => import(await bundleFile(entry));
 
 /**
- * The view's own sources: the bridge (apps/timer/src/mcp-bridge.ts), the MCP App component with the
+ * The view's own sources: the bridge (apps/timer/src/mcp-bridge.ts), the page's visibility
+ * (mcp-visibility.ts), the MCP App component with the
  * board it mounts, compiled for server rendering, and the board's view model, which decides what the
  * board shows for an action's reply.
  */
 const view = await bundle(
   [
     `export * from ${JSON.stringify(join(REPO, 'apps/timer/src/mcp-bridge.ts'))};`,
+    `export { watchVisibility } from ${JSON.stringify(join(REPO, 'apps/timer/src/mcp-visibility.ts'))};`,
     `export { default as McpApp } from ${JSON.stringify(join(REPO, 'apps/timer/src/McpApp.svelte'))};`,
     `export { failureText, readBoardResult, readOutcome } from ${VIEW_MODEL};`,
     `export { render } from 'svelte/server';`
@@ -423,6 +425,37 @@ test('a read issued before the host passes a newer tool result never replaces it
   assert.ok(hasTea(bridge.state().result));
 });
 
+test('a host tool result after a failed read clears the read\'s notice, as it is the newer board', async (t) => {
+  const { host, bridge, mcp, intervals } = await connectedBridge(t);
+  const notice = /Could not refresh the timers/;
+  const list = await mcp.callTool('timer_list', {});
+
+  // A refused read, then a successful tool result.
+  host.refuse = () => 'The host is offline.';
+  intervals.fire();
+  await host.idle();
+  assert.match(rendered(bridge), notice);
+  host.refuse = null;
+  host.notify('ui/notifications/tool-result', list);
+  assert.equal(bridge.state().refreshError, null);
+  assert.doesNotMatch(rendered(bridge), notice);
+
+  // A read past its deadline, then an error tool result: the error alone, no notice.
+  host.withhold = ({ name }) => name === 'timer_list';
+  intervals.fire();
+  await host.idle();
+  intervals.expire(view.READ_TIMEOUT_MS);
+  await host.idle();
+  assert.match(rendered(bridge), notice);
+  host.notify('ui/notifications/tool-result', await mcp.callTool('timer_get', { id: 't_00000000' }));
+  assert.equal(bridge.state().refreshError, null);
+  assert.doesNotMatch(rendered(bridge), notice);
+  host.withhold = null;
+  host.release();
+  await host.idle();
+  assert.equal(bridge.state().refreshError, null);
+});
+
 test('a read or change the host never answers fails at its deadline, the refresh reads again, and a late reply is ignored', async (t) => {
   const { host, bridge, intervals, timer } = await connectedBridge(t);
   assert.deepEqual([view.READ_TIMEOUT_MS, view.CHANGE_TIMEOUT_MS], [15_000, 300_000]);
@@ -536,6 +569,38 @@ test('the bridge reads timer_list every 10 s while the view is visible, stops wh
   await host.idle();
   assert.equal(host.sent.length, sent);
   assert.equal(intervals.live.size, 0);
+});
+
+test('a view loaded while the page is hidden starts hidden, so it reads nothing until the page is shown', async (t) => {
+  const session = await mcpSession(t);
+  const host = fakeHost(session.mcp);
+  const intervals = fakeIntervals();
+  const bridge = view.createBridge(bridgeOptions(host, intervals));
+  t.after(() => bridge.close());
+  // A hidden page: visibilitychange comes only when it is shown, and the observer never calls back.
+  const page = { visibilityState: 'hidden', changed: null, addEventListener: (type, listener) => (assert.equal(type, 'visibilitychange'), (page.changed = listener)) };
+  let onScreen = null;
+  const seen = [];
+  view.watchVisibility((visible) => (seen.push(visible), bridge.setVisible(visible)), page, (callback) => (onScreen = callback));
+  assert.deepEqual(seen, [false]);
+  const connected = bridge.connect();
+  await host.idle();
+  await connected;
+  assert.equal(intervals.live.size, 0);
+  assert.equal(host.calls.length, 0);
+
+  // Shown: one read at once, then every 10 s; scrolled out of sight: none.
+  page.visibilityState = 'visible';
+  page.changed();
+  await host.idle();
+  assert.deepEqual(host.calls, [{ name: 'timer_list', arguments: {} }]);
+  assert.equal(intervals.live.size, 1);
+  onScreen([{ isIntersecting: false }]);
+  assert.equal(intervals.live.size, 0);
+  onScreen([{ isIntersecting: true }]);
+  await host.idle();
+  assert.equal(host.calls.length, 2);
+  assert.deepEqual(seen, [false, true, false, true]);
 });
 
 test('the bridge tells the host the view size once connected, and only when it changes', async (t) => {
