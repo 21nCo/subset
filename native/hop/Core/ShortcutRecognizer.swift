@@ -95,8 +95,9 @@ public struct Classification: Sendable, Equatable {
 /// Modifiers match exactly: a shortcut starts or steps a switch only with its holding modifier alone (forward) or with
 /// ⇧ (backward); while a switch is active the arrows, Esc, Delete and the search's printable keys count only with the
 /// holding modifier, optionally plus ⇧, and the operation keys (M, W, H, Q) only with the holding modifier plus ⌘. Any
-/// other modifier set (⌥⌘Tab, ⌥⌃→, ⌥⇧⌘W, ⌥⌃E) passes and changes nothing. The other shortcut's key steps too when it
-/// has the same holding modifier, so ⌥` in a ⌥Tab switch moves rather than searching for a `.
+/// other modifier set (⌥⌘Tab, ⌥⌃→, ⌥⇧⌘W, ⌥⌃E) passes and changes nothing. A printable key with ⌃ never types, so a
+/// switch held with ⌃ has no search and ⌃E passes. The other shortcut's key steps too when it has the same holding
+/// modifier, so ⌥` in a ⌥Tab switch moves rather than searching for a `.
 ///
 /// The classifier sees one event at a time. Which press a key-up or an auto-repeat belongs to is
 /// `ShortcutRecognizer`'s job.
@@ -154,7 +155,10 @@ public enum EventClassifier {
         case KeyCode.escape: return Classification(.swallow, .escape)
         case KeyCode.delete: return Classification(.swallow, .deleteBackward)
         default:
-            guard let text = key.text, SwitcherSearch.isSearchCharacter(text) else { return .pass }
+            // A ⌃ chord is never typing, even in a switch held with ⌃: such a switch has no search.
+            guard !key.modifiers.contains(.control), let text = key.text, SwitcherSearch.isSearchCharacter(text) else {
+                return .pass
+            }
             return Classification(.swallow, .type(text))
         }
     }

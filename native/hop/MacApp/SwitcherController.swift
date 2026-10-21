@@ -16,8 +16,9 @@ import os
 /// switcher at once, and nothing draws it again. A hover after a waiting key waits behind it too, and selects the
 /// window it was over, not the place. While anything waits, a read can neither add an item to a search's list nor
 /// reorder it (`SwitcherViewModel.hold()`), so a waiting key or commit never acts on a window the search did not show.
-/// A waiting commit ends the search once what came before it has been applied: it cancels if the search then lists
-/// nothing, and otherwise chooses only among what it listed, in its order.
+/// A commit that waits ends the search at once (`SwitcherViewModel.endSearch(before:)`): no text outlives the panel, as
+/// what each waiting character or Delete will list is worked out then and applied in its turn, so the commit chooses
+/// only among what the search listed, in its order, and with nothing listed it does nothing, as a cancel.
 /// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. Every listed
 /// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
 /// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
@@ -56,10 +57,21 @@ final class SwitcherController {
 
     private enum Deferred {
         case event(SwitchSession.Event)
+        /// List what a character or Delete that waited searched for, worked out when the switch ended.
+        case search(SwitcherViewModel.SearchResult)
         /// Select this item, as a hover over it did, if it is still listed.
         case select(SwitcherItem.ID)
         /// Commit the selection, or only this item (a click chose it) if it is still listed.
         case commit(SwitcherItem.ID?)
+
+        /// The character or Delete that waits, if this is one.
+        var typed: SwitchSession.Event? {
+            guard case let .event(event) = self else { return nil }
+            switch event {
+            case .type, .deleteBackward: return event
+            default: return nil
+            }
+        }
     }
 
     /// The switcher ended the session itself (a click chose a window), so the host's session must end too.
@@ -171,7 +183,7 @@ final class SwitcherController {
             wait(.commit(item))
             isReleased = true
             panel.hide()
-            return endSearchBeforeCommit()
+            return endSearch()
         }
         let target = if let item { model?.items.first { $0.id == item } } else { model?.selectedItem }
         reset()
@@ -218,24 +230,26 @@ final class SwitcherController {
         }
     }
 
-    /// The switch ended with a query while a commit waits: once everything typed before the release has been applied,
-    /// so the commit is next, the search ends, and a search that lists nothing cancels, as releasing on "No matching
-    /// windows" does.
-    private func endSearchBeforeCommit() {
-        guard case .commit = deferred.first, let model, !model.query.isEmpty else { return }
-        guard !model.items.isEmpty else { return cancel() }
-        update { $0.endSearch() }
+    /// The switch ended while a commit waits: ends the search, and puts in place of each character or Delete that waits
+    /// what it will list, so no text is left once the panel hides. One that changes nothing is dropped.
+    private func endSearch() {
+        guard var model else { return }
+        var results = model.endSearch(before: deferred.compactMap(\.typed))[...]
+        self.model = model
+        deferred = deferred.compactMap { next in
+            guard next.typed != nil else { return next }
+            return results.removeFirst().map(Deferred.search)
+        }
     }
 
     /// An operation's result has been reconciled with the list; once none is pending, carries out what waited. Once
     /// nothing waits, the search lists whatever matches again.
     private func settle() {
         pending -= 1
-        while !deferred.isEmpty {
-            endSearchBeforeCommit()
-            guard pending == 0, !deferred.isEmpty else { break }
+        while pending == 0, !deferred.isEmpty {
             switch deferred.removeFirst() {
             case let .event(event): run(event)
+            case let .search(result): update { $0.show(result) }
             case let .select(item):
                 if let index = model?.items.firstIndex(where: { $0.id == item }) { update { $0.select(index) } }
             case let .commit(item): commit(only: item)

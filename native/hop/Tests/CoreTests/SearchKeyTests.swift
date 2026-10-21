@@ -1,3 +1,4 @@
+import CoreGraphics
 import HopCore
 import XCTest
 
@@ -66,15 +67,24 @@ final class SearchKeyTests: XCTestCase {
         XCTAssertEqual(classify(down(0x0E, .option), active), .pass, "no character from the layout")
     }
 
-    func testAControlHeldSwitchTypesWithControlButNotOption() throws {
+    func testAControlHeldSwitchNeverTypesInEitherScope() throws {
         let control = try Shortcut(holdModifier: .control, keyCode: KeyCode.tab)
-        var active = SwitchSession()
-        active.handle(.trigger(.forward))
-        let typed = EventClassifier.classify(.key(down(0x0E, .control, text: "e")), session: active, shortcut: control)
-        XCTAssertEqual(typed, Classification(.swallow, .type("e")))
-        let chord = EventClassifier.classify(.key(down(0x0E, [.control, .option], text: "e")), session: active,
-                                             shortcut: control)
-        XCTAssertEqual(chord, .pass)
+        let controlGrave = try Shortcut(holdModifier: .control, keyCode: KeyCode.grave)
+        for (trigger, scope) in [(KeyCode.tab, SwitchScope.allWindows), (KeyCode.grave, .frontmostApp)] {
+            var recognizer = ShortcutRecognizer(shortcut: control, sameAppShortcut: controlGrave)
+            XCTAssertEqual(recognizer.handle(.key(down(trigger, .control))).event, .trigger(.forward, scope: scope))
+            var model = SwitcherViewModel(items: [], available: CGSize(width: 1440, height: 900))
+            for modifiers: ModifierMask in [.control, [.control, .shift], [.control, .option]] {
+                let chord = recognizer.handle(.key(down(0x0E /* E */, modifiers, text: "e")))
+                XCTAssertEqual(chord, .init(disposition: .pass, event: nil, outcome: nil), "\(scope): ⌃E is a chord")
+                _ = recognizer.handle(.key(KeyEvent(.keyUp, keyCode: 0x0E, modifiers: modifiers)))
+                if let event = chord.event { model.handle(event) }
+            }
+            XCTAssertEqual(model.query, "", "\(scope): the query is unchanged")
+            XCTAssertEqual(recognizer.handle(.key(down(KeyCode.delete, .control, text: "\u{7F}"))).event, .deleteBackward)
+            XCTAssertEqual(recognizer.handle(.key(down(KeyCode.rightArrow, .control))).event, .step(.forward))
+            XCTAssertEqual(recognizer.handle(.key(down(KeyCode.escape, .control))).outcome, .cancel)
+        }
     }
 
     // MARK: - Same-app shortcut
@@ -108,7 +118,7 @@ final class SearchKeyTests: XCTestCase {
         XCTAssertEqual(recognizer.handle(.key(down(KeyCode.grave, .control))).event, .step(.forward))
         XCTAssertEqual(recognizer.handle(.key(down(KeyCode.tab, .control, text: "\t"))).disposition, .pass,
                        "⌃Tab is not a shortcut")
-        XCTAssertEqual(recognizer.handle(.key(down(0x0E, .control, text: "e"))).event, .type("e"))
+        XCTAssertEqual(recognizer.handle(.key(down(0x0E, .control, text: "e"))).disposition, .pass, "⌃E never types")
         let release = recognizer.handle(.key(KeyEvent(.flagsChanged, keyCode: 0x3B, modifiers: [])))
         XCTAssertEqual(release.outcome, .commit, "releasing ⌃ commits")
         XCTAssertEqual(recognizer.session.scope, .allWindows)

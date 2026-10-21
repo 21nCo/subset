@@ -28,8 +28,8 @@ public enum SwitcherScope: Sendable, Equatable {
 /// Every listed item is in `scope`, passes `filter` and matches `query` (`SwitcherSearch`), whichever way the list
 /// changed: a fresh list, the kept items of apps that did not answer, an operation's result, a new filter, or a new
 /// query. While the host holds keys back (`hold()`), a search lists only items it listed when they began to wait; once
-/// a search has ended (`endSearch()`), the query is gone and only the items it listed then can be listed, in that
-/// order. Either way a later read can only remove items.
+/// a search has ended (`endSearch(before:)`), the query is gone and only the items it listed then can be listed, in that
+/// order, or those a waiting key's `SearchResult` lists. Either way a later read can only remove items.
 public struct SwitcherViewModel: Sendable, Equatable {
     /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
@@ -40,6 +40,12 @@ public struct SwitcherViewModel: Sendable, Equatable {
             self.operation = operation
             self.item = item
         }
+    }
+
+    /// What a key typed before the switch ended lists, worked out when it ended (`endSearch(before:)`): the items it
+    /// listed then, in that order, or, when it left the query empty, every candidate. It holds no text.
+    public struct SearchResult: Sendable, Equatable {
+        fileprivate let items: [SwitcherItem.ID]?
     }
 
     private struct Held: Sendable, Equatable {
@@ -60,8 +66,8 @@ public struct SwitcherViewModel: Sendable, Equatable {
     public private(set) var query = ""
     /// While keys wait (`hold()`), the items listed when they began to wait, in that order, and the query then.
     private var held: Held?
-    /// The items a search listed when it ended, in that order: the only ones that can be listed after it, in that
-    /// order; nil while none has ended.
+    /// The items a search listed when it ended, or a waiting key's result lists (`show(_:)`), in that order: the only
+    /// ones that can be listed, in that order; nil while none has ended, or once a key left the query empty.
     private var searched: [SwitcherItem.ID]?
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
@@ -201,13 +207,36 @@ public struct SwitcherViewModel: Sendable, Equatable {
         refreshed(candidates)
     }
 
-    /// Ends the search when the switch ends while an operation is still pending, so the commit that waits for it
-    /// chooses among what the user saw: the query is dropped, and from now on only the items listed now can be listed,
-    /// in the order they are listed, with the selection on its item. Without a query this changes nothing.
-    public mutating func endSearch() {
-        guard !query.isEmpty else { return }
-        searched = items.map(\.id)
+    /// Ends the search when the switch ends while keys still wait for a pending operation, so no text outlives the
+    /// panel and the commit that waits chooses among what the search listed. Works out now what each of `typed`, the
+    /// characters and Deletes that wait, in order, will list, as if each were applied after the one before (the items
+    /// held, ranked as now), then drops the query and what was held. From now on only the items listed now can be
+    /// listed, in the order they are listed, with the selection on its item, until `show(_:)` lists a key's result.
+    /// Returns a result for each of `typed`, nil for one that changes nothing; without a query and with no waiting keys
+    /// nothing changes.
+    public mutating func endSearch(before typed: [SwitchSession.Event]) -> [SearchResult?] {
+        var trial = self
+        let results = typed.map { key -> SearchResult? in
+            let before = trial.query
+            trial.handle(key)
+            guard trial.query != before else { return nil }
+            return SearchResult(items: trial.query.isEmpty ? nil : trial.items.map(\.id))
+        }
+        if !query.isEmpty { searched = items.map(\.id) }
         query = ""
+        held = nil
+        return results
+    }
+
+    /// Lists what a waiting key searched for (`endSearch(before:)`), as typing it would have: only the items in
+    /// `result` that are still candidates, in its order, or every candidate for an empty query, with the first
+    /// selected.
+    public mutating func show(_ result: SearchResult) {
+        searched = result.items
+        list(matches())
+        firstVisibleRow = 0
+        selection = nil
+        select(0)
     }
 
     /// Lists `items` and lays them out, keeping the scroll position where it can. The selection is the caller's.

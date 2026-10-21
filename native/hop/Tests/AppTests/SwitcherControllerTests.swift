@@ -751,6 +751,67 @@ final class SwitcherControllerTests: XCTestCase {
         switcher.cancel()
     }
 
+    func testNoSearchTextOutlivesAReleaseWaitingOnOneOrTwoCloses() async throws {
+        for closes in 1...2 {
+            let gate = GatedWindowOperator(holding: [.close])
+            lists = [windows]
+            let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+            switcher.open()
+            for character in "Window" { switcher.apply(.type(character)) }
+            for _ in 0..<closes { switcher.apply(.operation(.close)) }
+            switcher.commit()
+            XCTAssertFalse(switcher.panel.isVisible)
+            XCTAssertEqual(searchText(in: switcher), [], "\(closes) waiting: the controller and its model keep no query")
+            try await wait(until: { gate.held == 1 })
+            switcher.cancel()
+            gate.release(.done)
+        }
+    }
+
+    func testKeysTypedBehindAWaitingCloseAreWorkedOutAtTheReleaseAndAppliedInTurn() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], windows[2], windows[3]], [windows[0], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        for character in "Window" { switcher.apply(.type(character)) }
+        switcher.apply(.step(.forward))
+        switcher.apply(.operation(.close))
+        switcher.apply(.operation(.close))
+        for character in " 3" { switcher.apply(.type(character)) }
+        switcher.apply(.deleteBackward)
+        switcher.apply(.type("3"))
+        switcher.commit()
+        XCTAssertEqual(searchText(in: switcher), [], "nothing typed waits as text once the panel hides")
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { gate.held == 1 && gate.calls.count == 2 }, "the waiting ⌘W runs after the read")
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 3 }, "the release commits after the second read")
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref, windows[3].ref],
+                       "the ⌘W before the typing closed Window 1's follower; the typing then chose Window 3")
+        XCTAssertFalse(switcher.isOpen)
+    }
+
+    func testKeysTypedBehindAWaitingCloseToNoMatchCancelEvenIfAReadAddsAMatch() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        let notes = entry(20, "zz notes", app: "Notes", pid: 20)
+        lists = [windows, [windows[0], windows[2], windows[3]], [windows[0], notes, windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.apply(.operation(.close))
+        for character in "zz" { switcher.apply(.type(character)) }
+        switcher.commit()
+        XCTAssertEqual(searchText(in: switcher), [])
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { gate.held == 1 && gate.calls.count == 2 }, "the waiting ⌘W runs after the read")
+        gate.release(.done)
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref], "zz notes is not focused")
+        XCTAssertFalse(switcher.isOpen, "the release cancelled")
+    }
+
     func testAReleaseWaitingOnACloseFocusesTheFollowerInTheOrderTheSearchListed() async throws {
         let gate = GatedWindowOperator(holding: [.close])
         // Recency C, A, B; "saf" lists the Safari windows first: A, B, C.
@@ -821,6 +882,23 @@ final class SwitcherControllerTests: XCTestCase {
         switcher.cancel()
         switcher.open()
         XCTAssertEqual(switcher.model?.items.count, 5, "the switch shortcut still lists every window")
+    }
+
+    /// The search text kept anywhere in `value`'s stored state: a non-empty `query`, or a typed character or Delete
+    /// that waits. Goes `depth` levels down.
+    private func searchText(in value: Any, depth: Int = 8) -> [String] {
+        guard depth > 0 else { return [] }
+        return Mirror(reflecting: value).children.flatMap { child -> [String] in
+            switch child.value {
+            case let query as String where child.label == "query": query.isEmpty ? [] : [query]
+            case let event as SwitchSession.Event:
+                switch event {
+                case .type, .deleteBackward: [String(describing: event)]
+                default: []
+                }
+            default: searchText(in: child.value, depth: depth - 1)
+            }
+        }
     }
 
     private func readWindows() -> WindowList {

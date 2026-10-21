@@ -191,7 +191,7 @@ final class SwitcherViewModelSearchTests: XCTestCase {
         var model = SwitcherViewModel(items: items, available: wide)
         typing("re", into: &model)
         model.handle(.step(.forward)) // Report draft
-        model.endSearch()
+        XCTAssertEqual(model.endSearch(before: []), [])
         XCTAssertEqual(model.query, "")
         XCTAssertEqual(model.items.map(\.displayTitle), ["Q3 report", "Report draft", "Release notes"])
         XCTAssertEqual(model.selectedItem?.displayTitle, "Report draft")
@@ -206,7 +206,7 @@ final class SwitcherViewModelSearchTests: XCTestCase {
     func testEndingASearchWithoutAQueryChangesNothing() {
         var model = SwitcherViewModel(items: items, available: wide)
         let before = model
-        model.endSearch()
+        XCTAssertEqual(model.endSearch(before: []), [])
         XCTAssertEqual(model, before)
     }
 
@@ -222,7 +222,7 @@ final class SwitcherViewModelSearchTests: XCTestCase {
         typing("saf", into: &model)
         XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"])
         model.handle(.step(.forward)) // News
-        model.endSearch()
+        XCTAssertEqual(model.endSearch(before: []), [])
         model.refreshed([safari[2], safari[0], safari[1]])
         XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"], "a read does not reorder it")
         model.refreshed([safari[0], safari[1]])
@@ -231,6 +231,42 @@ final class SwitcherViewModelSearchTests: XCTestCase {
         model.handle(.deleteBackward)
         XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "Safe guide"], "an ended search takes no more keys")
         XCTAssertEqual(model.selectedItem?.displayTitle, "Safe guide")
+    }
+
+    func testEndingASearchWorksOutEachWaitingKeyAndKeepsNoText() {
+        let newer = window(13, "Safe news", app: "Safari")
+        var model = SwitcherViewModel(items: safari, available: wide)
+        typing("saf", into: &model)
+        model.hold()
+        let typed: [SwitchSession.Event] = [.type("e")] + Array(repeating: .deleteBackward, count: 5) + [.type("n")]
+        let results = model.endSearch(before: typed)
+        XCTAssertEqual(searchText(in: model) + searchText(in: results), [], "no text in the model or the results")
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"], "listed as the search left it")
+        XCTAssertNil(results[5], "a Delete with nothing typed changes nothing")
+        model.refreshed([newer] + safari)
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"], "a read adds nothing")
+        var listed: [[String]] = []
+        for result in results.compactMap({ $0 }) {
+            model.show(result)
+            XCTAssertEqual(model.selection, 0)
+            listed.append(model.items.map(\.displayTitle))
+        }
+        XCTAssertEqual(listed, [
+            ["Safe guide"], // safe, without the Safe news the read added
+            ["Docs", "News", "Safe guide"], // saf, in the order it listed
+            ["Docs", "News", "Safe guide"], // sa
+            ["Docs", "News", "Safe guide"], // s
+            ["Safe news", "Safe guide", "Docs", "News"], // no query: every window
+            ["News"], // n, among the items held at the release
+        ])
+    }
+
+    /// The search text kept anywhere in `value`: a non-empty `query`.
+    private func searchText(in value: Any) -> [String] {
+        Mirror(reflecting: value).children.flatMap { child -> [String] in
+            if child.label == "query", let query = child.value as? String { return query.isEmpty ? [] : [query] }
+            return searchText(in: child.value)
+        }
     }
 
     func testWhileHeldAReadNeitherAddsToNorReordersASearchsList() {

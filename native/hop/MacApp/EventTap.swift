@@ -95,10 +95,10 @@ func tapInput(
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let modifiers = ModifierMask(eventFlags: event.flags.rawValue)
         // Only a ⌘ key-down can be an operation key, which matches the character the layout gives the key with ⌘. Only
-        // a key-down with ⌥ or ⌃ and no ⌘ during a switch can type into its search, which takes the character without
-        // them.
+        // a key-down with ⌥ and neither ⌘ nor ⌃ during a switch can type into its search, which takes the character
+        // without ⌥.
         let command = modifiers.contains(.command)
-        let types = readsText && !command && !modifiers.isDisjoint(with: [.option, .control])
+        let types = readsText && modifiers.contains(.option) && modifiers.isDisjoint(with: [.command, .control])
         let layout = kind == .keyDown && (command || types) ? currentLayout() : nil
         let character = command ? layout?.commandCharacter(keyCode: keyCode) : nil
         let text = types ? layout?.typedCharacter(keyCode: keyCode, shift: modifiers.contains(.shift)) : nil

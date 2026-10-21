@@ -113,6 +113,13 @@ final class KeyLayoutTests: XCTestCase {
         }
         XCTAssertNil(command.text, "a ⌘ chord never types")
         XCTAssertEqual(command.character, "e")
+        event.flags = .maskControl
+        let before = lookups
+        guard case let .key(control) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
+            return XCTFail("a key-down is a key")
+        }
+        XCTAssertNil(control.text, "a ⌃ chord never types")
+        XCTAssertEqual(lookups, before, "nor consults the layout")
     }
 
     func testAnUnknownLayoutIsNil() {
