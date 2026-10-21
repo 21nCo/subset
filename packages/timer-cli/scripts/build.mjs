@@ -2,9 +2,10 @@
 // dependency) inlined into dist/cli.mjs, and copies the built board from apps/timer/dist into web/
 // for `serve`. The apps/timer build writes the MCP App view to mcp-app/board.html itself. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
 // dist/mcp-server.mjs, and code both use to dist/common.mjs. The published package has no runtime dependencies,
-// so dist/THIRD_PARTY_NOTICES.md carries the licences of the packages bundled into it.
+// so dist/THIRD_PARTY_NOTICES.md carries the licences of the packages bundled into it. The build also stages
+// app-runtime/, the copy the Timer macOS app embeds (dist, web, mcp-app and skills); it is not part of the npm package.
 import { builtinModules } from 'node:module';
-import { chmod, cp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'rolldown';
@@ -52,3 +53,17 @@ await chmod(cliFile, 0o755);
 await writeFile(path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), await notices(output));
 await rm(path.join(root, 'web'), { recursive: true, force: true });
 await cp(webSource, path.join(root, 'web'), { recursive: true });
+
+// Stage the macOS app runtime. It is assembled in a temporary folder and renamed into place only when
+// complete, so the app never embeds a partial copy.
+const runtime = path.join(root, 'app-runtime');
+const staging = path.join(root, `.app-runtime-${process.pid}`);
+await rm(staging, { recursive: true, force: true });
+try {
+  for (const folder of ['dist', 'web', 'mcp-app', 'skills']) await cp(path.join(root, folder), path.join(staging, folder), { recursive: true });
+  await rm(runtime, { recursive: true, force: true });
+  await rename(staging, runtime);
+} catch (error) {
+  await rm(staging, { recursive: true, force: true });
+  throw error;
+}

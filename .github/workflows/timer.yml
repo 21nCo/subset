@@ -1,0 +1,80 @@
+name: Timer macOS
+
+# Builds and tests the Timer menu bar app on macOS: the TimerCore package tests, including a real daemon run from the
+# built CLI, the generated project's reproducibility, and an unsigned Release build that embeds the CLI runtime. No
+# signing credentials are available or needed here; releases go through release-macos.yml.
+on:
+  pull_request:
+    paths:
+      - 'native/timer/**'
+      - 'packages/timer/**'
+      - 'packages/timer-cli/**'
+      - 'apps/timer/**'
+      - '.github/workflows/timer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native/timer/**'
+      - 'packages/timer/**'
+      - 'packages/timer-cli/**'
+      - 'apps/timer/**'
+      - '.github/workflows/timer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: timer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "No Xcode 26 on this runner." >&2; exit 1; fi
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      # Stages packages/timer-cli/app-runtime, which the app embeds, and dist/cli.mjs for the integration test.
+      - name: Build the Timer CLI runtime
+        run: npm ci && npm run build
+
+      - name: Package tests
+        working-directory: native/timer
+        env:
+          SUBSET_TIMER_CLI_PATH: ${{ github.workspace }}/packages/timer-cli/dist/cli.mjs
+        run: swift test
+
+      - name: Generated project is current
+        working-directory: native/timer
+        run: |
+          gem install --user-install xcodeproj -v 1.27.0
+          export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"
+          ruby ProjectGenerator.rb
+          git diff --exit-code -- Timer.xcodeproj
+          test -z "$(git status --porcelain -- Timer.xcodeproj)"
+
+      # Release, so a missing CLI runtime fails the build instead of warning.
+      - name: Build the app (unsigned)
+        working-directory: native/timer
+        run: |
+          xcodebuild -project Timer.xcodeproj -scheme Timer -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build
+          resources="$RUNNER_TEMP/derived/Build/Products/Release/Timer.app/Contents/Resources/timer-cli"
+          for file in dist/cli.mjs web/index.html mcp-app/board.html skills/subset-timer/SKILL.md; do
+            test -f "$resources/$file" || { echo "Timer.app is missing timer-cli/$file" >&2; exit 1; }
+          done
