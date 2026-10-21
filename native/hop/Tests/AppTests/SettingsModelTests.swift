@@ -196,4 +196,101 @@ final class SettingsModelTests: XCTestCase {
         settings.openAccessibilitySettings()
         XCTAssertEqual(requests, ["prompt", open], "not allowed: prompts so Hop is listed, then opens the pane")
     }
+
+    // MARK: - Window previews
+
+    /// Screen Recording as macOS would answer: granted or not, and whether Hop ever asked.
+    private final class FakeScreenRecording {
+        var granted = false
+        var requested = false
+        var calls: [String] = []
+
+        var pane: ScreenRecordingPane {
+            ScreenRecordingPane(
+                isGranted: { self.granted },
+                wasRequested: { self.requested },
+                request: {
+                    self.requested = true
+                    self.calls.append("request")
+                },
+                open: { self.calls.append("open \($0.absoluteString)") }
+            )
+        }
+    }
+
+    private func model(_ screenRecording: FakeScreenRecording) -> SettingsModel {
+        SettingsModel(store: SettingsStore(defaults: defaults), loginItemService: loginItem,
+                      screenRecordingPane: screenRecording.pane)
+    }
+
+    func testTurningPreviewsOnAsksForScreenRecordingOnceAndSaysTheSwitcherShowsIcons() {
+        let screenRecording = FakeScreenRecording()
+        let settings = model(screenRecording)
+        XCTAssertFalse(settings.settings.showWindowPreviews, "off by default")
+        XCTAssertEqual(settings.screenRecording, .notDetermined)
+        XCTAssertEqual(screenRecording.calls, [], "nothing is asked while previews are off")
+        var applied: [Settings] = []
+        settings.onChange = { applied.append($0) }
+
+        settings.setShowWindowPreviews(true)
+        XCTAssertEqual(screenRecording.calls, ["request"])
+        XCTAssertEqual(applied.map(\.showWindowPreviews), [true])
+        XCTAssertTrue(SettingsStore(defaults: defaults).load().showWindowPreviews, "saved at once")
+        XCTAssertEqual(settings.screenRecording, .denied)
+        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording isn't allowed for Hop, so the switcher shows app icons.")
+        XCTAssertFalse(settings.capturesThumbnails())
+
+        settings.setShowWindowPreviews(false)
+        XCTAssertEqual(screenRecording.calls, ["request"], "turning previews off asks nothing")
+        XCTAssertEqual(applied.map(\.showWindowPreviews), [true, false])
+    }
+
+    func testTurningPreviewsOnWithAccessAlreadyGrantedAsksNothingAndCaptures() {
+        let screenRecording = FakeScreenRecording()
+        screenRecording.granted = true
+        let settings = model(screenRecording)
+        settings.setShowWindowPreviews(true)
+        XCTAssertEqual(screenRecording.calls, [])
+        XCTAssertEqual(settings.screenRecording, .granted)
+        XCTAssertNil(settings.screenRecording.notice)
+        XCTAssertTrue(settings.capturesThumbnails())
+    }
+
+    func testARevocationNoticedWhenTheSwitcherOpensShowsInSettingsAndStopsCapture() {
+        let screenRecording = FakeScreenRecording()
+        screenRecording.granted = true
+        let settings = model(screenRecording)
+        settings.setShowWindowPreviews(true)
+        XCTAssertTrue(settings.capturesThumbnails())
+        screenRecording.granted = false
+        XCTAssertFalse(settings.capturesThumbnails(), "the switcher shows icons")
+        XCTAssertEqual(settings.screenRecording, .revoked)
+        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording was turned off for Hop, so the switcher shows app icons.")
+        XCTAssertEqual(screenRecording.calls, [], "never asks while switching")
+    }
+
+    func testPreviewsOffNeverCaptureEvenWithAccess() {
+        let screenRecording = FakeScreenRecording()
+        screenRecording.granted = true
+        XCTAssertFalse(model(screenRecording).capturesThumbnails())
+    }
+
+    func testAnEarlierRequestReadsAsDeniedAfterRelaunch() {
+        let screenRecording = FakeScreenRecording()
+        screenRecording.requested = true
+        XCTAssertEqual(model(screenRecording).screenRecording, .denied)
+    }
+
+    func testOpenScreenRecordingSettingsAsksFirstOnlyWhenNotAllowed() {
+        let screenRecording = FakeScreenRecording()
+        let settings = model(screenRecording)
+        let open = "open x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        settings.openScreenRecordingSettings()
+        XCTAssertEqual(screenRecording.calls, ["request", open])
+        screenRecording.granted = true
+        screenRecording.calls = []
+        settings.openScreenRecordingSettings()
+        XCTAssertEqual(screenRecording.calls, [open])
+        XCTAssertEqual(settings.screenRecording, .granted)
+    }
 }

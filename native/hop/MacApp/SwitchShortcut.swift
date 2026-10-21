@@ -33,12 +33,18 @@ final class SwitchShortcutController {
     /// permission again and shows onboarding.
     var onNeedsPermission: () -> Void = {}
 
-    convenience init(windowList: WindowListController, settings: @escaping () -> Settings) {
+    convenience init(
+        windowList: WindowListController,
+        settings: @escaping () -> Settings,
+        capturesThumbnails: @escaping () -> Bool
+    ) {
         self.init(
             switcher: SwitcherController(
                 readWindows: { windowList.refresh() },
                 windowOperator: windowList.windowOperator,
-                settings: settings
+                settings: settings,
+                thumbnails: ThumbnailProvider(),
+                capturesThumbnails: capturesThumbnails
             ),
             shortcut: settings().shortcut,
             sameAppShortcut: settings().sameAppShortcut
@@ -91,6 +97,11 @@ final class SwitchShortcutController {
     func settingsChanged(_ settings: Settings) {
         use(settings.shortcut, sameApp: settings.sameAppShortcut)
         switcher.settingsChanged()
+    }
+
+    /// Screen Recording is not granted: the switcher drops every thumbnail and shows icons.
+    func dropThumbnails() {
+        switcher.dropThumbnails()
     }
 
     /// Installs the tap. Call only while the process is trusted; returns false if the system refused the tap.

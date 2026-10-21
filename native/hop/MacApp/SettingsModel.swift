@@ -65,8 +65,8 @@ struct ExcludedApp: Identifiable, Equatable {
 }
 
 /// Hop's settings while it runs: loads them at launch, saves each change at once and hands it to the app
-/// (`onChange`), and holds what the Settings window shows besides them: the shortcut recorder, the login item and the
-/// Accessibility permission.
+/// (`onChange`), and holds what the Settings window shows besides them: the shortcut recorder, the login item, and the
+/// Accessibility and Screen Recording permissions.
 ///
 /// Recording a shortcut (the switch shortcut or the same-app shortcut) takes every key press in Hop (a local event
 /// monitor) and asks the app to let every key through the event tap (`onRecordingChange`) until it ends: with a new
@@ -87,27 +87,37 @@ final class SettingsModel: ObservableObject {
     /// Why turning launch at login on or off failed, or nil.
     @Published private(set) var loginItemError: String?
     @Published var isAccessibilityTrusted = false
+    /// The Screen Recording permission as last sampled; window previews need it.
+    @Published private(set) var screenRecording = ScreenRecordingAccess.notDetermined
 
     /// Called after each change to the settings, once they are saved.
     var onChange: (Settings) -> Void = { _ in }
     /// Called when recording starts (true) and ends (false).
     var onRecordingChange: (Bool) -> Void = { _ in }
+    /// Called after each sample that finds Screen Recording not granted, wherever it was taken (the Settings window,
+    /// Hop becoming active, a switcher opening), so the switcher drops every thumbnail at once.
+    var onScreenRecordingNotGranted: () -> Void = {}
 
     private let store: SettingsStore
     private let loginItemService: any LoginItemService
     private let accessibilityPane: AccessibilityPane
+    private let screenRecordingPane: ScreenRecordingPane
+    private var screenRecordingGate = ScreenRecordingGate()
     private var monitor: Any?
 
     init(
         store: SettingsStore = SettingsStore(),
         loginItemService: any LoginItemService = MainAppLoginItem(),
-        accessibilityPane: AccessibilityPane = .live
+        accessibilityPane: AccessibilityPane = .live,
+        screenRecordingPane: ScreenRecordingPane = .live
     ) {
         self.store = store
         self.loginItemService = loginItemService
         self.accessibilityPane = accessibilityPane
+        self.screenRecordingPane = screenRecordingPane
         settings = store.load()
         loginItem = loginItemService.status
+        refreshScreenRecording()
     }
 
     /// Applies a change, saves it and tells the app. Nothing happens when it changes nothing.
@@ -267,6 +277,43 @@ final class SettingsModel: ObservableObject {
 
     func openLoginItems() {
         loginItemService.openSettings()
+    }
+
+    // MARK: - Window previews
+
+    /// Turns window previews on or off. Turning them on asks for Screen Recording unless Hop has it; macOS shows its
+    /// prompt then, never while switching.
+    func setShowWindowPreviews(_ on: Bool) {
+        update { $0.showWindowPreviews = on }
+        if on, !screenRecordingPane.isGranted() { screenRecordingPane.request() }
+        refreshScreenRecording()
+    }
+
+    /// Samples the Screen Recording permission, without prompting. A sample that finds it not granted tells the app
+    /// (`onScreenRecordingNotGranted`), even when it was already not granted.
+    @discardableResult
+    func refreshScreenRecording() -> ScreenRecordingAccess {
+        let access = screenRecordingGate.update(
+            granted: screenRecordingPane.isGranted(),
+            requested: screenRecordingPane.wasRequested()
+        )
+        if access != screenRecording { screenRecording = access }
+        if access != .granted { onScreenRecordingNotGranted() }
+        return access
+    }
+
+    /// Whether a switcher opening now captures thumbnails: previews are on and Screen Recording is granted. Samples the
+    /// permission without prompting, so a revocation noticed here shows in the Settings window too.
+    func capturesThumbnails() -> Bool {
+        guard settings.showWindowPreviews else { return false }
+        return ScreenRecordingGate.captures(previewsOn: true, access: refreshScreenRecording())
+    }
+
+    /// Opens Privacy & Security > Screen Recording. When Hop is not allowed yet, it asks first so Hop is listed there.
+    func openScreenRecordingSettings() {
+        if !screenRecordingPane.isGranted() { screenRecordingPane.request() }
+        screenRecordingPane.open(ScreenRecordingPane.settingsURL)
+        refreshScreenRecording()
     }
 
     // MARK: - Permissions

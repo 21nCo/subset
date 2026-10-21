@@ -4,8 +4,9 @@ import SwiftUI
 
 /// What the switcher panel shows.
 enum SwitcherContent {
-    /// The open switcher; `icons` holds each listed app's icon by pid.
-    case switcher(SwitcherViewModel, icons: [pid_t: NSImage])
+    /// The open switcher; `icons` holds each listed app's icon by pid, and `thumbnails` the windows' images that have
+    /// arrived, by window. A cell without one shows its app's icon.
+    case switcher(SwitcherViewModel, icons: [pid_t: NSImage], thumbnails: [HopCore.WindowRef: CGImage] = [:])
     /// Only a message, after the switcher closed: why the committed switch did not happen.
     case message(String)
 }
@@ -130,7 +131,7 @@ final class SwitcherContentView: NSView {
         let previousMessage = message
         let size: NSSize
         switch content {
-        case let .switcher(model, _):
+        case let .switcher(model, _, _):
             self.model = model
             message = model.message
             let grid = model.items.isEmpty
@@ -380,7 +381,7 @@ struct SwitcherView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             switch content {
-            case let .switcher(model, icons):
+            case let .switcher(model, icons, thumbnails):
                 if !model.query.isEmpty {
                     QueryText(model.query)
                         .frame(maxWidth: .infinity, minHeight: SwitcherContentView.queryHeight, maxHeight: SwitcherContentView.queryHeight)
@@ -391,7 +392,7 @@ struct SwitcherView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, minHeight: SwitcherContentView.emptyHeight)
                 } else {
-                    SwitcherGrid(model: model, icons: icons)
+                    SwitcherGrid(model: model, icons: icons, thumbnails: thumbnails)
                         .padding(.leading, gridOrigin.x)
                 }
                 if let message = model.message {
@@ -451,6 +452,7 @@ private struct MessageText: View {
 private struct SwitcherGrid: View {
     let model: SwitcherViewModel
     let icons: [pid_t: NSImage]
+    let thumbnails: [HopCore.WindowRef: CGImage]
 
     var body: some View {
         let layout = model.layout
@@ -464,6 +466,7 @@ private struct SwitcherGrid: View {
                         SwitcherCell(
                             item: model.items[index],
                             icon: icons[model.items[index].pid],
+                            thumbnail: model.items[index].window.flatMap { thumbnails[$0.ref] },
                             isSelected: index == model.selection
                         )
                         .frame(width: metrics.cellSize.width, height: metrics.cellSize.height)
@@ -477,11 +480,14 @@ private struct SwitcherGrid: View {
 }
 
 /// One window: its app's icon at 64 pt with the minimized and hidden badges, and its title (or app name) on one line,
-/// truncated in the middle. A windowless app's cell shows its icon and name with a dashed-window badge. The selection
-/// is a rounded highlight that thickens with Increase Contrast and does not animate with Reduce Motion.
+/// truncated in the middle. With a thumbnail, the window's image fills the preview area in place of the large icon,
+/// with the app's icon small at its corner; the image is decorative and changes nothing Accessibility reads. A
+/// windowless app's cell shows its icon and name with a dashed-window badge. The selection is a rounded highlight that
+/// thickens with Increase Contrast and does not animate with Reduce Motion.
 private struct SwitcherCell: View {
     let item: SwitcherItem
     let icon: NSImage?
+    let thumbnail: CGImage?
     let isSelected: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -491,15 +497,21 @@ private struct SwitcherCell: View {
         let increased = contrast == .increased
         VStack(spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
-                Group {
-                    if let icon {
-                        Image(nsImage: icon).resizable()
-                    } else {
-                        Image(systemName: "macwindow").resizable().foregroundStyle(.secondary)
+                if let thumbnail {
+                    ZStack(alignment: .bottomLeading) {
+                        Image(decorative: thumbnail, scale: 1)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .frame(width: ThumbnailSizing.cellArea.width, height: ThumbnailSizing.cellArea.height)
+                        appIcon.frame(width: 24, height: 24).offset(x: -4, y: 4)
                     }
+                    .frame(width: ThumbnailSizing.cellArea.width, height: ThumbnailSizing.cellArea.height)
+                } else {
+                    appIcon
+                        .frame(width: 64, height: 64)
+                        .opacity(item.isMinimized || item.isAppHidden ? 0.6 : 1)
                 }
-                .frame(width: 64, height: 64)
-                .opacity(item.isMinimized || item.isAppHidden ? 0.6 : 1)
                 HStack(spacing: 2) {
                     if item.window == nil { Badge(symbol: "rectangle.dashed") }
                     if item.isMinimized { Badge(symbol: "minus") }
@@ -526,6 +538,18 @@ private struct SwitcherCell: View {
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSelected)
+    }
+}
+
+extension SwitcherCell {
+    private var appIcon: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon).resizable()
+            } else {
+                Image(systemName: "macwindow").resizable().foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

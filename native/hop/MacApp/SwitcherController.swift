@@ -23,6 +23,10 @@ import os
 /// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
 /// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
 /// appears after a fresh read.
+///
+/// With previews on and Screen Recording granted (`capturesThumbnails`, which never prompts), opening the switcher
+/// also captures a thumbnail of each listed window (`ThumbnailProvider`); a cell shows its app's icon until its window's
+/// image arrives, and keeps it if the window has no image. Otherwise every cell shows the icon and no image is kept.
 @MainActor
 final class SwitcherController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switcher")
@@ -38,6 +42,10 @@ final class SwitcherController {
     private let settings: () -> Settings
     /// The pid of the frontmost app, whose windows the same-app shortcut goes through.
     private let frontmostApp: () -> pid_t?
+    /// The window thumbnails, or nil for a switcher that never shows them.
+    private let thumbnails: ThumbnailProvider?
+    /// Whether previews are on and Screen Recording is granted, sampled each time the switcher opens.
+    private let capturesThumbnails: () -> Bool
     let panel = SwitcherPanel()
     private(set) var model: SwitcherViewModel?
     private var screen: NSScreen?
@@ -83,12 +91,17 @@ final class SwitcherController {
         readWindows: @escaping () -> WindowList,
         windowOperator: any WindowOperator,
         settings: @escaping () -> Settings = { .default },
-        frontmostApp: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+        frontmostApp: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        thumbnails: ThumbnailProvider? = nil,
+        capturesThumbnails: @escaping () -> Bool = { false }
     ) {
         self.readWindows = readWindows
         self.windowOperator = windowOperator
         self.settings = settings
         self.frontmostApp = frontmostApp
+        self.thumbnails = thumbnails
+        self.capturesThumbnails = capturesThumbnails
+        thumbnails?.onUpdate = { [unowned self] in render() }
         panel.switcherView.onHover = { [unowned self] index in
             guard let model, model.items.indices.contains(index) else { return }
             if deferred.isEmpty {
@@ -125,8 +138,9 @@ final class SwitcherController {
         self.screen = screen
         loadIcons()
         observeTerminations()
+        loadThumbnails(scale: screen?.backingScaleFactor ?? 2)
         guard let screen else { return }
-        panel.show(.switcher(model, icons: icons), on: screen)
+        panel.show(.switcher(model, icons: icons, thumbnails: currentThumbnails()), on: screen)
         Self.log.debug("Switcher opened with \(model.items.count, privacy: .public) items")
     }
 
@@ -139,6 +153,7 @@ final class SwitcherController {
     /// moves to its follower if its item left, and a waiting commit or click can no longer reach a removed item. The
     /// list is then read again, for anything the settings now show.
     func settingsChanged() {
+        if !settings().showWindowPreviews { dropThumbnails() }
         guard let model else { return }
         let filter = currentFilter()
         guard filter != model.filter else { return }
@@ -267,7 +282,7 @@ final class SwitcherController {
 
     private func render() {
         guard let model, let screen, !isReleased else { return }
-        panel.update(.switcher(model, icons: icons), on: screen)
+        panel.update(.switcher(model, icons: icons, thumbnails: currentThumbnails()), on: screen)
     }
 
     private func refresh() {
@@ -277,6 +292,7 @@ final class SwitcherController {
         model?.apply(filter)
         model?.refreshed(list.items, unread: Set(list.skippedApps.map(\.pid)))
         loadIcons()
+        if let model { thumbnails?.retain(model.candidates.compactMap(\.window)) }
         render()
     }
 
@@ -312,6 +328,7 @@ final class SwitcherController {
         isReleased = false
         messageTask?.cancel()
         messageTask = nil
+        thumbnails?.cancel()
         if let terminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver) }
         terminationObserver = nil
         panel.hide()
@@ -336,6 +353,31 @@ final class SwitcherController {
         for pid in pids where icons[pid] == nil {
             icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon
         }
+    }
+
+    /// Drops every thumbnail, and any still being captured, and shows the open switcher's cells with their icons at
+    /// once: previews were turned off, or a sample found Screen Recording not granted.
+    func dropThumbnails() {
+        guard let thumbnails else { return }
+        let hadImages = !thumbnails.cachedRefs.isEmpty
+        thumbnails.clear()
+        if hadImages { render() }
+    }
+
+    /// Captures every candidate window's thumbnail when previews may be shown; otherwise drops any kept, so a switcher
+    /// with previews off or without Screen Recording shows icons only.
+    private func loadThumbnails(scale: CGFloat) {
+        guard let thumbnails, let model else { return }
+        guard capturesThumbnails() else { return thumbnails.clear() }
+        thumbnails.load(model.candidates.compactMap(\.window), scale: scale)
+    }
+
+    /// The thumbnails in memory for the listed windows. A minimized window, or one whose app is hidden, is not on screen
+    /// and shows its icon with its badge, even when an image was taken before an operation minimized or hid it.
+    func currentThumbnails() -> [HopCore.WindowRef: CGImage] {
+        guard let thumbnails, let model else { return [:] }
+        let shown = model.items.compactMap(\.window).filter { !$0.isMinimized && !$0.isAppHidden }
+        return thumbnails.images(for: shown.map(\.ref))
     }
 
     private static func perform(

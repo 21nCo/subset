@@ -31,6 +31,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         model.refreshLoginItem()
+        model.refreshScreenRecording()
         // An accessory app is not active until asked; activate so the window comes to the front with focus.
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
@@ -53,6 +54,7 @@ struct SettingsView: View {
             ShortcutSection(model: model)
             ShownWindowsSection(model: model)
             ExcludedAppsSection(model: model)
+            PreviewsSection(model: model)
             LoginSection(model: model)
             PermissionsSection(model: model)
         }
@@ -190,6 +192,40 @@ private struct ExcludedAppsSection: View {
             Text("Hop never shows windows of excluded apps.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Show window previews: what turning it on means (Screen Recording, asked again from time to time, images in memory
+/// only), the link to the Screen Recording pane, and, while previews are on without access, one line saying the
+/// switcher shows icons.
+private struct PreviewsSection: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { model.settings.showWindowPreviews },
+                set: { model.setShowWindowPreviews($0) }
+            )) {
+                Text("Show window previews")
+                Text("""
+                    Shows a recent image of each window instead of its app's icon. macOS asks you to allow Screen \
+                    Recording for this, and may ask again from time to time. Images stay in memory and are never saved.
+                    """)
+            }
+            if model.settings.showWindowPreviews {
+                if let notice = model.screenRecording.notice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .help(notice)
+                }
+                Button("Open Screen Recording Settings") { model.openScreenRecordingSettings() }
+            }
+        } header: {
+            Text("Window previews")
         }
     }
 }
