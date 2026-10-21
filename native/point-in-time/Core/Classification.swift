@@ -18,7 +18,7 @@ public struct BlockLabeling: Equatable, Sendable {
     public var label: BlockLabel?
     public var reason: String?
     public var confidence: Double?
-    /// `chatgpt-codex`, `openrouter`, or `user` for a correction.
+    /// The provider's name, such as `openrouter`, or `user` for a correction.
     public var provider: String?
     public var model: String?
     public var at: Date?
@@ -230,8 +230,6 @@ public struct ClassificationRequest: Sendable {
 /// Why a provider call did not produce labels. Messages never include the prompt, the answer, or a credential.
 public enum ProviderError: Error, Equatable, CustomStringConvertible {
     case notConfigured(String)
-    case notSignedIn
-    case notChatGPT
     case unauthorized(String)
     case network(String)
     case rateLimited(retryAfter: TimeInterval?)
@@ -242,8 +240,6 @@ public enum ProviderError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .notConfigured(let message): message
-        case .notSignedIn: "Codex is not signed in. Sign in with `codex login`."
-        case .notChatGPT: "Codex is not signed in with ChatGPT. Sign in with `codex login` using your ChatGPT account."
         case .unauthorized(let message): message
         case .network(let message): "Network error: \(message)"
         case .rateLimited: "The provider is rate limiting requests"
@@ -257,10 +253,10 @@ public enum ProviderError: Error, Equatable, CustomStringConvertible {
 /// A classification provider: sends a prompt and returns the model's final text, which `ClassificationRequest.validate`
 /// checks. The text is data only; it is never executed or rendered as markup.
 public protocol ClassificationProvider: Sendable {
-    /// Recorded with every label: `chatgpt-codex` or `openrouter`.
+    /// Recorded with every label, such as `openrouter`.
     var name: String { get }
     var model: String { get }
-    /// Checks the provider can take a request (for Codex, its sign-in) without sending any activity. The request is
+    /// Checks the provider can take a request (a sign-in, say) without sending any activity. The request is
     /// built after this returns, from the settings in force then.
     func prepare() async throws
     func complete(prompt: String, schema: String) async throws -> String
@@ -268,4 +264,14 @@ public protocol ClassificationProvider: Sendable {
 
 extension ClassificationProvider {
     public func prepare() async throws {}
+}
+
+/// The provider chosen in settings. A stored choice this build does not offer, such as the ChatGPT subscription an
+/// earlier build listed, reads as off: nothing is sent until the user chooses a provider again.
+public enum ProviderChoice: String, CaseIterable, Sendable {
+    case off, openRouter
+
+    public init(stored: String?) {
+        self = stored.flatMap(Self.init(rawValue:)) ?? .off
+    }
 }

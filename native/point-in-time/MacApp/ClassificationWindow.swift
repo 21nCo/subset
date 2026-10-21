@@ -24,7 +24,6 @@ final class ClassificationWindowController {
         model.modelField = model.settings.openRouterModel
         model.refreshKey()
         model.refresh()
-        model.checkProvider()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)
@@ -35,7 +34,6 @@ final class ClassificationWindowController {
 final class ClassificationModel: ObservableObject {
     @Published var status = ClassificationStatus()
     @Published var recent: [Block] = []
-    @Published var codexState = ""
     @Published var keyField = ""
     /// The OpenRouter model being typed; it is used only once committed, so a partial ID is never sent.
     @Published var modelField = ""
@@ -43,8 +41,6 @@ final class ClassificationModel: ObservableObject {
     @Published var hasKey = false
     @Published var storeError: String?
     let controller: ClassificationController
-    /// Changes with each provider check, so only the latest one sets the status it shows.
-    private var check = 0
     private let store: ActivityStore?
 
     init(controller: ClassificationController, store: ActivityStore?) {
@@ -58,7 +54,6 @@ final class ClassificationModel: ObservableObject {
         Binding(get: { self.settings[keyPath: keyPath] }, set: { value in
             self.objectWillChange.send()
             self.settings[keyPath: keyPath] = value
-            self.checkProvider()
         })
     }
 
@@ -76,49 +71,6 @@ final class ClassificationModel: ObservableObject {
     /// a removal.
     func refreshKey() {
         hasKey = (try? KeychainSecret.openRouterKey.exists()) ?? false
-    }
-
-    func checkProvider(refresh: Bool = false) {
-        check += 1
-        guard settings.provider == .codex else { return }
-        codexState = "Checking codex…"
-        let check = check
-        Task {
-            let codex = await controller.codex(refresh: refresh)
-            guard check == self.check else { return }
-            guard let codex else {
-                codexState = "codex was not found in the login shell’s PATH. Choose the binary below."
-                return
-            }
-            let status = await codex.loginStatus()
-            guard check == self.check else { return }
-            switch status {
-            case .signedIn:
-                codexState = "\(codex.executable.path): signed in with ChatGPT"
-                // Check Again after signing in retries the waiting blocks now rather than after the backoff.
-                if refresh { controller.resume() }
-            case .notChatGPT: codexState = "Codex is not signed in with ChatGPT (an API key is not used). Sign in with `codex login` using ChatGPT in Terminal, then check again."
-            case .signedOut: codexState = "Sign in with `codex login` in Terminal, then check again."
-            case .unavailable(let message): codexState = "\(codex.executable.path) could not run: \(message)"
-            }
-        }
-    }
-
-    func chooseCodex() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.showsHiddenFiles = true
-        panel.message = "Choose your codex binary"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        objectWillChange.send()
-        settings.codexPath = url.path
-        checkProvider()
-    }
-
-    func useLoginShellCodex() {
-        objectWillChange.send()
-        settings.codexPath = nil
-        checkProvider(refresh: true)
     }
 
     func saveKey() {
@@ -218,21 +170,11 @@ struct ClassificationView: View {
             Section("Provider") {
                 Picker("Classify blocks with", selection: model.binding(\.provider)) {
                     Text("Off (nothing is sent)").tag(ProviderChoice.off)
-                    Text("ChatGPT subscription (Codex CLI)").tag(ProviderChoice.codex)
                     Text("OpenRouter key").tag(ProviderChoice.openRouter)
                 }
                 switch model.settings.provider {
                 case .off:
                     Text("Blocks stay on this Mac, pending, until you choose a provider.").foregroundStyle(.secondary)
-                case .codex:
-                    Text(verbatim: model.codexState)
-                    HStack {
-                        Button("Choose codex Binary…") { model.chooseCodex() }
-                        if model.settings.codexPath != nil { Button("Use Login Shell PATH") { model.useLoginShellCodex() } }
-                        Button("Check Again") { model.checkProvider(refresh: true) }
-                    }
-                    Text("pointInTime runs your codex binary in an empty private folder, inside a macOS sandbox in which it can read none of your files (your home folder, other users’ folders, external volumes, temporary folders) except its installation, its sign-in, and the request, and can start no other program. Its tools and web search are also turned off, any answer for which Codex went beyond the request is discarded, and pointInTime never reads Codex’s credential files.")
-                        .font(.caption).foregroundStyle(.secondary)
                 case .openRouter:
                     Text(model.hasKey ? "A key is saved in the Keychain." : "No key is saved.")
                     SecureField("OpenRouter API key", text: $model.keyField)

@@ -2,16 +2,12 @@ import AppKit
 import Network
 import PointInTimeCore
 
-enum ProviderChoice: String, CaseIterable {
-    case off, codex, openRouter
-}
-
 /// The user's classification choices, persisted in the app's defaults. Nothing is sent until a provider is chosen. The
 /// OpenRouter key is not here: it lives in the Keychain.
 @MainActor
 final class ClassificationSettings {
     private let defaults: UserDefaults
-    /// Called with true when the change is to who sends (provider, codex binary, or model), false for what is sent.
+    /// Called with true when the change is to who sends (provider or model), false for what is sent.
     var onChange: ((_ providerChanged: Bool) -> Void)?
 
     init(defaults: UserDefaults = .standard) {
@@ -19,19 +15,13 @@ final class ClassificationSettings {
     }
 
     var provider: ProviderChoice {
-        get { defaults.string(forKey: "classificationProvider").flatMap(ProviderChoice.init) ?? .off }
+        get { ProviderChoice(stored: defaults.string(forKey: "classificationProvider")) }
         set { defaults.set(newValue.rawValue, forKey: "classificationProvider"); onChange?(true) }
     }
 
     var sendWindowTitles: Bool {
         get { defaults.bool(forKey: "sendWindowTitles") }
         set { defaults.set(newValue, forKey: "sendWindowTitles"); onChange?(false) }
-    }
-
-    /// A `codex` binary the user chose; nil means the one found through the login shell's `PATH`.
-    var codexPath: String? {
-        get { defaults.string(forKey: "codexPath") }
-        set { defaults.set(newValue, forKey: "codexPath"); onChange?(true) }
     }
 
     var openRouterModel: String {
@@ -56,7 +46,6 @@ final class ClassificationController {
     /// generation its provider was set up with.
     private var generation = 0
     private var timer: Timer?
-    private var loginPATH: String?
     private let pathMonitor = NWPathMonitor()
     private var connectivity = ConnectivityTracker()
     private var lastOptions: ClassificationOptions?
@@ -116,7 +105,7 @@ final class ClassificationController {
     }
 
     /// A classification setting or the key changed: a request being set up under the old ones is not sent.
-    /// `providerChanged` is true for a change of provider, codex binary, model, or key.
+    /// `providerChanged` is true for a change of provider, model, or key.
     func settingsChanged(providerChanged: Bool) {
         generation += 1
         lastOptions = options
@@ -149,7 +138,7 @@ final class ClassificationController {
         Task {
             while true {
                 let generation = self.generation
-                let provider = await currentProvider()
+                let provider = currentProvider()
                 guard await runner.runOnce(provider: provider, options: generation == self.generation ? options : nil),
                       provider != nil else { break }
             }
@@ -159,34 +148,13 @@ final class ClassificationController {
         }
     }
 
-    /// The configured provider, nil when none is chosen. One that cannot be set up fails every request with the reason,
-    /// so the queue backs off and the settings window shows it.
-    func currentProvider() async -> (any ClassificationProvider)? {
+    /// The configured provider, nil when none is chosen.
+    func currentProvider() -> (any ClassificationProvider)? {
         switch settings.provider {
         case .off: return nil
-        case .codex:
-            return await codex() ?? Unavailable(reason: "No codex binary was found in the login shell’s PATH. Choose one in Classification settings.")
         case .openRouter:
             // The key is read only when a batch is sent, not on every tick.
             return OpenRouterClient(keychain: .openRouterKey, model: settings.openRouterModel)
         }
-    }
-
-    /// `refresh` probes the login shell's `PATH` again (Check Again); a failed probe is retried on the next call.
-    func codex(refresh: Bool = false) async -> CodexCLI? {
-        if loginPATH == nil || refresh { loginPATH = await CodexCLI.loginShellPATH() }
-        let path = loginPATH
-        let executable = settings.codexPath.map { URL(fileURLWithPath: $0) } ?? path.flatMap(CodexCLI.locate(in:))
-        return executable.map { CodexCLI(executable: $0, searchPath: path) }
-    }
-}
-
-private struct Unavailable: ClassificationProvider {
-    let name = "unavailable"
-    let model = ""
-    let reason: String
-
-    func complete(prompt: String, schema: String) async throws -> String {
-        throw ProviderError.notConfigured(reason)
     }
 }
