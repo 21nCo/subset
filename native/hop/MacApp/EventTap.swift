@@ -78,8 +78,14 @@ final class EventTap {
 }
 
 /// The input an event delivers to the tap, or nil for an event type the tap does not handle. The typed character is
-/// read only when `readsText`, so ⌥ and ⌃ chords outside a switch never consult the keyboard layout.
-func tapInput(type: CGEventType, event: CGEvent, readsText: Bool) -> TapInput? {
+/// read only when `readsText`, so ⌥ and ⌃ chords outside a switch never consult the keyboard layout (`layout`, the
+/// current one unless a test fixes it).
+func tapInput(
+    type: CGEventType,
+    event: CGEvent,
+    readsText: Bool,
+    layout currentLayout: () -> KeyLayout? = KeyLayout.current
+) -> TapInput? {
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
         return .tapDisabled
@@ -93,7 +99,7 @@ func tapInput(type: CGEventType, event: CGEvent, readsText: Bool) -> TapInput? {
         // them.
         let command = modifiers.contains(.command)
         let types = readsText && !command && !modifiers.isDisjoint(with: [.option, .control])
-        let layout = kind == .keyDown && (command || types) ? KeyLayout.current() : nil
+        let layout = kind == .keyDown && (command || types) ? currentLayout() : nil
         let character = command ? layout?.commandCharacter(keyCode: keyCode) : nil
         let text = types ? layout?.typedCharacter(keyCode: keyCode, shift: modifiers.contains(.shift)) : nil
         return .key(KeyEvent(

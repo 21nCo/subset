@@ -14,8 +14,10 @@ import os
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
 /// switcher at once, and nothing draws it again. A hover after a waiting key waits behind it too, and selects the
-/// window it was over, not the place. A waiting commit ends the search once what came before it has been applied: it
-/// cancels if the search then lists nothing, and otherwise chooses only among what it listed.
+/// window it was over, not the place. While anything waits, a read can neither add an item to a search's list nor
+/// reorder it (`SwitcherViewModel.hold()`), so a waiting key or commit never acts on a window the search did not show.
+/// A waiting commit ends the search once what came before it has been applied: it cancels if the search then lists
+/// nothing, and otherwise chooses only among what it listed, in its order.
 /// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. Every listed
 /// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
 /// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
@@ -83,7 +85,7 @@ final class SwitcherController {
             }
             // Only the last hover matters once it waits.
             if case .select = deferred.last { deferred.removeLast() }
-            deferred.append(.select(model.items[index].id))
+            wait(.select(model.items[index].id))
         }
         panel.switcherView.onScroll = { [unowned self] rows in update { $0.scroll(byRows: rows) } }
         panel.switcherView.onChoose = { [unowned self] item in
@@ -136,9 +138,15 @@ final class SwitcherController {
     /// the selected window. While an operation is pending, an operation key, and anything after it, waits.
     func apply(_ event: SwitchSession.Event) {
         guard model != nil else { return }
-        if case .operation = event, pending > 0 { return deferred.append(.event(event)) }
-        if !deferred.isEmpty { return deferred.append(.event(event)) }
+        if case .operation = event, pending > 0 { return wait(.event(event)) }
+        if !deferred.isEmpty { return wait(.event(event)) }
         run(event)
+    }
+
+    /// Makes `next` wait for the pending operation. The first to wait holds the search's list as it is shown.
+    private func wait(_ next: Deferred) {
+        if deferred.isEmpty { model?.hold() }
+        deferred.append(next)
     }
 
     private func run(_ event: SwitchSession.Event) {
@@ -160,11 +168,10 @@ final class SwitcherController {
     /// list has been read again after it.
     private func commit(only item: SwitcherItem.ID?) {
         guard pending == 0 else {
-            deferred.append(.commit(item))
+            wait(.commit(item))
             isReleased = true
             panel.hide()
-            if deferred.count == 1 { endSearch() }
-            return
+            return endSearchBeforeCommit()
         }
         let target = if let item { model?.items.first { $0.id == item } } else { model?.selectedItem }
         reset()
@@ -212,18 +219,20 @@ final class SwitcherController {
     }
 
     /// The switch ended with a query while a commit waits: once everything typed before the release has been applied,
-    /// the search ends, and a search that lists nothing cancels, as releasing on "No matching windows" does.
-    private func endSearch() {
-        guard let model, !model.query.isEmpty else { return }
+    /// so the commit is next, the search ends, and a search that lists nothing cancels, as releasing on "No matching
+    /// windows" does.
+    private func endSearchBeforeCommit() {
+        guard case .commit = deferred.first, let model, !model.query.isEmpty else { return }
         guard !model.items.isEmpty else { return cancel() }
         update { $0.endSearch() }
     }
 
-    /// An operation's result has been reconciled with the list; once none is pending, carries out what waited.
+    /// An operation's result has been reconciled with the list; once none is pending, carries out what waited. Once
+    /// nothing waits, the search lists whatever matches again.
     private func settle() {
         pending -= 1
         while !deferred.isEmpty {
-            if case .commit = deferred.first { endSearch() }
+            endSearchBeforeCommit()
             guard pending == 0, !deferred.isEmpty else { break }
             switch deferred.removeFirst() {
             case let .event(event): run(event)
@@ -232,6 +241,7 @@ final class SwitcherController {
             case let .commit(item): commit(only: item)
             }
         }
+        if deferred.isEmpty { update { $0.stopHolding() } }
     }
 
     private func update(_ change: (inout SwitcherViewModel) -> Void) {

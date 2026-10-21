@@ -27,7 +27,9 @@ public enum SwitcherScope: Sendable, Equatable {
 ///
 /// Every listed item is in `scope`, passes `filter` and matches `query` (`SwitcherSearch`), whichever way the list
 /// changed: a fresh list, the kept items of apps that did not answer, an operation's result, a new filter, or a new
-/// query. Once a search has ended (`endSearch()`), the query is gone and only the items it listed then can be listed.
+/// query. While the host holds keys back (`hold()`), a search lists only items it listed when they began to wait; once
+/// a search has ended (`endSearch()`), the query is gone and only the items it listed then can be listed, in that
+/// order. Either way a later read can only remove items.
 public struct SwitcherViewModel: Sendable, Equatable {
     /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
@@ -38,6 +40,11 @@ public struct SwitcherViewModel: Sendable, Equatable {
             self.operation = operation
             self.item = item
         }
+    }
+
+    private struct Held: Sendable, Equatable {
+        var items: [SwitcherItem.ID]
+        var query: String
     }
 
     /// The listed items: those of `candidates` that match `query`, best match first.
@@ -51,8 +58,11 @@ public struct SwitcherViewModel: Sendable, Equatable {
     /// What has been typed since the switcher opened. It lives only here: never stored or logged, and gone with the
     /// switcher.
     public private(set) var query = ""
-    /// The items a search listed when it ended, the only ones that can be listed after it; nil while none has ended.
-    private var searched: Set<SwitcherItem.ID>?
+    /// While keys wait (`hold()`), the items listed when they began to wait, in that order, and the query then.
+    private var held: Held?
+    /// The items a search listed when it ended, in that order: the only ones that can be listed after it, in that
+    /// order; nil while none has ended.
+    private var searched: [SwitcherItem.ID]?
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
     public private(set) var firstVisibleRow = 0
@@ -116,9 +126,10 @@ public struct SwitcherViewModel: Sendable, Equatable {
         case let .trigger(direction, _), let .step(direction):
             step(direction)
         case let .type(character):
+            guard searched == nil else { return nil }
             search(query + String(character))
         case .deleteBackward:
-            guard !query.isEmpty else { return nil }
+            guard searched == nil, !query.isEmpty else { return nil }
             search(String(query.dropLast()))
         case let .row(direction):
             guard let selection else { return nil }
@@ -156,23 +167,47 @@ public struct SwitcherViewModel: Sendable, Equatable {
         select(0)
     }
 
-    /// The candidates that match the query, best match first, or those the ended search listed, in recency order.
+    /// The candidates that match the query, best match first. While keys wait, a search lists only items that were
+    /// listed when they began to, in the same order while the query is the same; an ended search lists the candidates
+    /// it listed, in its order.
     private func matches() -> [SwitcherItem] {
-        guard let searched else { return SwitcherSearch.matches(query, in: candidates) }
-        return candidates.filter { searched.contains($0.id) }
+        if let searched { return Self.ordered(candidates, as: searched) }
+        let found = SwitcherSearch.matches(query, in: candidates)
+        guard let held, !query.isEmpty else { return found }
+        let listed = Set(held.items)
+        let kept = found.filter { listed.contains($0.id) }
+        return query == held.query ? Self.ordered(kept, as: held.items) : kept
+    }
+
+    /// Those of `items` whose IDs are in `ids`, in the order of `ids`.
+    private static func ordered(_ items: [SwitcherItem], as ids: [SwitcherItem.ID]) -> [SwitcherItem] {
+        ids.compactMap { id in items.first { $0.id == id } }
+    }
+
+    /// The host has begun to hold keys back until a pending operation's result has been read: until `stopHolding()`, a
+    /// read cannot add an item to a search's list or reorder it, so a waiting key never acts on a window the switcher
+    /// did not show. A search typed by the waiting keys goes only through the items listed now. Without a query the
+    /// list changes as usual. Holding again changes nothing.
+    public mutating func hold() {
+        guard held == nil else { return }
+        held = Held(items: items.map(\.id), query: query)
+    }
+
+    /// Nothing waits any more: the search lists every candidate that matches it, any a read added included, with the
+    /// selection on its item.
+    public mutating func stopHolding() {
+        guard held != nil else { return }
+        held = nil
+        refreshed(candidates)
     }
 
     /// Ends the search when the switch ends while an operation is still pending, so the commit that waits for it
     /// chooses among what the user saw: the query is dropped, and from now on only the items listed now can be listed,
-    /// in recency order, with the selection on its item. Without a query this changes nothing.
+    /// in the order they are listed, with the selection on its item. Without a query this changes nothing.
     public mutating func endSearch() {
         guard !query.isEmpty else { return }
-        searched = Set(items.map(\.id))
+        searched = items.map(\.id)
         query = ""
-        let selected = selectedItem?.id
-        list(matches())
-        selection = nil
-        if let index = items.firstIndex(where: { $0.id == selected }) { select(index) }
     }
 
     /// Lists `items` and lays them out, keeping the scroll position where it can. The selection is the caller's.

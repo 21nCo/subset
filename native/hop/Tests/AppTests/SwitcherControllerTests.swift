@@ -702,6 +702,76 @@ final class SwitcherControllerTests: XCTestCase {
         XCTAssertFalse(switcher.panel.isVisible)
     }
 
+    /// A window of an app with this pid and name, titled `title`, with ref `ref`.
+    private func entry(_ ref: UInt64, _ title: String, app: String, pid: pid_t) -> WindowEntry {
+        WindowEntry(
+            app: SourceApp(pid: pid, bundleIdentifier: nil, name: app),
+            window: SourceWindow(ref: HopCore.WindowRef(rawValue: ref), title: title,
+                                 subrole: "AXStandardWindow", frame: CGRect(x: 0, y: 0, width: 400, height: 300)),
+            frame: CGRect(x: 0, y: 0, width: 400, height: 300),
+            display: nil
+        )
+    }
+
+    func testAWaitingCloseKeyPressedOnNoMatchActsOnNothingTheReadAddsAndTheReleaseCancels() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        lists = [windows, [windows[0], entry(20, "zz notes", app: "Notes", pid: 20), windows[2], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        for character in "zz" { switcher.apply(.type(character)) }
+        XCTAssertEqual(switcher.model?.emptyText, "No matching windows")
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "")
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "neither the waiting ⌘W nor the release acted on zz notes")
+        XCTAssertFalse(switcher.isOpen, "the release cancelled")
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "")
+    }
+
+    func testAWaitingCloseKeyPressedOnNoMatchWhileHeldActsOnNothingTheReadAdds() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        let notes = entry(20, "zz notes", app: "Notes", pid: 20)
+        lists = [windows, [windows[0], notes, windows[2], windows[3]]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        switcher.apply(.operation(.close))
+        for character in "zz" { switcher.apply(.type(character)) }
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { reads == 2 }, "the close's read")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "the waiting ⌘W did nothing to zz notes")
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [notes.ref], "once nothing waits, the new match is listed")
+        XCTAssertEqual(switcher.panel.switcherView.accessibilityQueryText, "Search: zz")
+        switcher.cancel()
+    }
+
+    func testAReleaseWaitingOnACloseFocusesTheFollowerInTheOrderTheSearchListed() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        // Recency C, A, B; "saf" lists the Safari windows first: A, B, C.
+        let guide = entry(30, "Safe guide", app: "TextEdit", pid: 30)
+        let docs = entry(31, "Docs", app: "Safari", pid: 31)
+        let news = entry(32, "News", app: "Safari", pid: 31)
+        lists = [[guide, docs, news], [guide, docs]]
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate)
+        switcher.open()
+        for character in "saf" { switcher.apply(.type(character)) }
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [docs.ref, news.ref, guide.ref])
+        switcher.apply(.step(.forward))
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, news.ref)
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the list is read again, then the release commits")
+        XCTAssertEqual(gate.calls.map(\.window), [news.ref, guide.ref], "News was followed by Safe guide, as listed")
+    }
+
     func testDeletingAfterARefreshShowsTheIconOfEachAppListedAgain() async throws {
         let recorder = RecordingWindowOperator()
         let own = WindowEntry(

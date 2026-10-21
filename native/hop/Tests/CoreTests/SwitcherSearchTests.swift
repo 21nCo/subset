@@ -210,6 +210,65 @@ final class SwitcherViewModelSearchTests: XCTestCase {
         XCTAssertEqual(model, before)
     }
 
+    /// Recency C, A, B; "saf" ranks the Safari windows first: A, B, C.
+    private let safari = [
+        window(10, "Safe guide", app: "TextEdit"),
+        window(11, "Docs", app: "Safari"),
+        window(12, "News", app: "Safari"),
+    ]
+
+    func testAnEndedSearchKeepsTheOrderItListed() {
+        var model = SwitcherViewModel(items: safari, available: wide)
+        typing("saf", into: &model)
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"])
+        model.handle(.step(.forward)) // News
+        model.endSearch()
+        model.refreshed([safari[2], safari[0], safari[1]])
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"], "a read does not reorder it")
+        model.refreshed([safari[0], safari[1]])
+        XCTAssertEqual(model.selectedItem?.displayTitle, "Safe guide", "the follower in the order it listed")
+        model.handle(.type("d"))
+        model.handle(.deleteBackward)
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "Safe guide"], "an ended search takes no more keys")
+        XCTAssertEqual(model.selectedItem?.displayTitle, "Safe guide")
+    }
+
+    func testWhileHeldAReadNeitherAddsToNorReordersASearchsList() {
+        let newer = window(13, "Safe house", app: "Safari")
+        var model = SwitcherViewModel(items: safari, available: wide)
+        typing("saf", into: &model)
+        model.hold()
+        model.refreshed([newer, safari[1], safari[0], safari[2]])
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"])
+        typing("e", into: &model)
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Safe guide"], "a waiting key searches only what was listed")
+        model.handle(.deleteBackward)
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Docs", "News", "Safe guide"])
+        model.stopHolding()
+        XCTAssertEqual(model.items.map(\.displayTitle), ["Safe house", "Docs", "News", "Safe guide"],
+                       "once nothing waits, a match the read added is listed")
+    }
+
+    func testAHeldSearchThatListedNothingListsNothingAfterARead() {
+        var model = SwitcherViewModel(items: items, available: wide)
+        typing("zz", into: &model)
+        model.hold()
+        model.refreshed(items + [window(5, "zz notes", app: "Notes")])
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertNil(model.handle(.operation(.close)), "a waiting ⌘W has nothing to act on")
+        model.stopHolding()
+        XCTAssertEqual(model.items.map(\.displayTitle), ["zz notes"])
+        XCTAssertEqual(model.selection, 0)
+    }
+
+    func testHoldingWithoutAQueryListsAsUsual() {
+        var model = SwitcherViewModel(items: items, available: wide)
+        model.hold()
+        model.refreshed([window(5, "New", app: "Numbers")] + items)
+        XCTAssertEqual(model.items.count, 6)
+        XCTAssertEqual(model.selectedItem?.displayTitle, "Q3 report")
+    }
+
     // MARK: - Same-app scope
 
     private func appWindows(_ count: Int, pid: pid_t) -> [SwitcherItem] {

@@ -90,24 +90,29 @@ final class KeyLayoutTests: XCTestCase {
     }
 
     func testTheTapReadsTheTypedCharacterOnlyDuringASwitch() throws {
+        let us = try XCTUnwrap(KeyLayout.named("com.apple.keylayout.US"))
+        var lookups = 0
+        let layout = { () -> KeyLayout? in
+            lookups += 1
+            return us
+        }
         let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 0x0E, keyDown: true))
         event.flags = .maskAlternate
-        guard case let .key(idle) = tapInput(type: .keyDown, event: event, readsText: false) else {
+        guard case let .key(idle) = tapInput(type: .keyDown, event: event, readsText: false, layout: layout) else {
             return XCTFail("a key-down is a key")
         }
-        XCTAssertNil(idle.text, "an ⌥ chord outside a switch never consults the layout")
-        guard case let .key(active) = tapInput(type: .keyDown, event: event, readsText: true) else {
+        XCTAssertNil(idle.text)
+        XCTAssertEqual(lookups, 0, "an ⌥ chord outside a switch never consults the layout")
+        guard case let .key(active) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
             return XCTFail("a key-down is a key")
         }
-        let layout = try XCTUnwrap(KeyLayout.current())
-        XCTAssertNotNil(active.text)
-        XCTAssertEqual(active.text, layout.typedCharacter(keyCode: 0x0E, shift: false))
+        XCTAssertEqual(active.text, "e", "the e the key types without ⌥")
         event.flags = [.maskAlternate, .maskCommand]
-        guard case let .key(command) = tapInput(type: .keyDown, event: event, readsText: true) else {
+        guard case let .key(command) = tapInput(type: .keyDown, event: event, readsText: true, layout: layout) else {
             return XCTFail("a key-down is a key")
         }
         XCTAssertNil(command.text, "a ⌘ chord never types")
-        XCTAssertEqual(command.character, layout.commandCharacter(keyCode: 0x0E))
+        XCTAssertEqual(command.character, "e")
     }
 
     func testAnUnknownLayoutIsNil() {
