@@ -272,7 +272,7 @@ private struct BlockInspector: View {
     private func state(_ block: Block) -> String {
         guard model.canCorrect(block) else { return "in progress" }
         return switch block.labeling.state {
-        case .pending: "pending"
+        case .pending: model.isSendable(block) ? "pending" : "not sent: excluded app or time"
         case .classified: "by the model"
         case .corrected: "corrected by you"
         case .failed: "could not be classified"

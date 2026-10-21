@@ -245,6 +245,9 @@ final class ReportsModel: ObservableObject {
     /// A block can be corrected once it has ended, as in the Classification window.
     func canCorrect(_ block: Block) -> Bool { block.end <= Date() }
 
+    /// Whether classification would send `block`; an unsendable pending block stays pending, as in the Classification window.
+    func isSendable(_ block: Block) -> Bool { ClassificationRequest.isSendable(block, classification.options) }
+
     /// Stores the correction through the store's correction operation; the timeline and totals update at once.
     func saveCorrection() {
         guard let store, let block, canCorrect(block) else { return }
