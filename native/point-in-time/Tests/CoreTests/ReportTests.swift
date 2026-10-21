@@ -345,6 +345,15 @@ private func temporaryDirectory() -> URL {
         #expect(ReportText.heatmap(week.heatmap) { names[$0] } == "Focus in 1 hour of the week; the most on Mon from 09:00 (12 min).")
     }
 
+    @Test func barsSummaryNamesExcludedTimeTheChartLeavesOut() {
+        // Tuesday holds only excluded time; Wednesday holds focus and excluded time.
+        let blocks = [block(date(cal, 20, 9), nil, active: 0, excluded: 180), block(date(cal, 21, 9), .focus, active: 120, excluded: 60)]
+        let week = WeekReport(containing: date(cal, 22, 12), blocks: blocks, calendar: cal)
+        let names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        #expect(ReportText.bars(week.days) { day in names[week.days.firstIndex { $0.interval == day.interval }!] }
+                == "Tue: focus 0 min, neutral 0 min, drift 0 min, excluded 3 min. Wed: focus 2 min, neutral 0 min, drift 0 min, excluded 1 min.")
+    }
+
     @Test func profileMeasuresStartsRunsShortDriftsAndBalance() {
         let blocks =
             // Monday: focus from 09:00 for 30 min, a 3-min drift, focus again for 9 min.

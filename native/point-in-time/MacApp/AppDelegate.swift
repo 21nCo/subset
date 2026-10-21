@@ -33,7 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                               showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() },
                                               showReports: { reportsWindow.show() })
         capture.onStateChange = { statusMenu.refreshIcon(); reportsWindow.refreshIfOpen() }
-        capture.onActivityRemoved = { classificationWindow.model.refresh(); reportsWindow.refreshIfOpen() }
+        // A removal recounts pending and failed blocks; the recount's onChange then refreshes both windows.
+        capture.onActivityRemoved = { classification.refreshStatus() }
         // Excluded apps also decide what classification may send, so a change re-runs both.
         settings.onChange = { capture.tick(); classification.captureSettingsChanged() }
         classification.settings.onChange = { classification.settingsChanged(providerChanged: $0) }

@@ -504,11 +504,13 @@ public enum ReportText {
         return parts.isEmpty ? "No focus or drift recorded." : "Half-hour rhythm: " + parts.joined(separator: "; ") + "."
     }
 
-    /// Focus and drift per day, naming each day with `dayName`.
+    /// Each recorded day's focus, neutral, and drift, naming each day with `dayName`; unclassified and excluded time are
+    /// named when a day has any. The bars chart leaves excluded time out, so only this summary reports it.
     public static func bars(_ days: [DayReport], dayName: (DayReport) -> String) -> String {
         let parts = days.filter { $0.totals.recorded > 0 }.map { day in
             "\(dayName(day)): focus \(duration(day.totals.focus)), neutral \(duration(day.totals.neutral)), drift \(duration(day.totals.drift))"
                 + (day.totals.unclassified > 0 ? ", unclassified \(duration(day.totals.unclassified))" : "")
+                + (day.totals.excluded > 0 ? ", excluded \(duration(day.totals.excluded))" : "")
         }
         return parts.isEmpty ? "No activity recorded this week." : parts.joined(separator: ". ") + "."
     }

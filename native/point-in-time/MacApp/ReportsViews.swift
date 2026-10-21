@@ -435,7 +435,8 @@ private struct ProfileCards: View {
     }
 }
 
-/// Minutes per category per day, side by side in a fixed order, each bar marked with its category's initial.
+/// Minutes per category per day, side by side in a fixed order, each bar marked with its category's initial. Excluded
+/// time is left out; the text summary names it.
 private struct WeekBars: View {
     @ObservedObject var model: ReportsModel
     let week: WeekReport
