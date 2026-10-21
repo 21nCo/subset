@@ -29,8 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         NSApp.mainMenu = MainMenu.make(perform: perform)
         statusMenu = StatusMenuController(perform: perform, state: .needsPermission)
-        // Settings apply at once: the shortcut here, and the shown windows each time the switcher reads the list.
-        settings.onChange = { [unowned self] in switchShortcut.use($0.shortcut) }
+        // Settings apply at once: the shortcut, and the shown windows in an open switcher.
+        settings.onChange = { [unowned self] in switchShortcut.settingsChanged($0) }
         settings.onRecordingChange = { [unowned self] in switchShortcut.isSuspended = $0 }
         switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
         switchShortcut.onNeedsPermission = { [unowned self] in

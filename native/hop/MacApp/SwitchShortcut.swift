@@ -12,7 +12,7 @@ import os
 /// open, on the next pass of the main run loop. What the session does before then is held and applied in order once it
 /// has opened, so every key is applied to the list it was meant for; a switch cancelled before then never opens.
 ///
-/// A new shortcut from Settings applies at once (`use(_:)`), and while the Settings window records one the tap passes
+/// Changed settings apply at once (`settingsChanged(_:)`): a new shortcut, and the shown windows in an open switcher; and while the Settings window records one the tap passes
 /// every event (`isSuspended`), so the recorder sees the keys a switch would otherwise take.
 @MainActor
 final class SwitchShortcutController {
@@ -71,6 +71,13 @@ final class SwitchShortcutController {
         interrupt()
         recognizer.shortcut = shortcut
         Self.log.info("Switch shortcut changed to \(shortcut.displayName, privacy: .public)")
+    }
+
+    /// Applies changed settings at once: a new shortcut (`use(_:)`), and the Shown-windows options and excluded apps to
+    /// an open switcher.
+    func settingsChanged(_ settings: Settings) {
+        use(settings.shortcut)
+        switcher.settingsChanged()
     }
 
     /// Installs the tap. Call only while the process is trusted; returns false if the system refused the tap.

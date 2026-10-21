@@ -8,6 +8,9 @@ import CoreGraphics
 /// The selection is the index of a listed item, or nil when the list is empty. It follows its item, not its place:
 /// when the list changes, the selected item stays selected, and if it is gone the selection moves to the item that
 /// followed it.
+///
+/// Every listed item passes `filter`, whichever way the list changed: a fresh list, the kept items of apps that did not
+/// answer, an operation's result, or a new filter.
 public struct SwitcherViewModel: Sendable, Equatable {
     /// An operation for the host to perform on a listed window, or on the app of an app cell.
     public struct Request: Sendable, Equatable {
@@ -21,6 +24,8 @@ public struct SwitcherViewModel: Sendable, Equatable {
     }
 
     public private(set) var items: [SwitcherItem]
+    /// The Shown-windows options and excluded apps the listed items pass.
+    public private(set) var filter: SwitcherFilter
     public private(set) var selection: Int?
     public private(set) var layout: SwitcherLayout
     public private(set) var firstVisibleRow = 0
@@ -30,9 +35,16 @@ public struct SwitcherViewModel: Sendable, Equatable {
     public let available: CGSize
 
     /// Opens on the previous window (index 1), the usual target, or on the only item there is, whichever direction
-    /// the shortcut started in.
-    public init(items: [SwitcherItem], available: CGSize, metrics: SwitcherMetrics = .standard) {
+    /// the shortcut started in. Only the items `filter` shows are listed.
+    public init(
+        items: [SwitcherItem],
+        available: CGSize,
+        metrics: SwitcherMetrics = .standard,
+        filter: SwitcherFilter = .showingEverything
+    ) {
+        let items = items.filter(filter.shows)
         self.items = items
+        self.filter = filter
         self.available = available
         layout = SwitcherLayout(count: items.count, available: available, metrics: metrics)
         selection = items.isEmpty ? nil : min(1, items.count - 1)
@@ -93,7 +105,8 @@ public struct SwitcherViewModel: Sendable, Equatable {
 
     /// Replaces the list with a fresh one, keeping the selection on its item, or on the item that followed it when it
     /// is gone (the one before it when none after it remains). The items of `unread` apps, which did not answer this
-    /// read, are not known to be gone: they stay listed, each after the item it followed.
+    /// read, are not known to be gone: they stay listed, each after the item it followed. Only the items `filter` shows
+    /// are listed.
     public mutating func refreshed(_ fresh: [SwitcherItem], unread: Set<pid_t> = []) {
         let previous = items
         var fresh = fresh
@@ -106,6 +119,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
                 next += 1
             }
         }
+        fresh = fresh.filter(filter.shows)
         let selected = selection
         items = fresh
         layout = SwitcherLayout(count: fresh.count, available: available, metrics: layout.metrics)
@@ -120,9 +134,17 @@ public struct SwitcherViewModel: Sendable, Equatable {
         select(min(selected, fresh.count - 1))
     }
 
+    /// Applies a new filter to the listed items at once, keeping the selection on its item or its follower. Items it
+    /// now shows that are not listed appear with the next refresh.
+    public mutating func apply(_ filter: SwitcherFilter) {
+        guard filter != self.filter else { return }
+        self.filter = filter
+        refreshed(items)
+    }
+
     /// Records an operation's result: sets or clears the message and, until the next refresh confirms it, shows the
     /// items as the operation left them (a minimized window or a hidden app flagged, a window or app found gone
-    /// removed). A close or quit that was delivered removes nothing: the app may be asking to save, so the window
+    /// removed). A window just minimized, or an app just hidden, leaves the list when `filter` does not show it. A close or quit that was delivered removes nothing: the app may be asking to save, so the window
     /// stays listed and selected until a refresh no longer lists it.
     public mutating func finished(_ request: Request, result: OperationResult) {
         message = Self.message(for: result, of: request.operation, appName: request.item.appName)

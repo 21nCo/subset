@@ -467,6 +467,105 @@ final class SwitcherControllerTests: XCTestCase {
         XCTAssertEqual(recorder.calls.map(\.pid), [30])
     }
 
+    /// `windows` with bundle IDs, so their apps can be excluded: App n is com.example.app<n>.
+    private var bundled: [WindowEntry] {
+        windows.map { entry in
+            var entry = entry
+            entry.bundleIdentifier = "com.example.app\(entry.pid - 10)"
+            return entry
+        }
+    }
+
+    func testAWindowMinimizedWithMinimizedWindowsOffIsNotFocusedByAWaitingReleaseWhenItsAppDoesNotAnswer() async throws {
+        let gate = GatedWindowOperator(holding: [.minimize])
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        skipping = [2: [windows[1].pid]]
+        var settings = Settings.default
+        settings.shownWindows.minimized = false
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate, settings: { settings })
+        switcher.open()
+        switcher.apply(.operation(.minimize))
+        switcher.commit()
+        try await wait(until: { gate.held == 1 })
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the read, then the commit")
+        XCTAssertEqual(gate.calls.map(\.operation), [.minimize, .focus])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[2].ref], "the minimized window stays minimized")
+    }
+
+    func testASettingsChangeAppliesToTheOpenSwitcherAtOnce() async throws {
+        let recorder = RecordingWindowOperator()
+        var windows = bundled
+        windows[2].isMinimized = true
+        lists = [windows]
+        var settings = Settings.default
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: recorder, settings: { settings })
+        let tap = SwitchShortcutController(switcher: switcher, shortcut: .default, isTrusted: { true })
+        switcher.open()
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[1].ref)
+
+        settings.exclude("com.example.app1")
+        tap.settingsChanged(settings)
+        XCTAssertTrue(switcher.isOpen, "the same shortcut keeps the switch going")
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [0, 2, 3].map { windows[$0].ref }, "with no read in between")
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[2].ref)
+
+        settings.shownWindows.minimized = false
+        tap.settingsChanged(settings)
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [0, 3].map { windows[$0].ref })
+        XCTAssertEqual(switcher.model?.selectedWindow?.ref, windows[3].ref)
+        try await wait(until: { reads >= 3 }, "each change reads the list again")
+        XCTAssertEqual(switcher.model?.windows.map(\.ref), [0, 3].map { windows[$0].ref }, "the reads keep the filter")
+        switcher.commit()
+        try await wait(until: { !recorder.calls.isEmpty })
+        XCTAssertEqual(recorder.calls.map(\.window), [windows[3].ref])
+    }
+
+    func testAReleaseWaitingOnACloseDoesNotFocusAWindowASettingsChangeRemoved() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        let windows = bundled
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        // App 2 answers no read after the switcher opened.
+        skipping = [2: [windows[2].pid], 3: [windows[2].pid], 4: [windows[2].pid]]
+        var settings = Settings.default
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate, settings: { settings })
+        switcher.open()
+        switcher.apply(.operation(.close))
+        switcher.commit()
+        try await wait(until: { gate.held == 1 })
+        settings.exclude("com.example.app2")
+        switcher.settingsChanged()
+        XCTAssertFalse(switcher.model?.windows.contains { $0.ref == windows[2].ref } ?? true, "it leaves at once")
+        gate.release(.done)
+        try await wait(until: { gate.calls.count == 2 }, "the read, then the commit")
+        XCTAssertEqual(gate.calls.map(\.operation), [.close, .focus])
+        XCTAssertEqual(gate.calls.map(\.window), [windows[1].ref, windows[3].ref], "window 2 is never focused")
+    }
+
+    func testAClickWaitingOnACloseCommitsNothingWhenASettingsChangeRemovedItsWindow() async throws {
+        let gate = GatedWindowOperator(holding: [.close])
+        let windows = bundled
+        lists = [windows, [windows[0], windows[2], windows[3]]]
+        // App 3 answers no read after the switcher opened.
+        skipping = [2: [windows[3].pid], 3: [windows[3].pid], 4: [windows[3].pid]]
+        var settings = Settings.default
+        let switcher = SwitcherController(readWindows: readWindows, windowOperator: gate, settings: { settings })
+        var ended = 0
+        switcher.onSessionEnded = { ended += 1 }
+        switcher.open()
+        switcher.apply(.operation(.close))
+        try await wait(until: { gate.held == 1 })
+        let view = switcher.panel.switcherView
+        view.mouseDown(with: try mouse(.leftMouseDown, onCellAt: 3, of: switcher))
+        view.mouseUp(with: try mouse(.leftMouseUp, onCellAt: 3, of: switcher))
+        settings.exclude("com.example.app3")
+        switcher.settingsChanged()
+        gate.release(.done)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(ended, 1, "the click ended the switch")
+        XCTAssertEqual(gate.calls.map(\.operation), [.close], "the clicked window is no longer listed")
+    }
+
     private func readWindows() -> WindowList {
         reads += 1
         let windows = lists.count > 1 ? lists.removeFirst() : lists[0]

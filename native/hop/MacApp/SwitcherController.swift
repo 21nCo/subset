@@ -3,7 +3,7 @@ import HopCore
 import os
 
 /// The switcher while a switch is in progress: opens it on a fresh window list, filtered by the Shown-windows settings
-/// and excluded apps (`Settings.items(from:pointerDisplay:)`), applies the session's events and the mouse to its
+/// and excluded apps (`SwitcherFilter`), applies the session's events and the mouse to its
 /// `SwitcherViewModel`, performs the operations it asks for, and on commit hides it and brings the selected window
 /// forward, or activates the selected windowless app. An operation, or a commit, that does not succeed shows its message for 1.5 seconds; one
 /// that finds Hop without the Accessibility permission reopens onboarding instead. Nothing about a window, and never a
@@ -13,8 +13,10 @@ import os
 /// window or a quit app is gone, or still there behind a save prompt. A further operation key, or a commit, that comes
 /// while one is pending waits, in order, and then acts on the selection in the list as read; a commit hides the
 /// switcher at once. A hover after a waiting key waits behind it too, and selects the window it was over, not the place.
-/// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. The settings
-/// are read each time the list is, so a change applies from the next read.
+/// A read that an app did not answer in time leaves that app's windows listed: they are unknown, not gone. Every listed
+/// item passes the settings' filter, including those kept for an app that did not answer and those an operation left;
+/// a change to the settings (`settingsChanged()`) applies to the open switcher at once, and anything it now shows
+/// appears after a fresh read.
 @MainActor
 final class SwitcherController {
     private static let log = Logger(subsystem: HopIdentity.bundleIdentifier, category: "switcher")
@@ -89,7 +91,12 @@ final class SwitcherController {
         reset()
         let screen = Self.screenUnderPointer()
         display = screen.flatMap(Self.displayID)
-        let model = SwitcherViewModel(items: items(in: readWindows()), available: screen?.visibleFrame.size ?? .zero)
+        let filter = currentFilter()
+        let model = SwitcherViewModel(
+            items: filter.items(from: readWindows()),
+            available: screen?.visibleFrame.size ?? .zero,
+            filter: filter
+        )
         self.model = model
         self.screen = screen
         loadIcons()
@@ -99,9 +106,20 @@ final class SwitcherController {
         Self.log.debug("Switcher opened with \(model.items.count, privacy: .public) items")
     }
 
-    /// The cells for a list, as the current settings show it on the switcher's display.
-    private func items(in list: WindowList) -> [SwitcherItem] {
-        settings().items(from: list, pointerDisplay: display)
+    /// The current settings' filter on the switcher's display.
+    private func currentFilter() -> SwitcherFilter {
+        SwitcherFilter(settings(), pointerDisplay: display)
+    }
+
+    /// Applies changed settings to the open switcher at once: items they no longer show leave the list, the selection
+    /// moves to its follower if its item left, and a waiting commit or click can no longer reach a removed item. The
+    /// list is then read again, for anything the settings now show.
+    func settingsChanged() {
+        guard let model else { return }
+        let filter = currentFilter()
+        guard filter != model.filter else { return }
+        update { $0.apply(filter) }
+        scheduleRefresh(after: .zero)
     }
 
     /// Applies a session event: moves the selection, or performs an operation on the selected window. While an
@@ -207,8 +225,10 @@ final class SwitcherController {
 
     private func refresh() {
         guard model != nil else { return }
+        let filter = currentFilter()
         let list = readWindows()
-        model?.refreshed(items(in: list), unread: Set(list.skippedApps.map(\.pid)))
+        model?.apply(filter)
+        model?.refreshed(filter.items(from: list), unread: Set(list.skippedApps.map(\.pid)))
         loadIcons()
         render()
     }

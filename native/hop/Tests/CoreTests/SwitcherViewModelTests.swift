@@ -362,6 +362,87 @@ final class SwitcherViewModelTests: XCTestCase {
         model.finished(.init(.quitApp, on: SwitcherItem.app(notes)), result: .appGone)
         XCTAssertEqual(model.items.map(\.id), [.window(WindowRef(rawValue: 0))])
     }
+
+    // MARK: - Filter
+
+    private func filter(_ change: (inout Settings) -> Void) -> SwitcherFilter {
+        var settings = Settings.default
+        change(&settings)
+        return SwitcherFilter(settings, pointerDisplay: nil)
+    }
+
+    func testAWindowMinimizedWithMinimizedWindowsOffLeavesAndAnUnreadRefreshDoesNotBringItBack() {
+        let windows = entries(6) // apps: pid 100 (0, 1), 101 (2, 3), 102 (4, 5)
+        var model = SwitcherViewModel(
+            items: windows.map(SwitcherItem.window),
+            available: wide,
+            filter: filter { $0.shownWindows.minimized = false }
+        )
+        XCTAssertEqual(model.selectedWindow?.ref, windows[1].ref)
+        model.finished(.init(.minimize, on: windows[1]), result: .done)
+        XCTAssertEqual(model.windows.map(\.ref), [0, 2, 3, 4, 5].map { windows[$0].ref })
+        XCTAssertEqual(model.selectedWindow?.ref, windows[2].ref, "the selection moves to the window that followed")
+        // App 0 does not answer the next read.
+        model.refreshed([windows[2], windows[3], windows[4], windows[5]], unread: [windows[1].pid])
+        XCTAssertFalse(model.windows.contains { $0.ref == windows[1].ref }, "the minimized window is not kept for App 0")
+        XCTAssertEqual(model.windows.map(\.ref), [0, 2, 3, 4, 5].map { windows[$0].ref })
+        XCTAssertEqual(model.selectedWindow?.ref, windows[2].ref)
+    }
+
+    func testAKeptWindowOfAnUnreadAppStillPassesTheFilter() {
+        let windows = entries(4)
+        var model = SwitcherViewModel(
+            items: windows.map(SwitcherItem.window),
+            available: wide,
+            filter: filter { $0.shownWindows.minimized = false }
+        )
+        var minimized = windows[1]
+        minimized.isMinimized = true
+        // A fresh list that somehow carries a minimized window is filtered as well.
+        model.refreshed([windows[0], minimized, windows[2], windows[3]])
+        XCTAssertEqual(model.windows.map(\.ref), [0, 2, 3].map { windows[$0].ref })
+    }
+
+    func testHidingAnAppWithHiddenAppsOffRemovesItsWindowsAndItsAppCell() {
+        let windows = entries(4) // apps: pid 100 (0, 1), 101 (2, 3)
+        var model = SwitcherViewModel(
+            items: windows.map(SwitcherItem.window) + [.app(notes)],
+            available: wide,
+            filter: filter {
+                $0.shownWindows.hiddenApps = false
+                $0.shownWindows.windowlessApps = true
+            }
+        )
+        model.select(2)
+        model.finished(.init(.hideApp, on: windows[2]), result: .done)
+        XCTAssertEqual(model.items.map(\.id), [.window(windows[0].ref), .window(windows[1].ref), .app(300)])
+        XCTAssertEqual(model.selectedItem?.id, .app(300), "the selection moves to the item that followed")
+        model.refreshed([.window(windows[0]), .window(windows[1]), .app(notes)], unread: [windows[2].pid])
+        XCTAssertEqual(model.items.count, 3, "the hidden app's windows are not kept for it")
+
+        model.finished(.init(.hideApp, on: SwitcherItem.app(notes)), result: .done)
+        XCTAssertEqual(model.items.map(\.id), [.window(windows[0].ref), .window(windows[1].ref)])
+        XCTAssertEqual(model.selectedWindow?.ref, windows[1].ref, "nothing follows the app cell, so the one before it")
+        model.refreshed([.window(windows[0]), .window(windows[1])], unread: [300])
+        XCTAssertEqual(model.items.count, 2, "the hidden app cell is not kept for its app")
+    }
+
+    func testANewFilterAppliesAtOnceAndTheSelectionMovesToTheFollower() {
+        let windows = entries(6)
+        var model = SwitcherViewModel(items: windows.map(SwitcherItem.window) + [.app(notes)], available: wide)
+        model.select(2)
+        model.apply(filter {
+            $0.exclude("com.example.app1")
+            $0.shownWindows.windowlessApps = true
+        })
+        XCTAssertEqual(model.items.map(\.id), [0, 1, 4, 5].map { .window(windows[$0].ref) } + [.app(300)])
+        XCTAssertEqual(model.selectedWindow?.ref, windows[4].ref)
+        model.apply(filter { $0.exclude("com.example.app1") })
+        XCTAssertEqual(model.items.map(\.id), [0, 1, 4, 5].map { .window(windows[$0].ref) }, "app cells off")
+        model.refreshed(windows.map(SwitcherItem.window) + [.app(notes)])
+        XCTAssertEqual(model.windows.map(\.ref), [0, 1, 4, 5].map { windows[$0].ref }, "a refresh keeps the filter")
+        XCTAssertEqual(model.selectedWindow?.ref, windows[4].ref)
+    }
 }
 
 extension SwitcherViewModel {

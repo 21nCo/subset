@@ -32,6 +32,13 @@ public enum SwitcherItem: Sendable, Equatable {
         }
     }
 
+    public var bundleIdentifier: String? {
+        switch self {
+        case let .window(entry): entry.bundleIdentifier
+        case let .app(app): app.bundleIdentifier
+        }
+    }
+
     public var appName: String {
         switch self {
         case let .window(entry): entry.appName
@@ -90,30 +97,71 @@ public enum SwitcherItem: Sendable, Equatable {
     }
 }
 
-extension Settings {
-    /// The switcher's cells for a window list, applying the Shown-windows options and the excluded apps after
-    /// `WindowFilter`'s rules:
+/// The Shown-windows options and excluded apps as one switcher applies them, after `WindowFilter`'s closed rules. The
+/// switcher keeps every item it lists passing `shows(_:)`: the items of a fresh list, the items of apps that did not
+/// answer a read, the items an operation left (a window just minimized, an app just hidden), and all of them again
+/// when the settings change while it is open.
+public struct SwitcherFilter: Sendable, Equatable {
+    public var shownWindows: ShownWindows
+    /// The bundle IDs of excluded apps.
+    public var excludedApps: Set<String>
+    /// The display under the pointer when the switcher opened, for `ShownWindows.pointerDisplayOnly`; nil when unknown.
+    public var pointerDisplay: DisplayID?
+
+    /// Shows every item, app cells included; for a switcher not tied to settings.
+    public static let showingEverything: SwitcherFilter = {
+        var shownWindows = ShownWindows()
+        shownWindows.windowlessApps = true
+        return SwitcherFilter(shownWindows: shownWindows, excludedApps: [], pointerDisplay: nil)
+    }()
+
+    public init(shownWindows: ShownWindows, excludedApps: Set<String>, pointerDisplay: DisplayID?) {
+        self.shownWindows = shownWindows
+        self.excludedApps = excludedApps
+        self.pointerDisplay = pointerDisplay
+    }
+
+    public init(_ settings: Settings, pointerDisplay: DisplayID?) {
+        self.init(
+            shownWindows: settings.shownWindows,
+            excludedApps: Set(settings.excludedApps),
+            pointerDisplay: pointerDisplay
+        )
+    }
+
+    /// Whether the switcher may list `item`:
     ///
-    /// - an excluded app's windows, and its app cell, never appear;
+    /// - an excluded app's windows, and its app cell, never appear (an app without a bundle ID cannot be excluded);
     /// - minimized windows appear only with `minimized`;
     /// - windows of hidden apps, and hidden apps' cells, appear only with `hiddenApps`;
     /// - with `pointerDisplayOnly`, a window appears only when its display (`WindowEntry.display`, the display it
     ///   overlaps most) is `pointerDisplay`; a window on no display does not. When the pointer's display is unknown
     ///   (nil), no window is left out for it. App cells have no display and are not affected;
-    /// - with `windowlessApps`, each app the list reports without a switchable window gets a cell after the windows,
-    ///   in the list's order. An app whose windows the options above removed is not windowless and gets none.
-    ///
-    /// The windows keep the list's recency order.
-    public func items(from list: WindowList, pointerDisplay: DisplayID?) -> [SwitcherItem] {
-        let windows = list.windows.filter { entry in
-            allows(bundleIdentifier: entry.bundleIdentifier)
-                && (shownWindows.minimized || !entry.isMinimized)
-                && (shownWindows.hiddenApps || !entry.isAppHidden)
+    /// - app cells appear only with `windowlessApps`.
+    public func shows(_ item: SwitcherItem) -> Bool {
+        if let bundleIdentifier = item.bundleIdentifier, excludedApps.contains(bundleIdentifier) { return false }
+        if !shownWindows.hiddenApps, item.isAppHidden { return false }
+        switch item {
+        case let .window(entry):
+            return (shownWindows.minimized || !entry.isMinimized)
                 && (!shownWindows.pointerDisplayOnly || pointerDisplay == nil || entry.display == pointerDisplay)
+        case .app:
+            return shownWindows.windowlessApps
         }
-        let apps = !shownWindows.windowlessApps ? [] : list.windowlessApps.filter { app in
-            allows(bundleIdentifier: app.bundleIdentifier) && (shownWindows.hiddenApps || !app.isHidden)
-        }
-        return windows.map(SwitcherItem.window) + apps.map(SwitcherItem.app)
+    }
+
+    /// The switcher's cells for a window list: its windows in recency order, then a cell for each app it reports
+    /// without a switchable window, in its order, keeping those `shows(_:)` allows. An app whose windows an option
+    /// removed is not windowless and gets no cell.
+    public func items(from list: WindowList) -> [SwitcherItem] {
+        (list.windows.map(SwitcherItem.window) + list.windowlessApps.map(SwitcherItem.app)).filter(shows)
+    }
+}
+
+extension Settings {
+    /// The switcher's cells for a window list, applying the Shown-windows options and the excluded apps
+    /// (`SwitcherFilter`) after `WindowFilter`'s rules.
+    public func items(from list: WindowList, pointerDisplay: DisplayID?) -> [SwitcherItem] {
+        SwitcherFilter(self, pointerDisplay: pointerDisplay).items(from: list)
     }
 }
