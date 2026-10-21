@@ -94,7 +94,8 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(lengths[5] <= 2 * Segment.maxIdentityBytes + 100)
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
         let bytes = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
-        #expect(bytes < 100_000, "the store directory holds \(bytes) bytes after one segment")
+        // Schema version 2's tables and indexes add a few pages; unbounded text would add about 200 KB.
+        #expect(bytes < 120_000, "the store directory holds \(bytes) bytes after one segment")
     }
 
     /// Segments built directly, not through `Activity`, stay bounded through a save, the tail a deletion re-inserts, and
@@ -158,7 +159,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         try ActivityStore(directory: directory).save(segment("a", 0, 60))
         let reopened = try ActivityStore(directory: directory)
         #expect(try reopened.segmentCount() == 1)
-        #expect(try reopened.schemaVersion() == 1)
+        #expect(try reopened.schemaVersion() == ActivityStore.supportedSchemaVersion)
     }
 
     @Test func refusesNewerSchema() throws {
@@ -169,7 +170,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(sqlite3_open(store.databaseURL.path, &db) == SQLITE_OK)
         #expect(sqlite3_exec(db, "INSERT INTO schema_version VALUES (99, 0)", nil, nil, nil) == SQLITE_OK)
         sqlite3_close(db)
-        #expect(throws: StoreError.newerSchema(found: 99, supported: 1)) { try ActivityStore(directory: directory) }
+        #expect(throws: StoreError.newerSchema(found: 99, supported: 2)) { try ActivityStore(directory: directory) }
     }
 
     @Test func refusesANewerSchemaWithoutTouchingItsJournalOrBytes() throws {
@@ -182,12 +183,12 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(sqlite3_exec(db, """
             PRAGMA journal_mode=DELETE;
             CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
-            INSERT INTO schema_version VALUES (2, 0);
+            INSERT INTO schema_version VALUES (3, 0);
             """, nil, nil, nil) == SQLITE_OK)
         sqlite3_close(db)
         let before = try Data(contentsOf: URL(fileURLWithPath: path))
 
-        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) { try ActivityStore(directory: directory) }
+        #expect(throws: StoreError.newerSchema(found: 3, supported: 2)) { try ActivityStore(directory: directory) }
 
         #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
         for suffix in ["-wal", "-shm", "-journal"] {
@@ -210,10 +211,10 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(sqlite3_exec(db, """
             PRAGMA journal_mode=WAL;
             CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
-            INSERT INTO schema_version VALUES (1, 0);
+            INSERT INTO schema_version VALUES (2, 0);
             PRAGMA wal_checkpoint(TRUNCATE);
             PRAGMA wal_autocheckpoint=0;
-            INSERT INTO schema_version VALUES (2, 0);
+            INSERT INTO schema_version VALUES (3, 0);
             CREATE TABLE newer (value TEXT);
             """, nil, nil, nil) == SQLITE_OK)
         let suffixes = keepSharedMemory ? ["", "-wal", "-shm"] : ["", "-wal"]
@@ -223,7 +224,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         try? FileManager.default.removeItem(atPath: path + (keepSharedMemory ? "-journal" : "-shm"))
         #expect(try Data(contentsOf: URL(fileURLWithPath: path + "-wal")).count > 0)
 
-        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) { try ActivityStore(directory: directory) }
+        #expect(throws: StoreError.newerSchema(found: 3, supported: 2)) { try ActivityStore(directory: directory) }
 
         // The database and its WAL are unchanged. With its -shm present nothing changes at all; without it, SQLite
         // needs a writable WAL index to read the WAL and may create one.
@@ -259,7 +260,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         #expect(sqlite3_exec(db, """
             PRAGMA journal_mode=WAL;
             CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
-            INSERT INTO schema_version VALUES (2, 0);
+            INSERT INTO schema_version VALUES (3, 0);
             PRAGMA wal_checkpoint(TRUNCATE);
             """, nil, nil, nil) == SQLITE_OK)
         sqlite3_close(db)
@@ -267,7 +268,7 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         let before = try Data(contentsOf: URL(fileURLWithPath: path))
         #expect(before[18] == 2 && before[19] == 2)
 
-        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) { try ActivityStore(directory: directory) }
+        #expect(throws: StoreError.newerSchema(found: 3, supported: 2)) { try ActivityStore(directory: directory) }
 
         #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
         for suffix in ["-wal", "-shm", "-journal"] {
@@ -294,17 +295,17 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         }
 
         var advanced: [String] = []
-        #expect(throws: StoreError.newerSchema(found: 2, supported: 1)) {
+        #expect(throws: StoreError.newerSchema(found: 3, supported: 2)) {
             try ActivityStore(directory: directory) {
                 // Another, newer copy of the app migrates the database after the read-only check passed.
                 var db: OpaquePointer?
                 #expect(sqlite3_open(path, &db) == SQLITE_OK)
-                #expect(sqlite3_exec(db, "INSERT INTO schema_version VALUES (2, 0)", nil, nil, nil) == SQLITE_OK)
+                #expect(sqlite3_exec(db, "INSERT INTO schema_version VALUES (3, 0)", nil, nil, nil) == SQLITE_OK)
                 sqlite3_close(db)
                 advanced = contents()
             }
         }
-        #expect(advanced.contains("version 2") && advanced.contains { $0.hasPrefix("segment ") })
+        #expect(advanced.contains("version 3") && advanced.contains { $0.hasPrefix("segment ") })
         #expect(contents() == advanced)
     }
 

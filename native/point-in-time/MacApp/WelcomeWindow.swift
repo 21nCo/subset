@@ -97,7 +97,7 @@ struct WelcomeView: View {
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 Label("Recorded: the app’s name, its focused window title, and for Chrome, Brave, Edge, and Arc the site and page path. Query strings and idle time are not recorded. An excluded app’s name, title, and site are never recorded; its time is kept as anonymous excluded time unless you choose Record Nothing.", systemImage: "list.bullet.rectangle")
-                Label("Stored only on this Mac in ~/Library/Application Support/pointInTime. Nothing is sent anywhere.", systemImage: "lock.laptopcomputer")
+                Label("Stored only on this Mac in ~/Library/Application Support/pointInTime. Nothing is sent anywhere unless you choose a provider in Classification settings.", systemImage: "lock.laptopcomputer")
                 Label("Pause, exclude an app, or delete data any time from the menu bar.", systemImage: "menubar.rectangle")
             }
             .fixedSize(horizontal: false, vertical: true)

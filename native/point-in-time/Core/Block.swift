@@ -30,6 +30,10 @@ public struct Block: Equatable, Sendable {
     public var dominantAppName: String?
     public var dominantTitle: String?
     public var dominantURL: RedactedURL?
+    /// The block's classification, kept when capture rebuilds the block.
+    public var labeling: BlockLabeling = .pending
+    /// Counts changes to a stored block's content, so a label is stored only for the content it judged.
+    public var revision = 0
 
     public var end: Date { start.addingTimeInterval(Block.length) }
 

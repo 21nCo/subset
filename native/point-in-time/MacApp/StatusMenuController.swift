@@ -9,13 +9,18 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let settings: CaptureSettings
     private let capture: CaptureController
     private let store: ActivityStore?
+    private let classification: ClassificationController
     private let showWelcome: () -> Void
+    private let showClassification: () -> Void
 
-    init(settings: CaptureSettings, capture: CaptureController, store: ActivityStore?, showWelcome: @escaping () -> Void) {
+    init(settings: CaptureSettings, capture: CaptureController, store: ActivityStore?, classification: ClassificationController,
+         showWelcome: @escaping () -> Void, showClassification: @escaping () -> Void) {
         self.settings = settings
         self.capture = capture
         self.store = store
+        self.classification = classification
         self.showWelcome = showWelcome
+        self.showClassification = showClassification
         super.init()
         menu.delegate = self
         item.menu = menu
@@ -78,6 +83,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
         menu.addItem(excludedAppsItem())
         menu.addItem(.separator())
+        menu.addItem(disabled(classificationLine()))
+        menu.addItem(action("Classification…", showClassification))
+        menu.addItem(.separator())
         menu.addItem(action("Delete Today’s Data…") { [weak self] in self?.confirmDelete(all: false) })
         menu.addItem(action("Delete All Data…") { [weak self] in self?.confirmDelete(all: true) })
         menu.addItem(.separator())
@@ -99,6 +107,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         case .writesBacklogged: "Not recording until the activity store accepts the queued writes"
         case .clockBehind: "Not recording until the clock passes the latest recorded activity"
         }
+    }
+
+    private func classificationLine() -> String {
+        guard classification.settings.provider != .off else { return "Classification: off" }
+        let status = classification.status
+        return status.lastError != nil && status.pending > 0
+            ? "Classification: \(status.pending) pending, retrying"
+            : "Classification: \(status.pending) pending"
     }
 
     private func todayRecorded() -> String? {
