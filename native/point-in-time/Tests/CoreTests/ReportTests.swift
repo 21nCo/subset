@@ -409,7 +409,12 @@ private func temporaryDirectory() -> URL {
         let day = week.days[1]
         #expect(day.totals.focus == 180)
         #expect(day.totals.drift == 360)
+        #expect(day.totals.focusShare == 1.0 / 3)
         #expect(day.spans.map(\.category) == [.drift, .focus, .drift])
+        #expect(week.rhythm[18].seconds.focus == 180 && week.rhythm[18].seconds.drift == 360)
+        #expect(week.profile.focusDays == 1)
+        #expect(week.profile.typicalFocusStart == 9 * 60 + 3)
+        #expect(week.profile.balance == 1.0 / 3)
         #expect(week.profile.longestFocusRun?.start == start.addingTimeInterval(180))
         #expect(week.profile.shortDrifts == 2)
         #expect(week.heatmap[1 * 24 + 9].seconds.focus == 180)
