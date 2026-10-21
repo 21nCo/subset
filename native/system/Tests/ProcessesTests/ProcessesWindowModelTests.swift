@@ -124,6 +124,23 @@ final class ProcessesWindowModelTests: XCTestCase {
         XCTAssertEqual(model.rows.count, 5 + 3, "clearing the filter keeps Chrome open and leaves the agent closed")
     }
 
+    /// ⌘F from the Disk section asks before the Processes view exists, so the request stays until a view takes it.
+    func testAFilterFocusRequestWaitsUntilTheViewFocusesTheField() throws {
+        let model = try model()
+        XCTAssertFalse(model.isFilterFocusPending)
+
+        model.focusFilter()
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0 + 2), memory: nil, cadence: .mainWindowVisible)
+        model.layer = .vendor
+        XCTAssertTrue(model.isFilterFocusPending, "a new sample or layer does not clear a request; only the view does")
+        model.didFocusFilter()
+        XCTAssertFalse(model.isFilterFocusPending)
+
+        // A second ⌘F after the first was taken asks again.
+        model.focusFilter()
+        XCTAssertTrue(model.isFilterFocusPending)
+    }
+
     // MARK: Restricted processes and the footnote
 
     func testRestrictedProcessesAreCountedSeparatelyAndNeverShownAsZero() throws {

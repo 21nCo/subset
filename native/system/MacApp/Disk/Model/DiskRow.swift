@@ -61,8 +61,13 @@ public enum DiskRowID: Hashable, Sendable {
     /// A reclaim match, by its position in the analysis.
     case match(Int)
     case matchItem(match: Int, item: Int)
-    /// The row standing for the items a list leaves out.
+    /// The row ending a list that leaves items out, by the list's key; opening it shows the next page.
     case more(parent: String)
+
+    public var isMore: Bool {
+        if case .more = self { return true }
+        return false
+    }
 }
 
 /// A flag on a row that changes what its sizes mean.
@@ -134,6 +139,9 @@ public struct DiskRow: Identifiable, Equatable, Sendable {
     public let isNavigable: Bool
     public let accessibilityLabel: String
     public let accessibilityValue: String
+
+    /// The row ending a long list, which shows its next page when opened.
+    public var isMore: Bool { id.isMore }
 }
 
 /// A titled list of rows: the Folders tab has one untitled section, By origin one per `DiskOriginSection`, and

@@ -9,7 +9,8 @@ import SystemProcesses
 /// selection, and the unreadable-folder banner. The section only reads: nothing here deletes, moves, or runs a cleanup.
 ///
 /// A cancelled scan keeps what it read on screen, with folders not read in full marked; origins and suggestions are
-/// worked out only for a scan that finished.
+/// worked out only for a scan that finished and was not cancelled. A list longer than `rowLimit` ends in a row that
+/// shows the next page, so every item can be reached.
 @MainActor
 @Observable
 public final class DiskWindowModel {
@@ -59,7 +60,7 @@ public final class DiskWindowModel {
     public let format: UsageFormat
     /// The home folder's real path, as the scanner reports paths.
     public let home: String
-    /// The most rows one folder, group, or match lists; the rest are summed in one row.
+    /// The rows one folder, group, or match lists at first, and how many more each Show more adds.
     public let rowLimit: Int
 
     @ObservationIgnored private let service: DiskScanService
@@ -67,6 +68,8 @@ public final class DiskWindowModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var selections: [DiskTab: DiskRowID] = [:]
     @ObservationIgnored private var expanded: Set<DiskRowID> = []
+    /// How many rows each list shows, by the list's key, when Show more raised it above `rowLimit`.
+    @ObservationIgnored private var shown: [String: Int] = [:]
 
     public init(service: DiskScanService = .live, format: UsageFormat? = nil, home: String = DiskWindowModel.realHome,
                 rowLimit: Int = 500) {
@@ -123,6 +126,7 @@ public final class DiskWindowModel {
         selection = nil
         selections = [:]
         expanded = []
+        shown = [:]
         rebuild()
         let service = service
         // The header is read on its own, so cancelling the scan does not stop it.
@@ -140,7 +144,8 @@ public final class DiskWindowModel {
         }
     }
 
-    /// Stops the scan, keeping what it read; during analysis, keeps the whole tree without origins or suggestions.
+    /// Stops the scan, keeping what it read; during analysis, or once the scan has finished reading, keeps the whole
+    /// tree without origins or suggestions.
     public func cancel() {
         switch phase {
         case .scanning:
@@ -162,6 +167,9 @@ public final class DiskWindowModel {
     }
 
     private func finish(_ scanned: Result<DiskScanResult, DiskScanError>, scope: DiskScope, generation: Int) async {
+        // Cancel may come after the scanner finished reading but before this runs: the tree is whole, and it is not
+        // analyzed, since the analysis would run in the cancelled task.
+        let cancelled = isCancelling || Task.isCancelled
         isCancelling = false
         let result: DiskScanResult
         switch scanned {
@@ -173,7 +181,7 @@ public final class DiskWindowModel {
             result = value
         }
         self.result = result
-        guard result.outcome == .completed else {
+        guard result.outcome == .completed, !cancelled else {
             phase = .cancelled
             rebuild()
             return
@@ -214,6 +222,9 @@ public final class DiskWindowModel {
             return "Scanned \(read) in \(place). Working out origins and suggestions…"
         case .completed:
             return "Scanned \(read) in \(place)."
+        case .cancelled where isTreeWhole:
+            return "Scanned \(read) in \(place). Cancelled before origins and suggestions were worked out; the whole "
+                + "folder tree is shown."
         case .cancelled:
             return "Scan cancelled: showing the \(read) read in \(place) before it stopped. Folders not read in full are "
                 + "marked “\(DiskBadge.partial.title)”."
@@ -221,6 +232,9 @@ public final class DiskWindowModel {
             return "The scan did not run. \(message)"
         }
     }
+
+    /// The scan shown read everything it was asked to, even if Cancel then stopped the analysis.
+    private var isTreeWhole: Bool { result?.outcome == .completed }
 
     /// Shown only when the scan met folders or items it could not read.
     public var unreadableBanner: DiskUnreadableBanner? {
@@ -230,8 +244,10 @@ public final class DiskWindowModel {
 
     // MARK: Folders tab
 
-    /// Opens a folder of the Folders tab; anything else is ignored.
+    /// Opens a folder of the Folders tab, or shows the next page of the list a Show more row ends; anything else is
+    /// ignored.
     public func open(_ id: DiskRowID) {
+        if case .more = id { return showMore(id) }
         guard case let .item(index) = id, let tree = result?.tree, index < tree.count, Self.isNavigable(tree[index])
         else { return }
         folder = index
@@ -243,7 +259,7 @@ public final class DiskWindowModel {
     /// in the others.
     public func openSelection() {
         guard let selection else { return }
-        if tab == .folders {
+        if tab == .folders || selection.isMore {
             open(selection)
         } else if isExpandable(selection), !expanded.contains(selection) {
             setExpanded(selection, true)
@@ -281,6 +297,28 @@ public final class DiskWindowModel {
         rebuild()
         selection = below.map(DiskRowID.item)
     }
+
+    /// A double-click or the primary action: opens a folder or Show more row in the Folders tab, and expands or
+    /// collapses a group or match, or shows more, in the others.
+    public func activate(_ id: DiskRowID) {
+        if tab == .folders || id.isMore {
+            open(id)
+        } else {
+            toggle(id)
+        }
+    }
+
+    /// Shows the next `rowLimit` rows of the list a Show more row ends, and selects the first of them.
+    public func showMore(_ id: DiskRowID) {
+        guard case let .more(list) = id, let position = sections.flatMap(\.rows).firstIndex(where: { $0.id == id })
+        else { return }
+        shown[list] = limit(list) + rowLimit
+        rebuild()
+        let rows = sections.flatMap(\.rows)
+        selection = rows.indices.contains(position) ? rows[position].id : nil
+    }
+
+    private func limit(_ list: String) -> Int { shown[list] ?? rowLimit }
 
     static func isNavigable(_ item: DiskItem) -> Bool {
         item.kind == .directory && item.sizes != nil
@@ -345,7 +383,12 @@ public final class DiskWindowModel {
         case (.failed, _): note = "The scan did not run."
         case (.scanning, _): note = "Results appear when the scan finishes or is cancelled."
         case (.analyzing, _): note = "Working out origins and suggestions…"
-        case (.cancelled, _): note = "The scan was cancelled before origins and suggestions were worked out. Scan again to see them."
+        case (.cancelled, _) where isTreeWhole:
+            note = "The scan finished reading, but was cancelled before origins and suggestions were worked out. Scan again "
+                + "to see them."
+        case (.cancelled, _):
+            note = "The scan was cancelled before it finished, so origins and suggestions were not worked out. Scan again "
+                + "to see them."
         case (.completed, .origins): note = "Nothing in this scan is in your Library folders or a developer tool's folders."
         case (.completed, _): note = "No suggestions for this scan."
         }
@@ -370,21 +413,35 @@ public final class DiskWindowModel {
         let items = ordered(tree.children(of: folder))
         let largest = items.compactMap(\.sizes?.allocated).max() ?? 0
         let scale = max(parent.sizes?.allocated ?? 0, largest)
-        var rows = items.prefix(rowLimit).map { folderRow($0, in: tree, scale: scale) }
-        if items.count > rowLimit {
-            rows.append(moreRow(items.count - rowLimit, parent: "folder-\(folder)"))
+        let list = "folder-\(folder)"
+        var rows = items.prefix(limit(list)).map { folderRow($0, in: tree, scale: scale) }
+        if items.count > rows.count {
+            rows.append(moreRow(items.count - rows.count, list: list))
         }
-        let note: String?
-        if parent.sizes == nil {
-            note = "This folder could not be read, so its contents are unknown."
-        } else if parent.flags.contains(.partial) {
-            note = "The scan was cancelled before this folder was read in full, so it may hold more than is listed."
-        } else if items.isEmpty {
-            note = "This folder is empty."
-        } else {
-            note = nil
+        return [DiskRowSection(id: "folders", title: nil, note: Self.contentsNote(parent, listed: !items.isEmpty), rows: rows)]
+    }
+
+    /// Why a folder lists less than it holds, or that it is empty; an empty list is called empty only for a folder
+    /// that was read in full.
+    static func contentsNote(_ folder: DiskItem, listed: Bool) -> String? {
+        let flags = folder.flags
+        if folder.sizes == nil {
+            return "This folder could not be read, so its contents are unknown."
+        } else if flags.contains(.partial) {
+            return "The scan was cancelled before this folder was read in full, so it may hold more than is listed."
+        } else if listed {
+            return nil
+        } else if flags.contains(.dataless) {
+            return "This folder is stored in iCloud and not downloaded to this Mac, so its contents were not read. System "
+                + "never downloads it."
+        } else if flags.contains(.countedElsewhere) {
+            return "This folder was reached another way during the scan, so its contents are listed and counted there, "
+                + "not here."
+        } else if flags.contains(.incomplete) {
+            return "This folder's contents were not read (it may have been replaced while the scan ran), so they are "
+                + "unknown."
         }
-        return [DiskRowSection(id: "folders", title: nil, note: note, rows: rows)]
+        return "This folder is empty."
     }
 
     private func ordered(_ items: [DiskItem]) -> [DiskItem] {
@@ -449,7 +506,7 @@ public final class DiskWindowModel {
                     accessibilityValue: figures.accessibilityValue))
                 if open {
                     rows += itemRows(group.items.map { (index: $0, path: tree.path(of: $0)) }, in: tree,
-                                     id: { .originItem(section, group.id, item: $0) }, parent: "\(id)")
+                                     id: { .originItem(section, group.id, item: $0) }, list: "\(id)")
                 }
             }
             var note: String? = groups.isEmpty ? "None in this scan." : nil
@@ -474,7 +531,7 @@ public final class DiskWindowModel {
                 rows.append(matchRow(match, id: id, scale: scale))
                 if expanded.contains(id) {
                     rows += itemRows(match.items.map { (index: $0.index, path: $0.path) }, in: tree,
-                                     id: { .matchItem(match: position, item: $0) }, parent: "\(id)")
+                                     id: { .matchItem(match: position, item: $0) }, list: "\(id)")
                 }
             }
             let count = found.count == 1 ? "1 suggestion" : "\(found.count) suggestions"
@@ -518,13 +575,13 @@ public final class DiskWindowModel {
         }
     }
 
-    /// The items inside an open group or match, largest first, up to `rowLimit`.
+    /// The items inside an open group or match, largest first, as many as the list shows.
     private func itemRows(_ items: [(index: Int, path: String)], in tree: DiskTree, id: (Int) -> DiskRowID,
-                          parent: String) -> [DiskRow] {
+                          list: String) -> [DiskRow] {
         let sorted = items.map { (item: tree[$0.index], path: $0.path) }
             .sorted { ($0.item.sizes?.allocated ?? 0, $1.path) > ($1.item.sizes?.allocated ?? 0, $0.path) }
         let scale = sorted.compactMap(\.item.sizes?.allocated).max() ?? 0
-        var rows = sorted.prefix(rowLimit).map { item, path in
+        var rows = sorted.prefix(limit(list)).map { item, path in
             let figures = DiskFigures(item.sizes, flags: item.flags, format: format)
             let name = Self.name(item.name)
             let shown = format.path(path)
@@ -534,16 +591,20 @@ public final class DiskWindowModel {
                 explanation: nil, rebuild: nil, yield: nil, isExpandable: false, isExpanded: false, isNavigable: false,
                 accessibilityLabel: "\(name), \(item.kind.title) at \(shown)", accessibilityValue: figures.accessibilityValue)
         }
-        if sorted.count > rowLimit { rows.append(moreRow(sorted.count - rowLimit, parent: parent, depth: 1)) }
+        if sorted.count > rows.count { rows.append(moreRow(sorted.count - rows.count, list: list, depth: 1)) }
         return rows
     }
 
-    private func moreRow(_ count: Int, parent: String, depth: Int = 0) -> DiskRow {
-        let name = "\(format.count(count)) more item\(count == 1 ? "" : "s")"
-        let detail = "Not listed; the totals include them."
-        return DiskRow(id: .more(parent: parent), depth: depth, name: name, detail: detail, size: "", privateSize: nil,
+    /// The row ending a list that leaves `count` items out; opening it shows the next page.
+    private func moreRow(_ count: Int, list: String, depth: Int = 0) -> DiskRow {
+        let next = min(count, rowLimit)
+        let name = "Show \(format.count(next)) more"
+        let detail = "\(format.count(count)) more item\(count == 1 ? "" : "s") not listed yet; the totals include "
+            + (count == 1 ? "it." : "them.")
+        return DiskRow(id: .more(parent: list), depth: depth, name: name, detail: detail, size: "", privateSize: nil,
                        fraction: nil, badges: [], path: nil, explanation: nil, rebuild: nil, yield: nil,
-                       isExpandable: false, isExpanded: false, isNavigable: false, accessibilityLabel: name,
+                       isExpandable: false, isExpanded: false, isNavigable: false,
+                       accessibilityLabel: "Show \(format.count(next)) more item\(next == 1 ? "" : "s")",
                        accessibilityValue: detail)
     }
 

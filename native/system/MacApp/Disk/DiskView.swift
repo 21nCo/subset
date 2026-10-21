@@ -135,8 +135,7 @@ struct DiskView: View {
         .contextMenu(forSelectionType: DiskRowID.self) { ids in
             RowActions(path: ids.first.flatMap(model.path(for:)))
         } primaryAction: { ids in
-            guard let id = ids.first else { return }
-            model.tab == .folders ? model.open(id) : model.toggle(id)
+            if let id = ids.first { model.activate(id) }
         }
         .onKeyPress(.rightArrow) {
             model.openSelection()
@@ -188,13 +187,39 @@ struct DiskView: View {
 }
 
 /// One row: a disclosure button for a group or match, the name and detail, the badges, the bar, and the sizes; a
-/// match adds its explanation, rebuild note, and what a cleanup would free.
+/// match adds its explanation, rebuild note, and what a cleanup would free. The row ending a long list is a Show more
+/// button.
 private struct DiskRowView: View {
     let row: DiskRow
     let toggle: () -> Void
     let open: () -> Void
 
     var body: some View {
+        if row.isMore {
+            moreButton
+        } else {
+            item
+        }
+    }
+
+    private var moreButton: some View {
+        HStack(spacing: 6) {
+            Color.clear.frame(width: 14, height: 1)
+            Button(row.name, action: open)
+                .buttonStyle(.link)
+            Text(row.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Spacer()
+        }
+        .padding(.leading, CGFloat(row.depth) * 20)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+        .accessibilityValue(row.accessibilityValue)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, open)
+        .accessibilityAction(named: "Show more", open)
+    }
+
+    private var item: some View {
         HStack(alignment: .top, spacing: 6) {
             if row.isExpandable {
                 Button(action: toggle) {

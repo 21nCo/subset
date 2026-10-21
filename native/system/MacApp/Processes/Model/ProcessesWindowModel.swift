@@ -43,8 +43,9 @@ public final class ProcessesWindowModel {
     }
     /// The visible rows, in outline order.
     public private(set) var rows: [ProcessRow] = []
-    /// Bumped to ask the view to focus the filter field (⌘F).
-    public private(set) var filterFocusRequest = 0
+    /// ⌘F asked for the filter field and the view has not focused it yet. A flag rather than a counter, so a request
+    /// made before the Processes view appears (⌘F from the Disk section) is still there when it does.
+    public private(set) var isFilterFocusPending = false
 
     public let format: UsageFormat
     /// The Mac's logical cores, for the header before the first sample gives them.
@@ -162,7 +163,12 @@ public final class ProcessesWindowModel {
 
     /// ⌘F.
     public func focusFilter() {
-        filterFocusRequest += 1
+        isFilterFocusPending = true
+    }
+
+    /// The view focused the filter field.
+    public func didFocusFilter() {
+        isFilterFocusPending = false
     }
 
     /// Shows a group, as the menu bar's top groups do: switches to its layer, opens the group holding a subgroup,

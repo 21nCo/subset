@@ -1,11 +1,13 @@
 import Foundation
-import SystemCore
+import os
+@testable import SystemCore
 @testable import SystemDisk
 import SystemProcesses
 import XCTest
 
 /// The Disk section's view model without the UI, on a fixture home folder scanned with the real scanner: breadcrumb
-/// navigation, sort order, each tab's contents, the unreadable-folder banner, cancelling, and spoken labels.
+/// navigation, sort order, paging long lists, folders whose contents were not read, each tab's contents, the
+/// unreadable-folder banner, cancelling, and spoken labels.
 @MainActor
 final class DiskWindowModelTests: XCTestCase {
     private var fixture: DiskFixture!
@@ -56,7 +58,7 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.breadcrumbs.map(\.name), ["~"])
     }
 
-    func testFoldersSortBySizeOrNameWithUnknownSizesLastAndLongListsCapped() async throws {
+    func testFoldersSortBySizeOrNameWithUnknownSizesLastAndLongListsPaged() async throws {
         try fixture.lock("Locked")
         try fixture.write("Library/Caches/zz-small", bytes: 4_000)
         let model = try await fixture.scanned()
@@ -81,8 +83,119 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.rows.last?.name, "Locked")
 
         let capped = try await fixture.scanned(rowLimit: 2)
-        XCTAssertEqual(capped.rows.map(\.name), ["Documents", "Library", "2 more items"])
+        XCTAssertEqual(capped.rows.map(\.name), ["Documents", "Library", "Show 2 more"])
         XCTAssertNil(capped.rows.last?.path)
+        XCTAssertEqual(capped.rows.last?.detail, "2 more items not listed yet; the totals include them.")
+    }
+
+    /// Every item of a long list can be reached, selected, revealed, and copied: the row ending it shows the next page
+    /// from Return, a double-click, or its button, in the Folders tab and in an open group or match alike.
+    func testShowMorePagesThroughEveryItemOfALongList() async throws {
+        try fixture.write("Library/Developer/Xcode/DerivedData/Other-def/Build/app", bytes: 400_000)
+        try fixture.write("Library/Application Support/com.example.editor/data.db", bytes: 50_000)
+        let model = try await fixture.scanned(rowLimit: 1)
+        XCTAssertEqual(model.rows.map(\.name), ["Library", "Show 1 more"])
+        let first = try XCTUnwrap(model.rows.last)
+        XCTAssertTrue(first.isMore)
+        XCTAssertEqual(first.accessibilityLabel, "Show 1 more item")
+        XCTAssertEqual(first.accessibilityValue, "2 more items not listed yet; the totals include them.")
+
+        // Return on the row shows the next item and selects it.
+        model.selection = first.id
+        model.openSelection()
+        XCTAssertEqual(model.rows.map(\.name), ["Library", "Documents", "Show 1 more"])
+        XCTAssertEqual(model.selection, model.row(named: "Documents")?.id)
+        // A double-click or the button shows the last one, which can be revealed and copied.
+        model.activate(try XCTUnwrap(model.rows.last).id)
+        XCTAssertEqual(model.rows.map(\.name), ["Library", "Documents", ".Trash"])
+        let trash = try XCTUnwrap(model.row(named: ".Trash"))
+        XCTAssertEqual(model.selection, trash.id)
+        XCTAssertEqual(model.path(for: trash.id), fixture.path(".Trash"))
+        // The page stays when the sort changes; another folder starts at one page.
+        model.sortKey = .name
+        XCTAssertEqual(model.rows.map(\.name), [".Trash", "Documents", "Library"])
+        model.open(try XCTUnwrap(model.row(named: "Documents")).id)
+        XCTAssertEqual(model.rows.map(\.name), ["big.bin", "Show 1 more"])
+
+        model.tab = .suggestions
+        let derived = try XCTUnwrap(model.row(named: "Xcode DerivedData"))
+        model.setExpanded(derived.id, true)
+        let page = model.rows.drop { $0.id != derived.id }.dropFirst().prefix(2).map(\.name)
+        XCTAssertEqual(page, ["App-abc", "Show 1 more"])
+        model.selection = try XCTUnwrap(model.rows.first { $0.isMore }).id
+        model.openSelection()
+        let other = try XCTUnwrap(model.row(named: "Other-def"))
+        XCTAssertEqual(other.depth, 1)
+        XCTAssertEqual(model.selection, other.id)
+        XCTAssertEqual(model.path(for: other.id), fixture.path("Library/Developer/Xcode/DerivedData/Other-def"))
+        XCTAssertNil(model.rows.first { $0.isMore })
+        XCTAssertTrue(model.isExpanded(derived.id), "showing more does not collapse the match")
+
+        model.tab = .origins
+        let editor = try XCTUnwrap(model.row(named: "Editor"))
+        model.activate(editor.id)
+        XCTAssertTrue(model.isExpanded(editor.id))
+        let more = try XCTUnwrap(model.rows.first { $0.isMore })
+        XCTAssertEqual(more.depth, 1)
+        model.activate(more.id)
+        XCTAssertNil(model.rows.first { $0.isMore })
+        let items = model.rows.filter { $0.depth == 1 }
+        XCTAssertEqual(Set(items.compactMap { model.path(for: $0.id) }),
+                       [fixture.path("Library/Caches/com.example.editor"),
+                        fixture.path("Library/Application Support/com.example.editor")])
+    }
+
+    /// A folder opens to an empty list when the scan did not read its contents; only one read in full is called empty.
+    func testAFolderWhoseContentsWereNotReadIsNeverCalledEmpty() async throws {
+        for name in ["Cloud", "Elsewhere", "Replaced"] {
+            try fixture.write("\(name)/inside.bin", bytes: 4_000)
+        }
+        try FileManager.default.createDirectory(atPath: fixture.path("Empty"), withIntermediateDirectories: false)
+        let home = fixture.home
+        // The scanner's states for a placeholder folder, one reached another way, and one replaced after it was listed,
+        // as the Core tests place them: no children and nothing counted.
+        let placed: [(name: String, flags: DiskItemFlags)] = [
+            ("Cloud", .dataless), ("Elsewhere", .countedElsewhere), ("Replaced", .incomplete)
+        ]
+        let model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            guard case var .success(result) = scanned else { return scanned }
+            var tree = result.tree
+            for (name, flags) in placed {
+                guard let index = tree.index(atPath: home + "/" + name) else { continue }
+                tree.nodes[index].flags = flags
+                tree.nodes[index].childCount = 0
+                tree.nodes[index].sizes = .zero
+            }
+            result = DiskScanResult(tree: tree, outcome: result.outcome, unreadablePaths: result.unreadablePaths,
+                                    entriesRead: result.entriesRead)
+            return .success(result)
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.phase, .completed)
+
+        let notes = [
+            "Cloud": "This folder is stored in iCloud and not downloaded to this Mac, so its contents were not read. "
+                + "System never downloads it.",
+            "Elsewhere": "This folder was reached another way during the scan, so its contents are listed and counted "
+                + "there, not here.",
+            "Replaced": "This folder's contents were not read (it may have been replaced while the scan ran), so they "
+                + "are unknown.",
+            "Empty": "This folder is empty."
+        ]
+        for (name, note) in notes {
+            let row = try XCTUnwrap(model.row(named: name), name)
+            XCTAssertTrue(row.isNavigable, name)
+            model.open(row.id)
+            XCTAssertEqual(model.breadcrumbs.last?.name, name)
+            XCTAssertEqual(model.rows, [], name)
+            XCTAssertEqual(model.sections.first?.note, note, name)
+            model.goUp()
+        }
+        XCTAssertEqual(try XCTUnwrap(model.row(named: "Cloud")).badges, [.dataless])
+        XCTAssertEqual(try XCTUnwrap(model.row(named: "Elsewhere")).badges, [.countedElsewhere])
+        XCTAssertNil(model.sections.first?.note, "a folder that lists items needs no note")
     }
 
     // MARK: Tabs
@@ -204,13 +317,14 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .cancelled)
         XCTAssertEqual(model.result?.outcome, .cancelled)
         XCTAssertTrue(model.statusText.hasPrefix("Scan cancelled"), model.statusText)
+        XCTAssertTrue(model.statusText.contains("before it stopped"), model.statusText)
         XCTAssertEqual(Set(model.rows.map(\.name)), [".Trash", "Documents", "Library"])
         XCTAssertTrue(try XCTUnwrap(model.row(named: "Documents")).badges.contains(.partial))
         XCTAssertNotNil(model.sections.first?.note)
         XCTAssertNil(model.analysis)
         model.tab = .suggestions
-        XCTAssertEqual(model.sections.first?.note,
-                       "The scan was cancelled before origins and suggestions were worked out. Scan again to see them.")
+        XCTAssertEqual(model.sections.first?.note, "The scan was cancelled before it finished, so origins and "
+                       + "suggestions were not worked out. Scan again to see them.")
     }
 
     func testCancellingWhileSuggestionsAreWorkedOutKeepsTheWholeTreeAndDropsTheLateAnalysis() async throws {
@@ -232,6 +346,52 @@ final class DiskWindowModelTests: XCTestCase {
         XCTAssertNil(model.analysis)
         XCTAssertEqual(model.result?.outcome, .completed)
         XCTAssertEqual(Set(model.rows.map(\.name)), [".Trash", "Documents", "Library"])
+        Self.assertWholeTreeCancelled(model)
+    }
+
+    /// Cancel pressed after the scanner finished reading, before the model takes the result: the whole tree is shown
+    /// as cancelled, and nothing is analyzed in the cancelled task.
+    func testCancellingAfterTheScanFinishedReadingDoesNotAnalyze() async throws {
+        let gate = Gate()
+        let analyzed = OSAllocatedUnfairLock(initialState: 0)
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            gate.pass()
+            return scanned
+        }, analyze: { result, _ in
+            analyzed.withLock { $0 += 1 }
+            return DiskFixture.analysis(result, home: home)
+        }))
+        model.scan()
+        await fulfillment(of: [gate.reached], timeout: 30)
+        XCTAssertEqual(model.phase, .scanning)
+        model.cancel()
+        gate.open()
+        try await DiskFixture.wait { !model.isScanning }
+
+        XCTAssertEqual(model.phase, .cancelled)
+        XCTAssertEqual(model.result?.outcome, .completed)
+        XCTAssertNil(model.analysis)
+        XCTAssertEqual(analyzed.withLock { $0 }, 0)
+        XCTAssertFalse(model.isCancelling)
+        XCTAssertEqual(Set(model.rows.map(\.name)), [".Trash", "Documents", "Library"])
+        Self.assertWholeTreeCancelled(model)
+    }
+
+    /// A tree read in full and cancelled before its analysis says so, without the partial scan's wording.
+    private static func assertWholeTreeCancelled(_ model: DiskWindowModel, file: StaticString = #filePath, line: UInt = #line) {
+        let status = model.statusText
+        XCTAssertTrue(status.contains("Cancelled before origins and suggestions were worked out; the whole folder tree is shown."),
+                      status, file: file, line: line)
+        XCTAssertFalse(status.contains("before it stopped"), status, file: file, line: line)
+        XCTAssertFalse(status.contains(DiskBadge.partial.title), status, file: file, line: line)
+        XCTAssertNil(model.sections.first?.note, file: file, line: line)
+        XCTAssertFalse(model.rows.contains { $0.badges.contains(.partial) }, file: file, line: line)
+        model.tab = .suggestions
+        XCTAssertEqual(model.sections.first?.note, "The scan finished reading, but was cancelled before origins and "
+                       + "suggestions were worked out. Scan again to see them.", file: file, line: line)
+        model.tab = .folders
     }
 
     func testAScanThatCannotStartSaysWhy() async throws {

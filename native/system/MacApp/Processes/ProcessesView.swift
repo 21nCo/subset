@@ -63,7 +63,15 @@ struct ProcessesView: View {
                 .accessibilityLabel("Filter by name")
                 .accessibilityValue(model.filter.isEmpty ? "No filter" : model.filter)
         }
-        .onChange(of: model.filterFocusRequest) { filterFocused = true }
+        // `initial`: ⌘F from the Disk section asks before this view exists. Focus is set on the next turn, once the
+        // field is in the window.
+        .onChange(of: model.isFilterFocusPending, initial: true) { _, pending in
+            guard pending else { return }
+            Task { @MainActor in
+                filterFocused = true
+                model.didFocusFilter()
+            }
+        }
     }
 
     private var outline: some View {
