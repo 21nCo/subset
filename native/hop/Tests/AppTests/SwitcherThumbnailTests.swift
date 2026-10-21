@@ -5,13 +5,15 @@ import XCTest
 
 /// A capture source that lists the windows it is given and captures a blank image of the asked size; it fails the
 /// listing or the windows it is told to, and can hold every capture until the test releases it, as ScreenCaptureKit's
-/// do not stop when their task is cancelled. The test can change each of these between openings.
+/// do not stop when their task is cancelled. A held capture is suspended, not polling, so a cancelled one takes no
+/// thread from the cooperative pool. The test can change each of these between openings.
 private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
     private let lock = NSLock()
     private var listedWindows: [CaptureWindow]
     private var failingIDs: Set<UInt32>
     private var listingRefused = false
     private var held: Bool
+    private var waiting: [CheckedContinuation<Void, Never>] = []
     private var listed = 0
     private var asked: [UInt32] = []
     private var running = 0
@@ -39,7 +41,14 @@ private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
         set { lock.withLock { listingRefused = newValue } }
     }
     func hold() { lock.withLock { held = true } }
-    func release() { lock.withLock { held = false } }
+    func release() {
+        let waiting = lock.withLock {
+            held = false
+            defer { self.waiting = [] }
+            return self.waiting
+        }
+        for capture in waiting { capture.resume() }
+    }
 
     struct Refused: Error {}
 
@@ -57,7 +66,13 @@ private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
             running += 1
             peak = max(peak, running)
         }
-        while lock.withLock({ held }) { try? await Task.sleep(for: .milliseconds(5)) }
+        await withCheckedContinuation { capture in
+            let holds = lock.withLock {
+                if held { waiting.append(capture) }
+                return held
+            }
+            if !holds { capture.resume() }
+        }
         lock.withLock { running -= 1 }
         if failing.contains(window.id) { throw Refused() }
         let context = CGContext(
@@ -66,6 +81,15 @@ private final class FakeImageSource: WindowCaptureSource, @unchecked Sendable {
         )
         return try XCTUnwrap(context?.makeImage())
     }
+}
+
+/// A login item that is never registered, for a Settings model that only needs Screen Recording.
+@MainActor
+private final class UnusedLoginItem: LoginItemService {
+    var status = LoginItemStatus.notRegistered
+    func register() throws {}
+    func unregister() throws {}
+    func openSettings() {}
 }
 
 /// Window previews in the switcher: captured only with previews on and Screen Recording granted, each cell's image
@@ -97,8 +121,17 @@ final class SwitcherThumbnailTests: XCTestCase {
         }
     }
 
+    private var suiteName = ""
+    private var defaults: UserDefaults!
+
     override func setUp() async throws {
         settings.showWindowPreviews = true
+        suiteName = "dev.subset.hop.tests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+    }
+
+    override func tearDown() async throws {
+        defaults.removePersistentDomain(forName: suiteName)
     }
 
     private func switcher(_ source: FakeImageSource) -> (SwitcherController, ThumbnailProvider) {
@@ -318,6 +351,67 @@ final class SwitcherThumbnailTests: XCTestCase {
         switcher.settingsChanged()
         XCTAssertTrue(thumbnails.cachedRefs.isEmpty)
         XCTAssertTrue(switcher.isOpen)
+    }
+
+    /// A switcher with previews on, wired to a Settings model as the app wires them: the switcher samples Screen
+    /// Recording through it, and every sample that finds it not granted drops the thumbnails.
+    private func switcherWithSettings(
+        _ source: FakeImageSource
+    ) -> (SwitcherController, ThumbnailProvider, SettingsModel) {
+        let model = SettingsModel(
+            store: SettingsStore(defaults: defaults),
+            loginItemService: UnusedLoginItem(),
+            screenRecordingPane: ScreenRecordingPane(
+                isGranted: { [unowned self] in granted }, wasRequested: { true }, request: {}, open: { _ in }
+            )
+        )
+        model.setShowWindowPreviews(true)
+        let thumbnails = ThumbnailProvider(source: source, ownPid: 1)
+        let switcher = SwitcherController(
+            readWindows: { [unowned self] in WindowList(windows: lists[0]) },
+            windowOperator: RecordingWindowOperator(),
+            settings: { model.settings },
+            thumbnails: thumbnails,
+            capturesThumbnails: { model.capturesThumbnails() }
+        )
+        model.onChange = { _ in switcher.settingsChanged() }
+        model.onScreenRecordingNotGranted = { switcher.dropThumbnails() }
+        return (switcher, thumbnails, model)
+    }
+
+    func testARevocationSampledWhileTheSwitcherIsOpenDropsEveryImageAtOnce() async throws {
+        let source = FakeImageSource(windows: captureWindows)
+        let (switcher, thumbnails, model) = switcherWithSettings(source)
+        lists = [windows]
+        switcher.open()
+        try await wait(until: { thumbnails.cachedRefs == refs(0, 1, 2) })
+        XCTAssertEqual(switcher.currentThumbnails().count, 3)
+        // Screen Recording is turned off in System Settings; Hop notices when its Settings window shows or it becomes
+        // active, without the switcher opening again or previews being turned off.
+        granted = false
+        model.refreshScreenRecording()
+        XCTAssertEqual(model.screenRecording, .revoked)
+        XCTAssertEqual(thumbnails.cachedBytes, 0)
+        XCTAssertTrue(thumbnails.cachedRefs.isEmpty)
+        XCTAssertTrue(switcher.currentThumbnails().isEmpty, "every cell shows its icon")
+        XCTAssertTrue(switcher.isOpen)
+        XCTAssertTrue(model.settings.showWindowPreviews, "the preference stays on")
+    }
+
+    func testCapturesStillRunningWhenARevocationIsSampledNeverComeBack() async throws {
+        let source = FakeImageSource(windows: captureWindows, holds: true)
+        let (switcher, thumbnails, model) = switcherWithSettings(source)
+        lists = [windows]
+        switcher.open()
+        try await wait(until: { source.captures.count == 3 })
+        granted = false
+        model.refreshScreenRecording()
+        source.release()
+        try await wait(until: { thumbnails.capturesInFlight == 0 })
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(thumbnails.cachedRefs.isEmpty, "late images are dropped")
+        XCTAssertEqual(thumbnails.cachedBytes, 0)
+        XCTAssertTrue(switcher.currentThumbnails().isEmpty)
     }
 
     func testImagesThatArriveAfterTheSwitcherClosesAreDropped() async throws {

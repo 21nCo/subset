@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Settings apply at once: the shortcut, and the shown windows in an open switcher.
         settings.onChange = { [unowned self] in switchShortcut.settingsChanged($0) }
         settings.onRecordingChange = { [unowned self] in switchShortcut.isSuspended = $0 }
+        // Wherever Screen Recording is found not granted, no thumbnail stays in memory or on screen.
+        settings.onScreenRecordingNotGranted = { [unowned self] in switchShortcut.dropThumbnails() }
         switchShortcut.onTrustLost = { [unowned self] in refreshAccessibility() }
         switchShortcut.onNeedsPermission = { [unowned self] in
             refreshAccessibility()

@@ -141,7 +141,8 @@ final class ThumbnailCacheTests: XCTestCase {
 }
 
 /// A capture source that records its calls, fails where told, and counts captures in flight. A held capture waits until
-/// its task is cancelled, or, like ScreenCaptureKit's, until the test releases it whether or not it was cancelled.
+/// its task is cancelled, or, like ScreenCaptureKit's, until the test releases it whether or not it was cancelled; one
+/// held until released is suspended, not polling, so once cancelled it takes no thread from the cooperative pool.
 private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable {
     private let lock = NSLock()
     private let windows: [CaptureWindow]
@@ -150,6 +151,7 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
     private let delay: Duration
     private let holdsUntilCancelled: Bool
     private var held: Bool
+    private var waiting: [CheckedContinuation<Void, Never>] = []
     private var running = 0
     private var peak = 0
     private var asked: [UInt32] = []
@@ -175,7 +177,14 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
     var maxInFlight: Int { lock.withLock { peak } }
     var captured: [UInt32] { lock.withLock { asked } }
     var listings: Int { lock.withLock { listed } }
-    func release() { lock.withLock { held = false } }
+    func release() {
+        let waiting = lock.withLock {
+            held = false
+            defer { self.waiting = [] }
+            return self.waiting
+        }
+        for capture in waiting { capture.resume() }
+    }
 
     struct Refused: Error {}
 
@@ -193,7 +202,13 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
         }
         try? await Task.sleep(for: delay)
         while holdsUntilCancelled, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(1)) }
-        while lock.withLock({ held }) { try? await Task.sleep(for: .milliseconds(1)) }
+        await withCheckedContinuation { capture in
+            let holds = lock.withLock {
+                if held { waiting.append(capture) }
+                return held
+            }
+            if !holds { capture.resume() }
+        }
         lock.withLock { running -= 1 }
         if failing.contains(window.id) { throw Refused() }
         return "image \(window.id) \(size.width)x\(size.height)"
@@ -201,7 +216,7 @@ private final class FakeCaptureSource: WindowCaptureSource, @unchecked Sendable 
 }
 
 /// A capture source whose listings each return only when the test releases them, in any order, with handles tagged by
-/// the listing they came from; a capture records the handle it was given.
+/// the listing they came from; a capture records the handle it was given. A held listing is suspended, not polling.
 private final class OutOfOrderListingSource: WindowCaptureSource, @unchecked Sendable {
     struct Handle: Sendable, Equatable {
         var listing: Int
@@ -212,6 +227,7 @@ private final class OutOfOrderListingSource: WindowCaptureSource, @unchecked Sen
     private let windowsByListing: [Int: [CaptureWindow]]
     private var started = 0
     private var released: Set<Int> = []
+    private var waiting: [Int: CheckedContinuation<Void, Never>] = [:]
     private var asked: [Handle] = []
 
     /// `windowsByListing[n]` is what the nth listing (from 1) returns.
@@ -221,7 +237,13 @@ private final class OutOfOrderListingSource: WindowCaptureSource, @unchecked Sen
 
     var listingsStarted: Int { lock.withLock { started } }
     var captured: [Handle] { lock.withLock { asked } }
-    func releaseListing(_ number: Int) { lock.withLock { _ = released.insert(number) } }
+    func releaseListing(_ number: Int) {
+        let listing = lock.withLock {
+            released.insert(number)
+            return waiting.removeValue(forKey: number)
+        }
+        listing?.resume()
+    }
 
     func shareableWindows() async throws -> [ListedWindow<Handle>] {
         let number = lock.withLock {
@@ -229,7 +251,14 @@ private final class OutOfOrderListingSource: WindowCaptureSource, @unchecked Sen
             return started
         }
         // Like ScreenCaptureKit's, a listing does not stop when its task is cancelled.
-        while !lock.withLock({ released.contains(number) }) { try? await Task.sleep(for: .milliseconds(1)) }
+        await withCheckedContinuation { listing in
+            let holds = lock.withLock {
+                let holds = !released.contains(number)
+                if holds { waiting[number] = listing }
+                return holds
+            }
+            if !holds { listing.resume() }
+        }
         return (windowsByListing[number] ?? []).map { ListedWindow(window: $0, handle: Handle(listing: number, id: $0.id)) }
     }
 

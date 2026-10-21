@@ -99,6 +99,11 @@ final class SwitchShortcutController {
         switcher.settingsChanged()
     }
 
+    /// Screen Recording is not granted: the switcher drops every thumbnail and shows icons.
+    func dropThumbnails() {
+        switcher.dropThumbnails()
+    }
+
     /// Installs the tap. Call only while the process is trusted; returns false if the system refused the tap.
     @discardableResult
     func install() -> Bool {

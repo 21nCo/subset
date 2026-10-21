@@ -94,6 +94,9 @@ final class SettingsModel: ObservableObject {
     var onChange: (Settings) -> Void = { _ in }
     /// Called when recording starts (true) and ends (false).
     var onRecordingChange: (Bool) -> Void = { _ in }
+    /// Called after each sample that finds Screen Recording not granted, wherever it was taken (the Settings window,
+    /// Hop becoming active, a switcher opening), so the switcher drops every thumbnail at once.
+    var onScreenRecordingNotGranted: () -> Void = {}
 
     private let store: SettingsStore
     private let loginItemService: any LoginItemService
@@ -286,7 +289,8 @@ final class SettingsModel: ObservableObject {
         refreshScreenRecording()
     }
 
-    /// Samples the Screen Recording permission, without prompting.
+    /// Samples the Screen Recording permission, without prompting. A sample that finds it not granted tells the app
+    /// (`onScreenRecordingNotGranted`), even when it was already not granted.
     @discardableResult
     func refreshScreenRecording() -> ScreenRecordingAccess {
         let access = screenRecordingGate.update(
@@ -294,6 +298,7 @@ final class SettingsModel: ObservableObject {
             requested: screenRecordingPane.wasRequested()
         )
         if access != screenRecording { screenRecording = access }
+        if access != .granted { onScreenRecordingNotGranted() }
         return access
     }
 

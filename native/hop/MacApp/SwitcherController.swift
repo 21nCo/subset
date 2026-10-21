@@ -153,11 +153,7 @@ final class SwitcherController {
     /// moves to its follower if its item left, and a waiting commit or click can no longer reach a removed item. The
     /// list is then read again, for anything the settings now show.
     func settingsChanged() {
-        if !settings().showWindowPreviews, let thumbnails {
-            let hadImages = !thumbnails.cachedRefs.isEmpty
-            thumbnails.clear()
-            if hadImages { render() }
-        }
+        if !settings().showWindowPreviews { dropThumbnails() }
         guard let model else { return }
         let filter = currentFilter()
         guard filter != model.filter else { return }
@@ -357,6 +353,15 @@ final class SwitcherController {
         for pid in pids where icons[pid] == nil {
             icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon
         }
+    }
+
+    /// Drops every thumbnail, and any still being captured, and shows the open switcher's cells with their icons at
+    /// once: previews were turned off, or a sample found Screen Recording not granted.
+    func dropThumbnails() {
+        guard let thumbnails else { return }
+        let hadImages = !thumbnails.cachedRefs.isEmpty
+        thumbnails.clear()
+        if hadImages { render() }
     }
 
     /// Captures every candidate window's thumbnail when previews may be shown; otherwise drops any kept, so a switcher
