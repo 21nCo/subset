@@ -1,20 +1,41 @@
 {
   "name": "@subset.dev/timer",
-  "version": "0.0.0",
-  "description": "Local Timer daemon and command line for multi-timers and interval workouts",
+  "version": "0.1.0",
+  "description": "Multi-timers and interval workouts from the command line, with sound, notifications and an agent skill",
   "license": "MIT",
-  "private": true,
+  "private": false,
   "type": "module",
-  "exports": {
-    "./daemon": "./src/daemon/index.mjs"
+  "bin": {
+    "subset-timer": "dist/cli.mjs"
   },
+  "files": [
+    "dist",
+    "skills",
+    "README.md"
+  ],
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.13"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/21nCo/subset.git",
+    "directory": "packages/timer-cli"
+  },
+  "homepage": "https://github.com/21nCo/subset/tree/main/packages/timer-cli#readme",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
-    "test": "node --test --test-timeout=60000 test/daemon/*.test.mjs"
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test --test-timeout=60000 test/daemon/*.test.mjs test/cli/*.test.mjs",
+    "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
   },
-  "dependencies": {
-    "@subset/timer": "*"
+  "devDependencies": {
+    "@subset/timer": "*",
+    "rolldown": "1.2.11"
   }
 }

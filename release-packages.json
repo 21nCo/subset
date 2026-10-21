@@ -1,4 +1,5 @@
 [
   { "slug": "usage", "path": "packages/usage-cli", "name": "@subset.dev/usage", "inputs": ["packages/usage-cli", "packages/usage", "apps/usage"] },
-  { "slug": "minutes", "path": "packages/minutes-cli", "name": "@subset.dev/minutes", "inputs": ["packages/minutes-cli", "packages/minutes"] }
+  { "slug": "minutes", "path": "packages/minutes-cli", "name": "@subset.dev/minutes", "inputs": ["packages/minutes-cli", "packages/minutes"] },
+  { "slug": "timer", "path": "packages/timer-cli", "name": "@subset.dev/timer", "inputs": ["packages/timer-cli", "packages/timer"] }
 ]

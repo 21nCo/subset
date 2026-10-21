@@ -1,0 +1,82 @@
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import test from 'node:test';
+import { pidAlive } from '../../src/daemon/index.mjs';
+import { eventually, tempDataDir } from '../daemon/helpers.mjs';
+import { PACKAGE_ROOT } from './helpers.mjs';
+
+// The package test script builds dist/cli.mjs first.
+const CLI = join(PACKAGE_ROOT, 'dist/cli.mjs');
+const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
+
+function cli(dataDir, ...argv) {
+  const result = spawnSync(process.execPath, [CLI, ...argv], {
+    env: { ...process.env, SUBSET_TIMER_DATA_DIR: dataDir, SUBSET_TIMER_ALERTS: 'off' },
+    encoding: 'utf8',
+    timeout: 20_000
+  });
+  return { code: result.status, stdout: result.stdout, stderr: result.stderr, json: () => JSON.parse(result.stdout) };
+}
+
+test('the manifest is ready to publish as @subset.dev/timer 0.1.0 with the subset-timer bin', () => {
+  assert.deepEqual(
+    { name: manifest.name, version: manifest.version, private: manifest.private, bin: manifest.bin, files: manifest.files, engines: manifest.engines },
+    { name: '@subset.dev/timer', version: '0.1.0', private: false, bin: { 'subset-timer': 'dist/cli.mjs' }, files: ['dist', 'skills', 'README.md'], engines: { node: '>=22.13' } }
+  );
+  // Workspaces are bundled, so nothing installs at runtime.
+  assert.equal(manifest.dependencies, undefined);
+  const releases = JSON.parse(readFileSync(join(PACKAGE_ROOT, '../../release-packages.json'), 'utf8'));
+  assert.deepEqual(releases.find((entry) => entry.slug === 'timer'), { slug: 'timer', path: 'packages/timer-cli', name: '@subset.dev/timer', inputs: ['packages/timer-cli', 'packages/timer'] });
+});
+
+test('the bundle is executable, imports only Node built-ins, and prints its version', () => {
+  const source = readFileSync(CLI, 'utf8');
+  assert.ok(source.startsWith('#!/usr/bin/env node\n'));
+  assert.equal(statSync(CLI).mode & 0o111, 0o111);
+  // Code lines only: a JSDoc type such as import('@subset/timer').TimerDefinition is not an import.
+  const code = source.split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
+  const specifiers = [...code.matchAll(/(?:\bfrom|\bimport\()\s*["']([^"']+)["']/g)].map((match) => match[1]);
+  assert.ok(specifiers.includes('node:child_process'));
+  assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), []);
+  assert.equal(execFileSync(process.execPath, [CLI, '--version'], { encoding: 'utf8' }), '0.1.0\n');
+  // The bundled skill path is the package's own skills folder.
+  assert.equal(execFileSync(process.execPath, [CLI, 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, 'skills', 'subset-timer')}\n`);
+});
+
+test('npm pack ships dist/cli.mjs, the skill and the README, and no sources or tests', () => {
+  // prepack's check accepts the bundle it built (it throws, failing the test, when it refuses).
+  execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--check'], { encoding: 'utf8' });
+  const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: PACKAGE_ROOT, encoding: 'utf8' }));
+  const files = packed.files.map((file) => file.path).sort();
+  assert.deepEqual(files, ['README.md', 'dist/cli.mjs', 'package.json', 'skills/subset-timer/SKILL.md']);
+  assert.equal(packed.name, '@subset.dev/timer');
+  assert.equal(packed.version, '0.1.0');
+});
+
+test('the built CLI starts the daemon on first use, reports it, and stops it', async (t) => {
+  const dataDir = tempDataDir(t);
+  // daemon status never starts one.
+  assert.equal(cli(dataDir, 'daemon', 'status', '--json').code, 3);
+
+  const started = cli(dataDir, 'start', '25m', '--name', 'Tea', '--json');
+  assert.equal(started.code, 0, started.stderr);
+  const id = started.json().timer.definition.id;
+
+  const status = cli(dataDir, 'daemon', 'status', '--json');
+  assert.equal(status.code, 0);
+  assert.deepEqual({ dataDir: status.json().dataDir, alerts: status.json().alerts }, { dataDir, alerts: 'off' });
+  const { pid } = status.json();
+  assert.notEqual(pid, process.pid);
+
+  // The timer outlives the command that started it.
+  const listed = cli(dataDir, 'list');
+  assert.match(listed.stdout, new RegExp(`^Tea \\(${id}\\): running · 2[45]:\\d\\d left\\n$`));
+
+  assert.deepEqual(cli(dataDir, 'daemon', 'stop', '--json').json(), { stopped: true });
+  await eventually(() => !pidAlive(pid), 10_000);
+  // Timers keep their place and continue when the daemon starts again.
+  assert.equal(cli(dataDir, 'status', id, '--json').json().timer.projection.status, 'running');
+  cli(dataDir, 'daemon', 'stop');
+});

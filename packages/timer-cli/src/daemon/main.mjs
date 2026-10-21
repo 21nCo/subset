@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The daemon entry a client spawns until the SET-77 CLI provides `subset-timer daemon run`.
+// The default daemon entry of `createClient`; the CLI passes its own file, which runs `subset-timer daemon run`.
 import { runDaemonCommand } from './server.mjs';
 
 const args = process.argv.slice(2);

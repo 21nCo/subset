@@ -1,0 +1,34 @@
+import { defaultSpawn, notificationFor, playInOrder, runProcess } from './process.mjs';
+
+const STEREO = '/usr/share/sounds/freedesktop/stereo';
+/** Only these freedesktop sound theme files are played; no path comes from a timer or a user. */
+export const LINUX_SOUNDS = {
+  tick: [`${STEREO}/audio-volume-change.oga`],
+  segment: [`${STEREO}/message.oga`],
+  finish: [`${STEREO}/complete.oga`, `${STEREO}/complete.oga`, `${STEREO}/complete.oga`]
+};
+
+export function notifySendArgs(title, body) {
+  return ['--app-name=Timer', '--', title, body];
+}
+
+/**
+ * The Linux sink, given the absolute paths of the tools found on `PATH` (either may be null):
+ * `paplay` plays a freedesktop sound when the timer's `sound` is on and the file exists, and
+ * `notify-send` posts a notification for the finish and for alerts missed while away.
+ */
+export function createLinuxSink({ notifySend = null, paplay = null, spawn = defaultSpawn, soundExists = () => true } = {}) {
+  const play = (path) => runProcess(spawn, paplay, [path]);
+  return {
+    name: `linux (${[notifySend && 'notify-send', paplay && 'paplay'].filter(Boolean).join(', ')})`,
+    async alert(alert, timer) {
+      const tasks = [];
+      const sounds = LINUX_SOUNDS[alert.kind]?.filter((path) => soundExists(path));
+      if (paplay && sounds?.length && timer.sound !== false) tasks.push(playInOrder(play, sounds));
+      const notification = notificationFor(alert, timer);
+      if (notifySend && notification) tasks.push(runProcess(spawn, notifySend, notifySendArgs(notification.title, notification.body)));
+      const failed = (await Promise.allSettled(tasks)).find((outcome) => outcome.status === 'rejected');
+      if (failed) throw failed.reason;
+    }
+  };
+}
