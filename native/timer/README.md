@@ -21,7 +21,7 @@ Status: builds and passes its tests. It is not signed or released, and no surfac
 | Status item | The running timer that ends soonest, as `m:ss` (`h:mm:ss` from an hour), counted from its timestamps. Stopwatches never end, so they are not shown there. When no timer is running, it shows the `timer` glyph from the app icon. |
 | One row per timer | Name, state and time left, as the CLI prints them: for example `Tabata — running · round 3/8 · work · 0:12 left · next rest 0:10`. Its submenu has the controls that apply now: **Start** (idle), **Pause** or **Resume**, **Lap** (running stopwatches and countdowns with laps), **Skip** (running or paused interval timers), **Reset…** (not idle) and **Remove…**. Reset and Remove ask for confirmation first. |
 | Start ▸ | The built-in presets, then the saved ones, from `GET /v1/presets`. Choosing one runs `start` with that preset. |
-| New Countdown… | A small window with a duration field (`90s`, `25m`, `1h30m`, `1:30` or `1:02:03`, from 1 second to 24 hours, checked as the CLI checks it) and an optional name. **Start** stays disabled until the duration is valid, and the daemon's own errors appear in the window. |
+| New Countdown… | A small window with a duration field (`90s`, `25m`, `1h30m`, `1:30` or `1:02:03`, from 1 second to 24 hours, checked as the CLI checks it) and an optional name. **Start** stays disabled until the duration is valid, and the daemon's own errors appear in the window. The fields take the usual Command-X, C, V, A and Z. |
 | Open Board | Runs `node cli.mjs serve --json`, which starts the local web board and opens it in the browser. While that server starts or runs, choosing Open Board again starts no second server; once it is serving, it reopens its URL. If `serve` fails, the app shows the CLI's error. Quitting the app stops the server. |
 | About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path, the connection state and any timer state the app could not read, or the setup problem. |
 | Daemon problems | While the event stream is down, the menu shows **Reconnecting to the Timer daemon…** and the error. A `state` event the app cannot read (another schema version or a malformed body) shows its error without that heading, until a readable one arrives. |
@@ -49,12 +49,12 @@ npm ci && npm run build      # at the repository root; stages packages/timer-cli
 cd native/timer
 swift test                   # TimerCore, board and menu state tests (Command Line Tools are enough)
 SUBSET_TIMER_CLI_PATH=$PWD/../../packages/timer-cli/dist/cli.mjs swift test   # adds the real-daemon test
-ruby ProjectGenerator.rb     # after adding or removing a source file (xcodeproj gem 1.27.0)
+ruby ProjectGenerator.rb     # after adding or removing a source file (xcodeproj gem 1.27.0); keeps your xcuserdata
 xcodebuild -project Timer.xcodeproj -scheme Timer -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 swift scripts/render-icon.swift   # redraws the app icon
 ```
 
-The `@subset.dev/timer` build stages `packages/timer-cli/app-runtime/`, which holds `dist`, `web`, `mcp-app` and `skills`. It is assembled in a temporary folder and renamed into place, and it is not part of the npm package. The **Embed Timer CLI** build phase copies it to `Timer.app/Contents/Resources/timer-cli`. A Release build fails if it is missing. A Debug build warns, and that app then runs the CLI only from `SUBSET_TIMER_CLI_PATH`.
+The `@subset.dev/timer` build stages `packages/timer-cli/app-runtime`, a link to a complete copy of `dist`, `web`, `mcp-app` and `skills` that the build never changes once published. It is not part of the npm package. The **Embed Timer CLI** build phase copies what the link names to `Timer.app/Contents/Resources/timer-cli`, and copies again if another build replaced it meanwhile. A Release build fails if it is missing. A Debug build warns, and that app then runs the CLI only from `SUBSET_TIMER_CLI_PATH`.
 
 The app target is named `Timer` and its bundle ID is `dev.subset.timer` (`LSUIElement`, `MARKETING_VERSION` 0.1.0). Its Swift module is `TimerApp`, because a module named `Timer` would shadow Foundation's `Timer`. `macos-release.json` lists the npm workspaces a release builds before archiving: `@subset/timer`, `@subset/timer-web` and `@subset.dev/timer`. `@subset/timer-web` is there because the CLI build copies the built board from `apps/timer`.
 

@@ -9,7 +9,23 @@ enum TimerApp {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
+        app.mainMenu = mainMenu()
         withExtendedLifetime(delegate) { app.run() }
+    }
+
+    /// The app shows no menu bar, but key equivalents still go through its main menu. This Edit menu gives the
+    /// countdown fields the standard editing shortcuts, sent to the focused field through the responder chain.
+    static func mainMenu() -> NSMenu {
+        let edit = NSMenu(title: "Edit")
+        let items: [(String, Selector, String)] = [
+            ("Undo", Selector(("undo:")), "z"), ("Redo", Selector(("redo:")), "Z"), ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"), ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ]
+        for (title, action, key) in items { edit.addItem(withTitle: title, action: action, keyEquivalent: key) }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+        return menu
     }
 }
 

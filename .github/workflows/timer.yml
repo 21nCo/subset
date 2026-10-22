@@ -64,7 +64,11 @@ jobs:
         run: |
           gem install --user-install xcodeproj -v 1.27.0
           export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"
+          # Regeneration replaces only the files it writes, so local Xcode user data survives it.
+          mkdir -p Timer.xcodeproj/xcuserdata/ci.xcuserdatad Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad
+          touch Timer.xcodeproj/xcuserdata/ci.xcuserdatad/keep Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad/keep
           ruby ProjectGenerator.rb
+          test -f Timer.xcodeproj/xcuserdata/ci.xcuserdatad/keep && test -f Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad/keep
           git diff --exit-code -- Timer.xcodeproj
           test -z "$(git status --porcelain -- Timer.xcodeproj)"
 

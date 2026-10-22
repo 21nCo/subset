@@ -88,9 +88,10 @@ app_target.frameworks_build_phase.add_file_reference(core_target.product_referen
   app_target.frameworks_build_phase.add_file_reference(file_ref)
 end
 
-# Copies packages/timer-cli/app-runtime (dist, web, mcp-app and skills, staged by `npm run build` at the repository
-# root) into Timer.app/Contents/Resources/timer-cli. A Release build fails without it; a Debug build warns, and that
-# app then needs SUBSET_TIMER_CLI_PATH.
+# Copies the generation packages/timer-cli/app-runtime links to (dist, web, mcp-app and skills, staged by
+# `npm run build` at the repository root) into Timer.app/Contents/Resources/timer-cli. A build that publishes a newer
+# generation meanwhile may remove that one, so the copy counts only if the generation still exists afterwards. A Release
+# build fails without a staged runtime; a Debug build warns, and that app then needs SUBSET_TIMER_CLI_PATH.
 embed = app_target.new_shell_script_build_phase("Embed Timer CLI")
 embed.shell_path = "/bin/sh"
 embed.input_paths = ["$(SRCROOT)/../../packages/timer-cli/app-runtime"]
@@ -98,20 +99,27 @@ embed.output_paths = ["$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/
 embed.always_out_of_date = "1"
 embed.shell_script = <<~'SH'
   set -eu
-  SRC="${SRCROOT}/../../packages/timer-cli/app-runtime"
+  RUNTIME="${SRCROOT}/../../packages/timer-cli/app-runtime"
   DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/timer-cli"
-  rm -rf "${DEST}"
-  for part in dist/cli.mjs web/index.html mcp-app/board.html skills/subset-timer/SKILL.md; do
-    if [ ! -f "${SRC}/${part}" ]; then
-      if [ "${CONFIGURATION}" = "Release" ]; then
-        echo "error: ${SRC}/${part} is missing. Run npm ci && npm run build at the repository root first."
-        exit 1
+  for attempt in 1 2 3; do
+    rm -rf "${DEST}"
+    GENERATION=$(readlink "${RUNTIME}" || true)
+    SRC="${RUNTIME%/*}/${GENERATION}"
+    for part in dist/cli.mjs web/index.html mcp-app/board.html skills/subset-timer/SKILL.md; do
+      if [ -z "${GENERATION}" ] || [ ! -f "${SRC}/${part}" ]; then
+        if [ -n "${GENERATION}" ] && [ "$(readlink "${RUNTIME}" || true)" != "${GENERATION}" ]; then continue 2; fi
+        if [ "${CONFIGURATION}" = "Release" ]; then
+          echo "error: ${RUNTIME}/${part} is missing. Run npm ci && npm run build at the repository root first."
+          exit 1
+        fi
+        echo "warning: ${RUNTIME}/${part} is missing; this Debug app runs the CLI only from SUBSET_TIMER_CLI_PATH."
+        exit 0
       fi
-      echo "warning: ${SRC}/${part} is missing; this Debug app runs the CLI only from SUBSET_TIMER_CLI_PATH."
-      exit 0
-    fi
+    done
+    if ditto "${SRC}" "${DEST}" && [ -d "${SRC}" ]; then exit 0; fi
   done
-  ditto "${SRC}" "${DEST}"
+  echo "error: ${RUNTIME} kept changing while it was copied. Wait for the npm run build in progress, then build again."
+  exit 1
 SH
 
 # Derive object IDs from their paths so regeneration is byte-for-byte reproducible.
@@ -119,8 +127,9 @@ project.predictabilize_uuids
 # Target dependency proxies hash the targets' IDs, so a second pass settles them on the derived IDs.
 project.predictabilize_uuids
 
-# Write the project and its scheme to a temporary folder and replace the old project only after both saves succeed,
-# so a failure leaves it intact.
+# Write the project and its scheme to a temporary folder, then move each generated file over its old copy only after
+# both saves succeed. Each move replaces one whole file, and what the generator does not write, such as xcuserdata and
+# project.xcworkspace, is left alone.
 Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
   staged_path = File.join(staging, File.basename(project_path))
   project.save(staged_path)
@@ -128,8 +137,10 @@ Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, nil, launch_target: true)
   scheme.save_as(staged_path, "Timer", true)
-  FileUtils.rm_rf(project_path)
-  FileUtils.mv(staged_path, project_path)
+  Dir.glob("**/*", base: staged_path).reject { |file| File.directory?(File.join(staged_path, file)) }.each do |file|
+    FileUtils.mkdir_p(File.dirname(File.join(project_path, file)))
+    File.rename(File.join(staged_path, file), File.join(project_path, file))
+  end
 end
 
 puts "Generated #{project_path}"

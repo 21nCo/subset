@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { pidAlive } from '../../src/daemon/index.mjs';
 import { eventually, tempDataDir } from '../daemon/helpers.mjs';
@@ -53,31 +54,81 @@ test('the bundle is executable, imports only Node built-ins and its own chunks, 
   assert.equal(execFileSync(process.execPath, [CLI, 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, 'skills', 'subset-timer')}\n`);
 });
 
-test('the build stages app-runtime/, the copy the macOS app embeds, with the same dist, web, mcp-app and skills', () => {
-  const runtime = join(PACKAGE_ROOT, 'app-runtime');
+const RUNTIME = join(PACKAGE_ROOT, 'app-runtime');
+const GENERATIONS = join(PACKAGE_ROOT, '.app-runtime');
+const stage = (nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'], { encoding: 'utf8' });
+// Stands for a build interrupted at the moment it publishes its generation.
+const KILL_AT_PUBLISH = ['--import', `data:text/javascript,${encodeURIComponent('import fs from "node:fs/promises"; import { syncBuiltinESMExports } from "node:module"; const { rename } = fs; fs.rename = (from, to) => (String(to).endsWith("app-runtime") ? process.kill(process.pid, "SIGKILL") : rename(from, to)); syncBuiltinESMExports();')}`];
+const assertComplete = (runtime) => {
   const listing = (folder) => readdirSync(folder, { recursive: true }).sort();
   assert.deepEqual(readdirSync(runtime).sort(), ['dist', 'mcp-app', 'skills', 'web']);
   for (const folder of ['dist', 'web', 'mcp-app', 'skills']) assert.deepEqual(listing(join(runtime, folder)), listing(join(PACKAGE_ROOT, folder)), folder);
   assert.equal(readFileSync(join(runtime, 'dist/cli.mjs'), 'utf8'), readFileSync(CLI, 'utf8'));
+};
+
+test('the build stages app-runtime, a link to the generation the macOS app embeds, with the same dist, web, mcp-app and skills', () => {
+  const generation = readlinkSync(RUNTIME);
+  assert.match(generation, /^\.app-runtime\/\d+-\d+$/);
+  assertComplete(RUNTIME);
   // The embedded CLI finds its skill inside the runtime, as it does inside an installed package.
-  const embedded = join(runtime, 'dist/cli.mjs');
-  assert.equal(execFileSync(process.execPath, [embedded, 'skill', 'path'], { encoding: 'utf8' }), `${join(runtime, 'skills', 'subset-timer')}\n`);
-  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
+  assert.equal(execFileSync(process.execPath, [join(RUNTIME, 'dist/cli.mjs'), 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, generation, 'skills', 'subset-timer')}\n`);
+  assert.deepEqual(readdirSync(GENERATIONS), [basename(generation)]);
 });
 
-test('staging app-runtime/ removes the staging folder an interrupted build left behind, and keeps a running build\'s', (t) => {
-  const stale = join(PACKAGE_ROOT, '.app-runtime-999999999');
+test('staging app-runtime removes what interrupted builds left behind, and keeps a running build\'s generation', (t) => {
+  const previous = readlinkSync(RUNTIME);
   // Named for this test's own process, it stands for another build still staging.
-  const live = join(PACKAGE_ROOT, `.app-runtime-${process.pid}`);
+  const live = join(GENERATIONS, `${process.pid}-1`);
   t.after(() => rmSync(live, { recursive: true, force: true }));
-  for (const folder of [stale, live]) {
+  for (const folder of [join(GENERATIONS, '999999999-1'), live]) {
     mkdirSync(join(folder, 'dist'), { recursive: true });
     writeFileSync(join(folder, 'dist/cli.mjs'), 'partial');
   }
-  execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'], { encoding: 'utf8' });
-  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), [`.app-runtime-${process.pid}`]);
+  symlinkSync('.app-runtime/999999999-1', join(GENERATIONS, '999999999-1.link'));
+  assert.equal(stage().status, 0);
+  const current = readlinkSync(RUNTIME);
+  assert.notEqual(current, previous);
+  assert.deepEqual(readdirSync(GENERATIONS).sort(), [basename(current), `${process.pid}-1`].sort());
   assert.equal(readFileSync(join(live, 'dist/cli.mjs'), 'utf8'), 'partial');
-  assert.equal(readFileSync(join(PACKAGE_ROOT, 'app-runtime/dist/cli.mjs'), 'utf8'), readFileSync(CLI, 'utf8'));
+  assertComplete(RUNTIME);
+});
+
+test('a build interrupted while publishing leaves app-runtime on the previous complete generation', () => {
+  const previous = readlinkSync(RUNTIME);
+  assert.equal(stage(KILL_AT_PUBLISH).signal, 'SIGKILL');
+  assert.equal(readlinkSync(RUNTIME), previous);
+  assertComplete(RUNTIME);
+  assert.equal(readdirSync(GENERATIONS).length, 3); // the previous generation, and the interrupted one with its link
+  assert.equal(stage().status, 0);
+  assert.deepEqual(readdirSync(GENERATIONS), [basename(readlinkSync(RUNTIME))]);
+});
+
+test('overlapping builds each publish a complete generation and none fails', async () => {
+  const runs = Array.from({ length: 4 }, () => new Promise((resolve) => execFile(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'], (error) => resolve(error))));
+  assert.deepEqual(await Promise.all(runs), [null, null, null, null]);
+  assertComplete(RUNTIME);
+  // A replaced generation whose build was still running when the last one finished goes with the next build.
+  assert.equal(stage().status, 0);
+  assert.deepEqual(readdirSync(GENERATIONS), [basename(readlinkSync(RUNTIME))]);
+});
+
+test('the Embed Timer CLI phase copies a complete runtime while builds publish and are interrupted during the copy', { skip: process.platform !== 'darwin' && 'ditto is macOS only' }, (t) => {
+  const generator = readFileSync(join(PACKAGE_ROOT, '../../native/timer/ProjectGenerator.rb'), 'utf8');
+  const script = /embed\.shell_script = <<~'SH'\n([\s\S]*?)\nSH\n/.exec(generator)[1].replace(/^ {2}/gm, '');
+  const temp = mkdtempSync(join(tmpdir(), 'timer-embed-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  // The first copy starts after one build published a newer generation (removing the one the phase read) and another
+  // was interrupted while publishing.
+  const marker = join(temp, 'published');
+  const build = [process.execPath, join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'].map((arg) => `'${arg}'`).join(' ');
+  mkdirSync(join(temp, 'bin'));
+  writeFileSync(join(temp, 'bin/ditto'), `#!/bin/sh\nif [ ! -e '${marker}' ]; then touch '${marker}'; ${build}; NODE_OPTIONS='${KILL_AT_PUBLISH.join(' ')}' ${build}; fi\nexec /usr/bin/ditto "$@"\n`, { mode: 0o755 });
+  const result = spawnSync('/bin/sh', ['-c', script], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${join(temp, 'bin')}:${process.env.PATH}`, SRCROOT: join(PACKAGE_ROOT, '../../native/timer'), TARGET_BUILD_DIR: temp, UNLOCALIZED_RESOURCES_FOLDER_PATH: 'Resources', CONFIGURATION: 'Release' }
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assertComplete(join(temp, 'Resources/timer-cli'));
 });
 
 test('dist/THIRD_PARTY_NOTICES.md carries the licence of every bundled package', () => {
