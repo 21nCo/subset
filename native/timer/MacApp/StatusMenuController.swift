@@ -68,7 +68,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         switch controller.setup {
         case .problem(let problem): "Timer: \(problem.message)"
         case .locating: "Timer: starting"
-        case .ready: controller.connectionProblem.map { "Timer: \($0)" } ?? "Timer: no timer running"
+        case .ready: (controller.connectionProblem ?? controller.stateProblem).map { "Timer: \($0)" } ?? "Timer: no timer running"
         }
     }
 
@@ -108,6 +108,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         case .ready:
             if let problem = controller.connectionProblem {
                 menu.addItem(disabled("Reconnecting to the Timer daemon…"))
+                menu.addItem(disabled(problem))
+                menu.addItem(.separator())
+            } else if let problem = controller.stateProblem {
                 menu.addItem(disabled(problem))
                 menu.addItem(.separator())
             }
@@ -202,7 +205,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             Timer CLI (\(runtime.cliSource.rawValue)) at \(runtime.cli)
             Daemon socket: \(controller.paths.socket)
             \(controller.connectionProblem.map { "Connection: \($0)" } ?? "Connected to the daemon.")
-            """
+            """ + (controller.stateProblem.map { "\nTimer state: \($0)" } ?? "")
         }
         NSApp.activate()
         NSApp.orderFrontStandardAboutPanel(options: [.credits: NSAttributedString(string: details, attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)])])

@@ -16,6 +16,9 @@ final class TimerController {
     private(set) var presets: [Preset] = []
     /// Set while the event stream is down, until it reconnects.
     private(set) var connectionProblem: String?
+    /// Set when the last `state` event could not be read (an unsupported schema or a malformed body), until one can.
+    /// The stream is still connected, so the app keeps the last timers it read.
+    private(set) var stateProblem: String?
     /// Called after any of the above changes.
     var onChange: () -> Void = {}
     /// Shows an operation's failure.
@@ -60,7 +63,7 @@ final class TimerController {
         try DaemonLauncher.launch(node: runtime.node, cli: runtime.cli, paths: paths)
     }
 
-    private func handle(_ update: EventSubscription.Update) {
+    func handle(_ update: EventSubscription.Update) {
         switch update {
         case .connected:
             connectionProblem = nil
@@ -68,8 +71,9 @@ final class TimerController {
         case .event(let event) where event.event == "state":
             do {
                 timers = try DaemonClient.board(from: Data(event.data.utf8)).timers.map(\.stored)
+                stateProblem = nil
             } catch {
-                connectionProblem = error.localizedDescription
+                stateProblem = error.localizedDescription
             }
         case .event:
             return

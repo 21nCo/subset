@@ -30,6 +30,12 @@ if (process.argv.includes('--check')) {
   process.exit(0);
 }
 
+if (process.argv.includes('--stage-app-runtime')) {
+  // Restages app-runtime/ from the current build alone.
+  await stageAppRuntime();
+  process.exit(0);
+}
+
 if (!(await exists(path.join(webSource, 'index.html'))) || !(await exists(path.join(root, 'mcp-app/board.html')))) { console.error('apps/timer/dist or mcp-app/board.html is missing. Build @subset/timer-web first.'); process.exit(1); }
 await rm(path.join(root, 'dist'), { recursive: true, force: true });
 const { output } = await build({
@@ -54,16 +60,23 @@ await writeFile(path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), await notices(ou
 await rm(path.join(root, 'web'), { recursive: true, force: true });
 await cp(webSource, path.join(root, 'web'), { recursive: true });
 
-// Stage the macOS app runtime. It is assembled in a temporary folder and renamed into place only when
-// complete, so the app never embeds a partial copy.
-const runtime = path.join(root, 'app-runtime');
-const staging = path.join(root, `.app-runtime-${process.pid}`);
-await rm(staging, { recursive: true, force: true });
-try {
-  for (const folder of ['dist', 'web', 'mcp-app', 'skills']) await cp(path.join(root, folder), path.join(staging, folder), { recursive: true });
-  await rm(runtime, { recursive: true, force: true });
-  await rename(staging, runtime);
-} catch (error) {
-  await rm(staging, { recursive: true, force: true });
-  throw error;
+await stageAppRuntime();
+
+// Stages the macOS app runtime from the built dist, web, mcp-app and skills. It is assembled in a temporary folder
+// and renamed into place only when complete, so the app never embeds a partial copy. Staging folders an
+// interrupted build left behind are removed first.
+async function stageAppRuntime() {
+  for (const name of await readdir(root)) {
+    if (name.startsWith('.app-runtime-')) await rm(path.join(root, name), { recursive: true, force: true });
+  }
+  const runtime = path.join(root, 'app-runtime');
+  const staging = path.join(root, `.app-runtime-${process.pid}`);
+  try {
+    for (const folder of ['dist', 'web', 'mcp-app', 'skills']) await cp(path.join(root, folder), path.join(staging, folder), { recursive: true });
+    await rm(runtime, { recursive: true, force: true });
+    await rename(staging, runtime);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
 }

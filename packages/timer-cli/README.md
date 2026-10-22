@@ -125,7 +125,7 @@ In hosts with the MCP Apps extension (`io.modelcontextprotocol/ui`), the results
 
 ## macOS app runtime (SET-81)
 
-The build also stages `app-runtime/` (`dist`, `web`, `mcp-app` and `skills`), which the Timer menu bar app embeds ([native/timer](../../native/timer/README.md)). It is assembled in a temporary folder and renamed into place, so the app never embeds a partial copy. It is git-ignored and not in the npm package.
+The build also stages `app-runtime/` (`dist`, `web`, `mcp-app` and `skills`), which the Timer menu bar app embeds ([native/timer](../../native/timer/README.md)). It is assembled in a temporary folder and renamed into place, so the app never embeds a partial copy; the next build removes a temporary folder an interrupted build left behind. It is git-ignored and not in the npm package.
 
 ## Daemon (SET-76)
 

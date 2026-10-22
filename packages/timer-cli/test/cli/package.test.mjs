@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pidAlive } from '../../src/daemon/index.mjs';
@@ -63,6 +63,15 @@ test('the build stages app-runtime/, the copy the macOS app embeds, with the sam
   const embedded = join(runtime, 'dist/cli.mjs');
   assert.equal(execFileSync(process.execPath, [embedded, 'skill', 'path'], { encoding: 'utf8' }), `${join(runtime, 'skills', 'subset-timer')}\n`);
   assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
+});
+
+test('staging app-runtime/ removes the staging folder an interrupted build left behind', () => {
+  const stale = join(PACKAGE_ROOT, '.app-runtime-999999999');
+  mkdirSync(join(stale, 'dist'), { recursive: true });
+  writeFileSync(join(stale, 'dist/cli.mjs'), 'partial');
+  execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'], { encoding: 'utf8' });
+  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
+  assert.equal(readFileSync(join(PACKAGE_ROOT, 'app-runtime/dist/cli.mjs'), 'utf8'), readFileSync(CLI, 'utf8'));
 });
 
 test('dist/THIRD_PARTY_NOTICES.md carries the licence of every bundled package', () => {

@@ -23,7 +23,8 @@ Status: builds and passes its tests. It is not signed or released, and no surfac
 | Start ▸ | The built-in presets, then the saved ones, from `GET /v1/presets`. Choosing one runs `start` with that preset. |
 | New Countdown… | A small window with a duration field (`90s`, `25m`, `1h30m`, `1:30` or `1:02:03`, from 1 second to 24 hours, checked as the CLI checks it) and an optional name. **Start** stays disabled until the duration is valid, and the daemon's own errors appear in the window. |
 | Open Board | Runs `node cli.mjs serve --json`, which starts the local web board and opens it in the browser. While that server starts or runs, choosing Open Board again starts no second server; once it is serving, it reopens its URL. If `serve` fails, the app shows the CLI's error. Quitting the app stops the server. |
-| About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path and the connection state, or the setup problem. |
+| About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path, the connection state and any timer state the app could not read, or the setup problem. |
+| Daemon problems | While the event stream is down, the menu shows **Reconnecting to the Timer daemon…** and the error. A `state` event the app cannot read (another schema version or a malformed body) shows its error without that heading, until a readable one arrives. |
 | Setup problems | Without a supported Node.js, the menu shows "Node.js 22.13 or later is required" and **Download Node.js from nodejs.org…**. A missing CLI shows its path. **Check Again** searches again. |
 
 While the menu is closed, only the status item updates, about once a second, at the moment its shown second changes. While the menu is open, the timer rows update with it, and a row whose timer finishes gets the controls of a finished timer. Quitting the app does not stop the daemon or the timers.
@@ -46,7 +47,7 @@ While the menu is closed, only the status item updates, about once a second, at 
 ```sh
 npm ci && npm run build      # at the repository root; stages packages/timer-cli/app-runtime
 cd native/timer
-swift test                   # TimerCore and board tests (Command Line Tools are enough)
+swift test                   # TimerCore, board and menu state tests (Command Line Tools are enough)
 SUBSET_TIMER_CLI_PATH=$PWD/../../packages/timer-cli/dist/cli.mjs swift test   # adds the real-daemon test
 ruby ProjectGenerator.rb     # after adding or removing a source file (xcodeproj gem 1.27.0)
 xcodebuild -project Timer.xcodeproj -scheme Timer -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
@@ -68,6 +69,7 @@ The app target is named `Timer` and its bundle ID is `dev.subset.timer` (`LSUIEl
 - **Projection and formatting:** the Swift projection reproduces every fixture projection, and `TimerFormat.line` reproduces the agent result's text exactly. Also covered: time left from timestamps, the soonest-running choice, `until` countdowns, and duration parsing.
 - **`RuntimeLocator` order:** checked with a fake file system and process runner.
 - **Board process:** with a fake `serve`, Open Board while the server starts launches no second process, Quit stops it, and a `serve --json` failure shows the CLI's error.
+- **Menu state:** a `state` event the app cannot read (an unsupported schema or a malformed body) shows as its own problem, not as reconnecting, until a readable one arrives. A disconnect shows reconnecting until the stream connects again.
 - **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down.
 
 The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, `swift test` with `SUBSET_TIMER_CLI_PATH` set, the project-regeneration check, and an unsigned Release `xcodebuild`, then checks that the embedded runtime is present.
