@@ -63,7 +63,7 @@ final class DriftSettingsModel: ObservableObject {
         Binding { self.settings.notificationFallback } set: {
             self.settings.notificationFallback = $0
             // Permission is asked for only here, when the user turns the fallback on.
-            if $0 { self.companion.checkNotifications(request: true) }
+            if $0 { self.companion.requestNotifications() }
             self.reload()
         }
     }

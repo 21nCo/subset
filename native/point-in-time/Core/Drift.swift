@@ -110,7 +110,8 @@ public struct CompanionState: Equatable, Sendable {
     public static let focusWindowLength: TimeInterval = 25 * 60
     public static let breakLengths: [TimeInterval] = [5 * 60, 10 * 60, 15 * 60]
 
-    /// The start of the latest episode the companion offered, recorded only once it was shown or sent.
+    /// The start of the latest episode the companion offered, recorded only once the panel showed it or macOS accepted
+    /// its notification.
     public var promptedEpisode: Date?
     /// The latest focus intent, from Return to Focus.
     public var focusWindow: DateInterval?
@@ -149,13 +150,10 @@ public struct CompanionState: Equatable, Sendable {
         return end
     }
 
-    /// Records `episode` as offered if `route` delivered it; an undelivered drift stays eligible for the next refresh.
-    /// Returns whether it was recorded.
-    @discardableResult
-    public mutating func recordOffer(of episode: DriftEpisode, by route: DriftOfferRoute) -> Bool {
-        guard route.delivers else { return false }
+    /// Records `episode` as offered, once it reached the user: the panel showed it, or macOS accepted its notification
+    /// (see `DriftOfferDelivery`).
+    public mutating func recordOffer(of episode: DriftEpisode) {
         promptedEpisode = episode.start
-        return true
     }
 
     /// Forgets the drift last offered unless its first block is among `blocks`, read from `readFrom` on: a deletion
@@ -173,25 +171,53 @@ public struct CompanionState: Equatable, Sendable {
     }
 }
 
-/// How a drift to offer reaches the user: the panel when it could be shown, else a notification when the user turned the
-/// fallback on and macOS allows it. Only those two deliver, so a drift that could not be shown is not recorded as
-/// offered.
-public enum DriftOfferRoute: Equatable, Sendable {
-    case panel
-    case notification
-    /// The fallback is on but macOS has not yet said whether notifications are allowed: offer again once it has.
-    case awaitingPermission
-    /// Neither can show it now; it is offered again at a later refresh while it is still current.
-    case undelivered
-
-    public init(panelShown: Bool, fallbackEnabled: Bool, notificationsAllowed: Bool?) {
-        self = if panelShown { .panel }
-        else if !fallbackEnabled { .undelivered }
-        else if let notificationsAllowed { notificationsAllowed ? .notification : .undelivered }
-        else { .awaitingPermission }
+/// How the companion offers a drift and records it: at once when the panel showed it, else by a notification when the
+/// user turned that fallback on, recorded only once macOS accepted it and the drift is still the current episode. One
+/// notification is sent at a time, and until macOS answers no drift is offered again, so a refresh meanwhile never sends
+/// a second one. A drift that reached the user neither way (no panel and no fallback, or macOS refused the
+/// notification: notifications turned off in System Settings, say) is not recorded and stays eligible.
+public struct DriftOfferDelivery: Equatable, Sendable {
+    public enum Step: Equatable, Sendable {
+        /// The panel showed it, and it was recorded as offered.
+        case recorded
+        /// Send its notification, then pass macOS's answer to `finish`.
+        case sendNotification
+        /// Nothing reached the user; a later refresh offers it again.
+        case notDelivered
     }
 
-    public var delivers: Bool { self == .panel || self == .notification }
+    /// The drift whose notification macOS has not answered yet.
+    public private(set) var sending: DriftEpisode?
+
+    public init() {}
+
+    public var isSending: Bool { sending != nil }
+
+    /// Offers `episode`, after the companion tried the panel: `panelShown` says whether it appeared.
+    public mutating func offer(_ episode: DriftEpisode, panelShown: Bool, fallbackEnabled: Bool, state: inout CompanionState) -> Step {
+        if panelShown {
+            state.recordOffer(of: episode)
+            return .recorded
+        }
+        guard fallbackEnabled, sending == nil else { return .notDelivered }
+        sending = episode
+        return .sendNotification
+    }
+
+    /// macOS's answer for the notification on its way, with `current`, the decision from a read made after the answer
+    /// arrived. When macOS accepted it and the episode sent is still the current one (after a reset or a new session
+    /// another episode is current, and that one was not offered), records it in `state`. Returns whether it did.
+    public mutating func finish(accepted: Bool, current: DriftDecision, state: inout CompanionState) -> Bool {
+        guard let sent = sending else { return false }
+        sending = nil
+        let episode: DriftEpisode? = switch current {
+        case .prompt(let episode), .suppressed(let episode): episode
+        case .none, .alreadyPrompted: nil
+        }
+        guard accepted, let episode, episode.since <= sent.start else { return false }
+        state.recordOffer(of: sent)
+        return true
+    }
 }
 
 /// The outcome of checking the current session for a drift.

@@ -204,6 +204,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             menu.addItem(disabled("Focus window until \(window.end.formatted(date: .omitted, time: .shortened))"))
             menu.addItem(action("End Focus Window") { [companion] in companion.endFocusWindow() })
         }
+        if let error = companion.notificationError { menu.addItem(disabled("Drift notification not sent: \(error)")) }
         guard let episode = companion.offered else { return }
         menu.addItem(.separator())
         menu.addItem(disabled("Drifting? \(companion.summary(of: episode))"))

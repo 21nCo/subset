@@ -148,30 +148,92 @@ private func episodeStarts(_ decision: DriftDecision) -> [Date]? {
         #expect(next.start == reset[5].start)
     }
 
-    @Test func aDriftIsRecordedAsOfferedOnlyOnceShownOrSent() {
-        #expect(DriftOfferRoute(panelShown: true, fallbackEnabled: false, notificationsAllowed: nil) == .panel)
-        #expect(DriftOfferRoute(panelShown: true, fallbackEnabled: true, notificationsAllowed: false) == .panel)
-        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: false, notificationsAllowed: true) == .undelivered)
-        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: nil) == .awaitingPermission)
-        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: false) == .undelivered)
-        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: true) == .notification)
-
+    @Test func aDriftShownInThePanelIsRecordedAtOnce() {
         let blocks = session(at(10), [.drift, .drift])
         guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
-        // At launch, before macOS says whether notifications are allowed, nothing is shown: the drift stays eligible.
-        for route in [DriftOfferRoute.awaitingPermission, .undelivered] {
+        for fallbackEnabled in [false, true] {
+            var delivery = DriftOfferDelivery()
             var state = CompanionState()
-            let recorded = state.recordOffer(of: episode, by: route)
-            #expect(!recorded)
+            #expect(delivery.offer(episode, panelShown: true, fallbackEnabled: fallbackEnabled, state: &state) == .recorded)
+            #expect(!delivery.isSending)
+            #expect(evaluate(blocks, state: state) == .alreadyPrompted(episode))
+        }
+        // No panel and no fallback: nothing reached the user, so the drift stays eligible.
+        var delivery = DriftOfferDelivery()
+        var state = CompanionState()
+        #expect(delivery.offer(episode, panelShown: false, fallbackEnabled: false, state: &state) == .notDelivered)
+        #expect(!delivery.isSending && state == CompanionState())
+        #expect(evaluate(blocks, state: state) == .prompt(episode))
+    }
+
+    @Test func aNotifiedDriftIsRecordedOnlyOnceMacOSAcceptsIt() {
+        let blocks = session(at(10), [.drift, .drift])
+        guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
+        var delivery = DriftOfferDelivery()
+        var state = CompanionState()
+        #expect(delivery.offer(episode, panelShown: false, fallbackEnabled: true, state: &state) == .sendNotification)
+        // Sending is not delivering: nothing is recorded until macOS answers.
+        #expect(state == CompanionState())
+        #expect(evaluate(blocks, state: state) == .prompt(episode))
+        // A refresh while it is on its way sends nothing more, the next block's longer episode included.
+        let grown = blocks + session(blocks.last!.end, [.drift])
+        guard case .prompt(let longer) = evaluate(grown, state: state) else { Issue.record("expected a prompt"); return }
+        #expect(delivery.offer(longer, panelShown: false, fallbackEnabled: true, state: &state) == .notDelivered)
+        #expect(delivery.sending == episode)
+
+        #expect(delivery.finish(accepted: true, current: evaluate(grown, state: state), state: &state))
+        #expect(!delivery.isSending)
+        #expect(evaluate(grown, state: state) == .alreadyPrompted(longer))
+    }
+
+    @Test func aRefusedNotificationLeavesTheDriftEligible() {
+        let blocks = session(at(10), [.drift, .drift])
+        guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
+        var delivery = DriftOfferDelivery()
+        var state = CompanionState()
+        #expect(delivery.offer(episode, panelShown: false, fallbackEnabled: true, state: &state) == .sendNotification)
+        #expect(!delivery.finish(accepted: false, current: evaluate(blocks, state: state), state: &state))
+        #expect(state == CompanionState())
+        #expect(evaluate(blocks, state: state) == .prompt(episode))
+        // The next refresh may send it again, and the panel may show it.
+        #expect(delivery.offer(episode, panelShown: false, fallbackEnabled: true, state: &state) == .sendNotification)
+        #expect(!delivery.finish(accepted: false, current: evaluate(blocks, state: state), state: &state))
+        #expect(delivery.offer(episode, panelShown: true, fallbackEnabled: true, state: &state) == .recorded)
+        #expect(evaluate(blocks, state: state) == .alreadyPrompted(episode))
+        // An answer with nothing on its way records nothing.
+        var idle = DriftOfferDelivery()
+        var untouched = CompanionState()
+        #expect(!idle.finish(accepted: true, current: evaluate(blocks), state: &untouched))
+        #expect(untouched == CompanionState())
+    }
+
+    @Test func anAnswerArrivingAfterTheEpisodeEndedDoesNotRecordTheNextOne() {
+        let blocks = session(at(10), [.drift, .drift])
+        guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
+        // While macOS answers, a Focus block resets the run and two new drift blocks make a new episode.
+        let reset = blocks + session(blocks.last!.end, [.focus, .drift, .drift])
+        // Or the session ends.
+        let ended = blocks
+        for (current, now) in [(reset, justAfter(reset)), (ended, justAfter(ended).addingTimeInterval(2 * Block.length))] {
+            var delivery = DriftOfferDelivery()
+            var state = CompanionState()
+            #expect(delivery.offer(episode, panelShown: false, fallbackEnabled: true, state: &state) == .sendNotification)
+            #expect(!delivery.finish(accepted: true, current: evaluate(current, now: now, state: state), state: &state))
             #expect(state.promptedEpisode == nil)
-            #expect(evaluate(blocks, state: state) == .prompt(episode), "\(route)")
+            #expect(!delivery.isSending)
         }
-        for route in [DriftOfferRoute.panel, .notification] {
-            var state = CompanionState()
-            let recorded = state.recordOffer(of: episode, by: route)
-            #expect(recorded)
-            #expect(evaluate(blocks, state: state) == .alreadyPrompted(episode), "\(route)")
-        }
+        guard case .prompt(let next) = evaluate(reset) else { Issue.record("expected the new episode"); return }
+        #expect(next.start == reset[3].start)
+        // An earlier block labeled drift while macOS answered is still the episode sent.
+        let pending = session(at(10), [.pending, .drift, .drift])
+        guard case .prompt(let sent) = evaluate(pending) else { Issue.record("expected a prompt"); return }
+        var backfilled = pending
+        backfilled[0] = block(pending[0].start, .drift)
+        var delivery = DriftOfferDelivery()
+        var state = CompanionState()
+        #expect(delivery.offer(sent, panelShown: false, fallbackEnabled: true, state: &state) == .sendNotification)
+        #expect(delivery.finish(accepted: true, current: evaluate(backfilled, state: state), state: &state))
+        guard case .alreadyPrompted = evaluate(backfilled, state: state) else { Issue.record("the episode sent was offered again"); return }
     }
 
     @Test func notADriftAsFocusEndsTheEpisodeAndAsNeutralLeavesNothingToOffer() {

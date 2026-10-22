@@ -72,7 +72,7 @@ final class DriftSettings {
 /// Today's ring and the drift companion. After every classification run or correction, and every minute, it reads the
 /// last day of blocks once, computes the ring from today's report totals, and asks `DriftDetector` whether a drift is
 /// confirmed. A new one is offered in a panel by the menu bar item, or by notification when the user enabled that and
-/// the panel cannot be shown. Each action is an explicit operation: Return to Focus records a focus window, Take a Break
+/// the panel cannot be shown; it is recorded as offered once the panel showed it or macOS accepted the notification. Each action is an explicit operation: Return to Focus records a focus window, Take a Break
 /// pauses tracking, and Not a Drift writes corrections through the store's `correct`. None closes tabs, quits apps, or
 /// sends anything anywhere.
 @MainActor
@@ -95,9 +95,11 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     private(set) var offered: DriftEpisode?
     /// Why the last action could not finish, shown in the panel.
     private(set) var actionError: String?
-    /// Whether macOS allows notifications, after the user turned the fallback on; nil until macOS answers.
+    /// Whether macOS allows pointInTime's alerts, as last read; nil until read. Read again before every notification.
     private(set) var notificationsAllowed: Bool?
-    private var readingNotificationPermission = false
+    /// Why the last notification was not sent, shown in the menu until one is.
+    private(set) var notificationError: String?
+    private var delivery = DriftOfferDelivery()
     /// Where the menu bar item is on screen, in screen coordinates; nil when it is not shown.
     var anchor: () -> NSRect? = { nil }
     /// Called after a refresh or an action, for the menu bar item.
@@ -120,61 +122,67 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         timer.tolerance = 10
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        if settings.notificationFallback { checkNotifications(request: false) }
+        setUpNotifications()
+        if settings.notificationFallback { readNotificationPermission() }
         refresh()
     }
 
     /// Reads the store once, updates the ring, and offers a newly confirmed drift. Nothing is offered unless capture is
     /// recording: a drift noticed while paused, idle, asleep, or locked waits, and is offered only if it is still
-    /// current once recording resumes.
+    /// current once recording resumes, and none while a drift notification waits for macOS's answer.
     func refresh(now: Date = Date()) {
         defer { onChange?() }
+        guard let (blocks, from) = read(now: now) else { return }
+        var state = state
+        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { settings.companionState = state }
+        guard capture.state == .recording, !delivery.isSending,
+              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
+        else { return }
+        offer(episode)
+    }
+
+    /// Reads the blocks since the start of today or the last day, whichever is earlier, and updates the ring; nil when
+    /// the store cannot be read.
+    private func read(now: Date) -> (blocks: [Block], from: Date)? {
         guard let store else {
             ring = nil
             readError = "The activity store is unavailable."
-            return
+            return nil
         }
         let from = min(calendar.startOfDay(for: now), now.addingTimeInterval(-Self.lookBack))
-        let blocks: [Block]
         do {
-            blocks = try store.blocks(from: from, to: now.addingTimeInterval(Block.length))
+            let blocks = try store.blocks(from: from, to: now.addingTimeInterval(Block.length))
             readError = nil
+            ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
+            return (blocks, from)
         } catch {
             ring = nil
             readError = String(describing: error)
-            return
+            return nil
         }
-        ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
-        var state = state
-        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { settings.companionState = state }
-        guard capture.state == .recording,
-              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: settings.rule, state: state, calendar: calendar),
-              state.recordOffer(of: episode, by: offer(episode)) else { return }
-        settings.companionState = state
     }
 
     func settingsChanged() {
         if !settings.enabled { dismiss() }
+        if !settings.notificationFallback { notificationError = nil }
         refresh()
     }
 
     // MARK: Offering
 
-    /// Shows `episode` in the panel, else sends it as a notification, and returns how it went. A drift neither could show
-    /// is not recorded, so it is offered again; while macOS's answer about notifications is still on its way, the
-    /// answer's arrival refreshes again.
-    private func offer(_ episode: DriftEpisode) -> DriftOfferRoute {
+    /// Shows `episode` in the panel and records it as offered, else sends it as a notification when the user turned that
+    /// on, recorded once macOS accepts it. A drift neither reached is not recorded, so a later refresh offers it again.
+    private func offer(_ episode: DriftEpisode) {
         offered = episode
         actionError = nil
-        let route = DriftOfferRoute(panelShown: panel.show(near: anchor()), fallbackEnabled: settings.notificationFallback,
-                                    notificationsAllowed: notificationsAllowed)
-        if route != .panel { offered = nil }
-        switch route {
-        case .notification: notify(episode)
-        case .awaitingPermission: checkNotifications(request: false)
-        case .panel, .undelivered: break
+        let shown = panel.show(near: anchor())
+        if !shown { offered = nil }
+        var state = state
+        switch delivery.offer(episode, panelShown: shown, fallbackEnabled: settings.notificationFallback, state: &state) {
+        case .recorded: settings.companionState = state
+        case .sendNotification: send(.drift(episode, summary: summary(of: episode)))
+        case .notDelivered: break
         }
-        return route
     }
 
     /// Closes the panel without acting; the episode stays offered, so it is not offered again.
@@ -251,7 +259,7 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
             let message = "Could not relabel every block. " + failures.joined(separator: "; ")
             offered = episode
             actionError = message
-            if !panel.show(near: anchor()), settings.notificationFallback { notifyFailure(message) }
+            if !panel.show(near: anchor()), settings.notificationFallback { send(.failure(message)) }
         }
         refresh()
     }
@@ -262,62 +270,128 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         case focus, breakTen, notDriftFocus, notDriftNeutral
     }
 
-    private static let notificationCategory = "drift"
+    /// What a notification carries: a drift to offer with its summary, or why Not a Drift was not fully saved.
+    private enum Outgoing: Sendable {
+        case drift(DriftEpisode, summary: String)
+        case failure(String)
+    }
+
+    private nonisolated static let driftCategory = "drift"
+    private nonisolated static let failureCategory = "drift-error"
 
     /// UserNotifications needs an app bundle; a bare executable gets no notification center.
     private var notificationCenter: UNUserNotificationCenter? {
         Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
     }
 
-    /// Asks macOS for permission when `request` is true (the user just turned the fallback on), otherwise only reads it,
-    /// once at a time. The answer refreshes, so a drift held back until it arrived is offered.
-    func checkNotifications(request: Bool) {
-        guard let center = notificationCenter else {
-            notificationsAllowed = false
-            onChange?()
-            return
-        }
-        guard request || !readingNotificationPermission else { return }
-        readingNotificationPermission = true
+    /// Handles notification actions and foreground presentation from launch, so an action on a notification sent before
+    /// a relaunch still works. This asks macOS for nothing.
+    private func setUpNotifications() {
+        guard let center = notificationCenter else { return }
         center.delegate = self
-        center.setNotificationCategories([UNNotificationCategory(identifier: Self.notificationCategory, actions: [
+        center.setNotificationCategories([UNNotificationCategory(identifier: Self.driftCategory, actions: [
             UNNotificationAction(identifier: NotificationAction.focus.rawValue, title: "Return to Focus"),
             UNNotificationAction(identifier: NotificationAction.breakTen.rawValue, title: "Take a 10-Minute Break"),
             UNNotificationAction(identifier: NotificationAction.notDriftFocus.rawValue, title: "Not a Drift: Focus"),
             UNNotificationAction(identifier: NotificationAction.notDriftNeutral.rawValue, title: "Not a Drift: Neutral")
         ], intentIdentifiers: [])])
-        let update: @Sendable (Bool) -> Void = { allowed in
+    }
+
+    /// Asks macOS for permission to show alerts, without sound. Called only when the user turns the fallback on.
+    func requestNotifications() {
+        guard let center = notificationCenter else {
+            notificationsAllowed = false
+            onChange?()
+            return
+        }
+        center.requestAuthorization(options: [.alert]) { _, _ in
+            Task { @MainActor [weak self] in self?.readNotificationPermission() }
+        }
+    }
+
+    /// Reads whether macOS allows pointInTime's alerts, for the settings window.
+    private func readNotificationPermission() {
+        guard let center = notificationCenter else { return }
+        center.getNotificationSettings { settings in
+            let allowed = Self.alertsAllowed(settings)
+            Task { @MainActor [weak self] in
+                self?.notificationsAllowed = allowed
+                self?.onChange?()
+            }
+        }
+    }
+
+    private nonisolated static func alertsAllowed(_ settings: UNNotificationSettings) -> Bool {
+        settings.authorizationStatus == .authorized && settings.alertSetting == .enabled
+    }
+
+    /// Sends `outgoing` if macOS allows pointInTime's alerts, read again each time because the user can turn them off in
+    /// System Settings at any moment, then hands macOS's answer to `answered`.
+    private func send(_ outgoing: Outgoing) {
+        guard let center = notificationCenter else {
+            answered(outgoing, error: "Notifications need the pointInTime app.")
+            return
+        }
+        center.getNotificationSettings { settings in
+            let allowed = Self.alertsAllowed(settings)
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 notificationsAllowed = allowed
-                readingNotificationPermission = false
-                refresh()
+                guard allowed else {
+                    answered(outgoing, error: "Notifications for pointInTime are turned off in System Settings > Notifications.")
+                    return
+                }
+                do {
+                    try await center.add(Self.request(for: outgoing))
+                    answered(outgoing, error: nil)
+                } catch {
+                    answered(outgoing, error: "The notification could not be sent: \(error.localizedDescription)")
+                }
             }
         }
-        if request {
-            // Alerts only: the companion makes no sound.
-            center.requestAuthorization(options: [.alert]) { allowed, _ in update(allowed) }
-        } else {
-            center.getNotificationSettings { settings in update(settings.authorizationStatus == .authorized) }
+    }
+
+    private nonisolated static func request(for outgoing: Outgoing) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        switch outgoing {
+        case .drift(let episode, let summary):
+            content.title = "Drifting?"
+            content.body = summary
+            content.categoryIdentifier = driftCategory
+            content.userInfo = ["blockStarts": episode.blockStarts.map(\.timeIntervalSince1970), "since": episode.since.timeIntervalSince1970]
+            return UNNotificationRequest(identifier: "drift-\(Int(episode.start.timeIntervalSince1970))", content: content, trigger: nil)
+        case .failure(let message):
+            content.title = "Not a Drift was not fully saved"
+            content.body = message
+            content.categoryIdentifier = failureCategory
+            return UNNotificationRequest(identifier: "drift-error-\(UUID().uuidString)", content: content, trigger: nil)
         }
     }
 
-    private func notify(_ episode: DriftEpisode) {
-        guard let center = notificationCenter, notificationsAllowed == true else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Drifting?"
-        content.body = summary(of: episode)
-        content.categoryIdentifier = Self.notificationCategory
-        content.userInfo = ["blockStarts": episode.blockStarts.map(\.timeIntervalSince1970), "since": episode.since.timeIntervalSince1970]
-        center.add(UNNotificationRequest(identifier: "drift-\(Int(episode.start.timeIntervalSince1970))", content: content, trigger: nil))
+    /// macOS's answer for a notification: nil once it accepted it, else why not, which the menu shows until one is
+    /// sent. A drift is recorded as offered only if it is still the current episode; one refused stays eligible, and the
+    /// minute timer offers it again rather than retrying at once.
+    private func answered(_ outgoing: Outgoing, error: String?) {
+        notificationError = error
+        guard case .drift = outgoing else {
+            onChange?()
+            return
+        }
+        let now = Date()
+        var state = state
+        let current = read(now: now).map {
+            DriftDetector.evaluate($0.blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
+        } ?? .none
+        if delivery.finish(accepted: error == nil, current: current, state: &state) { settings.companionState = state }
+        if error == nil { refresh(now: now) } else { onChange?() }
     }
 
-    private func notifyFailure(_ message: String) {
-        guard let center = notificationCenter, notificationsAllowed == true else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Not a Drift was not fully saved"
-        content.body = message
-        center.add(UNNotificationRequest(identifier: "drift-error-\(UUID().uuidString)", content: content, trigger: nil))
+    /// The fallback's notifications are shown while pointInTime is in front too (its reports or settings window, say), as
+    /// a banner and in Notification Center, without sound.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        let category = notification.request.content.categoryIdentifier
+        return category == Self.driftCategory || category == Self.failureCategory ? [.banner, .list] : []
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
