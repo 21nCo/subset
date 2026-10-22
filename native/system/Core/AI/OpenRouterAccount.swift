@@ -20,8 +20,9 @@ public final class OpenRouterAccount {
     public private(set) var keyTest: KeyTest?
     /// The model ID as the user entered it; empty sends `openrouter/auto` (`OpenRouterProvider.model(_:)`). An entry
     /// that looks like an API key, or is the key stored, whichever was entered first, is refused: it is cleared, never
-    /// kept in user defaults, and `modelError` says why. While a key is stored, an entry is kept in user defaults only
-    /// once it is checked against the key, off the main actor (`checkModel(_:)`).
+    /// kept in user defaults, and `modelError` says why. Unless no key is known to be stored, an entry is kept in user
+    /// defaults only once a read of the key, off the main actor, shows it is not the key (`keep(_:)`); while the key
+    /// cannot be read, it is not kept, and it is checked again when whether a key is stored is next read.
     public var model: String {
         didSet {
             modelCheck?.cancel()
@@ -61,6 +62,8 @@ public final class OpenRouterAccount {
     static let modelKey = "openRouterModel"
     public static let keyAsModelMessage = "That looks like an API key, not a model ID, so it was cleared and not "
         + "kept: openrouter/auto is used. Add the key with Add Key."
+    public static let modelUncheckedMessage = "The Keychain could not be read to check that this model ID is not your "
+        + "API key, so it is not kept for next time yet. It is checked again when Settings is next shown."
     public static let invalidKeyMessage = "That is not an API key: paste the whole key from openrouter.ai, with no spaces "
         + "inside it."
 
@@ -97,10 +100,13 @@ public final class OpenRouterAccount {
             return false
         }
         stopKeyTest()
-        // A key entered as the model ID before is not kept there.
+        // A key entered as the model ID before is not kept there, nor one kept before an entry not checked yet.
         if model.trimmingCharacters(in: .whitespacesAndNewlines) == key {
             model = ""
             modelError = Self.keyAsModelMessage
+        }
+        if defaults.string(forKey: Self.modelKey)?.trimmingCharacters(in: .whitespacesAndNewlines) == key {
+            defaults.set("", forKey: Self.modelKey)
         }
         do {
             try keys.save(key)
@@ -157,6 +163,8 @@ public final class OpenRouterAccount {
             } else {
                 hasKey = stored
             }
+            // A model ID that could not be checked against the key is checked again.
+            if modelError == Self.modelUncheckedMessage, modelCheck == nil { keep(model) }
         case let .failure(error):
             // Whether a key is stored is not known: what is shown stays.
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
@@ -175,25 +183,33 @@ public final class OpenRouterAccount {
         keyTest = nil
     }
 
-    /// Keeps `entered` in user defaults. While a key is stored, a non-empty entry is first compared with it off the
-    /// main actor; one that is the key is cleared instead (`keyAsModelMessage`). A later entry ends the check.
+    /// Keeps `entered` in user defaults. Unless no key is known to be stored, a non-empty entry is first compared with
+    /// the key, read off the main actor: one that is the key is cleared instead (`keyAsModelMessage`), and one that
+    /// cannot be compared, because the key cannot be read, is not kept (`modelUncheckedMessage`), so user defaults keep
+    /// what they held. A later entry ends the check.
     private func keep(_ entered: String) {
         let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard hasKey, !candidate.isEmpty else {
+        guard !candidate.isEmpty, hasKey || presenceFailed else {
             defaults.set(entered, forKey: Self.modelKey)
             return
         }
         let keys = self.keys
-        modelCheck = Task {
-            let key = await Task.detached { try? keys.readKey() }.value
+        let task = Task {
+            let read = await Task.detached { Result { try keys.readKey() } }.value
             guard !Task.isCancelled, model == entered else { return }
-            if key == candidate {
+            modelCheck = nil
+            switch read {
+            case .success(candidate):
                 model = ""
                 modelError = Self.keyAsModelMessage
-            } else {
+            case .success:
+                if modelError == Self.modelUncheckedMessage { modelError = nil }
                 defaults.set(entered, forKey: Self.modelKey)
+            case .failure:
+                modelError = Self.modelUncheckedMessage
             }
         }
+        modelCheck = task
     }
 
     /// Waits for the model ID entered to be checked against the key and kept.

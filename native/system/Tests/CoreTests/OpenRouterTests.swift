@@ -645,6 +645,89 @@ final class OpenRouterTests: XCTestCase {
         }
     }
 
+    func testAConfirmedRequestWhoseKeyCannotBeReadSendsNothingAndTheItemsWaitingForItArePreviewedAgain() async throws {
+        let keychain = FakeKeychain()
+        let (center, _) = center(defaults(), keychain: keychain, key: Self.key)
+        center.choose(.openRouter)
+        // Stored, so OpenRouter is available, but not usable as a key when read for the request.
+        keychain.set(dataProtection: true, data: Data("sk-or\nX-Injected: 1".utf8))
+        keychain.holdsDataReads = true
+        let (a, b, c) = (ExplainKey("a"), ExplainKey("b"), ExplainKey("c"))
+        let first = Task { await center.explain(a) { _ in self.request("alphad") } }
+        let second = Task { await center.explain(b) { _ in self.request("betad") } }
+        _ = try await confirming(center, a)
+        _ = try await confirming(center, b)
+        center.confirmSend(a)
+        try await until { keychain.heldDataReads == 1 }
+        let third = Task { await center.explain(c) { _ in self.request("gammad") } }
+        try await until { if case .working = center.state(for: c) { true } else { false } }
+        guard case .working = center.state(for: b) else { return XCTFail("\(center.state(for: b))") }
+
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await first.value
+        XCTAssertEqual(center.state(for: a), .unavailable(.openRouterKeyUnreadable))
+        XCTAssertFalse(center.sendConfirmed, "nothing the user confirmed went out")
+        // The items that waited for it are previewed, not sent.
+        let shownB = try await confirming(center, b)
+        let shownC = try await confirming(center, c)
+        XCTAssertTrue(shownC.text.contains("gammad"))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+
+        // Once the key can be read, the item confirmed then is the first request.
+        try OpenRouterKeyStore(items: keychain).save(Self.key)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        center.confirmSend(b)
+        await second.value
+        await third.value
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(shownB.text.utf8), Data(shownC.text.utf8)])
+        XCTAssertTrue(center.sendConfirmed)
+    }
+
+    func testAConfirmedRequestCancelledOrTimedOutBeforeItWentOutLeavesThePreviewRequired() async throws {
+        let keychain = FakeKeychain()
+        try OpenRouterKeyStore(items: keychain).save(Self.key)
+        let account = OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client(), defaults: defaults())
+        let center = ExplainCenter(defaults: defaults(), redactor: redactor, openRouter: account,
+                                   answerTimeout: .milliseconds(300))
+        center.choose(.openRouter)
+        let (a, b) = (ExplainKey("a"), ExplainKey("b"))
+
+        // Cancelled while its key is read: nothing goes out, and the item that waited is previewed again.
+        keychain.holdsDataReads = true
+        let first = Task { await center.explain(a) { _ in self.request("alphad") } }
+        let second = Task { await center.explain(b) { _ in self.request("betad") } }
+        _ = try await confirming(center, a)
+        _ = try await confirming(center, b)
+        center.confirmSend(a)
+        try await until { keychain.heldDataReads == 1 }
+        first.cancel()
+        await first.value
+        XCTAssertEqual(center.state(for: a), .idle)
+        XCTAssertFalse(center.sendConfirmed)
+        _ = try await confirming(center, b)
+        keychain.releaseDataRead()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "the cancelled request is not sent once its key is read")
+
+        // Timed out while its key is read: the same.
+        center.confirmSend(b)
+        try await until { keychain.heldDataReads == 1 }
+        await second.value
+        guard case .failed = center.state(for: b) else { return XCTFail("\(center.state(for: b))") }
+        XCTAssertFalse(center.sendConfirmed)
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+        let again = Task { await center.explain(a) { _ in self.request("alphad") } }
+        _ = try await confirming(center, a)
+        center.cancelSend(a)
+        await again.value
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
     // MARK: Model ID
 
     func testAKeyEnteredAsTheModelIDIsNeverKeptLoggedOrSent() async throws {
@@ -714,6 +797,50 @@ final class OpenRouterTests: XCTestCase {
         let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(sent["model"] as? String, OpenRouterProvider.defaultModel)
         for message in log.messages { XCTAssertFalse(message.contains("or-token") || message.contains("sk-or-v1"), message) }
+    }
+
+    func testAModelIDIsNotKeptWhileTheKeyCannotBeReadToCompareItWith() async throws {
+        let defaults = defaults()
+        let log = RecordingLog()
+        let keychain = FakeKeychain()
+        let (_, account) = center(defaults, keychain: keychain, log: log)
+        let key = "or-token-0123456789"
+        XCTAssertTrue(account.addKey(key))
+        account.model = "anthropic/claude-sonnet"
+        await account.modelChecked()
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
+
+        // The key, entered as the model while the Keychain cannot be read: not kept, and what was kept stays.
+        keychain.failure = errSecInteractionNotAllowed
+        account.model = key
+        await account.modelChecked()
+        XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
+        for (name, value) in defaults.dictionaryRepresentation() {
+            XCTAssertFalse("\(name) \(value)".contains(key), name)
+        }
+
+        // Checked again once the Keychain can be read: found to be the key, it is cleared.
+        keychain.failure = nil
+        await account.refreshKey()
+        await account.modelChecked()
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+
+        // Whether a key is stored unknown at launch: an entry is still checked before it is kept.
+        keychain.failure = errSecInteractionNotAllowed
+        let (_, unread) = center(defaults, keychain: keychain, log: log)
+        XCTAssertFalse(unread.hasKey)
+        unread.model = key
+        await unread.modelChecked()
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        keychain.failure = nil
+        await unread.refreshKey()
+        await unread.modelChecked()
+        XCTAssertEqual(unread.model, "")
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        for message in log.messages { XCTAssertFalse(message.contains(key), message) }
     }
 
     func testAppleIntelligenceNeedsNoPreview() {

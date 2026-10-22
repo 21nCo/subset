@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 /// Identifies an item to explain across samples and scans: a group's or process's identity, or a scanned path.
 public struct ExplainKey: Hashable, Sendable {
@@ -55,9 +56,10 @@ public struct SendPreview: Equatable, Sendable {
 /// given up on, so an item is never left being explained. Changing the provider ends the work begun with the one
 /// before: it is cancelled, nothing it had not sent yet is sent, and nothing it answers is kept, even when the user
 /// picks that provider again before it finishes. Before the first request of the session to a provider off this Mac
-/// (OpenRouter), the item waits while the user reviews exactly what will be sent and confirms it; once confirmed, no
-/// preview is shown again this session, and that request is the session's first: every other request to the provider
-/// waits until it has ended.
+/// (OpenRouter), the item waits while the user reviews exactly what will be sent and confirms it, and that request is the
+/// session's first: every other request to the provider waits until it has ended. Once it has gone out, no preview is
+/// shown again this session; when it ends before it went out (the key could not be read, it was cancelled or timed out,
+/// or the provider changed), the preview is still required, and the items that waited for it are previewed instead.
 @MainActor
 @Observable
 public final class ExplainCenter {
@@ -70,7 +72,7 @@ public final class ExplainCenter {
             selection += 1
             for cancel in pending.values { cancel() }
             pending = [:]
-            for confirmation in confirmations.values { confirmation.resume(returning: false) }
+            for confirmation in confirmations.values { confirmation.resume(returning: .stop) }
             confirmations = [:]
             firstSendInFlight = false
             states = states.filter { _, state in
@@ -84,7 +86,7 @@ public final class ExplainCenter {
     }
     /// The OpenRouter key and model, for Settings; `nil` where OpenRouter is not offered.
     public let openRouter: OpenRouterAccount?
-    /// Whether the user confirmed the send preview this session, so it is not shown again.
+    /// Whether a request the user confirmed in the send preview went out this session, so it is not shown again.
     public private(set) var sendConfirmed = false
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
@@ -107,10 +109,10 @@ public final class ExplainCenter {
     /// at launch, so it comes back once a later read finds the key; anything else the user does with the provider or
     /// the key ends that.
     @ObservationIgnored private var openRouterSetAside = false
-    /// Whether the request the user confirmed in the send preview is on its way, so every other one waits for it.
+    /// Whether the request the user confirmed in the send preview has not ended yet, so every other one waits for it.
     @ObservationIgnored private var firstSendInFlight = false
     /// Each item waiting for the send preview's answer, or for the confirmed request to end.
-    @ObservationIgnored private var confirmations: [StateKey: CheckedContinuation<Bool, Never>] = [:]
+    @ObservationIgnored private var confirmations: [StateKey: CheckedContinuation<Resumption, Never>] = [:]
     /// Exactly what was sent for each item, for What was sent.
     @ObservationIgnored private var sentTexts: [StateKey: String] = [:]
 
@@ -126,6 +128,16 @@ public final class ExplainCenter {
     private struct StateKey: Hashable, Sendable {
         let choice: AIProviderChoice
         let item: ExplainKey
+    }
+
+    /// Why an item waiting for the send preview, or for the confirmed request, goes on.
+    private enum Resumption: Sendable {
+        /// The user sent what the preview showed.
+        case confirmed
+        /// The confirmed request ended: sent now if it went out, otherwise previewed.
+        case released
+        /// Cancelled by the user or the caller, or the provider changed: nothing is sent.
+        case stop
     }
 
     /// `availabilityTimeout` and `answerTimeout` bound how long the provider may take to say whether it is available
@@ -193,15 +205,15 @@ public final class ExplainCenter {
         sentTexts[StateKey(choice: choice, item: item)]
     }
 
-    /// Sends the item shown in the send preview first, then every other item waiting for one; no preview is shown again
-    /// this session.
+    /// Sends the item shown in the send preview first, then every other item waiting for one; once it has gone out, no
+    /// preview is shown again this session.
     public func confirmSend(_ item: ExplainKey) {
-        resolveConfirmation(StateKey(choice: choice, item: item), true)
+        resolveConfirmation(StateKey(choice: choice, item: item), .confirmed)
     }
 
     /// Sends nothing for the item shown in the send preview; it can be asked again.
     public func cancelSend(_ item: ExplainKey) {
-        resolveConfirmation(StateKey(choice: choice, item: item), false)
+        resolveConfirmation(StateKey(choice: choice, item: item), .stop)
     }
 
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
@@ -298,6 +310,7 @@ public final class ExplainCenter {
         }
         var builtWith = sendFolderNames
         var isFirstSend = false
+        let submitted = OSAllocatedUnfairLock(initialState: false)
         while true {
             // Built with the setting the user has now, so a folder name is never sent once they turn it off.
             if builtWith != self.sendFolderNames {
@@ -310,18 +323,19 @@ public final class ExplainCenter {
                 states[key] = .working(request)
             }
             guard provider.needsSendPreview else { break }
-            if sendConfirmed {
-                guard firstSendInFlight else { break }
-                // The request the user confirmed has not ended yet: this one waits, so that one is sent first.
+            if firstSendInFlight {
+                // The request the user confirmed has not ended yet: this one waits, so that one is sent first, then is
+                // sent, or previewed if that one did not go out.
                 states[key] = .working(request)
-                let released = await confirmation(for: key)
+                let resumption = await confirmation(for: key)
                 guard selection == self.selection else { return }
-                guard released, !Task.isCancelled else {
+                guard resumption != .stop, !Task.isCancelled else {
                     states[key] = nil
                     return
                 }
                 continue
             }
+            if sendConfirmed { break }
             let text: String
             do {
                 text = try provider.sentText(for: request)
@@ -330,23 +344,23 @@ public final class ExplainCenter {
                 return
             }
             states[key] = .confirming(SendPreview(provider: choice, text: text, request: request))
-            let confirmed = await confirmation(for: key)
+            let resumption = await confirmation(for: key)
             // The provider changed meanwhile: this item's state is no longer this call's.
             guard selection == self.selection else { return }
-            guard confirmed, !Task.isCancelled else {
+            guard resumption != .stop, !Task.isCancelled else {
                 states[key] = nil
                 return
             }
             states[key] = .working(request)
-            // Released once another item's confirmed request ended, or confirmed just after it: sent as the others are.
-            if sendConfirmed { continue }
+            // Released once another item's confirmed request ended, or confirmed while another one is on its way: sent
+            // once that one went out, otherwise previewed again.
+            guard resumption == .confirmed, !firstSendInFlight, !sendConfirmed else { continue }
             // What was shown is sent only if Send folder names is as it was; otherwise it is built again and shown.
             guard builtWith != self.sendFolderNames else {
-                sendConfirmed = true
                 firstSendInFlight = true
                 isFirstSend = true
-                // Every other item waiting for a preview is sent too, once this request has ended, built with the
-                // setting as it is then; until then it waits without its preview.
+                // Every other item waiting for a preview waits until this request has ended, without its preview: it
+                // is then sent, built with the setting as it is then, if this one went out, and previewed otherwise.
                 for (other, state) in states where other != key && other.choice == choice {
                     if case let .confirming(preview) = state { states[other] = .working(preview.request) }
                 }
@@ -354,11 +368,16 @@ public final class ExplainCenter {
             }
         }
         defer {
-            // The first request ended: the others waiting for it go now. After a provider change they were already
-            // ended, and the requests waiting then are not this one's.
-            if isFirstSend, selection == self.selection {
-                firstSendInFlight = false
-                resolveAllConfirmations(true)
+            if isFirstSend {
+                // Only a confirmed body that went out ends the preview for the session; one that did not (no key read,
+                // cancelled, timed out, or the provider changed first) leaves it required.
+                if submitted.withLock({ $0 }) { sendConfirmed = true }
+                // The first request ended: the others waiting for it go on now. After a provider change they were
+                // already ended, and the requests waiting then are not this one's.
+                if selection == self.selection {
+                    firstSendInFlight = false
+                    resolveAllConfirmations(.released)
+                }
             }
         }
         do {
@@ -371,7 +390,9 @@ public final class ExplainCenter {
         do {
             let sent = request
             let timeout = answerTimeout
-            let draft = try await untilProviderChanges { try await answer(within: timeout, { try await provider.explain(sent) }) }
+            let draft = try await untilProviderChanges {
+                try await answer(within: timeout, { try await provider.explain(sent) { submitted.withLock { $0 = true } } })
+            }
             if let draft {
                 outcome = .explained(try Explanation(validating: draft, for: request), request)
             } else {
@@ -390,27 +411,27 @@ public final class ExplainCenter {
         states[key] = outcome
     }
 
-    /// Whether the user confirms the send preview shown for `key`: `false` when they cancel, the provider changes, or
-    /// the caller is cancelled.
-    private func confirmation(for key: StateKey) async -> Bool {
+    /// Whether the user confirms the send preview shown for `key`, or the confirmed request `key` waits for ended:
+    /// `.stop` when they cancel, the provider changes, or the caller is cancelled.
+    private func confirmation(for key: StateKey) async -> Resumption {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else { return continuation.resume(returning: false) }
+                guard !Task.isCancelled else { return continuation.resume(returning: .stop) }
                 confirmations[key] = continuation
             }
         } onCancel: {
-            Task { @MainActor in self.resolveConfirmation(key, false) }
+            Task { @MainActor in self.resolveConfirmation(key, .stop) }
         }
     }
 
-    private func resolveConfirmation(_ key: StateKey, _ confirmed: Bool) {
-        confirmations.removeValue(forKey: key)?.resume(returning: confirmed)
+    private func resolveConfirmation(_ key: StateKey, _ resumption: Resumption) {
+        confirmations.removeValue(forKey: key)?.resume(returning: resumption)
     }
 
-    private func resolveAllConfirmations(_ confirmed: Bool) {
+    private func resolveAllConfirmations(_ resumption: Resumption) {
         let waiting = confirmations
         confirmations = [:]
-        for confirmation in waiting.values { confirmation.resume(returning: confirmed) }
+        for confirmation in waiting.values { confirmation.resume(returning: resumption) }
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does.

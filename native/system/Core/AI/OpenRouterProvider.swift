@@ -70,6 +70,13 @@ public struct OpenRouterProvider: AIProvider {
     }
 
     public func explain(_ request: ExplainRequest) async throws -> ExplanationDraft {
+        try await explain(request, submitted: {})
+    }
+
+    /// Calls `submitted` only once the request is handed to the network: not when the key cannot be read, the model ID
+    /// is the key, or it is cancelled first.
+    public func explain(_ request: ExplainRequest,
+                        submitted: @escaping @Sendable () -> Void) async throws -> ExplanationDraft {
         let key: String?
         do {
             key = try keys.readKey()
@@ -79,7 +86,7 @@ public struct OpenRouterProvider: AIProvider {
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
         // The key entered as the model ID, before Settings has cleared it: not sent in the body.
         guard model != key else { throw ExplainError.failed(Self.keyAsModelFailure) }
-        let data = try await client.send(.chat(try body(for: request)), key: key)
+        let data = try await client.send(.chat(try body(for: request)), key: key, submitted: submitted)
         return try Self.draft(from: data, key: key)
     }
 
@@ -229,12 +236,15 @@ public struct OpenRouterClient: Sendable {
 
     /// The body of OpenRouter's 2xx answer. Throws `ExplainError.failed` with the status and OpenRouter's message, or
     /// with the timeout or connection failure; `CancellationError` when cancelled, before the request or its retry
-    /// is sent, during the backoff, or while it is on its way.
-    public func send(_ request: Request, key: String) async throws -> Data {
+    /// is sent, during the backoff, or while it is on its way. `submitted` is called just before the request is handed
+    /// to the session, and not when it is cancelled before that.
+    public func send(_ request: Request, key: String,
+                     submitted: @Sendable () -> Void = {}) async throws -> Data {
         let urlRequest = Self.urlRequest(request, key: key)
         for attempt in 1...2 {
             try Task.checkCancellation()
             log.record("OpenRouter \(request.name) sent" + (attempt == 1 ? "" : " again"))
+            submitted()
             let (data, response): (Data, URLResponse)
             do {
                 (data, response) = try await session.data(for: urlRequest, delegate: NoRedirects())

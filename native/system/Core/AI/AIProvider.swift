@@ -4,6 +4,9 @@ public protocol AIProvider: Sendable {
     /// Whether it can answer now.
     func availability() async -> AIAvailability
     func explain(_ request: ExplainRequest) async throws -> ExplanationDraft
+    /// As `explain(_:)`, calling `submitted` once the request is handed over to be sent off this Mac, so the send
+    /// preview counts as used only once a body the user confirmed has actually gone out.
+    func explain(_ request: ExplainRequest, submitted: @escaping @Sendable () -> Void) async throws -> ExplanationDraft
     /// Exactly what `explain(_:)` sends for `request`, as the send preview and What was sent show it.
     func sentText(for request: ExplainRequest) throws -> String
     /// Whether the user confirms what is sent before the first request of each app session: a provider off this Mac.
@@ -11,6 +14,11 @@ public protocol AIProvider: Sendable {
 }
 
 extension AIProvider {
+    public func explain(_ request: ExplainRequest,
+                        submitted: @escaping @Sendable () -> Void) async throws -> ExplanationDraft {
+        submitted()
+        return try await explain(request)
+    }
     public func sentText(for request: ExplainRequest) throws -> String { request.promptText }
     public var needsSendPreview: Bool { false }
 }
