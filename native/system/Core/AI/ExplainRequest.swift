@@ -202,8 +202,10 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
             + "the app group, Apple identifier, or bundle ID a Library entry is named for. A name after a Team ID no "
             + "single installed app has is the folder's own, sent only with Send folder names."),
         ExplainField(.signingID, "The code signature's identifier."),
-        ExplainField(.teamID, "The code signature's Team ID."),
-        ExplainField(.vendor, "The signing team's name, or Apple."),
+        ExplainField(.teamID, "The code signature's Team ID; for a group, only when every process's signature was "
+            + "read and has it."),
+        ExplainField(.vendor, "The signing team's name, or Apple; for a group, only when every process's signature was "
+            + "read and names that vendor."),
         ExplainField(.launchdLabel, "The launchd job's label."),
         ExplainField(.sizes, "Memory and CPU, or disk sizes, or why they were not measured, with paths redacted the same way."),
         ExplainField(.age, "How long it has run, or when it last changed."),

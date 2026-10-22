@@ -44,7 +44,7 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(request.sizes?.hasPrefix("3 processes; memory"), true)
         XCTAssertTrue(request.evidence.contains("Google Chrome: Inside `Google Chrome.app`"), "\(request.evidence)")
         XCTAssertFalse(request.maySuggestOrigin)
-        XCTAssertEqual(ProcessesWindowModel.explainKey(for: chrome), ExplainKey("process-group:app:\(ProcessFixtures.chrome)"))
+        XCTAssertEqual(ProcessesWindowModel.explainKey(for: chrome, in: .app), ExplainKey("process-group:app:\(ProcessFixtures.chrome)"))
     }
 
     func testAProcessRequestRedactsItsPathAndEvidence() throws {
@@ -205,6 +205,63 @@ final class ProcessExplainTests: XCTestCase {
         }
         model.selection = .process(ProcessFixtures.identity(500))
         XCTAssertEqual(model.detail?.placement?.group, syncd, "the rule-based group is the one shown")
+    }
+
+    /// A group is sent with a Team ID and vendor only when every member's signature was read and names that identity:
+    /// Apple platform code and unsigned or ad hoc code both have no Team ID, and an unread signature says nothing.
+    func testAGroupIsSentWithAVendorOnlyWhenEveryMembersSignatureNamesIt() throws {
+        let project = "/Users/me/dev/subset"
+        func request(_ members: [(path: String, memory: UInt64, signature: CodeSignature?)]) throws -> ExplainRequest {
+            let model = ProcessesWindowModel(format: ProcessFixtures.format)
+            let processes = members.enumerated().map { index, member in
+                FixtureProcess(pid: Int32(700 + index), path: member.path, memory: member.memory * ProcessFixtures.mib, cpu: 1,
+                               energy: 1, signature: member.signature, cwd: project)
+            }
+            model.apply(try ProcessFixtures.sample(processes), memory: nil, cadence: .mainWindowVisible)
+            model.layer = .project
+            let group = RowID.group(OriginGroupID(.project(path: project)))
+            let request = try XCTUnwrap(model.explainRequest(for: group, redactor: redactor))
+            XCTAssertEqual(request.members.count, members.count, "\(request.members)")
+            return request
+        }
+        let zsh = "/bin/zsh", node = "/opt/homebrew/bin/node"
+        for (zshMemory, nodeMemory) in [(UInt64(40), UInt64(4)), (4, 40)] {
+            let mixed = try request([(zsh, zshMemory, ProcessFixtures.apple), (node, nodeMemory, ProcessFixtures.unsigned)])
+            XCTAssertNil(mixed.vendor, "Apple and unsigned, the larger \(zshMemory > nodeMemory ? "Apple" : "unsigned")")
+            XCTAssertNil(mixed.teamID)
+        }
+        let apple = try request([(zsh, 40, ProcessFixtures.apple), ("/usr/bin/vim", 4, ProcessFixtures.apple)])
+        XCTAssertEqual(apple.vendor, "Apple")
+        XCTAssertNil(apple.teamID)
+        let chrome = ProcessFixtures.chrome + "/Contents/MacOS/Google Chrome"
+        let google = try request([(chrome, 40, ProcessFixtures.google), (chrome + " Helper", 4, ProcessFixtures.google)])
+        XCTAssertEqual(google.teamID, "EQHXZ8M8AV")
+        XCTAssertEqual(google.vendor, "Google LLC")
+        let unread = try request([(chrome, 40, ProcessFixtures.google), (chrome + " Helper", 4, nil)])
+        XCTAssertNil(unread.vendor, "one member's signature was not read")
+        XCTAssertNil(unread.teamID)
+        let unsigned = try request([(node, 40, ProcessFixtures.unsigned), ("/opt/homebrew/bin/npm", 4, ProcessFixtures.unsigned)])
+        XCTAssertNil(unsigned.vendor)
+        XCTAssertNil(unsigned.teamID)
+    }
+
+    /// Each layer places a process by its own rules, so an answer about it in one layer is not the answer in another.
+    func testAProcessIsExplainedPerLayer() throws {
+        let model = try model()
+        let claude = RowID.process(ProcessFixtures.identity(202))
+        model.layer = .app
+        let appKey = ProcessesWindowModel.explainKey(for: claude, in: .app)
+        let app = try XCTUnwrap(model.explainRequest(for: claude, key: appKey, redactor: redactor))
+        XCTAssertNotEqual(ProcessesWindowModel.explainKey(for: claude, in: .vendor), appKey)
+        model.layer = .vendor
+        XCTAssertNil(model.explainRequest(for: claude, key: appKey, redactor: redactor),
+                     "a panel opened in the App layer does not send the Vendor layer's facts under its key")
+        let vendor = try XCTUnwrap(model.explainRequest(for: claude, key: ProcessesWindowModel.explainKey(for: claude, in: .vendor),
+                                                        redactor: redactor))
+        XCTAssertNotEqual(vendor.type, app.type)
+        let group = RowID.group(OriginGroupID(.app(bundlePath: ProcessFixtures.chrome)))
+        XCTAssertEqual(ProcessesWindowModel.explainKey(for: group, in: .app),
+                       ProcessesWindowModel.explainKey(for: group, in: .vendor), "a group's ID holds its layer")
     }
 
     func testARowGoneFromTheSampleHasNoRequest() throws {

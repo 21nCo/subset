@@ -76,7 +76,10 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(redactor.text("\(redactor.pathInText("/Users/jdoe/Library/Application Support")) could not be read."),
                        "~/Library/Application Support could not be read.")
         XCTAssertEqual(redactor.pathInText("/tmp/secret-client"), "/tmp/secret-client", "only a home path is marked")
-        XCTAssertEqual(redactor.text("~ and ~/dev; /tmp/secret-client"), "~ and ~/dev; /tmp/secret-client")
+        XCTAssertEqual(redactor.text("/tmp/secret-client, then ~/dev"), "/tmp/secret-client, then ~/dev")
+        XCTAssertEqual(redactor.text("~ and ~/dev; /tmp/secret-client"),
+                       "~ and ~/dev; /\(redactor.placeholder("tmp"))/\(redactor.placeholder("secret-client"))",
+                       "an absolute path after a raw home path may be more of its names")
         XCTAssertEqual(redactor.sendingFolderNames(true).text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
                        "~/dev/secret-client/node_modules could not be read.")
     }
@@ -103,7 +106,8 @@ final class ExplainTests: XCTestCase {
             }
             XCTAssertTrue(text.hasPrefix("~/Clients/\(redactor.placeholder(name))/"), text)
         }
-        // A path after it starts its own, so the clause end stays the end.
+        // A home path after it starts its own, so the clause end stays the end; an absolute path after it may be more of
+        // its names, so it is withheld with them.
         let app = "/Users/jdoe/Applications/Acme Notes.app"
         let unread = " has no readable bundle identifier."
         for next in [" /Applications/Other.app could not be read.", " Runs `/usr/bin/tool`.", " See (~/dev)."] {
@@ -112,8 +116,9 @@ final class ExplainTests: XCTestCase {
             XCTAssertTrue(rawSent.hasPrefix("~/Applications/folder-"), rawSent)
             XCTAssertFalse(rawSent.contains("Acme") || rawSent.contains("Notes"), rawSent)
         }
-        XCTAssertTrue(redactor.text(app + unread + " /Applications/Other.app could not be read.")
-            .hasSuffix(" /Applications/Other.app could not be read."))
+        XCTAssertEqual(redactor.text(app + unread + " /Applications/Other.app could not be read."),
+                       "~/Applications/\(redactor.placeholder("Acme Notes.app has no readable bundle identifier. "))/"
+                        + "\(redactor.placeholder("Applications"))/\(redactor.placeholder("Other.app could not be read")).")
         XCTAssertTrue(redactor.text(app + unread + " See (~/dev).").hasSuffix(" (~/dev)."))
         // Another path in the clause starts its own.
         XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
@@ -133,11 +138,11 @@ final class ExplainTests: XCTestCase {
             for word in ["Acme", "Inc", "Holdings"] { XCTAssertFalse(sent.contains(word), "\(word): \(sent)") }
             XCTAssertTrue(sent.contains("~/Clients/folder-"), sent)
         }
-        // The next line and the next path are their own.
+        // The next line without a slash and the next home path are their own.
         XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings\nDone."),
                        "~/Clients/\(redactor.placeholder("Acme Inc. Holdings"))\nDone.")
-        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings, then /Applications/Other.app."),
-                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings, then")) /Applications/Other.app.")
+        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings, then ~/Applications."),
+                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings, then")) ~/Applications.")
         XCTAssertEqual(redactor.sendingFolderNames(true).text("No socket at /Users/jdoe/Clients/Acme Inc. Holdings."),
                        "No socket at ~/Clients/Acme Inc. Holdings.")
     }
@@ -165,6 +170,28 @@ final class ExplainTests: XCTestCase {
         let forged = other.pathInText("/Users/jdoe/Library/Caches") + " Secret Client"
         XCTAssertFalse(redactor.text(forged).contains("Secret"), redactor.text(forged))
         XCTAssertEqual(other.text(forged), "~/Library/Caches Secret Client")
+    }
+
+    func testARawPathRunsToItsLastSlashAndTheHomeFolderInAnyCaseOrAsTheAccountsTildeIsHome() {
+        // A name may hold spaces and line breaks but no slash, so a space or a line break before one does not end the
+        // path; the home folder matches in any case, as APFS does, and `~jdoe` is the account's home.
+        let raws = ["Could not read /Users/jdoe/Clients/Acme /Secret Project/data.",
+                    "Could not read /Users/jdoe/Clients/Acme\n/Secret Project/data.",
+                    "Could not read /Users/JDOE/Clients/Acme Secret Project data",
+                    "Could not read ~jdoe/Clients/Acme Secret Project data"]
+        for raw in raws {
+            let sent = redactor.text(raw)
+            for word in ["Acme", "Secret", "Project", "data", "JDOE", "jdoe"] {
+                XCTAssertFalse(sent.contains(word), "\(word): \(sent)")
+            }
+            XCTAssertTrue(sent.hasPrefix("Could not read ~/Clients/folder-"), sent)
+            let named = redactor.sendingFolderNames(true).text(raw)
+            for word in ["Acme", "Secret", "Project", "data"] { XCTAssertTrue(named.contains(word), "\(word): \(named)") }
+            XCTAssertTrue(named.hasPrefix("Could not read ~/Clients/Acme"), named)
+        }
+        XCTAssertEqual(redactor.path("/Users/JDoe/dev/acme-merger"), "~/dev/\(redactor.placeholder("acme-merger"))")
+        XCTAssertTrue(redactor.isInHome("/USERS/jdoe"))
+        XCTAssertEqual(redactor.text("~jdoesmith/x and ~jdoe"), "~jdoesmith/x and ~", "only the account's own ~")
     }
 
     func testTheHomeFolderThroughTheDataVolumeIsTheHomeFolder() {

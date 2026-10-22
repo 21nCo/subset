@@ -3,12 +3,20 @@ import SystemCore
 
 /// What Explain sends for a group or process: the facts the window already shows, with paths redacted.
 extension ProcessesWindowModel {
-    /// The same for a row in every sample and layer it appears in, so its explanation is kept for the session.
-    public nonisolated static func explainKey(for row: RowID) -> ExplainKey {
+    /// The same for a row in every sample it appears in, so its explanation is kept for the session. A process is
+    /// placed, and so explained, by each layer's rules, so it has a key per layer, as a group (whose ID holds its layer)
+    /// does.
+    public nonisolated static func explainKey(for row: RowID, in layer: AttributionLayer) -> ExplainKey {
         switch row {
         case let .group(id): ExplainKey("process-group:\(id)")
-        case let .process(identity): ExplainKey("process:\(identity.pid):\(identity.startTime)")
+        case let .process(identity): ExplainKey("process:\(layer.rawValue):\(identity.pid):\(identity.startTime)")
         }
+    }
+
+    /// The request for a row Explain was chosen for under `key`, or `nil` when the row now has another key (the layer
+    /// changed) or is gone.
+    public func explainRequest(for row: RowID, key: ExplainKey, redactor: ExplainRedactor) -> ExplainRequest? {
+        Self.explainKey(for: row, in: layer) == key ? explainRequest(for: row, redactor: redactor) : nil
     }
 
     /// The request for a row of the current sample, or `nil` when it is gone.
@@ -30,10 +38,9 @@ extension ProcessesWindowModel {
         let totals = group.totals
         result.sizes = "\(totals.processCount) processes; memory \(format.spokenTotal(totals.memory, format.bytes)); "
             + "CPU \(format.spokenTotal(totals.cpuPercent, format.percent)) of one core"
-        let signatures = members.compactMap { $0.origin?.codeSignature.value }
-        if let first = signatures.first, signatures.allSatisfy({ $0.teamID == first.teamID }) {
-            result.teamID = first.teamID
-            result.vendor = first.isPlatformBinary ? "Apple" : first.teamName
+        if let identity = Self.sharedIdentity(group.members.map { facts[$0]?.origin?.codeSignature.value }) {
+            result.teamID = identity.teamID
+            result.vendor = identity.vendor
         }
         if case let .launchdJob(label) = group.id.origin {
             result.launchdLabel = label
@@ -82,6 +89,20 @@ extension ProcessesWindowModel {
             Self.explainName(id, groups[id]?.displayName ?? OriginGroup.displayName(id.name(members: [process])),
                              redactor: redactor)
         }
+    }
+
+    /// The Team ID and vendor every member's signature names, or `nil` unless every signature was read and names the
+    /// same identity: one Team ID, or Apple for platform code. Unsigned and ad-hoc code have no identity, so a group
+    /// with any of it, or with a member whose signature is unknown, is sent without one.
+    nonisolated static func sharedIdentity(_ signatures: [CodeSignature?]) -> (teamID: String?, vendor: String?)? {
+        guard let first = signatures.first ?? nil else { return nil }
+        if let teamID = first.teamID {
+            guard signatures.allSatisfy({ $0?.teamID == teamID }) else { return nil }
+            let names = Set(signatures.map { $0?.teamName })
+            return (teamID, names.count == 1 ? first.teamName : nil)
+        }
+        guard signatures.allSatisfy({ $0.map { $0.teamID == nil && $0.isPlatformBinary } ?? false }) else { return nil }
+        return (nil, "Apple")
     }
 
     /// A group's name as sent. A group standing for a path in the home folder (an app, a login item, a project, or an

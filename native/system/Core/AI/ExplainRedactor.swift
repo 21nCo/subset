@@ -101,19 +101,22 @@ public struct ExplainRedactor: Sendable {
         homeRelative(path) != nil
     }
 
-    /// Free text as sent: the home folder's path shown as `~`, folder names in each `~/…` path withheld as `path(_:)`
-    /// withholds them, and account names removed. Paths in the text should already have been put there with
-    /// `pathInText(_:)` or `paths(in:known:)` where the text was built; such a path ends where it is marked, and the words
-    /// after it are kept. Any other `~/…` path is raw (a home path in a tool's message), and since a folder name may hold
-    /// spaces and punctuation, its end cannot be told from the words after it, so it fails closed: it runs to the end
-    /// of its line or the next path, and its last name is kept only when it is exactly a placeholder or, directly in
-    /// `~/Library`, one of macOS's own folders, with punctuation after it; otherwise it is withheld with the words after
-    /// it.
+    /// Free text as sent: the home folder's path, in any case, and `~<account>` shown as `~`, folder names in each `~/…`
+    /// path withheld as `path(_:)` withholds them, and account names removed. Paths in the text should already have been
+    /// put there with `pathInText(_:)` or `paths(in:known:)` where the text was built; such a path ends where it is
+    /// marked, and the words after it are kept. Any other `~/…` path is raw (a home path in a tool's message), and since
+    /// a folder name may hold any character but a slash, its end cannot be told from the words after it, so it fails
+    /// closed: it runs to the last slash before the next `~/` path, and then to the end of that line, and its last
+    /// name is kept only when it is exactly a placeholder or, directly in `~/Library`, one of macOS's own folders, with
+    /// punctuation after it; otherwise it is withheld with the words after it.
     public func text(_ text: String) -> String {
         var result = text
         for home in homes {
-            result = result.replacingOccurrences(of: home + "/", with: "~/")
-            result = Self.replacing(home, in: result, with: "~", caseInsensitive: false)
+            result = result.replacingOccurrences(of: home + "/", with: "~/", options: .caseInsensitive)
+            result = Self.replacing(home, in: result, with: "~", caseInsensitive: true)
+        }
+        for name in Set(accountNames + homes.map { ($0 as NSString).lastPathComponent }) {
+            result = Self.replacing("~" + name, in: result, with: "~", caseInsensitive: true)
         }
         if !sendFolderNames { result = withholdingDeepNames(in: result) }
         return removingAccountNames(result.replacingOccurrences(of: pathEnd, with: ""))
@@ -147,7 +150,8 @@ public struct ExplainRedactor: Sendable {
     }
 
     /// Each `~/…` path in `text` with its deep folder names withheld. A path marked by `pathInText(_:)` ends at its mark
-    /// unless a line break or another path comes first. Any other path runs to its line's end or the next path. Each
+    /// unless a line break or another path comes first. Any other path runs to the end of the line its last slash
+    /// before the next `~/` path is on, since a name may hold spaces and line breaks but no slash. Each
     /// component a slash follows is shown as `path(_:)` shows it, and an unmarked path's last component, which may run
     /// on into the line's words, is kept only when, without the punctuation after it, it is exactly a name sent as it
     /// is; otherwise it is withheld whole and that punctuation kept.
@@ -159,8 +163,8 @@ public struct ExplainRedactor: Sendable {
             let path = rest[start.upperBound...]
             let lineEnd = Self.lineOrPathEnd(in: path)
             let mark = path.range(of: pathEnd).flatMap { $0.lowerBound <= lineEnd ? $0 : nil }
-            var parts = path[..<(mark?.lowerBound ?? lineEnd)].split(separator: "/", omittingEmptySubsequences: false)
-                .map(String.init)
+            let end = mark?.lowerBound ?? Self.rawPathEnd(in: path)
+            var parts = path[..<end].split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             if parts.count > 1 {
                 let first = Substring(parts[0])
                 for position in 1..<parts.count - (mark == nil ? 1 : 0)
@@ -177,7 +181,7 @@ public struct ExplainRedactor: Sendable {
                 }
             }
             result += parts.joined(separator: "/")
-            rest = mark.map { path[$0.upperBound...] } ?? path[lineEnd...]
+            rest = mark.map { path[$0.upperBound...] } ?? path[end...]
         }
         return result + rest
     }
@@ -195,11 +199,23 @@ public struct ExplainRedactor: Sendable {
         return index
     }
 
-    /// Whether `text` starts another path after a space: `~/` or `/`, alone or after an opening backtick, bracket, or
+    /// Where a raw path in free text ends: the end of the line its last slash before the next `~/` path is on.
+    private static func rawPathEnd(in text: Substring) -> Substring.Index {
+        var limit = text.startIndex
+        while limit < text.endIndex {
+            let next = text.index(after: limit)
+            if text[limit].isWhitespace, startsPath(text[next...], homeOnly: true) { break }
+            limit = next
+        }
+        let name = text[..<limit].lastIndex(of: "/").map { text.index(after: $0) } ?? text.startIndex
+        return text[name..<limit].firstIndex(where: \.isNewline) ?? limit
+    }
+
+    /// Whether `text` starts another path after a space: `~/` or, unless `homeOnly`, `/`, alone or after an opening backtick, bracket, or
     /// quote.
-    private static func startsPath(_ text: Substring) -> Bool {
+    private static func startsPath(_ text: Substring, homeOnly: Bool = false) -> Bool {
         let path = text.first.map { "`([{\"'".contains($0) } == true ? text.dropFirst() : text
-        return path.hasPrefix("~/") || path.hasPrefix("/")
+        return path.hasPrefix("~/") || !homeOnly && path.hasPrefix("/")
     }
 
     /// Whether a name ends where `after` starts: what follows is not part of a name, or is a full stop that ends a
@@ -236,8 +252,9 @@ public struct ExplainRedactor: Sendable {
 
     private func homeRelative(_ path: String) -> String? {
         for home in homes {
-            if path == home { return "" }
-            if path.hasPrefix(home + "/") { return String(path.dropFirst(home.count + 1)) }
+            guard let match = path.range(of: home, options: [.anchored, .caseInsensitive]) else { continue }
+            if match.upperBound == path.endIndex { return "" }
+            if path[match.upperBound] == "/" { return String(path[path.index(after: match.upperBound)...]) }
         }
         return nil
     }
