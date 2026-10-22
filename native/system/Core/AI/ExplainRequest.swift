@@ -86,44 +86,31 @@ public struct ExplainFacts: Sendable {
         return order.map { counts[$0] == 1 ? $0 : "\($0) ×\(counts[$0] ?? 0)" }
     }
 
-    /// `countedNames(_:)` of `items`' names in `precedes` order, the first `limit` only, for names that are costly to
-    /// make: items with the same `key` have the same name, made from the key by `name`. One pass counts every item per
-    /// key and keeps each key's first item; only the first `limit` keys are then ordered, by those items, and named. So
-    /// a suggestion of many thousand items orders and names about `limit`, not one per item, whatever the names are.
-    /// When keys turn out to have one name, they are counted as one and the next keys are named, until `limit` names
-    /// are found.
-    public static func countedNames<Item, Key: Hashable>(_ items: [Item], limit: Int, key: (Item) -> Key,
-                                                         precedes: (Item, Item) -> Bool,
-                                                         name: (Key) -> String) -> [String] {
-        var groups: [Key: (count: Int, first: Item)] = [:]
+    /// `countedNames(_:)` of `items`' names in `precedes` order, the first `limit` only. One pass names each item once
+    /// and keeps, per name, its count and its first item; only the first `limit` names are then ordered, by those
+    /// items, in a bounded selection. So a suggestion of many thousand items is counted exactly by the names it is
+    /// sent with, and orders about `limit` names, not every item.
+    public static func countedNames<Item>(_ items: [Item], limit: Int, name: (Item) -> String,
+                                          precedes: (Item, Item) -> Bool) -> [String] {
+        guard limit > 0 else { return [] }
+        var groups: [String: (count: Int, first: Item)] = [:]
         for item in items {
-            let key = key(item)
-            if let group = groups[key] {
-                groups[key] = (group.count + 1, precedes(item, group.first) ? item : group.first)
+            let name = name(item)
+            if let group = groups[name] {
+                groups[name] = (group.count + 1, precedes(item, group.first) ? item : group.first)
             } else {
-                groups[key] = (1, item)
+                groups[name] = (1, item)
             }
         }
-        var names: [String] = []
-        var nameCounts: [String: Int] = [:]
-        while names.count < limit, !groups.isEmpty {
-            // The first keys still to name, in order: a bounded selection, not a sort of every key.
-            var next: [(key: Key, count: Int, first: Item)] = []
-            let wanted = limit - names.count
-            for (key, group) in groups {
-                guard next.count < wanted || precedes(group.first, next[next.count - 1].first) else { continue }
-                let position = next.firstIndex { precedes(group.first, $0.first) } ?? next.count
-                next.insert((key, group.count, group.first), at: position)
-                if next.count > wanted { next.removeLast() }
-            }
-            for group in next {
-                groups[group.key] = nil
-                let name = name(group.key)
-                if nameCounts[name] == nil { names.append(name) }
-                nameCounts[name, default: 0] += group.count
-            }
+        // The first names, in order: a bounded selection, not a sort of every name.
+        var first: [(name: String, count: Int, first: Item)] = []
+        for (name, group) in groups {
+            guard first.count < limit || precedes(group.first, first[first.count - 1].first) else { continue }
+            let position = first.firstIndex { precedes(group.first, $0.first) } ?? first.count
+            first.insert((name, group.count, group.first), at: position)
+            if first.count > limit { first.removeLast() }
         }
-        return names.map { nameCounts[$0] == 1 ? $0 : "\($0) ×\(nameCounts[$0] ?? 0)" }
+        return first.map { $0.count == 1 ? $0.name : "\($0.name) ×\($0.count)" }
     }
 
     /// A duration in the largest whole unit: "3 minutes", "5 hours", "45 days".

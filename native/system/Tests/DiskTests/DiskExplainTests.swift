@@ -115,6 +115,35 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(named.members, expected)
     }
 
+    func testASuggestionCountsItemsWhosePlaceholdersAreTheSameAsOneName() async throws {
+        // Build-3187 and Build-10265 are withheld as one placeholder under this key. One is the largest item and the
+        // other the twelfth, past the names a request keeps, yet they are sent as one name of two.
+        let shared = redactor.placeholder("Build-3187")
+        XCTAssertEqual(redactor.placeholder("Build-10265"), shared)
+        for number in 0..<20 {
+            try fixture.write("Library/Developer/Xcode/DerivedData/Big-\(String(format: "%02d", number))/Build/app",
+                              bytes: (60 - number) * 16_384)
+        }
+        try fixture.write("Library/Developer/Xcode/DerivedData/Build-3187/Build/app", bytes: 80 * 16_384)
+        try fixture.write("Library/Developer/Xcode/DerivedData/Build-10265/Build/app", bytes: 50 * 16_384 + 8_192)
+        let model = try await fixture.scanned()
+        model.tab = .suggestions
+        let id = try XCTUnwrap(model.row(named: "Xcode DerivedData")).id
+        let match = try XCTUnwrap(model.analysis?.matches.first { $0.rule.id == .xcodeDerivedData })
+        let sorted = match.items.sorted(by: DiskWindowModel.precedes)
+        XCTAssertEqual(sorted.map(\.path).firstIndex { $0.hasSuffix("/Build-10265") }, 11, "the twelfth item")
+        let withheld = try request(model, id)
+        XCTAssertEqual(withheld.members, [shared + " ×2"] + (0..<9).map { redactor.placeholder("Big-0\($0)") })
+        let named = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor.sendingFolderNames(true)))
+        XCTAssertEqual(named.members, ["Build-3187"] + (0..<9).map { "Big-0\($0)" })
+        for (redactor, sent) in [(redactor, withheld), (redactor.sendingFolderNames(true), named)] {
+            var reference = ExplainFacts(kind: .suggestion, name: "Xcode DerivedData")
+            reference.members = ExplainFacts.countedNames(sorted.map { redactor.name(ofPath: $0.path) })
+            XCTAssertEqual(sent.members, ExplainRequest(reference, redactor: redactor).members)
+            XCTAssertTrue(sent.truncated)
+        }
+    }
+
     func testASuggestionOfTenThousandItemsWhoseNamesDifferOnlyInWhatIsNotSentIsSentAsAFullSortWouldSendIt() async throws {
         // 10,000 folders under 12 names as sent with folder names on: each differs from the others of its name only in
         // control characters, each sent as a space. Every hundredth is larger, so sizes order them first.

@@ -111,11 +111,10 @@ extension DiskWindowModel {
             facts.notMeasured = rule.id == .dockerImages ? ExplainNotMeasured(docker: analysis?.dockerUnavailable) : .notRead
         }
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
-        // names are sent; largest first, then by path, and only the names a request keeps are ordered and made (one
-        // past them, so the request says it left some out).
+        // names are sent; counted by the names they are sent with, largest first, then by path, and only the names a
+        // request keeps are ordered (one past them, so the request says it left some out).
         facts.members = ExplainFacts.countedNames(match.items, limit: ExplainRequest.memberLimit + 1,
-                                                  key: { redactor.nameKey(ofPath: $0.path) },
-                                                  precedes: Self.precedes, name: redactor.name(of:))
+                                                  name: { redactor.name(ofPath: $0.path) }, precedes: Self.precedes)
         return facts
     }
 

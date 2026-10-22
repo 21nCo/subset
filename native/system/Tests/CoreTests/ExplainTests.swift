@@ -71,17 +71,17 @@ final class ExplainTests: XCTestCase {
     }
 
     private func counted(_ items: [Sized], _ redactor: ExplainRedactor, made: Counter) -> [String] {
-        ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1, key: { redactor.nameKey(ofPath: $0.path) },
-                                  precedes: Self.precedes, name: { made.count += 1; return redactor.name(of: $0) })
+        ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1,
+                                  name: { made.count += 1; return redactor.name(ofPath: $0.path) }, precedes: Self.precedes)
     }
 
-    func testCountedNamesOfManyItemsMakeOnlyTheNamesARequestKeeps() {
-        // 10,000 items under 2,500 names, with sizes that fall and rise; every item is counted, but only 11 names are
-        // made.
+    func testCountedNamesOfManyItemsNameEachItemOnceAndKeepOnlyTheNamesARequestKeeps() {
+        // 10,000 items under 2,500 names, with sizes that fall and rise; every item is named once and counted, and 11
+        // names are kept.
         let items = (0..<10_000).map { Sized(path: "/Users/jdoe/dev/project-\($0 % 2_500)", size: ($0 * 7) % 13) }
         let made = Counter()
         let names = counted(items, redactor, made: made)
-        XCTAssertEqual(made.count, ExplainRequest.memberLimit + 1)
+        XCTAssertEqual(made.count, items.count)
         XCTAssertEqual(names, reference(items, redactor))
         XCTAssertTrue(names.allSatisfy { $0.hasPrefix("folder-") && $0.hasSuffix(" ×4") }, "\(names)")
         var facts = ExplainFacts(kind: .suggestion, name: "s")
@@ -89,10 +89,10 @@ final class ExplainTests: XCTestCase {
         XCTAssertTrue(ExplainRequest(facts, redactor: redactor).truncated, "the request says it left names out")
     }
 
-    func testNamesThatDifferOnlyInWhatIsNotSentAreMadeOnceWhateverTheirNumber() {
+    func testNamesThatDifferOnlyInWhatIsNotSentAreCountedAsOneNameWhateverTheirNumber() {
         // 16,384 names outside ~ that differ only in control and format characters, each sent as a space, and 16,384
         // under ~ that differ only in the case of the account name, sent by name with folder names on. Each set is sent
-        // as 12 names, so only 11 are made, with every item counted.
+        // as 12 names, so 11 are kept, with every item named once and counted.
         let marks: [Character] = ["\u{01}", "\u{200B}"]
         func variant(_ number: Int) -> String {
             String((0..<14).map { marks[(number >> $0) & 1] })
@@ -105,7 +105,7 @@ final class ExplainTests: XCTestCase {
         for (items, redactor) in [(hidden, redactor), (account, redactor.sendingFolderNames(true))] {
             let made = Counter()
             let names = counted(items, redactor, made: made)
-            XCTAssertLessThanOrEqual(made.count, ExplainRequest.memberLimit + 1)
+            XCTAssertEqual(made.count, items.count)
             XCTAssertEqual(names, reference(items, redactor))
             XCTAssertEqual(names.count, 11)
         }
@@ -115,30 +115,50 @@ final class ExplainTests: XCTestCase {
                       "\(sent)")
     }
 
-    func testPathsHaveOneNameKeyExactlyWhenTheyHaveOneNameAsSent() {
+    func testNamesWhosePlaceholdersAreTheSameAreCountedAsOneName() {
+        // collision-3369 and collision-5014 are withheld as one placeholder under this key, so they are one name as
+        // sent: counted together whether the other is second, third, or twelfth by size and path.
+        let (one, other) = ("/Users/jdoe/dev/collision-3369", "/Users/jdoe/dev/collision-5014")
+        let shared = redactor.placeholder("collision-3369")
+        XCTAssertEqual(redactor.placeholder("collision-5014"), shared)
+        let rest = (0..<20).map { Sized(path: "/Users/jdoe/dev/project-\($0)", size: 100 - $0) }
+        let expected = [shared + " ×2"] + (0..<10).map { redactor.placeholder("project-\($0)") }
+        for second in [200, 99, 90] {
+            let items = rest + [Sized(path: one, size: 200), Sized(path: other, size: second)]
+            let made = Counter()
+            let names = counted(items, redactor, made: made)
+            XCTAssertEqual(names, reference(items, redactor), "the other ranked by size \(second)")
+            XCTAssertEqual(names, expected)
+            XCTAssertEqual(made.count, items.count)
+        }
+        // With folder names sent they are two names.
+        let sending = redactor.sendingFolderNames(true)
+        let items = rest + [Sized(path: one, size: 200), Sized(path: other, size: 199)]
+        XCTAssertEqual(counted(items, sending, made: Counter()), reference(items, sending))
+        XCTAssertEqual(counted(items, sending, made: Counter()).prefix(2), ["collision-3369", "collision-5014"])
+    }
+
+    func testAPathsNameIsTheLastNameItsPathIsSentWith() {
         let redactor = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: ["jdoe", "Jane Doe"], sendFolderNames: false,
                                        key: Array(repeating: 7, count: 32))
         let names = ["dev", "jdoe", "JDOE", "Jane Doe", "jane doe", "Caches", "line\nbreak", "line\rbreak", "line\u{2028}break",
-                     "a\u{01}", "a\u{02}", "a\u{200B}", "a ", "a", "folder-x"]
+                     "a\u{01}", "a\u{02}", "a\u{200B}", "a ", "a", "folder-x", "collision-3369", "collision-5014"]
         var paths = ["/Users/jdoe", "/USERS/JDOE/", "/System/Volumes/Data/Users/jdoe", "/", "", "/Users/jdoe/dev/"]
         for name in names {
             paths += ["/Users/jdoe/\(name)", "/Users/jdoe/x/\(name)", "/Users/jdoe/a/b/\(name)", "/opt/\(name)",
                       "/Volumes/\(name)/", "/System/Volumes/Data/Users/jdoe/Library/\(name)"]
         }
         for redactor in [redactor, redactor.sendingFolderNames(true)] {
-            for first in paths {
-                let sent = redactor.path(first).value.split(separator: "/").last.map(String.init) ?? "~"
-                XCTAssertEqual(redactor.name(ofPath: first), sent, "named as its path is sent: \(first)")
-                for second in paths {
-                    XCTAssertEqual(redactor.nameKey(ofPath: first) == redactor.nameKey(ofPath: second),
-                                   redactor.name(ofPath: first) == redactor.name(ofPath: second), "\(first) and \(second)")
-                }
+            for path in paths {
+                let sent = redactor.path(path).value.split(separator: "/").last.map(String.init) ?? "~"
+                XCTAssertEqual(redactor.name(ofPath: path), sent, "named as its path is sent: \(path)")
             }
         }
-        XCTAssertNotEqual(redactor.nameKey(ofPath: "/Users/jdoe/dev"), redactor.nameKey(ofPath: "/Users/jdoe/a/dev"))
-        XCTAssertEqual(redactor.nameKey(ofPath: "/opt/a\u{01}"), redactor.nameKey(ofPath: "/opt/a\u{200B}"))
-        XCTAssertEqual(redactor.sendingFolderNames(true).nameKey(ofPath: "/Users/jdoe/x/JDOE"),
-                       redactor.sendingFolderNames(true).nameKey(ofPath: "/Users/jdoe/y/jdoe"))
+        XCTAssertNotEqual(redactor.name(ofPath: "/Users/jdoe/dev"), redactor.name(ofPath: "/Users/jdoe/a/dev"))
+        XCTAssertEqual(redactor.name(ofPath: "/opt/a\u{01}"), redactor.name(ofPath: "/opt/a\u{200B}"))
+        XCTAssertEqual(redactor.name(ofPath: "/Users/jdoe/x/collision-3369"), redactor.name(ofPath: "/Users/jdoe/y/collision-5014"))
+        XCTAssertEqual(redactor.sendingFolderNames(true).name(ofPath: "/Users/jdoe/x/JDOE"),
+                       redactor.sendingFolderNames(true).name(ofPath: "/Users/jdoe/y/jdoe"))
     }
 
     func testTheHomeFolderInAnyCaseOrThroughTheDataVolumeIsTheHomeFolder() {

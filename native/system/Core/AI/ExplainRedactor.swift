@@ -77,35 +77,14 @@ public struct ExplainRedactor: Sendable {
     }
 
     /// The last name of a path as sent, as `path(_:)` sends it: a placeholder when the path is under the home folder
-    /// deeper than the first level and folder names are not sent.
+    /// deeper than the first level and folder names are not sent. Two paths have the same name here exactly when they
+    /// are sent with the same last name, placeholders that happen to be the same included, so a suggestion counts its
+    /// items by this name (`ExplainFacts.countedNames(_:limit:name:precedes:)`). Only the last name is made.
     public func name(ofPath path: String) -> String {
-        name(of: nameKey(ofPath: path))
-    }
-
-    /// What a path's name as sent (`name(ofPath:)`) is made from: the name itself when it is sent by name, or the raw
-    /// name its placeholder is made from. Paths have the same key exactly when they have the same name (but for two
-    /// placeholders that happen to be the same), and the key is found without making a placeholder.
-    public enum NameKey: Hashable, Sendable {
-        /// The home folder, or a path with no names.
-        case home
-        case sent(String)
-        case withheld(Substring)
-    }
-
-    public func nameKey(ofPath path: String) -> NameKey {
-        guard let rest = homeRelative(path) else { return path.split(separator: "/").last.map { .sent(sent($0)) } ?? .home }
+        guard let rest = homeRelative(path) else { return path.split(separator: "/").last.map(sent) ?? "~" }
         let parts = rest.split(separator: "/")
-        guard let last = parts.last else { return .home }
-        return isSent(at: parts.count - 1) ? .sent(sent(last)) : .withheld(last)
-    }
-
-    /// The name as sent for a key (`nameKey(ofPath:)`).
-    public func name(of key: NameKey) -> String {
-        switch key {
-        case .home: "~"
-        case let .sent(name): name
-        case let .withheld(raw): placeholder(String(raw))
-        }
+        guard let last = parts.last else { return "~" }
+        return isSent(at: parts.count - 1) ? sent(last) : placeholder(String(last))
     }
 
     /// A path's name that is sent by name, as it is sent: account names removed and kept on one line.
