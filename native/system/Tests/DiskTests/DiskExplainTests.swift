@@ -1,6 +1,6 @@
 import Foundation
 @testable import SystemCore
-import SystemDisk
+@testable import SystemDisk
 import SystemProcesses
 import XCTest
 
@@ -124,6 +124,24 @@ final class DiskExplainTests: XCTestCase {
         for text in [try sent(suggestion), try sent(named)] {
             for name in ["Acme", "Merger", "webclient"] { XCTAssertFalse(text.contains(name), text) }
         }
+    }
+
+    /// A suggestion's size is bounded as its row is: a sum that may count shared clone blocks twice is at most what is
+    /// used, and one with an unread item at least it.
+    func testASuggestionsSizeIsSentWithTheBoundsItsRowShows() {
+        let format = fixture.format
+        func sizes(complete: Bool, upperBound: Bool, private privateBytes: UInt64 = 8_192) -> String? {
+            DiskWindowModel.sizes(of: .scanned(private: privateBytes, allocated: 8_192, complete: complete,
+                                               allocatedUpperBound: upperBound), format: format)
+        }
+        XCTAssertEqual(sizes(complete: true, upperBound: false), "8 kB")
+        XCTAssertEqual(sizes(complete: true, upperBound: true), "at most 8 kB")
+        XCTAssertEqual(sizes(complete: false, upperBound: false), "at least 8 kB")
+        XCTAssertEqual(sizes(complete: false, upperBound: true), "about 8 kB")
+        XCTAssertEqual(sizes(complete: true, upperBound: true, private: 4_096), "at most 8 kB, 4 kB private")
+        XCTAssertEqual(DiskWindowModel.sizes(of: .dockerReclaimable(upTo: 4_096, total: nil), format: format),
+                       "up to 4 kB reclaimable, as Docker reports")
+        XCTAssertNil(DiskWindowModel.sizes(of: .unavailable("Not read"), format: format))
     }
 
     func testAnUnreadableAppOutsideTheScannedFolderIsWithheldInASuggestionsReason() async throws {

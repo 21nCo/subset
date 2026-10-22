@@ -106,12 +106,8 @@ extension DiskWindowModel {
         // The rule's own words from the catalog: what the data is, where it is, how it comes back, and what a cleanup
         // frees.
         facts.matchedRule = "\(rule.name): \(rule.explanation) Location: \(rule.location). \(rule.rebuild) \(rule.yield.note)"
-        switch match.bytes {
-        case let .scanned(privateBytes, allocated, complete, _):
-            facts.sizes = "\(complete ? "" : "at least ")\(format.diskBytes(allocated)) used, \(format.diskBytes(privateBytes)) private"
-        case let .dockerReclaimable(upTo, _):
-            facts.sizes = "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
-        case .unavailable:
+        facts.sizes = Self.sizes(of: match.bytes, format: format)
+        if case .unavailable = match.bytes {
             facts.notMeasured = rule.id == .dockerImages ? ExplainNotMeasured(docker: analysis?.dockerUnavailable) : .notRead
         }
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
@@ -119,6 +115,21 @@ extension DiskWindowModel {
         facts.members = ExplainFacts.countedNames(match.items.sorted { ($0.sizes?.allocated ?? 0) > ($1.sizes?.allocated ?? 0) }
             .map { redactor.name(ofPath: $0.path) })
         return facts
+    }
+
+    /// A suggestion's sizes as sent, bounded as its Suggestions row is: the space used is "at least" it when an item's
+    /// size is unknown or a lower bound, "at most" it when clones may be counted more than once, and "about" it when
+    /// both; `nil` when it was not measured.
+    static func sizes(of bytes: ReclaimBytes, format: UsageFormat) -> String? {
+        switch bytes {
+        case let .scanned(privateBytes, allocated, complete, upperBound):
+            DiskFigures(allocated: allocated, private: privateBytes, lowerBound: !complete, upperBound: upperBound,
+                        format: format).accessibilityValue
+        case let .dockerReclaimable(upTo, _):
+            "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
+        case .unavailable:
+            nil
+        }
     }
 
     /// An installed app's name as sent, the same as Processes names its group: its bundle's name, or the bundle's

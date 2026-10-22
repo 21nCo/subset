@@ -232,6 +232,26 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(model.detail?.placement?.group, syncd, "the rule-based group is the one shown")
     }
 
+    /// An Unattributed group is named by its executable's path wherever it is; outside the home folder too, the path is
+    /// sent only as the path field, and the group's name is the path's last name.
+    func testAnUnattributedGroupOutsideTheHomeFolderIsNamedByItsExecutablesLastName() throws {
+        let daemon = "/opt/acme/bin/syncd"
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        model.apply(try ProcessFixtures.sample([FixtureProcess(pid: 800, path: daemon, memory: 30 * ProcessFixtures.mib, cpu: 2,
+                                                               energy: 1, signature: ProcessFixtures.unsigned)]),
+                    memory: nil, cadence: .mainWindowVisible)
+        let group = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.unattributed(executable: daemon))),
+                                                       redactor: redactor))
+        let process = try XCTUnwrap(model.explainRequest(for: .process(ProcessFixtures.identity(800)), redactor: redactor))
+        XCTAssertEqual(group.name, "syncd")
+        XCTAssertEqual(process.group, "syncd")
+        for request in [group, process] {
+            XCTAssertEqual(request.path?.value, daemon)
+            XCTAssertFalse(request.name.contains("/") || request.group?.contains("/") == true,
+                           "\(request.name) \(request.group ?? "")")
+        }
+    }
+
     /// A group is sent with a Team ID and vendor only when every member's signature was read and names that identity:
     /// Apple platform code and unsigned or ad hoc code both have no Team ID, and an unread signature says nothing.
     func testAGroupIsSentWithAVendorOnlyWhenEveryMembersSignatureNamesIt() throws {
