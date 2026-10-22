@@ -493,6 +493,26 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(provider.availabilityReads, 2)
     }
 
+    func testAnAvailabilityReadThatALaterOneOvertakesIsNotShown() async {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request() } }
+        await gate.reached()
+        provider.availabilityGate = nil
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .available)
+        provider.status = .modelNotReady
+        gate.open()
+        await asked.value
+        XCTAssertEqual(center.availability, .available, "Settings keeps the newer read")
+        XCTAssertEqual(center.state(for: key), .unavailable(.modelNotReady), "the item follows its own read")
+        XCTAssertEqual(provider.explained, 0)
+    }
+
     func testAnItemGoneBeforeItsRequestIsBuiltSaysSoAndSendsNothing() async {
         let provider = FakeProvider()
         let center = center(defaults(), provider: provider)

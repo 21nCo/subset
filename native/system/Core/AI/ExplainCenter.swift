@@ -102,11 +102,18 @@ public final class ExplainCenter {
     public func refreshAvailability() async {
         let choice = self.choice
         guard choice != .none, let provider = makeProvider(choice) else { return }
+        _ = await readAvailability(of: provider, for: choice)
+    }
+
+    /// `provider`'s availability, or `nil` when it does not answer in time. Shown only when no later read has started
+    /// and `choice` is still the chosen provider, so a slow read never replaces a newer one.
+    private func readAvailability(of provider: any AIProvider, for choice: AIProviderChoice) async -> AIAvailability? {
         availabilityReads += 1
         let read = availabilityReads
         guard let availability = try? await answer(within: availabilityTimeout, { await provider.availability() })
-        else { return }
+        else { return nil }
         if choice == self.choice, read == availabilityReads { self.availability = availability }
+        return availability
     }
 
     /// Explains an item with the chosen provider, building its request with the current redactor. Does nothing without
@@ -129,7 +136,7 @@ public final class ExplainCenter {
             return
         }
         states[key] = .working(request)
-        let read = try? await answer(within: availabilityTimeout, { await provider.availability() })
+        let read = await readAvailability(of: provider, for: choice)
         guard choice == self.choice else {
             states[key] = nil
             return
@@ -138,7 +145,6 @@ public final class ExplainCenter {
             states[key] = .failed(Self.late(choice, availabilityTimeout) + " Nothing was sent.", request)
             return
         }
-        self.availability = availability
         guard availability.isAvailable else {
             states[key] = .unavailable(availability)
             return
