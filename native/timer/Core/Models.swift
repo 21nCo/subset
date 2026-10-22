@@ -22,6 +22,12 @@ public struct Segment: Codable, Equatable, Sendable {
     public var label: String
     public var phase: Phase
     public var durationMs: Int
+
+    public init(label: String, phase: Phase, durationMs: Int) {
+        self.label = label
+        self.phase = phase
+        self.durationMs = durationMs
+    }
 }
 
 /// One of the three kinds, flattened: the fields of the other kinds are nil.
@@ -137,6 +143,22 @@ public struct TimerSpec: Codable, Equatable, Sendable {
     public var rounds: Int?
     public var prepMs: Int?
     public var cooldownMs: Int?
+
+    public init(kind: TimerKind, name: String? = nil, sound: Bool? = nil, countdownTicks: Bool? = nil, durationMs: Int? = nil,
+                until: String? = nil, lapsEnabled: Bool? = nil, segments: [Segment]? = nil, rounds: Int? = nil,
+                prepMs: Int? = nil, cooldownMs: Int? = nil) {
+        self.kind = kind
+        self.name = name
+        self.sound = sound
+        self.countdownTicks = countdownTicks
+        self.durationMs = durationMs
+        self.until = until
+        self.lapsEnabled = lapsEnabled
+        self.segments = segments
+        self.rounds = rounds
+        self.prepMs = prepMs
+        self.cooldownMs = cooldownMs
+    }
 
     public static func countdown(durationMs: Int, name: String? = nil) -> TimerSpec {
         TimerSpec(kind: .countdown, name: name, durationMs: durationMs)

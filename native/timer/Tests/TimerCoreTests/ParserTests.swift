@@ -32,6 +32,31 @@ private func body(_ events: [HTTPResponseParser.Event]) -> Data {
     }
 }
 
+@Test func headAndLineLimitsHoldWhenTheirEndHasArrived() throws {
+    let limit = HTTPResponseParser.maxHeadBytes
+    let status = "HTTP/1.1 200 OK\r\n"
+    let chunked = status + "Transfer-Encoding: chunked\r\n\r\n"
+    let oversized = [
+        // A head one byte over the limit, then its terminator.
+        status + "X: " + String(repeating: "a", count: limit + 1 - status.utf8.count - 3) + "\r\n\r\n",
+        // A chunk-size line, then a trailer line, over the limit with their line ends.
+        chunked + String(repeating: "0", count: limit) + "1\r\nx\r\n0\r\n\r\n",
+        chunked + "0\r\nX: " + String(repeating: "a", count: limit) + "\r\n\r\n"
+    ]
+    for reply in oversized {
+        for size in [reply.utf8.count, 4096] {
+            #expect(throws: HTTPParseError.headTooLarge) { try parse(Data(reply.utf8), pieces: size) }
+        }
+    }
+    // A head at the limit stays valid, however much body arrives in the same read.
+    let bodyText = String(repeating: "b", count: 2 * limit)
+    let prefix = status + "Content-Length: \(bodyText.utf8.count)\r\nX: "
+    let reply = Data((prefix + String(repeating: "a", count: limit - prefix.utf8.count) + "\r\n\r\n" + bodyText).utf8)
+    for size in [reply.count, 4096] {
+        #expect(try body(parse(reply, pieces: size)) == Data(bodyText.utf8))
+    }
+}
+
 @Test func chunkedEventStreamParsesFromAnySplit() throws {
     // Node writes each frame as one chunk; extensions and lower- or upper-case hex are valid too.
     let frames = ["event: state\ndata: {\"a\":1}\n\n", "event: heartbeat\ndata: {\"at\":5}\n\n", "event: alert\ndata: {\"é\":\"✓\"}\n\n"]

@@ -8,7 +8,7 @@ public enum DurationParser {
 
     /// The milliseconds, or the message to show for text that is not a valid duration.
     public static func parse(_ text: String) -> Result<Int, DurationError> {
-        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed(text)
         // ASCII only, as the CLI's patterns: Swift's `\d` and `(?i)` would take other scripts' digits and letters.
         var ms: Int?
         if let match = value.wholeMatch(of: /(?:([0-9]{1,6})[hH])?(?:([0-9]{1,6})[mM])?(?:([0-9]{1,6})[sS])?/), !value.isEmpty {
@@ -26,6 +26,16 @@ public enum DurationParser {
             return .failure(DurationError(message: "\u{201C}\(value)\u{201D} must be from 1 second to 24 hours."))
         }
         return .success(ms)
+    }
+
+    /// JavaScript's `trim`: Foundation's white space and line ends, but with U+FEFF and without U+0085.
+    static func trimmed(_ text: String) -> String {
+        let isSpace = { (scalar: Unicode.Scalar) in
+            scalar == "\u{FEFF}" || (scalar != "\u{85}" && CharacterSet.whitespacesAndNewlines.contains(scalar))
+        }
+        let scalars = text.unicodeScalars
+        guard let first = scalars.firstIndex(where: { !isSpace($0) }), let last = scalars.lastIndex(where: { !isSpace($0) }) else { return "" }
+        return String(scalars[first...last])
     }
 }
 

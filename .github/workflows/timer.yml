@@ -47,9 +47,9 @@ jobs:
           sudo xcode-select --switch "$xcode/Contents/Developer"
           xcodebuild -version
 
-      # Builds packages/timer-cli/dist/cli.mjs for the integration test.
+      # Builds packages/timer-cli/dist/cli.mjs for the integration test. No dependency's install script is needed.
       - name: Build the Timer CLI runtime
-        run: npm ci && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Package tests
         working-directory: native/timer

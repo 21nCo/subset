@@ -58,4 +58,9 @@ private func countdown(_ id: String, durationMs: Int, status: TimerStatus, start
     for text in ["\u{661}:30", "1:\u{663}0", "1:3\u{660}", "\u{FF11}:02:03", "1:02:0\u{FF13}", "1h\u{663}m", "\u{665}m30s", "\u{FF15}", "1\u{17F}"] {
         #expect(DurationParser.parse(text) == .failure(DurationError(message: "\u{201C}\(text)\u{201D} is not a duration such as 90s, 25m, 1h30m or 1:30.")), "\(text)")
     }
+    // Trimmed as JavaScript's trim, which takes a byte order mark and leaves U+0085 in place.
+    for (text, ms) in [("\u{FEFF}90s", 90_000), ("\u{3000}25m\u{2028}", 1_500_000), ("\u{0B}1:30\u{0C}", 90_000)] {
+        #expect(DurationParser.parse(text) == .success(ms), "\(text.unicodeScalars.map(\.value))")
+    }
+    #expect(DurationParser.parse("\u{85}90s") == .failure(DurationError(message: "\u{201C}\u{85}90s\u{201D} is not a duration such as 90s, 25m, 1h30m or 1:30.")))
 }

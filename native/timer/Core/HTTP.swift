@@ -65,10 +65,10 @@ public struct HTTPResponseParser: Sendable {
     }
 
     private mutating func line() throws -> String? {
-        guard let newline = buffer.firstIndex(of: 0x0A) else {
-            if buffer.count > Self.maxHeadBytes { throw HTTPParseError.headTooLarge }
-            return nil
-        }
+        // A line, terminated or not yet, is limited like a head; the bytes after it are not part of it.
+        let newline = buffer.firstIndex(of: 0x0A)
+        if (newline ?? buffer.endIndex) - buffer.startIndex > Self.maxHeadBytes { throw HTTPParseError.headTooLarge }
+        guard let newline else { return nil }
         var bytes = buffer[buffer.startIndex..<newline]
         if bytes.last == 0x0D { bytes = bytes.dropLast() }
         buffer.removeSubrange(buffer.startIndex...newline)
@@ -89,10 +89,12 @@ public struct HTTPResponseParser: Sendable {
     private mutating func step() throws -> Step {
         switch state {
         case .head:
-            guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else {
-                if buffer.count > Self.maxHeadBytes { throw HTTPParseError.headTooLarge }
-                return .needMore
+            // The head is limited whether or not its end has arrived, and body bytes after it do not count.
+            let end = buffer.range(of: Data("\r\n\r\n".utf8))
+            if (end?.lowerBound ?? buffer.endIndex - min(3, buffer.count)) - buffer.startIndex > Self.maxHeadBytes {
+                throw HTTPParseError.headTooLarge
             }
+            guard let end else { return .needMore }
             let text = String(data: buffer[buffer.startIndex..<end.lowerBound], encoding: .utf8)
             buffer.removeSubrange(buffer.startIndex..<end.upperBound)
             guard let text else { throw HTTPParseError.malformedHead }

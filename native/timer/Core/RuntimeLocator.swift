@@ -106,33 +106,89 @@ public struct ProcessRuntimeSystem: RuntimeSystem {
     public func fileExists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: path) }
 
     public func run(_ executable: String, _ arguments: [String], timeout: TimeInterval) async -> String? {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            process.standardInput = FileHandle.nullDevice
-            let once = Once()
+        await withCheckedContinuation { ProbeRun(continuation: $0).start(executable, arguments, timeout: timeout) }
+    }
+}
+
+/// One child process run with a deadline. At the deadline it closes its end of the output pipe and ends the child's
+/// process group (the child leads its own): SIGTERM, then SIGKILL after `killGrace`. A descendant that left the group
+/// is not ended, but holds nothing of this process. Its state changes only on `queue`.
+private final class ProbeRun: @unchecked Sendable {
+    static let killGrace: TimeInterval = 0.5
+    private let queue = DispatchQueue(label: "dev.subset.timer.probe")
+    private let continuation: CheckedContinuation<String?, Never>
+    private let process = Process()
+    private let pipe = Pipe()
+    private var source: DispatchSourceRead?
+    private var output = Data()
+    private var status: Int32?
+    private var closed = false
+    private var done = false
+
+    init(continuation: CheckedContinuation<String?, Never>) {
+        self.continuation = continuation
+    }
+
+    func start(_ executable: String, _ arguments: [String], timeout: TimeInterval) {
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        process.terminationHandler = { [self] process in
+            queue.async { [self] in
+                status = process.terminationStatus
+                completeIfFinished()
+            }
+        }
+        queue.sync {
             do {
                 try process.run()
             } catch {
-                once.run { continuation.resume(returning: nil) }
-                return
+                return finish(nil)
             }
             // Read while it runs, so output larger than the pipe's buffer cannot block it.
-            DispatchQueue.global().async {
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                once.run { continuation.resume(returning: process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil) }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                once.run {
-                    process.terminate()
-                    continuation.resume(returning: nil)
-                }
+            let fd = pipe.fileHandleForReading.fileDescriptor
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+            source.setEventHandler { [self] in read(fd) }
+            source.setCancelHandler { [pipe] in try? pipe.fileHandleForReading.close() }
+            self.source = source
+            source.resume()
+            queue.asyncAfter(deadline: .now() + timeout) { [self] in
+                guard !done else { return }
+                finish(nil)
+                signalGroup(SIGTERM)
+                queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in signalGroup(SIGKILL) }
             }
         }
+    }
+
+    private func read(_ fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        let count = Darwin.read(fd, &buffer, buffer.count)
+        if count > 0 {
+            output.append(contentsOf: buffer[..<count])
+        } else if count == 0 || (errno != EAGAIN && errno != EINTR) {
+            closed = true
+            completeIfFinished()
+        }
+    }
+
+    private func completeIfFinished() {
+        guard let status, closed, !done else { return }
+        finish(status == 0 ? String(decoding: output, as: UTF8.self) : nil)
+    }
+
+    private func finish(_ result: String?) {
+        done = true
+        source?.cancel()
+        source = nil
+        continuation.resume(returning: result)
+    }
+
+    private func signalGroup(_ signal: Int32) {
+        let pid = process.processIdentifier
+        if pid > 0 { kill(-pid, signal) }
     }
 }

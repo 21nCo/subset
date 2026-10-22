@@ -205,3 +205,28 @@ private final class FakeDaemons: @unchecked Sendable {
     await #expect(throws: DaemonError.notListening) { try await locked.run(client, timeout: 0.3) }
     #expect(locked.launched.count == 1)
 }
+
+@Test func aProbeReturnsItsOutput() async {
+    #expect(await ProcessRuntimeSystem().run("/bin/sh", ["-c", "echo v22.13.0"], timeout: 5) == "v22.13.0\n")
+    #expect(await ProcessRuntimeSystem().run("/bin/sh", ["-c", "echo v22.13.0; exit 1"], timeout: 5) == nil)
+}
+
+@Test func aTimedOutProbeEndsItsWholeProcessGroup() async throws {
+    // A shell and its child that ignore SIGTERM and both hold the output pipe, as a slow login shell might.
+    let pids = FileManager.default.temporaryDirectory.appendingPathComponent("probe-\(UUID().uuidString)").path
+    defer { try? FileManager.default.removeItem(atPath: pids) }
+    let started = ContinuousClock.now
+    let output = await ProcessRuntimeSystem().run("/bin/sh", ["-c", "trap '' TERM; sleep 30 & echo $$ $! > '\(pids)'; wait"], timeout: 0.5)
+    #expect(output == nil)
+    #expect(ContinuousClock.now - started < .seconds(2))
+    let both = try String(contentsOfFile: pids, encoding: .utf8).split(separator: " ").compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    #expect(both.count == 2)
+    // The operating system, not the probe, says whether they still run.
+    var alive = both
+    for _ in 0..<60 where !alive.isEmpty {
+        try await Task.sleep(for: .milliseconds(50))
+        alive = alive.filter { kill($0, 0) == 0 }
+    }
+    #expect(alive.isEmpty, "still running: \(alive)")
+    alive.forEach { kill($0, SIGKILL) }
+}

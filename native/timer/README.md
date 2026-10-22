@@ -18,7 +18,7 @@ Status: the library builds and passes its tests. The menu bar app, its embedded 
 
 - **`DaemonClient`** sends HTTP/1.1 requests over `daemon.sock` with `NWConnection` and a Unix endpoint. Each request opens its own connection (`Connection: close`) and is limited to 10 seconds. A missing or refusing socket is `DaemonError.notListening`. A daemon's error reply (`{ "error": { code, message } }`) becomes `.rejected`, or `.shuttingDown` for its 503. A board whose `schemaVersion` is not 1 is refused (`.unsupportedSchema`).
 - **`HTTPResponseParser`** and **`ServerSentEventParser`** are incremental. They handle bodies with `content-length`, chunked bodies (the event stream), and frames split anywhere, including inside a CRLF or a UTF-8 character.
-- **`EventSubscription`** keeps `/v1/events` open. When the stream ends or fails, it reconnects with exponential backoff (0.5 seconds doubling to 10). The wait resets once a connection succeeds. A stream that stays silent for 45 seconds (three missed heartbeats) is treated as dropped.
+- **`EventSubscription`** keeps `/v1/events` open. When the stream ends or fails, it reconnects with exponential backoff (0.5 seconds doubling to 10). The wait resets once a connection succeeds. A stream that stays silent for 45 seconds (three missed heartbeats) is treated as dropped. Both it and `DaemonClient.openEvents` read only as their consumer asks. When the consumer stops reading, the bytes stay with the daemon, which keeps only the latest state for a subscriber that stops reading and drops one stalled for 30 seconds.
 - **`DaemonLauncher`** starts `node cli.mjs daemon run` the way the CLI's own client does. The daemon runs in its own session (`POSIX_SPAWN_SETSID`), its output goes to `daemon.log` (keeping one previous log of up to 1 MiB), and `SUBSET_TIMER_DATA_DIR` is set. Before it writes anything, it checks the data folder as the CLI does: the folder must not be a symbolic link or belong to another user, and the socket path must be at most 103 bytes. It also tightens the folder to 0700. A client calls `ensureRunning` before it subscribes or runs an operation. If no daemon answers, `ensureRunning` launches one and waits up to 3 seconds, on a monotonic clock, for its socket. A daemon that is still shutting down makes the new one exit with "already running". Once that child has exited and no live process holds `daemon.lock`, `ensureRunning` launches again, at most 3 times in all.
 - **Models** (`Models.swift`) are `Codable` types for the SET-74 contract, schema version 1. **`Projection`** and **`TimerFormat`** port `project`, `formatDuration` and `timerLine` from `@subset/timer`. Time left rounds up, so a countdown shows `0:01` until it ends.
 - **`RuntimeLocator`** finds Node.js and then the CLI:
@@ -46,7 +46,7 @@ SUBSET_TIMER_CLI_PATH=$PWD/../../packages/timer-cli/dist/cli.mjs swift test   # 
 - **`RuntimeLocator` order:** checked with a fake file system and process runner.
 - **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down.
 
-The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci && npm run build`, then `swift test` with `SUBSET_TIMER_CLI_PATH` set.
+The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, then `swift test` with `SUBSET_TIMER_CLI_PATH` set.
 
 ## Superfunctions reuse review
 

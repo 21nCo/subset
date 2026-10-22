@@ -25,33 +25,76 @@ public enum EventSubscription {
     public typealias Connect = @Sendable () async throws -> AsyncThrowingStream<Data, Error>
     public typealias Sleep = @Sendable (TimeInterval) async throws -> Void
 
+    /// The updates, produced only as the consumer asks for them: each one connects, reads, or waits out the backoff
+    /// in the consuming task, so a consumer that stops reading stops the reads too and holds at most one read's events.
     public static func updates(connect: @escaping Connect, backoff: Backoff = Backoff(),
                                sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }) -> AsyncStream<Update> {
-        AsyncStream { continuation in
-            let task = Task {
-                var failures = 0
-                while !Task.isCancelled {
-                    var failure: Error?
-                    do {
-                        let bytes = try await connect()
-                        failures = 0
-                        continuation.yield(.connected)
-                        var parser = ServerSentEventParser()
-                        for try await chunk in bytes {
-                            for event in parser.feed(chunk) { continuation.yield(.event(event)) }
+        let pump = Pump(connect: connect, backoff: backoff, sleep: sleep)
+        return AsyncStream(unfolding: { await pump.next() })
+    }
+
+    /// The subscription's state between updates. Its stream's iterator calls `next()` one call at a time.
+    private final class Pump: @unchecked Sendable {
+        let connect: Connect
+        let backoff: Backoff
+        let sleep: Sleep
+        var bytes: AsyncThrowingStream<Data, Error>.AsyncIterator?
+        var parser = ServerSentEventParser()
+        var events: [ServerSentEvent] = []
+        var failures = 0
+        var retryIn: TimeInterval?
+        var finished = false
+
+        init(connect: @escaping Connect, backoff: Backoff, sleep: @escaping Sleep) {
+            self.connect = connect
+            self.backoff = backoff
+            self.sleep = sleep
+        }
+
+        func next() async -> Update? {
+            if !events.isEmpty { return .event(events.removeFirst()) }
+            if finished || Task.isCancelled { return finish() }
+            if var iterator = bytes {
+                do {
+                    while let chunk = try await iterator.next() {
+                        events = parser.feed(chunk)
+                        if !events.isEmpty {
+                            bytes = iterator
+                            return .event(events.removeFirst())
                         }
-                    } catch {
-                        failure = error
                     }
-                    if Task.isCancelled { break }
-                    let delay = backoff.delay(after: failures)
-                    failures += 1
-                    continuation.yield(.disconnected(error: failure, retryIn: delay))
-                    do { try await sleep(delay) } catch { break }
+                    return disconnected(nil)
+                } catch {
+                    return disconnected(error)
                 }
-                continuation.finish()
             }
-            continuation.onTermination = { _ in task.cancel() }
+            if let delay = retryIn {
+                retryIn = nil
+                do { try await sleep(delay) } catch { return finish() }
+            }
+            do {
+                bytes = try await connect().makeAsyncIterator()
+                parser = ServerSentEventParser()
+                failures = 0
+                return .connected
+            } catch {
+                return disconnected(error)
+            }
+        }
+
+        private func disconnected(_ error: Error?) -> Update? {
+            bytes = nil
+            if Task.isCancelled { return finish() }
+            let delay = backoff.delay(after: failures)
+            failures += 1
+            retryIn = delay
+            return .disconnected(error: error, retryIn: delay)
+        }
+
+        private func finish() -> Update? {
+            finished = true
+            bytes = nil
+            return nil
         }
     }
 }

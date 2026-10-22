@@ -151,59 +151,31 @@ public struct DaemonClient: Sendable {
     }
 
     /// Opens `/v1/events`. Returns once the daemon accepts the stream; the stream then yields its bytes until the
-    /// daemon ends it, and fails when it stays silent longer than `streamIdleTimeout`.
+    /// daemon ends it, and fails when it stays silent longer than `streamIdleTimeout` while a read is waiting.
+    /// It reads only when its consumer asks for more, so a consumer that stops reading leaves the bytes with the
+    /// daemon, which coalesces and then drops a stalled subscriber (server.mjs). Dropping the stream closes it.
     public func openEvents() async throws -> AsyncThrowingStream<Data, Error> {
         let connection = SocketConnection(path: paths.socket)
         do {
             connection.setDeadline(10)
             try await connection.open()
             try await connection.send(Self.request("GET", "/v1/events", body: nil))
-            var parser = HTTPResponseParser(maxBodyBytes: .max)
-            var pending: [Data] = []
+            let reader = EventReader(connection: connection, idleTimeout: streamIdleTimeout)
             var head: HTTPResponseHead?
-            var ended = false
             while head == nil {
-                for event in try await connection.parse(&parser) {
+                for event in try await connection.parse(&reader.parser) {
                     switch event {
                     case .head(let value): head = value
-                    case .body(let chunk): pending.append(chunk)
-                    case .end: ended = true
+                    case .body(let chunk): reader.pending.append(chunk)
+                    case .end: reader.ended = true
                     }
                 }
             }
+            connection.clearDeadline()
             guard let head, head.status == 200 else {
                 throw head?.status == 503 ? DaemonError.shuttingDown : DaemonError.malformedReply("HTTP \(head?.status ?? 0) for the event stream")
             }
-            let idleTimeout = streamIdleTimeout
-            let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
-            for chunk in pending { continuation.yield(chunk) }
-            if ended {
-                connection.cancel()
-                continuation.finish()
-                return stream
-            }
-            let reader = Task { [parser] in
-                var parser = parser
-                do {
-                    while true {
-                        connection.setDeadline(idleTimeout)
-                        for event in try await connection.parse(&parser) {
-                            switch event {
-                            case .body(let chunk): continuation.yield(chunk)
-                            case .end: return continuation.finish()
-                            case .head: break
-                            }
-                        }
-                    }
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in
-                reader.cancel()
-                connection.cancel()
-            }
-            return stream
+            return AsyncThrowingStream(unfolding: { try await reader.next() })
         } catch {
             connection.cancel()
             throw error
@@ -243,6 +215,46 @@ public struct DaemonClient: Sendable {
     }
 }
 
+/// The event stream's reads. Its stream's iterator calls `next()` one call at a time; releasing the stream
+/// releases this reader, which closes the connection.
+private final class EventReader: @unchecked Sendable {
+    let connection: SocketConnection
+    let idleTimeout: TimeInterval
+    var parser = HTTPResponseParser(maxBodyBytes: .max)
+    var pending: [Data] = []
+    var ended = false
+
+    init(connection: SocketConnection, idleTimeout: TimeInterval) {
+        self.connection = connection
+        self.idleTimeout = idleTimeout
+    }
+
+    deinit {
+        connection.cancel()
+    }
+
+    /// The next body bytes, read from the socket only now; nil once the daemon has ended the stream.
+    func next() async throws -> Data? {
+        while pending.isEmpty, !ended {
+            // The deadline runs only while waiting on the daemon, never while the consumer holds the stream.
+            connection.setDeadline(idleTimeout)
+            defer { connection.clearDeadline() }
+            for event in try await connection.parse(&parser) {
+                switch event {
+                case .body(let chunk): pending.append(chunk)
+                case .end: ended = true
+                case .head: break
+                }
+            }
+        }
+        if pending.isEmpty {
+            connection.cancel()
+            return nil
+        }
+        return pending.removeFirst()
+    }
+}
+
 /// One `NWConnection` to a Unix socket, with its errors mapped to `DaemonError`. A deadline cancels the connection
 /// unless it is set again first.
 final class SocketConnection: @unchecked Sendable {
@@ -269,6 +281,11 @@ final class SocketConnection: @unchecked Sendable {
             }
             if expired { connection.cancel() }
         }
+    }
+
+    /// Stops the running deadline without starting another.
+    func clearDeadline() {
+        lock.withLock { deadlineGeneration += 1 }
     }
 
     func cancel() {
@@ -335,6 +352,8 @@ final class SocketConnection: @unchecked Sendable {
     func parse(_ parser: inout HTTPResponseParser) async throws -> [HTTPResponseParser.Event] {
         while true {
             guard let bytes = try await receive() else {
+                // A deadline cancels the connection, which then reads as closed.
+                if lock.withLock({ timedOut }) { throw DaemonError.timedOut }
                 do {
                     // A reply that had already ended reports its end again rather than nothing.
                     let events = try parser.finish()
