@@ -115,12 +115,12 @@ public struct CleanupItem: Hashable, Sendable {
         return nil
     }
 
-    /// `revalidate`, returning, when the item may be moved, the folder holding it, which must still be the folder at
-    /// that path once it has been moved.
+    /// `revalidate`, returning, when the item may be moved, the folder holding it, held open: it must still be the
+    /// folder at that path once the item has been moved, and it is the only place the item is ever put back into.
     func check(_ protection: CleanupProtection,
-               identify: (String) -> DiskItemCurrent) -> Result<FolderIdentity, CleanupSkipReason> {
+               identify: (String) -> DiskItemCurrent) -> Result<HeldFolder, CleanupSkipReason> {
         if let reason = recheck(protection, identify: identify) { return .failure(reason) }
-        return FolderIdentity.read((path as NSString).deletingLastPathComponent)
+        return HeldFolder.open((path as NSString).deletingLastPathComponent)
     }
 
     private func recheck(_ protection: CleanupProtection, identify: (String) -> DiskItemCurrent) -> CleanupSkipReason? {
@@ -157,7 +157,26 @@ struct FolderIdentity: Equatable, Sendable {
 
     /// The folder at `path` now; a link anywhere on the way, or a file, is `outsideRoot`.
     static func read(_ path: String) -> Result<FolderIdentity, CleanupSkipReason> {
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY)
+        HeldFolder.open(path).map(\.identity)
+    }
+}
+
+/// A folder opened without following any link and kept open, so it can be reached however it is renamed or moved
+/// afterwards. The descriptor is closed when this is released.
+final class HeldFolder {
+    let descriptor: Int32
+    let identity: FolderIdentity
+
+    private init(descriptor: Int32, identity: FolderIdentity) {
+        self.descriptor = descriptor
+        self.identity = identity
+    }
+
+    deinit { close(descriptor) }
+
+    /// The folder at `path` now; a link anywhere on the way, or a file, is `outsideRoot`.
+    static func open(_ path: String) -> Result<HeldFolder, CleanupSkipReason> {
+        let fd = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY)
         guard fd >= 0 else {
             let error = errno
             switch error {
@@ -166,10 +185,13 @@ struct FolderIdentity: Equatable, Sendable {
             default: return .failure(.unreadable(error))
             }
         }
-        defer { close(fd) }
         var info = stat()
-        guard fstat(fd, &info) == 0 else { return .failure(.unreadable(errno)) }
-        return .success(FolderIdentity(device: info.st_dev, inode: info.st_ino))
+        guard fstat(fd, &info) == 0 else {
+            let error = errno
+            close(fd)
+            return .failure(.unreadable(error))
+        }
+        return .success(HeldFolder(descriptor: fd, identity: FolderIdentity(device: info.st_dev, inode: info.st_ino)))
     }
 }
 

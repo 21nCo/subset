@@ -345,7 +345,7 @@ final class CleanupTests: XCTestCase {
         }
     }
 
-    func testAFolderAboveTheItemTurnedIntoALinkJustBeforeTheMovePutsTheOtherItemBack() async throws {
+    func testAFolderAboveTheItemTurnedIntoALinkJustBeforeTheMoveLeavesTheOtherItemInTheTrash() async throws {
         try fixture.write("Library/Developer/Xcode/DerivedData/A-1/Build/app", bytes: 4_000)
         let match = try await match(.xcodeDerivedData)
         let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
@@ -362,10 +362,13 @@ final class CleanupTests: XCTestCase {
         }
         let executor = CleanupExecutor(protection: protection, commands: commands(), trash: trash, freeSpace: { nil })
         let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
-        XCTAssertEqual(result.outcome, .trash([.init(path: derivedData("A-1"), status: .skipped(.replacedWhileMoving))]))
-        // Put back through the same path, so where the link leads.
-        XCTAssertTrue(FileManager.default.fileExists(atPath: decoy + "/A-1"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.path("Bin/A-1")))
+        // What was moved came through the link, so it is put back only into the folder checked, where the confirmed item
+        // still holds its name: it stays in the Trash and is reported there, and nothing is put through the link.
+        guard case let .trash(outcomes) = result.outcome, outcomes.count == 1, case let .failed(message) = outcomes[0].status
+        else { return XCTFail("\(result.outcome)") }
+        XCTAssertTrue(message.contains("Another item took its place") && message.contains(fixture.path("Bin/A-1")), message)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.path("Bin/A-1")))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: decoy), [])
         XCTAssertTrue(FileManager.default.fileExists(atPath: real + "/A-1/Build/app"), "the confirmed item stayed")
     }
 
@@ -390,6 +393,55 @@ final class CleanupTests: XCTestCase {
         XCTAssertEqual(result.outcome, .trash([.init(path: derivedData("A-1"), status: .skipped(.folderChangedWhileMoving))]))
         XCTAssertTrue(FileManager.default.fileExists(atPath: keychains + "/DerivedData/A-1/Build/app"), "it was put back")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.path("Bin/A-1")))
+    }
+
+    func testAnItemIsPutBackOnlyIntoTheFolderItWasTakenFrom() async throws {
+        let rule = fixture.path("Library/Developer/Xcode/DerivedData")
+        let decoy = fixture.path("Decoy")
+        try FileManager.default.createDirectory(atPath: decoy, withIntermediateDirectories: true)
+        let manager = FileManager.default
+        // Once the confirmed item is in the Trash, its folder is renamed and another folder, or a link to one, takes
+        // its path; or, in the renamed folder, something else takes the item's name.
+        for name in ["Folder-1", "Link-2", "Taken-3"] {
+            try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 4_000)
+            let match = try await match(.xcodeDerivedData)
+            let preview = try CleanupPreview.make(match, selection: .all, commands: commands(), protection: protection)
+            let real = fixture.path("Real-" + name)
+            let move = mover()
+            let trash: @Sendable (URL) throws -> URL? = { url in
+                let manager = FileManager.default
+                let moved = try move(url)
+                try manager.moveItem(atPath: rule, toPath: real)
+                if name == "Link-2" {
+                    try manager.createSymbolicLink(atPath: rule, withDestinationPath: decoy)
+                } else {
+                    try manager.createDirectory(atPath: rule, withIntermediateDirectories: false)
+                }
+                if name == "Taken-3" { manager.createFile(atPath: real + "/" + name, contents: Data("kept".utf8)) }
+                return moved
+            }
+            let executor = CleanupExecutor(protection: protection, commands: commands(), trash: trash, freeSpace: { nil })
+            let result = await executor.perform(preview, confirmation: CleanupConfirmation(preview))
+            guard case let .trash(outcomes) = result.outcome, outcomes.count == 1 else { return XCTFail("\(result.outcome)") }
+            XCTAssertEqual(outcomes[0].path, rule + "/" + name)
+            if name == "Taken-3" {
+                guard case let .failed(message) = outcomes[0].status else { return XCTFail("\(outcomes[0].status)") }
+                XCTAssertTrue(message.contains(fixture.path("Bin/Taken-3")), message)
+                XCTAssertTrue(manager.fileExists(atPath: fixture.path("Bin/Taken-3/Build/app")), "left in the Trash")
+                XCTAssertEqual(manager.contents(atPath: real + "/Taken-3"), Data("kept".utf8), "nothing overwritten")
+            } else {
+                XCTAssertEqual(outcomes[0].status, .skipped(.folderChangedWhileMoving), name)
+                XCTAssertTrue(manager.fileExists(atPath: real + "/\(name)/Build/app"), "\(name) is back where it was")
+                XCTAssertFalse(manager.fileExists(atPath: fixture.path("Bin/" + name)), name)
+            }
+            // What took the folder's path was left alone.
+            XCTAssertEqual(try manager.contentsOfDirectory(atPath: decoy), [], name)
+            if name == "Link-2" {
+                try manager.removeItem(atPath: rule)
+            } else {
+                XCTAssertEqual(try manager.contentsOfDirectory(atPath: rule), [], name)
+            }
+        }
     }
 
     func testSkippedItemsAreReportedAndTheRestMoved() async throws {
