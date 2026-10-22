@@ -84,7 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func perform(_ command: ShellCommand) {
         switch command {
         case .openSystem: mainWindow.show()
-        case .settings: settingsWindow.show()
+        case .settings:
+            settingsWindow.show()
+            // Closing Settings only hides it, so the provider's availability is read again each time it is shown.
+            Task { await explain.refreshAvailability() }
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)

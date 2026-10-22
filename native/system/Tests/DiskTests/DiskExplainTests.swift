@@ -295,6 +295,28 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(ContainerUnavailable.remoteContext(name: "x", host: "tcp://10.0.0.2:2375").paths, [])
     }
 
+    func testAPathInADockerMessageThatStartsWithALibraryFolderIsNotSentByName() async throws {
+        // The CLI's own message names a path System did not build into the text, so only the last line of defense sees it.
+        let message = "Could not read \(fixture.home)/Library/Caches Secret Client."
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(
+                home: home, installedApps: InstalledApps([DiskFixture.editor]), simulatorRuntimes: .installed([]),
+                dockerImages: .unavailable(.failed(command: "docker system df", status: 1, message: message))))
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        let analysis = try XCTUnwrap(model.analysis)
+        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
+        let request = try request(model, docker)
+        let text = try sent(request)
+        for word in ["Secret", "Client"] { XCTAssertFalse(text.contains(word), "\(word): \(text)") }
+        XCTAssertTrue(request.sizes?.hasPrefix("Not measured: docker system df failed with exit status 1: Could not read "
+            + "~/Library/folder-") == true, request.sizes ?? "")
+        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
+                       "Not measured: docker system df failed with exit status 1: Could not read ~/Library/Caches Secret Client.")
+    }
+
     func testAScanOfTheHomeFolderThroughTheDataVolumeIsRedactedAsTheHomeFolder() async throws {
         let model = fixture.model()
         model.scope = .folder(path: "/System/Volumes/Data" + fixture.home)

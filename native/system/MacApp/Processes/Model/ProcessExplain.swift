@@ -75,7 +75,7 @@ extension ProcessesWindowModel {
 
     private func placement(of process: ProcessFacts, redactor: ExplainRedactor) -> PlacementDetail? {
         guard let placed = sample?.attribution.attribution(of: process.identity) else { return nil }
-        let explanation = OriginExplanation(process: process, format: format, path: { redactor.path($0) }) { [names] in
+        let explanation = OriginExplanation(process: process, format: format, path: { redactor.pathInText($0) }) { [names] in
             names[$0]
         }
         return PlacementDetail(layer: layer, attribution: placed, explanation: explanation) { [groups] id in

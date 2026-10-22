@@ -108,7 +108,7 @@ extension DiskWindowModel {
         case let .scanned(privateBytes, allocated, complete, _):
             "\(complete ? "" : "at least ")\(format.diskBytes(allocated)) used, \(format.diskBytes(privateBytes)) private"
         case let .dockerReclaimable(upTo, _): "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
-        case let .unavailable(reason): "Not measured: " + redactingPaths(reason, in: tree, redactor: redactor)
+        case let .unavailable(reason): "Not measured: " + redactingPaths(reason, of: rule, in: tree, redactor: redactor)
         }
         facts.ruleEvidence = ["Location: \(rule.location)", rule.rebuild, rule.yield.note]
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
@@ -118,12 +118,15 @@ extension DiskWindowModel {
         return facts
     }
 
-    /// Free text from the scan, such as why a suggestion was not measured, with each path it names as the redactor
-    /// sends it: a scanned path, or one outside the scanned folder that a reason names (`DiskAnalysis.knownPaths`),
-    /// such as an app's or the Docker socket's. Known paths go first: a scan of the home folder would otherwise show
-    /// only the part of such a path the scan read.
-    func redactingPaths(_ text: String, in tree: DiskTree, redactor: ExplainRedactor) -> String {
-        Self.redactingScannedPaths(redactor.paths(in: text, known: analysis?.knownPaths ?? []), in: tree, redactor: redactor)
+    /// Why a suggestion was not measured, with each path it names as the redactor sends it: a scanned path, or one
+    /// outside the scanned folder that a reason names (`DiskAnalysis.knownPaths`), such as an app's. Known paths go
+    /// first: a scan of the home folder would otherwise show only the part of such a path the scan read. Docker's reason
+    /// holds the CLI's own messages, which may name any path, so only the paths System put in it are shown that way
+    /// (`DiskAnalysis.dockerPaths`); any other is left to `ExplainRedactor.text(_:)`, which fails closed.
+    func redactingPaths(_ text: String, of rule: ReclaimRule, in tree: DiskTree, redactor: ExplainRedactor) -> String {
+        guard rule.id != .dockerImages else { return redactor.paths(in: text, known: analysis?.dockerPaths ?? []) }
+        return Self.redactingScannedPaths(redactor.paths(in: text, known: analysis?.knownPaths ?? []), in: tree,
+                                          redactor: redactor)
     }
 
     /// `text` with each scanned path in it as the redactor sends it. A reason names a path whole and a folder name may
@@ -149,7 +152,7 @@ extension DiskWindowModel {
                 result += rest[found]
                 rest = rest[found.upperBound...]
             } else {
-                result += redactor.path(String(rest[found.lowerBound..<end]))
+                result += redactor.pathInText(String(rest[found.lowerBound..<end]))
                 rest = rest[end...]
             }
         }

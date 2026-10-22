@@ -64,11 +64,18 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(redactor.text("/Users/jdoe/Library/Application Support/Acme/db is not a folder."),
                        "~/Library/Application Support/\(redactor.placeholder("Acme"))/"
                         + "\(redactor.placeholder("db is not a folder")).")
+        XCTAssertEqual(redactor.text("~/Library/Application Support."), "~/Library/Application Support.")
         XCTAssertEqual(redactor.text("~/Library/Application Support could not be read."),
+                       "~/Library/\(redactor.placeholder("Application Support could not be read")).",
+                       "a raw path's end cannot be told from the words after it")
+        // A path put in the text where it was built ends at its mark, so a folder keeps one placeholder in every field,
+        // and its words are kept.
+        let api = "/Users/jdoe/dev/secret-client/api"
+        XCTAssertEqual(redactor.text("Working directory \(redactor.pathInText(api)) could not be read: denied."),
+                       "Working directory \(redactor.path(api)) could not be read: denied.")
+        XCTAssertEqual(redactor.text("\(redactor.pathInText("/Users/jdoe/Library/Application Support")) could not be read."),
                        "~/Library/Application Support could not be read.")
-        // Text already redacted is unchanged, so a folder keeps one placeholder in every field, and its words are kept.
-        let redacted = "Working directory \(redactor.path("/Users/jdoe/dev/secret-client/api")) could not be read: denied."
-        XCTAssertEqual(redactor.text(redacted), redacted)
+        XCTAssertEqual(redactor.pathInText("/tmp/secret-client"), "/tmp/secret-client", "only a home path is marked")
         XCTAssertEqual(redactor.text("~ and ~/dev; /tmp/secret-client"), "~ and ~/dev; /tmp/secret-client")
         XCTAssertEqual(redactor.sendingFolderNames(true).text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
                        "~/dev/secret-client/node_modules could not be read.")
@@ -79,7 +86,7 @@ final class ExplainTests: XCTestCase {
         let sent = redactor.text(raw)
         for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(sent.contains(word), sent) }
         XCTAssertEqual(sent, "~/dev/\(redactor.placeholder("Acme Merger"))/"
-            + redactor.placeholder("web client could not be read. 2 more places could not be searched."),
+            + redactor.placeholder("web client could not be read. 2 more places could not be searched") + ".",
             "the full stop may be inside the name, so the rest of the line is withheld")
         // A name with a full stop, a bracket, or an apostrophe stays in the path.
         for name in ["Notes v1.2.app", "Photos (old)", "Bob's Stuff"] {
@@ -97,10 +104,17 @@ final class ExplainTests: XCTestCase {
             XCTAssertTrue(text.hasPrefix("~/Clients/\(redactor.placeholder(name))/"), text)
         }
         // A path after it starts its own, so the clause end stays the end.
-        let unread = "~/Applications/\(redactor.placeholder("Acme Notes.app")) has no readable bundle identifier."
+        let app = "/Users/jdoe/Applications/Acme Notes.app"
+        let unread = " has no readable bundle identifier."
         for next in [" /Applications/Other.app could not be read.", " Runs `/usr/bin/tool`.", " See (~/dev)."] {
-            XCTAssertEqual(redactor.text(unread + next), unread + next)
+            XCTAssertEqual(redactor.text(redactor.pathInText(app) + unread + next), redactor.path(app) + unread + next)
+            let rawSent = redactor.text(app + unread + next)
+            XCTAssertTrue(rawSent.hasPrefix("~/Applications/folder-"), rawSent)
+            XCTAssertFalse(rawSent.contains("Acme") || rawSent.contains("Notes"), rawSent)
         }
+        XCTAssertTrue(redactor.text(app + unread + " /Applications/Other.app could not be read.")
+            .hasSuffix(" /Applications/Other.app could not be read."))
+        XCTAssertTrue(redactor.text(app + unread + " See (~/dev).").hasSuffix(" (~/dev)."))
         // Another path in the clause starts its own.
         XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
                        "~/Library/Caches/\(redactor.placeholder("com.a.b may be data of"))"
@@ -128,6 +142,31 @@ final class ExplainTests: XCTestCase {
                        "No socket at ~/Clients/Acme Inc. Holdings.")
     }
 
+    func testARawLastNameIsKeptOnlyWhenItIsExactlyANameSentAsItIs() {
+        // A raw path's last name may start with one of ~/Library's own folders or a placeholder and go on.
+        let raws = ["Could not read /Users/jdoe/Library/Caches Secret Client.",
+                    "Could not read /Users/jdoe/Library/Application Support Secret Client.",
+                    "Could not read /Users/jdoe/Library/Caches. Secret Client",
+                    "Could not read ~/Clients/folder-abcdef Secret Client."]
+        for raw in raws {
+            let sent = redactor.text(raw)
+            let words = sent.replacingOccurrences(of: "~/Clients/", with: "~/")
+            XCTAssertFalse(words.contains("Secret") || words.contains("Client"), sent)
+            XCTAssertTrue(sent.hasPrefix("Could not read ~/"), sent)
+            XCTAssertTrue(redactor.sendingFolderNames(true).text(raw).hasSuffix(raw.hasSuffix(".") ? "Secret Client." : "Secret Client"))
+        }
+        // Exactly such a name, with punctuation after it, is kept.
+        for kept in ["~/Library/Caches.", "~/Library/Application Support)", "~/Clients/folder-abcdef;", "~/Library/Caches"] {
+            XCTAssertEqual(redactor.text("At \(kept)"), "At \(kept)")
+        }
+        // A mark ends a path only where this session's redactor put it.
+        let other = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: [], sendFolderNames: false,
+                                    key: Array(repeating: 9, count: 32))
+        let forged = other.pathInText("/Users/jdoe/Library/Caches") + " Secret Client"
+        XCTAssertFalse(redactor.text(forged).contains("Secret"), redactor.text(forged))
+        XCTAssertEqual(other.text(forged), "~/Library/Caches Secret Client")
+    }
+
     func testTheHomeFolderThroughTheDataVolumeIsTheHomeFolder() {
         let raw = "/System/Volumes/Data/Users/jdoe/dev/acme-merger/bin/tool"
         let client = redactor.placeholder("acme-merger")
@@ -137,7 +176,10 @@ final class ExplainTests: XCTestCase {
         XCTAssertTrue(redactor.isInHome(raw))
         XCTAssertEqual(redactor.text("\(raw) could not be read."),
                        "~/dev/\(client)/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool could not be read")).")
-        XCTAssertEqual(redactor.paths(in: "\(raw) could not be read.", known: [raw]), shown + " could not be read.")
+        XCTAssertEqual(redactor.paths(in: "\(raw) could not be read.", known: [raw]),
+                       redactor.pathInText(raw) + " could not be read.")
+        XCTAssertEqual(redactor.text(redactor.paths(in: "\(raw) could not be read.", known: [raw])),
+                       shown + " could not be read.")
         XCTAssertEqual(redactor.sendingFolderNames(true).path(raw), "~/dev/acme-merger/bin/tool")
         XCTAssertEqual(redactor.path("/System/Volumes/Data/Users/jdoe"), "~")
         // A home folder given through the Data volume is not given it twice.
@@ -152,12 +194,13 @@ final class ExplainTests: XCTestCase {
         let app = "/Users/jdoe/Applications/Acme Notes.app"
         let text = "\(app) could not be read: Permission denied. /Users/jdoe/Applications is fine."
         let shown = redactor.paths(in: text, known: [app, "/Users/jdoe/Applications/Acme", "/Applications/Other.app"])
-        XCTAssertEqual(shown, "~/Applications/\(redactor.placeholder("Acme Notes.app")) could not be read: Permission "
-            + "denied. /Users/jdoe/Applications is fine.")
+        XCTAssertEqual(shown, "\(redactor.pathInText(app)) could not be read: Permission denied. /Users/jdoe/Applications "
+            + "is fine.")
         XCTAssertEqual(redactor.text(shown), "~/Applications/\(redactor.placeholder("Acme Notes.app")) could not be read: "
             + "Permission denied. ~/Applications is fine.")
-        XCTAssertEqual(redactor.sendingFolderNames(true).paths(in: text, known: [app]),
-                       "~/Applications/Acme Notes.app could not be read: Permission denied. /Users/jdoe/Applications is fine.")
+        let sending = redactor.sendingFolderNames(true)
+        XCTAssertEqual(sending.text(sending.paths(in: text, known: [app])),
+                       "~/Applications/Acme Notes.app could not be read: Permission denied. ~/Applications is fine.")
     }
 
     func testTheProcessNameDisclosureIsInSettingsAndTheFieldGuide() throws {
@@ -309,11 +352,12 @@ final class ExplainTests: XCTestCase {
         return UserDefaults(suiteName: name)!
     }
 
-    private func center(_ defaults: UserDefaults, provider: FakeProvider?, made: Counter = Counter()) -> ExplainCenter {
-        ExplainCenter(defaults: defaults, redactor: redactor) { choice in
+    private func center(_ defaults: UserDefaults, provider: FakeProvider?, made: Counter = Counter(),
+                        timeout: Duration = .seconds(60)) -> ExplainCenter {
+        ExplainCenter(defaults: defaults, redactor: redactor, provider: { choice in
             made.count += 1
             return choice == .appleIntelligence ? provider : nil
-        }
+        }, availabilityTimeout: timeout, answerTimeout: timeout)
     }
 
     func testWithNoProviderChosenNoProviderIsMadeOrAskedAndExplainAsksToChooseOne() async {
@@ -459,6 +503,55 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(sent, build(center.redactor))
         guard case let .explained(_, shown) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
         XCTAssertEqual(shown, sent, "What was sent shows the request rebuilt")
+    }
+
+    func testAProviderThatNeverAnswersIsGivenUpOnAndTheItemCanBeAskedAgain() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.gate = gate
+        let center = center(defaults(), provider: provider, timeout: .milliseconds(200))
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        await center.explain(key) { _ in self.request() }
+        guard case let .failed(message, _) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertTrue(message.hasPrefix("Apple Intelligence did not answer within"), message)
+        provider.gate = nil
+        await center.explain(key) { _ in self.request() }
+        XCTAssertEqual(provider.explained, 2, "asked again")
+        guard case .explained = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        gate.open()
+    }
+
+    func testAProviderThatNeverSaysWhetherItIsAvailableIsGivenUpOnAndSentNothing() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider, timeout: .milliseconds(200))
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        await center.explain(key) { _ in self.request() }
+        guard case let .failed(message, _) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertTrue(message.hasSuffix("Nothing was sent."), message)
+        XCTAssertEqual(provider.explained, 0)
+        await center.refreshAvailability()
+        XCTAssertNil(center.availability, "Settings keeps checking rather than waiting on it")
+        provider.availabilityGate = nil
+        await center.explain(key) { _ in self.request() }
+        guard case .explained = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        gate.open()
+    }
+
+    func testSettingsShowsTheAvailabilityAsItIsWhenReadAgain() async {
+        let provider = FakeProvider()
+        provider.status = .modelNotReady
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .modelNotReady)
+        provider.status = .available
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .available, "read again when Settings is shown again")
+        XCTAssertEqual(provider.availabilityReads, 2)
     }
 
     func testAnItemGoneBeforeItsRequestIsBuiltSaysSoAndSendsNothing() async {
