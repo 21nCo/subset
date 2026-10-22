@@ -38,12 +38,18 @@ public struct OpenRouterProvider: AIProvider {
     }
 
     /// The model ID sent: what the user entered, without the whitespace around it, or `openrouter/auto` when that is
-    /// empty or is not one run of visible ASCII characters.
+    /// empty, is not one run of visible ASCII characters, or looks like an API key (`looksLikeKey(_:)`), so a key
+    /// pasted there is never sent, logged, or shown as the model.
     public static func model(_ entered: String) -> String {
         let model = entered.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty, model.count <= modelLimit,
+        guard !model.isEmpty, model.count <= modelLimit, !looksLikeKey(model),
               model.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return defaultModel }
         return model
+    }
+
+    /// Whether `text` starts like an OpenRouter API key (`sk-or-`), which no model ID does.
+    public static func looksLikeKey(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("sk-or-")
     }
 
     /// Available while a key is stored; it is not read, and nothing is sent.

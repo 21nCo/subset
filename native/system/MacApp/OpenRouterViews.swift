@@ -33,6 +33,9 @@ struct OpenRouterSection: View {
                 Text(verbatim: error).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             TextField("Model", text: $account.model, prompt: Text(verbatim: OpenRouterProvider.defaultModel))
+            if let error = account.modelError {
+                Text(verbatim: error).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
             Text("The OpenRouter model ID to use; when empty, openrouter/auto picks a model for each request. Test Key "
                 + "asks OpenRouter whether the key works and sends none of your data. The key is kept only in this "
                 + "Mac's Keychain and is sent only in each request's Authorization header, to openrouter.ai.")

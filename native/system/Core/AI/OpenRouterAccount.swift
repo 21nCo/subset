@@ -18,10 +18,22 @@ public final class OpenRouterAccount {
     /// Why the latest Add key, Remove key, or Keychain read failed; cleared by the next one that works.
     public private(set) var keyError: String?
     public private(set) var keyTest: KeyTest?
-    /// The model ID as the user entered it; empty sends `openrouter/auto` (`OpenRouterProvider.model(_:)`).
+    /// The model ID as the user entered it; empty sends `openrouter/auto` (`OpenRouterProvider.model(_:)`). An entry
+    /// that looks like an API key, or is the key just added, is refused: it is cleared, never kept in user defaults,
+    /// and `modelError` says why.
     public var model: String {
-        didSet { defaults.set(model, forKey: Self.modelKey) }
+        didSet {
+            if OpenRouterProvider.looksLikeKey(model) {
+                model = ""
+                modelError = Self.keyAsModelMessage
+            } else if !model.isEmpty {
+                modelError = nil
+            }
+            defaults.set(model, forKey: Self.modelKey)
+        }
     }
+    /// Why the model ID entered was cleared; cleared by the next one kept.
+    public private(set) var modelError: String?
 
     /// Called once a key is removed, so the provider setting stops being OpenRouter.
     @ObservationIgnored var onKeyRemoved: (() -> Void)?
@@ -33,6 +45,8 @@ public final class OpenRouterAccount {
     @ObservationIgnored private var tests = 0
 
     static let modelKey = "openRouterModel"
+    public static let keyAsModelMessage = "That looks like an API key, not a model ID, so it was cleared and not "
+        + "kept: openrouter/auto is used. Add the key with Add Key."
     public static let invalidKeyMessage = "That is not an API key: paste the whole key from openrouter.ai, with no spaces "
         + "inside it."
 
@@ -42,7 +56,10 @@ public final class OpenRouterAccount {
         self.client = client
         self.defaults = defaults
         self.log = log
-        model = defaults.string(forKey: Self.modelKey) ?? ""
+        let stored = defaults.string(forKey: Self.modelKey) ?? ""
+        let refused = OpenRouterProvider.looksLikeKey(stored)
+        if refused { defaults.set("", forKey: Self.modelKey) }
+        model = refused ? "" : stored
         do {
             hasKey = try keys.containsKey()
         } catch let error as KeychainError {
@@ -68,6 +85,11 @@ public final class OpenRouterAccount {
         }
         tests += 1
         keyTest = nil
+        // A key entered as the model ID before is not kept there.
+        if model.trimmingCharacters(in: .whitespacesAndNewlines) == key {
+            model = ""
+            modelError = Self.keyAsModelMessage
+        }
         do {
             try keys.save(key)
             hasKey = true
@@ -107,7 +129,9 @@ public final class OpenRouterAccount {
         keyTest = .testing
         let outcome: KeyTest?
         do {
-            guard let key = try keys.readKey() else {
+            // Read off the main actor, as a request reads it, so a slow or prompting Keychain cannot hold the app.
+            let keys = self.keys
+            guard let key = try await Task.detached(operation: { try keys.readKey() }).value else {
                 hasKey = false
                 throw ExplainError.unavailable(.noOpenRouterKey)
             }

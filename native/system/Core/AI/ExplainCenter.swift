@@ -56,7 +56,8 @@ public struct SendPreview: Equatable, Sendable {
 /// before: it is cancelled, nothing it had not sent yet is sent, and nothing it answers is kept, even when the user
 /// picks that provider again before it finishes. Before the first request of the session to a provider off this Mac
 /// (OpenRouter), the item waits while the user reviews exactly what will be sent and confirms it; once confirmed, no
-/// preview is shown again this session.
+/// preview is shown again this session, and that request is the session's first: every other request to the provider
+/// waits until it has ended.
 @MainActor
 @Observable
 public final class ExplainCenter {
@@ -70,6 +71,7 @@ public final class ExplainCenter {
             pending = [:]
             for confirmation in confirmations.values { confirmation.resume(returning: false) }
             confirmations = [:]
+            firstSendInFlight = false
             states = states.filter { _, state in
                 switch state {
                 case .working, .confirming: false
@@ -100,7 +102,9 @@ public final class ExplainCenter {
     /// Cancels each availability read and answer in flight, by when it began.
     @ObservationIgnored private var pending: [Int: @Sendable () -> Void] = [:]
     @ObservationIgnored private var pendingCount = 0
-    /// Each item waiting for the send preview's answer.
+    /// Whether the request the user confirmed in the send preview is on its way, so every other one waits for it.
+    @ObservationIgnored private var firstSendInFlight = false
+    /// Each item waiting for the send preview's answer, or for the confirmed request to end.
     @ObservationIgnored private var confirmations: [StateKey: CheckedContinuation<Bool, Never>] = [:]
     /// Exactly what was sent for each item, for What was sent.
     @ObservationIgnored private var sentTexts: [StateKey: String] = [:]
@@ -179,8 +183,8 @@ public final class ExplainCenter {
         sentTexts[StateKey(choice: choice, item: item)]
     }
 
-    /// Sends the item shown in the send preview, and every other item waiting for one; no preview is shown again this
-    /// session.
+    /// Sends the item shown in the send preview first, then every other item waiting for one; no preview is shown again
+    /// this session.
     public func confirmSend(_ item: ExplainKey) {
         resolveConfirmation(StateKey(choice: choice, item: item), true)
     }
@@ -270,6 +274,7 @@ public final class ExplainCenter {
             return
         }
         var builtWith = sendFolderNames
+        var isFirstSend = false
         while true {
             // Built with the setting the user has now, so a folder name is never sent once they turn it off.
             if builtWith != self.sendFolderNames {
@@ -281,7 +286,19 @@ public final class ExplainCenter {
                 builtWith = self.sendFolderNames
                 states[key] = .working(request)
             }
-            guard provider.needsSendPreview, !sendConfirmed else { break }
+            guard provider.needsSendPreview else { break }
+            if sendConfirmed {
+                guard firstSendInFlight else { break }
+                // The request the user confirmed has not ended yet: this one waits, so that one is sent first.
+                states[key] = .working(request)
+                let released = await confirmation(for: key)
+                guard selection == self.selection else { return }
+                guard released, !Task.isCancelled else {
+                    states[key] = nil
+                    return
+                }
+                continue
+            }
             let text: String
             do {
                 text = try provider.sentText(for: request)
@@ -298,12 +315,27 @@ public final class ExplainCenter {
                 return
             }
             states[key] = .working(request)
+            // Released once another item's confirmed request ended, or confirmed just after it: sent as the others are.
+            if sendConfirmed { continue }
             // What was shown is sent only if Send folder names is as it was; otherwise it is built again and shown.
             guard builtWith != self.sendFolderNames else {
                 sendConfirmed = true
-                // Every other item waiting for a preview is sent too, built with the setting as it is then.
-                resolveAllConfirmations(true)
+                firstSendInFlight = true
+                isFirstSend = true
+                // Every other item waiting for a preview is sent too, once this request has ended, built with the
+                // setting as it is then; until then it waits without its preview.
+                for (other, state) in states where other != key && other.choice == choice {
+                    if case let .confirming(preview) = state { states[other] = .working(preview.request) }
+                }
                 break
+            }
+        }
+        defer {
+            // The first request ended: the others waiting for it go now. After a provider change they were already
+            // ended, and the requests waiting then are not this one's.
+            if isFirstSend, selection == self.selection {
+                firstSendInFlight = false
+                resolveAllConfirmations(true)
             }
         }
         do {

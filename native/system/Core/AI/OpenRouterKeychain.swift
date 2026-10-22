@@ -37,6 +37,10 @@ public struct KeychainError: Error, Equatable, Sendable {
     public let status: OSStatus
 
     public var message: String {
+        if status == errSecMissingEntitlement {
+            return "This build of System cannot store the key: it is kept only in the data protection keychain, which "
+                + "keeps it on this Mac, and only a signed build of System can use that keychain. Nothing was stored."
+        }
         let text = SecCopyErrorMessageString(status, nil).map { $0 as String } ?? "Unknown error"
         return "The Keychain failed (\(status)): \(text)"
     }
@@ -44,9 +48,10 @@ public struct KeychainError: Error, Equatable, Sendable {
 
 /// The user's OpenRouter API key: one generic password, service `dev.subset.system.openrouter`, readable only while
 /// this Mac is unlocked and never migrated to another (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`). The key is
-/// kept nowhere else: not in user defaults, a file, a log, or the pasteboard. It is stored in the data protection
-/// keychain, which honors that accessibility; a build without the entitlement that keychain needs (System has none)
-/// stores it in the login keychain on this Mac instead, which keeps it on this Mac but does not apply the attribute.
+/// kept nowhere else: not in user defaults, a file, a log, or the pasteboard. It is stored only in the data protection
+/// keychain, which honors that accessibility. The login keychain does not (it drops the attribute and moves with a
+/// Migration Assistant or Time Machine restore), so it is never used: a build without the keychain access group the
+/// data protection keychain needs gets `errSecMissingEntitlement`, and the key is not stored.
 public struct OpenRouterKeyStore: Sendable {
     public static let service = "dev.subset.system.openrouter"
     static let account = "api-key"
@@ -60,20 +65,13 @@ public struct OpenRouterKeyStore: Sendable {
         self.items = items
     }
 
-    /// The keychains tried, in order: the data protection keychain, then the login keychain when the build lacks the
-    /// entitlement for the first.
-    private enum Keychain: CaseIterable {
-        case dataProtection, login
-    }
-
-    private func query(_ keychain: Keychain) -> [String: Any] {
-        var query: [String: Any] = [
+    private var query: [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.account
+            kSecAttrAccount as String: Self.account,
+            kSecUseDataProtectionKeychain as String: true
         ]
-        if keychain == .dataProtection { query[kSecUseDataProtectionKeychain as String] = true }
-        return query
     }
 
     /// The key as the user pasted it, without the whitespace around it, when it can be a key: one run of visible ASCII
@@ -85,71 +83,53 @@ public struct OpenRouterKeyStore: Sendable {
         return key
     }
 
-    /// Whether a key is stored, without reading it.
+    /// Whether a key is stored, without reading it. A build that cannot use the data protection keychain has none.
     public func containsKey() throws -> Bool {
-        for keychain in Keychain.allCases {
-            var query = query(keychain)
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-            switch items.copyMatching(query).0 {
-            case errSecSuccess: return true
-            case errSecItemNotFound, errSecMissingEntitlement: continue
-            case let status: throw KeychainError(status: status)
-            }
+        var query = query
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        switch items.copyMatching(query).0 {
+        case errSecSuccess: return true
+        case errSecItemNotFound, errSecMissingEntitlement: return false
+        case let status: throw KeychainError(status: status)
         }
-        return false
     }
 
     /// The stored key, read for one request's authorization header; `nil` when none is stored.
     public func readKey() throws -> String? {
-        for keychain in Keychain.allCases {
-            var query = query(keychain)
-            query[kSecReturnData as String] = true
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-            switch items.copyMatching(query) {
-            case (errSecSuccess, let data?):
-                guard let text = String(data: data, encoding: .utf8), let key = Self.normalized(text) else {
-                    throw KeychainError(status: errSecDecode)
-                }
-                return key
-            case (errSecSuccess, nil): throw KeychainError(status: errSecDecode)
-            case (errSecItemNotFound, _), (errSecMissingEntitlement, _): continue
-            case let (status, _): throw KeychainError(status: status)
+        var query = query
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        switch items.copyMatching(query) {
+        case (errSecSuccess, let data?):
+            guard let text = String(data: data, encoding: .utf8), let key = Self.normalized(text) else {
+                throw KeychainError(status: errSecDecode)
             }
+            return key
+        case (errSecSuccess, nil): throw KeychainError(status: errSecDecode)
+        case (errSecItemNotFound, _), (errSecMissingEntitlement, _): return nil
+        case let (status, _): throw KeychainError(status: status)
         }
-        return nil
     }
 
-    /// Stores `key`, replacing the one stored, as this-device-only; the copy in the other keychain, if any, is removed.
+    /// Stores `key`, replacing the one stored, as this-device-only. Throws `errSecMissingEntitlement` (with a message
+    /// that says so) when this build cannot use the data protection keychain; nothing is stored anywhere then.
     public func save(_ key: String) throws {
         let attributes: [String: Any] = [
             kSecValueData as String: Data(key.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
-        for keychain in Keychain.allCases {
-            var status = items.update(query(keychain), attributes)
-            if status == errSecItemNotFound {
-                var add = query(keychain).merging(attributes) { $1 }
-                add[kSecAttrLabel as String] = Self.label
-                status = items.add(add)
-            }
-            switch status {
-            case errSecSuccess:
-                for other in Keychain.allCases where other != keychain { try delete(from: other) }
-                return
-            case errSecMissingEntitlement: continue
-            default: throw KeychainError(status: status)
-            }
+        var status = items.update(query, attributes)
+        if status == errSecItemNotFound {
+            var add = query.merging(attributes) { $1 }
+            add[kSecAttrLabel as String] = Self.label
+            status = items.add(add)
         }
-        throw KeychainError(status: errSecMissingEntitlement)
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
-    /// Removes the key from both keychains.
+    /// Removes the key.
     public func remove() throws {
-        for keychain in Keychain.allCases { try delete(from: keychain) }
-    }
-
-    private func delete(from keychain: Keychain) throws {
-        switch items.delete(query(keychain)) {
+        switch items.delete(query) {
         case errSecSuccess, errSecItemNotFound, errSecMissingEntitlement: return
         case let status: throw KeychainError(status: status)
         }

@@ -34,6 +34,7 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(item[kSecAttrAccessible as String] as? String,
                        kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
         XCTAssertNil(item[kSecAttrSynchronizable as String])
+        XCTAssertNil(keychain.item(dataProtection: false), "never the login keychain, which drops the attribute")
 
         try store.save("sk-or-v1-replacement")
         XCTAssertEqual(try store.readKey(), "sk-or-v1-replacement")
@@ -48,28 +49,31 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertNoThrow(try store.remove(), "removing no key is not an error")
     }
 
-    func testWithoutTheDataProtectionEntitlementTheKeyIsKeptInTheLoginKeychainWithTheSameAttributes() throws {
+    func testWithoutTheDataProtectionKeychainNoKeyIsStoredAnywhereAndAddKeySaysWhy() throws {
         let keychain = FakeKeychain(entitled: false)
         let store = OpenRouterKeyStore(items: keychain)
-        try store.save(Self.key)
-        XCTAssertNil(keychain.item(dataProtection: true))
-        let item = try XCTUnwrap(keychain.item(dataProtection: false))
-        XCTAssertEqual(item[kSecAttrAccessible as String] as? String,
-                       kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
-        XCTAssertEqual(try store.readKey(), Self.key)
-        try store.save("sk-or-v1-replacement")
-        XCTAssertEqual(keychain.count, 1)
-        XCTAssertEqual(try store.readKey(), "sk-or-v1-replacement")
-        try store.remove()
+        XCTAssertThrowsError(try store.save(Self.key)) { error in
+            XCTAssertEqual(error as? KeychainError, KeychainError(status: errSecMissingEntitlement))
+            XCTAssertTrue((error as? KeychainError)?.message.contains("signed build") == true)
+        }
+        XCTAssertEqual(keychain.count, 0, "not kept in the login keychain, where this-device-only is not applied")
+        XCTAssertFalse(try store.containsKey())
+        XCTAssertNil(try store.readKey())
+        XCTAssertNoThrow(try store.remove())
+
+        // Add Key shows that, and OpenRouter stays unavailable.
+        let (center, account) = center(defaults(), keychain: keychain)
+        XCTAssertFalse(account.addKey(Self.key))
+        XCTAssertFalse(account.hasKey)
+        XCTAssertEqual(account.keyError, KeychainError(status: errSecMissingEntitlement).message)
+        XCTAssertFalse(center.choose(.openRouter))
         XCTAssertEqual(keychain.count, 0)
 
-        // A key left in the login keychain moves to the data protection keychain once the build can use it.
-        let moving = FakeKeychain(entitled: false)
-        try OpenRouterKeyStore(items: moving).save(Self.key)
-        moving.entitled = true
-        try OpenRouterKeyStore(items: moving).save("sk-or-v1-replacement")
-        XCTAssertNil(moving.item(dataProtection: false))
-        XCTAssertNotNil(moving.item(dataProtection: true))
+        // A password of the same service in the login keychain, which does not keep the class, is not used.
+        keychain.entitled = true
+        keychain.set(dataProtection: false, data: Data(Self.key.utf8))
+        XCTAssertFalse(try store.containsKey())
+        XCTAssertNil(try store.readKey())
     }
 
     func testAKeychainFailureIsReportedAndAnUnusableStoredValueIsNotSent() throws {
@@ -343,11 +347,14 @@ final class OpenRouterTests: XCTestCase {
     // MARK: Test key
 
     func testTheKeyTestSendsNoUserDataAndReportsSuccessOrTheError() async throws {
-        let (_, account) = center(defaults(), keychain: FakeKeychain())
+        let keychain = FakeKeychain()
+        let (_, account) = center(defaults(), keychain: keychain)
         account.addKey(Self.key)
         StubProtocol.enqueue(status: 200, json: #"{"data":{"label":"x"}}"#)
         await account.testKey()
         XCTAssertEqual(account.keyTest, .passed)
+        XCTAssertEqual(keychain.dataReads, 1)
+        XCTAssertEqual(keychain.mainThreadDataReads, 0, "the key is read off the main thread")
         let sent = try XCTUnwrap(StubProtocol.requests.first)
         XCTAssertEqual(sent.url, URL(string: "https://openrouter.ai/api/v1/key"))
         XCTAssertEqual(sent.method, "GET")
@@ -465,22 +472,74 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(rebuilt.text.utf8)])
     }
 
-    func testConfirmingOnePreviewSendsTheOtherItemsWaitingForOne() async throws {
+    func testTheConfirmedBodyIsSentFirstAndTheOthersWaitingOnlyOnceItHasEnded() async throws {
         let (center, _) = center(defaults(), keychain: FakeKeychain(), key: Self.key)
         center.choose(.openRouter)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer), held: true)
         StubProtocol.enqueue(status: 200, json: completion(Self.answer))
         StubProtocol.enqueue(status: 200, json: completion(Self.answer))
-        let first = Task { await center.explain(ExplainKey("a")) { _ in self.request() } }
-        let second = Task { await center.explain(ExplainKey("b")) { _ in self.request() } }
-        _ = try await confirming(center, ExplainKey("a"))
-        _ = try await confirming(center, ExplainKey("b"))
-        center.confirmSend(ExplainKey("b"))
+        let (a, b, c) = (ExplainKey("a"), ExplainKey("b"), ExplainKey("c"))
+        let first = Task { await center.explain(a) { _ in self.request("alphad") } }
+        let second = Task { await center.explain(b) { _ in self.request("betad") } }
+        _ = try await confirming(center, a)
+        let shown = try await confirming(center, b)
+        center.confirmSend(b)
+        try await until { !StubProtocol.requests.isEmpty }
+        // An item asked while the confirmed request is on its way waits too, without a preview.
+        let third = Task { await center.explain(c) { _ in self.request("gammad") } }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(shown.text.utf8)], "only the body the user confirmed")
+        for item in [a, c] {
+            guard case .working = center.state(for: item) else { return XCTFail("\(item): \(center.state(for: item))") }
+        }
+
+        StubProtocol.releaseHeld()
         await first.value
         await second.value
-        XCTAssertEqual(StubProtocol.requests.count, 2)
-        for item in ["a", "b"] {
-            guard case .explained = center.state(for: ExplainKey(item)) else { return XCTFail("\(center.state(for: ExplainKey(item)))") }
+        await third.value
+        XCTAssertEqual(StubProtocol.requests.count, 3)
+        XCTAssertEqual(StubProtocol.requests.first?.body, Data(shown.text.utf8))
+        let rest = StubProtocol.requests.dropFirst().map { String(decoding: $0.body ?? Data(), as: UTF8.self) }
+        XCTAssertEqual(rest.filter { $0.contains("alphad") }.count, 1)
+        XCTAssertEqual(rest.filter { $0.contains("gammad") }.count, 1)
+        for item in [a, b, c] {
+            guard case .explained = center.state(for: item) else { return XCTFail("\(item): \(center.state(for: item))") }
         }
+    }
+
+    // MARK: Model ID
+
+    func testAKeyEnteredAsTheModelIDIsNeverKeptLoggedOrSent() async throws {
+        let defaults = defaults()
+        let log = RecordingLog()
+        let (center, account) = center(defaults, keychain: FakeKeychain(), key: Self.key, log: log)
+        XCTAssertEqual(OpenRouterProvider.model(" SK-OR-v1-abc "), OpenRouterProvider.defaultModel)
+        account.model = Self.key
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        account.model = "anthropic/claude-sonnet"
+        XCTAssertNil(account.modelError)
+
+        // A key with another prefix, entered as the model before it was added, is cleared once it is added.
+        account.model = "or-token-0123456789"
+        XCTAssertTrue(account.addKey("or-token-0123456789"))
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+
+        // One stored before is not used either.
+        defaults.set(Self.key, forKey: "openRouterModel")
+        let (_, reopened) = self.center(defaults, keychain: FakeKeychain(), key: Self.key, log: log)
+        XCTAssertEqual(reopened.model, "")
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+
+        center.choose(.openRouter)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await explainConfirmed(center, ExplainKey("a"))
+        let body = try XCTUnwrap(StubProtocol.requests.last?.body)
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, OpenRouterProvider.defaultModel)
+        for message in log.messages { XCTAssertFalse(message.contains("or-token") || message.contains("sk-or-v1"), message) }
     }
 
     func testAppleIntelligenceNeedsNoPreview() {
@@ -524,8 +583,18 @@ final class OpenRouterTests: XCTestCase {
         return (center, account)
     }
 
-    private func request() -> ExplainRequest {
-        ExplainRequest(ExplainFacts(kind: .process, name: "syncd"), redactor: redactor)
+    private func request(_ name: String = "syncd") -> ExplainRequest {
+        ExplainRequest(ExplainFacts(kind: .process, name: name), redactor: redactor)
+    }
+
+    /// Waits until `condition` holds.
+    private func until(_ condition: () -> Bool) async throws {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("never")
+        throw CancellationError()
     }
 
     /// The preview `item` waits for, once it waits for one that satisfies `condition`.
@@ -561,13 +630,15 @@ final class OpenRouterTests: XCTestCase {
 
 /// The Keychain as `SecItem` sees one generic password per keychain: the data protection keychain, which refuses
 /// every call but a search with `errSecMissingEntitlement` until `entitled`, as macOS does for an unentitled build,
-/// and the login keychain.
+/// and the login keychain, which drops `kSecAttrAccessible` as macOS does there (a probe with a throwaway item read
+/// back no accessibility attribute).
 final class FakeKeychain: KeychainItems, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [Bool: [String: Any]] = [:]
     private var _entitled: Bool
     private var _failure: OSStatus?
     private var _dataReads = 0
+    private var _mainThreadDataReads = 0
 
     init(entitled: Bool = true) {
         _entitled = entitled
@@ -584,6 +655,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
     var count: Int { lock.withLock { items.count } }
     var dataReads: Int { lock.withLock { _dataReads } }
+    var mainThreadDataReads: Int { lock.withLock { _mainThreadDataReads } }
 
     func item(dataProtection: Bool) -> [String: Any]? {
         lock.withLock { items[dataProtection] }
@@ -618,6 +690,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
                 if let item = items[dataProtection], matches(item, attributes) { return errSecDuplicateItem }
                 var item = attributes
                 item.removeValue(forKey: kSecUseDataProtectionKeychain as String)
+                if !dataProtection { item.removeValue(forKey: kSecAttrAccessible as String) }
                 items[dataProtection] = item
                 return errSecSuccess
             }
@@ -632,6 +705,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
                 guard let item = items[dataProtection], matches(item, query) else { return (errSecItemNotFound, nil) }
                 guard query[kSecReturnData as String] as? Bool == true else { return (errSecSuccess, nil) }
                 _dataReads += 1
+                if Thread.isMainThread { _mainThreadDataReads += 1 }
                 return (errSecSuccess, item[kSecValueData as String] as? Data)
             }
         }
@@ -644,6 +718,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
             case let .success(dataProtection):
                 guard var item = items[dataProtection], matches(item, query) else { return errSecItemNotFound }
                 item.merge(attributes) { $1 }
+                if !dataProtection { item.removeValue(forKey: kSecAttrAccessible as String) }
                 items[dataProtection] = item
                 return errSecSuccess
             }
@@ -703,6 +778,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
 
     private enum Answer {
         case response(Int, Data, [String: String])
+        /// Answered only once `releaseHeld()` is called.
+        case held(Int, Data)
         case error(URLError)
         case redirect(URL)
     }
@@ -710,6 +787,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var answers: [Answer] = []
     nonisolated(unsafe) private static var sent: [Sent] = []
+    nonisolated(unsafe) private static var heldRequests: [StubProtocol] = []
+    nonisolated(unsafe) private static var released = false
 
     static var requests: [Sent] { lock.withLock { sent } }
 
@@ -717,11 +796,37 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         lock.withLock {
             answers = []
             sent = []
+            heldRequests = []
+            released = false
         }
     }
 
-    static func enqueue(status: Int, json: String, headers: [String: String] = [:]) {
-        lock.withLock { answers.append(.response(status, Data(json.utf8), headers)) }
+    static func enqueue(status: Int, json: String, headers: [String: String] = [:], held: Bool = false) {
+        lock.withLock { answers.append(held ? .held(status, Data(json.utf8)) : .response(status, Data(json.utf8), headers)) }
+    }
+
+    /// Answers each held request, and those held later at once.
+    static func releaseHeld() {
+        let waiting = lock.withLock {
+            released = true
+            defer { heldRequests = [] }
+            return heldRequests
+        }
+        for request in waiting { request.answerHeld() }
+    }
+
+    private var heldAnswer: (Int, Data)?
+
+    private func answerHeld() {
+        guard let (status, data) = heldAnswer else { return }
+        respond(status, data, [:])
+    }
+
+    private func respond(_ status: Int, _ data: Data, _ headers: [String: String]) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     static func enqueue(redirectTo url: URL) {
@@ -750,10 +855,14 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         }
         switch answer {
         case let .response(status, data, headers)?:
-            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
+            respond(status, data, headers)
+        case let .held(status, data)?:
+            heldAnswer = (status, data)
+            let now = Self.lock.withLock {
+                if !Self.released { Self.heldRequests.append(self) }
+                return Self.released
+            }
+            if now { answerHeld() }
         case let .error(error)?:
             client?.urlProtocol(self, didFailWithError: error)
         case let .redirect(url)?:
