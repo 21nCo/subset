@@ -65,6 +65,7 @@ public final class ExplainCenter {
     public internal(set) var choice: AIProviderChoice {
         didSet {
             guard choice != oldValue else { return }
+            openRouterSetAside = false
             defaults.set(choice.rawValue, forKey: Self.choiceKey)
             selection += 1
             for cancel in pending.values { cancel() }
@@ -102,6 +103,10 @@ public final class ExplainCenter {
     /// Cancels each availability read and answer in flight, by when it began.
     @ObservationIgnored private var pending: [Int: @Sendable () -> Void] = [:]
     @ObservationIgnored private var pendingCount = 0
+    /// Whether the stored choice of OpenRouter started as None only because whether a key is stored could not be read
+    /// at launch, so it comes back once a later read finds the key; anything else the user does with the provider or
+    /// the key ends that.
+    @ObservationIgnored private var openRouterSetAside = false
     /// Whether the request the user confirmed in the send preview is on its way, so every other one waits for it.
     @ObservationIgnored private var firstSendInFlight = false
     /// Each item waiting for the send preview's answer, or for the confirmed request to end.
@@ -125,7 +130,8 @@ public final class ExplainCenter {
 
     /// `availabilityTimeout` and `answerTimeout` bound how long the provider may take to say whether it is available
     /// and to answer. `provider` makes the chosen provider; by default, the live one (`liveProvider(_:openRouter:)`).
-    /// A stored choice of OpenRouter with no key stored starts as None.
+    /// A stored choice of OpenRouter with no key stored starts as None, and is stored as None; one whose key could not
+    /// be read starts as None until a later read finds it (`refreshAvailability()`).
     public init(defaults: UserDefaults = .standard, redactor: ExplainRedactor, openRouter: OpenRouterAccount? = nil,
                 provider: (@MainActor (AIProviderChoice) -> (any AIProvider)?)? = nil,
                 availabilityTimeout: Duration = .seconds(15), answerTimeout: Duration = .seconds(90)) {
@@ -136,11 +142,15 @@ public final class ExplainCenter {
         self.availabilityTimeout = availabilityTimeout
         self.answerTimeout = answerTimeout
         let stored = defaults.string(forKey: Self.choiceKey).flatMap(AIProviderChoice.init(rawValue:)) ?? .none
-        choice = stored == .openRouter && openRouter?.hasKey != true ? .none : stored
+        let setAside = stored == .openRouter && openRouter?.hasKey != true
+        choice = setAside ? .none : stored
+        openRouterSetAside = setAside && openRouter?.presenceFailed == true
+        if setAside, !openRouterSetAside { defaults.set(AIProviderChoice.none.rawValue, forKey: Self.choiceKey) }
         sendFolderNames = defaults.bool(forKey: Self.sendFolderNamesKey)
         openRouter?.onKeyRemoved = { [weak self] in
             if self?.choice == .openRouter { self?.choice = .none }
         }
+        openRouter?.onKeyChange = { [weak self] in self?.openRouterSetAside = false }
     }
 
     /// This Mac's account, with placeholders keyed for this session, and the OpenRouter key in this Mac's Keychain.
@@ -196,13 +206,18 @@ public final class ExplainCenter {
 
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
     /// when the user checks again. A read that a later one overtakes is not shown. Whether an OpenRouter key is stored
-    /// is read again first; a stored choice of OpenRouter that started as None because that read failed comes back.
+    /// is read again first; a stored choice of OpenRouter that started as None only because that read failed at launch
+    /// comes back once it finds the key, and is stored as None once it finds none.
     public func refreshAvailability() async {
         if let openRouter {
             await openRouter.refreshKey()
-            if choice == .none, openRouter.hasKey,
-               defaults.string(forKey: Self.choiceKey) == AIProviderChoice.openRouter.rawValue {
-                choice = .openRouter
+            if openRouterSetAside, !openRouter.presenceFailed {
+                if openRouter.hasKey {
+                    choice = .openRouter
+                } else {
+                    openRouterSetAside = false
+                    defaults.set(AIProviderChoice.none.rawValue, forKey: Self.choiceKey)
+                }
             }
         }
         guard choice != .none, let provider = makeProvider(choice) else { return }

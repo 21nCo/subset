@@ -457,6 +457,59 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
+    func testAFailedReplaceKeyKeepsWhetherAKeyIsStoredAndTheProviderInStep() {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let (center, account) = center(defaults, keychain: keychain, key: Self.key)
+        center.choose(.openRouter)
+        let replacement = "sk-or-v1-" + String(repeating: "f", count: 64)
+
+        // Neither stored nor known whether a key is still stored: the key and OpenRouter stay as shown.
+        keychain.failure = errSecInteractionNotAllowed
+        XCTAssertFalse(account.addKey(replacement))
+        XCTAssertEqual(account.keyError, KeychainError(status: errSecInteractionNotAllowed).message)
+        XCTAssertTrue(account.hasKey)
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertTrue(center.canChoose(.openRouter))
+
+        // Not stored, and no key found any more: OpenRouter turns off with it.
+        keychain.failure = nil
+        keychain.entitled = false
+        XCTAssertFalse(account.addKey(replacement))
+        XCTAssertFalse(account.hasKey)
+        XCTAssertEqual(center.choice, .none)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), AIProviderChoice.none.rawValue)
+        XCTAssertFalse(center.canChoose(.openRouter))
+    }
+
+    func testAStoredChoiceOfOpenRouterWhoseKeyWasGoneAtLaunchIsNotPickedAgainByAddingAKey() async {
+        let defaults = defaults()
+        let (chosen, _) = center(defaults, keychain: FakeKeychain(), key: Self.key)
+        chosen.choose(.openRouter)
+
+        let (center, account) = center(defaults, keychain: FakeKeychain())
+        XCTAssertEqual(center.choice, .none)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), AIProviderChoice.none.rawValue,
+                       "a choice whose key is known to be gone is stored as None")
+        account.addKey(Self.key)
+        await center.refreshAvailability()
+        XCTAssertEqual(center.choice, .none, "adding a key does not pick OpenRouter")
+        XCTAssertTrue(center.canChoose(.openRouter))
+
+        // Set aside because the launch read failed, then the user adds a key: not picked again either.
+        let keychain = FakeKeychain()
+        let (again, _) = self.center(defaults, keychain: keychain, key: Self.key)
+        again.choose(.openRouter)
+        keychain.failure = errSecInteractionNotAllowed
+        let (unread, unreadAccount) = self.center(defaults, keychain: keychain)
+        XCTAssertEqual(unread.choice, .none)
+        keychain.failure = nil
+        unreadAccount.addKey(Self.key)
+        await unread.refreshAvailability()
+        XCTAssertEqual(unread.choice, .none)
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
     // MARK: Send preview
 
     func testTheFirstRequestOfASessionWaitsForTheUserToConfirmExactlyWhatIsSentAndLaterOnesDoNot() async throws {

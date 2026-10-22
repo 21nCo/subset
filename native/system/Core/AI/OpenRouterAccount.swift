@@ -38,8 +38,10 @@ public final class OpenRouterAccount {
     /// Why the model ID entered was cleared; cleared by the next one kept.
     public private(set) var modelError: String?
 
-    /// Called once a key is removed, so the provider setting stops being OpenRouter.
+    /// Called once a key is removed, or found no longer stored, so the provider setting stops being OpenRouter.
     @ObservationIgnored var onKeyRemoved: (() -> Void)?
+    /// Called on each Add key and Remove key, before the Keychain is changed.
+    @ObservationIgnored var onKeyChange: (() -> Void)?
     @ObservationIgnored private let keys: OpenRouterKeyStore
     @ObservationIgnored private let client: OpenRouterClient
     @ObservationIgnored private let defaults: UserDefaults
@@ -50,8 +52,9 @@ public final class OpenRouterAccount {
     @ObservationIgnored private var keyTestTask: Task<Void, Never>?
     /// Counts Add key and Remove key, so a presence read they overtake changes nothing.
     @ObservationIgnored private var keyChanges = 0
-    /// Whether `keyError` is the latest presence read's failure, which the next one that works clears.
-    @ObservationIgnored private var presenceFailed = false
+    /// Whether the latest read of whether a key is stored failed, so that is not known; `keyError` is then its
+    /// failure, which the next read that works clears.
+    @ObservationIgnored private(set) var presenceFailed = false
     /// The check of the model ID entered against the key stored.
     @ObservationIgnored private var modelCheck: Task<Void, Never>?
 
@@ -109,7 +112,11 @@ public final class OpenRouterAccount {
         } catch {
             keyError = (error as? KeychainError)?.message ?? "The key could not be stored."
             presenceFailed = false
-            hasKey = (try? keys.containsKey()) ?? false
+            // Whether a key is still stored: when that cannot be read either, what is shown stays.
+            if let stored = try? keys.containsKey(), stored != hasKey {
+                hasKey = stored
+                if !stored { onKeyRemoved?() }
+            }
             log.record("OpenRouter key could not be stored")
             return false
         }
@@ -162,6 +169,7 @@ public final class OpenRouterAccount {
     private func stopKeyTest() {
         tests += 1
         keyChanges += 1
+        onKeyChange?()
         keyTestTask?.cancel()
         keyTestTask = nil
         keyTest = nil
