@@ -1,16 +1,32 @@
-# Timer (macOS daemon client)
+# Timer (macOS menu bar app)
 
-`TimerCore` is the Swift library the Timer macOS menu bar app (SET-81) builds on. It is a native client of the per-user Timer daemon, the same one the `subset-timer` CLI, its MCP server and the web board use ([`@subset.dev/timer`](../../packages/timer-cli/README.md)). It runs the CLI with Node.js 22.13 or later (the CLI's `engines`) and does not bundle Node.
+**Timer** shows the running timer that ends soonest in the menu bar and lists every timer with its controls. From the menu you can start presets and countdowns and open the web board. It is a native client of the per-user Timer daemon, the same one the `subset-timer` CLI, its MCP server and the web board use ([`@subset.dev/timer`](../../packages/timer-cli/README.md)). The app embeds the CLI runtime, as [Minutes](../minutes/README.md) does, so it needs no separate `npm install`. **Node.js 22.13 or later must be installed** (the CLI's `engines`). The app does not bundle Node.
 
-Status: the library builds and passes its tests. The menu bar app, its embedded CLI runtime and its Xcode project come in the next slice (SET-154). Nothing here is signed or released, and no surface is listed as available.
+Status: builds and passes its tests. It is not signed or released, and no surface is listed as available. Using it on a real Mac and the visual review are deferred to SET-85, VoiceOver to SET-86, and the signed beta to SET-87. Native notifications and sounds are SET-82; until then the daemon's own alert sink plays them.
 
 ## Capability boundary
 
 | | |
 | --- | --- |
-| Source of truth | The daemon's `state.json`, in `~/.local/share/subset/timer` (or `SUBSET_TIMER_DATA_DIR`). The library holds no timer state. It decodes what the daemon publishes and works out the time left from the timestamps. |
-| Writes | Only through daemon operations (`POST /v1/ops/<name>`). The library never writes the store. |
-| Network | None. It talks to the daemon over its Unix socket only. |
+| User outcome | See at a glance how long the next timer has left, and control every timer from the menu bar. |
+| Source of truth | The daemon's `state.json`, in `~/.local/share/subset/timer` (or `SUBSET_TIMER_DATA_DIR`). The app holds no timer state. It shows what the daemon last published and works out the time left from the timestamps. |
+| Writes | Only through daemon operations (`POST /v1/ops/<name>`). The app never writes the store. |
+| Network | None. The app talks to the daemon over its Unix socket only. **Download Node.js** opens nodejs.org in the browser, and only when you choose it. |
+| Not included | Launch at login, iOS, bundling Node.js, editing interval sequences (the web board does that), native notifications and sounds (SET-82), signing and releases. |
+
+### Menu
+
+| Item | Effect |
+| --- | --- |
+| Status item | The running timer that ends soonest, as `m:ss` (`h:mm:ss` from an hour), counted from its timestamps. Stopwatches never end, so they are not shown there. When no timer is running, it shows the `timer` glyph from the app icon. |
+| One row per timer | Name, state and time left, as the CLI prints them: for example `Tabata — running · round 3/8 · work · 0:12 left · next rest 0:10`. Its submenu has the controls that apply now: **Start** (idle), **Pause** or **Resume**, **Lap** (running stopwatches and countdowns with laps), **Skip** (running or paused interval timers), **Reset…** (not idle) and **Remove…**. Reset and Remove ask for confirmation first. |
+| Start ▸ | The built-in presets, then the saved ones, from `GET /v1/presets`. Choosing one runs `start` with that preset. |
+| New Countdown… | A small window with a duration field (`90s`, `25m`, `1h30m`, `1:30` or `1:02:03`, from 1 second to 24 hours, checked as the CLI checks it) and an optional name. **Start** stays disabled until the duration is valid, and the daemon's own errors appear in the window. |
+| Open Board | Runs `node cli.mjs serve --json`, which starts the local web board and opens it in the browser. While that server runs, choosing Open Board again reopens its URL. Quitting the app stops the server. |
+| About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path and the connection state, or the setup problem. |
+| Setup problems | Without a supported Node.js, the menu shows "Node.js 22.13 or later is required" and **Download Node.js from nodejs.org…**. A missing CLI shows its path. **Check Again** searches again. |
+
+While the menu is closed, only the status item updates, about once a second, at the moment its shown second changes. While the menu is open, the timer rows update with it, and a row whose timer finishes gets the controls of a finished timer. Quitting the app does not stop the daemon or the timers.
 
 ## Daemon client (TimerCore)
 
@@ -19,20 +35,27 @@ Status: the library builds and passes its tests. The menu bar app, its embedded 
 - **`DaemonClient`** sends HTTP/1.1 requests over `daemon.sock` with `NWConnection` and a Unix endpoint. Each request opens its own connection (`Connection: close`) and is limited to 10 seconds. A missing or refusing socket is `DaemonError.notListening`. A daemon's error reply (`{ "error": { code, message } }`) becomes `.rejected`, or `.shuttingDown` for its 503. A board whose `schemaVersion` is not 1 is refused (`.unsupportedSchema`).
 - **`HTTPResponseParser`** and **`ServerSentEventParser`** are incremental. They handle bodies with `content-length`, chunked bodies (the event stream), and frames split anywhere, including inside a CRLF or a UTF-8 character.
 - **`EventSubscription`** keeps `/v1/events` open. When the stream ends or fails, it reconnects with exponential backoff (0.5 seconds doubling to 10). The wait resets once a connection succeeds. A stream that stays silent for 45 seconds (three missed heartbeats) is treated as dropped. Both it and `DaemonClient.openEvents` read only as their consumer asks. When the consumer stops reading, the bytes stay with the daemon, which keeps only the latest state for a subscriber that stops reading and drops one stalled for 30 seconds.
-- **`DaemonLauncher`** starts `node cli.mjs daemon run` the way the CLI's own client does. The daemon runs in its own session (`POSIX_SPAWN_SETSID`), its output goes to `daemon.log` (keeping one previous log of up to 1 MiB), and `SUBSET_TIMER_DATA_DIR` is set. Before it writes anything, it checks the data folder as the CLI does: the folder must not be a symbolic link or belong to another user, and the socket path must be at most 103 bytes. It also tightens the folder to 0700. A client calls `ensureRunning` before it subscribes or runs an operation. If no daemon answers, `ensureRunning` launches one and waits up to 3 seconds, on a monotonic clock, for its socket. A daemon that is still shutting down makes the new one exit with "already running". Once that child has exited and no live process holds `daemon.lock`, `ensureRunning` launches again, at most 3 times in all.
+- **`DaemonLauncher`** starts `node cli.mjs daemon run` the way the CLI's own client does. The daemon runs in its own session (`POSIX_SPAWN_SETSID`), its output goes to `daemon.log` (keeping one previous log of up to 1 MiB), and `SUBSET_TIMER_DATA_DIR` is set. Before it writes anything, it checks the data folder as the CLI does: the folder must not be a symbolic link or belong to another user, and the socket path must be at most 103 bytes. It also tightens the folder to 0700. Before it subscribes or runs an operation, the app calls `ensureRunning`. If no daemon answers, `ensureRunning` launches one and waits up to 3 seconds, on a monotonic clock, for its socket. A daemon that is still shutting down makes the new one exit with "already running". Once that child has exited and no live process holds `daemon.lock`, `ensureRunning` launches again, at most 3 times in all.
 - **Models** (`Models.swift`) are `Codable` types for the SET-74 contract, schema version 1. **`Projection`** and **`TimerFormat`** port `project`, `formatDuration` and `timerLine` from `@subset/timer`. Time left rounds up, so a countdown shows `0:01` until it ends.
 - **`RuntimeLocator`** finds Node.js and then the CLI:
   - **Node.js:** `/opt/homebrew/bin/node`, then `/usr/local/bin/node`, then `command -v node` in the login shell (`$SHELL -ilc`, limited to 5 seconds), which covers nvm, fnm and similar managers. An older Node in one place does not hide a newer one elsewhere.
-  - **CLI:** `SUBSET_TIMER_CLI_PATH` first, and an override that names a missing file is reported rather than skipped. Otherwise `timer-cli/dist/cli.mjs` in the app bundle's Resources.
+  - **CLI:** `SUBSET_TIMER_CLI_PATH` first, and an override that names a missing file is reported rather than skipped. Otherwise the bundled `Timer.app/Contents/Resources/timer-cli/dist/cli.mjs`.
 
 ## Build
 
 ```sh
-npm ci && npm run build      # at the repository root; builds packages/timer-cli/dist/cli.mjs
+npm ci && npm run build      # at the repository root; stages packages/timer-cli/app-runtime
 cd native/timer
 swift test                   # TimerCore tests (Command Line Tools are enough)
 SUBSET_TIMER_CLI_PATH=$PWD/../../packages/timer-cli/dist/cli.mjs swift test   # adds the real-daemon test
+ruby ProjectGenerator.rb     # after adding or removing a source file (xcodeproj gem 1.27.0)
+xcodebuild -project Timer.xcodeproj -scheme Timer -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+swift scripts/render-icon.swift   # redraws the app icon
 ```
+
+The `@subset.dev/timer` build stages `packages/timer-cli/app-runtime/`, which holds `dist`, `web`, `mcp-app` and `skills`. It is assembled in a temporary folder and renamed into place, and it is not part of the npm package. The **Embed Timer CLI** build phase copies it to `Timer.app/Contents/Resources/timer-cli`. A Release build fails if it is missing. A Debug build warns, and that app then runs the CLI only from `SUBSET_TIMER_CLI_PATH`.
+
+The app target is named `Timer` and its bundle ID is `dev.subset.timer` (`LSUIElement`, `MARKETING_VERSION` 0.1.0). Its Swift module is `TimerApp`, because a module named `Timer` would shadow Foundation's `Timer`. `macos-release.json` lists the npm workspaces a release builds before archiving: `@subset/timer`, `@subset/timer-web` and `@subset.dev/timer`. `@subset/timer-web` is there because the CLI build copies the built board from `apps/timer`.
 
 ## Verification
 
@@ -46,8 +69,8 @@ SUBSET_TIMER_CLI_PATH=$PWD/../../packages/timer-cli/dist/cli.mjs swift test   # 
 - **`RuntimeLocator` order:** checked with a fake file system and process runner.
 - **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down.
 
-The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, then `swift test` with `SUBSET_TIMER_CLI_PATH` set.
+The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, `swift test` with `SUBSET_TIMER_CLI_PATH` set, the project-regeneration check, and an unsigned Release `xcodebuild`, then checks that the embedded runtime is present.
 
 ## Superfunctions reuse review
 
-Reviewed `/Users/ar/dev/superfunctions` (branch `next`, commit `9cf3812`) on 2026-10-22. Swift packages exist only for `authfn`, `datafn`, `filefn` and `searchfn`. None of them provides a Unix-socket HTTP client, a server-sent-event parser or a local daemon client. `mcpfn` is TypeScript and serves agents, not this client. **Package/version used: none.** No Superfunctions code was copied or linked.
+Reviewed `/Users/ar/dev/superfunctions` (branch `next`, commit `9cf3812`) on 2026-10-22. Swift packages exist only for `authfn`, `datafn`, `filefn` and `searchfn`. None of them provides a Unix-socket HTTP client, a server-sent-event parser or a local daemon client. `mcpfn` is TypeScript and serves agents, not this app. **Package/version used: none.** No Superfunctions code was copied or linked.

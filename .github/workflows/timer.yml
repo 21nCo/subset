@@ -1,7 +1,8 @@
 name: Timer macOS
 
-# Builds and tests the Timer daemon client on macOS: the TimerCore package tests, including a real daemon run from the
-# built CLI. No signing credentials are available or needed here.
+# Builds and tests the Timer menu bar app on macOS: the TimerCore package tests, including a real daemon run from the
+# built CLI, the generated project's reproducibility, and an unsigned Release build that embeds the CLI runtime. No
+# signing credentials are available or needed here; releases go through release-macos.yml.
 on:
   pull_request:
     paths:
@@ -47,7 +48,8 @@ jobs:
           sudo xcode-select --switch "$xcode/Contents/Developer"
           xcodebuild -version
 
-      # Builds packages/timer-cli/dist/cli.mjs for the integration test. No dependency's install script is needed.
+      # Stages packages/timer-cli/app-runtime, which the app embeds, and dist/cli.mjs for the integration test. No
+      # dependency's install script is needed.
       - name: Build the Timer CLI runtime
         run: npm ci --ignore-scripts && npm run build
 
@@ -56,3 +58,24 @@ jobs:
         env:
           SUBSET_TIMER_CLI_PATH: ${{ github.workspace }}/packages/timer-cli/dist/cli.mjs
         run: swift test
+
+      - name: Generated project is current
+        working-directory: native/timer
+        run: |
+          gem install --user-install xcodeproj -v 1.27.0
+          export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"
+          ruby ProjectGenerator.rb
+          git diff --exit-code -- Timer.xcodeproj
+          test -z "$(git status --porcelain -- Timer.xcodeproj)"
+
+      # Release, so a missing CLI runtime fails the build instead of warning.
+      - name: Build the app (unsigned)
+        working-directory: native/timer
+        run: |
+          xcodebuild -project Timer.xcodeproj -scheme Timer -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build
+          resources="$RUNNER_TEMP/derived/Build/Products/Release/Timer.app/Contents/Resources/timer-cli"
+          for file in dist/cli.mjs web/index.html mcp-app/board.html skills/subset-timer/SKILL.md; do
+            test -f "$resources/$file" || { echo "Timer.app is missing timer-cli/$file" >&2; exit 1; }
+          done

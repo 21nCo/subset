@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pidAlive } from '../../src/daemon/index.mjs';
@@ -51,6 +51,18 @@ test('the bundle is executable, imports only Node built-ins and its own chunks, 
   assert.equal(execFileSync(process.execPath, [CLI, '--version'], { encoding: 'utf8' }), '0.1.0\n');
   // The bundled skill path is the package's own skills folder.
   assert.equal(execFileSync(process.execPath, [CLI, 'skill', 'path'], { encoding: 'utf8' }), `${join(PACKAGE_ROOT, 'skills', 'subset-timer')}\n`);
+});
+
+test('the build stages app-runtime/, the copy the macOS app embeds, with the same dist, web, mcp-app and skills', () => {
+  const runtime = join(PACKAGE_ROOT, 'app-runtime');
+  const listing = (folder) => readdirSync(folder, { recursive: true }).sort();
+  assert.deepEqual(readdirSync(runtime).sort(), ['dist', 'mcp-app', 'skills', 'web']);
+  for (const folder of ['dist', 'web', 'mcp-app', 'skills']) assert.deepEqual(listing(join(runtime, folder)), listing(join(PACKAGE_ROOT, folder)), folder);
+  assert.equal(readFileSync(join(runtime, 'dist/cli.mjs'), 'utf8'), readFileSync(CLI, 'utf8'));
+  // The embedded CLI finds its skill inside the runtime, as it does inside an installed package.
+  const embedded = join(runtime, 'dist/cli.mjs');
+  assert.equal(execFileSync(process.execPath, [embedded, 'skill', 'path'], { encoding: 'utf8' }), `${join(runtime, 'skills', 'subset-timer')}\n`);
+  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
 });
 
 test('dist/THIRD_PARTY_NOTICES.md carries the licence of every bundled package', () => {
