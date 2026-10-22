@@ -172,21 +172,25 @@ public struct CompanionState: Equatable, Sendable {
 }
 
 /// How the companion offers a drift and records it: at once when the panel showed it, else by a notification when the
-/// user turned that fallback on, recorded only once macOS accepted it and the drift is still the current episode. One
-/// notification is sent at a time, and until macOS answers no drift is offered again, so a refresh meanwhile never sends
-/// a second one. A drift that reached the user neither way (no panel and no fallback, or macOS refused the
-/// notification: notifications turned off in System Settings, say) is not recorded and stays eligible.
+/// user turned that fallback on. One notification is on its way at a time, and until macOS answers no drift is offered
+/// again, so a refresh meanwhile never sends a second one. Just before it is submitted, after the asynchronous permission
+/// read, `confirm` checks that the drift is still eligible; once macOS accepted it, `finish` records it, whatever any
+/// later read says. A drift that reached the user neither way (no panel and no fallback, no longer eligible at
+/// submission, or macOS refused the notification: notifications turned off in System Settings, say) is not recorded and
+/// stays eligible. Recording the episode sent can never mark a later one: a reset or a new session moves the next
+/// episode's `since` past it.
 public struct DriftOfferDelivery: Equatable, Sendable {
     public enum Step: Equatable, Sendable {
         /// The panel showed it, and it was recorded as offered.
         case recorded
-        /// Send its notification, then pass macOS's answer to `finish`.
+        /// Send its notification: pass a fresh decision to `confirm` just before submitting it, then macOS's answer to
+        /// `finish`.
         case sendNotification
         /// Nothing reached the user; a later refresh offers it again.
         case notDelivered
     }
 
-    /// The drift whose notification macOS has not answered yet.
+    /// The drift whose notification is on its way: being confirmed, or submitted and not answered yet.
     public private(set) var sending: DriftEpisode?
 
     public init() {}
@@ -204,17 +208,27 @@ public struct DriftOfferDelivery: Equatable, Sendable {
         return .sendNotification
     }
 
-    /// macOS's answer for the notification on its way, with `current`, the decision from a read made after the answer
-    /// arrived. When macOS accepted it and the episode sent is still the current one (after a reset or a new session
-    /// another episode is current, and that one was not offered), records it in `state`. Returns whether it did.
-    public mutating func finish(accepted: Bool, current: DriftDecision, state: inout CompanionState) -> Bool {
+    /// Just before the notification is submitted: `current` is the decision from a fresh read with the current rule and
+    /// state (`.none` while capture is not recording or the read failed), and `fallbackEnabled` the fallback setting
+    /// now. Returns the episode to submit, the drift sent as it stands now (it may have grown), when it is still offered
+    /// as a prompt in the same run and the fallback is still on. Otherwise nothing is submitted or recorded and the
+    /// delivery ends: returns nil.
+    public mutating func confirm(current: DriftDecision, fallbackEnabled: Bool) -> DriftEpisode? {
+        guard let sent = sending else { return nil }
+        guard fallbackEnabled, case .prompt(let episode) = current, episode.since <= sent.start else {
+            sending = nil
+            return nil
+        }
+        sending = episode
+        return episode
+    }
+
+    /// macOS's answer for the notification submitted. When it accepted it, records the episode sent in `state`: it
+    /// reached the user. Returns whether it did.
+    public mutating func finish(accepted: Bool, state: inout CompanionState) -> Bool {
         guard let sent = sending else { return false }
         sending = nil
-        let episode: DriftEpisode? = switch current {
-        case .prompt(let episode), .suppressed(let episode): episode
-        case .none, .alreadyPrompted: nil
-        }
-        guard accepted, let episode, episode.since <= sent.start else { return false }
+        guard accepted else { return false }
         state.recordOffer(of: sent)
         return true
     }

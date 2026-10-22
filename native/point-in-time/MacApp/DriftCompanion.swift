@@ -72,9 +72,9 @@ final class DriftSettings {
 /// Today's ring and the drift companion. After every classification run or correction, and every minute, it reads the
 /// last day of blocks once, computes the ring from today's report totals, and asks `DriftDetector` whether a drift is
 /// confirmed. A new one is offered in a panel by the menu bar item, or by notification when the user enabled that and
-/// the panel cannot be shown; it is recorded as offered once the panel showed it or macOS accepted the notification. Each action is an explicit operation: Return to Focus records a focus window, Take a Break
-/// pauses tracking, and Not a Drift writes corrections through the store's `correct`. None closes tabs, quits apps, or
-/// sends anything anywhere.
+/// the panel cannot be shown; it is recorded as offered once the panel showed it or macOS accepted the notification.
+/// Each action is an explicit operation: Return to Focus records a focus window, Take a Break pauses tracking, and Not
+/// a Drift writes corrections through the store's `correct`. None closes tabs, quits apps, or sends anything anywhere.
 @MainActor
 final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate {
     static let lookBack: TimeInterval = 24 * 3_600
@@ -180,7 +180,7 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         var state = state
         switch delivery.offer(episode, panelShown: shown, fallbackEnabled: settings.notificationFallback, state: &state) {
         case .recorded: settings.companionState = state
-        case .sendNotification: send(.drift(episode, summary: summary(of: episode)))
+        case .sendNotification: send(.drift)
         case .notDelivered: break
         }
     }
@@ -270,9 +270,9 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         case focus, breakTen, notDriftFocus, notDriftNeutral
     }
 
-    /// What a notification carries: a drift to offer with its summary, or why Not a Drift was not fully saved.
+    /// What a notification carries: the drift on its way (`delivery.sending`), or why Not a Drift was not fully saved.
     private enum Outgoing: Sendable {
-        case drift(DriftEpisode, summary: String)
+        case drift
         case failure(String)
     }
 
@@ -326,7 +326,8 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     }
 
     /// Sends `outgoing` if macOS allows pointInTime's alerts, read again each time because the user can turn them off in
-    /// System Settings at any moment, then hands macOS's answer to `answered`.
+    /// System Settings at any moment, and if it is still wanted once that read returns (see `submission`), then hands
+    /// macOS's answer to `answered`.
     private func send(_ outgoing: Outgoing) {
         guard let center = notificationCenter else {
             answered(outgoing, error: "Notifications need the pointInTime app.")
@@ -341,8 +342,12 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
                     answered(outgoing, error: "Notifications for pointInTime are turned off in System Settings > Notifications.")
                     return
                 }
+                guard let content = submission(for: outgoing) else {
+                    onChange?()
+                    return
+                }
                 do {
-                    try await center.add(Self.request(for: outgoing))
+                    try await center.add(Self.request(for: content))
                     answered(outgoing, error: nil)
                 } catch {
                     answered(outgoing, error: "The notification could not be sent: \(error.localizedDescription)")
@@ -351,9 +356,33 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         }
     }
 
-    private nonisolated static func request(for outgoing: Outgoing) -> UNNotificationRequest {
-        let content = UNMutableNotificationContent()
+    /// What to submit for `outgoing` now, or nil when it is no longer wanted: the fallback was turned off, or,
+    /// for a drift, a fresh read no longer offers it (the companion turned off, capture stopped, a focus window, break,
+    /// or quiet hours began, the episode ended, or the store cannot be read). A drift not submitted is not recorded and
+    /// stays eligible.
+    private func submission(for outgoing: Outgoing) -> Submission? {
         switch outgoing {
+        case .drift:
+            let now = Date()
+            let current = capture.state == .recording ? read(now: now).map {
+                DriftDetector.evaluate($0.blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
+            } ?? .none : .none
+            guard let episode = delivery.confirm(current: current, fallbackEnabled: settings.notificationFallback) else { return nil }
+            return .drift(episode, summary: summary(of: episode))
+        case .failure(let message):
+            return settings.notificationFallback ? .failure(message) : nil
+        }
+    }
+
+    /// What a notification submitted shows: the drift with its summary, or why Not a Drift was not fully saved.
+    private enum Submission: Sendable {
+        case drift(DriftEpisode, summary: String)
+        case failure(String)
+    }
+
+    private nonisolated static func request(for submission: Submission) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        switch submission {
         case .drift(let episode, let summary):
             content.title = "Drifting?"
             content.body = summary
@@ -369,21 +398,17 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     }
 
     /// macOS's answer for a notification: nil once it accepted it, else why not, which the menu shows until one is
-    /// sent. A drift is recorded as offered only if it is still the current episode; one refused stays eligible, and the
-    /// minute timer offers it again rather than retrying at once.
+    /// sent. A drift macOS accepted is recorded as offered, whatever a later read says; one refused stays eligible, and
+    /// the minute timer offers it again rather than retrying at once.
     private func answered(_ outgoing: Outgoing, error: String?) {
         notificationError = error
         guard case .drift = outgoing else {
             onChange?()
             return
         }
-        let now = Date()
         var state = state
-        let current = read(now: now).map {
-            DriftDetector.evaluate($0.blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
-        } ?? .none
-        if delivery.finish(accepted: error == nil, current: current, state: &state) { settings.companionState = state }
-        if error == nil { refresh(now: now) } else { onChange?() }
+        if delivery.finish(accepted: error == nil, state: &state) { settings.companionState = state }
+        if error == nil { refresh() } else { onChange?() }
     }
 
     /// The fallback's notifications are shown while pointInTime is in front too (its reports or settings window, say), as
