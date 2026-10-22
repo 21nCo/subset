@@ -309,7 +309,7 @@ private struct DayRings: View {
             HStack(spacing: 24) {
                 ForEach([TimeCategory.focus, .neutral, .drift], id: \.self) { category in
                     // Nil with nothing classified: an empty ring with a dash, not 0%.
-                    let share = totals.classified > 0 ? totals[category] / totals.classified : nil
+                    let share = totals.share(of: category)
                     VStack {
                         Gauge(value: share ?? 0) { Text(category.title) } currentValueLabel: { Text(share.map(ReportText.percent) ?? "–") }
                             .gaugeStyle(.accessoryCircularCapacity)

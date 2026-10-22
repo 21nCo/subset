@@ -99,7 +99,7 @@ app_group.new_file("PointInTime.entitlements")
 
 app_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
 test_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
-%w[AppKit.framework ApplicationServices.framework Carbon.framework Charts.framework SwiftUI.framework].each do |framework|
+%w[AppKit.framework ApplicationServices.framework Carbon.framework Charts.framework SwiftUI.framework UserNotifications.framework].each do |framework|
   file_ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}", :sdk_root)
   app_target.frameworks_build_phase.add_file_reference(file_ref)
 end
