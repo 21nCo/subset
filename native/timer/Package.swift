@@ -22,6 +22,11 @@ let package = Package(
             name: "TimerCoreTests",
             dependencies: ["TimerCore"],
             path: "Tests/TimerCoreTests"
+        ),
+        .testTarget(
+            name: "TimerAppTests",
+            dependencies: ["TimerApp", "TimerCore"],
+            path: "Tests/TimerAppTests"
         )
     ]
 )

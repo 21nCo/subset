@@ -24,8 +24,6 @@ final class TimerController {
     let paths = DaemonPaths.resolve()
     private var client: DaemonClient { DaemonClient(paths: paths) }
     private var subscription: Task<Void, Never>?
-    private var board: Process?
-    private var boardURL: URL?
 
     func start() {
         subscription?.cancel()
@@ -116,11 +114,17 @@ final class TimerController {
 
     /// Opens the web board: runs `cli serve`, which opens the browser, or reopens the one already serving.
     func openBoard() {
-        if let board, board.isRunning, let boardURL {
-            NSWorkspace.shared.open(boardURL)
+        guard case .ready(let runtime) = setup else { return }
+        openBoard(runtime)
+    }
+
+    /// The one `serve` process this app runs: while it starts, Open Board waits for it (`serve` opens the browser
+    /// once it listens) instead of starting another, so Quit always has every board process to stop.
+    func openBoard(_ runtime: Runtime) {
+        if let board, board.process.isRunning {
+            if let url = board.url { NSWorkspace.shared.open(url) }
             return
         }
-        guard case .ready(let runtime) = setup else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: runtime.node)
         process.arguments = [runtime.cli, "serve", "--json"]
@@ -132,44 +136,75 @@ final class TimerController {
         process.standardOutput = output
         process.standardError = errors
         process.standardInput = FileHandle.nullDevice
+        let firstLine = Task { await Self.served(output) }
         process.terminationHandler = { [weak self] process in
             let message = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             let failed = process.terminationReason == .exit && process.terminationStatus != 0
             Task { @MainActor in
-                guard let self, self.board === process else { return }
-                self.board = nil
-                self.boardURL = nil
-                if failed { self.onError(message.isEmpty ? "The Timer board stopped (exit code \(process.terminationStatus))." : message) }
+                let served = await firstLine.value
+                guard let self else { return }
+                if self.board?.process === process { self.board = nil }
+                if failed { self.onError(Served.failureMessage(served, errors: message, status: process.terminationStatus)) }
             }
         }
         do {
             try process.run()
         } catch {
+            try? output.fileHandleForWriting.close()
             onError("Could not open the Timer board: \(error.localizedDescription)")
             return
         }
-        board = process
+        board = Board(process: process)
         Task { [weak self] in
-            let url = await Self.servedURL(output)
-            if let self, self.board === process { self.boardURL = url }
+            if case .serving(let url)? = await firstLine.value, let self, self.board?.process === process { self.board?.url = url }
         }
     }
 
-    /// The URL in `serve --json`'s first line, `{"url":…,"port":…}`, which it prints once the board is listening.
-    nonisolated private static func servedURL(_ output: Pipe) async -> URL? {
+    /// The board process, and its URL once `serve` is listening.
+    struct Board {
+        let process: Process
+        var url: URL?
+    }
+
+    private(set) var board: Board?
+
+    /// `serve --json`'s first stdout line: `{"url":…,"port":…}` once listening, or `{"error":{"code":…,"message":…}}`,
+    /// since `--json` reports failures on stdout rather than stderr.
+    enum Served: Equatable {
+        case serving(URL)
+        case failed(String)
+
+        init?(line: Data) {
+            struct Line: Decodable {
+                struct Failure: Decodable { var message: String }
+                var url: URL?
+                var error: Failure?
+            }
+            guard let decoded = try? JSONDecoder().decode(Line.self, from: line) else { return nil }
+            if let url = decoded.url { self = .serving(url) } else if let message = decoded.error?.message { self = .failed(message) } else { return nil }
+        }
+
+        /// The CLI's own error, else what `serve` wrote to stderr, else its exit code.
+        static func failureMessage(_ served: Served?, errors: String, status: Int32) -> String {
+            if case .failed(let message)? = served { return message }
+            let errors = errors.trimmingCharacters(in: .whitespacesAndNewlines)
+            return errors.isEmpty ? "The Timer board stopped (exit code \(status))." : errors
+        }
+    }
+
+    nonisolated private static func served(_ output: Pipe) async -> Served? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
                 var line = Data()
                 while let byte = try? output.fileHandleForReading.read(upToCount: 1), let first = byte.first, first != 0x0A { line.append(first) }
-                struct Served: Decodable { var url: URL }
-                continuation.resume(returning: (try? JSONDecoder().decode(Served.self, from: line))?.url)
+                continuation.resume(returning: Served(line: line))
             }
         }
     }
 
-    /// Stops the board server this app started. The daemon keeps running.
+    /// Stops the board server this app started, whether it is still starting or serving. The daemon keeps running.
     func stopBoard() {
-        board?.terminate()
+        board?.process.terminate()
     }
 }
 
