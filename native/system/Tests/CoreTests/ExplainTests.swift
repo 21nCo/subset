@@ -98,7 +98,6 @@ final class ExplainTests: XCTestCase {
         for next in [" /Applications/Other.app could not be read.", " Runs `/usr/bin/tool`.", " See (~/dev)."] {
             XCTAssertEqual(redactor.text(unread + next), unread + next)
         }
-        // Another path in the clause starts its own.        XCTAssertEqual(redactor.text(sent), sent, "redacting twice changes nothing")
         // Another path in the clause starts its own.
         XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
                        "~/Library/Caches/\(redactor.placeholder("com.a.b may be data of"))"
@@ -392,6 +391,34 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(center.state(for: key), .idle, "no answer is kept, and the item can be explained again")
     }
 
+    func testTurningFolderNamesOffWhileAvailabilityIsReadSendsNoFolderName() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        center.sendFolderNames = true
+        let key = ExplainKey("disk:/Users/jdoe/dev/secret-client")
+        let build = { (redactor: ExplainRedactor) -> ExplainRequest? in
+            var facts = ExplainFacts(kind: .folder, name: redactor.name(ofPath: "/Users/jdoe/dev/secret-client"))
+            facts.path = "/Users/jdoe/dev/secret-client"
+            return ExplainRequest(facts, redactor: redactor)
+        }
+        let asked = Task { await center.explain(key, request: build) }
+        await gate.reached()
+        guard case let .working(built) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertTrue(built.promptText.contains("secret-client"), "built with folder names on")
+        center.sendFolderNames = false
+        gate.open()
+        await asked.value
+        XCTAssertEqual(provider.requests.count, 1)
+        let sent = try XCTUnwrap(provider.requests.first)
+        XCTAssertFalse(sent.promptText.contains("secret-client"), sent.promptText)
+        XCTAssertEqual(sent, build(center.redactor))
+        guard case let .explained(_, shown) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertEqual(shown, sent, "What was sent shows the request rebuilt")
+    }
+
     func testAnItemGoneBeforeItsRequestIsBuiltSaysSoAndSendsNothing() async {
         let provider = FakeProvider()
         let center = center(defaults(), provider: provider)
@@ -451,6 +478,7 @@ final class FakeProvider: AIProvider, @unchecked Sendable {
     private var _answer = ExplanationDraft(summary: "A sync agent.", whatItIs: "It syncs files.", removalSafety: "review",
                                            howToRemove: "Quit it, then move it to the Trash.", confidence: "medium")
     private var _explained = 0
+    private var _requests: [ExplainRequest] = []
     private var _availabilityReads = 0
     var gate: AnswerGate?
     /// Holds the availability read until the test opens it.
@@ -465,6 +493,7 @@ final class FakeProvider: AIProvider, @unchecked Sendable {
         set { lock.withLock { _answer = newValue } }
     }
     var explained: Int { lock.withLock { _explained } }
+    var requests: [ExplainRequest] { lock.withLock { _requests } }
     var availabilityReads: Int { lock.withLock { _availabilityReads } }
 
     func availability() async -> AIAvailability {
@@ -475,8 +504,11 @@ final class FakeProvider: AIProvider, @unchecked Sendable {
         }
     }
 
-    func explain(_: ExplainRequest) async throws -> ExplanationDraft {
-        lock.withLock { _explained += 1 }
+    func explain(_ request: ExplainRequest) async throws -> ExplanationDraft {
+        lock.withLock {
+            _explained += 1
+            _requests.append(request)
+        }
         await gate?.pass()
         return answer
     }

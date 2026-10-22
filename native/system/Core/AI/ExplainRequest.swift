@@ -199,7 +199,8 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
         ExplainField(.path, "Its path, with your home folder as ~ and deeper folder names, its own included, replaced "
             + "unless Send folder names is on."),
         ExplainField(.bundleID, "The app's bundle ID, never its name, for a Library entry named for an installed app; or "
-            + "the bundle ID, app group, or Apple identifier a Library entry is named for when a rule recognized it."),
+            + "the app group, Apple identifier, or bundle ID a Library entry is named for. A name after a Team ID no "
+            + "single installed app has is the folder's own, sent only with Send folder names."),
         ExplainField(.signingID, "The code signature's identifier."),
         ExplainField(.teamID, "The code signature's Team ID."),
         ExplainField(.vendor, "The signing team's name, or Apple."),

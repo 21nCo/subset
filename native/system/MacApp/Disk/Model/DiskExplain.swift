@@ -67,9 +67,7 @@ extension DiskWindowModel {
         facts.sizes = DiskFigures(item.sizes, flags: item.flags, format: format).accessibilityValue
         facts.age = item.touched.map { "Last changed " + ExplainFacts.duration(from: $0, to: now) + " ago" }
         if let entry {
-            // The identifier a rule recognized (a bundle ID, Team ID, app name, or developer tool's folder) names an app
-            // or tool, not the user's own folder; an unattributed entry's name is not sent.
-            facts.bundleID = entry.app?.bundleID ?? (entry.rule == .unattributed ? nil : entry.identifier)
+            facts.bundleID = Self.identifier(of: entry, redactor: redactor)
             facts.teamID = entry.teamID ?? entry.app?.signature?.teamID
             facts.vendor = entry.app?.signature?.teamName
             facts.matchedRule = Self.ruleText(entry.rule) + (entry.app.map { ": " + Self.appName($0, redactor: redactor) } ?? "")
@@ -82,12 +80,19 @@ extension DiskWindowModel {
 
     private func matchFacts(_ match: ReclaimMatch, in tree: DiskTree, redactor: ExplainRedactor) -> ExplainFacts {
         let rule = match.rule
+        // Leftovers are named for their entries' identifier, sent as each entry's is.
+        let entry = match.identifier == nil ? nil
+            : match.items.first.flatMap { item in analysis?.origins.entries.first { $0.index == item.index } }
+        let identifier = match.identifier.flatMap { identifier in
+            entry.map { Self.identifier(of: $0, redactor: redactor) }
+                ?? (DiskOrigins.isBundleID(identifier) || redactor.sendFolderNames ? identifier : nil)
+        }
         var facts = ExplainFacts(kind: .suggestion,
-                                 name: [rule.name, match.app.map { Self.appName($0, redactor: redactor) } ?? match.identifier]
+                                 name: [rule.name, match.app.map { Self.appName($0, redactor: redactor) } ?? identifier]
                                      .compactMap { $0 }.joined(separator: ": "))
         facts.type = "\(match.risk.title) suggestion"
-        facts.bundleID = match.app?.bundleID ?? match.identifier
-        facts.teamID = match.app?.signature?.teamID
+        facts.bundleID = match.app?.bundleID ?? identifier
+        facts.teamID = match.app?.signature?.teamID ?? entry?.teamID
         facts.vendor = match.app?.signature?.teamName
         facts.matchedRule = "\(rule.name): \(rule.explanation)"
         facts.sizes = switch match.bytes {
@@ -145,6 +150,22 @@ extension DiskWindowModel {
     /// are sent.
     static func appName(_ app: InstalledApp, redactor: ExplainRedactor) -> String {
         redactor.name(app.name, ofPath: app.path)
+    }
+
+    /// The identifier a Library entry is sent as, only when it is known identity: its app's bundle ID, an app group an
+    /// installed app declares, an Apple identifier, a developer tool's folder, or a bundle ID no installed app has. A name
+    /// after a Team ID no installed app has, or several apps share, is the folder's own and is sent only with folder
+    /// names, as is an unrecognized bundle ID's; an unattributed entry's is never sent (its name field is).
+    static func identifier(of entry: DiskOriginEntry, redactor: ExplainRedactor) -> String? {
+        if let app = entry.app { return app.bundleID }
+        switch entry.rule {
+        case .appGroup, .appleIdentifier, .developerTool:
+            return entry.identifier
+        case .bundleID, .teamID, .appName, .leftover, .possibleLeftover:
+            return DiskOrigins.isBundleID(entry.identifier) || redactor.sendFolderNames ? entry.identifier : nil
+        case .unattributed:
+            return nil
+        }
     }
 
     static func ruleText(_ rule: DiskOriginRule) -> String {

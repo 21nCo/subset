@@ -202,6 +202,50 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App caches: Acme Notes")
     }
 
+    func testAGroupContainerKnownOnlyByItsTeamIDIsNotSentByItsFolderName() async throws {
+        // NOSUCHTEAM is no installed app's Team ID, so its container is a leftover; EXAMPLE123 is two apps', so its
+        // container is that vendor's. Neither name after the Team ID is an identity an app has: it is the folder's own.
+        try fixture.write("Library/Group Containers/NOSUCHTEAM.Private Client/data", bytes: 4_000)
+        try fixture.write("Library/Group Containers/EXAMPLE123.Private Client/data", bytes: 4_000)
+        let viewer = InstalledApp(path: "/Applications/Viewer.app", bundleID: "com.example.viewer", name: "Viewer",
+                                  signature: DiskFixture.editor.signature)
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: InstalledApps([DiskFixture.editor, viewer]),
+                                                                    simulatorRuntimes: .installed([])))
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        let analysis = try XCTUnwrap(model.analysis)
+        func item(_ name: String) throws -> DiskRowID {
+            .item(try XCTUnwrap(analysis.origins.entries.first { $0.path.hasSuffix("/Group Containers/" + name) }).index)
+        }
+        func leftovers(_ identifier: String) throws -> DiskRowID {
+            .match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .appLeftovers && $0.identifier == identifier }))
+        }
+        let unknownTeam = try item("NOSUCHTEAM.Private Client")
+        let sharedTeam = try item("EXAMPLE123.Private Client")
+        let suggestion = try leftovers("Private Client")
+        let named = redactor.sendingFolderNames(true)
+
+        for (id, team) in [(unknownTeam, "NOSUCHTEAM"), (sharedTeam, "EXAMPLE123"), (suggestion, "NOSUCHTEAM")] {
+            let request = try request(model, id)
+            XCTAssertNil(request.bundleID)
+            XCTAssertEqual(request.teamID, team)
+            let text = try sent(request)
+            for word in ["Private", "Client"] { XCTAssertFalse(text.contains(word), text) }
+            XCTAssertEqual(model.explainRequest(for: id, redactor: named)?.bundleID, "Private Client")
+        }
+        XCTAssertEqual(try request(model, unknownTeam).kind, .leftover)
+        XCTAssertEqual(try request(model, suggestion).name, "App leftovers")
+        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App leftovers: Private Client")
+
+        // A leftover named for a bundle ID is still sent as that bundle ID.
+        let gone = try request(model, try leftovers("com.gone.app"))
+        XCTAssertEqual(gone.bundleID, "com.gone.app")
+        XCTAssertEqual(gone.name, "App leftovers: com.gone.app")
+    }
+
     func testALeftoverAndAFolderAtOnePathAreExplainedSeparately() async throws {
         let model = try await fixture.scanned()
         model.tab = .origins

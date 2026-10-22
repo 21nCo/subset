@@ -97,7 +97,8 @@ public final class ExplainCenter {
 
     /// Explains an item with the chosen provider, building its request with the current redactor. Does nothing without
     /// a provider, while the item is being explained, or once it has been. Returns when the answer is in. When the
-    /// user changes the provider meanwhile, the request is not sent if it has not been yet, and no answer is kept.
+    /// user changes the provider meanwhile, the request is not sent if it has not been yet, and no answer is kept; when
+    /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
         let key = StateKey(choice: choice, item: item)
@@ -106,7 +107,8 @@ public final class ExplainCenter {
         default: break
         }
         guard choice != .none, let provider = makeProvider(choice) else { return }
-        guard let request = build(redactor) else {
+        let sendFolderNames = self.sendFolderNames
+        guard var request = build(redactor) else {
             states[key] = .gone
             return
         }
@@ -120,6 +122,15 @@ public final class ExplainCenter {
         guard availability.isAvailable else {
             states[key] = .unavailable(availability)
             return
+        }
+        // Built with the setting the user has now, so a folder name is never sent once they turn it off.
+        if sendFolderNames != self.sendFolderNames {
+            guard let rebuilt = build(redactor) else {
+                states[key] = .gone
+                return
+            }
+            request = rebuilt
+            states[key] = .working(request)
         }
         let outcome: ExplainState?
         do {
