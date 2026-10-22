@@ -412,6 +412,34 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(read.ring.totals.share(of: .focus) == 1.0 / 3 && read.ring.totals.share(of: .drift) == 2.0 / 3)
     }
 
+    /// The menu's today totals (`StatusMenuController.todayLines` reads `FocusRing.read`) are the ring's and the status
+    /// command's whole-day totals after the clock was set back, including blocks starting more than a block after now.
+    @Test func theMenusTodayTotalsAreTheRingsAndTheStatusTotals() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = newYork
+        try store.save(segment("com.example.browser", "Browser", local(21, 11, 57), minutes: 6, url: "https://video.example.net/watch"))
+        try store.save(segment("com.example.editor", "Editor", local(21, 12, 3), minutes: 3))
+        func check(_ expected: (focus: Double, drift: Double, unclassified: Double)) throws {
+            for now in [local(21, 12, 1).addingTimeInterval(30), local(21, 11, 58).addingTimeInterval(30)] {
+                let menu = try FocusRing.read(today: now, from: store, calendar: calendar)
+                #expect(menu.totals.focus == expected.focus && menu.totals.drift == expected.drift
+                        && menu.totals.unclassified == expected.unclassified)
+                #expect(menu == (try DriftDetector.companionRead(from: store, now: now, calendar: calendar)).ring)
+                let totals = try #require(validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: now)))["totals"] as? [String: Int])
+                #expect(totals["focus"].map(Double.init) == menu.totals.focus && totals["drift"].map(Double.init) == menu.totals.drift
+                        && totals["unclassified"].map(Double.init) == menu.totals.unclassified)
+            }
+        }
+        try check((focus: 0, drift: 0, unclassified: 540))
+        try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        try label(store, "com.example.editor", .focus, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        try check((focus: 180, drift: 360, unclassified: 0))
+        #expect(FocusRing.dayRange(today: local(21, 12), calendar: calendar) == local(21, 0)..<local(22, 0))
+    }
+
     @Test func aDriftOfferedOutsideTheReadDoesNotMarkTheCurrentDriftOffered() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

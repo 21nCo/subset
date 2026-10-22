@@ -179,15 +179,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return line
     }
 
-    /// Today's recorded time and its focus, neutral, and drift, from the same day totals as the window.
+    /// Today's recorded time and its focus, neutral, and drift, from the same whole-day totals as the ring and the window.
     private func todayLines() -> [String] {
         guard let store else { return [] }
         let now = Date()
         let calendar = Calendar.autoupdatingCurrent
-        guard let blocks = try? store.blocks(from: calendar.startOfDay(for: now), to: now.addingTimeInterval(Block.length)) else {
+        guard let ring = try? FocusRing.read(today: now, from: store, calendar: calendar) else {
             return ["Today: the activity store could not be read"]
         }
-        let ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
         // Anonymous excluded time is recorded time too.
         let recorded = "Today: \(ReportText.duration(ring.totals.recorded)) recorded"
         guard !ring.isEmpty else { return [recorded, "Nothing classified yet today"] }

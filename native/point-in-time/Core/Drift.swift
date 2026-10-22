@@ -27,6 +27,19 @@ public struct FocusRing: Equatable, Sendable {
         self.init(totals: DayReport(day: now, blocks: blocks, calendar: calendar).totals)
     }
 
+    /// The span today's ring counts: the whole of today, including blocks starting after `now`, as after the clock was
+    /// set back, so the ring, the menu's totals, and the status command's totals agree.
+    public static func dayRange(today now: Date, calendar: Calendar) -> Range<Date> {
+        let day = ReportPeriod.day(containing: now, calendar: calendar)
+        return day.start..<day.end
+    }
+
+    /// Today's ring read from `store` over `dayRange`.
+    public static func read(today now: Date, from store: ActivityStore, calendar: Calendar) throws -> FocusRing {
+        let range = dayRange(today: now, calendar: calendar)
+        return FocusRing(today: now, blocks: try store.blocks(from: range.lowerBound, to: range.upperBound), calendar: calendar)
+    }
+
     public var isEmpty: Bool { totals.classified <= 0 }
 
     /// The arcs in drawing order, each a fraction of the whole ring; they add up to 1. Empty with nothing classified.
@@ -272,14 +285,14 @@ public enum DriftDetector {
         min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<Block.bucketStart(containing: now).addingTimeInterval(Block.length)
     }
 
-    /// What the companion reads at `now`, in one read through the end of today: today's ring from all of today's blocks
-    /// (the blocks the status command totals, including any starting after now), and the blocks in `readRange`, which
-    /// the rule counts, with where that read began.
+    /// What the companion reads at `now`, in one read covering `readRange` and `FocusRing.dayRange`: today's ring from
+    /// all of today's blocks (as `FocusRing.read` and the status command count them, including any starting after now),
+    /// and the blocks in `readRange`, which the rule counts, with where that read began.
     public static func companionRead(from store: ActivityStore, now: Date, calendar: Calendar) throws
         -> (ring: FocusRing, blocks: [Block], from: Date) {
         let range = readRange(now: now, calendar: calendar)
-        let today = ReportPeriod.day(containing: now, calendar: calendar)
-        let blocks = try store.blocks(from: range.lowerBound, to: max(range.upperBound, today.end))
+        let today = FocusRing.dayRange(today: now, calendar: calendar)
+        let blocks = try store.blocks(from: min(range.lowerBound, today.lowerBound), to: max(range.upperBound, today.upperBound))
         return (FocusRing(today: now, blocks: blocks, calendar: calendar), blocksInReadRange(blocks, now: now, calendar: calendar),
                 range.lowerBound)
     }
