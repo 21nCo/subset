@@ -135,13 +135,24 @@ struct SettingsView: View {
                 Text(center.choice.detail).foregroundStyle(.secondary)
                 if center.choice != .none {
                     LabeledContent("Status") {
-                        if let availability = center.availability {
+                        switch center.availabilityStatus {
+                        case .checking?:
+                            Text("Checking…").foregroundStyle(.secondary)
+                        case let .read(availability)?:
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text(availability.title)
                                 Text(availability.meaning).font(.caption).foregroundStyle(.secondary)
                             }
-                        } else {
-                            Text("Checking…").foregroundStyle(.secondary)
+                        case let .noAnswer(seconds)?:
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("No answer")
+                                Text("\(center.choice.title) did not say whether it is available within \(seconds) seconds. "
+                                    + "Check again, or try later.")
+                                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                                Button("Check Again") { Task { await center.refreshAvailability() } }
+                            }
+                        case nil:
+                            Button("Check") { Task { await center.refreshAvailability() } }
                         }
                     }
                 }

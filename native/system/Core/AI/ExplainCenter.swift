@@ -10,6 +10,19 @@ public struct ExplainKey: Hashable, Sendable {
     }
 }
 
+/// The chosen provider's availability as Settings shows it, from its latest read.
+public enum AvailabilityStatus: Equatable, Sendable {
+    /// The latest read has not answered yet.
+    case checking
+    case read(AIAvailability)
+    /// The latest read did not answer within this many seconds.
+    case noAnswer(seconds: Int64)
+
+    public var availability: AIAvailability? {
+        if case let .read(availability) = self { availability } else { nil }
+    }
+}
+
 /// Where explaining one item stands.
 public enum ExplainState: Equatable, Sendable {
     /// No provider is chosen, so Explain asks the user to choose one.
@@ -36,15 +49,18 @@ public final class ExplainCenter {
         didSet {
             guard choice != oldValue else { return }
             defaults.set(choice.rawValue, forKey: Self.choiceKey)
-            availability = nil
+            availabilityStatus = nil
         }
     }
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
         didSet { defaults.set(sendFolderNames, forKey: Self.sendFolderNamesKey) }
     }
-    /// The chosen provider's availability when last read; `nil` before that and for `.none`.
-    public private(set) var availability: AIAvailability?
+    /// The chosen provider's availability from its latest read, which may still be checking or may not have answered
+    /// in time; `nil` before any read and for `.none`.
+    public private(set) var availabilityStatus: AvailabilityStatus?
+    /// The chosen provider's availability when the latest read answered.
+    public var availability: AIAvailability? { availabilityStatus?.availability }
     private var states: [StateKey: ExplainState] = [:]
     /// Counts availability reads, so only the latest one is shown.
     @ObservationIgnored private var availabilityReads = 0
@@ -97,22 +113,32 @@ public final class ExplainCenter {
         return states[StateKey(choice: choice, item: item)] ?? .idle
     }
 
-    /// Reads the chosen provider's availability, for Settings, each time it is shown and when the provider changes.
-    /// A read that a later one overtakes is not shown, nor one the provider did not answer in time.
+    /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
+    /// when the user checks again. A read that a later one overtakes is not shown.
     public func refreshAvailability() async {
         let choice = self.choice
         guard choice != .none, let provider = makeProvider(choice) else { return }
         _ = await readAvailability(of: provider, for: choice)
     }
 
-    /// `provider`'s availability, or `nil` when it does not answer in time. Shown only when no later read has started
-    /// and `choice` is still the chosen provider, so a slow read never replaces a newer one.
+    /// `provider`'s availability, or `nil` when it does not answer in time. Settings shows it as checking while it is
+    /// read, then what it answered or that it did not answer in time, only while no later read has started and
+    /// `choice` is still the chosen provider, so a slow read never replaces a newer one.
     private func readAvailability(of provider: any AIProvider, for choice: AIProviderChoice) async -> AIAvailability? {
         availabilityReads += 1
         let read = availabilityReads
-        guard let availability = try? await answer(within: availabilityTimeout, { await provider.availability() })
-        else { return nil }
-        if choice == self.choice, read == availabilityReads { self.availability = availability }
+        availabilityStatus = .checking
+        let availability: AIAvailability?
+        do {
+            availability = try await answer(within: availabilityTimeout, { await provider.availability() })
+        } catch {
+            // Cancelled, as when Settings closes: not a status; the next read shows one.
+            if choice == self.choice, read == availabilityReads { availabilityStatus = nil }
+            return nil
+        }
+        if choice == self.choice, read == availabilityReads {
+            availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
+        }
         return availability
     }
 

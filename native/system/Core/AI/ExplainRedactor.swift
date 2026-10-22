@@ -133,12 +133,12 @@ public struct ExplainRedactor: Sendable {
 }
 
 /// A path as Explain sends it, made only by `ExplainRedactor.path(_:)`: a request's paths are values of their own, never
-/// part of other text.
+/// part of other text, and are kept on one line as every value is (`ExplainRequest.oneLine`).
 public struct ExplainPath: Encodable, Hashable, Sendable, CustomStringConvertible {
     public let value: String
 
     init(_ value: String) {
-        self.value = value
+        self.value = ExplainRequest.oneLine(value)
     }
 
     public var description: String { value }

@@ -101,7 +101,8 @@ public struct ExplainFacts: Sendable {
 /// What is sent to the provider: structured fields only. Paths are values of their own (`ExplainPath`), redacted
 /// component by component (`ExplainRedactor`); names and identifiers have account names removed; why something was
 /// not measured or read is a closed category. No field holds a tool's message, error text, or command text, so no
-/// text is scanned for paths. Each field is capped, and the whole is kept within an estimated 1,500 tokens
+/// text is scanned for paths. Every string value is kept on one line (`oneLine`), so the prompt's lines are System's
+/// own. Each field is capped, and the whole is kept within an estimated 1,500 tokens
 /// (characters ÷ 4) with the instructions. The same contract serves SET-50's OpenRouter provider, which sends it as
 /// JSON.
 public struct ExplainRequest: Encodable, Equatable, Sendable {
@@ -146,7 +147,7 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
         var truncated = false
         func cap(_ value: String?, _ limit: Int = Self.fieldLimit) -> String? {
             guard let value else { return nil }
-            let text = redactor.removingAccountNames(value).trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = redactor.removingAccountNames(Self.oneLine(value)).trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return nil }
             guard text.count > limit else { return text }
             truncated = true
@@ -187,6 +188,20 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
         maySuggestOrigin = facts.kind == .processGroup && facts.isUnattributedGroup
         self.truncated = truncated
         fit()
+    }
+
+    /// `text` on one line: every control, format, line separator, and paragraph separator character (a line break, a
+    /// tab, a bidirectional override) becomes a space. Every string value sent, each path included, goes through it, so
+    /// no value can start a line of the prompt that reads as one of System's own facts.
+    static func oneLine(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: scalars.append(" ")
+            default: scalars.append(scalar)
+            }
+        }
+        return String(scalars)
     }
 
     /// The estimated tokens of the instructions and this request.
