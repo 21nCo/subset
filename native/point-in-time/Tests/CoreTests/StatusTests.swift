@@ -304,6 +304,25 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(json["classification"] as? [String: AnyHashable] == ["provider": "openrouter", "pending": 5, "failed": 1])
     }
 
+    /// `pending` is the day's pending blocks with app time, so unlike the menu's count of what classification would send,
+    /// it includes the block still being recorded and the blocks of an app excluded from classification.
+    @Test func pendingCountsTheDaysPendingBlocksWithAppTimeIncludingUnsentOnes() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(segment("com.example.editor", "Editor", local(21, 9), minutes: 3))
+        try store.save(segment("com.example.chat", "Chat", local(21, 9, 3), minutes: 3))
+        try store.save(segment("com.example.editor", "Editor", local(21, 12), minutes: 1))
+        let now = local(21, 12, 1).addingTimeInterval(30)
+        let settings = setUp.merging([StoredSettings.Key.classificationProvider: "openRouter",
+                                      StoredSettings.Key.excludedApps: ["com.example.chat": "Chat"]]) { $1 }
+        let json = try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: now, settings: settings)))
+        #expect(json["classification"] as? [String: AnyHashable] == ["provider": "openrouter", "pending": 3, "failed": 0])
+        let sendable = try store.classificationSummary(completedBy: now, options: ClassificationOptions(includeWindowTitles: false,
+                                                                                                        excludedBundleIDs: ["com.example.chat"]))
+        #expect(sendable.pending == 1)
+    }
+
     @Test func trackingStateComesFromTheAppsSettings() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

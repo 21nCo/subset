@@ -57,7 +57,7 @@
       "required": ["provider", "pending", "failed"],
       "properties": {
         "provider": { "enum": ["off", "openrouter"], "description": "The provider's name; never a key or other credential." },
-        "pending": { "type": ["integer", "null"], "minimum": 0, "description": "The day's blocks with recorded app time waiting for a label." },
+        "pending": { "type": ["integer", "null"], "minimum": 0, "description": "The day's pending blocks with recorded app time, including the block still being recorded and blocks classification never sends (an excluded app's), so it can differ from the menu's store-wide count of completed, sendable blocks." },
         "failed": { "type": ["integer", "null"], "minimum": 0, "description": "The day's blocks the provider could not label." }
       }
     },
