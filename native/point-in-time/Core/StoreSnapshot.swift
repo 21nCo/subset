@@ -48,7 +48,12 @@ public struct StoreSnapshot: Equatable, Sendable {
     /// read (the app started writing), the read is repeated through the WAL, also when that read failed.
     public static func read(directory: URL, blocksFrom: Date, to: Date, lockWait: UInt64 = lockWaitNanoseconds) throws(StoreReadFailure) -> StoreSnapshot {
         let path = directory.appendingPathComponent("activity.sqlite").path
-        guard FileManager.default.fileExists(atPath: path) else { throw .missing }
+        switch entry(at: path) {
+        case .present: break
+        case .absent: throw .missing
+        case .unknown(let code):
+            throw .unreadable("its location could not be checked (\(String(cString: strerror(code)))).")
+        }
         do {
             return try readAnyMode(path: path, from: blocksFrom, to: to, lockWait: lockWait)
         } catch let failure as StoreReadFailure {
@@ -58,6 +63,27 @@ public struct StoreSnapshot: Equatable, Sendable {
         } catch {
             throw .unreadable(String(describing: error))
         }
+    }
+
+    enum Entry: Equatable {
+        case present, absent
+        /// `stat` failed for a reason other than absence, such as a folder without search permission.
+        case unknown(Int32)
+    }
+
+    /// Whether `path` exists. Unlike `FileManager.fileExists`, which reports false for any failure, only `ENOENT` and
+    /// `ENOTDIR` mean absent, so a store that cannot be reached is not reported as one that was never recorded.
+    static func entry(at path: String) -> Entry {
+        var info = stat()
+        if stat(path, &info) == 0 { return .present }
+        let code = errno
+        return code == ENOENT || code == ENOTDIR ? .absent : .unknown(code)
+    }
+
+    /// Whether a WAL may sit beside the store. A WAL whose existence cannot be determined counts as present, so the read
+    /// goes through SQLite and reports why it failed.
+    private static func walMayExist(_ path: String) -> Bool {
+        entry(at: path + "-wal") != .absent
     }
 
     private static func readAnyMode(path: String, from: Date, to: Date, lockWait: UInt64) throws -> StoreSnapshot {
@@ -70,7 +96,7 @@ public struct StoreSnapshot: Equatable, Sendable {
         } catch {
             // The read-only index is missing or cannot be used.
         }
-        if FileManager.default.fileExists(atPath: path + "-wal") {
+        if walMayExist(path) {
             return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
         }
         let snapshot: StoreSnapshot
@@ -78,10 +104,10 @@ public struct StoreSnapshot: Equatable, Sendable {
             snapshot = try read(SQLiteConnection(readingOnly: path, .withoutWAL, lockWait: lockWait), from: from, to: to)
         } catch {
             // The app may have started writing during the read, leaving the main file alone out of date.
-            guard FileManager.default.fileExists(atPath: path + "-wal") else { throw error }
+            guard walMayExist(path) else { throw error }
             return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
         }
-        guard FileManager.default.fileExists(atPath: path + "-wal") else { return snapshot }
+        guard walMayExist(path) else { return snapshot }
         return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
     }
 

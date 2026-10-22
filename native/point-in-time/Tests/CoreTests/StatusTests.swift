@@ -515,6 +515,55 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         try validated(noFolder)
     }
 
+    @Test func onlyAnAbsentPathIsMissing() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("file")
+        try Data().write(to: file)
+        #expect(StoreSnapshot.entry(at: file.path) == .present)
+        #expect(StoreSnapshot.entry(at: directory.appendingPathComponent("absent").path) == .absent)
+        #expect(StoreSnapshot.entry(at: file.appendingPathComponent("activity.sqlite").path) == .absent)
+        let loop = directory.appendingPathComponent("loop")
+        try FileManager.default.createSymbolicLink(atPath: loop.path, withDestinationPath: loop.path)
+        #expect(StoreSnapshot.entry(at: loop.path) == .unknown(ELOOP))
+    }
+
+    /// Permissions only bind a process that is not root.
+    @Test(.enabled(if: getuid() != 0)) func aStoreInAFolderThatCannotBeSearchedIsUnreadableNotMissing() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try seedWorkday(ActivityStore(directory: directory))
+        let before = try fingerprint(directory)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: directory.path)
+        let output = StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 12)))
+        let text = StatusCommand.run(["status"], environment: environment(directory, now: local(21, 12)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        #expect(output.exitCode == .storeUnreadable)
+        let json = try validated(output)
+        #expect(json["store"] as? [String: AnyHashable] == ["state": "unreadable", "schemaVersion": NSNull()])
+        #expect((json["errors"] as? [[String: String]])?.map { $0["code"] } == ["store_unreadable"])
+        #expect(text.exitCode == .storeUnreadable)
+        #expect(!text.standardError.contains("No activity store was found"))
+        #expect(try fingerprint(directory) == before)
+    }
+
+    @Test(.enabled(if: getuid() != 0)) func aStoreFileThatCannotBeOpenedIsUnreadable() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try seedWorkday(ActivityStore(directory: directory))
+        let path = directory.appendingPathComponent("activity.sqlite").path
+        let before = try fingerprint(directory)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: path)
+        let output = StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 12)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+        #expect(output.exitCode == .storeUnreadable)
+        let json = try validated(output)
+        #expect(json["store"] as? [String: AnyHashable] == ["state": "unreadable", "schemaVersion": NSNull()])
+        #expect((json["errors"] as? [[String: String]])?.map { $0["code"] } == ["store_unreadable"])
+        #expect(try fingerprint(directory) == before)
+    }
+
     @Test func aNewerSchemaIsRefusedWithoutChangingTheStore() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
