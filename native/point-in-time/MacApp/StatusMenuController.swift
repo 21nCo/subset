@@ -12,15 +12,17 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let classification: ClassificationController
     private let showWelcome: () -> Void
     private let showClassification: () -> Void
+    private let showReports: () -> Void
 
     init(settings: CaptureSettings, capture: CaptureController, store: ActivityStore?, classification: ClassificationController,
-         showWelcome: @escaping () -> Void, showClassification: @escaping () -> Void) {
+         showWelcome: @escaping () -> Void, showClassification: @escaping () -> Void, showReports: @escaping () -> Void) {
         self.settings = settings
         self.capture = capture
         self.store = store
         self.classification = classification
         self.showWelcome = showWelcome
         self.showClassification = showClassification
+        self.showReports = showReports
         super.init()
         menu.delegate = self
         item.menu = menu
@@ -44,6 +46,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
         menu.addItem(disabled(statusLine()))
         if let recorded = todayRecorded() { menu.addItem(disabled(recorded)) }
+        menu.addItem(action("Open Timeline and Reports…", key: "t", showReports))
         if let error = capture.lastError { menu.addItem(disabled("Store error: \(error)")) }
         menu.addItem(disabled(AccessibilityAccess.isGranted ? "Window titles: Accessibility granted" : "Window titles: Accessibility not granted"))
         if !AccessibilityAccess.isGranted { menu.addItem(action("Grant Accessibility Access…") { AccessibilityAccess.request() }) }

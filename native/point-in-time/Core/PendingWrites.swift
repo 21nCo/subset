@@ -5,7 +5,9 @@ public protocol CaptureStorage: AnyObject {
     func save(_ segment: Segment) throws
     func deleteData(from: Date, to: Date) throws
     func checkpoint() throws
-    func deleteAll() throws
+    /// Deletes every row; `compact` then removes the deleted pages from the file.
+    func removeAll() throws
+    func compact() throws
     /// The latest end of any stored segment, or nil when none is stored.
     func latestSegmentEnd() throws -> Date?
 }
@@ -40,6 +42,7 @@ public struct PendingWrites: Sendable {
         case save(Segment)
         /// Deletes `[from, to)` and then checkpoints the WAL, so the removed titles and URLs do not linger in it.
         case retract(from: Date, to: Date)
+        /// Deletes every row and then compacts the file.
         case deleteAll
     }
 
@@ -50,6 +53,12 @@ public struct PendingWrites: Sendable {
     private var head = 0
     /// The last write error, kept until every queued write has succeeded.
     public private(set) var failure: String?
+    /// How many retractions and deletions have removed rows from storage. It changes once when the delete step of one
+    /// succeeds, whether it ran at once or on a later retry, and even when the checkpoint or compaction after it failed
+    /// and the write stays queued, so readers can reload as soon as stored activity is gone.
+    public private(set) var appliedRemovals = 0
+    /// Whether the delete step of the write at the head of the queue has succeeded, so retrying it is not counted again.
+    private var headRemoved = false
     /// Saves refused because the queue was full; that time was not captured.
     private(set) var refusedSaves = 0
     /// Whether storage has reported the latest end of what it holds since the last removal was applied, and that end.
@@ -119,6 +128,8 @@ public struct PendingWrites: Sendable {
                 dropSaves(within: from, now)
                 if case .retract(let queuedFrom, let queuedTo)? = queue.last, known <= queuedTo {
                     entries[entries.count - 1] = .retract(from: min(from, queuedFrom), to: max(now, queuedTo))
+                    // A wider head has rows its earlier delete step did not remove.
+                    if count == 1 { headRemoved = false }
                     return retry(storage)
                 }
             }
@@ -146,6 +157,7 @@ public struct PendingWrites: Sendable {
     public mutating func deleteAll(in storage: CaptureStorage) -> Bool {
         entries = [.deleteAll]
         head = 0
+        headRemoved = false
         // Once it is applied nothing stored before it remains, and every later write is queued after it.
         (knowsStoredEnd, storedEnd, admittedEnd) = (true, nil, .distantPast)
         return retry(storage)
@@ -173,8 +185,12 @@ public struct PendingWrites: Sendable {
                 case .save(let segment): try storage.save(segment)
                 case .retract(let from, let to):
                     try storage.deleteData(from: from, to: to)
+                    noteRemoval()
                     try storage.checkpoint()
-                case .deleteAll: try storage.deleteAll()
+                case .deleteAll:
+                    try storage.removeAll()
+                    noteRemoval()
+                    try storage.compact()
                 }
             } catch {
                 failure = String(describing: error)
@@ -188,8 +204,14 @@ public struct PendingWrites: Sendable {
         return true
     }
 
+    private mutating func noteRemoval() {
+        if !headRemoved { appliedRemovals += 1 }
+        headRemoved = true
+    }
+
     private mutating func dequeue() {
         head += 1
+        headRemoved = false
         if head == entries.count {
             entries.removeAll(keepingCapacity: true)
             head = 0

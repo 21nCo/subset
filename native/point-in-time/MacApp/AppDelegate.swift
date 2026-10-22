@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var welcome: WelcomeWindowController?
     private var classification: ClassificationController?
     private var classificationWindow: ClassificationWindowController?
+    private var reportsWindow: ReportsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -25,18 +26,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let classification = ClassificationController(settings: ClassificationSettings(), capture: settings, store: store,
                                                       deletionPending: { capture.hasPendingDeletion })
         let classificationWindow = ClassificationWindowController(controller: classification, store: store)
+        let reportsWindow = ReportsWindowController(model: ReportsModel(store: store, storeError: storeError, classification: classification,
+                                                                        captureState: { capture.state },
+                                                                        showClassification: { classificationWindow.show() }))
         let statusMenu = StatusMenuController(settings: settings, capture: capture, store: store, classification: classification,
-                                              showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() })
-        capture.onStateChange = { statusMenu.refreshIcon() }
+                                              showWelcome: { welcome.show() }, showClassification: { classificationWindow.show() },
+                                              showReports: { reportsWindow.show() })
+        capture.onStateChange = { statusMenu.refreshIcon(); reportsWindow.refreshIfOpen() }
+        // A removal recounts pending and failed blocks; the recount's onChange then refreshes both windows.
+        capture.onActivityRemoved = { classification.refreshStatus() }
         // Excluded apps also decide what classification may send, so a change re-runs both.
         settings.onChange = { capture.tick(); classification.captureSettingsChanged() }
         classification.settings.onChange = { classification.settingsChanged(providerChanged: $0) }
-        classification.onChange = { classificationWindow.model.refresh() }
+        classification.onChange = { classificationWindow.model.refresh(); reportsWindow.refreshIfOpen() }
         self.capture = capture
         self.welcome = welcome
         self.statusMenu = statusMenu
         self.classification = classification
         self.classificationWindow = classificationWindow
+        self.reportsWindow = reportsWindow
         capture.start()
         classification.start()
         if !settings.onboardingCompleted { welcome.show() }

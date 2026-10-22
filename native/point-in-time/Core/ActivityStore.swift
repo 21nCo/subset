@@ -122,10 +122,22 @@ public final class ActivityStore: @unchecked Sendable {
     /// Deletes all captured data and compacts the file so deleted pages do not linger in the database or its WAL. Throws
     /// when a checkpoint could not complete (see `checkpoint`); running it again finishes the job.
     public func deleteAll() throws {
+        try removeAll()
+        try compact()
+    }
+
+    /// Deletes all captured data without compacting the file; `compact` then removes the deleted pages.
+    public func removeAll() throws {
         try locked {
             try connection.transaction {
                 try connection.execute("DELETE FROM segments; DELETE FROM blocks; DELETE FROM corrections;")
             }
+        }
+    }
+
+    /// Checkpoints the WAL, vacuums the database and checkpoints again. Throws like `checkpoint`.
+    public func compact() throws {
+        try locked {
             try connection.checkpointTruncatingWAL()
             try connection.execute("VACUUM;")
             try connection.checkpointTruncatingWAL()

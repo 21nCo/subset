@@ -637,7 +637,8 @@ private final class FlakyStorage: CaptureStorage {
         try fail(failDeletes); try store.deleteData(from: from, to: to)
     }
     func checkpoint() throws { calls.append("checkpoint"); try fail(failCheckpoints); try store.checkpoint() }
-    func deleteAll() throws { calls.append("deleteAll"); try fail(failDeletes); try store.deleteAll() }
+    func removeAll() throws { calls.append("deleteAll"); try fail(failDeletes); try store.removeAll() }
+    func compact() throws { calls.append("compact"); try fail(failCheckpoints); try store.compact() }
     func latestSegmentEnd() throws -> Date? { try fail(failReads); return try store.latestSegmentEnd() }
 }
 
@@ -719,6 +720,83 @@ private func withStorage(_ body: (FlakyStorage) throws -> Void) throws {
             #expect(drained)
             let remaining = try storage.store.segmentCount()
             #expect(remaining == 0)
+        }
+    }
+
+    @Test func appliedRemovalsCountsADeletionWhenItReachesStorageNotWhenItIsQueued() throws {
+        try withStorage { storage in
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            #expect(writes.appliedRemovals == 0)
+            writes.deleteDay(containing: t0 + 90, calendar: utc, in: storage)
+            #expect(writes.appliedRemovals == 1)
+
+            storage.failDeletes = true
+            writes.deleteAll(in: storage)
+            writes.retry(storage)
+            #expect(writes.hasPendingDeletion && writes.appliedRemovals == 1)
+            // A save behind the queued deletion succeeding alone is not a removal.
+            storage.failDeletes = false
+            writes.save(segment("b", 120, 180), to: storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 2)
+            writes.save(segment("b", 180, 240), to: storage)
+            #expect(writes.appliedRemovals == 2)
+        }
+    }
+
+    @Test func appliedRemovalsCountsADeletionOnceItsRowsAreGoneEvenWhenTheCheckpointAfterItFails() throws {
+        try withStorage { storage in
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = TimeZone(identifier: "UTC")!
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            storage.failCheckpoints = true
+            writes.deleteDay(containing: t0 + 90, calendar: utc, in: storage)
+            #expect(writes.hasPendingDeletion)
+            let stored = try storage.store.segmentCount()
+            #expect(stored == 0)
+            #expect(writes.appliedRemovals == 1)
+            // Retrying the delete step while the checkpoint still fails removes nothing new and is not counted again.
+            writes.retry(storage)
+            #expect(writes.appliedRemovals == 1)
+            storage.failCheckpoints = false
+            writes.retry(storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 1)
+
+            writes.save(segment("b", 120, 180), to: storage)
+            storage.failCheckpoints = true
+            writes.deleteAll(in: storage)
+            #expect(writes.hasPendingDeletion)
+            let remaining = try storage.store.segmentCount()
+            #expect(remaining == 0)
+            #expect(writes.appliedRemovals == 2)
+            storage.failCheckpoints = false
+            writes.retry(storage)
+            #expect(!writes.hasPendingDeletion && writes.appliedRemovals == 2)
+        }
+    }
+
+    @Test func aRetractionWideningTheQueuedHeadCountsItsDeleteAgain() throws {
+        try withStorage { storage in
+            var writes = PendingWrites()
+            writes.save(segment("a", 0, 60), to: storage)
+            writes.save(segment("b", 60, 80), to: storage)
+            storage.failCheckpoints = true
+            writes.retract(since: t0 + 70, until: t0 + 90, in: storage)
+            let trimmed = try storage.store.segmentCount()
+            #expect(trimmed == 2 && writes.count == 1 && writes.appliedRemovals == 1)
+            // It merges into the queued head, whose delete step already ran; the wider delete removes rows the first did not.
+            writes.retract(since: t0, until: t0 + 100, in: storage)
+            #expect(writes.queue == [.retract(from: t0, to: t0 + 100)])
+            let remaining = try storage.store.segmentCount()
+            #expect(remaining == 0 && writes.appliedRemovals == 2)
+            writes.retry(storage)
+            #expect(writes.appliedRemovals == 2)
+            storage.failCheckpoints = false
+            let drained = writes.retry(storage)
+            #expect(drained && writes.appliedRemovals == 2)
         }
     }
 

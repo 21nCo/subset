@@ -35,6 +35,8 @@ final class CaptureController {
     private var samplingActivity: NSObjectProtocol?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     var onStateChange: (() -> Void)?
+    /// Stored activity was removed: a deletion or idle retraction reached the store, at once or on a later tick.
+    var onActivityRemoved: (() -> Void)?
 
     init(settings: CaptureSettings, store: ActivityStore?, storeError: String?) {
         self.settings = settings
@@ -138,12 +140,14 @@ final class CaptureController {
         return session.writes.failure
     }
 
-    /// Changes the session and reports a changed state or error to the menu.
+    /// Changes the session and reports a changed state or error to the menu, and applied removals to activity readers.
     private func mutate(_ body: (inout CaptureSession) -> Void) {
         let before = (state, lastError)
+        let removals = session.writes.appliedRemovals
         body(&session)
         updateSamplingActivity()
         if before != (state, lastError) { onStateChange?() }
+        if session.writes.appliedRemovals != removals { onActivityRemoved?() }
     }
 
     /// Holds the App Nap opt-out while recording or idle, and through a timed pause so the timer that ends it is not
