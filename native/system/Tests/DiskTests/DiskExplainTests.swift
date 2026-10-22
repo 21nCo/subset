@@ -115,6 +115,38 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(named.members, expected)
     }
 
+    func testASuggestionOfTenThousandItemsWhoseNamesDifferOnlyInWhatIsNotSentIsSentAsAFullSortWouldSendIt() async throws {
+        // 10,000 folders under 12 names as sent with folder names on: each differs from the others of its name only in
+        // control characters, each sent as a space. Every hundredth is larger, so sizes order them first.
+        let marks: [Character] = ["\u{01}", "\u{02}"]
+        for number in 0..<10_000 {
+            let variant = String((0..<10).map { marks[((number / 12) >> $0) & 1] })
+            try fixture.write("Library/Developer/Xcode/DerivedData/Build-\(number % 12)\(variant)/app",
+                              bytes: number % 100 == 0 ? 40_000 : 100)
+        }
+        let model = try await fixture.scanned()
+        model.tab = .suggestions
+        let id = try XCTUnwrap(model.row(named: "Xcode DerivedData")).id
+        let match = try XCTUnwrap(model.analysis?.matches.first { $0.rule.id == .xcodeDerivedData })
+        XCTAssertEqual(match.items.count, 10_001)
+        let sorted = match.items.sorted { left, right in
+            let (leftSize, rightSize) = (left.sizes?.allocated ?? 0, right.sizes?.allocated ?? 0)
+            return leftSize != rightSize ? leftSize > rightSize : left.path < right.path
+        }
+        for redactor in [redactor, redactor.sendingFolderNames(true)] {
+            let sent = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor))
+            var reference = ExplainFacts(kind: .suggestion, name: "Xcode DerivedData")
+            reference.members = ExplainFacts.countedNames(sorted.map { redactor.name(ofPath: $0.path) })
+            XCTAssertEqual(sent.members, ExplainRequest(reference, redactor: redactor).members)
+            XCTAssertEqual(sent.members.count, ExplainRequest.memberLimit)
+            XCTAssertTrue(sent.truncated)
+        }
+        let named = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor.sendingFolderNames(true)))
+        // The fixture's App-abc is largest; Build-0, 4, and 8 hold the larger folders; the rest follow by path.
+        let spaces = String(repeating: " ", count: 10)
+        XCTAssertEqual(named.members, ["App-abc"] + [0, 4, 8, 1, 10, 11, 2, 3, 5].map { "Build-\($0)\(spaces) ×\($0 < 4 ? 834 : 833)" })
+    }
+
     func testAnAccountNameThatIsAlsoAWordLeavesSystemsOwnWordsAsTheyAre() async throws {
         let model = try await fixture.scanned()
         let words = ExplainRedactor(homes: [fixture.home], accountNames: ["in", "to", "the", "of", "a", "changed", "editor"],

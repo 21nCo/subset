@@ -130,13 +130,14 @@ public final class ExplainCenter {
     /// when the user checks again. A read that a later one overtakes is not shown.
     public func refreshAvailability() async {
         guard choice != .none, let provider = makeProvider(choice) else { return }
-        _ = await readAvailability(of: provider, in: selection)
+        _ = try? await readAvailability(of: provider, in: selection)
     }
 
-    /// `provider`'s availability, or `nil` when it does not answer in time. Settings shows it as checking while it is
-    /// read, then what it answered or that it did not answer in time, only while no later read has started and the
-    /// provider has not changed since `selection`, so a slow read never replaces a newer one.
-    private func readAvailability(of provider: any AIProvider, in selection: Int) async -> AIAvailability? {
+    /// `provider`'s availability, or `nil` when it does not answer in time; throws `CancellationError` when its caller
+    /// is cancelled or the provider changes, which is not a timeout. Settings shows it as checking while it is read,
+    /// then what it answered or that it did not answer in time, only while no later read has started and the provider
+    /// has not changed since `selection`, so a slow read never replaces a newer one.
+    private func readAvailability(of provider: any AIProvider, in selection: Int) async throws -> AIAvailability? {
         availabilityReads += 1
         let read = availabilityReads
         availabilityStatus = .checking
@@ -149,7 +150,7 @@ public final class ExplainCenter {
         } catch {
             // Cancelled, as when Settings closes: not a status; the next read shows one.
             if selection == self.selection, read == availabilityReads { availabilityStatus = nil }
-            return nil
+            throw CancellationError()
         }
         if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
@@ -163,7 +164,8 @@ public final class ExplainCenter {
     /// has not been yet, no answer is kept, and the item can be explained again at once; when
     /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
-    /// asked again.
+    /// asked again. When the caller is cancelled, nothing more is sent, no failure is kept, and the item can be asked
+    /// again.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
         let selection = self.selection
@@ -179,9 +181,22 @@ public final class ExplainCenter {
             return
         }
         states[key] = .working(request)
-        let read = await readAvailability(of: provider, in: selection)
+        let read: AIAvailability?
+        do {
+            read = try await readAvailability(of: provider, in: selection)
+        } catch {
+            // Cancelled by the caller or a provider change, which is not the provider failing to answer: no failure is
+            // kept. After a provider change the item's state is no longer this call's.
+            if selection == self.selection { states[key] = nil }
+            return
+        }
         // The provider changed meanwhile: this item's state is no longer this call's (a new request may have begun).
         guard selection == self.selection else { return }
+        // Cancelled as the read answered: nothing is sent.
+        guard !Task.isCancelled else {
+            states[key] = nil
+            return
+        }
         guard let availability = read else {
             states[key] = .failed(Self.late(choice, availabilityTimeout) + " Nothing was sent.", request)
             return

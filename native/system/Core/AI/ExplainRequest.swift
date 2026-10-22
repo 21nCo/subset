@@ -86,31 +86,42 @@ public struct ExplainFacts: Sendable {
         return order.map { counts[$0] == 1 ? $0 : "\($0) ×\(counts[$0] ?? 0)" }
     }
 
-    /// `countedNames(_:)` of the first names of `items` that a request keeps, for names that are costly to make: items
-    /// with the same `key` have the same name, and `name` is called once per key, in the order first seen, only until
-    /// `limit` different names are found, while every item is counted. So a suggestion of many thousand items redacts
-    /// about `limit` paths, not one per item. Two keys whose names turn out the same are counted as one name when both
+    /// `countedNames(_:)` of `items`' names in `precedes` order, the first `limit` only, for names that are costly to
+    /// make: items with the same `key` have the same name, made from the key by `name`. One pass counts every item per
+    /// key and keeps each key's first item; only the first `limit` keys are then ordered, by those items, and named. So
+    /// a suggestion of many thousand items orders and names about `limit`, not one per item, whatever the names are.
+    /// When keys turn out to have one name, they are counted as one and the next keys are named, until `limit` names
     /// are found.
     public static func countedNames<Item, Key: Hashable>(_ items: [Item], limit: Int, key: (Item) -> Key,
-                                                         name: (Item) -> String) -> [String] {
-        var order: [Key] = []
-        var first: [Key: Item] = [:]
-        var counts: [Key: Int] = [:]
+                                                         precedes: (Item, Item) -> Bool,
+                                                         name: (Key) -> String) -> [String] {
+        var groups: [Key: (count: Int, first: Item)] = [:]
         for item in items {
             let key = key(item)
-            if counts[key] == nil {
-                order.append(key)
-                first[key] = item
+            if let group = groups[key] {
+                groups[key] = (group.count + 1, precedes(item, group.first) ? item : group.first)
+            } else {
+                groups[key] = (1, item)
             }
-            counts[key, default: 0] += 1
         }
         var names: [String] = []
         var nameCounts: [String: Int] = [:]
-        for key in order where names.count < limit {
-            guard let item = first[key] else { continue }
-            let name = name(item)
-            if nameCounts[name] == nil { names.append(name) }
-            nameCounts[name, default: 0] += counts[key] ?? 0
+        while names.count < limit, !groups.isEmpty {
+            // The first keys still to name, in order: a bounded selection, not a sort of every key.
+            var next: [(key: Key, count: Int, first: Item)] = []
+            let wanted = limit - names.count
+            for (key, group) in groups {
+                guard next.count < wanted || precedes(group.first, next[next.count - 1].first) else { continue }
+                let position = next.firstIndex { precedes(group.first, $0.first) } ?? next.count
+                next.insert((key, group.count, group.first), at: position)
+                if next.count > wanted { next.removeLast() }
+            }
+            for group in next {
+                groups[group.key] = nil
+                let name = name(group.key)
+                if nameCounts[name] == nil { names.append(name) }
+                nameCounts[name, default: 0] += group.count
+            }
         }
         return names.map { nameCounts[$0] == 1 ? $0 : "\($0) ×\(nameCounts[$0] ?? 0)" }
     }

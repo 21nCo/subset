@@ -27,6 +27,8 @@ public struct ExplainRedactor: Sendable {
     let homes: [String]
     /// The account's short and full names, longest first.
     let accountNames: [String]
+    /// Finds each account name where no letter or digit adjoins it, in `accountNames`' order.
+    private let accountPatterns: [NSRegularExpression]
     public let sendFolderNames: Bool
     /// Keys the placeholders, so a folder name gets the same placeholder in every request this session and the
     /// placeholder does not reveal the name.
@@ -37,6 +39,7 @@ public struct ExplainRedactor: Sendable {
         let onDataVolume = homes.filter { $0.hasPrefix("/") && !$0.hasPrefix(Self.dataVolume + "/") }.map { Self.dataVolume + $0 }
         self.homes = Array(Set(homes + onDataVolume)).sorted { $0.count > $1.count }
         self.accountNames = Array(Set(accountNames.filter { !$0.isEmpty })).sorted { $0.count > $1.count }
+        accountPatterns = self.accountNames.compactMap(Self.wordPattern)
         self.sendFolderNames = sendFolderNames
         self.key = key
     }
@@ -73,24 +76,41 @@ public struct ExplainRedactor: Sendable {
         return ExplainPath((["~"] + shown).joined(separator: "/"))
     }
 
-    /// The last name of a path as sent: a placeholder when the path is under the home folder deeper than the first
-    /// level and folder names are not sent.
+    /// The last name of a path as sent, as `path(_:)` sends it: a placeholder when the path is under the home folder
+    /// deeper than the first level and folder names are not sent.
     public func name(ofPath path: String) -> String {
-        self.path(path).value.split(separator: "/").last.map(String.init) ?? "~"
+        name(of: nameKey(ofPath: path))
     }
 
-    /// What a path's name as sent (`name(ofPath:)`) depends on: its last name and whether that is sent by name. Paths
-    /// with the same key have the same name, and the key is found without redacting anything.
-    public struct NameKey: Hashable, Sendable {
-        let last: Substring?
-        let sentByName: Bool
+    /// What a path's name as sent (`name(ofPath:)`) is made from: the name itself when it is sent by name, or the raw
+    /// name its placeholder is made from. Paths have the same key exactly when they have the same name (but for two
+    /// placeholders that happen to be the same), and the key is found without making a placeholder.
+    public enum NameKey: Hashable, Sendable {
+        /// The home folder, or a path with no names.
+        case home
+        case sent(String)
+        case withheld(Substring)
     }
 
     public func nameKey(ofPath path: String) -> NameKey {
-        let last = path.split(separator: "/").last
-        guard let rest = homeRelative(path) else { return NameKey(last: last, sentByName: true) }
-        guard !rest.isEmpty else { return NameKey(last: nil, sentByName: true) }
-        return NameKey(last: last, sentByName: isSent(at: rest.split(separator: "/").count - 1))
+        guard let rest = homeRelative(path) else { return path.split(separator: "/").last.map { .sent(sent($0)) } ?? .home }
+        let parts = rest.split(separator: "/")
+        guard let last = parts.last else { return .home }
+        return isSent(at: parts.count - 1) ? .sent(sent(last)) : .withheld(last)
+    }
+
+    /// The name as sent for a key (`nameKey(ofPath:)`).
+    public func name(of key: NameKey) -> String {
+        switch key {
+        case .home: "~"
+        case let .sent(name): name
+        case let .withheld(raw): placeholder(String(raw))
+        }
+    }
+
+    /// A path's name that is sent by name, as it is sent: account names removed and kept on one line.
+    private func sent(_ name: Substring) -> String {
+        ExplainRequest.oneLine(removingAccountNames(String(name)))
     }
 
     /// An item's name as sent: `name` when its path's last name is sent, otherwise that name's placeholder, so a
@@ -107,7 +127,10 @@ public struct ExplainRedactor: Sendable {
 
     /// A name or identifier as sent: account names removed wherever they stand as a word.
     func removingAccountNames(_ text: String) -> String {
-        accountNames.reduce(text) { Self.replacing($1, in: $0, with: Self.accountPlaceholder) }
+        let template = NSRegularExpression.escapedTemplate(for: Self.accountPlaceholder)
+        return accountPatterns.reduce(text) { text, pattern in
+            pattern.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
+        }
     }
 
     func placeholder(_ name: String) -> String {
@@ -131,13 +154,11 @@ public struct ExplainRedactor: Sendable {
         return nil
     }
 
-    /// Replaces `word`, in any case, where no letter or digit adjoins it, so a short name inside a longer word is left
+    /// Finds `word`, in any case, where no letter or digit adjoins it, so a short name inside a longer word is left
     /// alone.
-    private static func replacing(_ word: String, in text: String, with replacement: String) -> String {
+    private static func wordPattern(_ word: String) -> NSRegularExpression? {
         let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: word) + "(?![\\p{L}\\p{N}])"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
-        return regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text),
-                                              withTemplate: NSRegularExpression.escapedTemplate(for: replacement))
+        return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }
 }
 

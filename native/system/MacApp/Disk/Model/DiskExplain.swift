@@ -111,16 +111,18 @@ extension DiskWindowModel {
             facts.notMeasured = rule.id == .dockerImages ? ExplainNotMeasured(docker: analysis?.dockerUnavailable) : .notRead
         }
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
-        // names are sent; largest first, then by path, and only the names a request keeps are redacted (one past them,
-        // so the request says it left some out).
-        let items = match.items.sorted { left, right in
-            let (leftSize, rightSize) = (left.sizes?.allocated ?? 0, right.sizes?.allocated ?? 0)
-            return leftSize != rightSize ? leftSize > rightSize : left.path < right.path
-        }
-        facts.members = ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1,
+        // names are sent; largest first, then by path, and only the names a request keeps are ordered and made (one
+        // past them, so the request says it left some out).
+        facts.members = ExplainFacts.countedNames(match.items, limit: ExplainRequest.memberLimit + 1,
                                                   key: { redactor.nameKey(ofPath: $0.path) },
-                                                  name: { redactor.name(ofPath: $0.path) })
+                                                  precedes: Self.precedes, name: redactor.name(of:))
         return facts
+    }
+
+    /// Whether a suggestion's item comes first among its names: the larger, then by path.
+    static func precedes(_ left: ReclaimItem, _ right: ReclaimItem) -> Bool {
+        let (leftSize, rightSize) = (left.sizes?.allocated ?? 0, right.sizes?.allocated ?? 0)
+        return leftSize != rightSize ? leftSize > rightSize : left.path < right.path
     }
 
     /// A suggestion's sizes as sent, bounded as its Suggestions row is: the space used is "at least" it when an item's

@@ -55,36 +55,90 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(sending.path("/Users/jdoe/dev/acme-merger/api/server").value, "~/dev/acme-merger/api/server")
     }
 
+    /// A path and size, as a suggestion's item has.
+    private struct Sized {
+        let path: String
+        let size: Int
+    }
+
+    private static func precedes(_ left: Sized, _ right: Sized) -> Bool {
+        left.size != right.size ? left.size > right.size : left.path < right.path
+    }
+
+    /// The names of `items` made one by one after a full sort: what a request's members must equal.
+    private func reference(_ items: [Sized], _ redactor: ExplainRedactor) -> [String] {
+        Array(ExplainFacts.countedNames(items.sorted(by: Self.precedes).map { redactor.name(ofPath: $0.path) }).prefix(11))
+    }
+
+    private func counted(_ items: [Sized], _ redactor: ExplainRedactor, made: Counter) -> [String] {
+        ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1, key: { redactor.nameKey(ofPath: $0.path) },
+                                  precedes: Self.precedes, name: { made.count += 1; return redactor.name(of: $0) })
+    }
+
     func testCountedNamesOfManyItemsMakeOnlyTheNamesARequestKeeps() {
-        // 10,000 items under 2,500 names, largest first; every item is counted, but only 11 names are made.
-        let items = (0..<10_000).map { "/Users/jdoe/dev/project-\($0 % 2_500)" }
+        // 10,000 items under 2,500 names, with sizes that fall and rise; every item is counted, but only 11 names are
+        // made.
+        let items = (0..<10_000).map { Sized(path: "/Users/jdoe/dev/project-\($0 % 2_500)", size: ($0 * 7) % 13) }
         let made = Counter()
-        let names = ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1,
-                                              key: { redactor.nameKey(ofPath: $0) },
-                                              name: { made.count += 1; return redactor.name(ofPath: $0) })
+        let names = counted(items, redactor, made: made)
         XCTAssertEqual(made.count, ExplainRequest.memberLimit + 1)
-        XCTAssertEqual(names, Array(ExplainFacts.countedNames(items.map { redactor.name(ofPath: $0) }).prefix(11)))
-        XCTAssertEqual(names.first, redactor.placeholder("project-0") + " ×4")
+        XCTAssertEqual(names, reference(items, redactor))
+        XCTAssertTrue(names.allSatisfy { $0.hasPrefix("folder-") && $0.hasSuffix(" ×4") }, "\(names)")
         var facts = ExplainFacts(kind: .suggestion, name: "s")
         facts.members = names
         XCTAssertTrue(ExplainRequest(facts, redactor: redactor).truncated, "the request says it left names out")
     }
 
-    func testPathsWithOneNameKeyHaveOneNameAsSent() {
+    func testNamesThatDifferOnlyInWhatIsNotSentAreMadeOnceWhateverTheirNumber() {
+        // 16,384 names outside ~ that differ only in control and format characters, each sent as a space, and 16,384
+        // under ~ that differ only in the case of the account name, sent by name with folder names on. Each set is sent
+        // as 12 names, so only 11 are made, with every item counted.
+        let marks: [Character] = ["\u{01}", "\u{200B}"]
+        func variant(_ number: Int) -> String {
+            String((0..<14).map { marks[(number >> $0) & 1] })
+        }
+        let hidden = (0..<16_384).map { Sized(path: "/opt/tool-\($0 % 12)" + variant($0 / 12), size: $0 % 3) }
+        let account = (0..<16_384).map { number in
+            let cased = String("jdoe".enumerated().map { number >> $0.offset & 1 == 1 ? Character($0.element.uppercased()) : $0.element })
+            return Sized(path: "/Users/jdoe/dev/\(cased)-\(number % 12)" + variant(number / 16), size: 0)
+        }
+        for (items, redactor) in [(hidden, redactor), (account, redactor.sendingFolderNames(true))] {
+            let made = Counter()
+            let names = counted(items, redactor, made: made)
+            XCTAssertLessThanOrEqual(made.count, ExplainRequest.memberLimit + 1)
+            XCTAssertEqual(names, reference(items, redactor))
+            XCTAssertEqual(names.count, 11)
+        }
+        // 16,384 items under 12 names: every case of the account name is one name.
+        let sent = counted(account, redactor.sendingFolderNames(true), made: Counter())
+        XCTAssertTrue(sent.allSatisfy { $0.hasPrefix("[user]-") && ($0.hasSuffix(" ×1365") || $0.hasSuffix(" ×1366")) },
+                      "\(sent)")
+    }
+
+    func testPathsHaveOneNameKeyExactlyWhenTheyHaveOneNameAsSent() {
         let redactor = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: ["jdoe", "Jane Doe"], sendFolderNames: false,
                                        key: Array(repeating: 7, count: 32))
-        let paths = ["/Users/jdoe", "/USERS/JDOE/", "/System/Volumes/Data/Users/jdoe", "/", "/Users/jdoe/dev", "/Users/jdoe/dev/",
-                     "/Users/jdoe/a/dev", "/Users/jdoe/b/dev", "/opt/dev", "/Users/jdoe/jdoe", "/Users/jdoe/x/jdoe",
-                     "/Volumes/jdoe", "/Users/jdoe/Library/Caches", "/Users/jdoe/Caches", "/opt/Caches",
-                     "/Users/jdoe/x/Jane Doe", "/opt/Jane Doe", "/Users/jdoe/a/line\nbreak", "/opt/line\nbreak"]
+        let names = ["dev", "jdoe", "JDOE", "Jane Doe", "jane doe", "Caches", "line\nbreak", "line\rbreak", "line\u{2028}break",
+                     "a\u{01}", "a\u{02}", "a\u{200B}", "a ", "a", "folder-x"]
+        var paths = ["/Users/jdoe", "/USERS/JDOE/", "/System/Volumes/Data/Users/jdoe", "/", "", "/Users/jdoe/dev/"]
+        for name in names {
+            paths += ["/Users/jdoe/\(name)", "/Users/jdoe/x/\(name)", "/Users/jdoe/a/b/\(name)", "/opt/\(name)",
+                      "/Volumes/\(name)/", "/System/Volumes/Data/Users/jdoe/Library/\(name)"]
+        }
         for redactor in [redactor, redactor.sendingFolderNames(true)] {
             for first in paths {
-                for second in paths where redactor.nameKey(ofPath: first) == redactor.nameKey(ofPath: second) {
-                    XCTAssertEqual(redactor.name(ofPath: first), redactor.name(ofPath: second), "\(first) and \(second)")
+                let sent = redactor.path(first).value.split(separator: "/").last.map(String.init) ?? "~"
+                XCTAssertEqual(redactor.name(ofPath: first), sent, "named as its path is sent: \(first)")
+                for second in paths {
+                    XCTAssertEqual(redactor.nameKey(ofPath: first) == redactor.nameKey(ofPath: second),
+                                   redactor.name(ofPath: first) == redactor.name(ofPath: second), "\(first) and \(second)")
                 }
             }
         }
         XCTAssertNotEqual(redactor.nameKey(ofPath: "/Users/jdoe/dev"), redactor.nameKey(ofPath: "/Users/jdoe/a/dev"))
+        XCTAssertEqual(redactor.nameKey(ofPath: "/opt/a\u{01}"), redactor.nameKey(ofPath: "/opt/a\u{200B}"))
+        XCTAssertEqual(redactor.sendingFolderNames(true).nameKey(ofPath: "/Users/jdoe/x/JDOE"),
+                       redactor.sendingFolderNames(true).nameKey(ofPath: "/Users/jdoe/y/jdoe"))
     }
 
     func testTheHomeFolderInAnyCaseOrThroughTheDataVolumeIsTheHomeFolder() {
@@ -562,6 +616,29 @@ final class ExplainTests: XCTestCase {
         guard case let .explained(_, shown) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
         XCTAssertEqual(shown, request(named: "new"))
         XCTAssertEqual(center.availability, .available)
+    }
+
+    func testCancellingExplainWhileAvailabilityIsReadSendsNothingKeepsNoFailureAndAllowsANewRequest() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
+        await gate.reached()
+        asked.cancel()
+        let ended = try await finishes(asked)
+        XCTAssertTrue(ended, "the read is given up on when its caller is cancelled")
+        XCTAssertEqual(center.state(for: key), .idle, "a cancellation is not the provider failing to answer")
+        XCTAssertEqual(provider.explained, 0, "nothing is sent")
+
+        provider.availabilityGate = nil
+        await center.explain(key) { _ in self.request(named: "new") }
+        gate.open()
+        XCTAssertEqual(provider.requests, [request(named: "new")])
+        guard case let .explained(_, shown) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertEqual(shown, request(named: "new"))
     }
 
     func testPickingTheProviderAgainWhileItAnswersKeepsNoOldAnswerAndAllowsANewOne() async throws {
