@@ -4,23 +4,35 @@ import Network
 /// The files the per-user daemon owns (packages/timer-cli/src/daemon/paths.mjs).
 public struct DaemonPaths: Equatable, Sendable {
     public var dataDir: String
-    public var socket: String { (dataDir as NSString).appendingPathComponent("daemon.sock") }
-    public var log: String { (dataDir as NSString).appendingPathComponent("daemon.log") }
+    public var socket: String { Self.join(dataDir, "daemon.sock") }
+    public var log: String { Self.join(dataDir, "daemon.log") }
+    public var lock: String { Self.join(dataDir, "daemon.lock") }
 
     public init(dataDir: String) {
         self.dataDir = dataDir
     }
 
-    /// `SUBSET_TIMER_DATA_DIR`, else `~/.local/share/subset/timer`, as the CLI resolves it: an absolute override as
-    /// given, a relative one against the working directory, without resolving symbolic links.
+    /// `SUBSET_TIMER_DATA_DIR`, else `~/.local/share/subset/timer`, as the CLI resolves it.
     public static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment,
                                home: String = FileManager.default.homeDirectoryForCurrentUser.path,
                                workingDirectory: String = FileManager.default.currentDirectoryPath) -> DaemonPaths {
         if let override = environment["SUBSET_TIMER_DATA_DIR"], !override.isEmpty {
             if override.hasPrefix("/") { return DaemonPaths(dataDir: override) }
-            return DaemonPaths(dataDir: URL(fileURLWithPath: workingDirectory).appendingPathComponent(override).standardized.path)
+            return DaemonPaths(dataDir: join(workingDirectory, override))
         }
-        return DaemonPaths(dataDir: (home as NSString).appendingPathComponent(".local/share/subset/timer"))
+        return DaemonPaths(dataDir: join(home, ".local/share/subset/timer"))
+    }
+
+    /// Node's `path.join`, normalized lexically: `/a/link/../timer` is `/a/timer`, as the daemon sees it.
+    static func join(_ parts: String...) -> String {
+        let path = parts.joined(separator: "/")
+        var components: [Substring] = []
+        for part in path.split(separator: "/") where part != "." {
+            if part == "..", let last = components.last, last != ".." { components.removeLast() }
+            else if part != ".." || !path.hasPrefix("/") { components.append(part) }
+        }
+        let joined = components.joined(separator: "/")
+        return path.hasPrefix("/") ? "/" + joined : (joined.isEmpty ? "." : joined)
     }
 }
 
@@ -102,8 +114,8 @@ public struct DaemonClient: Sendable {
         }
     }
 
-    public func info() async throws -> DaemonInfo {
-        let reply = try await send("GET", "/v1/daemon")
+    public func info(timeout: TimeInterval = 10) async throws -> DaemonInfo {
+        let reply = try await send("GET", "/v1/daemon", timeout: timeout)
         return try Self.decode(DaemonInfo.self, status: reply.status, body: reply.body)
     }
 
@@ -198,23 +210,33 @@ public struct DaemonClient: Sendable {
         }
     }
 
-    /// Makes sure a daemon answers: when none listens, or the one there is shutting down, calls `launch` once and
-    /// waits up to `timeout` seconds for the new daemon's socket.
-    public func ensureRunning(timeout: TimeInterval = 3, launch: @Sendable () throws -> Void) async throws {
+    /// Makes sure a daemon answers, as client.mjs `startDaemon` does: when none listens, or the one there is shutting
+    /// down, calls `launch`, again once it has exited while no live process holds the lock, and waits for its socket.
+    public func ensureRunning(timeout: TimeInterval = 3, maxLaunches: Int = 3, launch: @Sendable () throws -> LaunchedDaemon) async throws {
+        try await ensureRunning(timeout: timeout, maxLaunches: maxLaunches, probe: { _ = try await info(timeout: $0) },
+                                lockHeld: { DaemonLock.held(at: paths.lock) }, launch: launch)
+    }
+
+    func ensureRunning(timeout: TimeInterval, maxLaunches: Int, probe: (TimeInterval) async throws -> Void,
+                       lockHeld: () -> Bool, launch: () throws -> LaunchedDaemon) async throws {
         do {
-            _ = try await info()
-            return
+            return try await probe(10)
         } catch DaemonError.notListening, DaemonError.shuttingDown {}
-        try launch()
-        let deadline = Date().addingTimeInterval(timeout)
+        var child = try launch()
+        var launches = 1
+        let deadline = ContinuousClock.now + .seconds(timeout)
         var lastError: Error = DaemonError.notListening
-        while Date() < deadline {
-            try await Task.sleep(nanoseconds: 100_000_000)
+        while ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
             do {
-                _ = try await info()
-                return
+                // Each probe gets only what is left of the wait.
+                return try await probe(max(0.001, Double((deadline - ContinuousClock.now) / .milliseconds(1)) / 1000))
             } catch {
                 lastError = error
+            }
+            if child.hasExited, launches < maxLaunches, !lockHeld() {
+                child = try launch()
+                launches += 1
             }
         }
         throw lastError is DaemonError ? lastError : DaemonError.connectionFailed(String(describing: lastError))

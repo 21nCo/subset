@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// Starts `node <cli.mjs> daemon run` in its own session, so it keeps running after the app quits, with its
 /// output appended to `daemon.log` as the CLI's own client does (packages/timer-cli/src/daemon/client.mjs).
@@ -18,19 +19,14 @@ public enum DaemonLauncher {
         }
     }
 
-    /// Returns the daemon's process ID. A second daemon started while one runs exits at once with "already running".
+    /// Returns the daemon's process. A second daemon started while one runs exits at once with "already running".
     @discardableResult
     public static func launch(node: String, cli: String, paths: DaemonPaths,
-                              environment: [String: String] = ProcessInfo.processInfo.environment) throws -> pid_t {
-        do {
-            // The daemon tightens the folder to 0700 itself; creating it so keeps the log private from the start.
-            try FileManager.default.createDirectory(atPath: paths.dataDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            // Keep one previous log of up to 1 MiB.
-            if let size = try? FileManager.default.attributesOfItem(atPath: paths.log)[.size] as? Int, size > maxLogBytes {
-                _ = rename(paths.log, paths.log + ".1")
-            }
-        } catch {
-            throw LaunchError.dataDirectory(error.localizedDescription)
+                              environment: [String: String] = ProcessInfo.processInfo.environment) throws -> LaunchedDaemon {
+        try prepare(paths)
+        // Keep one previous log of up to 1 MiB.
+        if let size = try? FileManager.default.attributesOfItem(atPath: paths.log)[.size] as? Int, size > maxLogBytes {
+            _ = rename(paths.log, paths.log + ".1")
         }
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
@@ -53,11 +49,51 @@ public enum DaemonLauncher {
         let status = posix_spawn(&pid, node, &actions, &attributes, argv, envp)
         guard status == 0 else { throw LaunchError.spawn(status) }
         // Reap it when it exits, so it never lingers as a zombie while the app runs.
-        let child = pid
+        let child = LaunchedDaemon(pid: pid)
         Thread.detachNewThread {
             var exitStatus: Int32 = 0
-            waitpid(child, &exitStatus, 0)
+            waitpid(child.pid, &exitStatus, 0)
+            child.markExited()
         }
         return child
+    }
+
+    /// The CLI's `ensureDataDir` (paths.mjs), run before anything is written to the folder.
+    static func prepare(_ paths: DaemonPaths) throws {
+        guard paths.socket.utf8.count <= 103 else {
+            throw LaunchError.dataDirectory("The socket path \(paths.socket) is longer than 103 bytes; set SUBSET_TIMER_DATA_DIR to a shorter directory.")
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: paths.dataDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        } catch {
+            throw LaunchError.dataDirectory(error.localizedDescription)
+        }
+        var info = stat()
+        guard lstat(paths.dataDir, &info) == 0 else { throw LaunchError.dataDirectory(String(cString: strerror(errno))) }
+        guard info.st_mode & S_IFMT == S_IFDIR else { throw LaunchError.dataDirectory("\(paths.dataDir) is not a directory.") }
+        guard info.st_uid == getuid() else { throw LaunchError.dataDirectory("\(paths.dataDir) belongs to another user.") }
+        if info.st_mode & 0o777 != 0o700, chmod(paths.dataDir, 0o700) != 0 {
+            throw LaunchError.dataDirectory(String(cString: strerror(errno)))
+        }
+    }
+}
+
+/// A daemon process `DaemonLauncher` started; `hasExited` turns true once it ends.
+public final class LaunchedDaemon: Sendable {
+    public let pid: pid_t
+    private let exited = OSAllocatedUnfairLock(initialState: false)
+
+    public init(pid: pid_t) { self.pid = pid }
+    public var hasExited: Bool { exited.withLock { $0 } }
+    public func markExited() { exited.withLock { $0 = true } }
+}
+
+enum DaemonLock {
+    /// True while a live process holds `daemon.lock` (client.mjs `lockHeld`, without its check for a reused pid).
+    static func held(at path: String) -> Bool {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+              let match = text.wholeMatch(of: /([0-9]+)\n(?:[0-9a-f]{32}\n(?:[!-~]{1,128}\n)?)?/),
+              let pid = pid_t(match.1), pid > 0 else { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
     }
 }

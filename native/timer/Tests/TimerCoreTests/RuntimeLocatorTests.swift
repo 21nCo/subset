@@ -88,4 +88,120 @@ private func locator(_ system: FakeSystem, environment: [String: String] = ["SHE
     #expect(DaemonPaths.resolve(environment: ["SUBSET_TIMER_DATA_DIR": "/data/t/../timer"], home: "/Users/me").dataDir == "/data/t/../timer")
     #expect(DaemonPaths.resolve(environment: ["SUBSET_TIMER_DATA_DIR": "data/../timer/"], home: "/Users/me", workingDirectory: "/work/dir").dataDir == "/work/dir/timer")
     #expect(DaemonPaths.resolve(environment: ["SUBSET_TIMER_DATA_DIR": ""], home: "/Users/me").dataDir == "/Users/me/.local/share/subset/timer")
+    // The files are joined lexically, as path.join does, so the client connects where the daemon binds.
+    let override = DaemonPaths.resolve(environment: ["SUBSET_TIMER_DATA_DIR": "/data/link/../timer/./"], home: "/Users/me")
+    #expect([override.socket, override.log, override.lock] == ["/data/timer/daemon.sock", "/data/timer/daemon.log", "/data/timer/daemon.lock"])
+    #expect(DaemonPaths.join("/..", "a/../../b") == "/b")
+    #expect(DaemonPaths.join("a", "../../b") == "../b")
+}
+
+/// A short temporary folder of its own; the caller removes it.
+private func temporaryFolder() throws -> String {
+    var template = Array("/tmp/subset-timer-XXXXXX".utf8CString)
+    return String(cString: try #require(mkdtemp(&template)))
+}
+
+@Test func theDataFolderIsCheckedBeforeTheLogIsWritten() throws {
+    let root = try temporaryFolder()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let launch = { (dataDir: String) in try DaemonLauncher.launch(node: "/nonexistent/node", cli: "cli.mjs", paths: DaemonPaths(dataDir: dataDir)) }
+    let refusal = { (reason: String) in DaemonLauncher.LaunchError.dataDirectory(reason) }
+
+    let long = root + "/" + String(repeating: "d", count: 103 - root.utf8.count - "/daemon.sock".utf8.count)
+    #expect(throws: refusal("The socket path \(long)/daemon.sock is longer than 103 bytes; set SUBSET_TIMER_DATA_DIR to a shorter directory.")) { try launch(long) }
+    #expect(!FileManager.default.fileExists(atPath: long))
+
+    let target = root + "/target", link = root + "/link"
+    try FileManager.default.createDirectory(atPath: target, withIntermediateDirectories: false)
+    try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+    #expect(throws: refusal("\(link) is not a directory.")) { try launch(link) }
+    #expect(!FileManager.default.fileExists(atPath: target + "/daemon.log"))
+
+    // A loose folder is tightened to 0700 before the log is opened; the missing node then fails the spawn.
+    let loose = root + "/loose"
+    try FileManager.default.createDirectory(atPath: loose, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
+    #expect(throws: DaemonLauncher.LaunchError.spawn(ENOENT)) { try launch(loose) }
+    #expect(try FileManager.default.attributesOfItem(atPath: loose)[.posixPermissions] as? Int == 0o700)
+}
+
+@Test func aLockCountsOnlyWhileItsHolderLives() throws {
+    let root = try temporaryFolder()
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let lock = root + "/daemon.lock"
+    let held = { (text: String) in
+        try text.write(toFile: lock, atomically: true, encoding: .utf8)
+        return DaemonLock.held(at: lock)
+    }
+    #expect(try held("\(getpid())\n\(String(repeating: "a", count: 32))\nps-Thu_Oct_22_07:00:00_2026\n"))
+    #expect(try held("\(getpid())\n"))
+    #expect(try !held("99999999\n"))
+    #expect(try !held("\(getpid())"))
+    #expect(try !held("0\n"))
+    try FileManager.default.removeItem(atPath: lock)
+    #expect(!DaemonLock.held(at: lock))
+}
+
+/// Records launches and probes for `ensureRunning`, with a script of probe results.
+private final class FakeDaemons: @unchecked Sendable {
+    var probes: [Result<Void, DaemonError>]
+    var launched: [LaunchedDaemon] = []
+    var lockHeld = true
+    var onProbe: (FakeDaemons, Int) -> Void = { _, _ in }
+    private(set) var probeCount = 0
+
+    init(probes: [Result<Void, DaemonError>]) {
+        self.probes = probes
+    }
+
+    func probe(_ timeout: TimeInterval) throws {
+        #expect(timeout <= 10)
+        onProbe(self, probeCount)
+        probeCount += 1
+        try (probes.isEmpty ? .failure(.notListening) : probes.removeFirst()).get()
+    }
+
+    func launch() -> LaunchedDaemon {
+        launched.append(LaunchedDaemon(pid: pid_t(launched.count + 1)))
+        return launched.last!
+    }
+
+    func run(_ client: DaemonClient, timeout: TimeInterval) async throws {
+        try await client.ensureRunning(timeout: timeout, maxLaunches: 3, probe: { try self.probe($0) }, lockHeld: { self.lockHeld },
+                                       launch: { self.launch() })
+    }
+}
+
+@Test func aDaemonShuttingDownIsReplacedOnceItReleasesTheLock() async throws {
+    let client = DaemonClient(paths: DaemonPaths(dataDir: "/nonexistent"))
+    let fake = FakeDaemons(probes: [.failure(.shuttingDown), .failure(.shuttingDown), .failure(.shuttingDown), .failure(.notListening), .failure(.notListening), .success(())])
+    fake.onProbe = { fake, index in
+        // The first child exits "already running" while the old daemon still holds the lock, which it then releases.
+        if index == 2 { fake.launched[0].markExited() }
+        if index == 4 { fake.lockHeld = false }
+        #expect(fake.launched.count == (index == 0 ? 0 : index < 5 ? 1 : 2), "probe \(index)")
+    }
+    try await fake.run(client, timeout: 3)
+    #expect(fake.launched.count == 2)
+    #expect(fake.probeCount == 6)
+}
+
+@Test func ensureRunningGivesUpAfterThreeLaunchesAndItsDeadline() async throws {
+    let client = DaemonClient(paths: DaemonPaths(dataDir: "/nonexistent"))
+    let fake = FakeDaemons(probes: [])
+    fake.lockHeld = false
+    // Every child exits at once.
+    fake.onProbe = { fake, _ in fake.launched.forEach { $0.markExited() } }
+    let start = ContinuousClock.now
+    await #expect(throws: DaemonError.notListening) { try await fake.run(client, timeout: 0.6) }
+    #expect(fake.launched.count == 3)
+    #expect(ContinuousClock.now - start < .seconds(2))
+    // A child that keeps running is never replaced, nor is one that exited while a live process holds the lock.
+    let running = FakeDaemons(probes: [])
+    running.lockHeld = false
+    await #expect(throws: DaemonError.notListening) { try await running.run(client, timeout: 0.3) }
+    #expect(running.launched.count == 1)
+    let locked = FakeDaemons(probes: [])
+    locked.onProbe = { fake, _ in fake.launched.forEach { $0.markExited() } }
+    await #expect(throws: DaemonError.notListening) { try await locked.run(client, timeout: 0.3) }
+    #expect(locked.launched.count == 1)
 }

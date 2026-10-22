@@ -11,7 +11,7 @@ on:
       - 'apps/timer/**'
       - '.github/workflows/timer.yml'
   push:
-    branches: [main]
+    branches: [dev, main]
     paths:
       - 'native/timer/**'
       - 'packages/timer/**'

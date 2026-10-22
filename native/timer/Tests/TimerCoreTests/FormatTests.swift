@@ -54,4 +54,8 @@ private func countdown(_ id: String, durationMs: Int, status: TimerStatus, start
     for text in ["", "0s", "1:60", "m", "1m1h", "-5m", "1.5m"] {
         guard case .failure = DurationParser.parse(text) else { Issue.record("\(text) parsed"); continue }
     }
+    // The CLI reads ASCII digits only: other scripts' digits fail the same way instead of trapping or counting.
+    for text in ["\u{661}:30", "1:\u{663}0", "1:3\u{660}", "\u{FF11}:02:03", "1:02:0\u{FF13}", "1h\u{663}m", "\u{665}m30s", "\u{FF15}", "1\u{17F}"] {
+        #expect(DurationParser.parse(text) == .failure(DurationError(message: "\u{201C}\(text)\u{201D} is not a duration such as 90s, 25m, 1h30m or 1:30.")), "\(text)")
+    }
 }
