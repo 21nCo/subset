@@ -1,20 +1,32 @@
-/// Generates explanations. SET-49 has the on-device Apple Intelligence provider; SET-50 adds OpenRouter behind the same
+/// Generates explanations: the on-device Apple Intelligence provider (SET-49) and OpenRouter (SET-50) behind the same
 /// contract. A provider returns the model's answer unvalidated; `ExplainCenter` validates it.
 public protocol AIProvider: Sendable {
     /// Whether it can answer now.
     func availability() async -> AIAvailability
     func explain(_ request: ExplainRequest) async throws -> ExplanationDraft
+    /// Exactly what `explain(_:)` sends for `request`, as the send preview and What was sent show it.
+    func sentText(for request: ExplainRequest) throws -> String
+    /// Whether the user confirms what is sent before the first request of each app session: a provider off this Mac.
+    var needsSendPreview: Bool { get }
+}
+
+extension AIProvider {
+    public func sentText(for request: ExplainRequest) throws -> String { request.promptText }
+    public var needsSendPreview: Bool { false }
 }
 
 /// The provider the user chose. By owner decision none is used until the user picks one, the on-device one included.
 public enum AIProviderChoice: String, CaseIterable, Sendable {
     case none
     case appleIntelligence
+    /// The user's own OpenRouter key: selectable only while one is stored (`ExplainCenter.choose(_:)`).
+    case openRouter
 
     public var title: String {
         switch self {
         case .none: "None"
         case .appleIntelligence: "Apple Intelligence"
+        case .openRouter: "OpenRouter"
         }
     }
 
@@ -22,6 +34,8 @@ public enum AIProviderChoice: String, CaseIterable, Sendable {
         switch self {
         case .none: "Explain is off. System works fully without it."
         case .appleIntelligence: "Generated on this Mac by Apple's on-device model. Nothing leaves this Mac."
+        case .openRouter: "Sent to OpenRouter with your own API key, and from there to the model it routes to. Before "
+            + "the first request of each session, System shows exactly what it will send and asks you to confirm."
         }
     }
 }
@@ -38,6 +52,10 @@ public enum AIAvailability: Equatable, Sendable {
     case requiresNewerMacOS
     /// This build was made without the FoundationModels framework.
     case notInThisBuild
+    /// No OpenRouter key is stored.
+    case noOpenRouterKey
+    /// The Keychain did not return the stored OpenRouter key.
+    case openRouterKeyUnreadable
 
     public var isAvailable: Bool { self == .available }
 
@@ -50,18 +68,23 @@ public enum AIAvailability: Equatable, Sendable {
         case .unavailable: "Apple Intelligence is unavailable"
         case .requiresNewerMacOS: "Requires macOS 26"
         case .notInThisBuild: "Not in this build"
+        case .noOpenRouterKey: "No OpenRouter key"
+        case .openRouterKeyUnreadable: "The OpenRouter key could not be read"
         }
     }
 
     public var meaning: String {
         switch self {
-        case .available: "Explanations are generated on this Mac."
+        case .available: "Explain can answer now."
         case .deviceNotEligible: "Apple Intelligence needs a Mac with Apple silicon that supports it."
         case .appleIntelligenceNotEnabled: "Turn on Apple Intelligence in System Settings › Apple Intelligence & Siri."
         case .modelNotReady: "macOS is still downloading or preparing the on-device model. Try again later."
         case .unavailable: "macOS reports that the on-device model cannot be used now."
         case .requiresNewerMacOS: "The on-device model is available from macOS 26."
         case .notInThisBuild: "This copy of System was built without Apple Intelligence support."
+        case .noOpenRouterKey: "Add your OpenRouter API key in Settings."
+        case .openRouterKeyUnreadable: "The Keychain did not return the key. Unlock this Mac, or remove the key and add "
+            + "it again."
         }
     }
 }

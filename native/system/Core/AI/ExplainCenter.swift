@@ -30,6 +30,9 @@ public enum ExplainState: Equatable, Sendable {
     /// Not asked yet with the chosen provider.
     case idle
     case working(ExplainRequest)
+    /// Waiting for the user to confirm the send preview, before the first request of the session to a provider off
+    /// this Mac; nothing has been sent.
+    case confirming(SendPreview)
     case explained(Explanation, ExplainRequest)
     /// The provider cannot answer now; nothing was sent.
     case unavailable(AIAvailability)
@@ -38,28 +41,48 @@ public enum ExplainState: Equatable, Sendable {
     case gone
 }
 
+/// What the send preview shows: exactly what the provider will send for the request.
+public struct SendPreview: Equatable, Sendable {
+    public let provider: AIProviderChoice
+    /// The body as sent, byte for byte.
+    public let text: String
+    public let request: ExplainRequest
+}
+
 /// The Explain setting and each item's explanation. Nothing is sent until the user picks a provider (`choice` starts
 /// as `.none`, and with `.none` no provider is made or called). Explanations are kept in memory for the session, per
 /// provider and item; a failed or unavailable one can be asked again. A provider that does not answer in time is
 /// given up on, so an item is never left being explained. Changing the provider ends the work begun with the one
 /// before: it is cancelled, nothing it had not sent yet is sent, and nothing it answers is kept, even when the user
-/// picks that provider again before it finishes.
+/// picks that provider again before it finishes. Before the first request of the session to a provider off this Mac
+/// (OpenRouter), the item waits while the user reviews exactly what will be sent and confirms it; once confirmed, no
+/// preview is shown again this session.
 @MainActor
 @Observable
 public final class ExplainCenter {
-    public var choice: AIProviderChoice {
+    /// Changed through `choose(_:)`, which refuses OpenRouter while no key is stored.
+    public internal(set) var choice: AIProviderChoice {
         didSet {
             guard choice != oldValue else { return }
             defaults.set(choice.rawValue, forKey: Self.choiceKey)
             selection += 1
             for cancel in pending.values { cancel() }
             pending = [:]
+            for confirmation in confirmations.values { confirmation.resume(returning: false) }
+            confirmations = [:]
             states = states.filter { _, state in
-                if case .working = state { false } else { true }
+                switch state {
+                case .working, .confirming: false
+                default: true
+                }
             }
             availabilityStatus = nil
         }
     }
+    /// The OpenRouter key and model, for Settings; `nil` where OpenRouter is not offered.
+    public let openRouter: OpenRouterAccount?
+    /// Whether the user confirmed the send preview this session, so it is not shown again.
+    public private(set) var sendConfirmed = false
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
         didSet { defaults.set(sendFolderNames, forKey: Self.sendFolderNamesKey) }
@@ -77,6 +100,10 @@ public final class ExplainCenter {
     /// Cancels each availability read and answer in flight, by when it began.
     @ObservationIgnored private var pending: [Int: @Sendable () -> Void] = [:]
     @ObservationIgnored private var pendingCount = 0
+    /// Each item waiting for the send preview's answer.
+    @ObservationIgnored private var confirmations: [StateKey: CheckedContinuation<Bool, Never>] = [:]
+    /// Exactly what was sent for each item, for What was sent.
+    @ObservationIgnored private var sentTexts: [StateKey: String] = [:]
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let makeProvider: @MainActor (AIProviderChoice) -> (any AIProvider)?
@@ -87,35 +114,56 @@ public final class ExplainCenter {
     static let choiceKey = "explainProvider"
     static let sendFolderNamesKey = "explainSendFolderNames"
 
-    private struct StateKey: Hashable {
+    private struct StateKey: Hashable, Sendable {
         let choice: AIProviderChoice
         let item: ExplainKey
     }
 
     /// `availabilityTimeout` and `answerTimeout` bound how long the provider may take to say whether it is available
-    /// and to answer.
-    public init(defaults: UserDefaults = .standard, redactor: ExplainRedactor,
-                provider: @escaping @MainActor (AIProviderChoice) -> (any AIProvider)? = ExplainCenter.liveProvider,
+    /// and to answer. `provider` makes the chosen provider; by default, the live one (`liveProvider(_:openRouter:)`).
+    /// A stored choice of OpenRouter with no key stored starts as None.
+    public init(defaults: UserDefaults = .standard, redactor: ExplainRedactor, openRouter: OpenRouterAccount? = nil,
+                provider: (@MainActor (AIProviderChoice) -> (any AIProvider)?)? = nil,
                 availabilityTimeout: Duration = .seconds(15), answerTimeout: Duration = .seconds(90)) {
         self.defaults = defaults
         baseRedactor = redactor
-        makeProvider = provider
+        self.openRouter = openRouter
+        makeProvider = provider ?? { choice in Self.liveProvider(choice, openRouter: openRouter) }
         self.availabilityTimeout = availabilityTimeout
         self.answerTimeout = answerTimeout
-        choice = defaults.string(forKey: Self.choiceKey).flatMap(AIProviderChoice.init(rawValue:)) ?? .none
+        let stored = defaults.string(forKey: Self.choiceKey).flatMap(AIProviderChoice.init(rawValue:)) ?? .none
+        choice = stored == .openRouter && openRouter?.hasKey != true ? .none : stored
         sendFolderNames = defaults.bool(forKey: Self.sendFolderNamesKey)
+        openRouter?.onKeyRemoved = { [weak self] in
+            if self?.choice == .openRouter { self?.choice = .none }
+        }
     }
 
-    /// This Mac's account, with placeholders keyed for this session.
+    /// This Mac's account, with placeholders keyed for this session, and the OpenRouter key in this Mac's Keychain.
     public static func live() -> ExplainCenter {
-        ExplainCenter(redactor: .live(sendFolderNames: false, key: ExplainRedactor.sessionKey()))
+        ExplainCenter(redactor: .live(sendFolderNames: false, key: ExplainRedactor.sessionKey()),
+                      openRouter: OpenRouterAccount(keys: OpenRouterKeyStore(), client: OpenRouterClient()))
     }
 
-    public static func liveProvider(_ choice: AIProviderChoice) -> (any AIProvider)? {
+    public static func liveProvider(_ choice: AIProviderChoice, openRouter: OpenRouterAccount?) -> (any AIProvider)? {
         switch choice {
         case .none: nil
         case .appleIntelligence: AppleIntelligenceProvider()
+        case .openRouter: openRouter?.provider()
         }
+    }
+
+    /// Whether `choice` can be picked now: OpenRouter only while a key is stored.
+    public func canChoose(_ choice: AIProviderChoice) -> Bool {
+        choice != .openRouter || openRouter?.hasKey == true
+    }
+
+    /// Picks the provider, when it can be picked now (`canChoose(_:)`); returns whether it is the provider then.
+    @discardableResult
+    public func choose(_ choice: AIProviderChoice) -> Bool {
+        guard canChoose(choice) else { return false }
+        self.choice = choice
+        return true
     }
 
     /// Redacts with the current **Send folder names** setting.
@@ -124,6 +172,22 @@ public final class ExplainCenter {
     public func state(for item: ExplainKey) -> ExplainState {
         guard choice != .none else { return .needsProvider }
         return states[StateKey(choice: choice, item: item)] ?? .idle
+    }
+
+    /// Exactly what was sent for the item with the chosen provider, once it was sent.
+    public func sentText(for item: ExplainKey) -> String? {
+        sentTexts[StateKey(choice: choice, item: item)]
+    }
+
+    /// Sends the item shown in the send preview, and every other item waiting for one; no preview is shown again this
+    /// session.
+    public func confirmSend(_ item: ExplainKey) {
+        resolveConfirmation(StateKey(choice: choice, item: item), true)
+    }
+
+    /// Sends nothing for the item shown in the send preview; it can be asked again.
+    public func cancelSend(_ item: ExplainKey) {
+        resolveConfirmation(StateKey(choice: choice, item: item), false)
     }
 
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
@@ -171,7 +235,7 @@ public final class ExplainCenter {
         let selection = self.selection
         let key = StateKey(choice: choice, item: item)
         switch states[key] {
-        case .working?, .explained?: return
+        case .working?, .confirming?, .explained?: return
         default: break
         }
         guard choice != .none, let provider = makeProvider(choice) else { return }
@@ -205,14 +269,48 @@ public final class ExplainCenter {
             states[key] = .unavailable(availability)
             return
         }
-        // Built with the setting the user has now, so a folder name is never sent once they turn it off.
-        if sendFolderNames != self.sendFolderNames {
-            guard let rebuilt = build(redactor) else {
-                states[key] = .gone
+        var builtWith = sendFolderNames
+        while true {
+            // Built with the setting the user has now, so a folder name is never sent once they turn it off.
+            if builtWith != self.sendFolderNames {
+                guard let rebuilt = build(redactor) else {
+                    states[key] = .gone
+                    return
+                }
+                request = rebuilt
+                builtWith = self.sendFolderNames
+                states[key] = .working(request)
+            }
+            guard provider.needsSendPreview, !sendConfirmed else { break }
+            let text: String
+            do {
+                text = try provider.sentText(for: request)
+            } catch {
+                states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
                 return
             }
-            request = rebuilt
+            states[key] = .confirming(SendPreview(provider: choice, text: text, request: request))
+            let confirmed = await confirmation(for: key)
+            // The provider changed meanwhile: this item's state is no longer this call's.
+            guard selection == self.selection else { return }
+            guard confirmed, !Task.isCancelled else {
+                states[key] = nil
+                return
+            }
             states[key] = .working(request)
+            // What was shown is sent only if Send folder names is as it was; otherwise it is built again and shown.
+            guard builtWith != self.sendFolderNames else {
+                sendConfirmed = true
+                // Every other item waiting for a preview is sent too, built with the setting as it is then.
+                resolveAllConfirmations(true)
+                break
+            }
+        }
+        do {
+            sentTexts[key] = try provider.sentText(for: request)
+        } catch {
+            states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
+            return
         }
         let outcome: ExplainState?
         do {
@@ -235,6 +333,29 @@ public final class ExplainCenter {
         }
         guard selection == self.selection else { return }
         states[key] = outcome
+    }
+
+    /// Whether the user confirms the send preview shown for `key`: `false` when they cancel, the provider changes, or
+    /// the caller is cancelled.
+    private func confirmation(for key: StateKey) async -> Bool {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { return continuation.resume(returning: false) }
+                confirmations[key] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor in self.resolveConfirmation(key, false) }
+        }
+    }
+
+    private func resolveConfirmation(_ key: StateKey, _ confirmed: Bool) {
+        confirmations.removeValue(forKey: key)?.resume(returning: confirmed)
+    }
+
+    private func resolveAllConfirmations(_ confirmed: Bool) {
+        let waiting = confirmations
+        confirmations = [:]
+        for confirmation in waiting.values { confirmation.resume(returning: confirmed) }
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does.
