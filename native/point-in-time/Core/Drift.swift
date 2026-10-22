@@ -313,6 +313,17 @@ public enum DriftDetector {
         if state.isSuppressed(at: now) || rule.quietHours?.contains(now, calendar: calendar) == true { return .suppressed(episode) }
         return .prompt(episode)
     }
+
+    /// The companion's decision for a read: `blocks` read from `readFrom` (see `readBlocks`). First forgets, in a copy of
+    /// `state`, a drift offered whose block is not in the read (see `CompanionState.forgetOfferedEpisode`), then
+    /// evaluates with that copy. Returns the decision and the copy, which the companion keeps and the status command does
+    /// not; nothing is saved here.
+    public static func decide(_ blocks: [Block], readFrom: Date, now: Date, rule: DriftRule, state: CompanionState,
+                              calendar: Calendar) -> (decision: DriftDecision, state: CompanionState) {
+        var current = state
+        _ = current.forgetOfferedEpisode(unlessIn: blocks, readFrom: readFrom)
+        return (evaluate(blocks, now: now, rule: rule, state: current, calendar: calendar), current)
+    }
 }
 
 /// What the app gives the drift companion's flow: its settings and record, the store, capture, the panel, and the
@@ -371,11 +382,10 @@ public final class DriftCompanionFlow {
         guard let host, !acting else { return }
         defer { host.companionChanged() }
         guard let (blocks, from) = host.readBlocks(now: now) else { return }
-        var state = host.companionState
-        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { host.companionState = state }
-        guard onOffer == nil, host.isRecording, !delivery.isSending,
-              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: host.driftRule, state: state, calendar: calendar)
-        else { return }
+        let (decision, state) = DriftDetector.decide(blocks, readFrom: from, now: now, rule: host.driftRule, state: host.companionState,
+                                                     calendar: calendar)
+        if state != host.companionState { host.companionState = state }
+        guard onOffer == nil, host.isRecording, !delivery.isSending, case .prompt(let episode) = decision else { return }
         offer(episode, host: host)
     }
 
@@ -480,7 +490,8 @@ public final class DriftCompanionFlow {
     public func confirmSubmission(now: Date) -> DriftEpisode? {
         guard let host else { return nil }
         let current = host.isRecording ? host.readBlocks(now: now).map {
-            DriftDetector.evaluate($0.blocks, now: now, rule: host.driftRule, state: host.companionState, calendar: calendar)
+            DriftDetector.decide($0.blocks, readFrom: $0.from, now: now, rule: host.driftRule, state: host.companionState,
+                                 calendar: calendar).decision
         } ?? .none : .none
         return delivery.confirm(current: current, fallbackEnabled: host.notificationFallback)
     }

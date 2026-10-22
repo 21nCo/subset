@@ -212,13 +212,15 @@ struct StatusReport {
         result.snapshot = snapshot
         result.schemaVersion = snapshot.schemaVersion
         result.report = DayReport(day: day.start, blocks: snapshot.blocks, calendar: calendar)
-        // The current drift is the companion's, from the blocks it reads: the day's totals may include blocks starting
-        // after now (recorded before the clock was set back), which are not part of the current session.
+        // The current drift is the companion's decision, from the blocks it reads: the day's totals may include blocks
+        // starting after now (recorded before the clock was set back), which are not part of the current session. The
+        // state it would keep (a stale offer forgotten) is used here and never saved.
         let driftBlocks = DriftDetector.blocksInReadRange(snapshot.blocks, now: now, calendar: calendar)
-        if isToday, let episode = DriftDetector.episode(in: driftBlocks, now: now, rule: settings.driftRule,
-                                                         state: settings.companionState, calendar: calendar) {
-            let rule = settings.driftRule
-            let state = switch DriftDetector.evaluate(driftBlocks, now: now, rule: rule, state: settings.companionState, calendar: calendar) {
+        let rule = settings.driftRule
+        let (decision, companionState) = DriftDetector.decide(driftBlocks, readFrom: driftRange.lowerBound, now: now, rule: rule,
+                                                              state: settings.companionState, calendar: calendar)
+        if isToday, let episode = DriftDetector.episode(in: driftBlocks, now: now, rule: rule, state: companionState, calendar: calendar) {
+            let state = switch decision {
             case .prompt: "notYetOffered"
             case .alreadyPrompted: "offered"
             case .suppressed: "suppressed"

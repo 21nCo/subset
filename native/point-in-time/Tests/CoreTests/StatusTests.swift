@@ -364,6 +364,34 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(drift["driftBlocks"] as? Int == 2)
     }
 
+    @Test func aDriftOfferedOutsideTheReadDoesNotMarkTheCurrentDriftOffered() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        // Drift at 11:57 and 12:00, read at 12:01:30, and the drift at 13:00 offered before the clock was set back: the
+        // companion forgets that offer, as its block is not in its read, and would offer the current drift.
+        try store.save(segment("com.example.browser", "Browser", local(21, 11, 57), minutes: 6, url: "https://video.example.net/watch"))
+        try store.save(segment("com.example.browser", "Browser", local(21, 13), minutes: 3, url: "https://video.example.net/watch"))
+        try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 13, 5))
+        let before = try fingerprint(directory)
+        func status(offered: Date, now: Date) throws -> [String: Any] {
+            let settings = setUp.merging([StoredSettings.Key.driftPromptedEpisode: offered]) { $1 }
+            return try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: now, settings: settings)))
+        }
+        let json = try status(offered: local(21, 13), now: local(21, 12, 1).addingTimeInterval(30))
+        #expect((json["totals"] as? [String: Int])?["drift"] == 540)
+        let drift = try #require(json["currentDrift"] as? [String: Any])
+        #expect(drift["driftBlocks"] as? Int == 2)
+        #expect(drift["state"] as? String == "notYetOffered")
+        // An offer whose block was deleted (at 12:03 here, after the session's last block) is forgotten the same way;
+        // one on a block in the read still holds.
+        #expect((try status(offered: local(21, 12, 3), now: local(21, 12, 3).addingTimeInterval(30))["currentDrift"] as? [String: Any])?["state"] as? String
+                == "notYetOffered")
+        #expect((try status(offered: local(21, 11, 57), now: local(21, 12, 3).addingTimeInterval(30))["currentDrift"] as? [String: Any])?["state"] as? String
+                == "offered")
+        #expect(try fingerprint(directory) == before)
+    }
+
     @Test func jsonThatCannotBeEncodedExitsOneWithNothingOnStandardOutput() {
         let failed = StatusCommand.json(["focusPercent": Double.nan], exitCode: .ok)
         #expect(failed.exitCode == .internalError)
@@ -494,6 +522,21 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent("activity.sqlite" + suffix)) }
         try readsWithoutChanges()
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["activity.sqlite"])
+    }
+
+    /// A read of a store without a WAL notices a writer by the WAL it leaves, so the WAL must outlive the writer: the
+    /// macOS SQLite keeps it, emptied, when the last connection closes.
+    @Test func aWriterThatClosesLeavesItsWALBehind() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try seedWorkday(try ActivityStore(directory: directory))
+        let wal = directory.appendingPathComponent("activity.sqlite-wal").path
+        for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent("activity.sqlite" + suffix)) }
+        do {
+            let store = try ActivityStore(directory: directory)
+            try store.save(segment("com.example.editor", "Editor", local(21, 18), minutes: 1))
+        }
+        #expect(FileManager.default.fileExists(atPath: wal))
     }
 
     @Test func theCommandSeesWritesTheAppMakesWhileItReads() throws {

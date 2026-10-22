@@ -42,10 +42,12 @@ public struct StoreSnapshot: Equatable, Sendable {
 
     /// Reads `activity.sqlite` in `directory` without changing it. The connection is read-only (`SQLITE_OPEN_READONLY`),
     /// so it cannot write, checkpoint, or remove the WAL, and it reads the app's writes through the WAL while the app is
-    /// running. As in `ActivityStore`'s schema check, the WAL index is opened read-only when it exists; a WAL with no
-    /// index is read with a writable one, which SQLite may create beside it; and a store with no WAL, as the app leaves
-    /// it when it quits, is read from its main file alone, which creates nothing. If a WAL appears during that last
-    /// read (the app started writing), the read is repeated through the WAL, also when that read failed.
+    /// running. As in `ActivityStore`'s schema check, the WAL index is opened read-only when it can be; a WAL whose index
+    /// is missing or cannot be used read-only is read with a writable index, which SQLite may create or rebuild beside
+    /// it; and a store with no WAL is read from its main file alone, which creates nothing. If a WAL appears during that
+    /// last read (the app started writing), the read is repeated through the WAL, also when that read failed. This
+    /// relies on SQLite keeping the WAL once a writer closes, as the macOS library does, so a WAL written during the read
+    /// is still there to be noticed afterwards.
     public static func read(directory: URL, blocksFrom: Date, to: Date, lockWait: UInt64 = lockWaitNanoseconds) throws(StoreReadFailure) -> StoreSnapshot {
         let path = directory.appendingPathComponent("activity.sqlite").path
         switch entry(at: path) {

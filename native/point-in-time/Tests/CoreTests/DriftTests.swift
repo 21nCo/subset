@@ -557,6 +557,23 @@ private final class FakeCompanionHost: DriftCompanionHost {
         }
     }
 
+    /// The refresh decides through `DriftDetector.decide`, as the status command does: an offer whose block is not in the
+    /// read (one recorded before the clock was set back) is forgotten, and the current drift is offered.
+    @Test func theRefreshDecidesAsTheStatusCommandDoes() {
+        let host = FakeCompanionHost([.focus, .drift, .drift])
+        let stale = host.blocks.last!.end.addingTimeInterval(Block.length * 20)
+        host.companionState = CompanionState(promptedEpisode: stale)
+        guard case .alreadyPrompted(let episode) = host.evaluate() else { Issue.record("the stale offer covers the drift"); return }
+        let shared = DriftDetector.decide(host.blocks, readFrom: at(0), now: host.now, rule: host.driftRule, state: host.companionState,
+                                          calendar: newYork)
+        #expect(shared.decision == .prompt(episode))
+        #expect(shared.state.promptedEpisode == nil)
+        #expect(host.companionState.promptedEpisode == stale)
+        host.flow.refresh(now: host.now)
+        #expect(host.panel?.episode == episode)
+        #expect(host.companionState.promptedEpisode == episode.start)
+    }
+
     @Test func aShorterBreakAfterResumingPausesTrackingUntilTheBreakKept() {
         let host = FakeCompanionHost([.focus, .drift, .drift])
         host.flow.refresh(now: host.now)
