@@ -14,57 +14,50 @@ final class DriftSettings {
         self.defaults = defaults
     }
 
+    private var stored: StoredSettings { StoredSettings { [defaults] in defaults.object(forKey: $0) } }
+
     var enabled: Bool {
-        get { defaults.object(forKey: "driftCompanionEnabled") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "driftCompanionEnabled"); onChange?() }
+        get { stored.driftCompanionEnabled }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.driftCompanionEnabled); onChange?() }
     }
 
     var threshold: Int {
-        get { DriftRule(threshold: defaults.object(forKey: "driftThreshold") as? Int ?? DriftRule.defaultThreshold).threshold }
-        set { defaults.set(DriftRule(threshold: newValue).threshold, forKey: "driftThreshold"); onChange?() }
+        get { stored.driftThreshold }
+        set { defaults.set(DriftRule(threshold: newValue).threshold, forKey: StoredSettings.Key.driftThreshold); onChange?() }
     }
 
     var quietHoursEnabled: Bool {
-        get { defaults.bool(forKey: "quietHoursEnabled") }
-        set { defaults.set(newValue, forKey: "quietHoursEnabled"); onChange?() }
+        get { stored.quietHoursEnabled }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.quietHoursEnabled); onChange?() }
     }
 
     /// Minutes after local midnight; 22:00 to 07:00 until changed.
     var quietStartMinute: Int {
-        get { defaults.object(forKey: "quietHoursStart") as? Int ?? 22 * 60 }
-        set { defaults.set(newValue, forKey: "quietHoursStart"); onChange?() }
+        get { stored.quietStartMinute }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.quietHoursStart); onChange?() }
     }
 
     var quietEndMinute: Int {
-        get { defaults.object(forKey: "quietHoursEnd") as? Int ?? 7 * 60 }
-        set { defaults.set(newValue, forKey: "quietHoursEnd"); onChange?() }
+        get { stored.quietEndMinute }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.quietHoursEnd); onChange?() }
     }
 
     /// Post a system notification when the panel cannot be shown. Turning it on is what asks macOS for permission.
     var notificationFallback: Bool {
-        get { defaults.bool(forKey: "driftNotificationFallback") }
-        set { defaults.set(newValue, forKey: "driftNotificationFallback"); onChange?() }
+        get { defaults.bool(forKey: StoredSettings.Key.driftNotificationFallback) }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.driftNotificationFallback); onChange?() }
     }
 
-    var rule: DriftRule {
-        DriftRule(enabled: enabled, threshold: threshold,
-                  quietHours: quietHoursEnabled ? QuietHours(startMinute: quietStartMinute, endMinute: quietEndMinute) : nil)
-    }
+    var rule: DriftRule { stored.driftRule }
 
     /// The companion's record of what it offered and the user's focus window and break, kept between launches.
     var companionState: CompanionState {
-        get {
-            let start = defaults.object(forKey: "focusWindowStart") as? Date
-            let end = defaults.object(forKey: "focusWindowEnd") as? Date
-            return CompanionState(promptedEpisode: defaults.object(forKey: "driftPromptedEpisode") as? Date,
-                                  focusWindow: start.flatMap { start in end.map { DateInterval(start: start, end: max(start, $0)) } },
-                                  breakUntil: defaults.object(forKey: "driftBreakUntil") as? Date)
-        }
+        get { stored.companionState }
         set {
-            defaults.set(newValue.promptedEpisode, forKey: "driftPromptedEpisode")
-            defaults.set(newValue.focusWindow?.start, forKey: "focusWindowStart")
-            defaults.set(newValue.focusWindow?.end, forKey: "focusWindowEnd")
-            defaults.set(newValue.breakUntil, forKey: "driftBreakUntil")
+            defaults.set(newValue.promptedEpisode, forKey: StoredSettings.Key.driftPromptedEpisode)
+            defaults.set(newValue.focusWindow?.start, forKey: StoredSettings.Key.focusWindowStart)
+            defaults.set(newValue.focusWindow?.end, forKey: StoredSettings.Key.focusWindowEnd)
+            defaults.set(newValue.breakUntil, forKey: StoredSettings.Key.driftBreakUntil)
         }
     }
 }
@@ -78,7 +71,7 @@ final class DriftSettings {
 /// `correct`. None closes tabs, quits apps, or sends anything anywhere.
 @MainActor
 final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotificationCenterDelegate {
-    static let lookBack: TimeInterval = 24 * 3_600
+    static let lookBack = DriftDetector.lookBack
 
     let settings: DriftSettings
     private let store: ActivityStore?

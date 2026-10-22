@@ -11,31 +11,33 @@ final class CaptureSettings {
         self.defaults = defaults
     }
 
+    private var stored: StoredSettings { StoredSettings { [defaults] in defaults.object(forKey: $0) } }
+
     var onboardingCompleted: Bool {
-        get { defaults.bool(forKey: "onboardingCompleted") }
-        set { defaults.set(newValue, forKey: "onboardingCompleted"); onChange?() }
+        get { stored.onboardingCompleted }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.onboardingCompleted); onChange?() }
     }
 
     var trackingEnabled: Bool {
-        get { defaults.bool(forKey: "trackingEnabled") }
-        set { defaults.set(newValue, forKey: "trackingEnabled"); onChange?() }
+        get { stored.trackingEnabled }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.trackingEnabled); onChange?() }
     }
 
     /// `distantFuture` means paused until the user resumes.
     var pausedUntil: Date? {
-        get { defaults.object(forKey: "pausedUntil") as? Date }
-        set { defaults.set(newValue, forKey: "pausedUntil"); onChange?() }
+        get { stored.pausedUntil }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.pausedUntil); onChange?() }
     }
 
     /// Bundle ID to the display name shown in the menu.
     var excludedApps: [String: String] {
-        get { defaults.dictionary(forKey: "excludedApps") as? [String: String] ?? [:] }
-        set { defaults.set(newValue, forKey: "excludedApps"); onChange?() }
+        get { defaults.dictionary(forKey: StoredSettings.Key.excludedApps) as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.excludedApps); onChange?() }
     }
 
     var exclusionMode: ExclusionMode {
-        get { defaults.string(forKey: "exclusionMode").flatMap(ExclusionMode.init) ?? .timeOnly }
-        set { defaults.set(newValue.rawValue, forKey: "exclusionMode"); onChange?() }
+        get { defaults.string(forKey: StoredSettings.Key.exclusionMode).flatMap(ExclusionMode.init) ?? .timeOnly }
+        set { defaults.set(newValue.rawValue, forKey: StoredSettings.Key.exclusionMode); onChange?() }
     }
 
     var policy: CapturePolicy {

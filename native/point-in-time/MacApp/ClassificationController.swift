@@ -15,18 +15,18 @@ final class ClassificationSettings {
     }
 
     var provider: ProviderChoice {
-        get { ProviderChoice(stored: defaults.string(forKey: "classificationProvider")) }
-        set { defaults.set(newValue.rawValue, forKey: "classificationProvider"); onChange?(true) }
+        get { StoredSettings { [defaults] in defaults.object(forKey: $0) }.provider }
+        set { defaults.set(newValue.rawValue, forKey: StoredSettings.Key.classificationProvider); onChange?(true) }
     }
 
     var sendWindowTitles: Bool {
-        get { defaults.bool(forKey: "sendWindowTitles") }
-        set { defaults.set(newValue, forKey: "sendWindowTitles"); onChange?(false) }
+        get { defaults.bool(forKey: StoredSettings.Key.sendWindowTitles) }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.sendWindowTitles); onChange?(false) }
     }
 
     var openRouterModel: String {
-        get { defaults.string(forKey: "openRouterModel") ?? OpenRouterClient.defaultModel }
-        set { defaults.set(newValue, forKey: "openRouterModel"); onChange?(true) }
+        get { defaults.string(forKey: StoredSettings.Key.openRouterModel) ?? OpenRouterClient.defaultModel }
+        set { defaults.set(newValue, forKey: StoredSettings.Key.openRouterModel); onChange?(true) }
     }
 }
 

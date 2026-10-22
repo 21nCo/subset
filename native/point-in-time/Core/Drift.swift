@@ -263,6 +263,9 @@ public enum DriftDecision: Equatable, Sendable {
 ///   been labeled drift.
 /// - Nothing is offered while the rule is off, in quiet hours, or during a focus window or break.
 public enum DriftDetector {
+    /// How far back a read for the rule reaches, at least: a session can begin the evening before.
+    public static let lookBack: TimeInterval = 24 * 3_600
+
     /// The episode the current session's drift blocks form, whatever the threshold; nil with none.
     public static func episode(in blocks: [Block], now: Date, rule: DriftRule, state: CompanionState, calendar: Calendar) -> DriftEpisode? {
         let sorted = blocks.sorted { $0.start < $1.start }

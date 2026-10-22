@@ -2,16 +2,17 @@
 
 pointInTime is a menu-bar app that records which app, window, and website is in front while you work, and rolls that activity into three-minute blocks so you can see where your day went. Activity stays on the Mac unless you choose a classification provider.
 
-This folder holds the capture and storage slice ([SET-19](https://linear.app/21n/issue/SET-19)), block classification with your own OpenRouter key ([SET-20](https://linear.app/21n/issue/SET-20)), the daily timeline and weekly reports ([SET-21](https://linear.app/21n/issue/SET-21)), and the menu-bar focus ring and drift companion ([SET-22](https://linear.app/21n/issue/SET-22)) of the pointInTime outcome ([SET-18](https://linear.app/21n/issue/SET-18)). Classification with a ChatGPT subscription through the Codex CLI moved to SET-140. The read-only `status --json` agent command (SET-23) is a later issue and is not implemented here; neither are exports or sharing.
+This folder holds the capture and storage slice ([SET-19](https://linear.app/21n/issue/SET-19)), block classification with your own OpenRouter key ([SET-20](https://linear.app/21n/issue/SET-20)), the daily timeline and weekly reports ([SET-21](https://linear.app/21n/issue/SET-21)), the menu-bar focus ring and drift companion ([SET-22](https://linear.app/21n/issue/SET-22)), and the read-only `point-in-time status --json` agent command ([SET-23](https://linear.app/21n/issue/SET-23)) of the pointInTime outcome ([SET-18](https://linear.app/21n/issue/SET-18)). Classification with a ChatGPT subscription through the Codex CLI moved to SET-140. Exports, sharing, write commands, `serve`, and MCP are not implemented.
 
 ## Capability boundary
 
 | Owner | Responsibility |
 | --- | --- |
 | `Core/` (`PointInTimeCore`) | Activity and segment models, URL redaction, the capture policy (exclusions), the segment recorder state machine, three-minute block rollup, and the SQLite store with migrations and deletion. Classification: the request and response contract (`Classification.swift`), the queue (`ClassificationRunner`), the OpenRouter provider (`Providers.swift`), the Keychain wrapper, and `Memory.md`. Report math (`Reports.swift`): pure functions of stored blocks and a calendar. The menu-bar ring and the drift confirmation rule (`Drift.swift`): pure functions of stored blocks, the drift settings, and the companion's state, and the companion's order of steps (`DriftCompanionFlow`), with the app's side injected. Foundation, Security, and SQLite; no AppKit. Only the provider opens a network connection. |
+| `CLI/` (`point-in-time`) | The read-only command: gathers the clock, time zone, store folder, the app's defaults, and whether the app is running, then runs `StatusCommand` from `Core/` (`StatusCommand.swift`, `StoreSnapshot.swift`, `StoredSettings.swift`). It links `PointInTimeCore` and AppKit (only to ask whether the app is running) and opens no network connection. |
 | `MacApp/` | The menu-bar host: macOS signals (frontmost app, sleep, lock, fast user switching, idle), Accessibility and Apple Events reads, settings, the status menu, the welcome window, the Classification window and its schedule (every minute, on wake, when the network returns after being unavailable), the timeline and reports window (SwiftUI and Swift Charts), and the drift companion: its panel, settings window, and optional notification. |
 
-The store is the source of truth. Classification reads blocks from it and writes labels and corrections back; the reports window and the drift companion only read blocks, and their corrections go through the same `correct` operation. No other app, package, or product imports this code yet.
+The store is the source of truth. Classification reads blocks from it and writes labels and corrections back; the reports window and the drift companion only read blocks, and their corrections go through the same `correct` operation. The `point-in-time` command only reads it, through a read-only connection. No other app, package, or product imports this code yet.
 
 ## What is recorded
 
@@ -115,14 +116,67 @@ Each completed three-minute block is labeled **Focus**, **Neutral**, or **Drift*
 
 No action closes tabs, quits apps, or makes a sound, and the companion sends nothing anywhere itself. Settings (**Drift Companion…** in the menu): on or off (on by default), the threshold, quiet hours, and **Send a notification instead**, off by default, for when the panel cannot be shown (the menu bar item is hidden, for example). Turning that on is the only time pointInTime asks macOS for notification permission, for alerts without sound. Whether alerts are allowed is read again before each notification, so turning them off in System Settings takes effect at once, and the notifications are shown as a banner and in Notification Center even while a pointInTime window is in front. The notification offers Return to Focus, a 10-minute break, and Not a Drift as Focus or Neutral. These settings, the focus window and break end times, and the start of the drift last offered are kept in the app's defaults, not in the activity store; the last of these is forgotten once its block is deleted or more than a day old.
 
+## Command-line status for agents
+
+`point-in-time` is a read-only command for scripts and shell-capable agents (Claude Code, Codex, and similar). It prints a day's focus summary from the local store without starting the app, changing any data, or using the network, and works whether the app is running or not.
+
+```text
+point-in-time status [--date YYYY-MM-DD] [--json] [--include-titles]
+point-in-time --version
+```
+
+- `--date` names a day in this Mac's time zone (`TZ` overrides it); the default is today. A day is midnight to midnight, so a day the clocks change is 23 or 25 hours long, and a segment across midnight counts on each day by the three-minute block it falls in.
+- `--json` prints one JSON object that follows [`schemas/status-v1.schema.json`](schemas/status-v1.schema.json) (`schemaVersion: 1`); without it the command prints a short text summary.
+- `--include-titles` adds window titles and pages (scheme, host, and path) to the output. Without it no window title or URL path appears in either output; app names, bundle IDs, and hosts do. Query strings and fragments are never stored, so they never appear. Excluded apps are never named.
+
+**Installing on PATH.** The app bundles the command at `pointInTime.app/Contents/Helpers/point-in-time`. **Command-Line Tool…** in the menu shows the command to link it and can copy it or reveal the file; you create the link yourself, for example:
+
+```sh
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/pointInTime.app/Contents/Helpers/point-in-time /usr/local/bin/point-in-time
+```
+
+pointInTime never creates this link, writes to `/usr/local`, or edits shell files. Moving the app breaks the link; create it again. `--version` prints the enclosing app's version and build.
+
+**JSON fields** (schema version 1; every field is always present, `null` when it has no value):
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion`, `command`, `version` | `1`, `"status"`, and the app's version and build (`null` outside an app bundle). |
+| `observedAt`, `date`, `timeZone`, `day` | When the store was read; the day as `YYYY-MM-DD`; its IANA time zone; `day.start`, `day.end`, and `day.isToday`. Times are RFC 3339 with the zone's offset. |
+| `store` | `state` (`ok`, `missing`, `newerSchema`, `olderSchema`, `locked`, `unreadable`) and the store's `schemaVersion` when it could be read. |
+| `freshness` | `lastSegmentEnd` (the latest recorded activity, any day) and `lastClassifiedAt` (when a model last labeled a block). |
+| `tracking` | `state` from the app's settings (`notSetUp`, `off`, `paused`, `on`); `pausedUntil` for a timed pause (`null` when paused until resumed); `appRunning`. `on` records only while the app runs and the Mac is in use. |
+| `classification` | `provider` (`off` or `openrouter`, never a key) and the day's `pending` and `failed` blocks. |
+| `totals` | Whole seconds of `focus`, `neutral`, `drift`, `unclassified` (pending or failed), and `excluded` time, plus `classified` and `recorded`, counted as the reports count them. |
+| `focusPercent` | Focus as a rounded percentage of classified time; `null` when nothing is classified. |
+| `topApps`, `topHosts` | Up to ten apps (`bundleID`, `name`, `seconds`) and sites (`host`, `seconds`), longest first. |
+| `currentDrift` | Today only: the drift companion's current episode (`start`, `end`, `driftBlocks`, `threshold`, and `state`: `belowThreshold`, `companionOff`, `suppressed`, `notYetOffered`, `offered`), or `null`. |
+| `titles` | With `--include-titles`, up to ten window titles and pages with their time; otherwise `null`. |
+| `errors` | `{code, message}` for each failure; empty on success. |
+
+**Exit codes.** With `--json`, a store failure still prints the object, with `store.state`, `errors`, and `null` totals; text output reports it on standard error.
+
+| Code | Meaning | `errors[].code` |
+| --- | --- | --- |
+| 0 | Summary printed, including an empty day. | |
+| 1 | Internal error. | |
+| 2 | Usage error: unknown command or option, or a `--date` that is not a real `YYYY-MM-DD` date. Nothing is printed on standard output. | |
+| 3 | No store: pointInTime has not recorded on this Mac. Nothing is created. | `store_missing` |
+| 4 | The store was written by a newer pointInTime. It is not changed. | `store_newer_schema` |
+| 5 | Another process held the store locked for longer than 500 ms. Try again. | `store_locked` |
+| 6 | The store could not be read (a damaged file, permissions, no Application Support folder), or it predates the schema this command reads; opening pointInTime once updates it. | `store_unreadable`, `store_older_schema` |
+
+**Read-only.** The store is opened with `SQLITE_OPEN_READONLY`, so the command cannot write, checkpoint, or remove the WAL. It reads in one transaction while the app writes through the WAL, opens the WAL index read-only when one exists, and reads a store without a WAL from its main file alone, creating nothing; only a WAL left without its index is read with a writable index, which SQLite may create beside it. The settings come from the app's defaults domain (`dev.subset.point-in-time`), read without writing, and the Keychain is never read.
+
 ## Surfaces
 
 | Surface | State |
 | --- | --- |
 | macOS app | Building. Local development builds only; no notarized download yet. |
-| Agent CLI (`status --json`) | Planned in SET-23. |
+| Agent CLI (`point-in-time status --json`) | Building. Bundled in local builds; no notarized download or published package yet. |
 
-The catalog lists `point-in-time` as `building` with no available surface.
+The catalog lists `point-in-time` as `building`, with `macos` and `agent-cli` proposed and no available surface.
 
 ## Build and run
 
@@ -137,7 +191,9 @@ open native/point-in-time/build/pointInTime.app
 
 Launch through Finder or `open`, not by running the executable from a terminal: a terminal-launched process inherits the terminal's Accessibility grant and gives a misleading result.
 
-`PointInTime.xcodeproj` is generated by `ProjectGenerator.rb` (xcodeproj 1.27) from the same sources: a static `PointInTimeCore` library, the `pointInTime` app, and the `PointInTimeCoreTests` bundle. Regenerate it after adding or removing a source file; generation is reproducible, and CI fails if the committed project differs. `macos-release.json` opts the app into `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)).
+`build-app.sh` also builds the `point-in-time` command and places it, signed with the hardened runtime, at `pointInTime.app/Contents/Helpers/point-in-time`; `swift run point-in-time status` runs it from the package.
+
+`PointInTime.xcodeproj` is generated by `ProjectGenerator.rb` (xcodeproj 1.27) from the same sources: a static `PointInTimeCore` library, the `point-in-time` command, the `pointInTime` app, which embeds and signs the command in `Contents/Helpers`, and the `PointInTimeCoreTests` bundle. Regenerate it after adding or removing a source file; generation is reproducible, and CI fails if the committed project differs. `macos-release.json` opts the app into `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)).
 
 `.github/workflows/point-in-time.yml` runs on macOS for changes here: package tests, the generated-project check, and an unsigned `xcodebuild build test`.
 
@@ -154,12 +210,14 @@ Reviewed `/Users/ar/dev/superfunctions` (branch `next`, commit `9cf3812`) on 202
 - **datafn:** the Swift runtime (`datafn/swift`) targets a WebView and Core Data sync topology. pointInTime needs a local-only, single-writer SQLite store with deletion and redaction guarantees and no sync, so it was not used.
 - **filefn:** remote file APIs and uploads; nothing is uploaded.
 - **plugfn, authfn, billfn:** no accounts or billing. Repeated for SET-20's provider connections on 2026-10-19 (same commit): plugfn's providers are TypeScript connectors (GitHub, Slack, Linear, mail, and similar) with no OpenRouter or model provider, and a Swift app cannot use them. authfn's Swift `AuthFnKeychainCredentialStore` stores an authfn session credential, not an arbitrary secret, and sets no this-device-only accessibility, so pointInTime keeps a small Keychain wrapper of its own.
-- **mcpfn, apifn:** no MCP server or API.
+- **mcpfn, apifn:** no MCP server or API. Repeated for SET-23 on 2026-10-22: the `point-in-time` command is a local Swift executable with no server, transport, or published API, and SET-23 excludes MCP, so neither applies.
 - **uifn, observability:** not applicable to a SwiftUI/AppKit app with no telemetry.
 
 **Package/version used: none.** No Superfunctions code was copied or linked.
 
 ## Verification
+
+The `point-in-time` command (SET-23) is covered by `StatusTests`: its JSON validated against the checked-in schema (by a validator in the tests that fails on any schema keyword it does not check, and that is shown to reject a broken object) for a normal day, an empty store, an all-unclassified day, and missing, newer-schema, locked, damaged, and outdated stores with their exit codes; totals, the focus percentage, top apps and sites, freshness, pending and failed counts, the tracking state from the app's settings, and the drift companion's current episode in each of its states, only for today; no title, page path, query, or excluded app in the default JSON or text, and titles and pages but never queries with `--include-titles`; the read connection failing to write; reading while the store is open and after it closed, with and without a WAL left behind, changing no file's bytes or modification time and creating nothing; reading each write made by an open store; the day turning over at local midnight, `--date` and today in other time zones, and a 25-hour day; and malformed arguments. `StoredSettingsTests` check that the app's defaults read the same in the command as through `UserDefaults`. Not covered by a test: a WAL appearing during a read of a store without one, which repeats the read through the WAL.
 
 The ring and the drift companion (SET-22) are covered by `DriftTests`: the rule's default and configurable threshold kept within 2 to 5, a Focus block (the model's or a correction) resetting the count while Neutral, pending, failed, and excluded-only blocks are skipped, a missing block starting a new session and a session whose last block ended over a block length ago offering nothing, a single offer per episode as it grows, a correction relabels its first block, or an earlier block in its run is labeled drift later, a drift recorded as offered at once when the panel showed it but only once macOS accepted its notification (a refused notification leaving it eligible, one notification on its way at a time, a notification submitted only while a fresh read still offers its drift, so not after the companion or fallback was turned off, quiet hours began, it was offered meanwhile, another episode started, or capture stopped, and an accepted notification recorded even when the episode ended meanwhile, leaving the next episode or session to be offered), Not a Drift as Focus or Neutral, the companion's order of steps (`DriftCompanionFlow`, with a host that refreshes it synchronously during a correction and a pause, as the app does: a later drift that Not a Drift's corrections make current is offered once its own prompt has closed, from the panel or a notification, and stays on offer; a failed correction keeping its error on screen and the later drift unrecorded until dismissed, or both going by notification without the panel; Not a Drift from an older notification leaving a panel that offers another drift open; Return to Focus and Take a Break closing the prompt and offering nothing after), a Focus block or a new session starting a new episode, quiet hours (spans past midnight, empty spans, held-back prompts, and blocks in them resetting the count), focus windows and breaks (no prompt during them, drift before or during them never counted, a shorter break not cutting a longer one short, for prompts or tracking, ending a focus window early), the offered drift forgotten once its block is deleted or out of range, the rule turned off, and the ring's shares of classified time (a zero-data day and a day with nothing classified drawing an empty ring, shares adding up to the whole ring, a correction covering excluded time, yesterday's blocks left out, and the ring's totals equal to the window's day totals). The companion's on-screen behavior (appearing without taking focus from a text editor, each action's effect in the store and the UI, VoiceOver for the panel, its actions, and the ring, and the notification fallback's foreground and background delivery) is deferred to SET-71 by the owner's amendment of 2026-10-19 and is not claimed here.
 

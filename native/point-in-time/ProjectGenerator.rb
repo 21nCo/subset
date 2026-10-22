@@ -6,7 +6,8 @@ require "fileutils"
 require "tmpdir"
 
 # Generates PointInTime.xcodeproj from the same sources as Package.swift: a static PointInTimeCore library, the
-# pointInTime menu-bar app that links it, and the core unit tests. Run `ruby ProjectGenerator.rb` from this folder
+# pointInTime menu-bar app that links it, the read-only `point-in-time` command the app embeds at
+# Contents/Helpers/point-in-time, and the core unit tests. Run `ruby ProjectGenerator.rb` from this folder
 # after adding or removing a source file; CI regenerates the project and fails if the committed copy differs.
 Dir.chdir(__dir__)
 project_path = File.join(__dir__, "PointInTime.xcodeproj")
@@ -19,22 +20,28 @@ project.root_object.attributes["TargetAttributes"] = {}
 
 core_group = project.main_group.new_group("Core", "Core")
 app_group = project.main_group.new_group("MacApp", "MacApp")
+cli_group = project.main_group.new_group("CLI", "CLI")
 tests_group = project.main_group.new_group("Tests", "Tests/CoreTests")
 
 core_target = project.new_target(:static_library, "PointInTimeCore", :osx, "14.0")
+# The command comes before the app that depends on it, so its derived IDs come from the project's target list rather
+# than from the app's dependency proxy, which holds the command's own ID.
+cli_target = project.new_target(:command_line_tool, "point-in-time", :osx, "14.0")
 app_target = project.new_target(:application, "PointInTime", :osx, "14.0")
 test_target = project.new_target(:unit_test_bundle, "PointInTimeCoreTests", :osx, "14.0")
 app_target.add_dependency(core_target)
+cli_target.add_dependency(core_target)
+app_target.add_dependency(cli_target)
 # The product reference is named after the target; the bundle is named after PRODUCT_NAME.
 app_target.product_reference.path = "pointInTime.app"
 test_target.add_dependency(core_target)
 
 # new_target links Cocoa through a DEVELOPER_DIR path pinned to one SDK version; frameworks are added relative to
 # SDKROOT below instead.
-[core_target, app_target, test_target].each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
+[core_target, app_target, cli_target, test_target].each { |target| target.frameworks_build_phase.files.to_a.each(&:remove_from_project) }
 project.frameworks_group.recursive_children.select { |child| child.isa == "PBXFileReference" }.each(&:remove_from_project)
 project.frameworks_group.groups.each(&:remove_from_project)
-[app_target, test_target].each do |target|
+[app_target, cli_target, test_target].each do |target|
   project.root_object.attributes["TargetAttributes"][target.uuid] = { "CreatedOnToolsVersion" => "26.4" }
 end
 
@@ -76,6 +83,17 @@ app_target.build_configurations.each do |config|
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/../Frameworks"]
 end
 
+cli_target.build_configurations.each do |config|
+  COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
+  config.build_settings["PRODUCT_NAME"] = "point-in-time"
+  config.build_settings["PRODUCT_MODULE_NAME"] = "point_in_time"
+  config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.subset.point-in-time.cli"
+  config.build_settings["ENABLE_HARDENED_RUNTIME"] = "YES"
+  config.build_settings["CODE_SIGN_STYLE"] = "Automatic"
+  # The app embeds the command; only the app belongs in the release archive.
+  config.build_settings["SKIP_INSTALL"] = "YES"
+end
+
 test_target.build_configurations.each do |config|
   COMMON_SETTINGS.each { |key, value| config.build_settings[key] = value }
   config.build_settings["PRODUCT_NAME"] = "$(TARGET_NAME)"
@@ -92,16 +110,24 @@ end
 
 add_sources(core_group, core_target, "Core/*.swift")
 add_sources(app_group, app_target, "MacApp/*.swift")
+add_sources(cli_group, cli_target, "CLI/*.swift")
 add_sources(tests_group, test_target, "Tests/CoreTests/*.swift")
 app_target.resources_build_phase.add_file_reference(app_group.new_file("Assets.xcassets"))
 app_group.new_file("Info.plist")
 app_group.new_file("PointInTime.entitlements")
 
 app_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
+cli_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
+# Copied and signed into pointInTime.app/Contents/Helpers.
+embed_cli = app_target.new_copy_files_build_phase("Embed Command-Line Tool")
+embed_cli.symbol_dst_subfolder_spec = :wrapper
+embed_cli.dst_path = "Contents/Helpers"
+embed_cli.add_file_reference(cli_target.product_reference).settings = { "ATTRIBUTES" => ["CodeSignOnCopy"] }
 test_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
 %w[AppKit.framework ApplicationServices.framework Carbon.framework Charts.framework SwiftUI.framework UserNotifications.framework].each do |framework|
   file_ref = project.frameworks_group.new_file("System/Library/Frameworks/#{framework}", :sdk_root)
   app_target.frameworks_build_phase.add_file_reference(file_ref)
+  cli_target.frameworks_build_phase.add_file_reference(file_ref) if framework == "AppKit.framework"
 end
 
 # Derive object IDs from their paths so regeneration is byte-for-byte reproducible.
