@@ -8,6 +8,8 @@ import SystemProcesses
 struct ProcessesView: View {
     @Bindable var model: ProcessesWindowModel
     let monitor: SystemMonitor
+    let explain: ExplainCenter
+    let openSettings: () -> Void
     @FocusState private var filterFocused: Bool
 
     var body: some View {
@@ -23,7 +25,8 @@ struct ProcessesView: View {
             HSplitView {
                 outline
                     .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                ProcessDetailView(detail: model.detail, monitor: monitor)
+                ProcessDetailView(detail: model.detail, monitor: monitor, model: model, explain: explain,
+                                  openSettings: openSettings)
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
             }
             if let footnote = model.footnote {

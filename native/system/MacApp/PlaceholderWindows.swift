@@ -43,13 +43,3 @@ final class PlaceholderWindowController {
         window.makeKeyAndOrderFront(nil)
     }
 }
-
-/// The Settings window's placeholder; later issues add their settings here.
-struct SettingsPlaceholderView: View {
-    var body: some View {
-        Text("No settings yet.")
-            .foregroundStyle(.secondary)
-            .padding(32)
-            .frame(minWidth: 360, maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
-    }
-}

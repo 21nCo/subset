@@ -1,5 +1,6 @@
 import Observation
 import SwiftUI
+import SystemCore
 import SystemDisk
 import SystemProcesses
 
@@ -29,6 +30,8 @@ struct MainWindowView: View {
     let processes: ProcessesWindowModel
     let disk: DiskWindowModel
     let monitor: SystemMonitor
+    let explain: ExplainCenter
+    let openSettings: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,8 +46,8 @@ struct MainWindowView: View {
             .accessibilityValue(state.section.title)
             .padding(.top, 10)
             switch state.section {
-            case .processes: ProcessesView(model: processes, monitor: monitor)
-            case .disk: DiskView(model: disk)
+            case .processes: ProcessesView(model: processes, monitor: monitor, explain: explain, openSettings: openSettings)
+            case .disk: DiskView(model: disk, explain: explain, openSettings: openSettings)
             }
         }
     }

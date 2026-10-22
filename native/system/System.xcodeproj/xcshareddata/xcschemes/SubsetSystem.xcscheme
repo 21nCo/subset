@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "227A4FBFF90AECAEFA7F70D442665659"
+               BlueprintIdentifier = "3BA199AF0931DE60B9771B02280D91FD"
                BuildableName = "Subset System.app"
                BlueprintName = "SubsetSystem"
                ReferencedContainer = "container:System.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "DD2A6DAEA5BE20D7E3769590AA837790"
+               BlueprintIdentifier = "7F00710301E59EDDB1F358B82361B606"
                BuildableName = "SystemCoreTests.xctest"
                BlueprintName = "SystemCoreTests"
                ReferencedContainer = "container:System.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "227A4FBFF90AECAEFA7F70D442665659"
+            BlueprintIdentifier = "3BA199AF0931DE60B9771B02280D91FD"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "DD2A6DAEA5BE20D7E3769590AA837790"
+               BlueprintIdentifier = "7F00710301E59EDDB1F358B82361B606"
                BuildableName = "SystemCoreTests.xctest"
                BlueprintName = "SystemCoreTests"
                ReferencedContainer = "container:System.xcodeproj">
@@ -65,7 +65,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "EC01CF3D2698C1744E00ECC2E19F259D"
+               BlueprintIdentifier = "0666D9B276342DD11B82984264FE468F"
                BuildableName = "SystemProcessesTests.xctest"
                BlueprintName = "SystemProcessesTests"
                ReferencedContainer = "container:System.xcodeproj">
@@ -75,7 +75,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "368ACB235BE81B73CD09130492748C53"
+               BlueprintIdentifier = "A8872A379A2E881E84EB8C2163AD0D5C"
                BuildableName = "SystemDiskTests.xctest"
                BlueprintName = "SystemDiskTests"
                ReferencedContainer = "container:System.xcodeproj">
@@ -97,7 +97,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "227A4FBFF90AECAEFA7F70D442665659"
+            BlueprintIdentifier = "3BA199AF0931DE60B9771B02280D91FD"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -114,7 +114,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "227A4FBFF90AECAEFA7F70D442665659"
+            BlueprintIdentifier = "3BA199AF0931DE60B9771B02280D91FD"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">

@@ -59,19 +59,26 @@ public enum DiskScope: Hashable, Sendable {
 public struct DiskAnalysis: Sendable {
     public let origins: DiskOriginReport
     public let matches: [ReclaimMatch]
+    /// Why Docker's image space was not measured, when the Docker images rule asked and it was not, so Explain can say
+    /// why as a category rather than with the CLI's message.
+    public let dockerUnavailable: ContainerUnavailable?
 
-    public init(origins: DiskOriginReport, matches: [ReclaimMatch]) {
+    public init(origins: DiskOriginReport, matches: [ReclaimMatch], dockerUnavailable: ContainerUnavailable? = nil) {
         self.origins = origins
         self.matches = matches
+        self.dockerUnavailable = dockerUnavailable
     }
 
     /// Attributes the tree's Library entries and matches the reclaim rules with `context`.
     public init(tree: DiskTree, context: ReclaimContext) {
         let entries = DiskOrigins.entries(in: tree, home: context.home, apps: context.installedApps)
         let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context)
+        var docker: ContainerUnavailable?
+        if case let .unavailable(reason)? = context.dockerImages { docker = reason }
         self.init(origins: DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: context.home,
                                               apps: context.installedApps),
-                  matches: matches)
+                  matches: matches,
+                  dockerUnavailable: docker)
     }
 }
 

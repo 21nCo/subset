@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = SystemMonitor()
     private let processes = ProcessesWindowModel()
     private let disk = DiskWindowModel()
+    private let explain = ExplainCenter.live()
     private let mainWindowState = MainWindowState()
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
@@ -19,7 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             title: "System",
             autosaveName: "SystemMainWindow",
             size: NSSize(width: 980, height: 640),
-            content: MainWindowView(state: mainWindowState, processes: processes, disk: disk, monitor: monitor)
+            content: MainWindowView(state: mainWindowState, processes: processes, disk: disk, monitor: monitor,
+                                    explain: explain) { [weak self] in self?.perform(.settings) }
         )
         controller.onVisibilityChange = { [monitor, processes] visible in
             monitor.setMainWindowVisible(visible)
@@ -27,11 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return controller
     }()
-    private let settingsWindow = PlaceholderWindowController(
+    private lazy var settingsWindow = PlaceholderWindowController(
         title: "Settings",
         autosaveName: "SystemSettingsWindow",
-        size: NSSize(width: 460, height: 260),
-        content: SettingsPlaceholderView()
+        size: NSSize(width: 560, height: 640),
+        content: SettingsView(center: explain)
     )
     private var statusMenu: StatusMenuController?
 
@@ -82,7 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func perform(_ command: ShellCommand) {
         switch command {
         case .openSystem: mainWindow.show()
-        case .settings: settingsWindow.show()
+        case .settings:
+            settingsWindow.show()
+            // Closing Settings only hides it, so the provider's availability is read again each time it is shown.
+            Task { await explain.refreshAvailability() }
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
