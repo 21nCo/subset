@@ -251,7 +251,7 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
             onChange?()
             return
         }
-        center.requestAuthorization(options: [.alert]) { _, _ in
+        center.requestAuthorization(options: [.alert]) { @Sendable _, _ in
             Task { @MainActor [weak self] in self?.readNotificationPermission() }
         }
     }
@@ -259,7 +259,7 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
     /// Reads whether macOS allows pointInTime's alerts, for the settings window.
     private func readNotificationPermission() {
         guard let center = notificationCenter else { return }
-        center.getNotificationSettings { settings in
+        center.getNotificationSettings { @Sendable settings in
             let allowed = Self.alertsAllowed(settings)
             Task { @MainActor [weak self] in
                 self?.notificationsAllowed = allowed
@@ -273,33 +273,38 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
     }
 
     /// Sends `outgoing` if macOS allows pointInTime's alerts, read again each time because the user can turn them off in
-    /// System Settings at any moment, and if it is still wanted once that read returns (see `submission`), then hands
-    /// macOS's answer to `answered`.
+    /// System Settings at any moment, and if it is still wanted once that read returns (see `submit`).
     private func send(_ outgoing: Outgoing) {
         guard let center = notificationCenter else {
             answered(outgoing, error: "Notifications need the pointInTime app.")
             return
         }
-        center.getNotificationSettings { settings in
+        // macOS calls back on its own queue; only the Sendable answer crosses to the main actor, never the center.
+        center.getNotificationSettings { @Sendable settings in
             let allowed = Self.alertsAllowed(settings)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                notificationsAllowed = allowed
-                guard allowed else {
-                    answered(outgoing, error: "Notifications for pointInTime are turned off in System Settings > Notifications.")
-                    return
-                }
-                guard let content = submission(for: outgoing) else {
-                    onChange?()
-                    return
-                }
-                do {
-                    try await center.add(Self.request(for: content))
-                    answered(outgoing, error: nil)
-                } catch {
-                    answered(outgoing, error: "The notification could not be sent: \(error.localizedDescription)")
-                }
-            }
+            Task { @MainActor [weak self] in self?.submit(outgoing, allowed: allowed) }
+        }
+    }
+
+    /// Submits `outgoing` on the main actor right after the authorization read, if it is still wanted (see
+    /// `submission`), then hands macOS's answer to `answered`.
+    private func submit(_ outgoing: Outgoing, allowed: Bool) {
+        notificationsAllowed = allowed
+        guard allowed else {
+            answered(outgoing, error: "Notifications for pointInTime are turned off in System Settings > Notifications.")
+            return
+        }
+        guard let center = notificationCenter else {
+            answered(outgoing, error: "Notifications need the pointInTime app.")
+            return
+        }
+        guard let content = submission(for: outgoing) else {
+            onChange?()
+            return
+        }
+        center.add(Self.request(for: content)) { @Sendable error in
+            let message = error.map { "The notification could not be sent: \($0.localizedDescription)" }
+            Task { @MainActor [weak self] in self?.answered(outgoing, error: message) }
         }
     }
 

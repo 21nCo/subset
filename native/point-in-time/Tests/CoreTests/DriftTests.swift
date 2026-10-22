@@ -348,9 +348,13 @@ private func episodeStarts(_ decision: DriftDecision) -> [Date]? {
         var resting = CompanionState()
         #expect(resting.takeBreak(for: 10 * 60, at: at(10, 7)) == at(10, 17))
         #expect(resting.suppressedUntil == at(10, 17))
-        // A shorter break later does not cut a longer one short.
-        resting.takeBreak(for: 5 * 60, at: at(10, 8))
+        // A shorter break later does not cut a longer one short, and the end returned is the one kept.
+        #expect(resting.takeBreak(for: 5 * 60, at: at(10, 8)) == at(10, 17))
         #expect(resting.breakUntil == at(10, 17))
+        // A longer one extends it.
+        var extended = resting
+        #expect(extended.takeBreak(for: 15 * 60, at: at(10, 8)) == at(10, 23))
+        #expect(extended.breakUntil == at(10, 23))
         let afterBreak = session(at(10, 18), [.drift, .drift])
         guard case .prompt = evaluate(afterBreak, state: resting) else { Issue.record("expected a prompt after the break"); return }
         // During the break nothing is offered, even for drift confirmed before it began.
@@ -410,6 +414,8 @@ private final class FakeCompanionHost: DriftCompanionHost {
     private(set) var panel: (episode: DriftEpisode?, error: String?)?
     private(set) var driftNotifications = 0
     private(set) var failureNotifications: [String] = []
+    /// Until when the last Take a Break paused tracking.
+    private(set) var pausedUntil: Date?
 
     init(_ kinds: [Kind]) {
         blocks = session(at(10), kinds)
@@ -441,6 +447,7 @@ private final class FakeCompanionHost: DriftCompanionHost {
     func companionChanged() {}
 
     func pauseTracking(until end: Date, at now: Date) {
+        pausedUntil = end
         isRecording = false
         flow.refresh(now: now)
     }
@@ -548,6 +555,20 @@ private final class FakeCompanionHost: DriftCompanionHost {
             #expect(host.companionState.promptedEpisode == shown.start)
             #expect(host.failureNotifications.count == (fails ? 1 : 0))
         }
+    }
+
+    @Test func aShorterBreakAfterResumingPausesTrackingUntilTheBreakKept() {
+        let host = FakeCompanionHost([.focus, .drift, .drift])
+        host.flow.refresh(now: host.now)
+        host.flow.takeBreak(for: 15 * 60, at: host.now)
+        let longer = host.now.addingTimeInterval(15 * 60)
+        #expect(host.pausedUntil == longer)
+        // The user resumes tracking, then picks a shorter break from an older notification.
+        host.isRecording = true
+        host.flow.takeBreak(for: 5 * 60, at: host.now.addingTimeInterval(60))
+        // Prompts and tracking wait until the same time.
+        #expect(host.companionState.breakUntil == longer)
+        #expect(host.pausedUntil == longer)
     }
 
     @Test func returnToFocusAndTakeABreakCloseThePromptAndOfferNothingAfter() {

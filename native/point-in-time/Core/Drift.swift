@@ -142,11 +142,12 @@ public struct CompanionState: Equatable, Sendable {
         focusWindow = DateInterval(start: now, duration: Self.focusWindowLength)
     }
 
-    /// Take a Break: prompts wait until the break ends, which is returned. A later break already set is kept.
+    /// Take a Break: prompts wait until the break ends, which is returned so tracking pauses until the same time. A later
+    /// break already set is kept, and its end is the one returned.
     @discardableResult
     public mutating func takeBreak(for length: TimeInterval, at now: Date) -> Date {
-        let end = now.addingTimeInterval(length)
-        breakUntil = max(breakUntil ?? end, end)
+        let end = max(breakUntil ?? now, now.addingTimeInterval(length))
+        breakUntil = end
         return end
     }
 
