@@ -51,13 +51,31 @@ private func object(_ output: StatusCommand.Output) throws -> [String: Any] {
     try #require(JSONSerialization.jsonObject(with: Data(output.standardOutput.utf8)) as? [String: Any])
 }
 
-/// Every file of the store with its bytes and modification time, to prove a read changed nothing.
-private func fingerprint(_ directory: URL) throws -> [String: String] {
-    var result: [String: String] = [:]
+/// One store file's whole contents, size, and modification time.
+private struct FileFingerprint: Equatable {
+    let contents: Data
+    let size: Int
+    let modified: Date?
+}
+
+/// Every file of the store with its bytes, size, and modification time, to prove a read changed nothing.
+///
+/// `writerOpenInThisProcess` is for a test that keeps a writing connection open while the command reads: SQLite maps a
+/// WAL index once per process, so the command's connection then shares the writer's writable mapping and records its
+/// read mark there, in the WAL index's checkpoint-info read marks and locks (bytes 96..<136 of `-shm`). A reader in
+/// another process, as the command is beside the app, opens a usable index read-only and cannot change them. Only those
+/// bytes are left out; the rest of the index and every other file are compared in full.
+private func fingerprint(_ directory: URL, writerOpenInThisProcess: Bool = false) throws -> [String: FileFingerprint] {
+    var result: [String: FileFingerprint] = [:]
     for name in try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() {
         let url = directory.appendingPathComponent(name)
-        let modified = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
-        result[name] = "\(try Data(contentsOf: url).hashValue) \(modified?.timeIntervalSince1970 ?? 0)"
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        var contents = try Data(contentsOf: url)
+        if writerOpenInThisProcess, name.hasSuffix("-shm"), contents.count >= 136 {
+            contents.resetBytes(in: 96..<136)
+        }
+        result[name] = FileFingerprint(contents: contents, size: (attributes[.size] as? NSNumber)?.intValue ?? -1,
+                                       modified: attributes[.modificationDate] as? Date)
     }
     return result
 }
@@ -373,7 +391,7 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         try store.save(segment("com.example.browser", "Browser", local(21, 11, 57), minutes: 6, url: "https://video.example.net/watch"))
         try store.save(segment("com.example.browser", "Browser", local(21, 13), minutes: 3, url: "https://video.example.net/watch"))
         try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 13, 5))
-        let before = try fingerprint(directory)
+        let before = try fingerprint(directory, writerOpenInThisProcess: true)
         func status(offered: Date, now: Date) throws -> [String: Any] {
             let settings = setUp.merging([StoredSettings.Key.driftPromptedEpisode: offered]) { $1 }
             return try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: now, settings: settings)))
@@ -389,7 +407,7 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
                 == "notYetOffered")
         #expect((try status(offered: local(21, 11, 57), now: local(21, 12, 3).addingTimeInterval(30))["currentDrift"] as? [String: Any])?["state"] as? String
                 == "offered")
-        #expect(try fingerprint(directory) == before)
+        #expect(try fingerprint(directory, writerOpenInThisProcess: true) == before)
     }
 
     @Test func jsonThatCannotBeEncodedExitsOneWithNothingOnStandardOutput() {
@@ -472,6 +490,32 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
 // MARK: Store access
 
 @Suite struct StatusStoreTests {
+    /// The tests below prove a read changed nothing with `fingerprint`, so it must see a change anywhere in a file.
+    @Test func theFingerprintSeesAOneByteChangeAnywhere() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try seedWorkday(store)
+        for (name, offset) in [("activity.sqlite", 200), ("activity.sqlite-wal", 200), ("activity.sqlite-shm", 140)] {
+            let url = directory.appendingPathComponent(name)
+            let before = try fingerprint(directory, writerOpenInThisProcess: true)
+            let original = try Data(contentsOf: url)[offset]
+            // In place, past the 80 bytes `Data.hashValue` hashes; only the contents are compared, as writing moves the
+            // modification time.
+            func put(_ byte: UInt8) throws {
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seek(toOffset: UInt64(offset))
+                try handle.write(contentsOf: Data([byte]))
+                try handle.close()
+            }
+            try put(original ^ 0xFF)
+            #expect(try fingerprint(directory, writerOpenInThisProcess: true)[name]?.contents != before[name]?.contents, "\(name)")
+            try put(original)
+            #expect(try fingerprint(directory, writerOpenInThisProcess: true)[name]?.contents == before[name]?.contents, "\(name)")
+        }
+        withExtendedLifetime(store) {}
+    }
+
     @Test func theReadConnectionCannotWrite() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -501,12 +545,12 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         let env = environment(directory, now: local(21, 12))
         // Open: the rows are only in the WAL, which the command reads through its index without writing either.
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("activity.sqlite-wal").path))
-        let before = try fingerprint(directory)
+        let before = try fingerprint(directory, writerOpenInThisProcess: true)
         Thread.sleep(forTimeInterval: 0.02)
         let open = StatusCommand.run(["status", "--json", "--date", "2026-10-21"], environment: env)
         #expect(open.exitCode == .ok)
         #expect((try object(open)["totals"] as? [String: Int])?["recorded"] == 2_880)
-        #expect(try fingerprint(directory) == before)
+        #expect(try fingerprint(directory, writerOpenInThisProcess: true) == before)
         // Quit: the last connection checkpoints the WAL; macOS's SQLite may leave the emptied WAL and its index behind.
         store = nil
         func readsWithoutChanges() throws {
@@ -632,7 +676,7 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         let writer = try SQLiteConnection(path: store.databaseURL.path)
         try writer.execute("INSERT INTO schema_version (version, applied_at) VALUES (3, 0)")
         // Leave frames in the WAL, as a newer app that is running would.
-        let before = try fingerprint(directory)
+        let before = try fingerprint(directory, writerOpenInThisProcess: true)
         let output = StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 12)))
         #expect(output.exitCode == .newerSchema)
         #expect(output.exitCode.rawValue == 4)
@@ -640,7 +684,7 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(json["store"] as? [String: AnyHashable] == ["state": "newerSchema", "schemaVersion": 3])
         #expect((json["errors"] as? [[String: String]])?.map { $0["code"] } == ["store_newer_schema"])
         #expect(json["totals"] is NSNull)
-        #expect(try fingerprint(directory) == before)
+        #expect(try fingerprint(directory, writerOpenInThisProcess: true) == before)
     }
 
     @Test func aStoreHeldExclusivelyIsReportedAsLocked() throws {
