@@ -36,7 +36,7 @@ final class DiskExplainTests: XCTestCase {
         let documents = try request(model, try XCTUnwrap(model.row(named: "Documents")).id)
         XCTAssertEqual(documents.kind, .folder)
         XCTAssertEqual(documents.type, "Folder")
-        XCTAssertEqual(documents.path, "~/Documents")
+        XCTAssertEqual(documents.path?.value, "~/Documents")
         XCTAssertNotNil(documents.sizes)
         XCTAssertEqual(documents.age, "Last changed 0 minutes ago")
         XCTAssertNil(documents.bundleID)
@@ -46,13 +46,14 @@ final class DiskExplainTests: XCTestCase {
         let cache = try request(model, try XCTUnwrap(model.row(named: "com.example.editor")).id)
         XCTAssertEqual(cache.kind, .folder)
         XCTAssertEqual(cache.type, "Folder in ~/Library/Caches")
-        XCTAssertEqual(cache.path, "~/Library/Caches/\(redactor.placeholder("com.example.editor"))")
+        XCTAssertEqual(cache.path?.value, "~/Library/Caches/\(redactor.placeholder("com.example.editor"))")
         XCTAssertEqual(cache.name, redactor.placeholder("com.example.editor"), "named as its path is sent")
         XCTAssertEqual(cache.bundleID, "com.example.editor")
         XCTAssertEqual(cache.teamID, "EXAMPLE123")
         XCTAssertEqual(cache.vendor, "Example Ltd")
-        XCTAssertEqual(cache.matchedRule, "Named for an installed app's bundle ID: Editor")
-        XCTAssertTrue(cache.evidence.contains { $0.hasPrefix("Matches the reclaim rule App caches") }, "\(cache.evidence)")
+        XCTAssertEqual(cache.matchedRule, "Named for an installed app's bundle ID")
+        XCTAssertEqual(cache.app, "Editor")
+        XCTAssertTrue(cache.evidence.contains { $0.kind == .reclaimRule && $0.name == "App caches" }, "\(cache.evidence)")
         XCTAssertFalse(cache.maySuggestOrigin)
     }
 
@@ -63,7 +64,7 @@ final class DiskExplainTests: XCTestCase {
         let leftover = try request(model, try XCTUnwrap(model.row(named: "com.gone.app.plist")).id)
         XCTAssertEqual(leftover.kind, .leftover)
         XCTAssertEqual(leftover.bundleID, "com.gone.app")
-        XCTAssertEqual(leftover.path, "~/Library/Preferences/\(redactor.placeholder("com.gone.app.plist"))")
+        XCTAssertEqual(leftover.path?.value, "~/Library/Preferences/\(redactor.placeholder("com.gone.app.plist"))")
         XCTAssertEqual(leftover.name, redactor.placeholder("com.gone.app.plist"))
         XCTAssertEqual(leftover.matchedRule, "Named for a bundle ID no installed app has")
     }
@@ -78,7 +79,7 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(suggestion.type, "Safe to reclaim suggestion")
         XCTAssertEqual(suggestion.matchedRule?.hasPrefix("Xcode DerivedData: "), true)
         XCTAssertEqual(suggestion.members, [redactor.placeholder("App-abc")], "a project's name is a folder name")
-        XCTAssertEqual(suggestion.evidence.first, "Location: ~/Library/Developer/Xcode/DerivedData",
+        XCTAssertEqual(suggestion.matchedRule?.contains("Location: ~/Library/Developer/Xcode/DerivedData."), true,
                        "a rule's fixed location is System's own text, sent as it is")
         XCTAssertNil(suggestion.path)
         let named = try XCTUnwrap(model.explainRequest(for: derived.id, redactor: redactor.sendingFolderNames(true)))
@@ -87,7 +88,7 @@ final class DiskExplainTests: XCTestCase {
         model.toggle(derived.id)
         let item = try request(model, try XCTUnwrap(model.row(named: "App-abc")).id)
         XCTAssertEqual(item.kind, .folder)
-        XCTAssertTrue(item.evidence.contains { $0.hasPrefix("Matches the reclaim rule Xcode DerivedData") })
+        XCTAssertTrue(item.evidence.contains { $0.kind == .reclaimRule && $0.name == "Xcode DerivedData" })
     }
 
     func testWithFolderNamesOffNoRequestCarriesAFolderNameDeeperThanTheFirstLevel() async throws {
@@ -106,25 +107,23 @@ final class DiskExplainTests: XCTestCase {
         for (id, name) in [(project, "Acme Merger"), (sub, "Sub")] {
             let request = try request(model, id)
             XCTAssertEqual(request.name, redactor.placeholder(name))
-            XCTAssertEqual(request.path?.split(separator: "/").last.map(String.init), redactor.placeholder(name))
+            XCTAssertEqual(request.path?.value.split(separator: "/").last.map(String.init), redactor.placeholder(name))
             let text = try sent(request)
             XCTAssertFalse(text.contains(name), text)
             let named = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor.sendingFolderNames(true)))
             XCTAssertEqual(named.name, name)
         }
 
-        // A suggestion not measured because a folder in a project could not be read names that folder's path.
+        // A suggestion not measured because a folder in a project could not be read says so as a category; the reason's
+        // text, which names that folder, is not sent, even with folder names on.
         model.tab = .suggestions
         let suggestion = try request(model, stale)
-        let reason = try XCTUnwrap(suggestion.sizes)
-        XCTAssertEqual(reason, "Not measured: ~/dev/\(redactor.placeholder("Acme Merger"))/"
-            + "\(redactor.placeholder("webclient")) could not be read.")
-        let text = try sent(suggestion)
-        for name in ["Acme", "Merger", "webclient"] {
-            XCTAssertFalse(text.contains(name), text)
-        }
+        XCTAssertEqual(suggestion.notMeasured, .notRead)
+        XCTAssertNil(suggestion.sizes)
         let named = try XCTUnwrap(model.explainRequest(for: stale, redactor: redactor.sendingFolderNames(true)))
-        XCTAssertEqual(named.sizes, "Not measured: ~/dev/Acme Merger/webclient could not be read.")
+        for text in [try sent(suggestion), try sent(named)] {
+            for name in ["Acme", "Merger", "webclient"] { XCTAssertFalse(text.contains(name), text) }
+        }
     }
 
     func testAnUnreadableAppOutsideTheScannedFolderIsWithheldInASuggestionsReason() async throws {
@@ -135,9 +134,8 @@ final class DiskExplainTests: XCTestCase {
         try fixture.write("Applications/Acme Notes.app/Contents/Info.plist", bytes: 10)
         try fixture.lock("Applications/Acme Notes.app/Contents")
         let read = InstalledApps.read(folders: [fixture.path("Applications")]) { _ in AppSigning(signature: nil, appGroups: nil) }
-        let app = fixture.path("Applications/Acme Notes.app")
-        XCTAssertEqual(read.unreadPaths, [app])
-        let apps = InstalledApps([DiskFixture.editor], unread: read.unread, unreadPaths: read.unreadPaths)
+        XCTAssertFalse(read.isComplete)
+        let apps = InstalledApps([DiskFixture.editor], unread: read.unread)
         let home = fixture.home
         let model = fixture.model(service: fixture.service(analyze: { result, _ in
             DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: apps,
@@ -152,15 +150,12 @@ final class DiskExplainTests: XCTestCase {
         for rule in ["App caches", "App leftovers"] {
             guard let id = model.row(named: rule)?.id else { continue }
             let request = try request(model, id)
-            let reason = try XCTUnwrap(request.sizes)
-            XCTAssertTrue(reason.hasSuffix(": ~/Applications/\(redactor.placeholder("Acme Notes.app")) has no readable "
-                + "bundle identifier."), reason)
+            XCTAssertEqual(request.notMeasured, .notRead)
             let text = try sent(request)
             for word in ["Acme", "Notes", "removed.player", "gone.app"] { XCTAssertFalse(text.contains(word), "\(rule): \(text)") }
 
             let named = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor.sendingFolderNames(true)))
-            XCTAssertTrue(named.sizes?.hasSuffix(": ~/Applications/Acme Notes.app has no readable bundle identifier.") == true,
-                          "\(named.sizes ?? "")")
+            XCTAssertFalse(try sent(named).contains("Acme Notes"), "the reason's text is not sent")
             checked += 1
         }
         XCTAssertGreaterThan(checked, 0, "\(model.rows.map(\.name))")
@@ -188,18 +183,20 @@ final class DiskExplainTests: XCTestCase {
         let placeholder = redactor.placeholder("Acme Notes.app")
 
         let item = try request(model, cache)
-        XCTAssertEqual(item.matchedRule, "Named for an installed app's bundle ID: \(placeholder)")
+        XCTAssertEqual(item.matchedRule, "Named for an installed app's bundle ID")
+        XCTAssertEqual(item.app, placeholder)
         XCTAssertEqual(item.bundleID, "com.acme.notes")
         let match = try request(model, suggestion)
-        XCTAssertEqual(match.name, "App caches: \(placeholder)")
+        XCTAssertEqual(match.name, "App caches")
+        XCTAssertEqual(match.app, placeholder)
         for request in [item, match] {
             let text = try sent(request)
             for word in ["Acme", "Notes"] { XCTAssertFalse(text.contains(word), text) }
         }
 
         let named = redactor.sendingFolderNames(true)
-        XCTAssertEqual(model.explainRequest(for: cache, redactor: named)?.matchedRule, "Named for an installed app's bundle ID: Acme Notes")
-        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App caches: Acme Notes")
+        XCTAssertEqual(model.explainRequest(for: cache, redactor: named)?.app, "Acme Notes")
+        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.app, "Acme Notes")
     }
 
     func testAGroupContainerKnownOnlyByItsTeamIDIsNotSentByItsFolderName() async throws {
@@ -238,12 +235,12 @@ final class DiskExplainTests: XCTestCase {
         }
         XCTAssertEqual(try request(model, unknownTeam).kind, .leftover)
         XCTAssertEqual(try request(model, suggestion).name, "App leftovers")
-        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App leftovers: Private Client")
+        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App leftovers")
 
         // A leftover named for a bundle ID is still sent as that bundle ID.
         let gone = try request(model, try leftovers("com.gone.app"))
         XCTAssertEqual(gone.bundleID, "com.gone.app")
-        XCTAssertEqual(gone.name, "App leftovers: com.gone.app")
+        XCTAssertEqual(gone.name, "App leftovers")
     }
 
     func testALeftoverAndAFolderAtOnePathAreExplainedSeparately() async throws {
@@ -267,75 +264,40 @@ final class DiskExplainTests: XCTestCase {
                           "facts that differ by context are not answered from one cached explanation")
     }
 
-    func testADockerSocketInAWithheldFolderIsNotSentByName() async throws {
-        // Docker's image space was not measured: the context's socket, in a folder outside the scan, does not exist.
-        let socket = fixture.path("Clients/Acme Inc. Holdings")
+    /// Docker's image space not measured is sent as a category from the reason Docker gave; the CLI's message and the
+    /// paths in it are never sent, with folder names off or on.
+    func testDockerImagesNotMeasuredAreExplainedWithACategoryNotTheCLIsMessage() async throws {
         let home = fixture.home
-        let model = fixture.model(service: fixture.service(analyze: { result, _ in
-            DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: InstalledApps([DiskFixture.editor]),
-                                                                    simulatorRuntimes: .installed([]),
-                                                                    dockerImages: .unavailable(.noSocket(at: socket))))
-        }))
-        model.scan()
-        try await DiskFixture.wait { !model.isScanning }
-        let analysis = try XCTUnwrap(model.analysis)
-        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
-        let request = try request(model, docker)
-        XCTAssertEqual(request.sizes, "Not measured: The Docker daemon is not running. No socket at "
-            + "~/Clients/\(redactor.placeholder("Acme Inc. Holdings")).", "the socket is shown whole, as other paths are")
-        let text = try sent(request)
-        for word in ["Acme", "Inc", "Holdings"] { XCTAssertFalse(text.contains(word), "\(word): \(text)") }
-        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
-                       "Not measured: The Docker daemon is not running. No socket at ~/Clients/Acme Inc. Holdings.")
-
-        // Every reason that names a path on this Mac gives it, so it is shown the same way.
-        XCTAssertEqual(ContainerUnavailable.noSocket(at: "unix://" + socket).paths, [socket])
-        XCTAssertEqual(ContainerUnavailable.contextUnreadable(path: socket, message: "denied").paths, [socket])
-        XCTAssertEqual(ContainerUnavailable.contextNotRecognized(name: "x", host: "unix://" + socket).paths, [socket])
-        XCTAssertEqual(ContainerUnavailable.remoteContext(name: "x", host: "tcp://10.0.0.2:2375").paths, [])
-    }
-
-    func testAPathInADockerMessageThatStartsWithALibraryFolderIsNotSentByName() async throws {
-        // The CLI's own message names a path System did not build into the text, so only the last line of defense sees it.
-        let message = "Could not read \(fixture.home)/Library/Caches Secret Client."
-        let home = fixture.home
-        let model = fixture.model(service: fixture.service(analyze: { result, _ in
-            DiskAnalysis(tree: result.tree, context: ReclaimContext(
-                home: home, installedApps: InstalledApps([DiskFixture.editor]), simulatorRuntimes: .installed([]),
-                dockerImages: .unavailable(.failed(command: "docker system df", status: 1, message: message))))
-        }))
-        model.scan()
-        try await DiskFixture.wait { !model.isScanning }
-        let analysis = try XCTUnwrap(model.analysis)
-        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
-        let request = try request(model, docker)
-        let text = try sent(request)
-        for word in ["Secret", "Client"] { XCTAssertFalse(text.contains(word), "\(word): \(text)") }
-        XCTAssertTrue(request.sizes?.hasPrefix("Not measured: docker system df failed with exit status 1: Could not read "
-            + "~/Library/folder-") == true, request.sizes ?? "")
-        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
-                       "Not measured: docker system df failed with exit status 1: Could not read ~/Library/Caches Secret Client.")
-    }
-
-    func testAHomePathInsideAFolderNameInADockerMessageIsNotSentByName() async throws {
-        let message = "No such file: \(fixture.home)/Clients/Acme ~/Private Client/docker.sock"
-        let home = fixture.home
-        let model = fixture.model(service: fixture.service(analyze: { result, _ in
-            DiskAnalysis(tree: result.tree, context: ReclaimContext(
-                home: home, installedApps: InstalledApps([DiskFixture.editor]), simulatorRuntimes: .installed([]),
-                dockerImages: .unavailable(.failed(command: "docker system df", status: 1, message: message))))
-        }))
-        model.scan()
-        try await DiskFixture.wait { !model.isScanning }
-        let analysis = try XCTUnwrap(model.analysis)
-        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
-        let text = try sent(try request(model, docker))
-        for word in ["Acme", "Private", "Client ", "Client/", "docker.sock"] {
-            XCTAssertFalse(text.contains(word), "\(word): \(text)")
+        let cases: [(ContainerUnavailable?, ExplainNotMeasured)] = [
+            (.daemonNotRunning(message: "No socket at \(home)/Clients/Acme Inc. Holdings."), .dockerNotRunning),
+            (.failed(command: "docker system df", status: 1,
+                     message: "No such file: \(home)/Clients/Acme ~/Private Client/docker.sock\nSecret Client"), .dockerFailed),
+            (.contextUnreadable(path: "\(home)/Clients/Acme Inc. Holdings/config.json", message: "Private"),
+             .dockerContextNotOnThisMac),
+            (.cliNotFound, .dockerNotFound), (.cancelled, .dockerStopped), (nil, .dockerNotReported)
+        ]
+        for (reason, category) in cases {
+            let usage: DockerImageUsage = reason.map { .unavailable($0) }
+                ?? .reported(DockerImageSpace(count: nil, active: nil, size: nil, reclaimable: nil), observedAt: Date())
+            let model = fixture.model(service: fixture.service(analyze: { result, _ in
+                DiskAnalysis(tree: result.tree, context: ReclaimContext(
+                    home: home, installedApps: InstalledApps([DiskFixture.editor]), simulatorRuntimes: .installed([]),
+                    dockerImages: usage))
+            }))
+            model.scan()
+            try await DiskFixture.wait { !model.isScanning }
+            let analysis = try XCTUnwrap(model.analysis)
+            let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
+            let request = try request(model, docker)
+            XCTAssertEqual(request.notMeasured, category, "\(String(describing: reason))")
+            XCTAssertNil(request.sizes)
+            let named = try XCTUnwrap(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true)))
+            for text in [try sent(request), try sent(named)] {
+                for word in ["Acme", "Holdings", "Private", "Secret", "docker.sock", "config.json"] {
+                    XCTAssertFalse(text.contains(word), "\(word): \(text)")
+                }
+            }
         }
-        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
-                       "Not measured: docker system df failed with exit status 1: No such file: "
-                           + "~/Clients/Acme ~/Private Client/docker.sock")
     }
 
     func testAScanOfTheHomeFolderThroughTheDataVolumeIsRedactedAsTheHomeFolder() async throws {
@@ -347,10 +309,10 @@ final class DiskExplainTests: XCTestCase {
         model.open(try XCTUnwrap(model.row(named: "Documents")).id)
         let sub = try XCTUnwrap(model.row(named: "Sub")).id
         let request = try request(model, sub)
-        XCTAssertEqual(request.path, "~/Documents/\(redactor.placeholder("Sub"))")
+        XCTAssertEqual(request.path?.value, "~/Documents/\(redactor.placeholder("Sub"))")
         XCTAssertEqual(request.name, redactor.placeholder("Sub"))
         XCTAssertFalse(try sent(request).contains("/System/Volumes"))
-        XCTAssertEqual(model.explainRequest(for: sub, redactor: redactor.sendingFolderNames(true))?.path, "~/Documents/Sub")
+        XCTAssertEqual(model.explainRequest(for: sub, redactor: redactor.sendingFolderNames(true))?.path?.value, "~/Documents/Sub")
     }
 
     func testAScanNotYetAnalyzedIsNotExplainedAndACancelledOneIsNotAnsweredAsAnAnalyzedOne() async throws {

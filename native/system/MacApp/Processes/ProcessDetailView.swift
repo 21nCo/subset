@@ -43,7 +43,7 @@ struct ProcessDetailView: View {
                     }
                     if let row = model.selection {
                         Divider()
-                        let key = ProcessesWindowModel.explainKey(for: row, in: model.layer)
+                        let key = model.explainKey(for: row)
                         ExplainPanel(center: explain, key: key,
                                      request: { [model] in model.explainRequest(for: row, key: key, redactor: $0) },
                                      openSettings: openSettings)

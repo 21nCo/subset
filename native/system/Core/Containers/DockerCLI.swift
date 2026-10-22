@@ -94,7 +94,7 @@ public struct DockerCLI: Sendable {
         }
         guard let endpoint = context.endpoint else {
             return .unavailable(executable: cli, context: context,
-                                reason: .noSocket(at: context.missingSocket ?? context.host))
+                                reason: .daemonNotRunning(message: "No socket at \(context.missingSocket ?? context.host)."))
         }
         guard context.runtime != nil else {
             return .unavailable(executable: cli, context: context,
@@ -363,32 +363,6 @@ public enum ContainerUnavailable: Error, Equatable, Sendable {
     case unparsableOutput(command: String)
     /// The run was stopped before it finished, because the main window was hidden.
     case cancelled
-
-    /// The daemon is not running: its context's socket, a path on this Mac, does not exist.
-    public static func noSocket(at path: String) -> ContainerUnavailable {
-        .daemonNotRunning(message: noSocketPrefix + path + ".")
-    }
-
-    private static let noSocketPrefix = "No socket at "
-
-    /// The paths on this Mac that `reason` names, so text built from it can show them as other paths are shown. A
-    /// message the CLI printed may name others.
-    public var paths: [String] {
-        switch self {
-        case let .contextUnreadable(path, _):
-            [path]
-        case let .remoteContext(_, host), let .contextNotRecognized(_, host):
-            host.hasPrefix("unix://") ? [Self.socketPath(host)] : []
-        case let .daemonNotRunning(message) where message.hasPrefix(Self.noSocketPrefix) && message.hasSuffix("."):
-            [Self.socketPath(String(message.dropFirst(Self.noSocketPrefix.count).dropLast()))]
-        default:
-            []
-        }
-    }
-
-    private static func socketPath(_ host: String) -> String {
-        host.hasPrefix("unix://") ? String(host.dropFirst("unix://".count)) : host
-    }
 
     public var reason: String {
         switch self {

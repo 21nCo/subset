@@ -84,6 +84,7 @@ public enum ExplainPrompt {
         suggestedOrigin: only when the facts say an origin may be suggested, the app, tool, or vendor it most likely \
         belongs to; otherwise leave it empty.
         Write plain text: no Markdown, HTML, links, or code blocks. Paths show the home folder as ~, and folder-… \
-        names stand for folders whose names were withheld.
+        names stand for folders whose names were withheld. Evidence lines name a kind of evidence, then the values it \
+        names.
         """
 }

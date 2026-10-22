@@ -5,8 +5,8 @@ import XCTest
 import FoundationModels
 #endif
 
-/// The AI contract shared with SET-50 without a real model: redaction, the token budget, schema validation, the
-/// suggested origin, the provider setting, the session cache, and the availability mapping.
+/// The AI contract shared with SET-50 without a real model: redaction, the structured fields, the token budget, schema
+/// validation, the suggested origin, the provider setting, the session cache, and the availability mapping.
 @MainActor
 final class ExplainTests: XCTestCase {
     private let redactor = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: ["jdoe", "Jane Doe"],
@@ -15,22 +15,29 @@ final class ExplainTests: XCTestCase {
     // MARK: Redaction
 
     func testPathsShowHomeAsTildeAndReplaceDeeperFolderNamesUnlessFolderNamesAreSent() {
-        XCTAssertEqual(redactor.path("/Users/jdoe"), "~")
-        let deep = redactor.path("/Users/jdoe/dev/acme-merger/api/server")
+        XCTAssertEqual(redactor.path("/Users/jdoe").value, "~")
+        let deep = redactor.path("/Users/jdoe/dev/acme-merger/api/server").value
         let client = redactor.placeholder("acme-merger")
         XCTAssertEqual(deep, "~/dev/\(client)/\(redactor.placeholder("api"))/\(redactor.placeholder("server"))")
         XCTAssertTrue(client.hasPrefix("folder-"))
         // The same folder name gets the same placeholder, the explained item's own name included.
-        XCTAssertEqual(redactor.path("/Users/jdoe/dev/acme-merger"), "~/dev/\(client)")
+        XCTAssertEqual(redactor.path("/Users/jdoe/dev/acme-merger").value, "~/dev/\(client)")
         XCTAssertEqual(redactor.name("acme-merger", ofPath: "/Users/jdoe/dev/acme-merger"), client)
+        XCTAssertEqual(redactor.name(ofPath: "/Users/jdoe/dev/acme-merger"), client)
         XCTAssertEqual(redactor.name("Developer", ofPath: "/Users/jdoe/dev"), "Developer", "the first level is sent")
         XCTAssertEqual(redactor.name("Editor", ofPath: "/Applications/Editor.app"), "Editor", "outside the home folder")
         XCTAssertEqual(redactor.sendingFolderNames(true).name("acme-merger", ofPath: "/Users/jdoe/dev/acme-merger"),
                        "acme-merger")
+        // A folder name may hold spaces, full stops, brackets, or `~/`: each component is withheld whole.
+        let spaced = redactor.path("/Users/jdoe/Clients/Acme Inc. ~/Private Client (old)/data.sock").value
+        XCTAssertEqual(spaced, "~/Clients/\(redactor.placeholder("Acme Inc. ~"))/"
+            + "\(redactor.placeholder("Private Client (old)"))/\(redactor.placeholder("data.sock"))")
         // macOS's own folders in ~/Library say nothing about the user; what is inside them does.
-        XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches/com.example.app/data"),
+        XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches/com.example.app/data").value,
                        "~/Library/Caches/\(redactor.placeholder("com.example.app"))/\(redactor.placeholder("data"))")
-        XCTAssertEqual(redactor.path("/Users/jdoe/Projects/Library/Caches"),
+        XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches Secret Client").value,
+                       "~/Library/\(redactor.placeholder("Caches Secret Client"))", "only exactly macOS's own folder")
+        XCTAssertEqual(redactor.path("/Users/jdoe/Projects/Library/Caches").value,
                        "~/Projects/\(redactor.placeholder("Library"))/\(redactor.placeholder("Caches"))")
         // Another session's key gives other placeholders.
         let other = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: [], sendFolderNames: false,
@@ -38,229 +45,43 @@ final class ExplainTests: XCTestCase {
         XCTAssertNotEqual(other.placeholder("acme-merger"), client)
 
         let sending = redactor.sendingFolderNames(true)
-        XCTAssertEqual(sending.path("/Users/jdoe/dev/acme-merger/api/server"), "~/dev/acme-merger/api/server")
+        XCTAssertEqual(sending.path("/Users/jdoe/dev/acme-merger/api/server").value, "~/dev/acme-merger/api/server")
     }
 
-    func testTheAccountNameIsRemovedWhereverItAppearsButNotInsideOtherWords() {
-        XCTAssertEqual(redactor.path("/Users/jdoe/jdoe-notes/file"), "~/[user]-notes/\(redactor.placeholder("file"))")
-        XCTAssertEqual(redactor.text("Started by JDOE in /Users/jdoe/dev for Jane Doe; see /Users/jdoe"),
-                       "Started by [user] in ~/dev for [user]; see ~")
-        XCTAssertEqual(redactor.text("jdoesmith and /Users/jdoeother"), "jdoesmith and /Users/jdoeother")
-        XCTAssertEqual(redactor.path("/Volumes/Backup/jdoe/archive"), "/Volumes/Backup/[user]/archive")
-        XCTAssertEqual(redactor.sendingFolderNames(true).path("/Users/jdoe/dev/jdoe/x"), "~/dev/[user]/x")
-    }
-
-    func testPathsInFreeTextHaveTheirDeepFolderNamesWithheldToo() {
-        let client = redactor.placeholder("secret-client")
-        // A path in free text runs to the end of its clause, and a last name that is not a placeholder is withheld with
-        // the words after it, since a folder name may hold spaces.
-        XCTAssertEqual(redactor.text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
-                       "~/dev/\(client)/\(redactor.placeholder("node_modules could not be read")).")
-        // A withheld name that punctuation ends may go on past it, so the words after it up to the next path are withheld
-        // too; punctuation alone is kept. The next path may be more of that name, so it has no first level.
-        XCTAssertEqual(redactor.text("Runs `~/dev/secret-client/tool`, see (~/dev/secret-client); ~/dev: ok"),
-                       "Runs `~/dev/\(client)/\(redactor.placeholder("tool`, see")) (~/\(redactor.placeholder("dev"))/"
-                        + "\(client)); ~/\(redactor.placeholder("dev: ok"))")
-        // ~/Library's own folders are read whole, spaces included, and what is inside them is withheld.
-        XCTAssertEqual(redactor.text("/Users/jdoe/Library/Application Support/Acme/db is not a folder."),
-                       "~/Library/Application Support/\(redactor.placeholder("Acme"))/"
-                        + "\(redactor.placeholder("db is not a folder")).")
-        XCTAssertEqual(redactor.text("~/Library/Application Support."), "~/Library/Application Support.")
-        XCTAssertEqual(redactor.text("~/Library/Application Support could not be read."),
-                       "~/Library/\(redactor.placeholder("Application Support could not be read")).",
-                       "a raw path's end cannot be told from the words after it")
-        // A path put in the text where it was built ends at its mark, so a folder keeps one placeholder in every field,
-        // and its words are kept.
-        let api = "/Users/jdoe/dev/secret-client/api"
-        XCTAssertEqual(redactor.text("Working directory \(redactor.pathInText(api)) could not be read: denied."),
-                       "Working directory \(redactor.path(api)) could not be read: denied.")
-        XCTAssertEqual(redactor.text("\(redactor.pathInText("/Users/jdoe/Library/Application Support")) could not be read."),
-                       "~/Library/Application Support could not be read.")
-        XCTAssertEqual(redactor.pathInText("/tmp/secret-client"), "/tmp/secret-client", "only a home path is marked")
-        XCTAssertEqual(redactor.text("/tmp/secret-client, then ~/dev"), "/tmp/secret-client, then ~/dev")
-        XCTAssertEqual(redactor.text("~ and ~/dev; /tmp/secret-client"),
-                       "~ and ~/dev; /\(redactor.placeholder("tmp"))/\(redactor.placeholder("secret-client"))",
-                       "an absolute path after a raw home path may be more of its names")
-        XCTAssertEqual(redactor.sendingFolderNames(true).text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
-                       "~/dev/secret-client/node_modules could not be read.")
-    }
-
-    func testARawPathWithSpacesInFreeTextLeavesNoWordOfAWithheldName() {
-        let raw = "/Users/jdoe/dev/Acme Merger/web client could not be read. 2 more places could not be searched."
-        let sent = redactor.text(raw)
-        for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(sent.contains(word), sent) }
-        XCTAssertEqual(sent, "~/dev/\(redactor.placeholder("Acme Merger"))/"
-            + redactor.placeholder("web client could not be read. 2 more places could not be searched") + ".",
-            "the full stop may be inside the name, so the rest of the line is withheld")
-        // A name with a full stop, a bracket, or an apostrophe stays in the path.
-        for name in ["Notes v1.2.app", "Photos (old)", "Bob's Stuff"] {
-            let text = redactor.text("Runs ~/Applications/\(name)/Contents/MacOS/tool now")
-            XCTAssertFalse(text.contains(name), text)
-            XCTAssertFalse(text.contains("tool now"), text)
-        }
-        XCTAssertEqual(redactor.text(sent), sent, "redacting twice changes nothing")
-        // A clause end a slash follows is inside a folder name, so the path goes on.
-        for name in ["Acme Inc. Holdings", "Photos (Paris) backup", "Acme; Merger", "Draft] v2"] {
-            let text = redactor.text("/Users/jdoe/Clients/\(name)/node_modules could not be read.")
-            for word in name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-                XCTAssertFalse(text.contains(word), "\(word): \(text)")
-            }
-            XCTAssertTrue(text.hasPrefix("~/Clients/\(redactor.placeholder(name))/"), text)
-        }
-        // A home path after it starts its own, so the clause end stays the end, but with no first level, since it may
-        // be more of its names too; an absolute path after it may be more of its names, so it is withheld with them.
-        let app = "/Users/jdoe/Applications/Acme Notes.app"
-        let unread = " has no readable bundle identifier."
-        for next in [" /Applications/Other.app could not be read.", " Runs `/usr/bin/tool`.", " See (~/dev)."] {
-            XCTAssertEqual(redactor.text(redactor.pathInText(app) + unread + next), redactor.path(app) + unread + next)
-            let rawSent = redactor.text(app + unread + next)
-            XCTAssertTrue(rawSent.hasPrefix("~/Applications/folder-"), rawSent)
-            XCTAssertFalse(rawSent.contains("Acme") || rawSent.contains("Notes"), rawSent)
-        }
-        XCTAssertEqual(redactor.text(app + unread + " /Applications/Other.app could not be read."),
-                       "~/Applications/\(redactor.placeholder("Acme Notes.app has no readable bundle identifier. "))/"
-                        + "\(redactor.placeholder("Applications"))/\(redactor.placeholder("Other.app could not be read")).")
-        XCTAssertTrue(redactor.text(app + unread + " See (~/dev).").hasSuffix(" (~/\(redactor.placeholder("dev")))."))
-        // Another path in the clause starts its own.
-        XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
-                       "~/Library/Caches/\(redactor.placeholder("com.a.b may be data of"))"
-                        + " ~/\(redactor.placeholder("Applications"))/"
-                        + "\(redactor.placeholder("Acme Notes.app: unread")).")
-        XCTAssertEqual(redactor.sendingFolderNames(true).text(raw),
-                       "~/dev/Acme Merger/web client could not be read. 2 more places could not be searched.")
-    }
-
-    func testAWithheldNameThatPunctuationSeemsToEndLeavesNoWordOfIt() {
-        // No slash follows these clause ends, so only the rest of the line tells whether they were inside the name.
-        for raw in ["No socket at /Users/jdoe/Clients/Acme Inc. Holdings.",
-                    "No socket at /Users/jdoe/Clients/Acme Inc. Holdings",
-                    "See (~/Clients/Acme Inc) Holdings) now", "Runs `~/Clients/Acme Inc` Holdings`",
-                    "At ~/Clients/Acme Inc; Holdings] and more", "At ~/Clients/Acme Inc} Holdings."] {
-            let sent = redactor.text(raw)
-            for word in ["Acme", "Inc", "Holdings"] { XCTAssertFalse(sent.contains(word), "\(word): \(sent)") }
-            XCTAssertTrue(sent.contains("~/Clients/folder-"), sent)
-        }
-        // The next line without a slash and the next home path are their own, that path with no first level.
-        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings\nDone."),
-                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings"))\nDone.")
-        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings, then ~/Applications."),
-                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings, then"))"
-                        + " ~/\(redactor.placeholder("Applications")).")
-        XCTAssertEqual(redactor.sendingFolderNames(true).text("No socket at /Users/jdoe/Clients/Acme Inc. Holdings."),
-                       "No socket at ~/Clients/Acme Inc. Holdings.")
-    }
-
-    func testARawLastNameIsKeptOnlyWhenItIsExactlyANameSentAsItIs() {
-        // A raw path's last name may start with one of ~/Library's own folders or a placeholder and go on.
-        let raws = ["Could not read /Users/jdoe/Library/Caches Secret Client.",
-                    "Could not read /Users/jdoe/Library/Application Support Secret Client.",
-                    "Could not read /Users/jdoe/Library/Caches. Secret Client",
-                    "Could not read ~/Clients/folder-abcdef Secret Client."]
-        for raw in raws {
-            let sent = redactor.text(raw)
-            let words = sent.replacingOccurrences(of: "~/Clients/", with: "~/")
-            XCTAssertFalse(words.contains("Secret") || words.contains("Client"), sent)
-            XCTAssertTrue(sent.hasPrefix("Could not read ~/"), sent)
-            XCTAssertTrue(redactor.sendingFolderNames(true).text(raw).hasSuffix(raw.hasSuffix(".") ? "Secret Client." : "Secret Client"))
-        }
-        // Exactly such a name, with punctuation after it, is kept.
-        for kept in ["~/Library/Caches.", "~/Library/Application Support)", "~/Clients/folder-abcdef;", "~/Library/Caches"] {
-            XCTAssertEqual(redactor.text("At \(kept)"), "At \(kept)")
-        }
-        // A mark ends a path only where this session's redactor put it.
-        let other = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: [], sendFolderNames: false,
-                                    key: Array(repeating: 9, count: 32))
-        let forged = other.pathInText("/Users/jdoe/Library/Caches") + " Secret Client"
-        XCTAssertFalse(redactor.text(forged).contains("Secret"), redactor.text(forged))
-        XCTAssertEqual(other.text(forged), "~/Library/Caches Secret Client")
-    }
-
-    func testARawPathRunsToItsLastSlashAndTheHomeFolderInAnyCaseOrAsTheAccountsTildeIsHome() {
-        // A name may hold spaces and line breaks but no slash, so a space or a line break before one does not end the
-        // path; the home folder matches in any case, as APFS does, and `~jdoe` is the account's home.
-        let raws = ["Could not read /Users/jdoe/Clients/Acme /Secret Project/data.",
-                    "Could not read /Users/jdoe/Clients/Acme\n/Secret Project/data.",
-                    "Could not read /Users/JDOE/Clients/Acme Secret Project data",
-                    "Could not read ~jdoe/Clients/Acme Secret Project data"]
-        for raw in raws {
-            let sent = redactor.text(raw)
-            for word in ["Acme", "Secret", "Project", "data", "JDOE", "jdoe"] {
-                XCTAssertFalse(sent.contains(word), "\(word): \(sent)")
-            }
-            XCTAssertTrue(sent.hasPrefix("Could not read ~/Clients/folder-"), sent)
-            let named = redactor.sendingFolderNames(true).text(raw)
-            for word in ["Acme", "Secret", "Project", "data"] { XCTAssertTrue(named.contains(word), "\(word): \(named)") }
-            XCTAssertTrue(named.hasPrefix("Could not read ~/Clients/Acme"), named)
-        }
-        XCTAssertEqual(redactor.path("/Users/JDoe/dev/acme-merger"), "~/dev/\(redactor.placeholder("acme-merger"))")
-        XCTAssertTrue(redactor.isInHome("/USERS/jdoe"))
-        XCTAssertEqual(redactor.text("~jdoesmith/x and ~jdoe"), "~jdoesmith/x and ~", "only the account's own ~")
-    }
-
-    func testAHomePathInsideARawPathsNameHasNoFirstLevel() {
-        // A name may hold `~/` after a space, a bracket, a quote, a backtick, or a line break, so what follows it is
-        // still the raw path's names, not a first-level folder.
-        let raws = ["Could not read /Users/jdoe/Clients/Acme ~/Private Client/data.sock.",
-                    "Could not read /Users/jdoe/Clients/Acme (~/Private Client/data.sock.",
-                    "Could not read /Users/jdoe/Clients/Acme \"~/Private Client/data.sock.",
-                    "Could not read /Users/jdoe/Clients/Acme `~/Private Client/data.sock.",
-                    "Could not read /Users/jdoe/Clients/Acme\n~/Private Client/data.sock.",
-                    "Could not read /Users/jdoe/Clients/Acme ~/Library/Caches Private Client."]
-        for raw in raws {
-            let sent = redactor.text(raw)
-            for word in ["Acme", "Private", "Client ", "Client/", "Client.", "data", "sock", "Library", "Caches"] {
-                XCTAssertFalse(sent.contains(word), "\(word): \(sent)")
-            }
-            XCTAssertTrue(sent.hasPrefix("Could not read ~/Clients/folder-"), sent)
-            XCTAssertEqual(redactor.sendingFolderNames(true).text(raw),
-                           raw.replacingOccurrences(of: "/Users/jdoe", with: "~"))
-        }
-        // Placeholders after a raw path are kept, so redacting twice changes nothing.
-        let twice = redactor.text("Could not read /Users/jdoe/Clients/Acme ~/Private Client/data.sock.")
-        XCTAssertEqual(redactor.text(twice), twice)
-        // A path System put in the text is still a path: its first level and the words after its mark are kept.
-        let marked = "Could not read /Users/jdoe/Clients/Acme ~/Secret; "
-            + redactor.pathInText("/Users/jdoe/Documents/Acme Notes") + " is fine."
-        XCTAssertEqual(redactor.text(marked), "Could not read ~/Clients/\(redactor.placeholder("Acme")) "
-            + "~/\(redactor.placeholder("Secret")); ~/Documents/\(redactor.placeholder("Acme Notes")) is fine.")
-        // A raw path that is the text's first path keeps its first level.
-        XCTAssertEqual(redactor.text("~/Clients/Acme Secret"), "~/Clients/\(redactor.placeholder("Acme Secret"))")
-    }
-
-    func testTheHomeFolderThroughTheDataVolumeIsTheHomeFolder() {
+    func testTheHomeFolderInAnyCaseOrThroughTheDataVolumeIsTheHomeFolder() {
         let raw = "/System/Volumes/Data/Users/jdoe/dev/acme-merger/bin/tool"
-        let client = redactor.placeholder("acme-merger")
-        let shown = "~/dev/\(client)/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool"))"
-        XCTAssertEqual(redactor.path(raw), shown)
+        let shown = "~/dev/\(redactor.placeholder("acme-merger"))/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool"))"
+        XCTAssertEqual(redactor.path(raw).value, shown)
         XCTAssertEqual(redactor.name("tool", ofPath: raw), redactor.placeholder("tool"))
         XCTAssertTrue(redactor.isInHome(raw))
-        XCTAssertEqual(redactor.text("\(raw) could not be read."),
-                       "~/dev/\(client)/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool could not be read")).")
-        XCTAssertEqual(redactor.paths(in: "\(raw) could not be read.", known: [raw]),
-                       redactor.pathInText(raw) + " could not be read.")
-        XCTAssertEqual(redactor.text(redactor.paths(in: "\(raw) could not be read.", known: [raw])),
-                       shown + " could not be read.")
-        XCTAssertEqual(redactor.sendingFolderNames(true).path(raw), "~/dev/acme-merger/bin/tool")
-        XCTAssertEqual(redactor.path("/System/Volumes/Data/Users/jdoe"), "~")
+        XCTAssertEqual(redactor.sendingFolderNames(true).path(raw).value, "~/dev/acme-merger/bin/tool")
+        XCTAssertEqual(redactor.path("/System/Volumes/Data/Users/jdoe").value, "~")
+        // APFS ignores case, so the home folder matches in any case.
+        XCTAssertEqual(redactor.path("/USERS/JDoe/dev/acme-merger").value, "~/dev/\(redactor.placeholder("acme-merger"))")
+        XCTAssertFalse(redactor.isInHome("/Users/jdoeother/dev"))
         // A home folder given through the Data volume is not given it twice.
         let onData = ExplainRedactor(homes: ["/System/Volumes/Data/Users/jdoe"], accountNames: [], sendFolderNames: false,
                                      key: Array(repeating: 7, count: 32))
-        XCTAssertEqual(onData.path(raw), shown)
-        XCTAssertEqual(onData.path("/System/Volumes/Data/System/Volumes/Data/Users/jdoe/x"),
+        XCTAssertEqual(onData.path(raw).value, shown)
+        XCTAssertEqual(onData.path("/System/Volumes/Data/System/Volumes/Data/Users/jdoe/x").value,
                        "/System/Volumes/Data/System/Volumes/Data/Users/jdoe/x")
     }
 
-    func testKnownPathsInFreeTextAreShownWholeAndKeepTheWordsAfterThem() {
-        let app = "/Users/jdoe/Applications/Acme Notes.app"
-        let text = "\(app) could not be read: Permission denied. /Users/jdoe/Applications is fine."
-        let shown = redactor.paths(in: text, known: [app, "/Users/jdoe/Applications/Acme", "/Applications/Other.app"])
-        XCTAssertEqual(shown, "\(redactor.pathInText(app)) could not be read: Permission denied. /Users/jdoe/Applications "
-            + "is fine.")
-        XCTAssertEqual(redactor.text(shown), "~/Applications/\(redactor.placeholder("Acme Notes.app")) could not be read: "
-            + "Permission denied. ~/Applications is fine.")
-        let sending = redactor.sendingFolderNames(true)
-        XCTAssertEqual(sending.text(sending.paths(in: text, known: [app])),
-                       "~/Applications/Acme Notes.app could not be read: Permission denied. ~/Applications is fine.")
+    func testTheAccountNameIsRemovedFromPathsNamesAndIdentifiersButNotInsideOtherWords() {
+        XCTAssertEqual(redactor.path("/Users/jdoe/jdoe-notes/file").value, "~/[user]-notes/\(redactor.placeholder("file"))")
+        XCTAssertEqual(redactor.path("/Volumes/Backup/jdoe/archive").value, "/Volumes/Backup/[user]/archive")
+        XCTAssertEqual(redactor.path("/Volumes/jdoesmith/archive").value, "/Volumes/jdoesmith/archive")
+        XCTAssertEqual(redactor.sendingFolderNames(true).path("/Users/jdoe/dev/JDOE/x").value, "~/dev/[user]/x")
+        var facts = ExplainFacts(kind: .processGroup, name: "Jane Doe's tools")
+        facts.vendor = "Jane Doe"
+        facts.members = ["jdoe-sync", "jdoesmith"]
+        facts.evidence = [ExplainFacts.Evidence(.signedByTeam, name: "Jane Doe", identifier: "JDOE123")]
+        let request = ExplainRequest(facts, redactor: redactor)
+        XCTAssertEqual(request.name, "[user]'s tools")
+        XCTAssertEqual(request.vendor, "[user]")
+        XCTAssertEqual(request.members, ["[user]-sync", "jdoesmith"])
+        XCTAssertEqual(request.evidence.first?.name, "[user]")
+        XCTAssertEqual(request.evidence.first?.identifier, "JDOE123", "a word that only starts with it is kept")
     }
 
     func testTheProcessNameDisclosureIsInSettingsAndTheFieldGuide() throws {
@@ -270,38 +91,96 @@ final class ExplainTests: XCTestCase {
         XCTAssertFalse(name.contains("process, file"), "a process's name is not said to be withheld: \(name)")
     }
 
-    func testNoFieldOfARequestCarriesTheHomePathAccountNameOrDeepFolderNames() throws {
-        var facts = ExplainFacts(kind: .process, name: "server")
-        facts.path = "/Users/jdoe/dev/acme-merger/bin/server"
-        facts.type = "Process in jdoe's terminal"
-        facts.evidence = ["Working directory \(redactor.path("/Users/jdoe/dev/acme-merger"))",
-                          "Child of zsh in /Users/jdoe", "/Users/jdoe/dev/acme-merger/.git could not be read."]
-        facts.sizes = "Not measured: /Users/jdoe/dev/acme-merger could not be read."
-        facts.members = ["Jane Doe helper"]
-        facts.matchedRule = "Terminal session"
-        let request = ExplainRequest(facts, redactor: redactor)
-        let json = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
-        for sent in [json, request.promptText] {
-            XCTAssertFalse(sent.contains("/Users/"), sent)
-            XCTAssertFalse(sent.localizedCaseInsensitiveContains("jdoe"), sent)
-            XCTAssertFalse(sent.contains("Jane Doe"), sent)
-            XCTAssertFalse(sent.contains("acme-merger"), sent)
+    // MARK: Structured fields
+
+    /// A request is made of the owner-approved structured fields only (SET-49 owner amendment, 2026-10-22): the item
+    /// kind, names, identifiers, System's fixed words for its type, sizes, age, and rule, paths as path values, evidence
+    /// as closed kinds with typed values, and closed categories for what was not measured or read. Adding a field, or
+    /// giving one another type, fails here until it is approved and listed.
+    func testARequestAndItsEvidenceHoldOnlyStructuredFields() throws {
+        let optionalText = "Optional<String>"
+        let expected: [String: String] = [
+            "kind": "ExplainItemKind", "name": "String", "type": optionalText, "group": optionalText,
+            "path": "Optional<ExplainPath>", "app": optionalText, "bundleID": optionalText, "signingID": optionalText,
+            "teamID": optionalText, "vendor": optionalText, "launchdLabel": optionalText, "sizes": optionalText,
+            "notMeasured": "Optional<ExplainNotMeasured>", "age": optionalText, "matchedRule": optionalText,
+            "evidence": "Array<ExplainEvidence>", "members": "Array<String>", "maySuggestOrigin": "Bool", "truncated": "Bool"
+        ]
+        func fields(_ value: Any) -> [String: String] {
+            Dictionary(uniqueKeysWithValues: Mirror(reflecting: value).children.map {
+                ($0.label ?? "?", String(describing: type(of: $0.value)))
+            })
         }
-        XCTAssertEqual(request.path, "~/dev/\(redactor.placeholder("acme-merger"))/\(redactor.placeholder("bin"))/"
-            + redactor.placeholder("server"))
-        XCTAssertEqual(request.type, "Process in [user]'s terminal")
+        XCTAssertEqual(fields(request()), expected)
+        XCTAssertEqual(Set(expected.keys), Set(ExplainRequest.CodingKeys.allCases.map(\.rawValue)))
+        let evidence = ExplainRequest(ExplainFacts(kind: .process, name: "x").with {
+            $0.evidence = [ExplainFacts.Evidence(.launchdJob, path: "/Users/jdoe/Library/LaunchAgents/a.plist", identifier: "a")]
+        }, redactor: redactor).evidence
+        XCTAssertEqual(fields(try XCTUnwrap(evidence.first)), [
+            "kind": "Kind", "path": "Optional<ExplainPath>", "name": optionalText, "identifier": optionalText,
+            "failure": "Optional<ExplainFailure>"
+        ])
+    }
+
+    func testPathValuesAreRedactedComponentByComponentAndSentAsValuesOfTheirOwn() throws {
+        let project = "/Users/jdoe/dev/acme-merger"
+        var facts = ExplainFacts(kind: .process, name: "server")
+        facts.path = project + "/bin/server"
+        facts.evidence = [ExplainFacts.Evidence(.workingDirectory, path: project),
+                          ExplainFacts.Evidence(.launchdJob, path: "/Users/jdoe/Library/LaunchAgents/Acme Merger/agent.plist",
+                                                identifier: "com.acme.agent"),
+                          ExplainFacts.Evidence(.signatureUnavailable, failure: .denied)]
+        let request = ExplainRequest(facts, redactor: redactor)
+        XCTAssertEqual(request.path, redactor.path(project + "/bin/server"))
+        XCTAssertEqual(request.evidence.map(\.path), [redactor.path(project),
+                                                      redactor.path("/Users/jdoe/Library/LaunchAgents/Acme Merger/agent.plist"),
+                                                      nil])
+        XCTAssertEqual(request.evidence[1].path?.value, "~/Library/LaunchAgents/\(redactor.placeholder("Acme Merger"))/"
+            + redactor.placeholder("agent.plist"))
+        let json = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(object["path"] as? String, request.path?.value, "a path is sent as a value of its own")
+        for sent in [json, request.promptText] {
+            for word in ["/Users/", "jdoe", "acme-merger", "Acme", "Merger"] { XCTAssertFalse(sent.contains(word), "\(word): \(sent)") }
+        }
+        XCTAssertTrue(request.promptText.contains("- Signature unavailable: macOS denied the read"), request.promptText)
 
         let named = ExplainRequest(facts, redactor: redactor.sendingFolderNames(true))
-        XCTAssertEqual(named.path, "~/dev/acme-merger/bin/server")
-        XCTAssertEqual(named.sizes, "Not measured: ~/dev/acme-merger could not be read.")
+        XCTAssertEqual(named.path?.value, "~/dev/acme-merger/bin/server")
+        XCTAssertEqual(named.evidence[1].path?.value, "~/Library/LaunchAgents/Acme Merger/agent.plist")
+    }
+
+    /// Why a signal could not be read, or a suggestion not measured, is sent as a category: the error's text, a tool's
+    /// message, and the paths in them are not.
+    func testFailureReasonsAreSentAsCategoriesNotAsTheirText() {
+        let secret = "/Users/jdoe/Clients/Acme Secret\nfailed"
+        XCTAssertEqual(ExplainFailure(.unexpectedResult(secret)), .unexpectedResult)
+        XCTAssertEqual(ExplainFailure(.symbolMissing(secret)), .unsupportedMacOS)
+        XCTAssertEqual(ExplainFailure(.systemError(EACCES)), .systemError)
+        XCTAssertEqual(ExplainFailure(.incompleteScan([LaunchdScanFailure(path: secret, code: EACCES)])), .launchdPlistsNotAllRead)
+        XCTAssertEqual(ExplainNotMeasured(docker: .failed(command: "docker system df", status: 1, message: secret)), .dockerFailed)
+        XCTAssertEqual(ExplainNotMeasured(docker: .daemonNotRunning(message: secret)), .dockerNotRunning)
+        XCTAssertEqual(ExplainNotMeasured(docker: .contextUnreadable(path: secret, message: secret)), .dockerContextNotOnThisMac)
+        XCTAssertEqual(ExplainNotMeasured(docker: .cancelled), .dockerStopped)
+        XCTAssertEqual(ExplainNotMeasured(docker: nil), .dockerNotReported)
+        for title in ExplainFailure.allCases.map(\.title) + ExplainNotMeasured.allCases.map(\.title)
+            + ExplainEvidence.Kind.allCases.map(\.title) {
+            XCTAssertFalse(title.contains("/") || title.isEmpty, title)
+        }
+        var facts = ExplainFacts(kind: .suggestion, name: "Docker images")
+        facts.notMeasured = .dockerFailed
+        facts.evidence = [ExplainFacts.Evidence(.workingDirectoryUnavailable, failure: ExplainFailure(.unexpectedResult(secret)))]
+        let prompt = ExplainRequest(facts, redactor: redactor).promptText
+        XCTAssertTrue(prompt.contains("Not measured because: docker system df failed"), prompt)
+        XCTAssertFalse(prompt.contains("Acme") || prompt.contains("Secret"), prompt)
     }
 
     func testSettingsListEveryFieldThatIsSent() throws {
         XCTAssertEqual(ExplainRequest.fieldGuide.map(\.name), ExplainRequest.CodingKeys.allCases.map(\.rawValue))
         var facts = ExplainFacts(kind: .processGroup, name: "Everything")
-        facts.type = "t"; facts.path = "/p"; facts.bundleID = "b"; facts.signingID = "s"; facts.teamID = "T"
-        facts.vendor = "v"; facts.launchdLabel = "l"; facts.sizes = "1"; facts.age = "a"; facts.matchedRule = "r"
-        facts.evidence = ["e"]; facts.members = ["m"]
+        facts.type = "t"; facts.group = "g"; facts.path = "/p"; facts.app = "a"; facts.bundleID = "b"; facts.signingID = "s"
+        facts.teamID = "T"; facts.vendor = "v"; facts.launchdLabel = "l"; facts.sizes = "1"; facts.notMeasured = .notRead
+        facts.age = "a"; facts.matchedRule = "r"; facts.evidence = [ExplainFacts.Evidence(.unsigned)]; facts.members = ["m"]
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ExplainRequest(facts, redactor: redactor)))
         let sent = try XCTUnwrap(object as? [String: Any]).keys
         XCTAssertEqual(Set(sent), Set(ExplainRequest.fieldGuide.map(\.name)))
@@ -312,10 +191,10 @@ final class ExplainTests: XCTestCase {
     func testARequestOverTheBudgetIsTruncatedToFitAndKeepsItsKindAndName() {
         let long = String(repeating: "x", count: 1_000)
         var facts = ExplainFacts(kind: .suggestion, name: "Xcode DerivedData")
-        facts.type = long; facts.path = "/Users/jdoe/" + long; facts.bundleID = long; facts.signingID = long
-        facts.teamID = long; facts.vendor = long; facts.launchdLabel = long; facts.sizes = long; facts.age = long
-        facts.matchedRule = long
-        facts.evidence = (0..<40).map { "evidence \($0) " + long }
+        facts.type = long; facts.group = long; facts.path = "/Users/jdoe/" + long; facts.app = long; facts.bundleID = long
+        facts.signingID = long; facts.teamID = long; facts.vendor = long; facts.launchdLabel = long; facts.sizes = long
+        facts.age = long; facts.matchedRule = long
+        facts.evidence = (0..<40).map { ExplainFacts.Evidence(.projectMarker, path: "/Users/jdoe/" + long, name: "marker \($0)") }
         facts.members = (0..<40).map { "member \($0)" }
         let request = ExplainRequest(facts, redactor: redactor)
         XCTAssertLessThanOrEqual(request.estimatedTokens, ExplainRequest.tokenBudget)
@@ -327,10 +206,10 @@ final class ExplainTests: XCTestCase {
         XCTAssertLessThan(request.evidence.count, 12)
 
         var small = ExplainFacts(kind: .folder, name: "Caches")
-        small.evidence = ["one", "two"]
+        small.evidence = [ExplainFacts.Evidence(.unsigned), ExplainFacts.Evidence(.startedByLaunchd)]
         let fits = ExplainRequest(small, redactor: redactor)
         XCTAssertFalse(fits.truncated)
-        XCTAssertEqual(fits.evidence, ["one", "two"])
+        XCTAssertEqual(fits.evidence.map(\.kind), [.unsigned, .startedByLaunchd])
     }
 
     // MARK: Validation
@@ -659,6 +538,14 @@ final class ExplainTests: XCTestCase {
         #else
         throw XCTSkip("Built without FoundationModels")
         #endif
+    }
+}
+
+extension ExplainFacts {
+    func with(_ change: (inout ExplainFacts) -> Void) -> ExplainFacts {
+        var facts = self
+        change(&facts)
+        return facts
     }
 }
 

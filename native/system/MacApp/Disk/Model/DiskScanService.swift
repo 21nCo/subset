@@ -59,31 +59,26 @@ public enum DiskScope: Hashable, Sendable {
 public struct DiskAnalysis: Sendable {
     public let origins: DiskOriginReport
     public let matches: [ReclaimMatch]
-    /// Paths the reasons may name besides the scanned tree's: the installed apps and the apps that could not be read,
-    /// so Explain shows them as it shows other paths.
-    public let knownPaths: [String]
-    /// The Docker context's files or socket that its reason names when its image space was not measured. That reason
-    /// holds the CLI's own messages, so Explain shows only these paths in it, not the scanned tree's.
-    public let dockerPaths: [String]
+    /// Why Docker's image space was not measured, when the Docker images rule asked and it was not, so Explain can say
+    /// why as a category rather than with the CLI's message.
+    public let dockerUnavailable: ContainerUnavailable?
 
-    public init(origins: DiskOriginReport, matches: [ReclaimMatch], knownPaths: [String] = [], dockerPaths: [String] = []) {
+    public init(origins: DiskOriginReport, matches: [ReclaimMatch], dockerUnavailable: ContainerUnavailable? = nil) {
         self.origins = origins
         self.matches = matches
-        self.knownPaths = knownPaths
-        self.dockerPaths = dockerPaths
+        self.dockerUnavailable = dockerUnavailable
     }
 
     /// Attributes the tree's Library entries and matches the reclaim rules with `context`.
     public init(tree: DiskTree, context: ReclaimContext) {
         let entries = DiskOrigins.entries(in: tree, home: context.home, apps: context.installedApps)
         let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context)
-        var dockerPaths: [String] = []
-        if case let .unavailable(reason)? = context.dockerImages { dockerPaths = reason.paths }
+        var docker: ContainerUnavailable?
+        if case let .unavailable(reason)? = context.dockerImages { docker = reason }
         self.init(origins: DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: context.home,
                                               apps: context.installedApps),
                   matches: matches,
-                  knownPaths: context.installedApps.apps.map(\.path) + context.installedApps.unreadPaths,
-                  dockerPaths: dockerPaths)
+                  dockerUnavailable: docker)
     }
 }
 

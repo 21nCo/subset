@@ -36,15 +36,16 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(request.kind, .processGroup)
         XCTAssertEqual(request.name, "Google Chrome")
         XCTAssertEqual(request.type, "Group in the App layer")
-        XCTAssertEqual(request.path, ProcessFixtures.chrome)
+        XCTAssertEqual(request.path?.value, ProcessFixtures.chrome)
         XCTAssertEqual(request.teamID, "EQHXZ8M8AV")
         XCTAssertEqual(request.vendor, "Google LLC")
         XCTAssertEqual(request.matchedRule, "Inside an app bundle")
         XCTAssertEqual(request.members, ["Google Chrome", "Google Chrome Helper (Renderer)", "Google Chrome Helper (GPU)"])
         XCTAssertEqual(request.sizes?.hasPrefix("3 processes; memory"), true)
-        XCTAssertTrue(request.evidence.contains("Google Chrome: Inside `Google Chrome.app`"), "\(request.evidence)")
+        XCTAssertTrue(request.evidence.contains { $0.kind == .appBundle && $0.path?.value == ProcessFixtures.chrome },
+                      "\(request.evidence)")
         XCTAssertFalse(request.maySuggestOrigin)
-        XCTAssertEqual(ProcessesWindowModel.explainKey(for: chrome, in: .app), ExplainKey("process-group:app:\(ProcessFixtures.chrome)"))
+        XCTAssertEqual(model.explainKey(for: chrome), ExplainKey("process-group:app:\(ProcessFixtures.chrome)"))
     }
 
     func testAProcessRequestRedactsItsPathAndEvidence() throws {
@@ -55,20 +56,23 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(request.kind, .process)
         XCTAssertEqual(request.name, "2.1.304")
         let subset = redactor.placeholder("subset")
-        XCTAssertEqual(request.type, "Process in Agent: claude › \(subset) (App layer)")
+        XCTAssertEqual(request.type, "Process placed in the App layer")
+        XCTAssertEqual(request.group, "Agent: claude › \(subset)", "the group is a name of its own, withheld as the group's is")
         XCTAssertEqual(request.matchedRule, "Coding agent session")
         XCTAssertEqual(request.age, "Running for 2 hours")
-        XCTAssertEqual(request.path, "~/.local/\(redactor.placeholder("share"))/\(redactor.placeholder("claude"))/"
+        XCTAssertEqual(request.path?.value, "~/.local/\(redactor.placeholder("share"))/\(redactor.placeholder("claude"))/"
             + "\(redactor.placeholder("versions"))/\(redactor.placeholder("2.1.304"))")
-        XCTAssertTrue(request.evidence.contains("Runs claude in ~/dev/\(subset)"), "\(request.evidence)")
+        XCTAssertTrue(request.evidence.contains { $0.kind == .runsCodingAgent && $0.name == "claude"
+            && $0.path?.value == "~/dev/\(subset)" }, "\(request.evidence)")
         let json = try sent(request)
         XCTAssertFalse(json.contains("/Users/me"), json)
         XCTAssertFalse(json.contains("subset"), json)
 
         let named = try XCTUnwrap(model.explainRequest(for: claude, redactor: redactor.sendingFolderNames(true)))
-        XCTAssertTrue(named.evidence.contains("Runs claude in ~/dev/subset"), "\(named.evidence)")
-        XCTAssertEqual(named.type, "Process in Agent: claude › subset (App layer)")
-        XCTAssertEqual(named.path, "~/.local/share/claude/versions/2.1.304")
+        XCTAssertTrue(named.evidence.contains { $0.kind == .runsCodingAgent && $0.path?.value == "~/dev/subset" },
+                      "\(named.evidence)")
+        XCTAssertEqual(named.group, "Agent: claude › subset")
+        XCTAssertEqual(named.path?.value, "~/.local/share/claude/versions/2.1.304")
     }
 
     func testAProjectOrAppGroupInTheHomeFolderIsNamedAsItsPathIsSent() throws {
@@ -76,10 +80,10 @@ final class ProcessExplainTests: XCTestCase {
         let project = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.project(path: "/Users/me/dev/subset"))),
                                                          redactor: redactor))
         XCTAssertEqual(project.name, redactor.placeholder("subset"))
-        XCTAssertEqual(project.path, "~/dev/\(redactor.placeholder("subset"))")
+        XCTAssertEqual(project.path?.value, "~/dev/\(redactor.placeholder("subset"))")
         let app = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.app(bundlePath: notes))), redactor: redactor))
         XCTAssertEqual(app.name, redactor.placeholder("Acme Notes.app"))
-        XCTAssertEqual(app.path, "~/Applications/\(redactor.placeholder("Acme Notes.app"))")
+        XCTAssertEqual(app.path?.value, "~/Applications/\(redactor.placeholder("Acme Notes.app"))")
         XCTAssertEqual(app.members, ["notesd"], "a process is named by its executable, not a folder")
 
         let named = redactor.sendingFolderNames(true)
@@ -126,25 +130,28 @@ final class ProcessExplainTests: XCTestCase {
         let process = RowID.process(ProcessFixtures.identity(700))
         for row in [group, process] {
             let request = try XCTUnwrap(model.explainRequest(for: row, redactor: redactor), "\(row)")
-            XCTAssertTrue(request.evidence.contains { $0.contains("network volume at ~/Mounts/\(redactor.placeholder("Acme Merger"))") },
-                          "\(request.evidence)")
+            XCTAssertTrue(request.evidence.contains { $0.kind == .projectMarkersSkipped
+                && $0.path?.value == "~/Mounts/\(redactor.placeholder("Acme Merger"))" }, "\(request.evidence)")
             let text = try sent(request) + request.promptText
             for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(text.contains(word), "\(row): \(text)") }
 
             let named = try XCTUnwrap(model.explainRequest(for: row, redactor: redactor.sendingFolderNames(true)))
-            XCTAssertTrue(named.evidence.contains { $0.hasSuffix("network volume at ~/Mounts/Acme Merger") }, "\(named.evidence)")
+            XCTAssertTrue(named.evidence.contains { $0.kind == .projectMarkersSkipped && $0.path?.value == "~/Mounts/Acme Merger" },
+                          "\(named.evidence)")
         }
     }
 
-    /// Every kind of evidence that holds a path shows it through the redactor where its text is built, so no word of a
-    /// withheld folder name with spaces is left for the last line of defense; with folder names sent, the names appear.
-    func testEveryKindOfEvidenceShowsItsPathsAsTheRedactorSendsThem() throws {
+    /// Every kind of evidence is sent as a closed kind with its paths as path values, redacted, and an unavailable
+    /// signal's reason as a category: no word of a withheld folder name with spaces is sent, and the paths a failure's
+    /// text names are not sent even with folder names on.
+    func testEveryKindOfEvidenceIsSentAsAKindWithItsPathsRedacted() throws {
         let deep = "/Users/me/dev/Acme Merger/web client"
         let bundle = "/Users/me/Applications/Secret Notes.app"
         let process = try XCTUnwrap(try model().sample?.snapshot.processes.first { $0.pid == 600 })
         let job = LaunchdJob(label: "com.example.agent", plistPath: "/Users/me/Library/LaunchAgents/Acme Merger/agent.plist",
                              domain: .userAgent, program: deep + "/agent", resolution: .missing)
-        let scan = SignalFailure.incompleteScan([LaunchdScanFailure(path: deep + "/plists", code: EACCES)])
+        let unreadPlists = "/Users/me/Hidden Plists/agent.plist"
+        let scan = SignalFailure.incompleteScan([LaunchdScanFailure(path: unreadPlists, code: EACCES)])
         let evidence: [AttributionEvidence] = [
             .executable(path: deep + "/tool", name: "tool"), .executable(path: nil, name: "tool"), .appBundle(path: bundle),
             .systemLocation(prefix: "/System", platformBinary: true), .containerVM(ContainerVM(name: "Podman", detail: "vfkit")),
@@ -153,9 +160,9 @@ final class ProcessExplainTests: XCTestCase {
             .coalitionLeader(coalition: 3, pid: 2, bundlePath: bundle), .launchdJob(job), .orphanedLaunchdJob(job),
             .homebrew(formula: "wget"), .signature(ProcessFixtures.google), .signatureUnavailable(scan),
             .signatureUnavailable(nil), .loginItem(bundlePath: bundle), .parentIsLaunchd, .inheritedFrom(pid: 2),
-            .parentNotSampled(ppid: 9), .workingDirectory(deep), .workingDirectoryUnavailable(scan),
-            .workingDirectoryUnavailable(nil), .projectMarker(directory: deep, marker: ".git"),
-            .projectMarkersSkipped(volume: deep)
+            .parentNotSampled(ppid: 9), .workingDirectory(deep),
+            .workingDirectoryUnavailable(.unexpectedResult("cwd at \(deep) is gone")), .workingDirectoryUnavailable(nil),
+            .projectMarker(directory: deep, marker: ".git"), .projectMarkersSkipped(volume: deep)
         ]
         // Fails to compile when a kind of evidence is added, so this list is extended with it.
         func listed(_ evidence: AttributionEvidence) -> Bool {
@@ -167,21 +174,33 @@ final class ProcessExplainTests: XCTestCase {
             }
         }
         XCTAssertTrue(evidence.allSatisfy(listed))
-        let withheld = OriginExplanation(process: process, format: ProcessFixtures.format, path: { [redactor] in redactor.path($0) }) { _ in "helper" }
-        let named = redactor.sendingFolderNames(true)
-        let shown = OriginExplanation(process: process, format: ProcessFixtures.format, path: { named.path($0) }) { _ in "helper" }
-        var withNames = ""
-        for item in evidence {
-            let text = withheld.describe(item)
-            for word in ["Acme", "Merger", "web", "client", "Secret", "Notes", "subset"] {
-                XCTAssertFalse(text.contains(word), "\(item): \(text)")
-            }
-            XCTAssertFalse(text.contains("/Users/me"), text)
-            withNames += shown.describe(item) + "\n"
+        var facts = ExplainFacts(kind: .process, name: "tool")
+        facts.evidence = evidence.map { ExplainFacts.Evidence($0, of: process) { _ in "helper" } }
+        // Every piece, without the evidence cap.
+        let requests = facts.evidence.map { item in
+            ExplainRequest(ExplainFacts(kind: .process, name: "tool").with { $0.evidence = [item] }, redactor: redactor)
         }
-        for name in ["Acme Merger/web client", "Secret Notes.app", "~/dev/subset/webclient-x"] {
-            XCTAssertTrue(withNames.contains(name), "\(name) in \(withNames)")
+        XCTAssertEqual(requests.flatMap(\.evidence).map(\.kind), [
+            .executable, .noExecutablePath, .appBundle, .appleBinaryInSystemLocation, .containerVM, .runsCodingAgent,
+            .startedInTerminal, .controllingTerminal, .responsibleApp, .coalitionLeader, .launchdJob, .orphanedLaunchdJob,
+            .homebrew, .signedByTeam, .signatureUnavailable, .signatureNotRead, .loginItem, .startedByLaunchd,
+            .inheritsLaunchSource, .parentNotSampled, .workingDirectory, .workingDirectoryUnavailable,
+            .workingDirectoryNotRead, .projectMarker, .projectMarkersSkipped
+        ])
+        let sent = try requests.map { try self.sent($0) + $0.promptText }.joined(separator: "\n")
+        for word in ["Acme", "Merger", "web", "client", "Secret", "Notes", "subset", "/Users/me", "Hidden", "gone"] {
+            XCTAssertFalse(sent.contains(word), "\(word): \(sent)")
         }
+        let named = try facts.evidence.map { item in
+            let request = ExplainRequest(ExplainFacts(kind: .process, name: "tool").with { $0.evidence = [item] },
+                                         redactor: redactor.sendingFolderNames(true))
+            return try self.sent(request) + request.promptText
+        }.joined(separator: "\n")
+        for name in ["Acme Merger/web client", "Secret Notes.app", "~/dev/subset/webclient-x", "Google LLC", "EQHXZ8M8AV",
+                     "no readable launchd plist", "macOS returned a result System cannot use"] {
+            XCTAssertTrue(named.contains(name), "\(name) in \(named)")
+        }
+        XCTAssertFalse(named.contains("Hidden") || named.contains("gone"), "a failure's text is never sent: \(named)")
     }
 
     func testOnlyAnUnattributedGroupMayGetASuggestedOriginAndGroupingIsUnchanged() throws {
@@ -189,9 +208,15 @@ final class ProcessExplainTests: XCTestCase {
         let group = OriginGroupID(.unattributed(executable: syncd))
         let request = try XCTUnwrap(model.explainRequest(for: .group(group), redactor: redactor))
         XCTAssertTrue(request.maySuggestOrigin)
-        XCTAssertEqual(request.name, "~/tools/\(redactor.placeholder("acme-sync"))/\(redactor.placeholder("bin"))/"
-            + redactor.placeholder("syncd"),
-                       "an Unattributed group is named by its executable's path, redacted like any path")
+        let path = "~/tools/\(redactor.placeholder("acme-sync"))/\(redactor.placeholder("bin"))/\(redactor.placeholder("syncd"))"
+        XCTAssertEqual(request.path?.value, path)
+        XCTAssertEqual(request.name, redactor.placeholder("syncd"),
+                       "an Unattributed group, named by its executable's path, is named as that path's last name is sent")
+        let process = try XCTUnwrap(model.explainRequest(for: .process(ProcessFixtures.identity(500)), redactor: redactor))
+        XCTAssertEqual(process.group, request.name, "a process names its group as the group is named")
+        XCTAssertEqual(process.path?.value, path)
+        XCTAssertEqual(model.explainRequest(for: .process(ProcessFixtures.identity(500)),
+                                            redactor: redactor.sendingFolderNames(true))?.group, "syncd")
         XCTAssertEqual(request.matchedRule, "No origin found; grouped by executable")
         let draft = ExplanationDraft(summary: "A sync daemon.", whatItIs: "Syncs files.", removalSafety: "review",
                                      howToRemove: "Remove its launch agent.", confidence: "low", suggestedOrigin: "Acme Sync")
@@ -250,23 +275,52 @@ final class ProcessExplainTests: XCTestCase {
         let model = try model()
         let claude = RowID.process(ProcessFixtures.identity(202))
         model.layer = .app
-        let appKey = ProcessesWindowModel.explainKey(for: claude, in: .app)
+        let appKey = model.explainKey(for: claude)
         let app = try XCTUnwrap(model.explainRequest(for: claude, key: appKey, redactor: redactor))
-        XCTAssertNotEqual(ProcessesWindowModel.explainKey(for: claude, in: .vendor), appKey)
+        let group = RowID.group(OriginGroupID(.app(bundlePath: ProcessFixtures.chrome)))
+        let groupKey = model.explainKey(for: group)
         model.layer = .vendor
+        XCTAssertNotEqual(model.explainKey(for: claude), appKey)
         XCTAssertNil(model.explainRequest(for: claude, key: appKey, redactor: redactor),
                      "a panel opened in the App layer does not send the Vendor layer's facts under its key")
-        let vendor = try XCTUnwrap(model.explainRequest(for: claude, key: ProcessesWindowModel.explainKey(for: claude, in: .vendor),
-                                                        redactor: redactor))
+        let vendor = try XCTUnwrap(model.explainRequest(for: claude, key: model.explainKey(for: claude), redactor: redactor))
         XCTAssertNotEqual(vendor.type, app.type)
-        let group = RowID.group(OriginGroupID(.app(bundlePath: ProcessFixtures.chrome)))
-        XCTAssertEqual(ProcessesWindowModel.explainKey(for: group, in: .app),
-                       ProcessesWindowModel.explainKey(for: group, in: .vendor), "a group's ID holds its layer")
+        XCTAssertEqual(model.explainKey(for: group), groupKey, "a group's ID holds its layer")
+    }
+
+    /// `exec` keeps a process's PID and start time, so a process that now runs another executable is another item: the
+    /// shell's answer is not served for node.
+    func testAProcessThatRunsAnotherExecutableIsExplainedAgain() throws {
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        func apply(_ path: String) throws {
+            model.apply(try ProcessFixtures.sample([FixtureProcess(pid: 800, path: path, memory: ProcessFixtures.mib, cpu: 1,
+                                                                   energy: 1, signature: ProcessFixtures.apple)]),
+                        memory: nil, cadence: .mainWindowVisible)
+        }
+        let row = RowID.process(ProcessFixtures.identity(800))
+        try apply("/bin/sh")
+        let shell = model.explainKey(for: row)
+        XCTAssertNotNil(model.explainRequest(for: row, key: shell, redactor: redactor))
+        try apply("/usr/local/bin/node")
+        let node = model.explainKey(for: row)
+        XCTAssertNotEqual(node, shell)
+        XCTAssertNil(model.explainRequest(for: row, key: shell, redactor: redactor), "a panel opened on the shell finds it gone")
+        XCTAssertEqual(model.explainRequest(for: row, key: node, redactor: redactor)?.path?.value, "/usr/local/bin/node")
+        try apply("/usr/local/bin/node")
+        XCTAssertEqual(model.explainKey(for: row), node, "the same executable in the next sample keeps its answer")
     }
 
     func testARowGoneFromTheSampleHasNoRequest() throws {
         let model = try model()
         XCTAssertNil(model.explainRequest(for: .process(ProcessFixtures.identity(999)), redactor: redactor))
         XCTAssertNil(model.explainRequest(for: .group(OriginGroupID(.agent(name: "nobody"))), redactor: redactor))
+    }
+}
+
+private extension ExplainFacts {
+    func with(_ change: (inout ExplainFacts) -> Void) -> ExplainFacts {
+        var facts = self
+        change(&facts)
+        return facts
     }
 }

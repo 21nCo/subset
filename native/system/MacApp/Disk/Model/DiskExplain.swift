@@ -2,8 +2,8 @@ import Foundation
 import SystemCore
 import SystemProcesses
 
-/// What Explain sends for a scanned item, leftover, or suggestion: the facts the Disk section already shows, with paths
-/// redacted. Groups and Show more rows are not explained.
+/// What Explain sends for a scanned item, leftover, or suggestion: the facts the Disk section already shows, as
+/// structured values. Groups and Show more rows are not explained.
 extension DiskWindowModel {
     /// Whether Explain is offered for a row: a scanned item, an origin group's or suggestion's item, or a suggestion,
     /// once the scan is no longer being read or analyzed.
@@ -50,7 +50,7 @@ extension DiskWindowModel {
             facts = itemFacts(index, in: tree, kind: itemKind(id, index: index), redactor: redactor, now: now)
         case let .match(position):
             guard let match = analysis?.matches[safe: position] else { return nil }
-            facts = matchFacts(match, in: tree, redactor: redactor)
+            facts = matchFacts(match, redactor: redactor)
         case .originGroup, .more:
             return nil
         }
@@ -79,15 +79,16 @@ extension DiskWindowModel {
             facts.bundleID = Self.identifier(of: entry, redactor: redactor)
             facts.teamID = entry.teamID ?? entry.app?.signature?.teamID
             facts.vendor = entry.app?.signature?.teamName
-            facts.matchedRule = Self.ruleText(entry.rule) + (entry.app.map { ": " + Self.appName($0, redactor: redactor) } ?? "")
+            facts.matchedRule = Self.ruleText(entry.rule)
+            facts.app = entry.app.map { Self.appName($0, redactor: redactor) }
         }
         for match in analysis?.matches ?? [] where match.items.contains(where: { $0.index == index }) {
-            facts.evidence.append("Matches the reclaim rule \(match.rule.name) (\(match.risk.title)): \(match.rule.explanation)")
+            facts.evidence.append(ExplainFacts.Evidence(.reclaimRule, name: match.rule.name))
         }
         return facts
     }
 
-    private func matchFacts(_ match: ReclaimMatch, in tree: DiskTree, redactor: ExplainRedactor) -> ExplainFacts {
+    private func matchFacts(_ match: ReclaimMatch, redactor: ExplainRedactor) -> ExplainFacts {
         let rule = match.rule
         // Leftovers are named for their entries' identifier, sent as each entry's is.
         let entry = match.identifier == nil ? nil
@@ -96,67 +97,28 @@ extension DiskWindowModel {
             entry.map { Self.identifier(of: $0, redactor: redactor) }
                 ?? (DiskOrigins.isBundleID(identifier) || redactor.sendFolderNames ? identifier : nil)
         }
-        var facts = ExplainFacts(kind: .suggestion,
-                                 name: [rule.name, match.app.map { Self.appName($0, redactor: redactor) } ?? identifier]
-                                     .compactMap { $0 }.joined(separator: ": "))
+        var facts = ExplainFacts(kind: .suggestion, name: rule.name)
         facts.type = "\(match.risk.title) suggestion"
+        facts.app = match.app.map { Self.appName($0, redactor: redactor) }
         facts.bundleID = match.app?.bundleID ?? identifier
         facts.teamID = match.app?.signature?.teamID ?? entry?.teamID
         facts.vendor = match.app?.signature?.teamName
-        facts.matchedRule = "\(rule.name): \(rule.explanation)"
-        facts.sizes = switch match.bytes {
+        // The rule's own words from the catalog: what the data is, where it is, how it comes back, and what a cleanup
+        // frees.
+        facts.matchedRule = "\(rule.name): \(rule.explanation) Location: \(rule.location). \(rule.rebuild) \(rule.yield.note)"
+        switch match.bytes {
         case let .scanned(privateBytes, allocated, complete, _):
-            "\(complete ? "" : "at least ")\(format.diskBytes(allocated)) used, \(format.diskBytes(privateBytes)) private"
-        case let .dockerReclaimable(upTo, _): "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
-        case let .unavailable(reason): "Not measured: " + redactingPaths(reason, of: rule, in: tree, redactor: redactor)
+            facts.sizes = "\(complete ? "" : "at least ")\(format.diskBytes(allocated)) used, \(format.diskBytes(privateBytes)) private"
+        case let .dockerReclaimable(upTo, _):
+            facts.sizes = "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
+        case .unavailable:
+            facts.notMeasured = rule.id == .dockerImages ? ExplainNotMeasured(docker: analysis?.dockerUnavailable) : .notRead
         }
-        facts.ruleEvidence = ["Location: \(rule.location)", rule.rebuild, rule.yield.note]
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
         // names are sent.
         facts.members = ExplainFacts.countedNames(match.items.sorted { ($0.sizes?.allocated ?? 0) > ($1.sizes?.allocated ?? 0) }
             .map { redactor.name(ofPath: $0.path) })
         return facts
-    }
-
-    /// Why a suggestion was not measured, with each path it names as the redactor sends it: a scanned path, or one
-    /// outside the scanned folder that a reason names (`DiskAnalysis.knownPaths`), such as an app's. Known paths go
-    /// first: a scan of the home folder would otherwise show only the part of such a path the scan read. Docker's reason
-    /// holds the CLI's own messages, which may name any path, so only the paths System put in it are shown that way
-    /// (`DiskAnalysis.dockerPaths`); any other is left to `ExplainRedactor.text(_:)`, which fails closed.
-    func redactingPaths(_ text: String, of rule: ReclaimRule, in tree: DiskTree, redactor: ExplainRedactor) -> String {
-        guard rule.id != .dockerImages else { return redactor.paths(in: text, known: analysis?.dockerPaths ?? []) }
-        return Self.redactingScannedPaths(redactor.paths(in: text, known: analysis?.knownPaths ?? []), in: tree,
-                                          redactor: redactor)
-    }
-
-    /// `text` with each scanned path in it as the redactor sends it. A reason names a path whole and a folder name may
-    /// hold a space, so the path's end is found by following the tree's names, the longest that matches at each level.
-    static func redactingScannedPaths(_ text: String, in tree: DiskTree, redactor: ExplainRedactor) -> String {
-        let root = tree.rootPath == "/" ? "" : tree.rootPath
-        var result = ""
-        var rest = text[...]
-        while let found = rest.range(of: root.isEmpty ? "/" : root) {
-            result += rest[..<found.lowerBound]
-            var current = 0
-            var end = root.isEmpty ? found.lowerBound : found.upperBound
-            while rest[end...].hasPrefix("/") {
-                let after = rest.index(after: end)
-                let next = tree[current].children
-                    .filter { !tree[$0].name.isEmpty && rest[after...].hasPrefix(tree[$0].name) }
-                    .max { tree[$0].name.count < tree[$1].name.count }
-                guard let next else { break }
-                current = next
-                end = rest.index(after, offsetBy: tree[next].name.count)
-            }
-            if current == 0, root.isEmpty {
-                result += rest[found]
-                rest = rest[found.upperBound...]
-            } else {
-                result += redactor.pathInText(String(rest[found.lowerBound..<end]))
-                rest = rest[end...]
-            }
-        }
-        return result + rest
     }
 
     /// An installed app's name as sent, the same as Processes names its group: its bundle's name, or the bundle's

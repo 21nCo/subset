@@ -156,9 +156,10 @@ struct SettingsView: View {
                     }
                     .font(.callout)
                 }
-                Text("Your home folder's path is sent as ~ and your account name is removed. Command-line arguments and "
-                    + "file contents are never sent: System never reads them. Nothing is sent until you choose a provider "
-                    + "and press Explain.")
+                Text("Only these fields are sent. Your home folder's path is sent as ~ and your account name is removed. "
+                    + "Tools' messages and error text are never sent; a reason is sent as one of a fixed list. Command-line "
+                    + "arguments and file contents are never sent: System never reads them. Nothing is sent until you "
+                    + "choose a provider and press Explain.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

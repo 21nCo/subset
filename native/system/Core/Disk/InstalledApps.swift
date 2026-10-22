@@ -59,8 +59,6 @@ public struct InstalledApps: Sendable {
     public let apps: [InstalledApp]
     /// Where an app may be that could not be read: an app folder not listed, an app whose bundle ID could not be read.
     public let unread: [String]
-    /// The paths `unread` names, so a view can show them as it shows other paths (Explain withholds their folder names).
-    public let unreadPaths: [String]
     /// Every app in the app folders was read with its bundle ID, so a bundle ID no app has is no installed app's.
     public var isComplete: Bool { unread.isEmpty }
     /// The list is complete and every app's signature and entitlements were read, so a Team ID or app group no app
@@ -77,7 +75,7 @@ public struct InstalledApps: Sendable {
     private let byTeam: [String: [InstalledApp]]
     private let byGroup: [String: [InstalledApp]]
 
-    public init(_ apps: [InstalledApp], unread: [String] = [], unreadPaths: [String] = []) {
+    public init(_ apps: [InstalledApp], unread: [String] = []) {
         // Ordered by path so that two copies of one app (two Xcode versions) resolve the same way every time.
         let sorted = apps.sorted { ($0.path, $0.bundleID) < ($1.path, $1.bundleID) }
         self.apps = sorted
@@ -96,7 +94,6 @@ public struct InstalledApps: Sendable {
         self.byTeam = byTeam
         self.byGroup = byGroup
         self.unread = unread
-        self.unreadPaths = unreadPaths
         signingComplete = unread.isEmpty && sorted.allSatisfy { $0.signature != nil && $0.appGroups != nil }
     }
 
@@ -141,7 +138,7 @@ public struct InstalledApps: Sendable {
     public static func read(folders: [String] = defaultFolders(),
                             signing: (String) -> AppSigning = staticSigning) -> InstalledApps {
         var apps: [InstalledApp] = []
-        var unread = Unread()
+        var unread: [String] = []
         for folder in folders {
             for entry in listing(folder, unread: &unread) {
                 let path = folder + "/" + entry
@@ -154,12 +151,12 @@ public struct InstalledApps: Sendable {
                 }
             }
         }
-        return InstalledApps(apps, unread: unread.reasons, unreadPaths: unread.paths)
+        return InstalledApps(apps, unread: unread)
     }
 
     /// The app at `path` and the login items and helper apps inside it, all owned by it and placed under its vendor;
     /// each declares its own app groups. A wrapped iPhone or iPad app is signed as its inner bundle.
-    static func bundle(at path: String, signing: (String) -> AppSigning, unread: inout Unread) -> [InstalledApp] {
+    static func bundle(at path: String, signing: (String) -> AppSigning, unread: inout [String]) -> [InstalledApp] {
         let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
         guard let (signedPath, info) = appInfo(at: path, unread: &unread) else { return [] }
         let signed = signing(signedPath)
@@ -180,11 +177,11 @@ public struct InstalledApps: Sendable {
     /// its wrapped bundle's. An entry named like an app that is not one, a file (an alias), a link to nothing, or a
     /// folder with neither `Contents` nor a wrapped app, is skipped; one whose bundle ID cannot be read (a `Contents`
     /// without an `Info.plist` too), or that cannot be checked, is `unread`.
-    static func appInfo(at path: String, unread: inout Unread) -> (String, (bundleID: String, names: [String]))? {
+    static func appInfo(at path: String, unread: inout [String]) -> (String, (bundleID: String, names: [String]))? {
         var status = stat()
         guard stat(path, &status) == 0 else {
             let error = errno
-            if error != ENOENT, error != ENOTDIR { unread.add(path, " could not be read: \(String(cString: strerror(error))).") }
+            if error != ENOENT, error != ENOTDIR { unread.append("\(path) could not be read: \(String(cString: strerror(error))).") }
             return nil
         }
         guard status.st_mode & S_IFMT == S_IFDIR else { return nil }
@@ -199,7 +196,7 @@ public struct InstalledApps: Sendable {
             }
         }
         guard case let .success(found) = plist, let info = infoPlist(found) else {
-            unread.add(path, " has no readable bundle identifier.")
+            unread.append("\(path) has no readable bundle identifier.")
             return nil
         }
         return (signedPath, info)
@@ -253,23 +250,12 @@ public struct InstalledApps: Sendable {
         return (bundleID, names)
     }
 
-    static func listing(_ path: String, unread: inout Unread) -> [String] {
+    static func listing(_ path: String, unread: inout [String]) -> [String] {
         switch SimulatorRuntimes.listing(path) {
         case let .success(names): return names
         case let .failure(failure):
-            unread.add(path, " could not be listed: \(failure.message).")
+            unread.append("\(path) could not be listed: \(failure.message).")
             return []
-        }
-    }
-
-    /// Why apps could not be read, each naming its path, and those paths.
-    struct Unread {
-        var reasons: [String] = []
-        var paths: [String] = []
-
-        mutating func add(_ path: String, _ reason: String) {
-            reasons.append(path + reason)
-            paths.append(path)
         }
     }
 

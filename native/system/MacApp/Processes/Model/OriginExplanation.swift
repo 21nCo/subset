@@ -8,14 +8,10 @@ public struct OriginExplanation: Sendable {
     let processName: @Sendable (Int32) -> String?
     /// The process being explained, so "Runs claude" can be told from "Child of claude".
     let process: ProcessFacts
-    /// How a path is shown: with `~` for the home folder, or as Explain sends it (`ExplainRedactor.path`).
-    let showPath: @Sendable (String) -> String
 
-    public init(process: ProcessFacts, format: UsageFormat, path: (@Sendable (String) -> String)? = nil,
-                processName: @escaping @Sendable (Int32) -> String?) {
+    public init(process: ProcessFacts, format: UsageFormat, processName: @escaping @Sendable (Int32) -> String?) {
         self.process = process
         self.format = format
-        showPath = path ?? { [format] in format.path($0) }
         self.processName = processName
     }
 
@@ -83,7 +79,7 @@ public struct OriginExplanation: Sendable {
     public func describe(_ evidence: AttributionEvidence) -> String {
         switch evidence {
         case let .executable(path, name):
-            return path.map { "Runs `\(showPath($0))`" } ?? "No executable path; named \(OriginGroup.displayName(name))"
+            return path.map { "Runs `\(format.path($0))`" } ?? "No executable path; named \(OriginGroup.displayName(name))"
         case let .appBundle(path):
             return "Inside `\(bundleName(path))`"
         case let .systemLocation(prefix, platformBinary):
@@ -106,15 +102,15 @@ public struct OriginExplanation: Sendable {
         case let .coalitionLeader(coalition, pid, bundlePath):
             return "Coalition \(coalition) is led by `\(bundleName(bundlePath))` (\(processLabel(pid)))"
         case let .launchdJob(job):
-            return "launchd job `\(job.label)` in \(showPath(job.plistPath))"
+            return "launchd job `\(job.label)` in \(format.path(job.plistPath))"
         case let .orphanedLaunchdJob(job):
-            return "Orphaned launchd plist `\(job.label)` in \(showPath(job.plistPath)); its program no longer exists"
+            return "Orphaned launchd plist `\(job.label)` in \(format.path(job.plistPath)); its program no longer exists"
         case let .homebrew(formula):
             return formula.map { "Homebrew formula \($0)" } ?? "Under a Homebrew prefix"
         case let .signature(signature):
             return describe(signature)
         case let .signatureUnavailable(failure):
-            return failure.map { "Signature unavailable: \(reason($0))" } ?? "Signature not read yet"
+            return failure.map { "Signature unavailable: \($0.reason)" } ?? "Signature not read yet"
         case let .loginItem(bundlePath):
             return "Login item inside `\(bundleName(bundlePath))`"
         case .parentIsLaunchd:
@@ -124,13 +120,13 @@ public struct OriginExplanation: Sendable {
         case let .parentNotSampled(ppid):
             return "Parent pid \(ppid) is not in the sample"
         case let .workingDirectory(path):
-            return "Working directory \(showPath(path))"
+            return "Working directory \(format.path(path))"
         case let .workingDirectoryUnavailable(failure):
-            return failure.map { "Working directory unavailable: \(reason($0))" } ?? "Working directory not read yet"
+            return failure.map { "Working directory unavailable: \($0.reason)" } ?? "Working directory not read yet"
         case let .projectMarker(directory, marker):
-            return "`\(marker)` in \(showPath(directory))"
+            return "`\(marker)` in \(format.path(directory))"
         case let .projectMarkersSkipped(volume):
-            return "Project markers not looked for on the network volume at \(showPath(volume))"
+            return "Project markers not looked for on the network volume at \(volume)"
         }
     }
 
@@ -147,24 +143,15 @@ public struct OriginExplanation: Sendable {
         return "Signed by \(signature.teamName.map { "\($0) (\(teamID))" } ?? "team \(teamID)") as \(signingID)"
     }
 
-    /// Why a signal is unavailable, with any path in it shown as the other paths are.
-    private func reason(_ failure: SignalFailure) -> String {
-        guard case let .incompleteScan(failures) = failure else { return failure.reason }
-        return "no readable plist names it, but the launchd plists were not all read: "
-            + failures.map { "\(showPath($0.path)) (\($0.reason))" }.joined(separator: ", ")
-    }
-
     private var workingDirectorySuffix: String {
-        process.workingDirectory.map { " in \(showPath($0))" } ?? ""
+        process.workingDirectory.map { " in \(format.path($0))" } ?? ""
     }
 
     private func processLabel(_ pid: Int32) -> String {
         processName(pid).map { "\($0), pid \(pid)" } ?? "pid \(pid)"
     }
 
-    /// The bundle's name as its path is shown, so a redacted path's bundle is not named.
     private func bundleName(_ path: String) -> String {
-        let shown = showPath(path)
-        return shown.split(separator: "/").last.map(String.init) ?? shown
+        path.split(separator: "/").last.map(String.init) ?? path
     }
 }
