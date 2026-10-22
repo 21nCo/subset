@@ -26,7 +26,8 @@ func appSettings() -> StoredSettings {
 let arguments = Array(CommandLine.arguments.dropFirst())
 let environment = StatusEnvironment(
     now: Date(), timeZone: .current, storeDirectory: try? ActivityStore.defaultDirectory(), settings: appSettings(),
-    appRunning: !NSRunningApplication.runningApplications(withBundleIdentifier: StoredSettings.domain).isEmpty,
+    appRunning: RunningApp.isRunning(listedBundleIdentifiers: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier),
+                                     processExecutables: RunningApp.processExecutables),
     version: enclosingAppVersion())
 let output = StatusCommand.run(arguments, environment: environment)
 FileHandle.standardOutput.write(Data(output.standardOutput.utf8))

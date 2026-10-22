@@ -48,7 +48,7 @@
       "properties": {
         "state": { "enum": ["notSetUp", "off", "paused", "on"], "description": "The tracking setting. `on` records only while the app runs and the Mac is in use." },
         "pausedUntil": { "$ref": "#/$defs/optionalTime", "description": "When a timed pause ends; null when not paused or paused until resumed." },
-        "appRunning": { "type": ["boolean", "null"] }
+        "appRunning": { "type": ["boolean", "null"], "description": "Whether pointInTime is running; null when the command cannot list running apps (as inside an agent's sandbox) and finds no process running the app's executable." }
       }
     },
     "classification": {

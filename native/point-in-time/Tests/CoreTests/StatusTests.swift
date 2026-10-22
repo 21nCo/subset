@@ -835,3 +835,70 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(settings.companionState.focusWindow == DateInterval(start: local(21, 9), end: local(21, 9)))
     }
 }
+
+@Suite struct RunningAppTests {
+    private let appExecutable = URL(fileURLWithPath: "/Applications/pointInTime.app/Contents/MacOS/PointInTime")
+    private func bundleIdentifier(_ bundle: URL) -> String? {
+        bundle.lastPathComponent == "pointInTime.app" ? StoredSettings.domain : "com.example.other"
+    }
+
+    @Test func aReadableListDecides() {
+        func running(_ listed: [String?]) -> Bool? {
+            RunningApp.isRunning(listedBundleIdentifiers: listed, processExecutables: { [appExecutable] }, bundleIdentifier: bundleIdentifier)
+        }
+        #expect(running(["com.apple.finder", StoredSettings.domain]) == true)
+        #expect(running(["com.apple.finder", nil]) == false)
+    }
+
+    @Test func anEmptyListFallsBackToProcessesAndIsNeverFalse() {
+        func running(_ executables: [String]) -> Bool? {
+            RunningApp.isRunning(listedBundleIdentifiers: [], processExecutables: { executables.map(URL.init(fileURLWithPath:)) },
+                                 bundleIdentifier: bundleIdentifier)
+        }
+        #expect(running(["/sbin/launchd", appExecutable.path]) == true)
+        #expect(running(["/sbin/launchd"]) == nil)
+        #expect(running([]) == nil)
+        // Another app's executable, and the command itself inside pointInTime.app, are not the app.
+        #expect(running(["/Applications/Other.app/Contents/MacOS/PointInTime"]) == nil)
+        #expect(running(["/Applications/pointInTime.app/Contents/Helpers/point-in-time"]) == nil)
+    }
+
+    @Test func aRunningProcessOfTheAppsBundleIsFoundThroughLibproc() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let contents = directory.appendingPathComponent("Copy.app/Contents", isDirectory: true)
+        let executable = contents.appendingPathComponent("MacOS/PointInTime")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        let info: [String: Any] = ["CFBundleIdentifier": StoredSettings.domain, "CFBundleExecutable": "PointInTime", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"))
+        // Only the copy counts, so a pointInTime running on this Mac does not decide the test.
+        func copyRunning() -> Bool? {
+            RunningApp.isRunning(listedBundleIdentifiers: [], processExecutables: {
+                RunningApp.processExecutables().filter { $0.resolvingSymlinksInPath() == executable.resolvingSymlinksInPath() }
+            })
+        }
+        #expect(copyRunning() == nil)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["30"]
+        try process.run()
+        defer { process.terminate(); process.waitUntilExit() }
+        #expect(copyRunning() == true)
+    }
+
+    @Test func anUnknownAnswerIsNullInJSONAndLeftOutOfTheText() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try ActivityStore(directory: directory)
+        let now = local(21, 12)
+        func run(_ appRunning: Bool?, json: Bool) -> StatusCommand.Output {
+            StatusCommand.run(json ? ["status", "--json"] : ["status"], environment: environment(directory, now: now, appRunning: appRunning))
+        }
+        let unknown = RunningApp.isRunning(listedBundleIdentifiers: [], processExecutables: { [] })
+        #expect((try validated(run(unknown, json: true))["tracking"] as? [String: Any])?["appRunning"] is NSNull)
+        #expect(run(unknown, json: false).standardOutput.contains("Tracking: on. Classification"))
+        #expect(run(true, json: false).standardOutput.contains("Tracking: on, app running."))
+        #expect(run(false, json: false).standardOutput.contains("Tracking: on, app not running."))
+    }
+}
