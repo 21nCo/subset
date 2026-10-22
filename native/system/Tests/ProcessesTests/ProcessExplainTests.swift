@@ -75,6 +75,29 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(named.path?.value, "~/.local/share/claude/versions/2.1.304")
     }
 
+    /// An account name that is also a word of System's ("in", "the") leaves a group's and a process's type, sizes, age,
+    /// and rule as System words them, and is still removed from their names, evidence, and paths.
+    func testAnAccountNameThatIsAlsoAWordLeavesSystemsOwnWordsAsTheyAre() throws {
+        let model = try model()
+        let words = ExplainRedactor(homes: ["/Users/me"], accountNames: ["in", "the", "of", "for", "app", "claude"],
+                                    sendFolderNames: true, key: Array(repeating: 1, count: 32))
+        let chrome = RowID.group(OriginGroupID(.app(bundlePath: ProcessFixtures.chrome)))
+        let group = try XCTUnwrap(model.explainRequest(for: chrome, redactor: words))
+        XCTAssertEqual(group.type, "Group in the App layer")
+        XCTAssertEqual(group.sizes?.hasSuffix(" of one core"), true, group.sizes ?? "")
+        XCTAssertEqual(group.matchedRule, "Inside an app bundle")
+
+        let claude = RowID.process(ProcessFixtures.identity(202))
+        let process = try XCTUnwrap(model.explainRequest(for: claude, redactor: words,
+                                                         now: Date(timeIntervalSince1970: 3 * 3_600)))
+        XCTAssertEqual(process.type, "Process placed in the App layer")
+        XCTAssertEqual(process.age, "Running for 2 hours")
+        XCTAssertEqual(process.matchedRule, "Coding agent session")
+        XCTAssertEqual(process.group, "Agent: [user] › subset")
+        XCTAssertEqual(process.path?.value, "~/.local/share/[user]/versions/2.1.304")
+        XCTAssertTrue(process.evidence.contains { $0.kind == .runsCodingAgent && $0.name == "[user]" }, "\(process.evidence)")
+    }
+
     func testAProjectOrAppGroupInTheHomeFolderIsNamedAsItsPathIsSent() throws {
         let model = try model()
         let project = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.project(path: "/Users/me/dev/subset"))),

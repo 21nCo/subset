@@ -84,6 +84,40 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(request.evidence.first?.identifier, "JDOE123", "a word that only starts with it is kept")
     }
 
+    /// A short account name can be a word ("in", "ar"). System's own words hold no name, so they are sent as they are;
+    /// every name, identifier, and path component is still checked for it.
+    func testAnAccountNameThatIsAlsoAWordIsRemovedFromNamesButNotFromSystemsOwnWords() {
+        let short = ExplainRedactor(homes: ["/Users/ar"], accountNames: ["in", "ar", "Ar In"], sendFolderNames: true,
+                                    key: Array(repeating: 7, count: 32))
+        var facts = ExplainFacts(kind: .process, name: "ar")
+        facts.type = "Process placed in the App layer"
+        facts.group = "Tools in ar"
+        facts.path = "/Volumes/in/ar/bin/sync"
+        facts.app = "Ar In Notes"
+        facts.vendor = "Ar In"
+        facts.launchdLabel = "dev.ar.sync"
+        facts.sizes = "memory 2 MB; CPU 1% of one core"
+        facts.age = "Running for 3 minutes"
+        facts.matchedRule = "Started in a terminal"
+        facts.members = ["ar-sync", "sync in"]
+        facts.evidence = [ExplainFacts.Evidence(.runsCodingAgent, path: "/Users/ar/dev/in/ar", name: "ar", identifier: "in")]
+        let request = ExplainRequest(facts, redactor: short)
+        XCTAssertEqual(request.type, "Process placed in the App layer")
+        XCTAssertEqual(request.sizes, "memory 2 MB; CPU 1% of one core")
+        XCTAssertEqual(request.age, "Running for 3 minutes")
+        XCTAssertEqual(request.matchedRule, "Started in a terminal")
+        XCTAssertEqual(request.name, "[user]")
+        XCTAssertEqual(request.group, "Tools [user] [user]")
+        XCTAssertEqual(request.path?.value, "/Volumes/[user]/[user]/bin/sync")
+        XCTAssertEqual(request.app, "[user] Notes")
+        XCTAssertEqual(request.vendor, "[user]")
+        XCTAssertEqual(request.launchdLabel, "dev.[user].sync")
+        XCTAssertEqual(request.members, ["[user]-sync", "sync [user]"])
+        XCTAssertEqual(request.evidence.first?.path?.value, "~/dev/[user]/[user]")
+        XCTAssertEqual(request.evidence.first?.name, "[user]")
+        XCTAssertEqual(request.evidence.first?.identifier, "[user]")
+    }
+
     func testTheProcessNameDisclosureIsInSettingsAndTheFieldGuide() throws {
         XCTAssertTrue(ExplainRedactor.folderNamesCaption.contains("A process is still named by its executable"))
         let name = try XCTUnwrap(ExplainRequest.fieldGuide.first { $0.name == "name" }).meaning

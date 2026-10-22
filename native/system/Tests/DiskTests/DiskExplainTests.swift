@@ -91,6 +91,36 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertTrue(item.evidence.contains { $0.kind == .reclaimRule && $0.name == "Xcode DerivedData" })
     }
 
+    /// An account name that is also a word of System's ("in", "to") leaves a folder's and a suggestion's type, sizes,
+    /// age, and rule as System words them, and is still removed from their names, identifiers, and paths.
+    func testAnAccountNameThatIsAlsoAWordLeavesSystemsOwnWordsAsTheyAre() async throws {
+        let model = try await fixture.scanned()
+        let words = ExplainRedactor(homes: [fixture.home], accountNames: ["in", "to", "the", "of", "a", "changed", "editor"],
+                                    sendFolderNames: true, key: Array(repeating: 2, count: 32))
+        let plain = redactor.sendingFolderNames(true)
+        model.tab = .origins
+        model.toggle(try XCTUnwrap(model.row(named: "Editor")).id)
+        let cacheID = try XCTUnwrap(model.row(named: "com.example.editor")).id
+        let cache = try XCTUnwrap(model.explainRequest(for: cacheID, redactor: words, now: Date()))
+        let cachePlain = try XCTUnwrap(model.explainRequest(for: cacheID, redactor: plain, now: Date()))
+        XCTAssertEqual(cache.type, "Folder in ~/Library/Caches")
+        XCTAssertEqual(cache.sizes, cachePlain.sizes)
+        XCTAssertEqual(cache.age, cachePlain.age)
+        XCTAssertEqual(cache.matchedRule, "Named for an installed app's bundle ID")
+        XCTAssertEqual(cache.app, "[user]")
+        XCTAssertEqual(cache.bundleID, "com.example.[user]")
+        XCTAssertEqual(cache.path?.value, "~/Library/Caches/com.example.[user]")
+
+        model.tab = .suggestions
+        let derived = try XCTUnwrap(model.row(named: "Xcode DerivedData")).id
+        let suggestion = try XCTUnwrap(model.explainRequest(for: derived, redactor: words))
+        let suggestionPlain = try XCTUnwrap(model.explainRequest(for: derived, redactor: plain))
+        XCTAssertEqual(suggestion.type, "Safe to reclaim suggestion")
+        XCTAssertEqual(suggestion.sizes, suggestionPlain.sizes)
+        XCTAssertEqual(suggestion.matchedRule, suggestionPlain.matchedRule, "a rule's words are System's own")
+        XCTAssertFalse(suggestion.matchedRule?.contains(ExplainRedactor.accountPlaceholder) ?? true)
+    }
+
     func testWithFolderNamesOffNoRequestCarriesAFolderNameDeeperThanTheFirstLevel() async throws {
         try fixture.write("dev/Acme Merger/package.json", bytes: 100)
         try fixture.lock("dev/Acme Merger/webclient")

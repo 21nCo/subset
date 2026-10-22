@@ -99,7 +99,8 @@ public struct ExplainFacts: Sendable {
 }
 
 /// What is sent to the provider: structured fields only. Paths are values of their own (`ExplainPath`), redacted
-/// component by component (`ExplainRedactor`); names and identifiers have account names removed; why something was
+/// component by component (`ExplainRedactor`); names and identifiers have account names removed, System's own words
+/// (the type, sizes, age, and rule) are sent as they are; why something was
 /// not measured or read is a closed category. No field holds a tool's message, error text, or command text, so no
 /// text is scanned for paths. Every string value is kept on one line (`oneLine`), so the prompt's lines are System's
 /// own. Each field is capped, and the whole is kept within an estimated 1,500 tokens
@@ -145,9 +146,12 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
 
     public init(_ facts: ExplainFacts, redactor: ExplainRedactor) {
         var truncated = false
-        func cap(_ value: String?, _ limit: Int = Self.fieldLimit) -> String? {
+        // System's own words (`type`, `sizes`, `age`, `matchedRule`) hold no name, so account names are removed only
+        // from names and identifiers: a short name that is also a word ("in") leaves System's words as they are.
+        func cap(_ value: String?, _ limit: Int = Self.fieldLimit, systemWords: Bool = false) -> String? {
             guard let value else { return nil }
-            let text = redactor.removingAccountNames(Self.oneLine(value)).trimmingCharacters(in: .whitespaces)
+            let line = Self.oneLine(value)
+            let text = (systemWords ? line : redactor.removingAccountNames(line)).trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return nil }
             guard text.count > limit else { return text }
             truncated = true
@@ -166,7 +170,7 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
         }
         kind = facts.kind
         name = cap(facts.name, Self.nameLimit) ?? "Unnamed"
-        type = cap(facts.type)
+        type = cap(facts.type, systemWords: true)
         group = cap(facts.group, Self.nameLimit)
         path = capPath(facts.path)
         app = cap(facts.app, Self.nameLimit)
@@ -175,10 +179,10 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
         teamID = cap(facts.teamID)
         vendor = cap(facts.vendor)
         launchdLabel = cap(facts.launchdLabel)
-        sizes = cap(facts.sizes)
+        sizes = cap(facts.sizes, systemWords: true)
         notMeasured = facts.notMeasured
-        age = cap(facts.age)
-        matchedRule = cap(facts.matchedRule, Self.ruleLimit)
+        age = cap(facts.age, systemWords: true)
+        matchedRule = cap(facts.matchedRule, Self.ruleLimit, systemWords: true)
         if facts.evidence.count > Self.evidenceLimit { truncated = true }
         evidence = facts.evidence.prefix(Self.evidenceLimit).map { item in
             ExplainEvidence(kind: item.kind, path: capPath(item.path), name: cap(item.name, Self.memberNameLimit),
