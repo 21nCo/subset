@@ -44,6 +44,10 @@ struct EntryFacts: Equatable, Sendable {
     var error: Int32 = 0
     /// When the item was last changed or put in its folder, in seconds since 1970; `nil` when neither was returned.
     var touched: Int64?
+    /// The entry's own volume and inode, which a cleanup checks again before it moves the item; `nil` for an unreadable
+    /// entry, one whose volume or inode was not returned, and a firmlink, whose entry describes the link rather than the
+    /// folder it opens.
+    var identity: FileKey?
 
     /// The Finder flag that makes a folder a package.
     static let hasBundleBit: UInt16 = 0x2000
@@ -53,6 +57,9 @@ struct EntryFacts: Equatable, Sendable {
     init(_ entry: DirectoryEntry, isPackage: () -> Bool) {
         self.init(classifying: entry, isPackage: isPackage)
         touched = Self.touched(entry)
+        if entry.error == 0, !flags.contains(.firmlink), let id = entry.fileID, let device = entry.realDevice, device != 0 {
+            identity = FileKey(device: device, id: id)
+        }
     }
 
     /// The later of the modification time and the date added: a file downloaded with its server's modification time,

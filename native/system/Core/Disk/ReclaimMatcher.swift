@@ -43,6 +43,8 @@ public struct ReclaimItem: Equatable, Sendable {
     public let sizes: DiskSizes?
     public let flags: DiskItemFlags
     public let touched: Date?
+    /// The volume and inode the item had when it was scanned, which a cleanup checks again; `nil` when not read.
+    public let identity: DiskItemIdentity?
 }
 
 /// The bytes a match reports.
@@ -170,7 +172,8 @@ private struct Matching {
 
     func item(_ index: Int, path: String, root: String) -> ReclaimItem {
         let item = tree[index]
-        return ReclaimItem(path: path, index: index, root: root, sizes: item.sizes, flags: item.flags, touched: item.touched)
+        return ReclaimItem(path: path, index: index, root: root, sizes: item.sizes, flags: item.flags, touched: item.touched,
+                           identity: item.identity)
     }
 
     func children(of index: Int, path: String) -> [ReclaimItem] {

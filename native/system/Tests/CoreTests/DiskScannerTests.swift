@@ -372,6 +372,39 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.tree.count, 3)
     }
 
+    func testEachItemKeepsTheVolumeAndInodeItWasScannedWith() async throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("folder"), withIntermediateDirectories: false)
+        try Self.write(root.appendingPathComponent("folder/file"), bytes: 4_096)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link"),
+                                                   withDestinationURL: root.appendingPathComponent("folder"))
+        let result = try await DiskScanner().scan(root)
+        var volume = statfs()
+        XCTAssertEqual(statfs(root.path, &volume), 0)
+        for name in ["", "folder", "folder/file", "link"] {
+            let item = try XCTUnwrap(name.isEmpty ? result.tree.root : result.tree.item(at: name))
+            let identity = try XCTUnwrap(item.identity, name)
+            var info = stat()
+            XCTAssertEqual(lstat(name.isEmpty ? root.path : path(name), &info), 0)
+            XCTAssertEqual(identity.inode, UInt64(info.st_ino), name)
+            XCTAssertEqual(identity.device, UInt32(bitPattern: volume.f_fsid.val.0), name)
+            // Read again now, without following the link, the path still leads to it.
+            switch DiskItemIdentity.current(atPath: name.isEmpty ? root.path : path(name)) {
+            case let .item(now, _): XCTAssertTrue(now.isSameFile(as: identity), name)
+            case .symlink: XCTAssertEqual(name, "link")
+            case let other: XCTFail("\(name): \(other)")
+            }
+        }
+        // A file put in another's place is another file.
+        let file = try XCTUnwrap(result.tree.item(at: "folder/file")?.identity)
+        try FileManager.default.removeItem(atPath: path("folder/file"))
+        try Self.write(root.appendingPathComponent("folder/file"), bytes: 4_096)
+        guard case let .item(now, false) = DiskItemIdentity.current(atPath: path("folder/file")) else {
+            return XCTFail("the new file was not read")
+        }
+        XCTAssertFalse(now.isSameFile(as: file))
+        XCTAssertEqual(DiskItemIdentity.current(atPath: path("missing")), .missing)
+    }
+
     func testPackageBundleIsOneItemWithItsTotal() async throws {
         let bundle = root.appendingPathComponent("Tool.app")
         try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)

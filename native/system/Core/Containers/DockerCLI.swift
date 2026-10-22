@@ -103,6 +103,15 @@ public struct DockerCLI: Sendable {
         return .ready(executable: cli, context: context, endpoint: endpoint)
     }
 
+    /// The CLI and the real path of the current context's socket, as `report` would use them, or why there are none:
+    /// for a cleanup that runs its own command against the same local daemon.
+    public func localTarget() -> Result<(executable: String, endpoint: String), ContainerUnavailable> {
+        switch target() {
+        case let .ready(executable, _, endpoint): .success((executable, endpoint))
+        case let .unavailable(_, _, reason): .failure(reason)
+        }
+    }
+
     /// The arguments for one command: `--host` with the checked socket's real path first, so the CLI neither rereads
     /// the current context nor follows a link that a runtime has repointed since (both may have changed since the
     /// check), and so never reaches another daemon than the one the report is attributed to.

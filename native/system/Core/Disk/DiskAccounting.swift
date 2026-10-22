@@ -120,7 +120,8 @@ struct TreeBuilder {
         nodes.append(DiskTree.Node(
             nameStart: UInt32(names.count), nameLength: UInt16(bytes.count), kind: facts.kind, flags: facts.flags,
             parent: parent, firstChild: index + 1, childCount: 0, sizes: facts.sizes,
-            touched: facts.touched ?? DiskTree.Node.unknownTime))
+            touched: facts.touched ?? DiskTree.Node.unknownTime, device: facts.identity?.device ?? 0,
+            fileID: facts.identity?.id ?? 0))
         names.append(contentsOf: bytes)
         contributions.append(facts.contribution)
         return index

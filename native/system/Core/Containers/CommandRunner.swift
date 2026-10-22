@@ -70,7 +70,7 @@ public final class CommandRegistry: Sendable {
     public static let shared = CommandRegistry()
 
     private struct State {
-        var runs: [ObjectIdentifier: CommandRun] = [:]
+        var runs: [ObjectIdentifier: any RegisteredRun] = [:]
         var shutDown = false
     }
 
@@ -78,10 +78,10 @@ public final class CommandRegistry: Sendable {
 
     public init() {}
 
-    /// Before it returns, sends `SIGKILL` to every command already launched and answers each run `cancelled`; a run
-    /// not launched yet never launches, and no later run starts. It does not rely on any runner thread, so no child
-    /// is left alive when it returns. For an app about to quit, whose delayed `SIGKILL` would never fire, so a
-    /// command stuck on a socket would outlive it.
+    /// Before it returns, sends `SIGKILL` to every command already launched (to a `ProcessGroupRunner` command's whole
+    /// process group) and has each run answer `cancelled`; a run not launched yet never launches, and no later run
+    /// starts. It does not rely on any runner thread, so no child is left alive when it returns. For an app about to
+    /// quit, whose delayed `SIGKILL` would never fire, so a command stuck on a socket would outlive it.
     public func shutDown() {
         let runs = state.withLock { state in
             state.shutDown = true
@@ -91,7 +91,7 @@ public final class CommandRegistry: Sendable {
     }
 
     /// Registers a run about to launch, or returns `false` once the registry is shut down.
-    fileprivate func register(_ run: CommandRun) -> Bool {
+    func register(_ run: any RegisteredRun) -> Bool {
         state.withLock { state in
             guard !state.shutDown else { return false }
             state.runs[ObjectIdentifier(run)] = run
@@ -99,9 +99,15 @@ public final class CommandRegistry: Sendable {
         }
     }
 
-    fileprivate func remove(_ run: CommandRun) {
+    func remove(_ run: any RegisteredRun) {
         state.withLock { _ = $0.runs.removeValue(forKey: ObjectIdentifier(run)) }
     }
+}
+
+/// A run a `CommandRegistry` can stop at once.
+protocol RegisteredRun: AnyObject, Sendable {
+    /// Sends `SIGKILL` to the command before it returns, or makes sure it never launches.
+    func killNow()
 }
 
 /// Test hooks run on either side of the launch, where a shutdown can interleave with it.
@@ -112,7 +118,7 @@ struct LaunchHooks: Sendable {
 
 /// One command's run. Every path answers the continuation once; the output handlers and the termination handler
 /// keep the run alive until the command has exited and both pipes are closed.
-private final class CommandRun: @unchecked Sendable {
+private final class CommandRun: RegisteredRun, @unchecked Sendable {
     private let lock = NSLock()
     /// Held across `process.run()` and recording the launch, and by `killNow()`, which so finds the command either
     /// not launched, and stops it from launching, or launched with a known pid it kills itself.
