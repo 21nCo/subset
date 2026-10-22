@@ -146,6 +146,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(action("Delete All Data…") { [weak self] in self?.confirmDelete(all: true) })
         menu.addItem(.separator())
         menu.addItem(action("Welcome and Permissions…", showWelcome))
+        menu.addItem(action("Command-Line Tool…") { [weak self] in self?.showCommandLineTool() })
         menu.addItem(action("Quit pointInTime", key: "q") { [weak self] in self?.quit() })
     }
 
@@ -178,15 +179,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return line
     }
 
-    /// Today's recorded time and its focus, neutral, and drift, from the same day totals as the window.
+    /// Today's recorded time and its focus, neutral, and drift, from the same whole-day totals as the ring and the window.
     private func todayLines() -> [String] {
         guard let store else { return [] }
         let now = Date()
         let calendar = Calendar.autoupdatingCurrent
-        guard let blocks = try? store.blocks(from: calendar.startOfDay(for: now), to: now.addingTimeInterval(Block.length)) else {
+        guard let ring = try? FocusRing.read(today: now, from: store, calendar: calendar) else {
             return ["Today: the activity store could not be read"]
         }
-        let ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
         // Anonymous excluded time is recorded time too.
         let recorded = "Today: \(ReportText.duration(ring.totals.recorded)) recorded"
         guard !ring.isEmpty else { return [recorded, "Nothing classified yet today"] }
@@ -306,6 +306,45 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             guard alert.runModal() == .alertSecondButtonReturn else { return }
         }
         NSApp.terminate(nil)
+    }
+
+    /// Explains how to put the bundled, read-only `point-in-time` command on PATH. The user creates the link; pointInTime
+    /// never writes it, `/usr/local`, or a shell file itself.
+    private func showCommandLineTool() {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/point-in-time")
+        let alert = NSAlert()
+        alert.messageText = "pointInTime Command-Line Tool"
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+            alert.informativeText = "This copy of pointInTime does not include the point-in-time command. Build the app with scripts/build-app.sh or Xcode to bundle it."
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+        let quoted = "'" + helper.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let command = "sudo mkdir -p /usr/local/bin && sudo ln -sf \(quoted) /usr/local/bin/point-in-time"
+        alert.informativeText = """
+            pointInTime includes a read-only command for scripts and AI agents. point-in-time status --json prints today's \
+            focus summary from this Mac without starting the app, changing data, or using the network; titles and page paths \
+            are left out unless you add --include-titles.
+
+            To run it from a terminal, link it into a folder on your PATH, for example:
+
+            \(command)
+
+            pointInTime does not create this link or change your shell files. If you move the app, create the link again.
+            """
+        alert.addButton(withTitle: "Copy Command")
+        alert.addButton(withTitle: "Show in Finder")
+        alert.addButton(withTitle: "Done")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.activateFileViewerSelecting([helper])
+        default: break
+        }
     }
 
     private func disabled(_ title: String) -> NSMenuItem {

@@ -291,7 +291,7 @@ public final class ActivityStore: @unchecked Sendable {
 
     // MARK: Internals
 
-    private static func blockColumns(prefix: String = "") -> String {
+    static func blockColumns(prefix: String = "") -> String {
         ["start", "active_seconds", "excluded_seconds", "apps_json", "dominant_bundle_id", "dominant_app_name", "dominant_title",
          "dominant_url_scheme", "dominant_url_host", "dominant_url_path", "label_state", "label", "label_reason", "label_confidence",
          "label_source", "label_model", "classified_at", "revision"].map { prefix + $0 }.joined(separator: ", ")
@@ -300,7 +300,7 @@ public final class ActivityStore: @unchecked Sendable {
     private static let contentColumns = ["active_seconds", "excluded_seconds", "apps_json", "dominant_bundle_id", "dominant_app_name",
                                          "dominant_title", "dominant_url_scheme", "dominant_url_host", "dominant_url_path"]
 
-    private static func block(from row: [SQLValue]) -> Block {
+    static func block(from row: [SQLValue]) -> Block {
         let apps = row[3].string.flatMap { try? JSONDecoder().decode([AppTime].self, from: Data($0.utf8)) } ?? []
         let url = row[7].string.flatMap { scheme in row[8].string.map { RedactedURL(scheme: scheme, host: $0, path: row[9].string ?? "/") } }
         // A pending or failed block may keep the columns of a label it had before its content changed; they are not its label.
@@ -461,7 +461,7 @@ public final class ActivityStore: @unchecked Sendable {
     }
 
     /// The schema version recorded in the database; one without a `schema_version` table is version 0.
-    private static func storedVersion(_ connection: SQLiteConnection) throws -> Int {
+    static func storedVersion(_ connection: SQLiteConnection) throws -> Int {
         guard try !connection.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").isEmpty else { return 0 }
         return try connection.query("SELECT MAX(version) FROM schema_version").first?.first?.int ?? 0
     }

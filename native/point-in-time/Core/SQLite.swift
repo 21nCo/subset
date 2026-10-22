@@ -7,6 +7,8 @@ public enum StoreError: Error, Equatable, CustomStringConvertible {
     case sqlite(String)
     case newerSchema(found: Int, supported: Int)
     case filesystem(String)
+    /// Another connection held a lock longer than the connection waits (SQLITE_BUSY or SQLITE_LOCKED).
+    case busy(String)
 
     public var description: String {
         switch self {
@@ -14,6 +16,7 @@ public enum StoreError: Error, Equatable, CustomStringConvertible {
         case .sqlite(let message): "Activity store error: \(message)"
         case .newerSchema(let found, let supported): "The activity store uses schema \(found); this version supports up to \(supported)."
         case .filesystem(let message): "Activity store folder error: \(message)"
+        case .busy(let message): "The activity store is busy: \(message)"
         }
     }
 }
@@ -31,7 +34,9 @@ final class SQLiteConnection {
     static let busyWaitNanoseconds: UInt64 = 100_000_000
 
     private var handle: OpaquePointer?
-    private var busyWait = SQLiteConnection.busyWaitNanoseconds
+    /// How long a lock request waits on this connection; the WAL checkpoint waits for none.
+    private let lockWait: UInt64
+    private var busyWait: UInt64
     private var busySince: UInt64 = 0
 
     /// Opens `path` read-write, creating it if needed.
@@ -49,13 +54,16 @@ final class SQLiteConnection {
         case withoutWAL = "mode=ro&immutable=1"
     }
 
-    /// Opens `path` only to read it. Closing a read-only connection never checkpoints or removes a WAL.
-    convenience init(readingOnly path: String, _ mode: ReadOnlyMode) throws {
+    /// Opens `path` only to read it. Closing a read-only connection never checkpoints or removes a WAL. A lock request
+    /// waits up to `lockWait` nanoseconds.
+    convenience init(readingOnly path: String, _ mode: ReadOnlyMode, lockWait: UInt64 = SQLiteConnection.busyWaitNanoseconds) throws {
         let uri = URL(fileURLWithPath: path).absoluteString + "?" + mode.rawValue
-        try self.init(filename: uri, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+        try self.init(filename: uri, flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, lockWait: lockWait)
     }
 
-    private init(filename: String, flags: Int32) throws {
+    private init(filename: String, flags: Int32, lockWait: UInt64 = SQLiteConnection.busyWaitNanoseconds) throws {
+        self.lockWait = lockWait
+        busyWait = lockWait
         var db: OpaquePointer?
         let status = sqlite3_open_v2(filename, &db, flags | SQLITE_OPEN_FULLMUTEX, nil)
         guard status == SQLITE_OK, let db else {
@@ -95,7 +103,7 @@ final class SQLiteConnection {
     /// ends, which can be any length of time, so it runs without one and reports a blocked checkpoint at once.
     func checkpointTruncatingWAL() throws {
         busyWait = 0
-        defer { busyWait = Self.busyWaitNanoseconds }
+        defer { busyWait = lockWait }
         let row = try query("PRAGMA wal_checkpoint(TRUNCATE)").first
         guard let row, row.count == 3, row[0].int == 0, row[1].int == row[2].int else {
             throw StoreError.sqlite("The WAL checkpoint could not complete because another connection is reading")
@@ -157,7 +165,9 @@ final class SQLiteConnection {
     }
 
     private func error() -> StoreError {
-        .sqlite(String(cString: sqlite3_errmsg(handle)))
+        let message = String(cString: sqlite3_errmsg(handle))
+        let code = sqlite3_errcode(handle) & 0xFF
+        return code == SQLITE_BUSY || code == SQLITE_LOCKED ? .busy(message) : .sqlite(message)
     }
 }
 

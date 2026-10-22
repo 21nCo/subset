@@ -557,6 +557,23 @@ private final class FakeCompanionHost: DriftCompanionHost {
         }
     }
 
+    /// The refresh decides through `DriftDetector.decide`, as the status command does: an offer whose block is not in the
+    /// read (one recorded before the clock was set back) is forgotten, and the current drift is offered.
+    @Test func theRefreshDecidesAsTheStatusCommandDoes() {
+        let host = FakeCompanionHost([.focus, .drift, .drift])
+        let stale = host.blocks.last!.end.addingTimeInterval(Block.length * 20)
+        host.companionState = CompanionState(promptedEpisode: stale)
+        guard case .alreadyPrompted(let episode) = host.evaluate() else { Issue.record("the stale offer covers the drift"); return }
+        let shared = DriftDetector.decide(host.blocks, readFrom: at(0), now: host.now, rule: host.driftRule, state: host.companionState,
+                                          calendar: newYork)
+        #expect(shared.decision == .prompt(episode))
+        #expect(shared.state.promptedEpisode == nil)
+        #expect(host.companionState.promptedEpisode == stale)
+        host.flow.refresh(now: host.now)
+        #expect(host.panel?.episode == episode)
+        #expect(host.companionState.promptedEpisode == episode.start)
+    }
+
     @Test func aShorterBreakAfterResumingPausesTrackingUntilTheBreakKept() {
         let host = FakeCompanionHost([.focus, .drift, .drift])
         host.flow.refresh(now: host.now)
@@ -636,5 +653,30 @@ private final class FakeCompanionHost: DriftCompanionHost {
         #expect(ring.totals.share(of: .focus) == 180.0 / 420.0)
         #expect(ring.accessibilityText == "Focus 43%, Neutral 0%, Drift 57% today")
         #expect(CategorySeconds().share(of: .focus) == nil)
+    }
+}
+
+@Suite struct DriftReadRangeTests {
+    @Test func theReadEndsAfterTheBlockHoldingNow() {
+        #expect(DriftDetector.readRange(now: at(12, 1).addingTimeInterval(30), calendar: newYork).upperBound == at(12, 3))
+        #expect(DriftDetector.readRange(now: at(12, 3), calendar: newYork).upperBound == at(12, 6))
+        #expect(DriftDetector.readRange(now: at(12, 1), calendar: newYork).lowerBound == at(12, 1, day: 19))
+    }
+
+    /// The companion's drift input (`DriftCompanionController.readBlocks`) and the status command's filter of a wider
+    /// read return the same blocks: none after the block holding now.
+    @Test func theCompanionsReadAndTheStatusFilterLeaveOutLaterBlocks() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pit-drift-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(Segment(start: at(11, 57), end: at(12, 6), excluded: false, bundleID: "com.example.app", appName: "App",
+                               windowTitle: nil, url: nil))
+        let now = at(12, 1).addingTimeInterval(30)
+        let read = try DriftDetector.companionRead(from: store, now: now, calendar: newYork)
+        #expect(read.blocks.map(\.start) == [at(11, 57), at(12)])
+        #expect(read.from == now.addingTimeInterval(-DriftDetector.lookBack))
+        let all = try store.blocks(from: at(0, day: 19), to: at(0, day: 21))
+        #expect(all.count == 3)
+        #expect(DriftDetector.blocksInReadRange(all, now: now, calendar: newYork).map(\.start) == read.blocks.map(\.start))
     }
 }

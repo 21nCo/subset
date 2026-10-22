@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/point-in-time/status-v1.schema.json",
+  "title": "point-in-time status --json",
+  "description": "One day's focus summary from pointInTime's local activity store. Times are RFC 3339 in the reported time zone; durations are whole seconds. Window titles and page paths appear only in `titles`, which is null unless --include-titles was given.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "command", "version", "observedAt", "date", "timeZone", "day", "store", "freshness", "tracking", "classification", "totals", "focusPercent", "topApps", "topHosts", "currentDrift", "titles", "errors"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "command": { "const": "status" },
+    "version": { "type": ["string", "null"], "description": "The enclosing pointInTime.app's version and build; null outside the app bundle." },
+    "observedAt": { "type": "string", "format": "date-time", "description": "When the command read the store." },
+    "date": { "type": "string", "format": "date", "description": "The summarized day, YYYY-MM-DD in timeZone." },
+    "timeZone": { "type": "string", "minLength": 1, "description": "The IANA time zone the day and times are in." },
+    "day": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "isToday"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time", "description": "The next midnight; a day the clocks change is 23 or 25 hours long." },
+        "isToday": { "type": "boolean" }
+      }
+    },
+    "store": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "schemaVersion"],
+      "properties": {
+        "state": { "enum": ["ok", "missing", "newerSchema", "olderSchema", "locked", "unreadable"] },
+        "schemaVersion": { "type": ["integer", "null"], "minimum": 0, "description": "The store's schema version, when it could be read." }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lastSegmentEnd", "lastClassifiedAt"],
+      "properties": {
+        "lastSegmentEnd": { "$ref": "#/$defs/optionalTime", "description": "The end of the latest recorded activity on any day." },
+        "lastClassifiedAt": { "$ref": "#/$defs/optionalTime", "description": "When a model last labeled any block." }
+      }
+    },
+    "tracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "pausedUntil", "appRunning"],
+      "properties": {
+        "state": { "enum": ["notSetUp", "off", "paused", "on"], "description": "The tracking setting. `on` records only while the app runs and the Mac is in use." },
+        "pausedUntil": { "$ref": "#/$defs/optionalTime", "description": "When a timed pause ends; null when not paused or paused until resumed." },
+        "appRunning": { "type": ["boolean", "null"], "description": "Whether pointInTime is running; null when the command cannot list running apps (as inside an agent's sandbox) and finds no process running the app's executable." }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "pending", "failed"],
+      "properties": {
+        "provider": { "enum": ["off", "openrouter"], "description": "The provider's name; never a key or other credential." },
+        "pending": { "type": ["integer", "null"], "minimum": 0, "description": "The day's pending blocks with recorded app time, including the block still being recorded and blocks classification never sends (an excluded app's), so it can differ from the menu's store-wide count of completed, sendable blocks." },
+        "failed": { "type": ["integer", "null"], "minimum": 0, "description": "The day's blocks the provider could not label." }
+      }
+    },
+    "totals": {
+      "type": ["object", "null"],
+      "description": "Recorded seconds by label; null when the store could not be read. A correction counts its block's excluded time as its label.",
+      "additionalProperties": false,
+      "required": ["focus", "neutral", "drift", "unclassified", "excluded", "classified", "recorded"],
+      "properties": {
+        "focus": { "$ref": "#/$defs/seconds" },
+        "neutral": { "$ref": "#/$defs/seconds" },
+        "drift": { "$ref": "#/$defs/seconds" },
+        "unclassified": { "$ref": "#/$defs/seconds" },
+        "excluded": { "$ref": "#/$defs/seconds" },
+        "classified": { "$ref": "#/$defs/seconds" },
+        "recorded": { "$ref": "#/$defs/seconds" }
+      }
+    },
+    "focusPercent": { "type": ["integer", "null"], "minimum": 0, "maximum": 100, "description": "Focus as a share of classified time, rounded; null when nothing is classified." },
+    "topApps": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bundleID", "name", "seconds"],
+        "properties": {
+          "bundleID": { "type": "string" },
+          "name": { "type": "string" },
+          "seconds": { "$ref": "#/$defs/seconds" }
+        }
+      }
+    },
+    "topHosts": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "seconds"],
+        "properties": {
+          "host": { "type": "string" },
+          "seconds": { "$ref": "#/$defs/seconds" }
+        }
+      }
+    },
+    "currentDrift": {
+      "type": ["object", "null"],
+      "description": "Today's current drift episode, as the drift companion counts it; null on another day or without one.",
+      "additionalProperties": false,
+      "required": ["start", "end", "driftBlocks", "threshold", "state"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" },
+        "driftBlocks": { "type": "integer", "minimum": 1 },
+        "threshold": { "type": "integer", "minimum": 2, "maximum": 5 },
+        "state": { "enum": ["belowThreshold", "companionOff", "suppressed", "notYetOffered", "offered"] }
+      }
+    },
+    "titles": {
+      "type": ["array", "null"],
+      "maxItems": 10,
+      "description": "Window titles and pages with --include-titles; null otherwise.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bundleID", "app", "title", "url", "seconds"],
+        "properties": {
+          "bundleID": { "type": "string" },
+          "app": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "url": { "type": ["string", "null"], "description": "Scheme, host, and path; never a query or fragment." },
+          "seconds": { "$ref": "#/$defs/seconds" }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "enum": ["store_missing", "store_newer_schema", "store_older_schema", "store_locked", "store_unreadable"] },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "seconds": { "type": "integer", "minimum": 0 },
+    "optionalTime": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

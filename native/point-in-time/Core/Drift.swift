@@ -27,6 +27,19 @@ public struct FocusRing: Equatable, Sendable {
         self.init(totals: DayReport(day: now, blocks: blocks, calendar: calendar).totals)
     }
 
+    /// The span today's ring counts: the whole of today, including blocks starting after `now`, as after the clock was
+    /// set back, so the ring, the menu's totals, and the status command's totals agree.
+    public static func dayRange(today now: Date, calendar: Calendar) -> Range<Date> {
+        let day = ReportPeriod.day(containing: now, calendar: calendar)
+        return day.start..<day.end
+    }
+
+    /// Today's ring read from `store` over `dayRange`.
+    public static func read(today now: Date, from store: ActivityStore, calendar: Calendar) throws -> FocusRing {
+        let range = dayRange(today: now, calendar: calendar)
+        return FocusRing(today: now, blocks: try store.blocks(from: range.lowerBound, to: range.upperBound), calendar: calendar)
+    }
+
     public var isEmpty: Bool { totals.classified <= 0 }
 
     /// The arcs in drawing order, each a fraction of the whole ring; they add up to 1. Empty with nothing classified.
@@ -263,6 +276,34 @@ public enum DriftDecision: Equatable, Sendable {
 ///   been labeled drift.
 /// - Nothing is offered while the rule is off, in quiet hours, or during a focus window or break.
 public enum DriftDetector {
+    /// How far back a read for the rule reaches, at least: a session can begin the evening before.
+    public static let lookBack: TimeInterval = 24 * 3_600
+
+    /// The blocks the rule reads at `now`: from the start of today or `lookBack` before, whichever is earlier, through
+    /// the block holding `now`. Blocks starting later, as after the clock was set back, are not the current session.
+    public static func readRange(now: Date, calendar: Calendar) -> Range<Date> {
+        min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<Block.bucketStart(containing: now).addingTimeInterval(Block.length)
+    }
+
+    /// What the companion reads at `now`, in one read covering `readRange` and `FocusRing.dayRange`: today's ring from
+    /// all of today's blocks (as `FocusRing.read` and the status command count them, including any starting after now),
+    /// and the blocks in `readRange`, which the rule counts, with where that read began.
+    public static func companionRead(from store: ActivityStore, now: Date, calendar: Calendar) throws
+        -> (ring: FocusRing, blocks: [Block], from: Date) {
+        let range = readRange(now: now, calendar: calendar)
+        let today = FocusRing.dayRange(today: now, calendar: calendar)
+        let blocks = try store.blocks(from: min(range.lowerBound, today.lowerBound), to: max(range.upperBound, today.upperBound))
+        return (FocusRing(today: now, blocks: blocks, calendar: calendar), blocksInReadRange(blocks, now: now, calendar: calendar),
+                range.lowerBound)
+    }
+
+    /// The blocks of `blocks` that a read of `readRange` at `now` returns, for a caller that read a wider span.
+    public static func blocksInReadRange(_ blocks: [Block], now: Date, calendar: Calendar) -> [Block] {
+        let range = readRange(now: now, calendar: calendar)
+        let lower = Block.bucketStart(containing: range.lowerBound)
+        return blocks.filter { $0.start >= lower && $0.start < range.upperBound }
+    }
+
     /// The episode the current session's drift blocks form, whatever the threshold; nil with none.
     public static func episode(in blocks: [Block], now: Date, rule: DriftRule, state: CompanionState, calendar: Calendar) -> DriftEpisode? {
         let sorted = blocks.sorted { $0.start < $1.start }
@@ -291,6 +332,17 @@ public enum DriftDetector {
         if state.isSuppressed(at: now) || rule.quietHours?.contains(now, calendar: calendar) == true { return .suppressed(episode) }
         return .prompt(episode)
     }
+
+    /// The companion's decision for a read: `blocks` read from `readFrom` (see `companionRead`). First forgets, in a copy of
+    /// `state`, a drift offered whose block is not in the read (see `CompanionState.forgetOfferedEpisode`), then
+    /// evaluates with that copy. Returns the decision and the copy, which the companion keeps and the status command does
+    /// not; nothing is saved here.
+    public static func decide(_ blocks: [Block], readFrom: Date, now: Date, rule: DriftRule, state: CompanionState,
+                              calendar: Calendar) -> (decision: DriftDecision, state: CompanionState) {
+        var current = state
+        _ = current.forgetOfferedEpisode(unlessIn: blocks, readFrom: readFrom)
+        return (evaluate(blocks, now: now, rule: rule, state: current, calendar: calendar), current)
+    }
 }
 
 /// What the app gives the drift companion's flow: its settings and record, the store, capture, the panel, and the
@@ -302,8 +354,8 @@ public protocol DriftCompanionHost: AnyObject {
     var notificationFallback: Bool { get }
     /// Whether capture is recording; nothing is offered otherwise.
     var isRecording: Bool { get }
-    /// Reads the blocks since the start of today or the last day, whichever is earlier, and updates the ring; nil when
-    /// the store cannot be read.
+    /// Reads as `DriftDetector.companionRead` does: returns the blocks in `readRange` and updates the ring from all of
+    /// today's blocks; nil when the store cannot be read.
     func readBlocks(now: Date) -> (blocks: [Block], from: Date)?
     /// Shows the panel with the flow's `onOffer` and `actionError`; false when there is nowhere to show it.
     func showPanel() -> Bool
@@ -350,11 +402,10 @@ public final class DriftCompanionFlow {
         guard let host, !acting else { return }
         defer { host.companionChanged() }
         guard let (blocks, from) = host.readBlocks(now: now) else { return }
-        var state = host.companionState
-        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { host.companionState = state }
-        guard onOffer == nil, host.isRecording, !delivery.isSending,
-              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: host.driftRule, state: state, calendar: calendar)
-        else { return }
+        let (decision, state) = DriftDetector.decide(blocks, readFrom: from, now: now, rule: host.driftRule, state: host.companionState,
+                                                     calendar: calendar)
+        if state != host.companionState { host.companionState = state }
+        guard onOffer == nil, host.isRecording, !delivery.isSending, case .prompt(let episode) = decision else { return }
         offer(episode, host: host)
     }
 
@@ -459,7 +510,8 @@ public final class DriftCompanionFlow {
     public func confirmSubmission(now: Date) -> DriftEpisode? {
         guard let host else { return nil }
         let current = host.isRecording ? host.readBlocks(now: now).map {
-            DriftDetector.evaluate($0.blocks, now: now, rule: host.driftRule, state: host.companionState, calendar: calendar)
+            DriftDetector.decide($0.blocks, readFrom: $0.from, now: now, rule: host.driftRule, state: host.companionState,
+                                 calendar: calendar).decision
         } ?? .none : .none
         return delivery.confirm(current: current, fallbackEnabled: host.notificationFallback)
     }
