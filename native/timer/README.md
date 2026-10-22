@@ -68,8 +68,7 @@ The app target is named `Timer` and its bundle ID is `dev.subset.timer` (`LSUIEl
 - **Contract fixtures:** every file in `packages/timer/fixtures/contract-v1` decodes into the Swift models and re-encodes without loss. Every valid input survives the app's encoding.
 - **Projection and formatting:** the Swift projection reproduces every fixture projection, and `TimerFormat.line` reproduces the agent result's text exactly. Also covered: time left from timestamps, the soonest-running choice, `until` countdowns, and duration parsing.
 - **`RuntimeLocator` order:** checked with a fake file system and process runner.
-- **Board process:** with a fake `serve`, Open Board while the server starts launches no second process, Quit stops it, and a `serve --json` failure shows the CLI's error.
-- **Menu state:** a `state` event the app cannot read (an unsupported schema or a malformed body) shows as its own problem, not as reconnecting, until a readable one arrives. A disconnect shows reconnecting until the stream connects again.
+- **Board process and menu state:** with a fake `serve`, Open Board while the server starts launches no second process, Quit stops it, and a `serve --json` failure shows the CLI's error. A `state` event the app cannot read (an unsupported schema or a malformed body) shows as its own problem, not as reconnecting, until a readable one arrives; a disconnect shows reconnecting until the stream connects again.
 - **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down.
 
 The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, `swift test` with `SUBSET_TIMER_CLI_PATH` set, the project-regeneration check, and an unsigned Release `xcodebuild`, then checks that the embedded runtime is present.

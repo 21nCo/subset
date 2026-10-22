@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pidAlive } from '../../src/daemon/index.mjs';
@@ -65,12 +65,18 @@ test('the build stages app-runtime/, the copy the macOS app embeds, with the sam
   assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
 });
 
-test('staging app-runtime/ removes the staging folder an interrupted build left behind', () => {
+test('staging app-runtime/ removes the staging folder an interrupted build left behind, and keeps a running build\'s', (t) => {
   const stale = join(PACKAGE_ROOT, '.app-runtime-999999999');
-  mkdirSync(join(stale, 'dist'), { recursive: true });
-  writeFileSync(join(stale, 'dist/cli.mjs'), 'partial');
+  // Named for this test's own process, it stands for another build still staging.
+  const live = join(PACKAGE_ROOT, `.app-runtime-${process.pid}`);
+  t.after(() => rmSync(live, { recursive: true, force: true }));
+  for (const folder of [stale, live]) {
+    mkdirSync(join(folder, 'dist'), { recursive: true });
+    writeFileSync(join(folder, 'dist/cli.mjs'), 'partial');
+  }
   execFileSync(process.execPath, [join(PACKAGE_ROOT, 'scripts/build.mjs'), '--stage-app-runtime'], { encoding: 'utf8' });
-  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), []);
+  assert.deepEqual(readdirSync(PACKAGE_ROOT).filter((name) => name.startsWith('.app-runtime-')), [`.app-runtime-${process.pid}`]);
+  assert.equal(readFileSync(join(live, 'dist/cli.mjs'), 'utf8'), 'partial');
   assert.equal(readFileSync(join(PACKAGE_ROOT, 'app-runtime/dist/cli.mjs'), 'utf8'), readFileSync(CLI, 'utf8'));
 });
 

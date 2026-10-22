@@ -13,11 +13,13 @@ final class CountdownWindowController {
     }
 
     func show() {
-        if window == nil {
+        if window?.isVisible != true {
+            weak var presented: NSWindow? // A new window and form each time: a start still pending in a closed one cannot touch it.
             let form = CountdownForm(start: { [controller] ms, name in
                 await controller.perform("start", OperationInput(timer: .countdown(durationMs: ms, name: name)))
-            }, close: { [weak self] in self?.window?.close() })
+            }, close: { presented?.close() })
             let window = NSWindow(contentViewController: NSHostingController(rootView: form))
+            presented = window
             window.title = "New Countdown"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false

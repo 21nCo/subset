@@ -9,6 +9,7 @@ import { chmod, cp, readdir, readFile, rename, rm, stat, writeFile } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'rolldown';
+import { pidAlive } from '../src/daemon/lock.mjs';
 import { notices } from './notices.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -64,10 +65,10 @@ await stageAppRuntime();
 
 // Stages the macOS app runtime from the built dist, web, mcp-app and skills. It is assembled in a temporary folder
 // and renamed into place only when complete, so the app never embeds a partial copy. Staging folders an
-// interrupted build left behind are removed first.
+// interrupted build left behind (their pid is gone) are removed first; a running build's folder is kept.
 async function stageAppRuntime() {
   for (const name of await readdir(root)) {
-    if (name.startsWith('.app-runtime-')) await rm(path.join(root, name), { recursive: true, force: true });
+    if (/^\.app-runtime-\d+$/.test(name) && !pidAlive(Number(name.slice(13)))) await rm(path.join(root, name), { recursive: true, force: true });
   }
   const runtime = path.join(root, 'app-runtime');
   const staging = path.join(root, `.app-runtime-${process.pid}`);
