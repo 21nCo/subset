@@ -86,6 +86,35 @@ public struct ExplainFacts: Sendable {
         return order.map { counts[$0] == 1 ? $0 : "\($0) ×\(counts[$0] ?? 0)" }
     }
 
+    /// `countedNames(_:)` of the first names of `items` that a request keeps, for names that are costly to make: items
+    /// with the same `key` have the same name, and `name` is called once per key, in the order first seen, only until
+    /// `limit` different names are found, while every item is counted. So a suggestion of many thousand items redacts
+    /// about `limit` paths, not one per item. Two keys whose names turn out the same are counted as one name when both
+    /// are found.
+    public static func countedNames<Item, Key: Hashable>(_ items: [Item], limit: Int, key: (Item) -> Key,
+                                                         name: (Item) -> String) -> [String] {
+        var order: [Key] = []
+        var first: [Key: Item] = [:]
+        var counts: [Key: Int] = [:]
+        for item in items {
+            let key = key(item)
+            if counts[key] == nil {
+                order.append(key)
+                first[key] = item
+            }
+            counts[key, default: 0] += 1
+        }
+        var names: [String] = []
+        var nameCounts: [String: Int] = [:]
+        for key in order where names.count < limit {
+            guard let item = first[key] else { continue }
+            let name = name(item)
+            if nameCounts[name] == nil { names.append(name) }
+            nameCounts[name, default: 0] += counts[key] ?? 0
+        }
+        return names.map { nameCounts[$0] == 1 ? $0 : "\($0) ×\(nameCounts[$0] ?? 0)" }
+    }
+
     /// A duration in the largest whole unit: "3 minutes", "5 hours", "45 days".
     public static func duration(from start: Date, to now: Date) -> String {
         let seconds = max(0, now.timeIntervalSince(start))
@@ -141,7 +170,7 @@ public struct ExplainRequest: Encodable, Equatable, Sendable {
     /// A reclaim rule's fixed words: its name, what the data is, where it is, how it comes back, and what a cleanup frees.
     static let ruleLimit = 700
     static let evidenceLimit = 12
-    static let memberLimit = 10
+    public static let memberLimit = 10
     static let memberNameLimit = 100
 
     public init(_ facts: ExplainFacts, redactor: ExplainRedactor) {

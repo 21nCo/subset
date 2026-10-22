@@ -105,7 +105,10 @@ public struct Explanation: Equatable, Sendable {
         self.confidence = confidence
         let origin = Self.plainText(draft.suggestedOrigin ?? "")
         if request.maySuggestOrigin, !origin.isEmpty {
-            guard origin.count <= Self.originLimit, !origin.contains("\n") else {
+            // A short name is one line: no line break of any kind (LF, CR, VT, FF, U+0085, U+2028, U+2029) and no tab
+            // inside it, checked before control characters are removed, so a removed CR does not join two lines.
+            let inside = (draft.suggestedOrigin ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard origin.count <= Self.originLimit, !inside.contains(where: { $0.isNewline || $0 == "\t" }) else {
                 throw ExplainError.invalidResponse("The suggested origin is not a short name.")
             }
             suggestedOrigin = origin

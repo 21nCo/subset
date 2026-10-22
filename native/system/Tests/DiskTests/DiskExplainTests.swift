@@ -46,7 +46,8 @@ final class DiskExplainTests: XCTestCase {
         let cache = try request(model, try XCTUnwrap(model.row(named: "com.example.editor")).id)
         XCTAssertEqual(cache.kind, .folder)
         XCTAssertEqual(cache.type, "Folder in ~/Library/Caches")
-        XCTAssertEqual(cache.path?.value, "~/Library/Caches/\(redactor.placeholder("com.example.editor"))")
+        XCTAssertEqual(cache.path?.value,
+                       "~/Library/\(redactor.placeholder("Caches"))/\(redactor.placeholder("com.example.editor"))")
         XCTAssertEqual(cache.name, redactor.placeholder("com.example.editor"), "named as its path is sent")
         XCTAssertEqual(cache.bundleID, "com.example.editor")
         XCTAssertEqual(cache.teamID, "EXAMPLE123")
@@ -64,7 +65,8 @@ final class DiskExplainTests: XCTestCase {
         let leftover = try request(model, try XCTUnwrap(model.row(named: "com.gone.app.plist")).id)
         XCTAssertEqual(leftover.kind, .leftover)
         XCTAssertEqual(leftover.bundleID, "com.gone.app")
-        XCTAssertEqual(leftover.path?.value, "~/Library/Preferences/\(redactor.placeholder("com.gone.app.plist"))")
+        XCTAssertEqual(leftover.path?.value,
+                       "~/Library/\(redactor.placeholder("Preferences"))/\(redactor.placeholder("com.gone.app.plist"))")
         XCTAssertEqual(leftover.name, redactor.placeholder("com.gone.app.plist"))
         XCTAssertEqual(leftover.matchedRule, "Named for a bundle ID no installed app has")
     }
@@ -93,6 +95,26 @@ final class DiskExplainTests: XCTestCase {
 
     /// An account name that is also a word of System's ("in", "to") leaves a folder's and a suggestion's type, sizes,
     /// age, and rule as System words them, and is still removed from their names, identifiers, and paths.
+    func testALargeSuggestionSendsItsLargestItemsNamesInOrderAndSaysItLeftSomeOut() async throws {
+        // Sizes fall with the number, so Big-00 is largest; Tie-a and Tie-b have one size and are sent by path.
+        for number in 0..<40 {
+            try fixture.write("Library/Developer/Xcode/DerivedData/Big-\(String(format: "%02d", number))/Build/app",
+                              bytes: (60 - number) * 16_384)
+        }
+        for name in ["Tie-b", "Tie-a"] {
+            try fixture.write("Library/Developer/Xcode/DerivedData/\(name)/Build/app", bytes: 59 * 16_384 + 8_192)
+        }
+        let model = try await fixture.scanned()
+        model.tab = .suggestions
+        let suggestion = try request(model, try XCTUnwrap(model.row(named: "Xcode DerivedData")).id)
+        let expected = ["Big-00", "Tie-a", "Tie-b"] + (1..<8).map { "Big-0\($0)" }
+        XCTAssertEqual(suggestion.members, expected.map { redactor.placeholder($0) })
+        XCTAssertTrue(suggestion.truncated, "43 items, 10 names")
+        let named = try XCTUnwrap(model.explainRequest(for: try XCTUnwrap(model.row(named: "Xcode DerivedData")).id,
+                                                       redactor: redactor.sendingFolderNames(true)))
+        XCTAssertEqual(named.members, expected)
+    }
+
     func testAnAccountNameThatIsAlsoAWordLeavesSystemsOwnWordsAsTheyAre() async throws {
         let model = try await fixture.scanned()
         let words = ExplainRedactor(homes: [fixture.home], accountNames: ["in", "to", "the", "of", "a", "changed", "editor"],

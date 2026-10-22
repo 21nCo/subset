@@ -32,11 +32,18 @@ final class ExplainTests: XCTestCase {
         let spaced = redactor.path("/Users/jdoe/Clients/Acme Inc. ~/Private Client (old)/data.sock").value
         XCTAssertEqual(spaced, "~/Clients/\(redactor.placeholder("Acme Inc. ~"))/"
             + "\(redactor.placeholder("Private Client (old)"))/\(redactor.placeholder("data.sock"))")
-        // macOS's own folders in ~/Library say nothing about the user; what is inside them does.
-        XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches/com.example.app/data").value,
-                       "~/Library/Caches/\(redactor.placeholder("com.example.app"))/\(redactor.placeholder("data"))")
+        // macOS's own folders in ~/Library are no exception: every name deeper than the first level is withheld.
+        for folder in ["Caches", "LaunchAgents", "Application Support", "Preferences", "Saved Application State"] {
+            XCTAssertEqual(redactor.path("/Users/jdoe/Library/\(folder)/com.example.app").value,
+                           "~/Library/\(redactor.placeholder(folder))/\(redactor.placeholder("com.example.app"))")
+            XCTAssertEqual(redactor.name(ofPath: "/Users/jdoe/Library/\(folder)"), redactor.placeholder(folder))
+            XCTAssertEqual(redactor.name(folder, ofPath: "/Users/jdoe/Library/\(folder)"), redactor.placeholder(folder))
+            XCTAssertEqual(redactor.sendingFolderNames(true).path("/Users/jdoe/Library/\(folder)/com.example.app").value,
+                           "~/Library/\(folder)/com.example.app")
+            XCTAssertEqual(redactor.sendingFolderNames(true).name(folder, ofPath: "/Users/jdoe/Library/\(folder)"), folder)
+        }
         XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches Secret Client").value,
-                       "~/Library/\(redactor.placeholder("Caches Secret Client"))", "only exactly macOS's own folder")
+                       "~/Library/\(redactor.placeholder("Caches Secret Client"))")
         XCTAssertEqual(redactor.path("/Users/jdoe/Projects/Library/Caches").value,
                        "~/Projects/\(redactor.placeholder("Library"))/\(redactor.placeholder("Caches"))")
         // Another session's key gives other placeholders.
@@ -46,6 +53,38 @@ final class ExplainTests: XCTestCase {
 
         let sending = redactor.sendingFolderNames(true)
         XCTAssertEqual(sending.path("/Users/jdoe/dev/acme-merger/api/server").value, "~/dev/acme-merger/api/server")
+    }
+
+    func testCountedNamesOfManyItemsMakeOnlyTheNamesARequestKeeps() {
+        // 10,000 items under 2,500 names, largest first; every item is counted, but only 11 names are made.
+        let items = (0..<10_000).map { "/Users/jdoe/dev/project-\($0 % 2_500)" }
+        let made = Counter()
+        let names = ExplainFacts.countedNames(items, limit: ExplainRequest.memberLimit + 1,
+                                              key: { redactor.nameKey(ofPath: $0) },
+                                              name: { made.count += 1; return redactor.name(ofPath: $0) })
+        XCTAssertEqual(made.count, ExplainRequest.memberLimit + 1)
+        XCTAssertEqual(names, Array(ExplainFacts.countedNames(items.map { redactor.name(ofPath: $0) }).prefix(11)))
+        XCTAssertEqual(names.first, redactor.placeholder("project-0") + " ×4")
+        var facts = ExplainFacts(kind: .suggestion, name: "s")
+        facts.members = names
+        XCTAssertTrue(ExplainRequest(facts, redactor: redactor).truncated, "the request says it left names out")
+    }
+
+    func testPathsWithOneNameKeyHaveOneNameAsSent() {
+        let redactor = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: ["jdoe", "Jane Doe"], sendFolderNames: false,
+                                       key: Array(repeating: 7, count: 32))
+        let paths = ["/Users/jdoe", "/USERS/JDOE/", "/System/Volumes/Data/Users/jdoe", "/", "/Users/jdoe/dev", "/Users/jdoe/dev/",
+                     "/Users/jdoe/a/dev", "/Users/jdoe/b/dev", "/opt/dev", "/Users/jdoe/jdoe", "/Users/jdoe/x/jdoe",
+                     "/Volumes/jdoe", "/Users/jdoe/Library/Caches", "/Users/jdoe/Caches", "/opt/Caches",
+                     "/Users/jdoe/x/Jane Doe", "/opt/Jane Doe", "/Users/jdoe/a/line\nbreak", "/opt/line\nbreak"]
+        for redactor in [redactor, redactor.sendingFolderNames(true)] {
+            for first in paths {
+                for second in paths where redactor.nameKey(ofPath: first) == redactor.nameKey(ofPath: second) {
+                    XCTAssertEqual(redactor.name(ofPath: first), redactor.name(ofPath: second), "\(first) and \(second)")
+                }
+            }
+        }
+        XCTAssertNotEqual(redactor.nameKey(ofPath: "/Users/jdoe/dev"), redactor.nameKey(ofPath: "/Users/jdoe/a/dev"))
     }
 
     func testTheHomeFolderInAnyCaseOrThroughTheDataVolumeIsTheHomeFolder() {
@@ -169,8 +208,8 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(request.evidence.map(\.path), [redactor.path(project),
                                                       redactor.path("/Users/jdoe/Library/LaunchAgents/Acme Merger/agent.plist"),
                                                       nil])
-        XCTAssertEqual(request.evidence[1].path?.value, "~/Library/LaunchAgents/\(redactor.placeholder("Acme Merger"))/"
-            + redactor.placeholder("agent.plist"))
+        XCTAssertEqual(request.evidence[1].path?.value, "~/Library/\(redactor.placeholder("LaunchAgents"))/"
+            + "\(redactor.placeholder("Acme Merger"))/" + redactor.placeholder("agent.plist"))
         let json = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         XCTAssertEqual(object["path"] as? String, request.path?.value, "a path is sent as a value of its own")
@@ -349,7 +388,10 @@ final class ExplainTests: XCTestCase {
         XCTAssertNil(try Explanation(validating: suggested, for: request(.process, unattributed: true)).suggestedOrigin)
         XCTAssertNil(try Explanation(validating: suggested, for: request(.folder)).suggestedOrigin)
         XCTAssertFalse(request(.process, unattributed: true).maySuggestOrigin)
-        assertRejected(draft(origin: "Acme\nrm -rf ~"), request(.processGroup, unattributed: true))
+        // A short name is one line: every kind of line break, and a tab, is rejected, not only LF.
+        for separator in ["\n", "\r\n", "\r", "\u{2028}", "\u{2029}", "\u{0085}", "\u{000B}", "\u{000C}", "\t"] {
+            assertRejected(draft(origin: "Acme\(separator)rm -rf ~"), request(.processGroup, unattributed: true))
+        }
         assertRejected(draft(origin: String(repeating: "o", count: 81)), request(.processGroup, unattributed: true))
     }
 
@@ -484,6 +526,71 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(provider.explained, 1)
         center.choice = .appleIntelligence
         XCTAssertEqual(center.state(for: key), .idle, "no answer is kept, and the item can be explained again")
+    }
+
+    /// Whether `task` finishes within a few seconds, without waiting longer for one that does not.
+    private func finishes(_ task: Task<Void, Never>) async throws -> Bool {
+        try await answer(within: .seconds(5)) { await task.value; return true } ?? false
+    }
+
+    private func request(named name: String) -> ExplainRequest {
+        ExplainRequest(ExplainFacts(kind: .process, name: name), redactor: redactor)
+    }
+
+    func testPickingTheProviderAgainWhileItsAvailabilityIsReadEndsTheOldRequestAndAllowsANewOne() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
+        await gate.reached()
+        center.choice = .none
+        center.choice = .appleIntelligence
+        XCTAssertEqual(center.state(for: key), .idle, "the old request no longer holds the item")
+        let ended = try await finishes(asked)
+        XCTAssertTrue(ended, "the old work is cancelled while the provider is still reading its availability")
+        XCTAssertEqual(provider.explained, 0)
+
+        // Explain right after picking the provider again starts a new request.
+        provider.availabilityGate = nil
+        await center.explain(key) { _ in self.request(named: "new") }
+        gate.open()
+        _ = await asked.value
+        XCTAssertEqual(provider.requests, [request(named: "new")], "the old request is never sent")
+        guard case let .explained(_, shown) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+        XCTAssertEqual(shown, request(named: "new"))
+        XCTAssertEqual(center.availability, .available)
+    }
+
+    func testPickingTheProviderAgainWhileItAnswersKeepsNoOldAnswerAndAllowsANewOne() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.gate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
+        await gate.reached()
+        center.choice = .none
+        center.choice = .appleIntelligence
+        XCTAssertEqual(center.state(for: key), .idle, "the old request no longer holds the item")
+        let ended = try await finishes(asked)
+        XCTAssertTrue(ended, "the old answer is cancelled")
+
+        provider.gate = nil
+        provider.answer = ExplanationDraft(summary: "The new answer.", whatItIs: "w", removalSafety: "review",
+                                           howToRemove: "h", confidence: "high")
+        await center.explain(key) { _ in self.request(named: "new") }
+        gate.open()
+        _ = await asked.value
+        XCTAssertEqual(provider.requests, [request(named: "old"), request(named: "new")])
+        guard case let .explained(answer, shown) = center.state(for: key) else {
+            return XCTFail("\(center.state(for: key))")
+        }
+        XCTAssertEqual(answer.summary, "The new answer.")
+        XCTAssertEqual(shown, request(named: "new"), "the old answer, arriving last, is not kept")
     }
 
     func testTurningFolderNamesOffWhileAvailabilityIsReadSendsNoFolderName() async throws {

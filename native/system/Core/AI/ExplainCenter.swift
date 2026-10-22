@@ -41,7 +41,9 @@ public enum ExplainState: Equatable, Sendable {
 /// The Explain setting and each item's explanation. Nothing is sent until the user picks a provider (`choice` starts
 /// as `.none`, and with `.none` no provider is made or called). Explanations are kept in memory for the session, per
 /// provider and item; a failed or unavailable one can be asked again. A provider that does not answer in time is
-/// given up on, so an item is never left being explained.
+/// given up on, so an item is never left being explained. Changing the provider ends the work begun with the one
+/// before: it is cancelled, nothing it had not sent yet is sent, and nothing it answers is kept, even when the user
+/// picks that provider again before it finishes.
 @MainActor
 @Observable
 public final class ExplainCenter {
@@ -49,6 +51,12 @@ public final class ExplainCenter {
         didSet {
             guard choice != oldValue else { return }
             defaults.set(choice.rawValue, forKey: Self.choiceKey)
+            selection += 1
+            for cancel in pending.values { cancel() }
+            pending = [:]
+            states = states.filter { _, state in
+                if case .working = state { false } else { true }
+            }
             availabilityStatus = nil
         }
     }
@@ -64,6 +72,11 @@ public final class ExplainCenter {
     private var states: [StateKey: ExplainState] = [:]
     /// Counts availability reads, so only the latest one is shown.
     @ObservationIgnored private var availabilityReads = 0
+    /// Counts provider changes, so work begun before the latest one changes nothing.
+    @ObservationIgnored private var selection = 0
+    /// Cancels each availability read and answer in flight, by when it began.
+    @ObservationIgnored private var pending: [Int: @Sendable () -> Void] = [:]
+    @ObservationIgnored private var pendingCount = 0
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let makeProvider: @MainActor (AIProviderChoice) -> (any AIProvider)?
@@ -116,27 +129,29 @@ public final class ExplainCenter {
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
     /// when the user checks again. A read that a later one overtakes is not shown.
     public func refreshAvailability() async {
-        let choice = self.choice
         guard choice != .none, let provider = makeProvider(choice) else { return }
-        _ = await readAvailability(of: provider, for: choice)
+        _ = await readAvailability(of: provider, in: selection)
     }
 
     /// `provider`'s availability, or `nil` when it does not answer in time. Settings shows it as checking while it is
-    /// read, then what it answered or that it did not answer in time, only while no later read has started and
-    /// `choice` is still the chosen provider, so a slow read never replaces a newer one.
-    private func readAvailability(of provider: any AIProvider, for choice: AIProviderChoice) async -> AIAvailability? {
+    /// read, then what it answered or that it did not answer in time, only while no later read has started and the
+    /// provider has not changed since `selection`, so a slow read never replaces a newer one.
+    private func readAvailability(of provider: any AIProvider, in selection: Int) async -> AIAvailability? {
         availabilityReads += 1
         let read = availabilityReads
         availabilityStatus = .checking
         let availability: AIAvailability?
         do {
-            availability = try await answer(within: availabilityTimeout, { await provider.availability() })
+            let timeout = availabilityTimeout
+            availability = try await untilProviderChanges {
+                try await answer(within: timeout, { await provider.availability() })
+            }
         } catch {
             // Cancelled, as when Settings closes: not a status; the next read shows one.
-            if choice == self.choice, read == availabilityReads { availabilityStatus = nil }
+            if selection == self.selection, read == availabilityReads { availabilityStatus = nil }
             return nil
         }
-        if choice == self.choice, read == availabilityReads {
+        if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
         }
         return availability
@@ -144,12 +159,14 @@ public final class ExplainCenter {
 
     /// Explains an item with the chosen provider, building its request with the current redactor. Does nothing without
     /// a provider, while the item is being explained, or once it has been. Returns when the answer is in. When the
-    /// user changes the provider meanwhile, the request is not sent if it has not been yet, and no answer is kept; when
+    /// user changes the provider meanwhile, even back to this one, the work is cancelled, the request is not sent if it
+    /// has not been yet, no answer is kept, and the item can be explained again at once; when
     /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
     /// asked again.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
+        let selection = self.selection
         let key = StateKey(choice: choice, item: item)
         switch states[key] {
         case .working?, .explained?: return
@@ -162,11 +179,9 @@ public final class ExplainCenter {
             return
         }
         states[key] = .working(request)
-        let read = await readAvailability(of: provider, for: choice)
-        guard choice == self.choice else {
-            states[key] = nil
-            return
-        }
+        let read = await readAvailability(of: provider, in: selection)
+        // The provider changed meanwhile: this item's state is no longer this call's (a new request may have begun).
+        guard selection == self.selection else { return }
         guard let availability = read else {
             states[key] = .failed(Self.late(choice, availabilityTimeout) + " Nothing was sent.", request)
             return
@@ -187,7 +202,9 @@ public final class ExplainCenter {
         let outcome: ExplainState?
         do {
             let sent = request
-            if let draft = try await answer(within: answerTimeout, { try await provider.explain(sent) }) {
+            let timeout = answerTimeout
+            let draft = try await untilProviderChanges { try await answer(within: timeout, { try await provider.explain(sent) }) }
+            if let draft {
                 outcome = .explained(try Explanation(validating: draft, for: request), request)
             } else {
                 outcome = .failed(Self.late(choice, answerTimeout), request)
@@ -201,7 +218,20 @@ public final class ExplainCenter {
         } catch {
             outcome = .failed(error.localizedDescription, request)
         }
-        states[key] = choice == self.choice ? outcome : nil
+        guard selection == self.selection else { return }
+        states[key] = outcome
+    }
+
+    /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does.
+    private func untilProviderChanges<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T?
+    ) async throws -> T? {
+        let task = Task { try await operation() }
+        pendingCount += 1
+        let id = pendingCount
+        pending[id] = { task.cancel() }
+        defer { pending[id] = nil }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
     private static func late(_ choice: AIProviderChoice, _ timeout: Duration) -> String {
