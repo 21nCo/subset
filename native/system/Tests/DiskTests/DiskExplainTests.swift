@@ -317,6 +317,27 @@ final class DiskExplainTests: XCTestCase {
                        "Not measured: docker system df failed with exit status 1: Could not read ~/Library/Caches Secret Client.")
     }
 
+    func testAHomePathInsideAFolderNameInADockerMessageIsNotSentByName() async throws {
+        let message = "No such file: \(fixture.home)/Clients/Acme ~/Private Client/docker.sock"
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(
+                home: home, installedApps: InstalledApps([DiskFixture.editor]), simulatorRuntimes: .installed([]),
+                dockerImages: .unavailable(.failed(command: "docker system df", status: 1, message: message))))
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        let analysis = try XCTUnwrap(model.analysis)
+        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
+        let text = try sent(try request(model, docker))
+        for word in ["Acme", "Private", "Client ", "Client/", "docker.sock"] {
+            XCTAssertFalse(text.contains(word), "\(word): \(text)")
+        }
+        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
+                       "Not measured: docker system df failed with exit status 1: No such file: "
+                           + "~/Clients/Acme ~/Private Client/docker.sock")
+    }
+
     func testAScanOfTheHomeFolderThroughTheDataVolumeIsRedactedAsTheHomeFolder() async throws {
         let model = fixture.model()
         model.scope = .folder(path: "/System/Volumes/Data" + fixture.home)

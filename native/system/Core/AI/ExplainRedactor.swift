@@ -108,7 +108,8 @@ public struct ExplainRedactor: Sendable {
     /// a folder name may hold any character but a slash, its end cannot be told from the words after it, so it fails
     /// closed: it runs to the last slash before the next `~/` path, and then to the end of that line, and its last
     /// name is kept only when it is exactly a placeholder or, directly in `~/Library`, one of macOS's own folders, with
-    /// punctuation after it; otherwise it is withheld with the words after it.
+    /// punctuation after it; otherwise it is withheld with the words after it. A name may hold `~/` too, so a raw path
+    /// after a raw path has no first level: every name in it is withheld unless it is a placeholder.
     public func text(_ text: String) -> String {
         var result = text
         for home in homes {
@@ -154,10 +155,13 @@ public struct ExplainRedactor: Sendable {
     /// before the next `~/` path is on, since a name may hold spaces and line breaks but no slash. Each
     /// component a slash follows is shown as `path(_:)` shows it, and an unmarked path's last component, which may run
     /// on into the line's words, is kept only when, without the punctuation after it, it is exactly a name sent as it
-    /// is; otherwise it is withheld whole and that punctuation kept.
+    /// is; otherwise it is withheld whole and that punctuation kept. Since a name may also hold `~/`, after an unmarked
+    /// path no later unmarked one has a first level: each of its names, the first included, is kept only when it is a
+    /// placeholder.
     private func withholdingDeepNames(in text: String) -> String {
         var result = ""
         var rest = text[...]
+        var afterRawPath = false
         while let start = rest.range(of: "~/") {
             result += rest[..<start.upperBound]
             let path = rest[start.upperBound...]
@@ -165,23 +169,28 @@ public struct ExplainRedactor: Sendable {
             let mark = path.range(of: pathEnd).flatMap { $0.lowerBound <= lineEnd ? $0 : nil }
             let end = mark?.lowerBound ?? Self.rawPathEnd(in: path)
             var parts = path[..<end].split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            if parts.count > 1 {
-                let first = Substring(parts[0])
-                for position in 1..<parts.count - (mark == nil ? 1 : 0)
-                where !parts[position].isEmpty && !isSent(parts[position], at: position, under: first) {
-                    parts[position] = placeholder(parts[position])
-                }
-                if mark == nil {
-                    let last = parts[parts.count - 1]
-                    let punctuation = last.reversed().prefix { !$0.isLetter && !$0.isNumber }.count
-                    let name = String(last.dropLast(punctuation))
-                    if !name.isEmpty, !isSent(name, at: parts.count - 1, under: first) {
-                        parts[parts.count - 1] = placeholder(name) + last.suffix(punctuation)
-                    }
+            // After a raw path, a `~/` may be inside one of its names, so the next name is no first level.
+            let trusted = mark != nil || !afterRawPath
+            let first = trusted ? Substring(parts[0]) : nil
+            let isKept = { (part: String, position: Int) in
+                trusted ? self.isSent(part, at: position, under: first) : self.isPlaceholder(part)
+            }
+            let rawLast = mark == nil ? parts.count - 1 : nil
+            for position in (trusted ? 1 : 0)..<parts.count
+            where position != rawLast && !parts[position].isEmpty && !isKept(parts[position], position) {
+                parts[position] = placeholder(parts[position])
+            }
+            if let rawLast, rawLast > 0 || !trusted {
+                let last = parts[rawLast]
+                let punctuation = last.reversed().prefix { !$0.isLetter && !$0.isNumber }.count
+                let name = String(last.dropLast(punctuation))
+                if !name.isEmpty, !isKept(name, rawLast) {
+                    parts[rawLast] = placeholder(name) + last.suffix(punctuation)
                 }
             }
             result += parts.joined(separator: "/")
             rest = mark.map { path[$0.upperBound...] } ?? path[end...]
+            afterRawPath = afterRawPath || mark == nil
         }
         return result + rest
     }
