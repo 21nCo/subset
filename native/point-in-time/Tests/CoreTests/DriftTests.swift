@@ -392,6 +392,189 @@ private func episodeStarts(_ decision: DriftDecision) -> [Date]? {
     }
 }
 
+/// The app's side of the companion flow, re-entering it as the app does: a correction's classification recount and a
+/// pause's capture-state change each refresh the flow before returning.
+@MainActor
+private final class FakeCompanionHost: DriftCompanionHost {
+    let flow = DriftCompanionFlow(calendar: newYork)
+    var blocks: [Block]
+    var now: Date
+    var companionState = CompanionState()
+    var driftRule = DriftRule()
+    var notificationFallback = false
+    var isRecording = true
+    var panelAvailable = true
+    /// Blocks whose correction fails, as when one was deleted meanwhile.
+    var uncorrectable: Set<Date> = []
+    /// What the panel shows while it is open.
+    private(set) var panel: (episode: DriftEpisode?, error: String?)?
+    private(set) var driftNotifications = 0
+    private(set) var failureNotifications: [String] = []
+
+    init(_ kinds: [Kind]) {
+        blocks = session(at(10), kinds)
+        now = justAfter(blocks)
+        flow.host = self
+    }
+
+    /// Records more blocks after the last; now is just after them.
+    func record(_ kinds: [Kind]) {
+        blocks += session(blocks.last!.end, kinds)
+        now = justAfter(blocks)
+    }
+
+    func evaluate() -> DriftDecision {
+        DriftDetector.evaluate(blocks, now: now, rule: driftRule, state: companionState, calendar: newYork)
+    }
+
+    func readBlocks(now: Date) -> (blocks: [Block], from: Date)? { (blocks, at(0)) }
+
+    func showPanel() -> Bool {
+        guard panelAvailable else { return false }
+        panel = (flow.onOffer, flow.actionError)
+        return true
+    }
+
+    func closePanel() { panel = nil }
+    func sendDriftNotification() { driftNotifications += 1 }
+    func sendFailureNotification(_ message: String) { failureNotifications.append(message) }
+    func companionChanged() {}
+
+    func pauseTracking(until end: Date, at now: Date) {
+        isRecording = false
+        flow.refresh(now: now)
+    }
+
+    func relabel(_ blockStarts: [Date], as label: BlockLabel, at now: Date) -> [String] {
+        var failures: [String] = []
+        for start in blockStarts {
+            guard !uncorrectable.contains(start), let index = blocks.firstIndex(where: { $0.start == start }) else {
+                failures.append("\(start)")
+                continue
+            }
+            blocks[index].labeling = BlockLabeling(state: .corrected, label: label, provider: "user")
+        }
+        flow.refresh(now: now)
+        return failures
+    }
+}
+
+@MainActor @Suite struct DriftCompanionFlowTests {
+    @Test func notADriftOffersALaterDriftOnlyOnceItsOwnPromptHasClosed() {
+        for fromNotification in [false, true] {
+            let host = FakeCompanionHost([.focus, .drift, .drift])
+            host.flow.refresh(now: host.now)
+            guard let first = host.panel?.episode else { Issue.record("expected the drift on offer"); return }
+            #expect(host.companionState.promptedEpisode == first.start)
+            // The panel closed itself; the action comes from the drift's notification.
+            if fromNotification { host.flow.dismiss() }
+            host.record([.drift, .drift])
+            host.flow.refresh(now: host.now)
+            let later = Array(host.blocks[3...].map(\.start))
+            host.flow.notADrift(first, as: .focus, at: host.now)
+            // The corrections end the first run, so the later one is a new episode. The recount refreshed the flow
+            // while the first was still being closed; the later drift is offered only after, and stays on offer.
+            #expect(host.panel?.episode?.blockStarts == later, "from a notification: \(fromNotification)")
+            #expect(host.flow.onOffer?.blockStarts == later)
+            #expect(host.companionState.promptedEpisode == later[0])
+        }
+    }
+
+    @Test func aFailedCorrectionKeepsItsErrorOnScreenAndTheLaterDriftEligible() {
+        let host = FakeCompanionHost([.focus, .drift, .drift])
+        host.flow.refresh(now: host.now)
+        guard let first = host.flow.onOffer else { Issue.record("expected the drift on offer"); return }
+        host.record([.drift, .drift])
+        host.uncorrectable = [first.start]
+        host.flow.notADrift(first, as: .focus, at: host.now)
+        // The second block's correction resets the run, so the later blocks are a new episode, held back unrecorded
+        // while the panel shows the error.
+        let later = DriftEpisode(since: host.blocks[3].start, blockStarts: Array(host.blocks[3...].map(\.start)))
+        #expect(host.panel?.episode == first)
+        #expect(host.panel?.error?.hasPrefix("Could not relabel every block.") == true)
+        #expect(host.companionState.promptedEpisode == first.start)
+        #expect(host.evaluate() == .prompt(later))
+        host.flow.refresh(now: host.now)
+        #expect(host.panel?.episode == first)
+        // Once the error is dismissed, the later drift is offered.
+        host.flow.dismiss()
+        host.flow.refresh(now: host.now)
+        #expect(host.panel?.episode == later)
+        #expect(host.panel?.error == nil)
+        #expect(host.companionState.promptedEpisode == later.start)
+    }
+
+    @Test func withoutThePanelTheErrorAndTheLaterDriftGoByNotification() {
+        let host = FakeCompanionHost([.focus, .drift, .drift])
+        host.flow.refresh(now: host.now)
+        guard let first = host.flow.onOffer else { Issue.record("expected the drift on offer"); return }
+        host.flow.dismiss()
+        host.panelAvailable = false
+        host.notificationFallback = true
+        host.record([.drift, .drift])
+        host.uncorrectable = [first.start]
+        host.flow.notADrift(first, as: .focus, at: host.now)
+        #expect(host.failureNotifications.count == 1)
+        #expect(host.flow.onOffer == nil)
+        // One notification for the later drift, unrecorded until macOS accepts it.
+        #expect(host.driftNotifications == 1)
+        #expect(host.companionState.promptedEpisode == first.start)
+        host.flow.refresh(now: host.now)
+        #expect(host.driftNotifications == 1)
+        let later = host.flow.confirmSubmission(now: host.now)
+        #expect(later?.blockStarts == Array(host.blocks[3...].map(\.start)))
+        host.flow.deliveryAnswered(accepted: true, now: host.now)
+        #expect(host.companionState.promptedEpisode == later?.start)
+        guard case .alreadyPrompted = host.evaluate() else { Issue.record("expected the later drift recorded"); return }
+    }
+
+    @Test func notADriftFromAnOlderNotificationLeavesThePanelOfferingAnotherDrift() {
+        for fails in [false, true] {
+            let host = FakeCompanionHost([.focus, .drift, .drift])
+            host.panelAvailable = false
+            host.notificationFallback = true
+            host.flow.refresh(now: host.now)
+            guard let notified = host.flow.confirmSubmission(now: host.now) else { Issue.record("expected a notification"); return }
+            host.flow.deliveryAnswered(accepted: true, now: host.now)
+            host.record([.focus, .drift, .drift])
+            host.panelAvailable = true
+            host.flow.refresh(now: host.now)
+            guard let shown = host.panel?.episode, shown != notified else { Issue.record("expected the later drift on offer"); return }
+            if fails { host.uncorrectable = [notified.start] }
+            host.flow.notADrift(notified, as: .neutral, at: host.now)
+            // The later drift was recorded when shown, so it stays on offer; an error goes by notification.
+            #expect(host.panel?.episode == shown, "failing: \(fails)")
+            #expect(host.panel?.error == nil)
+            #expect(host.companionState.promptedEpisode == shown.start)
+            #expect(host.failureNotifications.count == (fails ? 1 : 0))
+        }
+    }
+
+    @Test func returnToFocusAndTakeABreakCloseThePromptAndOfferNothingAfter() {
+        for breakLength in [nil, 10 * 60.0] {
+            let host = FakeCompanionHost([.focus, .drift, .drift])
+            host.flow.refresh(now: host.now)
+            if let breakLength {
+                host.flow.takeBreak(for: breakLength, at: host.now)
+                #expect(!host.isRecording)
+                #expect(host.companionState.breakUntil == host.now.addingTimeInterval(breakLength))
+            } else {
+                host.flow.returnToFocus(at: host.now)
+                #expect(host.companionState.activeFocusWindow(at: host.now) != nil)
+            }
+            #expect(host.panel == nil)
+            #expect(host.flow.onOffer == nil)
+            host.record([.drift, .drift])
+            host.isRecording = true
+            host.flow.refresh(now: host.now)
+            // Blocks before the window or break ends are settled: nothing new is offered or recorded.
+            #expect(host.panel == nil)
+            #expect(host.evaluate() == .none)
+            #expect(host.companionState.promptedEpisode == host.blocks[1].start)
+        }
+    }
+}
+
 @Suite struct FocusRingTests {
     @Test func aZeroDataDayDrawsAnEmptyRing() {
         let ring = FocusRing(today: at(12), blocks: [], calendar: newYork)

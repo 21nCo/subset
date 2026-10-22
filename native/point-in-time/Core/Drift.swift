@@ -291,3 +291,184 @@ public enum DriftDetector {
         return .prompt(episode)
     }
 }
+
+/// What the app gives the drift companion's flow: its settings and record, the store, capture, the panel, and the
+/// notification fallback.
+@MainActor
+public protocol DriftCompanionHost: AnyObject {
+    var companionState: CompanionState { get set }
+    var driftRule: DriftRule { get }
+    var notificationFallback: Bool { get }
+    /// Whether capture is recording; nothing is offered otherwise.
+    var isRecording: Bool { get }
+    /// Reads the blocks since the start of today or the last day, whichever is earlier, and updates the ring; nil when
+    /// the store cannot be read.
+    func readBlocks(now: Date) -> (blocks: [Block], from: Date)?
+    /// Shows the panel with the flow's `onOffer` and `actionError`; false when there is nowhere to show it.
+    func showPanel() -> Bool
+    func closePanel()
+    /// Sends the notification for the drift in the flow's `delivery.sending`: asks `confirmSubmission` just before
+    /// submitting it, then passes macOS's answer to `deliveryAnswered`.
+    func sendDriftNotification()
+    /// Reports by notification that Not a Drift was not fully saved.
+    func sendFailureNotification(_ message: String)
+    /// Take a Break: pauses tracking until `end`. This may refresh the flow synchronously.
+    func pauseTracking(until end: Date, at now: Date)
+    /// Not a Drift: labels each block `label` through the store's correction operation, then recounts classification,
+    /// which may refresh the flow synchronously. Returns why each block that was not corrected was not.
+    func relabel(_ blockStarts: [Date], as label: BlockLabel, at now: Date) -> [String]
+    /// Something the menu bar item shows changed.
+    func companionChanged()
+}
+
+/// The drift companion's steps, ordered so a drift recorded as offered is always one the user can act on. A refresh
+/// offers a new drift only while no action is running and the panel is not holding an episode or an action's error.
+/// An action's own effects ask for refreshes synchronously (a correction recounts classification, a pause changes the
+/// capture state); those wait until the action has closed the panel or shown its error, and then one refresh runs. So
+/// an action never closes or replaces a drift a refresh has just shown and recorded, and a drift held back meanwhile is
+/// not recorded and stays eligible.
+@MainActor
+public final class DriftCompanionFlow {
+    public weak var host: (any DriftCompanionHost)?
+    /// The episode the panel shows; nil while it is closed.
+    public private(set) var onOffer: DriftEpisode?
+    /// Why the last action could not finish, shown with the panel.
+    public private(set) var actionError: String?
+    public private(set) var delivery = DriftOfferDelivery()
+    private let calendar: Calendar
+    private var acting = false
+
+    public init(calendar: Calendar) {
+        self.calendar = calendar
+    }
+
+    /// Reads the store once, updates the ring, and offers a newly confirmed drift. Nothing is offered unless capture is
+    /// recording: a drift noticed while paused, idle, asleep, or locked waits, and is offered only if it is still
+    /// current once recording resumes. Nor while the panel is open or a drift notification waits for macOS's answer.
+    public func refresh(now: Date) {
+        guard let host, !acting else { return }
+        defer { host.companionChanged() }
+        guard let (blocks, from) = host.readBlocks(now: now) else { return }
+        var state = host.companionState
+        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { host.companionState = state }
+        guard onOffer == nil, host.isRecording, !delivery.isSending,
+              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: host.driftRule, state: state, calendar: calendar)
+        else { return }
+        offer(episode, host: host)
+    }
+
+    /// Shows `episode` in the panel and records it as offered, else sends it as a notification when the user turned that
+    /// on, recorded once macOS accepts it. A drift neither reached is not recorded, so a later refresh offers it again.
+    private func offer(_ episode: DriftEpisode, host: any DriftCompanionHost) {
+        onOffer = episode
+        actionError = nil
+        let shown = host.showPanel()
+        if !shown { onOffer = nil }
+        var state = host.companionState
+        switch delivery.offer(episode, panelShown: shown, fallbackEnabled: host.notificationFallback, state: &state) {
+        case .recorded: host.companionState = state
+        case .sendNotification: host.sendDriftNotification()
+        case .notDelivered: break
+        }
+    }
+
+    /// Closes the panel without acting; the episode stays offered, so it is not offered again.
+    public func dismiss() {
+        onOffer = nil
+        actionError = nil
+        host?.closePanel()
+        host?.companionChanged()
+    }
+
+    /// Runs an action's steps, then one refresh; refreshes asked for meanwhile do nothing (see the type's comment).
+    private func act(now: Date, _ steps: (any DriftCompanionHost) -> Void) {
+        guard let host else { return }
+        guard !acting else { return steps(host) }
+        acting = true
+        steps(host)
+        acting = false
+        refresh(now: now)
+    }
+
+    /// Return to Focus: closes the panel and records a 25-minute focus window, during which no drift is offered and
+    /// blocks are not counted toward one.
+    public func returnToFocus(at now: Date) {
+        act(now: now) { host in
+            var state = host.companionState
+            state.returnToFocus(at: now)
+            host.companionState = state
+            dismiss()
+        }
+    }
+
+    /// Ends the focus window early, from the menu.
+    public func endFocusWindow(at now: Date) {
+        act(now: now) { host in
+            var state = host.companionState
+            state.endFocusWindow(at: now)
+            host.companionState = state
+        }
+    }
+
+    /// Take a Break: holds back drift prompts for `length`, pauses tracking, and closes the panel.
+    public func takeBreak(for length: TimeInterval, at now: Date) {
+        act(now: now) { host in
+            var state = host.companionState
+            let end = state.takeBreak(for: length, at: now)
+            host.companionState = state
+            host.pauseTracking(until: end, at: now)
+            dismiss()
+        }
+    }
+
+    /// Not a Drift: relabels the episode's blocks. If any block could not be corrected (one deleted meanwhile, say), the
+    /// others keep their correction and the panel shows the error for the episode, opening again when the action came
+    /// from the menu or a notification; when it cannot be shown, a notification reports it if the fallback is allowed.
+    /// While that error is on screen no new drift is offered. A panel offering another drift (the action came from an
+    /// older notification) stays as it is, and an error is reported by notification.
+    public func notADrift(_ episode: DriftEpisode, as label: BlockLabel, at now: Date) {
+        act(now: now) { host in
+            let panelOffersAnother = onOffer.map { $0 != episode } ?? false
+            let failures = host.relabel(episode.blockStarts, as: label, at: now)
+            guard !failures.isEmpty else {
+                if !panelOffersAnother { dismiss() }
+                return
+            }
+            let message = "Could not relabel every block. " + failures.joined(separator: "; ")
+            if !panelOffersAnother {
+                onOffer = episode
+                actionError = message
+                guard !host.showPanel() else { return }
+                onOffer = nil
+            }
+            if host.notificationFallback { host.sendFailureNotification(message) }
+        }
+    }
+
+    /// After the user changed a drift setting: turning the companion off closes the panel.
+    public func settingsChanged(at now: Date) {
+        act(now: now) { host in
+            if !host.driftRule.enabled { dismiss() }
+        }
+    }
+
+    /// Just before the drift notification is submitted, after the asynchronous permission read: the episode to submit,
+    /// from a fresh read, or nil when it is no longer offered (see `DriftOfferDelivery.confirm`), which leaves it
+    /// unrecorded and eligible.
+    public func confirmSubmission(now: Date) -> DriftEpisode? {
+        guard let host else { return nil }
+        let current = host.isRecording ? host.readBlocks(now: now).map {
+            DriftDetector.evaluate($0.blocks, now: now, rule: host.driftRule, state: host.companionState, calendar: calendar)
+        } ?? .none : .none
+        return delivery.confirm(current: current, fallbackEnabled: host.notificationFallback)
+    }
+
+    /// macOS's answer for the drift notification submitted: one accepted is recorded as offered, whatever a later read
+    /// says; one refused stays eligible, and the next refresh offers it again rather than retrying at once.
+    public func deliveryAnswered(accepted: Bool, now: Date) {
+        guard let host else { return }
+        var state = host.companionState
+        if delivery.finish(accepted: accepted, state: &state) { host.companionState = state }
+        if accepted { refresh(now: now) } else { host.companionChanged() }
+    }
+}

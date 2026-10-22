@@ -69,14 +69,15 @@ final class DriftSettings {
     }
 }
 
-/// Today's ring and the drift companion. After every classification run or correction, and every minute, it reads the
-/// last day of blocks once, computes the ring from today's report totals, and asks `DriftDetector` whether a drift is
-/// confirmed. A new one is offered in a panel by the menu bar item, or by notification when the user enabled that and
-/// the panel cannot be shown; it is recorded as offered once the panel showed it or macOS accepted the notification.
-/// Each action is an explicit operation: Return to Focus records a focus window, Take a Break pauses tracking, and Not
-/// a Drift writes corrections through the store's `correct`. None closes tabs, quits apps, or sends anything anywhere.
+/// Today's ring and the drift companion, hosting `DriftCompanionFlow`, which orders its steps. After every
+/// classification run or correction, and every minute, the flow reads the last day of blocks once, the ring is computed
+/// from today's report totals, and `DriftDetector` says whether a drift is confirmed. A new one is offered in a panel by
+/// the menu bar item, or by notification when the user enabled that and the panel cannot be shown; it is recorded as
+/// offered once the panel showed it or macOS accepted the notification. Each action is an explicit operation: Return to
+/// Focus records a focus window, Take a Break pauses tracking, and Not a Drift writes corrections through the store's
+/// `correct`. None closes tabs, quits apps, or sends anything anywhere.
 @MainActor
-final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate {
+final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotificationCenterDelegate {
     static let lookBack: TimeInterval = 24 * 3_600
 
     let settings: DriftSettings
@@ -85,21 +86,17 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     private let captureSettings: CaptureSettings
     private let classification: ClassificationController
     private let calendar = Calendar.autoupdatingCurrent
+    private let flow: DriftCompanionFlow
     private var timer: Timer?
     private lazy var panel = CompanionPanelController(companion: self)
 
     /// Today's ring; nil until the store has been read, or when it cannot be.
     private(set) var ring: FocusRing?
     private(set) var readError: String?
-    /// The episode on offer while the panel is open.
-    private(set) var offered: DriftEpisode?
-    /// Why the last action could not finish, shown in the panel.
-    private(set) var actionError: String?
     /// Whether macOS allows pointInTime's alerts, as last read; nil until read. Read again before every notification.
     private(set) var notificationsAllowed: Bool?
     /// Why the last notification was not sent, shown in the menu until one is.
     private(set) var notificationError: String?
-    private var delivery = DriftOfferDelivery()
     /// Where the menu bar item is on screen, in screen coordinates; nil when it is not shown.
     var anchor: () -> NSRect? = { nil }
     /// Called after a refresh or an action, for the menu bar item.
@@ -112,10 +109,16 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         self.capture = capture
         self.captureSettings = captureSettings
         self.classification = classification
+        flow = DriftCompanionFlow(calendar: calendar)
         super.init()
+        flow.host = self
     }
 
     var state: CompanionState { settings.companionState }
+    /// The episode on offer while the panel is open.
+    var offered: DriftEpisode? { flow.onOffer }
+    /// Why the last action could not finish, shown in the panel.
+    var actionError: String? { flow.actionError }
 
     func start() {
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
@@ -127,23 +130,38 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         refresh()
     }
 
-    /// Reads the store once, updates the ring, and offers a newly confirmed drift. Nothing is offered unless capture is
-    /// recording: a drift noticed while paused, idle, asleep, or locked waits, and is offered only if it is still
-    /// current once recording resumes, and none while a drift notification waits for macOS's answer.
-    func refresh(now: Date = Date()) {
-        defer { onChange?() }
-        guard let (blocks, from) = read(now: now) else { return }
-        var state = state
-        if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { settings.companionState = state }
-        guard capture.state == .recording, !delivery.isSending,
-              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
-        else { return }
-        offer(episode)
+    func refresh() { flow.refresh(now: Date()) }
+
+    func settingsChanged() {
+        if !settings.notificationFallback { notificationError = nil }
+        flow.settingsChanged(at: Date())
     }
 
-    /// Reads the blocks since the start of today or the last day, whichever is earlier, and updates the ring; nil when
-    /// the store cannot be read.
-    private func read(now: Date) -> (blocks: [Block], from: Date)? {
+    func dismiss() { flow.dismiss() }
+    func returnToFocus() { flow.returnToFocus(at: Date()) }
+    func endFocusWindow() { flow.endFocusWindow(at: Date()) }
+    func takeBreak(for length: TimeInterval) { flow.takeBreak(for: length, at: Date()) }
+    func notADrift(_ episode: DriftEpisode, as label: BlockLabel) { flow.notADrift(episode, as: label, at: Date()) }
+
+    /// The panel's text: how many blocks and since when.
+    func summary(of episode: DriftEpisode) -> String {
+        let count = episode.blockStarts.count
+        let since = ReportText.time(episode.start, calendar: calendar, locale: .autoupdatingCurrent)
+        return "\(count) recent block\(count == 1 ? " was" : "s were") labeled Drift, since \(since)."
+    }
+
+    // MARK: DriftCompanionHost
+
+    var companionState: CompanionState {
+        get { settings.companionState }
+        set { settings.companionState = newValue }
+    }
+
+    var driftRule: DriftRule { settings.rule }
+    var notificationFallback: Bool { settings.notificationFallback }
+    var isRecording: Bool { capture.state == .recording }
+
+    func readBlocks(now: Date) -> (blocks: [Block], from: Date)? {
         guard let store else {
             ring = nil
             readError = "The activity store is unavailable."
@@ -162,90 +180,26 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         }
     }
 
-    func settingsChanged() {
-        if !settings.enabled { dismiss() }
-        if !settings.notificationFallback { notificationError = nil }
-        refresh()
+    func showPanel() -> Bool { panel.show(near: anchor()) }
+    func closePanel() { panel.close() }
+    func sendDriftNotification() { send(.drift) }
+    func sendFailureNotification(_ message: String) { send(.failure(message)) }
+    func companionChanged() { onChange?() }
+
+    /// Pauses tracking (when it is on) until `end`. An existing longer pause, such as one until the user resumes, is kept.
+    func pauseTracking(until end: Date, at now: Date) {
+        guard captureSettings.onboardingCompleted, captureSettings.trackingEnabled,
+              !(captureSettings.isPaused(at: now) && (captureSettings.pausedUntil ?? .distantPast) >= end) else { return }
+        // Ended first, like every control, so the open segment is saved before the pause.
+        capture.endSegment()
+        captureSettings.pausedUntil = end
     }
 
-    // MARK: Offering
-
-    /// Shows `episode` in the panel and records it as offered, else sends it as a notification when the user turned that
-    /// on, recorded once macOS accepts it. A drift neither reached is not recorded, so a later refresh offers it again.
-    private func offer(_ episode: DriftEpisode) {
-        offered = episode
-        actionError = nil
-        let shown = panel.show(near: anchor())
-        if !shown { offered = nil }
-        var state = state
-        switch delivery.offer(episode, panelShown: shown, fallbackEnabled: settings.notificationFallback, state: &state) {
-        case .recorded: settings.companionState = state
-        case .sendNotification: send(.drift)
-        case .notDelivered: break
-        }
-    }
-
-    /// Closes the panel without acting; the episode stays offered, so it is not offered again.
-    func dismiss() {
-        offered = nil
-        actionError = nil
-        panel.close()
-        onChange?()
-    }
-
-    /// The panel's text: how many blocks and since when.
-    func summary(of episode: DriftEpisode) -> String {
-        let count = episode.blockStarts.count
-        let since = ReportText.time(episode.start, calendar: calendar, locale: .autoupdatingCurrent)
-        return "\(count) recent block\(count == 1 ? " was" : "s were") labeled Drift, since \(since)."
-    }
-
-    // MARK: Actions
-
-    /// Return to Focus: closes the panel and records a 25-minute focus window, during which no drift is offered and
-    /// blocks are not counted toward one.
-    func returnToFocus() {
-        var state = state
-        state.returnToFocus(at: Date())
-        settings.companionState = state
-        dismiss()
-        refresh()
-    }
-
-    /// Ends the focus window early, from the menu.
-    func endFocusWindow() {
-        var state = state
-        state.endFocusWindow(at: Date())
-        settings.companionState = state
-        refresh()
-    }
-
-    /// Take a Break: pauses tracking (when it is on) and drift prompts for `length`. An existing longer pause, such as
-    /// one until the user resumes, is kept.
-    func takeBreak(for length: TimeInterval) {
-        let now = Date()
-        var state = state
-        let end = state.takeBreak(for: length, at: now)
-        settings.companionState = state
-        if captureSettings.onboardingCompleted, captureSettings.trackingEnabled,
-           !(captureSettings.isPaused(at: now) && (captureSettings.pausedUntil ?? .distantPast) >= end) {
-            // Ended first, like every control, so the open segment is saved before the pause.
-            capture.endSegment()
-            captureSettings.pausedUntil = end
-        }
-        dismiss()
-        refresh()
-    }
-
-    /// Not a Drift: labels each of the episode's blocks `label` through the store's correction operation, which the
-    /// next classification requests send as examples. If any block could not be corrected (one deleted meanwhile, say),
-    /// the others keep their correction and the panel shows the error, opening again when the action came from the menu
-    /// or a notification; when it cannot be shown, a notification reports it if the fallback is allowed.
-    func notADrift(_ episode: DriftEpisode, as label: BlockLabel) {
-        guard let store else { return }
-        let now = Date()
+    /// Corrections are what the next classification requests send as examples.
+    func relabel(_ blockStarts: [Date], as label: BlockLabel, at now: Date) -> [String] {
+        guard let store else { return ["The activity store is unavailable."] }
         var failures: [String] = []
-        for start in episode.blockStarts {
+        for start in blockStarts {
             do {
                 try store.correct(blockStart: start, to: label, note: nil, at: now)
             } catch {
@@ -253,15 +207,7 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
             }
         }
         classification.refreshStatus()
-        if failures.isEmpty {
-            dismiss()
-        } else {
-            let message = "Could not relabel every block. " + failures.joined(separator: "; ")
-            offered = episode
-            actionError = message
-            if !panel.show(near: anchor()), settings.notificationFallback { send(.failure(message)) }
-        }
-        refresh()
+        return failures
     }
 
     // MARK: Notification fallback
@@ -270,7 +216,8 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         case focus, breakTen, notDriftFocus, notDriftNeutral
     }
 
-    /// What a notification carries: the drift on its way (`delivery.sending`), or why Not a Drift was not fully saved.
+    /// What a notification carries: the drift on its way (the flow's `delivery.sending`), or why Not a Drift was not
+    /// fully saved.
     private enum Outgoing: Sendable {
         case drift
         case failure(String)
@@ -356,18 +303,12 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         }
     }
 
-    /// What to submit for `outgoing` now, or nil when it is no longer wanted: the fallback was turned off, or,
-    /// for a drift, a fresh read no longer offers it (the companion turned off, capture stopped, a focus window, break,
-    /// or quiet hours began, the episode ended, or the store cannot be read). A drift not submitted is not recorded and
-    /// stays eligible.
+    /// What to submit for `outgoing` now, or nil when it is no longer wanted: the fallback was turned off, or, for a
+    /// drift, a fresh read no longer offers it (see `DriftCompanionFlow.confirmSubmission`).
     private func submission(for outgoing: Outgoing) -> Submission? {
         switch outgoing {
         case .drift:
-            let now = Date()
-            let current = capture.state == .recording ? read(now: now).map {
-                DriftDetector.evaluate($0.blocks, now: now, rule: settings.rule, state: state, calendar: calendar)
-            } ?? .none : .none
-            guard let episode = delivery.confirm(current: current, fallbackEnabled: settings.notificationFallback) else { return nil }
+            guard let episode = flow.confirmSubmission(now: Date()) else { return nil }
             return .drift(episode, summary: summary(of: episode))
         case .failure(let message):
             return settings.notificationFallback ? .failure(message) : nil
@@ -398,17 +339,14 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     }
 
     /// macOS's answer for a notification: nil once it accepted it, else why not, which the menu shows until one is
-    /// sent. A drift macOS accepted is recorded as offered, whatever a later read says; one refused stays eligible, and
-    /// the minute timer offers it again rather than retrying at once.
+    /// sent. A drift's answer goes to the flow (see `DriftCompanionFlow.deliveryAnswered`).
     private func answered(_ outgoing: Outgoing, error: String?) {
         notificationError = error
         guard case .drift = outgoing else {
             onChange?()
             return
         }
-        var state = state
-        if delivery.finish(accepted: error == nil, state: &state) { settings.companionState = state }
-        if error == nil { refresh() } else { onChange?() }
+        flow.deliveryAnswered(accepted: error == nil, now: Date())
     }
 
     /// The fallback's notifications are shown while pointInTime is in front too (its reports or settings window, say), as
