@@ -106,6 +106,11 @@ public struct ProcessRuntimeSystem: RuntimeSystem {
     public func fileExists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: path) }
 
     public func run(_ executable: String, _ arguments: [String], timeout: TimeInterval) async -> String? {
+        await probe(executable, arguments, timeout: timeout).output
+    }
+
+    /// `run`, plus how many times the output source fired: a probe that closed its output stops costing reads.
+    func probe(_ executable: String, _ arguments: [String], timeout: TimeInterval) async -> (output: String?, reads: Int) {
         await withCheckedContinuation { ProbeRun(continuation: $0).start(executable, arguments, timeout: timeout) }
     }
 }
@@ -116,16 +121,17 @@ public struct ProcessRuntimeSystem: RuntimeSystem {
 private final class ProbeRun: @unchecked Sendable {
     static let killGrace: TimeInterval = 0.5
     private let queue = DispatchQueue(label: "dev.subset.timer.probe")
-    private let continuation: CheckedContinuation<String?, Never>
+    private let continuation: CheckedContinuation<(output: String?, reads: Int), Never>
     private let process = Process()
     private let pipe = Pipe()
     private var source: DispatchSourceRead?
     private var output = Data()
+    private var reads = 0
     private var status: Int32?
     private var closed = false
     private var done = false
 
-    init(continuation: CheckedContinuation<String?, Never>) {
+    init(continuation: CheckedContinuation<(output: String?, reads: Int), Never>) {
         self.continuation = continuation
     }
 
@@ -165,12 +171,16 @@ private final class ProbeRun: @unchecked Sendable {
     }
 
     private func read(_ fd: Int32) {
+        reads += 1
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         let count = Darwin.read(fd, &buffer, buffer.count)
         if count > 0 {
             output.append(contentsOf: buffer[..<count])
         } else if count == 0 || (errno != EAGAIN && errno != EINTR) {
+            // A closed pipe stays readable: release the source, or it fires until the child exits.
             closed = true
+            source?.cancel()
+            source = nil
             completeIfFinished()
         }
     }
@@ -184,7 +194,7 @@ private final class ProbeRun: @unchecked Sendable {
         done = true
         source?.cancel()
         source = nil
-        continuation.resume(returning: result)
+        continuation.resume(returning: (result, reads))
     }
 
     private func signalGroup(_ signal: Int32) {

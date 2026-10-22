@@ -230,3 +230,27 @@ private final class FakeDaemons: @unchecked Sendable {
     #expect(alive.isEmpty, "still running: \(alive)")
     alive.forEach { kill($0, SIGKILL) }
 }
+
+@Test func aProbeThatClosesItsOutputEarlyDoesNotSpin() async throws {
+    // It closes stdout, then keeps running: its output still counts, and the closed pipe costs no further reads.
+    let started = ContinuousClock.now
+    let finished = await ProcessRuntimeSystem().probe("/bin/sh", ["-c", "echo v22.13.0; exec 1>&-; sleep 1"], timeout: 5)
+    #expect(finished.output == "v22.13.0\n")
+    #expect(ContinuousClock.now - started >= .seconds(1))
+    #expect(finished.reads < 10, "read \(finished.reads) times")
+
+    // Past its deadline, its process group still ends.
+    let pid = FileManager.default.temporaryDirectory.appendingPathComponent("probe-\(UUID().uuidString)").path
+    defer { try? FileManager.default.removeItem(atPath: pid) }
+    let timedOut = await ProcessRuntimeSystem().probe("/bin/sh", ["-c", "trap '' TERM; echo $$ > '\(pid)'; exec 1>&-; sleep 30"], timeout: 0.5)
+    #expect(timedOut.output == nil)
+    #expect(timedOut.reads < 10, "read \(timedOut.reads) times")
+    let shell = try #require(Int32(String(contentsOfFile: pid, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+    var alive = true
+    for _ in 0..<60 where alive {
+        try await Task.sleep(for: .milliseconds(50))
+        alive = kill(shell, 0) == 0
+    }
+    #expect(!alive, "still running: \(shell)")
+    if alive { kill(shell, SIGKILL) }
+}
