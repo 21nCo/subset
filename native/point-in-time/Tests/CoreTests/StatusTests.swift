@@ -330,6 +330,31 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(try drift([StoredSettings.Key.focusWindowStart: local(21, 12), StoredSettings.Key.focusWindowEnd: local(21, 12, 25)]) == nil)
         #expect(try drift([:], date: ["--date", "2026-10-20"]) == nil)
     }
+
+    @Test func blocksStartingAfterNowCountInTotalsButNotInTheCurrentDrift() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        // Drift from 13:00 to 13:12, recorded before the clock was set back to 12:01: the companion, reading up to the
+        // block holding now, sees none of it.
+        try store.save(segment("com.example.browser", "Browser", local(21, 13), minutes: 12, url: "https://video.example.net/watch"))
+        try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 13, 15))
+        let json = try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 12, 1))))
+        #expect((json["totals"] as? [String: Int])?["drift"] == 720)
+        #expect(json["currentDrift"] is NSNull)
+        // At 13:12 the same blocks are the current episode.
+        let later = try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 13, 12))))
+        #expect((later["currentDrift"] as? [String: Any])?["driftBlocks"] as? Int == 4)
+    }
+
+    @Test func jsonThatCannotBeEncodedExitsOneWithNothingOnStandardOutput() {
+        let failed = StatusCommand.json(["focusPercent": Double.nan], exitCode: .ok)
+        #expect(failed.exitCode == .internalError)
+        #expect(failed.standardOutput.isEmpty)
+        #expect(failed.standardError == "point-in-time: The status could not be encoded as JSON.\n")
+        #expect(StatusCommand.json(["errors": [] as [Any]], exitCode: .storeLocked)
+                == .init(standardOutput: "{\n  \"errors\" : [\n\n  ]\n}\n", standardError: "", exitCode: .storeLocked))
+    }
 }
 
 // MARK: Dates and time zones

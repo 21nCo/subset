@@ -266,6 +266,12 @@ public enum DriftDetector {
     /// How far back a read for the rule reaches, at least: a session can begin the evening before.
     public static let lookBack: TimeInterval = 24 * 3_600
 
+    /// The blocks the rule reads at `now`: from the start of today or `lookBack` before, whichever is earlier, up to
+    /// the block holding `now`. Blocks starting later, as after the clock was set back, are not the current session.
+    public static func readRange(now: Date, calendar: Calendar) -> Range<Date> {
+        min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<now.addingTimeInterval(Block.length)
+    }
+
     /// The episode the current session's drift blocks form, whatever the threshold; nil with none.
     public static func episode(in blocks: [Block], now: Date, rule: DriftRule, state: CompanionState, calendar: Calendar) -> DriftEpisode? {
         let sorted = blocks.sorted { $0.start < $1.start }
@@ -305,8 +311,7 @@ public protocol DriftCompanionHost: AnyObject {
     var notificationFallback: Bool { get }
     /// Whether capture is recording; nothing is offered otherwise.
     var isRecording: Bool { get }
-    /// Reads the blocks since the start of today or the last day, whichever is earlier, and updates the ring; nil when
-    /// the store cannot be read.
+    /// Reads the blocks in `DriftDetector.readRange` and updates the ring; nil when the store cannot be read.
     func readBlocks(now: Date) -> (blocks: [Block], from: Date)?
     /// Shows the panel with the flow's `onOffer` and `actionError`; false when there is nowhere to show it.
     func showPanel() -> Bool

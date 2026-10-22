@@ -71,8 +71,6 @@ final class DriftSettings {
 /// `correct`. None closes tabs, quits apps, or sends anything anywhere.
 @MainActor
 final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotificationCenterDelegate {
-    static let lookBack = DriftDetector.lookBack
-
     let settings: DriftSettings
     private let store: ActivityStore?
     private let capture: CaptureController
@@ -160,12 +158,12 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
             readError = "The activity store is unavailable."
             return nil
         }
-        let from = min(calendar.startOfDay(for: now), now.addingTimeInterval(-Self.lookBack))
+        let range = DriftDetector.readRange(now: now, calendar: calendar)
         do {
-            let blocks = try store.blocks(from: from, to: now.addingTimeInterval(Block.length))
+            let blocks = try store.blocks(from: range.lowerBound, to: range.upperBound)
             readError = nil
             ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
-            return (blocks, from)
+            return (blocks, range.lowerBound)
         } catch {
             ring = nil
             readError = String(describing: error)

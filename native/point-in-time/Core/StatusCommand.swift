@@ -128,9 +128,20 @@ public enum StatusCommand {
 
     static func status(_ options: Options, environment: StatusEnvironment) -> Output {
         let report = StatusReport.build(options: options, environment: environment)
-        let text = options.json ? report.json() : report.text()
-        return Output(standardOutput: text, standardError: options.json ? "" : report.errors.map { "point-in-time: \($0.message)\n" }.joined(),
-                      exitCode: report.exitCode)
+        guard options.json else {
+            return Output(standardOutput: report.text(), standardError: report.errors.map { "point-in-time: \($0.message)\n" }.joined(),
+                          exitCode: report.exitCode)
+        }
+        return json(report.jsonObject(), exitCode: report.exitCode)
+    }
+
+    /// `object` as JSON with `exitCode`, or nothing on standard output and exit code 1 when it cannot be encoded.
+    static func json(_ object: [String: Any], exitCode: ExitCode) -> Output {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+            return Output(standardOutput: "", standardError: "point-in-time: The status could not be encoded as JSON.\n", exitCode: .internalError)
+        }
+        return Output(standardOutput: String(decoding: data, as: UTF8.self) + "\n", standardError: "", exitCode: exitCode)
     }
 }
 
@@ -187,9 +198,10 @@ struct StatusReport {
             result.fail(.unreadable("Application Support could not be found."))
             return result
         }
-        // Today also reads the day before, back to the drift rule's reach, so a session begun last evening is whole.
-        let from = isToday ? min(day.start, now.addingTimeInterval(-DriftDetector.lookBack)) : day.start
-        let to = isToday ? max(day.end, now.addingTimeInterval(Block.length)) : day.end
+        // Today also reads what the drift companion reads, back to the day before, so a session begun last evening is whole.
+        let driftRange = DriftDetector.readRange(now: now, calendar: calendar)
+        let from = isToday ? min(day.start, driftRange.lowerBound) : day.start
+        let to = isToday ? max(day.end, driftRange.upperBound) : day.end
         let snapshot: StoreSnapshot
         do {
             snapshot = try StoreSnapshot.read(directory: directory, blocksFrom: from, to: to)
@@ -200,10 +212,13 @@ struct StatusReport {
         result.snapshot = snapshot
         result.schemaVersion = snapshot.schemaVersion
         result.report = DayReport(day: day.start, blocks: snapshot.blocks, calendar: calendar)
-        if isToday, let episode = DriftDetector.episode(in: snapshot.blocks, now: now, rule: settings.driftRule,
+        // The current drift is the companion's, from the blocks it reads: the day's totals may include blocks starting
+        // after now (recorded before the clock was set back), which are not part of the current session.
+        let driftBlocks = snapshot.blocks.filter { $0.start >= Block.bucketStart(containing: driftRange.lowerBound) && $0.start < driftRange.upperBound }
+        if isToday, let episode = DriftDetector.episode(in: driftBlocks, now: now, rule: settings.driftRule,
                                                          state: settings.companionState, calendar: calendar) {
             let rule = settings.driftRule
-            let state = switch DriftDetector.evaluate(snapshot.blocks, now: now, rule: rule, state: settings.companionState, calendar: calendar) {
+            let state = switch DriftDetector.evaluate(driftBlocks, now: now, rule: rule, state: settings.companionState, calendar: calendar) {
             case .prompt: "notYetOffered"
             case .alreadyPrompted: "offered"
             case .suppressed: "suppressed"
@@ -231,7 +246,7 @@ struct StatusReport {
 
     // MARK: JSON
 
-    func json() -> String {
+    func jsonObject() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         iso.timeZone = calendar.timeZone
         iso.formatOptions = [.withInternetDateTime]
@@ -276,10 +291,7 @@ struct StatusReport {
                 ["bundleID": $0.bundleID, "app": $0.app, "title": orNull($0.title), "url": orNull($0.url), "seconds": seconds($0.seconds)] as [String: Any]
             }
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
-            return "{\"schemaVersion\":1,\"errors\":[{\"code\":\"internal\",\"message\":\"The status could not be encoded.\"}]}\n"
-        }
-        return String(decoding: data, as: UTF8.self) + "\n"
+        return object
     }
 
     struct TitleTotal {

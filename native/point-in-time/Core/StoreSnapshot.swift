@@ -45,7 +45,7 @@ public struct StoreSnapshot: Equatable, Sendable {
     /// running. As in `ActivityStore`'s schema check, the WAL index is opened read-only when it exists; a WAL with no
     /// index is read with a writable one, which SQLite may create beside it; and a store with no WAL, as the app leaves
     /// it when it quits, is read from its main file alone, which creates nothing. If a WAL appears during that last
-    /// read (the app started writing), the read is repeated through the WAL.
+    /// read (the app started writing), the read is repeated through the WAL, also when that read failed.
     public static func read(directory: URL, blocksFrom: Date, to: Date, lockWait: UInt64 = lockWaitNanoseconds) throws(StoreReadFailure) -> StoreSnapshot {
         let path = directory.appendingPathComponent("activity.sqlite").path
         guard FileManager.default.fileExists(atPath: path) else { throw .missing }
@@ -73,7 +73,14 @@ public struct StoreSnapshot: Equatable, Sendable {
         if FileManager.default.fileExists(atPath: path + "-wal") {
             return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
         }
-        let snapshot = try read(SQLiteConnection(readingOnly: path, .withoutWAL, lockWait: lockWait), from: from, to: to)
+        let snapshot: StoreSnapshot
+        do {
+            snapshot = try read(SQLiteConnection(readingOnly: path, .withoutWAL, lockWait: lockWait), from: from, to: to)
+        } catch {
+            // The app may have started writing during the read, leaving the main file alone out of date.
+            guard FileManager.default.fileExists(atPath: path + "-wal") else { throw error }
+            return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
+        }
         guard FileManager.default.fileExists(atPath: path + "-wal") else { return snapshot }
         return try read(SQLiteConnection(readingOnly: path, .sharedMemoryWritable, lockWait: lockWait), from: from, to: to)
     }
