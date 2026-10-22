@@ -207,6 +207,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         guard let episode = companion.offered else { return }
         menu.addItem(.separator())
         menu.addItem(disabled("Drifting? \(companion.summary(of: episode))"))
+        if let error = companion.actionError { menu.addItem(disabled(error)) }
         menu.addItem(action("Return to Focus") { [companion] in companion.returnToFocus() })
         let rest = NSMenuItem(title: "Take a Break", action: nil, keyEquivalent: "")
         rest.submenu = NSMenu()

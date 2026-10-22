@@ -89,7 +89,8 @@ public struct DriftRule: Equatable, Sendable {
 /// The drift blocks of one episode so far, in start order.
 public struct DriftEpisode: Equatable, Sendable {
     /// Where the episode's run began: the session's start, the end of the last block that reset the count, or the end
-    /// of the latest focus window or break. An episode offered at or after it is this one.
+    /// of the latest focus window or break. A drift offered at or after it is this episode, whichever of the run's
+    /// blocks are drift now.
     public var since: Date
     public var blockStarts: [Date]
 
@@ -109,7 +110,7 @@ public struct CompanionState: Equatable, Sendable {
     public static let focusWindowLength: TimeInterval = 25 * 60
     public static let breakLengths: [TimeInterval] = [5 * 60, 10 * 60, 15 * 60]
 
-    /// The start of the latest episode the companion was offered for.
+    /// The start of the latest episode the companion offered, recorded only once it was shown or sent.
     public var promptedEpisode: Date?
     /// The latest focus intent, from Return to Focus.
     public var focusWindow: DateInterval?
@@ -148,6 +149,15 @@ public struct CompanionState: Equatable, Sendable {
         return end
     }
 
+    /// Records `episode` as offered if `route` delivered it; an undelivered drift stays eligible for the next refresh.
+    /// Returns whether it was recorded.
+    @discardableResult
+    public mutating func recordOffer(of episode: DriftEpisode, by route: DriftOfferRoute) -> Bool {
+        guard route.delivers else { return false }
+        promptedEpisode = episode.start
+        return true
+    }
+
     /// Forgets the drift last offered unless its first block is among `blocks`, read from `readFrom` on: a deletion
     /// removed it, or it is older than the read and can no longer name a current episode. Returns whether it changed.
     public mutating func forgetOfferedEpisode(unlessIn blocks: [Block], readFrom: Date) -> Bool {
@@ -161,6 +171,27 @@ public struct CompanionState: Equatable, Sendable {
         guard let window = activeFocusWindow(at: now) else { return }
         focusWindow = DateInterval(start: window.start, end: max(window.start, now))
     }
+}
+
+/// How a drift to offer reaches the user: the panel when it could be shown, else a notification when the user turned the
+/// fallback on and macOS allows it. Only those two deliver, so a drift that could not be shown is not recorded as
+/// offered.
+public enum DriftOfferRoute: Equatable, Sendable {
+    case panel
+    case notification
+    /// The fallback is on but macOS has not yet said whether notifications are allowed: offer again once it has.
+    case awaitingPermission
+    /// Neither can show it now; it is offered again at a later refresh while it is still current.
+    case undelivered
+
+    public init(panelShown: Bool, fallbackEnabled: Bool, notificationsAllowed: Bool?) {
+        self = if panelShown { .panel }
+        else if !fallbackEnabled { .undelivered }
+        else if let notificationsAllowed { notificationsAllowed ? .notification : .undelivered }
+        else { .awaitingPermission }
+    }
+
+    public var delivers: Bool { self == .panel || self == .notification }
 }
 
 /// The outcome of checking the current session for a drift.
@@ -187,7 +218,8 @@ public enum DriftDecision: Equatable, Sendable {
 ///   before the end of the latest focus window or break are not counted.
 /// - The drift is confirmed once the count reaches the threshold, and offered at most once per episode: the companion
 ///   records the first drift block of the episode it offered, and an episode holding that time (no reset since) was
-///   offered, even if a correction has since relabeled some of its blocks.
+///   offered, even if a correction has since relabeled some of its blocks or an earlier block in the run has since
+///   been labeled drift.
 /// - Nothing is offered while the rule is off, in quiet hours, or during a focus window or break.
 public enum DriftDetector {
     /// The episode the current session's drift blocks form, whatever the threshold; nil with none.
@@ -212,7 +244,9 @@ public enum DriftDetector {
     public static func evaluate(_ blocks: [Block], now: Date, rule: DriftRule, state: CompanionState, calendar: Calendar) -> DriftDecision {
         guard rule.enabled, let episode = episode(in: blocks, now: now, rule: rule, state: state, calendar: calendar),
               episode.blockStarts.count >= rule.threshold else { return .none }
-        if let offered = state.promptedEpisode, episode.since <= offered, offered <= episode.start { return .alreadyPrompted(episode) }
+        // The episode is its run, from `since`: a drift offered in it is this one, even if earlier blocks have turned
+        // drift since (a backlog classified newest first, a retry, or a correction) and moved its first block back.
+        if let offered = state.promptedEpisode, episode.since <= offered { return .alreadyPrompted(episode) }
         if state.isSuppressed(at: now) || rule.quietHours?.contains(now, calendar: calendar) == true { return .suppressed(episode) }
         return .prompt(episode)
     }

@@ -118,6 +118,62 @@ private func episodeStarts(_ decision: DriftDecision) -> [Date]? {
         guard case .prompt = evaluate(resumed, state: state) else { Issue.record("expected a new session's episode"); return }
     }
 
+    @Test func anEarlierBlockLabeledDriftLaterIsStillTheOfferedEpisode() {
+        // Pending blocks are classified newest first, so a backlog can label the run's earlier blocks after the offer.
+        let blocks = session(at(10), [.pending, .drift, .drift, .pending, .pending])
+        guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
+        #expect(episode.start == blocks[1].start)
+        let state = CompanionState(promptedEpisode: episode.start)
+        for kind in [Kind.drift, .correctedDrift] {
+            var backfilled = blocks
+            backfilled[0] = block(blocks[0].start, kind)
+            guard case .alreadyPrompted(let same) = evaluate(backfilled, state: state) else {
+                Issue.record("an earlier \(kind) block made the offered episode new"); return
+            }
+            #expect(same.start == blocks[0].start)
+        }
+        // An earlier neutral block the user corrects to drift is the same episode too.
+        var corrected = session(at(10), [.neutral, .drift, .drift])
+        guard case .prompt(let offered) = evaluate(corrected) else { Issue.record("expected a prompt"); return }
+        corrected[0] = block(corrected[0].start, .correctedDrift)
+        guard case .alreadyPrompted = evaluate(corrected, state: CompanionState(promptedEpisode: offered.start)) else {
+            Issue.record("a correction to drift made the offered episode new"); return
+        }
+        // A focus block after the offer still starts a new episode.
+        var reset = blocks
+        reset[0] = block(blocks[0].start, .drift)
+        reset[3] = block(blocks[3].start, .focus)
+        reset += session(reset.last!.end, [.drift, .drift])
+        guard case .prompt(let next) = evaluate(reset, state: state) else { Issue.record("expected a new episode after Focus"); return }
+        #expect(next.start == reset[5].start)
+    }
+
+    @Test func aDriftIsRecordedAsOfferedOnlyOnceShownOrSent() {
+        #expect(DriftOfferRoute(panelShown: true, fallbackEnabled: false, notificationsAllowed: nil) == .panel)
+        #expect(DriftOfferRoute(panelShown: true, fallbackEnabled: true, notificationsAllowed: false) == .panel)
+        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: false, notificationsAllowed: true) == .undelivered)
+        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: nil) == .awaitingPermission)
+        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: false) == .undelivered)
+        #expect(DriftOfferRoute(panelShown: false, fallbackEnabled: true, notificationsAllowed: true) == .notification)
+
+        let blocks = session(at(10), [.drift, .drift])
+        guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }
+        // At launch, before macOS says whether notifications are allowed, nothing is shown: the drift stays eligible.
+        for route in [DriftOfferRoute.awaitingPermission, .undelivered] {
+            var state = CompanionState()
+            let recorded = state.recordOffer(of: episode, by: route)
+            #expect(!recorded)
+            #expect(state.promptedEpisode == nil)
+            #expect(evaluate(blocks, state: state) == .prompt(episode), "\(route)")
+        }
+        for route in [DriftOfferRoute.panel, .notification] {
+            var state = CompanionState()
+            let recorded = state.recordOffer(of: episode, by: route)
+            #expect(recorded)
+            #expect(evaluate(blocks, state: state) == .alreadyPrompted(episode), "\(route)")
+        }
+    }
+
     @Test func notADriftAsFocusEndsTheEpisodeAndAsNeutralLeavesNothingToOffer() {
         let blocks = session(at(10), [.drift, .drift])
         guard case .prompt(let episode) = evaluate(blocks) else { Issue.record("expected a prompt"); return }

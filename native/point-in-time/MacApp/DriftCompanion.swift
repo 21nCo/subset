@@ -95,8 +95,9 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     private(set) var offered: DriftEpisode?
     /// Why the last action could not finish, shown in the panel.
     private(set) var actionError: String?
-    /// Whether macOS allows notifications, after the user turned the fallback on.
+    /// Whether macOS allows notifications, after the user turned the fallback on; nil until macOS answers.
     private(set) var notificationsAllowed: Bool?
+    private var readingNotificationPermission = false
     /// Where the menu bar item is on screen, in screen coordinates; nil when it is not shown.
     var anchor: () -> NSRect? = { nil }
     /// Called after a refresh or an action, for the menu bar item.
@@ -147,10 +148,9 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         var state = state
         if state.forgetOfferedEpisode(unlessIn: blocks, readFrom: from) { settings.companionState = state }
         guard capture.state == .recording,
-              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: settings.rule, state: state, calendar: calendar) else { return }
-        state.promptedEpisode = episode.start
+              case .prompt(let episode) = DriftDetector.evaluate(blocks, now: now, rule: settings.rule, state: state, calendar: calendar),
+              state.recordOffer(of: episode, by: offer(episode)) else { return }
         settings.companionState = state
-        offer(episode)
     }
 
     func settingsChanged() {
@@ -160,12 +160,21 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
 
     // MARK: Offering
 
-    private func offer(_ episode: DriftEpisode) {
+    /// Shows `episode` in the panel, else sends it as a notification, and returns how it went. A drift neither could show
+    /// is not recorded, so it is offered again; while macOS's answer about notifications is still on its way, the
+    /// answer's arrival refreshes again.
+    private func offer(_ episode: DriftEpisode) -> DriftOfferRoute {
         offered = episode
         actionError = nil
-        if panel.show(near: anchor()) { return }
-        offered = nil
-        if settings.notificationFallback { notify(episode) }
+        let route = DriftOfferRoute(panelShown: panel.show(near: anchor()), fallbackEnabled: settings.notificationFallback,
+                                    notificationsAllowed: notificationsAllowed)
+        if route != .panel { offered = nil }
+        switch route {
+        case .notification: notify(episode)
+        case .awaitingPermission: checkNotifications(request: false)
+        case .panel, .undelivered: break
+        }
+        return route
     }
 
     /// Closes the panel without acting; the episode stays offered, so it is not offered again.
@@ -221,8 +230,9 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
     }
 
     /// Not a Drift: labels each of the episode's blocks `label` through the store's correction operation, which the
-    /// next classification requests send as examples. The panel stays open with the error if any block could not be
-    /// corrected (one deleted meanwhile, say); the others keep their correction.
+    /// next classification requests send as examples. If any block could not be corrected (one deleted meanwhile, say),
+    /// the others keep their correction and the panel shows the error, opening again when the action came from the menu
+    /// or a notification; when it cannot be shown, a notification reports it if the fallback is allowed.
     func notADrift(_ episode: DriftEpisode, as label: BlockLabel) {
         guard let store else { return }
         let now = Date()
@@ -238,8 +248,10 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         if failures.isEmpty {
             dismiss()
         } else {
-            actionError = "Could not relabel every block. " + failures.joined(separator: "; ")
-            panel.refresh()
+            let message = "Could not relabel every block. " + failures.joined(separator: "; ")
+            offered = episode
+            actionError = message
+            if !panel.show(near: anchor()), settings.notificationFallback { notifyFailure(message) }
         }
         refresh()
     }
@@ -257,13 +269,16 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
     }
 
-    /// Asks macOS for permission when `request` is true (the user just turned the fallback on), otherwise only reads it.
+    /// Asks macOS for permission when `request` is true (the user just turned the fallback on), otherwise only reads it,
+    /// once at a time. The answer refreshes, so a drift held back until it arrived is offered.
     func checkNotifications(request: Bool) {
         guard let center = notificationCenter else {
             notificationsAllowed = false
             onChange?()
             return
         }
+        guard request || !readingNotificationPermission else { return }
+        readingNotificationPermission = true
         center.delegate = self
         center.setNotificationCategories([UNNotificationCategory(identifier: Self.notificationCategory, actions: [
             UNNotificationAction(identifier: NotificationAction.focus.rawValue, title: "Return to Focus"),
@@ -273,8 +288,10 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         ], intentIdentifiers: [])])
         let update: @Sendable (Bool) -> Void = { allowed in
             Task { @MainActor [weak self] in
-                self?.notificationsAllowed = allowed
-                self?.onChange?()
+                guard let self else { return }
+                notificationsAllowed = allowed
+                readingNotificationPermission = false
+                refresh()
             }
         }
         if request {
@@ -293,6 +310,14 @@ final class DriftCompanionController: NSObject, UNUserNotificationCenterDelegate
         content.categoryIdentifier = Self.notificationCategory
         content.userInfo = ["blockStarts": episode.blockStarts.map(\.timeIntervalSince1970), "since": episode.since.timeIntervalSince1970]
         center.add(UNNotificationRequest(identifier: "drift-\(Int(episode.start.timeIntervalSince1970))", content: content, trigger: nil))
+    }
+
+    private func notifyFailure(_ message: String) {
+        guard let center = notificationCenter, notificationsAllowed == true else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Not a Drift was not fully saved"
+        content.body = message
+        center.add(UNNotificationRequest(identifier: "drift-error-\(UUID().uuidString)", content: content, trigger: nil))
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
@@ -347,7 +372,7 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
         closeTimer = timer
-        let text = model.episode.map { "pointInTime: drifting? \(companion.summary(of: $0)) Return to Focus, Take a Break, or Not a Drift." }
+        let text = model.error ?? model.episode.map { "pointInTime: drifting? \(companion.summary(of: $0)) Return to Focus, Take a Break, or Not a Drift." }
         NSAccessibility.post(element: panel, notification: .announcementRequested,
                              userInfo: [.announcement: text ?? "pointInTime drift companion", .priority: NSAccessibilityPriorityLevel.high.rawValue])
         return true
