@@ -347,6 +347,23 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect((later["currentDrift"] as? [String: Any])?["driftBlocks"] as? Int == 4)
     }
 
+    @Test func theBlockAfterTheOneHoldingNowIsNotInTheCurrentDrift() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        // Drift at 11:57 and 12:00, then Focus at 12:03 recorded before the clock was set back to 12:01:30: the Focus
+        // block is after the block holding now, so it neither ends the episode nor leaves the totals.
+        try store.save(segment("com.example.browser", "Browser", local(21, 11, 57), minutes: 6, url: "https://video.example.net/watch"))
+        try store.save(segment("com.example.editor", "Editor", local(21, 12, 3), minutes: 3))
+        try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        try label(store, "com.example.editor", .focus, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        let json = try validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: local(21, 12, 1).addingTimeInterval(30))))
+        #expect((json["totals"] as? [String: Int])?["drift"] == 360)
+        #expect((json["totals"] as? [String: Int])?["focus"] == 180)
+        let drift = try #require(json["currentDrift"] as? [String: Any])
+        #expect(drift["driftBlocks"] as? Int == 2)
+    }
+
     @Test func jsonThatCannotBeEncodedExitsOneWithNothingOnStandardOutput() {
         let failed = StatusCommand.json(["focusPercent": Double.nan], exitCode: .ok)
         #expect(failed.exitCode == .internalError)

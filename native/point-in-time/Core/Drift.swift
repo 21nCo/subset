@@ -266,10 +266,23 @@ public enum DriftDetector {
     /// How far back a read for the rule reaches, at least: a session can begin the evening before.
     public static let lookBack: TimeInterval = 24 * 3_600
 
-    /// The blocks the rule reads at `now`: from the start of today or `lookBack` before, whichever is earlier, up to
+    /// The blocks the rule reads at `now`: from the start of today or `lookBack` before, whichever is earlier, through
     /// the block holding `now`. Blocks starting later, as after the clock was set back, are not the current session.
     public static func readRange(now: Date, calendar: Calendar) -> Range<Date> {
-        min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<now.addingTimeInterval(Block.length)
+        min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<Block.bucketStart(containing: now).addingTimeInterval(Block.length)
+    }
+
+    /// The stored blocks in `readRange` at `now`, which the companion counts, and where the read began.
+    public static func readBlocks(from store: ActivityStore, now: Date, calendar: Calendar) throws -> (blocks: [Block], from: Date) {
+        let range = readRange(now: now, calendar: calendar)
+        return (try store.blocks(from: range.lowerBound, to: range.upperBound), range.lowerBound)
+    }
+
+    /// The blocks of `blocks` that a read of `readRange` at `now` returns, for a caller that read a wider span.
+    public static func blocksInReadRange(_ blocks: [Block], now: Date, calendar: Calendar) -> [Block] {
+        let range = readRange(now: now, calendar: calendar)
+        let lower = Block.bucketStart(containing: range.lowerBound)
+        return blocks.filter { $0.start >= lower && $0.start < range.upperBound }
     }
 
     /// The episode the current session's drift blocks form, whatever the threshold; nil with none.

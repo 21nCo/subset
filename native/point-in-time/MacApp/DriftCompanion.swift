@@ -158,12 +158,11 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
             readError = "The activity store is unavailable."
             return nil
         }
-        let range = DriftDetector.readRange(now: now, calendar: calendar)
         do {
-            let blocks = try store.blocks(from: range.lowerBound, to: range.upperBound)
+            let read = try DriftDetector.readBlocks(from: store, now: now, calendar: calendar)
             readError = nil
-            ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
-            return (blocks, range.lowerBound)
+            ring = FocusRing(today: now, blocks: read.blocks, calendar: calendar)
+            return read
         } catch {
             ring = nil
             readError = String(describing: error)

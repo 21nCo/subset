@@ -214,7 +214,7 @@ struct StatusReport {
         result.report = DayReport(day: day.start, blocks: snapshot.blocks, calendar: calendar)
         // The current drift is the companion's, from the blocks it reads: the day's totals may include blocks starting
         // after now (recorded before the clock was set back), which are not part of the current session.
-        let driftBlocks = snapshot.blocks.filter { $0.start >= Block.bucketStart(containing: driftRange.lowerBound) && $0.start < driftRange.upperBound }
+        let driftBlocks = DriftDetector.blocksInReadRange(snapshot.blocks, now: now, calendar: calendar)
         if isToday, let episode = DriftDetector.episode(in: driftBlocks, now: now, rule: settings.driftRule,
                                                          state: settings.companionState, calendar: calendar) {
             let rule = settings.driftRule

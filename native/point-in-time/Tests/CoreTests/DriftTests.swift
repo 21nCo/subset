@@ -638,3 +638,28 @@ private final class FakeCompanionHost: DriftCompanionHost {
         #expect(CategorySeconds().share(of: .focus) == nil)
     }
 }
+
+@Suite struct DriftReadRangeTests {
+    @Test func theReadEndsAfterTheBlockHoldingNow() {
+        #expect(DriftDetector.readRange(now: at(12, 1).addingTimeInterval(30), calendar: newYork).upperBound == at(12, 3))
+        #expect(DriftDetector.readRange(now: at(12, 3), calendar: newYork).upperBound == at(12, 6))
+        #expect(DriftDetector.readRange(now: at(12, 1), calendar: newYork).lowerBound == at(12, 1, day: 19))
+    }
+
+    /// The companion's read (`DriftCompanionController.readBlocks`) and the status command's filter of a wider read
+    /// return the same blocks: none after the block holding now.
+    @Test func theCompanionsReadAndTheStatusFilterLeaveOutLaterBlocks() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pit-drift-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try store.save(Segment(start: at(11, 57), end: at(12, 6), excluded: false, bundleID: "com.example.app", appName: "App",
+                               windowTitle: nil, url: nil))
+        let now = at(12, 1).addingTimeInterval(30)
+        let read = try DriftDetector.readBlocks(from: store, now: now, calendar: newYork)
+        #expect(read.blocks.map(\.start) == [at(11, 57), at(12)])
+        #expect(read.from == now.addingTimeInterval(-DriftDetector.lookBack))
+        let all = try store.blocks(from: at(0, day: 19), to: at(0, day: 21))
+        #expect(all.count == 3)
+        #expect(DriftDetector.blocksInReadRange(all, now: now, calendar: newYork).map(\.start) == read.blocks.map(\.start))
+    }
+}
