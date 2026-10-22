@@ -6,8 +6,8 @@ public protocol ExplainLog: Sendable {
     func record(_ message: String)
 }
 
-/// The unified log, subsystem `dev.subset.system`. Messages hold only System's own words, status codes, and the model
-/// ID: never a key, a request body, or OpenRouter's message text.
+/// The unified log, subsystem `dev.subset.system`. Messages hold only System's own words and status codes: never a key,
+/// the model ID the user entered, a request body, or OpenRouter's message text.
 public struct SystemExplainLog: ExplainLog {
     private static let logger = Logger(subsystem: "dev.subset.system", category: "openrouter")
 
@@ -24,6 +24,8 @@ public struct SystemExplainLog: ExplainLog {
 /// the Keychain for each request and goes only into its `Authorization` header.
 public struct OpenRouterProvider: AIProvider {
     public static let defaultModel = "openrouter/auto"
+    static let keyAsModelFailure = "The model ID in Settings is your API key, so nothing was sent. Clear the Model "
+        + "field in Settings, then ask again."
     /// The longest model ID accepted.
     static let modelLimit = 200
 
@@ -75,7 +77,9 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.unavailable(.openRouterKeyUnreadable)
         }
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
-        let data = try await client.send(.chat(try body(for: request)), key: key, model: model)
+        // The key entered as the model ID, before Settings has cleared it: not sent in the body.
+        guard model != key else { throw ExplainError.failed(Self.keyAsModelFailure) }
+        let data = try await client.send(.chat(try body(for: request)), key: key)
         return try Self.draft(from: data, key: key)
     }
 
@@ -224,11 +228,13 @@ public struct OpenRouterClient: Sendable {
     }
 
     /// The body of OpenRouter's 2xx answer. Throws `ExplainError.failed` with the status and OpenRouter's message, or
-    /// with the timeout or connection failure; `CancellationError` when cancelled.
-    public func send(_ request: Request, key: String, model: String? = nil) async throws -> Data {
+    /// with the timeout or connection failure; `CancellationError` when cancelled, before the request or its retry
+    /// is sent, during the backoff, or while it is on its way.
+    public func send(_ request: Request, key: String) async throws -> Data {
         let urlRequest = Self.urlRequest(request, key: key)
-        log.record("OpenRouter \(request.name) sent" + (model.map { " for model \($0)" } ?? ""))
         for attempt in 1...2 {
+            try Task.checkCancellation()
+            log.record("OpenRouter \(request.name) sent" + (attempt == 1 ? "" : " again"))
             let (data, response): (Data, URLResponse)
             do {
                 (data, response) = try await session.data(for: urlRequest, delegate: NoRedirects())

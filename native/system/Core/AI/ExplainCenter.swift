@@ -195,8 +195,16 @@ public final class ExplainCenter {
     }
 
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
-    /// when the user checks again. A read that a later one overtakes is not shown.
+    /// when the user checks again. A read that a later one overtakes is not shown. Whether an OpenRouter key is stored
+    /// is read again first; a stored choice of OpenRouter that started as None because that read failed comes back.
     public func refreshAvailability() async {
+        if let openRouter {
+            await openRouter.refreshKey()
+            if choice == .none, openRouter.hasKey,
+               defaults.string(forKey: Self.choiceKey) == AIProviderChoice.openRouter.rawValue {
+                choice = .openRouter
+            }
+        }
         guard choice != .none, let provider = makeProvider(choice) else { return }
         _ = try? await readAvailability(of: provider, in: selection)
     }

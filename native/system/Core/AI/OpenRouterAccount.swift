@@ -19,17 +19,20 @@ public final class OpenRouterAccount {
     public private(set) var keyError: String?
     public private(set) var keyTest: KeyTest?
     /// The model ID as the user entered it; empty sends `openrouter/auto` (`OpenRouterProvider.model(_:)`). An entry
-    /// that looks like an API key, or is the key just added, is refused: it is cleared, never kept in user defaults,
-    /// and `modelError` says why.
+    /// that looks like an API key, or is the key stored, whichever was entered first, is refused: it is cleared, never
+    /// kept in user defaults, and `modelError` says why. While a key is stored, an entry is kept in user defaults only
+    /// once it is checked against the key, off the main actor (`checkModel(_:)`).
     public var model: String {
         didSet {
+            modelCheck?.cancel()
+            modelCheck = nil
             if OpenRouterProvider.looksLikeKey(model) {
                 model = ""
                 modelError = Self.keyAsModelMessage
             } else if !model.isEmpty {
                 modelError = nil
             }
-            defaults.set(model, forKey: Self.modelKey)
+            keep(model)
         }
     }
     /// Why the model ID entered was cleared; cleared by the next one kept.
@@ -41,8 +44,16 @@ public final class OpenRouterAccount {
     @ObservationIgnored private let client: OpenRouterClient
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let log: any ExplainLog
-    /// Counts key tests, so only the latest one is shown.
+    /// Counts key tests, Add key, and Remove key, so only the latest test is shown.
     @ObservationIgnored private var tests = 0
+    /// The key test in flight; Add key and Remove key cancel it, so it sends nothing more with the key it read.
+    @ObservationIgnored private var keyTestTask: Task<Void, Never>?
+    /// Counts Add key and Remove key, so a presence read they overtake changes nothing.
+    @ObservationIgnored private var keyChanges = 0
+    /// Whether `keyError` is the latest presence read's failure, which the next one that works clears.
+    @ObservationIgnored private var presenceFailed = false
+    /// The check of the model ID entered against the key stored.
+    @ObservationIgnored private var modelCheck: Task<Void, Never>?
 
     static let modelKey = "openRouterModel"
     public static let keyAsModelMessage = "That looks like an API key, not a model ID, so it was cleared and not "
@@ -62,11 +73,10 @@ public final class OpenRouterAccount {
         model = refused ? "" : stored
         do {
             hasKey = try keys.containsKey()
-        } catch let error as KeychainError {
-            hasKey = false
-            keyError = error.message
         } catch {
             hasKey = false
+            keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
+            presenceFailed = true
         }
     }
 
@@ -83,8 +93,7 @@ public final class OpenRouterAccount {
             keyError = Self.invalidKeyMessage
             return false
         }
-        tests += 1
-        keyTest = nil
+        stopKeyTest()
         // A key entered as the model ID before is not kept there.
         if model.trimmingCharacters(in: .whitespacesAndNewlines) == key {
             model = ""
@@ -94,10 +103,12 @@ public final class OpenRouterAccount {
             try keys.save(key)
             hasKey = true
             keyError = nil
+            presenceFailed = false
             log.record("OpenRouter key stored in the Keychain")
             return true
         } catch {
             keyError = (error as? KeychainError)?.message ?? "The key could not be stored."
+            presenceFailed = false
             hasKey = (try? keys.containsKey()) ?? false
             log.record("OpenRouter key could not be stored")
             return false
@@ -106,8 +117,8 @@ public final class OpenRouterAccount {
 
     /// Removes the key from the Keychain; the provider setting then stops being OpenRouter.
     public func removeKey() {
-        tests += 1
-        keyTest = nil
+        stopKeyTest()
+        presenceFailed = false
         do {
             try keys.remove()
             hasKey = false
@@ -121,18 +132,94 @@ public final class OpenRouterAccount {
         if !hasKey { onKeyRemoved?() }
     }
 
+    /// Reads again whether a key is stored, without reading the key, off the main actor: each time Settings is shown
+    /// and when the user checks the provider again, so a Keychain read that failed once is not kept for the session.
+    /// A read that Add key or Remove key overtakes changes nothing; a key no longer stored turns OpenRouter off.
+    public func refreshKey() async {
+        let changes = keyChanges
+        let keys = self.keys
+        let read = await Task.detached { Result { try keys.containsKey() } }.value
+        guard changes == keyChanges else { return }
+        switch read {
+        case let .success(stored):
+            if presenceFailed { keyError = nil }
+            presenceFailed = false
+            if hasKey, !stored {
+                hasKey = false
+                onKeyRemoved?()
+            } else {
+                hasKey = stored
+            }
+        case let .failure(error):
+            // Whether a key is stored is not known: what is shown stays.
+            keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
+            presenceFailed = true
+        }
+    }
+
+    /// Ends the key test in flight, which used the key before this change: it is cancelled, so neither its request nor
+    /// its retry is sent again, and nothing it finds is shown.
+    private func stopKeyTest() {
+        tests += 1
+        keyChanges += 1
+        keyTestTask?.cancel()
+        keyTestTask = nil
+        keyTest = nil
+    }
+
+    /// Keeps `entered` in user defaults. While a key is stored, a non-empty entry is first compared with it off the
+    /// main actor; one that is the key is cleared instead (`keyAsModelMessage`). A later entry ends the check.
+    private func keep(_ entered: String) {
+        let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hasKey, !candidate.isEmpty else {
+            defaults.set(entered, forKey: Self.modelKey)
+            return
+        }
+        let keys = self.keys
+        modelCheck = Task {
+            let key = await Task.detached { try? keys.readKey() }.value
+            guard !Task.isCancelled, model == entered else { return }
+            if key == candidate {
+                model = ""
+                modelError = Self.keyAsModelMessage
+            } else {
+                defaults.set(entered, forKey: Self.modelKey)
+            }
+        }
+    }
+
+    /// Waits for the model ID entered to be checked against the key and kept.
+    func modelChecked() async {
+        await modelCheck?.value
+    }
+
     /// Sends the key test, which carries no user data (`OpenRouterClient.Request.keyTest`), and shows whether the key
     /// works or OpenRouter's error. A test that a later one, or Add key or Remove key, overtakes is not shown.
+    /// Add key and Remove key cancel it: once either is pressed, nothing more is sent with the key it read.
     public func testKey() async {
+        keyTestTask?.cancel()
         tests += 1
         let test = tests
         keyTest = .testing
+        let task = Task { await runKeyTest(test) }
+        keyTestTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        if test == tests { keyTestTask = nil }
+    }
+
+    private func runKeyTest(_ test: Int) async {
         let outcome: KeyTest?
         do {
             // Read off the main actor, as a request reads it, so a slow or prompting Keychain cannot hold the app.
             let keys = self.keys
-            guard let key = try await Task.detached(operation: { try keys.readKey() }).value else {
-                hasKey = false
+            let key = try await Task.detached(operation: { try keys.readKey() }).value
+            // Add key or Remove key while it was read: what was read is not the key stored now, so it is not used.
+            guard test == tests, !Task.isCancelled else { return }
+            guard let key else {
+                if hasKey {
+                    hasKey = false
+                    onKeyRemoved?()
+                }
                 throw ExplainError.unavailable(.noOpenRouterKey)
             }
             _ = try await client.send(.keyTest, key: key)
