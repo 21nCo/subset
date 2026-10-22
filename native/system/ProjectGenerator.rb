@@ -123,6 +123,7 @@ add_sources(core_group.new_group("Attribution", "Attribution"), core_target, "Co
 add_sources(core_group.new_group("Signals", "Signals"), core_target, "Core/Signals/*.swift")
 add_sources(core_group.new_group("Containers", "Containers"), core_target, "Core/Containers/*.swift")
 add_sources(core_group.new_group("Disk", "Disk"), core_target, "Core/Disk/*.swift")
+add_sources(core_group.new_group("AI", "AI"), core_target, "Core/AI/*.swift")
 add_sources(app_group, app_target, "MacApp/*.swift")
 processes_group = app_group.new_group("Processes", "Processes")
 add_sources(processes_group, app_target, "MacApp/Processes/*.swift")

@@ -57,9 +57,9 @@ public final class ProcessesWindowModel {
     @ObservationIgnored private var filterOpened: Set<OriginGroupID> = []
     @ObservationIgnored private var filterCollapsed: Set<OriginGroupID> = []
     @ObservationIgnored private var parents: [RowID: RowID] = [:]
-    @ObservationIgnored private var facts: [ProcessIdentity: ProcessFacts] = [:]
-    @ObservationIgnored private var groups: [OriginGroupID: OriginGroup] = [:]
-    @ObservationIgnored private var names: [Int32: String] = [:]
+    @ObservationIgnored private(set) var facts: [ProcessIdentity: ProcessFacts] = [:]
+    @ObservationIgnored private(set) var groups: [OriginGroupID: OriginGroup] = [:]
+    @ObservationIgnored private(set) var names: [Int32: String] = [:]
 
     public init(format: UsageFormat = UsageFormat(), logicalCoreCount: Int = ProcessInfo.processInfo.processorCount) {
         self.format = format

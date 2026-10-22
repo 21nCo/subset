@@ -3,10 +3,14 @@ import SystemCore
 import SystemProcesses
 
 /// The selected group's totals or the selected process's placement: why it is in its group (the rule, a confidence
-/// badge, and the evidence), its executable, Team ID, launchd label, and restricted state, and its raw origin signals.
+/// badge, and the evidence), its executable, Team ID, launchd label, and restricted state, Explain, and its raw origin
+/// signals.
 struct ProcessDetailView: View {
     let detail: RowDetail?
     let monitor: SystemMonitor
+    let model: ProcessesWindowModel
+    let explain: ExplainCenter
+    let openSettings: () -> Void
 
     var body: some View {
         ScrollView {
@@ -36,6 +40,12 @@ struct ProcessDetailView: View {
                     if let runtime = detail.containerRuntime,
                        let group = monitor.containerVMs.first(where: { $0.runtime.displayName == runtime }) {
                         ContainerVMsView(groups: [group], report: monitor.containerReport)
+                    }
+                    if let row = model.selection {
+                        Divider()
+                        ExplainPanel(center: explain, key: ProcessesWindowModel.explainKey(for: row),
+                                     request: { [model] in model.explainRequest(for: row, redactor: $0) },
+                                     openSettings: openSettings)
                     }
                     if let process = detail.process {
                         DisclosureGroup("Origin signals") {

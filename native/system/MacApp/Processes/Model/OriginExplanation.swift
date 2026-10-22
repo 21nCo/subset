@@ -8,10 +8,14 @@ public struct OriginExplanation: Sendable {
     let processName: @Sendable (Int32) -> String?
     /// The process being explained, so "Runs claude" can be told from "Child of claude".
     let process: ProcessFacts
+    /// How a path is shown: with `~` for the home folder, or as Explain sends it (`ExplainRedactor.path`).
+    let showPath: @Sendable (String) -> String
 
-    public init(process: ProcessFacts, format: UsageFormat, processName: @escaping @Sendable (Int32) -> String?) {
+    public init(process: ProcessFacts, format: UsageFormat, path: (@Sendable (String) -> String)? = nil,
+                processName: @escaping @Sendable (Int32) -> String?) {
         self.process = process
         self.format = format
+        showPath = path ?? { [format] in format.path($0) }
         self.processName = processName
     }
 
@@ -79,7 +83,7 @@ public struct OriginExplanation: Sendable {
     public func describe(_ evidence: AttributionEvidence) -> String {
         switch evidence {
         case let .executable(path, name):
-            return path.map { "Runs `\(format.path($0))`" } ?? "No executable path; named \(OriginGroup.displayName(name))"
+            return path.map { "Runs `\(showPath($0))`" } ?? "No executable path; named \(OriginGroup.displayName(name))"
         case let .appBundle(path):
             return "Inside `\(bundleName(path))`"
         case let .systemLocation(prefix, platformBinary):
@@ -102,9 +106,9 @@ public struct OriginExplanation: Sendable {
         case let .coalitionLeader(coalition, pid, bundlePath):
             return "Coalition \(coalition) is led by `\(bundleName(bundlePath))` (\(processLabel(pid)))"
         case let .launchdJob(job):
-            return "launchd job `\(job.label)` in \(format.path(job.plistPath))"
+            return "launchd job `\(job.label)` in \(showPath(job.plistPath))"
         case let .orphanedLaunchdJob(job):
-            return "Orphaned launchd plist `\(job.label)` in \(format.path(job.plistPath)); its program no longer exists"
+            return "Orphaned launchd plist `\(job.label)` in \(showPath(job.plistPath)); its program no longer exists"
         case let .homebrew(formula):
             return formula.map { "Homebrew formula \($0)" } ?? "Under a Homebrew prefix"
         case let .signature(signature):
@@ -120,11 +124,11 @@ public struct OriginExplanation: Sendable {
         case let .parentNotSampled(ppid):
             return "Parent pid \(ppid) is not in the sample"
         case let .workingDirectory(path):
-            return "Working directory \(format.path(path))"
+            return "Working directory \(showPath(path))"
         case let .workingDirectoryUnavailable(failure):
             return failure.map { "Working directory unavailable: \($0.reason)" } ?? "Working directory not read yet"
         case let .projectMarker(directory, marker):
-            return "`\(marker)` in \(format.path(directory))"
+            return "`\(marker)` in \(showPath(directory))"
         case let .projectMarkersSkipped(volume):
             return "Project markers not looked for on the network volume at \(volume)"
         }
@@ -144,14 +148,16 @@ public struct OriginExplanation: Sendable {
     }
 
     private var workingDirectorySuffix: String {
-        process.workingDirectory.map { " in \(format.path($0))" } ?? ""
+        process.workingDirectory.map { " in \(showPath($0))" } ?? ""
     }
 
     private func processLabel(_ pid: Int32) -> String {
         processName(pid).map { "\($0), pid \(pid)" } ?? "pid \(pid)"
     }
 
+    /// The bundle's name as its path is shown, so a redacted path's bundle is not named.
     private func bundleName(_ path: String) -> String {
-        path.split(separator: "/").last.map(String.init) ?? path
+        let shown = showPath(path)
+        return shown.split(separator: "/").last.map(String.init) ?? shown
     }
 }

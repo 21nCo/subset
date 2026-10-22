@@ -5,10 +5,14 @@ import SystemCore
 import SystemDisk
 
 /// The Disk section: the scope picker, Scan and Cancel, progress, the volume header, the unreadable-folder banner, and
-/// the Folders, By origin, and Suggestions tabs. Its row actions reveal or copy a path; a suggestion's Clean Up opens the
-/// confirmation sheet, the only way it changes anything. Its state lives in `DiskWindowModel`.
+/// the Folders, By origin, and Suggestions tabs. Its row actions reveal or copy a path or explain an item; a suggestion's
+/// Clean Up opens the confirmation sheet, the only way it changes anything. Its state lives in `DiskWindowModel`.
 struct DiskView: View {
     @Bindable var model: DiskWindowModel
+    let explain: ExplainCenter
+    let openSettings: () -> Void
+    /// The row the Explain sheet is open for.
+    @State private var explaining: ExplainTarget?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -40,6 +44,11 @@ struct DiskView: View {
                 CleanupHistoryView(results: model.cleanupResults, format: model.format)
             }
             list
+                .sheet(item: $explaining) { target in
+                    ExplainSheet(target: target, model: model, explain: explain, openSettings: openSettings) {
+                        explaining = nil
+                    }
+                }
             actionBar
         }
         .sheet(item: Binding(get: { model.cleanupSheet }, set: { if $0 == nil { model.dismissCleanup() } })) { sheet in
@@ -161,7 +170,8 @@ struct DiskView: View {
                 Section {
                     ForEach(section.rows) { row in
                         DiskRowView(row: row, toggle: { model.toggle(row.id) }, open: { model.open(row.id) },
-                                    cleanUp: model.canCleanUp(row.id) ? { model.beginCleanup(row.id) } : nil)
+                                    cleanUp: model.canCleanUp(row.id) ? { model.beginCleanup(row.id) } : nil,
+                                    explain: model.canExplain(row.id) ? { explaining = target(row.id) } : nil)
                             .tag(Optional(row.id))
                             .id(row.id)
                     }
@@ -176,6 +186,9 @@ struct DiskView: View {
         }
         .contextMenu(forSelectionType: DiskRowID.self) { ids in
             RowActions(path: ids.first.flatMap(model.path(for:)))
+            if let id = ids.first, model.canExplain(id) {
+                Button("Explain…") { explaining = target(id) }
+            }
         } primaryAction: { ids in
             if let id = ids.first { model.activate(id) }
         }
@@ -199,6 +212,7 @@ struct DiskView: View {
     private var actionBar: some View {
         let path = model.selection.flatMap(model.path(for:))
         let cleanable = model.selection.map(model.canCleanUp) ?? false
+        let explainable = model.selection.map(model.canExplain) ?? false
         return HStack {
             Text(path.map(model.format.path) ?? "Select an item to reveal it in Finder or copy its path.")
                 .font(.caption)
@@ -215,12 +229,23 @@ struct DiskView: View {
                 .keyboardShortcut("c", modifiers: [.command, .option])
                 .disabled(path == nil)
                 .help("Copy the selected item's path (⌥⌘C)")
+            Button("Explain…") { explaining = model.selection.flatMap(target) }
+                .disabled(!explainable)
+                .help("Explain what the selected item is and how to remove it")
             if model.tab == .suggestions {
                 Button("Clean Up…") { if let selection = model.selection { model.beginCleanup(selection) } }
                     .disabled(!cleanable)
                     .help("Preview and confirm a cleanup of the selected suggestion")
             }
         }
+    }
+
+    /// What the Explain sheet needs for a row; `nil` for a row Explain does not offer. Made only when Explain is chosen,
+    /// since it builds the row's path.
+    private func target(_ id: DiskRowID) -> ExplainTarget? {
+        guard let key = model.explainKey(for: id),
+              let row = model.sections.lazy.flatMap(\.rows).first(where: { $0.id == id }) else { return nil }
+        return ExplainTarget(id: id, key: key, name: row.name)
     }
 
     private func chooseFolder() {
@@ -244,6 +269,8 @@ private struct DiskRowView: View {
     let open: () -> Void
     /// Opens the cleanup sheet; `nil` when the row offers no cleanup now.
     let cleanUp: (() -> Void)?
+    /// Opens the Explain sheet; `nil` when Explain is not offered for the row.
+    let explain: (() -> Void)?
 
     var body: some View {
         if row.isMore {
@@ -332,11 +359,48 @@ private struct DiskRowView: View {
             if let cleanUp {
                 Button("Clean up…", action: cleanUp)
             }
+            if let explain {
+                Button("Explain…", action: explain)
+            }
             if let path = row.path {
                 Button("Reveal in Finder") { RowActions.reveal(path) }
                 Button("Copy path") { RowActions.copy(path) }
             }
         }
+    }
+}
+
+/// A row Explain was chosen for.
+private struct ExplainTarget: Identifiable {
+    let id: DiskRowID
+    let key: ExplainKey
+    let name: String
+}
+
+/// Explain for a scanned item, leftover, or suggestion, started when the sheet opens.
+private struct ExplainSheet: View {
+    let target: ExplainTarget
+    let model: DiskWindowModel
+    let explain: ExplainCenter
+    let openSettings: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(target.name).font(.title3.bold()).lineLimit(2)
+            ScrollView {
+                ExplainPanel(center: explain, key: target.key,
+                             request: { [model, id = target.id] in model.explainRequest(for: id, redactor: $0) },
+                             openSettings: openSettings, startsAtOnce: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 520, height: 460)
     }
 }
 

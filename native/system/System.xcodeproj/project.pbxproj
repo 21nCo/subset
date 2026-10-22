@@ -7,359 +7,383 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		04228C1A511A97820C8A1200874DF207 /* ShellCommandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA854994498BB526092C8777D04647F3 /* ShellCommandTests.swift */; };
-		0558D35C4FA6D7B3F21390903D3251E7 /* TopGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = 213913864623E37153FF4F72DBBAF4C5 /* TopGroups.swift */; };
-		05A5DEBCB0AA0F7D5FF77FE5DD596E35 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99069B725B2409FEEF6EFA7A35DC54AD /* ShellCommand.swift */; };
-		06E37DC96C1E2F701303F1D01CBBB18F /* DirectoryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EF7C854F5D7CC35EA35B2CFF94DAC8 /* DirectoryEntry.swift */; };
-		0849BE32AA421F68B45AFAB053A18BDA /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 192243E665A11C82D97EECEB2F369E09 /* AppKit.framework */; };
-		0AF9CCE684E81FBE632F13E78BD5FC99 /* CodeSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 798218B0DDF1743CDB5F05317F22E50A /* CodeSignatureTests.swift */; };
-		0AFA0E7FA2299A8F0DD5623B9DA3B066 /* HostCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D58ADF17F9B1C900F340C58F68D45C9 /* HostCPU.swift */; };
-		0FE43FF7AB95A3089E5BF43A349FA579 /* ContainerVMRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F006E0D3294DBD5813CA2907F7559AAE /* ContainerVMRecognizer.swift */; };
-		115E8F5E781A1786842035D728490E6C /* AttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D934F2650B0A6AB2A18C4AE7A5F52782 /* AttributionTests.swift */; };
-		127D7BFBA8A107C11FC514ECCC08CE38 /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
-		13E283C9899F32FD2F7E9AA0ADCD9AAF /* DiskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579797E6F59D6CD060D2EA5ED4C49AC9 /* DiskView.swift */; };
-		1500206FA6CA56D33C2A8590682AEFC5 /* VolumeSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBFF62FA43BC170A76F57A8FD0EDC36 /* VolumeSummaryTests.swift */; };
-		1AC2442536439D3D8548AB8505465BB3 /* libSystemDisk.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */; };
-		1BC8F2B24666D602504B118510221D7E /* DiskScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFBB9FAF61A1A88DEFE08C137D7B1550 /* DiskScanner.swift */; };
-		1C63BC8B1616C2CD6CBDBCB41895F503 /* SystemMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = BABEAB2D37556AFE9548499882BC3B83 /* SystemMemory.swift */; };
-		1E4611F3A0AC899C036F89EDC02F572F /* ContainerVMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA21FF6B7410B946DF930761303B48D /* ContainerVMTests.swift */; };
-		1F545218E754FC1F8AC0C33B5074D31D /* FixtureSignalReaders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39423F8797049F9FF5D8E6E747AC9279 /* FixtureSignalReaders.swift */; };
-		2169DA04689FAC7825DE034F9720222D /* CleanupExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58AEA3902F86EB9A56E94D02A61B9C23 /* CleanupExecutor.swift */; };
-		277D97C80698621EAB0E51D387B754FB /* CommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED1A3B5715417245D2D64890F546DEB /* CommandRunner.swift */; };
-		285F573C60583F3F843F8454974E0070 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
-		2AC874D0D4BBA523C679D6FEF2544CAA /* ProcessGroupRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CA95105B4AED39B089C50D345EBDD38 /* ProcessGroupRunnerTests.swift */; };
-		2C6865D84CD6DA35A09758EF22057058 /* ContainerBreakdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B428118F898A5E77F79706984B7159 /* ContainerBreakdown.swift */; };
-		2CC7CC595A7FF1CB2C3E6BC2A14E02A1 /* AttributionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEE6F5995678D5E8E23EAF61F4009EAF /* AttributionModel.swift */; };
-		2E34FC19ECE98580831AFFDE1307075C /* ProcessTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EEA830D46531D3DD9079FE7043B0109 /* ProcessTree.swift */; };
-		2ED87927B56E51E0E9362F2A4A2C036E /* SystemMemoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48B20A988E65AE1EAB767220F2F609A3 /* SystemMemoryTests.swift */; };
-		31089C965EED252B6F8162B9F241E060 /* Attribution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8403DB6C9F75FCF308C888A90E711C70 /* Attribution.swift */; };
-		3429083D0BDA8A8FFE77C0C2B0A2D700 /* DockerDiskUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93E3EF04821C65FCFF8E1D3E441BE4CD /* DockerDiskUsage.swift */; };
-		37B8E5A88D11806156A0450F3514E0B6 /* SystemMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114FDD807E1AC1AACECB537FE86A32AC /* SystemMonitor.swift */; };
-		38877F1F53DC445553DCC831430604F9 /* LiveAttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E37AF75AC12AA305E2C5AB62DAA1ECD /* LiveAttributionTests.swift */; };
-		38F0EAA12D6FBF4D71A2967AA62700A7 /* LiveOriginSignalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94887BA858F75CCCE1C5E40AE67285FB /* LiveOriginSignalTests.swift */; };
-		3E9080198A6168956DF3AEEEB63E4984 /* SamplerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC4FE8E1D16589592408B3BB2D2A1851 /* SamplerTests.swift */; };
-		3F8A6B46F6831AD5D18EFD87F758337A /* DiskTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = A45E548052E0903CDD24BD0E514E5921 /* DiskTree.swift */; };
-		40F14DD27C14538C3AF7DBF2D18D68F5 /* StatusSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD4FC38B93B3FB7CD9679FAA1B4A3813 /* StatusSummaryTests.swift */; };
-		426684D3BA8AB0438597126428B90F9E /* DiskFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1EFD86EB58E452B20CEFBF731CBAB8A /* DiskFixtures.swift */; };
-		45238674257F5C982CEA5BC4F2BD6B8E /* LibprocProcessSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD447AB0FFFDEBDC01CF6DC31FB15032 /* LibprocProcessSource.swift */; };
-		458EE7CD6676902D1510AB4993745674 /* VolumeSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5343142A36A824A2B222B5827DB500A8 /* VolumeSummary.swift */; };
-		4645326283707FCEDFD003CD8AD65BD4 /* DiskAccounting.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4C6F1FB6311BD7C92020EDD695B72B8 /* DiskAccounting.swift */; };
-		50B20EB666F02BAD3E31B0D3F523666F /* ProcessContextReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57F60962958FED046E2DC0E209B0AC37 /* ProcessContextReader.swift */; };
-		51766006878DDE151AC470A31F4517EB /* CleanupCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59F08D9AE67E8043B33E1D3E81E21327 /* CleanupCommands.swift */; };
-		541336320E9DA3DB95B2A3A4161879D5 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
-		547204DD8E449F1351D32B7233B90D25 /* DockerOutputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6A4DF319D37C431ED0FB9DBF1C02C8 /* DockerOutputTests.swift */; };
-		580A305FD86A81C3C98431E1AC054CD6 /* ReclaimRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A916584089305BDC9E28C49A4911A40A /* ReclaimRulesTests.swift */; };
-		5A26901099927DB40A1B0C1DEF709C47 /* ReclaimMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F629FAE5792A38F0CBE838B69DB7E41 /* ReclaimMatcher.swift */; };
-		5D93AF33F1EC7AB7143CD3164FBDF8C8 /* CleanupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D6DD6CFBC8DAA45953B85AF9A0CD3B5 /* CleanupSheet.swift */; };
-		5FDCBF06A55ECB417799D0F90165EBFD /* PlaceholderWindows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 966CC6EE62BE2D9016D01D402EBFC84D /* PlaceholderWindows.swift */; };
-		614FD970DE9C63F47861C3F2EFAFFDF9 /* DiskRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D1369BCFCC36710D40926D62BC4D16 /* DiskRow.swift */; };
-		61B898AE13C83BA4A883DDE34F105C19 /* WindowHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05F8A26BE39170160DCDD2FD53FA0338 /* WindowHeader.swift */; };
-		61EF38A991040E0C939EBDDC70FDF7F1 /* ProcessGroupRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA862BBBFEDB23BEB89DF09C0A08978 /* ProcessGroupRunner.swift */; };
-		634689230A79D36BFC91D7E2F13B8599 /* ProcessesWindowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8253CB7F8045D2027622B3EB0ACCF033 /* ProcessesWindowModelTests.swift */; };
-		652A3E9A02A503E0535B96A670F91E66 /* OriginSignalReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94FD86B6AEE512050BAD0B0F6C0354FF /* OriginSignalReader.swift */; };
-		65AB00A02E0767E0AFEA34DE0D5FA198 /* LaunchdJobIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08D59BD17F019C5541279F077BF36DDE /* LaunchdJobIndexTests.swift */; };
-		67D7E2D76868B7633E28D9A3A218694B /* LiveSamplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54FD9C88F8726FAA670EEE597C2EBEA /* LiveSamplingTests.swift */; };
-		6998EA70696369FAC29822C1380F8689 /* DiskScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E29FF59EC019B56E312E727F13E0D86 /* DiskScannerTests.swift */; };
-		69FD1A5165723F2F11441F02AEF8E0DE /* OriginSignalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE5DE7856E98753B6783920635E686C5 /* OriginSignalsView.swift */; };
-		6C267DB2BCFB6B3C3F8E9843E86241C4 /* InstalledApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = D147F2601E0F62C1436F33D8AF4009FC /* InstalledApps.swift */; };
-		6CA26081999E5D776FEA9A07FB3D6F3F /* UsageFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C2557FDAE901AEF4417C7726E96C132 /* UsageFormat.swift */; };
-		6D2B0ADB218992B6BD4946A20FF7E0CE /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
-		701D4841D6FD6143949DF0CF6351F009 /* StatusMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15EDA6F16389621209A855FBF0A50B3B /* StatusMenuController.swift */; };
-		72A18C6980D8866497C795B2D9C64BFA /* DockerCLITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 814226E583E07B9B6C4F8D1FD3C835CE /* DockerCLITests.swift */; };
-		73282B6129D6B8248A63DBDD1BE7D60F /* CleanupPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D6DD01AAC87578DE0D43A9B18D0202 /* CleanupPlan.swift */; };
-		75E034DFA640C242A7060513C6524552 /* DiskScanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD0F2A36B478EEED967F30FC06492AA /* DiskScanService.swift */; };
-		7960DEFB98934F57814DAA174E7E20AD /* DiskEntryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 663D65A4F8631C0BC18578F48E948BA2 /* DiskEntryTests.swift */; };
-		7E2A2FC5FD3C5EC69C5FC4BE2C75AD87 /* PrivateInterfaceReaders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AC3896F678E827C5B89CD879E788E26 /* PrivateInterfaceReaders.swift */; };
-		7E885DBA540494949C97740FC625089E /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
-		842D89B89ED7AF7BDDD707E08670D186 /* ProcessesWindowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3783EBC542877753F0FF867D6D67B2B1 /* ProcessesWindowModel.swift */; };
-		854325374E1C58B1C90D0651F0BE0591 /* CleanupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6BD54CF93F692A1E0F52D0748F36F6 /* CleanupTests.swift */; };
-		87ECBAE35236375548A0677F83564979 /* libSystemDisk.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */; };
-		884CA6D096B4A86A058EBA785DFFABF0 /* ReclaimRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AB043902D32702D076D0306D5030914 /* ReclaimRules.swift */; };
-		89CBB6E1F4FCBEAB60865E8576CA86E7 /* ProcessRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EE6EB97676440A2DEF8C949F5F0791E /* ProcessRow.swift */; };
-		91C481201F2AAF86A1C67807AA5A7F25 /* ProcessSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C7FA501E178BB3510C6AB78550F790A /* ProcessSource.swift */; };
-		97F83378F02664C3A1A060762078468C /* LaunchdJobIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C68E3436CEBC8B2D383A8EBB73EEB29 /* LaunchdJobIndex.swift */; };
-		A9BCDDF49518F50AF669AD3FAF5C7BF3 /* DockerCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A41926089D61AAF25E4F2C4DC7569394 /* DockerCLI.swift */; };
-		AB938BD67CA776A420F534256ED70BF8 /* DiskHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25E47046AC8D43C0B58D1DDD4245C3C /* DiskHeader.swift */; };
-		ABA4C4000EA71F632618032FC3D68575 /* DiskOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5CAC08D4D6F79B27FAA4269841AB10 /* DiskOriginTests.swift */; };
-		AC285A09FEE64E94E5FB82774B43B072 /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
-		AD39A6AC1B4F65ECB52668154F53B429 /* GroupTotals.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF908125AA1A605C761BC5EDFD7BD55F /* GroupTotals.swift */; };
-		AE28F3A737C859B5F2ADFE0C24BDC5C5 /* CleanupSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9911E5A38A1B45F55D9DF389ADEFD2D0 /* CleanupSafety.swift */; };
-		AF565D84E6E5AD1A3EE5E51D939FFA4F /* DiskWindowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA4A0D8AE5794A9CE2959046E7980B8 /* DiskWindowModelTests.swift */; };
-		B52FC626351F0423177641C0970C65D6 /* OriginSignalReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DD9642F0A8FBCC6B54372F5090C4F3C /* OriginSignalReaderTests.swift */; };
-		B60498B0D3348A2FB69BE436580D8100 /* StatusSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 343BF4B80055A9E7C67F2D7A48239963 /* StatusSummary.swift */; };
-		BB0CA1D56A46B4FAB5B65B6B15F3A183 /* PrivateInterfaceReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9591E6ABF2131FE0E860DD17A16BCD12 /* PrivateInterfaceReaderTests.swift */; };
-		BBE6FFF030D2C442389641C247C9623E /* SimulatorRuntimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80592798D01D333F36FAB7AEC455165 /* SimulatorRuntimes.swift */; };
-		BF4E95222EF634E1CACBF35C61BA8E59 /* ContainerVMView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BE3DC94A71DB1587839965B97E7DE87 /* ContainerVMView.swift */; };
-		C18F4FF30CD4C778B85340F98B0BEE8B /* GroupBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F51231816F0E94A17BC62B2DF5066C /* GroupBuilder.swift */; };
-		C2AAC84AD064792EAB027F5BE79300A9 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
-		C585C17EBD6FEB165D771F4B3F29C4DA /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0758914ED77C899080F664C2DBF8DC /* AppDelegate.swift */; };
-		C601D890553FB2679A4D44A5AF556A7F /* CodeSignatureReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEDFD4A26CA28618323435D7E6399CDD /* CodeSignatureReader.swift */; };
-		CAF5446165496074DB4B8D42B9C665C8 /* SubsetSystemApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 618C0F3B9AEC780F50F72531362CCC41 /* SubsetSystemApp.swift */; };
-		CB493077D8A477404ABEF2E5B8EA939C /* CleanupSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B19A852FBFED7C107FFDE1DBDE070030 /* CleanupSheetView.swift */; };
-		CC657B198328DA5AE84CB396B27A71E6 /* OriginExplanation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B0A611BC22D6E9129EE49493F85032F /* OriginExplanation.swift */; };
-		DB7A94A618836A2264419871BDB00E35 /* ProcessesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77936BAB4C1D69D3D2B89AADA333BCCC /* ProcessesView.swift */; };
-		E3AE02788A840EAF5FCD609113F88472 /* OriginSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10A94C70E1E314616732E0B929233A4 /* OriginSignals.swift */; };
-		E4440E31B2507E178261A4314979D541 /* RowAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F783FFB5C61458AE1B9016479FA03433 /* RowAccessibilityTests.swift */; };
-		E471112DDB94B89683DD76829231DC45 /* ProcessFacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE4F4EAC5DEC7A7860210A78FE5A781 /* ProcessFacts.swift */; };
-		EA2D3F58F4ADB0063841462D2C09478D /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C256626B070E1ED589119F4DB47C9E6 /* MainWindowView.swift */; };
-		EC2EBB8C8AAA56C8ADD117FAD87B1F4D /* DiskOrigins.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF2059249CD76211732657562B977A1A /* DiskOrigins.swift */; };
-		EE3F77BA651BA95EB0C89171F12C6950 /* DiskWindowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B7E9B91E74C1D374A30F9001FA8DF79 /* DiskWindowModel.swift */; };
-		F16EC271902271FF9DCDF56987FB5DE9 /* EntryFacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57FECBECEF13D4D3B1B4743759B70314 /* EntryFacts.swift */; };
-		F28FF388057644E278591F8D7E51DBD6 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E5094382A6EA8E0FB85E7A4628B11B5B /* SwiftUI.framework */; };
-		F6811C8E42CFD5D48DD649AF76E62294 /* ProcessReadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5F475D3D1E040F6284C7D615F4E41A7 /* ProcessReadTests.swift */; };
-		F81E95054BA1CC17BCC3F7E0070760B3 /* ProcessFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91687BB0CBBD102F65D2609B4115264 /* ProcessFixtures.swift */; };
-		F95C197B3C816690EDE6FC0269BE01C4 /* ProcessDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B3DCA6E6A227FAE14563F0DF5E9B275 /* ProcessDetailView.swift */; };
-		FBF73E8C475E248AFAD549A88C25B056 /* Sampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65D41235BACD942D3FC1A39E1E4C357B /* Sampler.swift */; };
+		01CC8CD2C3EBBAA8D2331001DB881A4E /* ProcessesWindowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C18CA80D20500DC5EFB0A1EBAF18371 /* ProcessesWindowModel.swift */; };
+		0246EB982812C750E8B47D46EA34E518 /* HostCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31C958380010C10DB8FDD1DB160422E9 /* HostCPU.swift */; };
+		039CA2AAE52C30CA240ACFDAC82E7416 /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
+		05A3681B6D07B90EA6FBFDB05167B236 /* CodeSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA127BAAC3A26F18F6BC0DBAD2EB394 /* CodeSignatureTests.swift */; };
+		08CFE7EE7688B14978E8C35F68E522EA /* ExplainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70575BD72622BE2337B0FBACB50B55E /* ExplainTests.swift */; };
+		0D2629D1A8C794F948943E0DB716539D /* SystemMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32E2210C82AA6EA70A8C3923DD2C70E2 /* SystemMonitor.swift */; };
+		0F3F45F4B42C52B73D84F40C826B396E /* DockerOutputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D6B663A8DE8D5591234614374A1E0ED /* DockerOutputTests.swift */; };
+		0FC1F43DFF67FCE6DF7FB33F39914854 /* LaunchdJobIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AAB6FDD29C0DF12B8F1E9A48200BA40 /* LaunchdJobIndexTests.swift */; };
+		120C6AC98E87B7872B6FE2C407DC53EA /* AttributionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEF484A411C7BD0B5F377F99DFE56AB4 /* AttributionModel.swift */; };
+		13A388980B01346D6FF4D0B0BA747878 /* DiskExplain.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64AAF05A613ED08699E497B18BC546D /* DiskExplain.swift */; };
+		169DA07C4926AAE54790C9B1DA71EB8F /* ContainerVMView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4348B0E962E14FEDEEC4312F075A7A0D /* ContainerVMView.swift */; };
+		17E4DD12F2954DC8AAAA037C6A17E7F5 /* ContainerBreakdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC2464AFCE9B895CF526761425D85DB4 /* ContainerBreakdown.swift */; };
+		19E8486449159B170287A1AA399A98DF /* OriginSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA72E0E6979E5F159E92EBE4F21DAA4D /* OriginSignals.swift */; };
+		1ACAB680E8A565FDF1132F7059AAF14A /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
+		1BEFAB4C3E3ECFF28F3BD9995D0578A2 /* Attribution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D5A46A4AD43DD47ED42E7706C39F44 /* Attribution.swift */; };
+		1C0D28C63B3E3F18D6A82AE7830E3372 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
+		1C84D4A737F4F632FEDAFF5E7EB63E80 /* ContainerVMRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D116B389421C27F9F85AC2393A26FA0 /* ContainerVMRecognizer.swift */; };
+		1F591D45277C208C0CABFB32509CE1F2 /* DiskScanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C56D78DB8DE4DA84E998B1021B55433F /* DiskScanService.swift */; };
+		2244B8115F7E315E67733B827EF45B26 /* ProcessFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E04F6846E2452825B5E23969B61DA03C /* ProcessFixtures.swift */; };
+		291D89C3ECE931AA852A9D433B0A0B6B /* ProcessDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 414EE304551EAFA99083C973CA85042A /* ProcessDetailView.swift */; };
+		29D3B86CBC41533FE38973DAD431CE4A /* ReclaimMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41D3106F4084ADEFD0D212A98A68E0DC /* ReclaimMatcher.swift */; };
+		2A37700A8E8CA232EB6F1A23EFA16D8C /* DiskWindowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25E8C020242526A118B14261FD7BB246 /* DiskWindowModelTests.swift */; };
+		2E0471A80F2C51E882778D83BBA32867 /* StatusSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3591B7B0CACC9AFBCFF0003BA208CF52 /* StatusSummary.swift */; };
+		2FE3365B964A93669361DD7858762ECF /* ProcessContextReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAD4830DF106017F6966BE703D883DDC /* ProcessContextReader.swift */; };
+		308E294D20C5407E20D4E18F206C8C1D /* ShellCommandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0DDDF247E56DBE5EB49F603F1DB724A /* ShellCommandTests.swift */; };
+		333BEB00922A94F095B617B3C23BB753 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 192243E665A11C82D97EECEB2F369E09 /* AppKit.framework */; };
+		37DB1AC19EBE24221AB193C099A86741 /* GroupBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1410D91DC2F56F71B92D908219D38069 /* GroupBuilder.swift */; };
+		3933D6EF6F43AD50B5927BCB216D0B11 /* CleanupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229E9D24925D597D6A07DB6BEC4F3CE5 /* CleanupSheet.swift */; };
+		3A0655C6125320A3DA18DC699A79AB2B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 292CA2504EEE05A79D1065A1C636C6B7 /* AppDelegate.swift */; };
+		3C373750D5C3A38C1FADCD9355C9DF8D /* InstalledApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = C27C90AE27906F76BAECE8311F5E4481 /* InstalledApps.swift */; };
+		3E2330908571762836FB257D177C5478 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59191D90276864FC8E235C1E7251CFC4 /* MainWindowView.swift */; };
+		42C743B598EEECEC44B186BAA7DF45A9 /* ReclaimRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 409F1DB6833A7CADDAB1D2AD2595B32C /* ReclaimRulesTests.swift */; };
+		46EDDAA215275B2505DACEEA8EB54E15 /* CleanupExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CAF0335ECEEF0B6E8D5DE3234B7FDFD /* CleanupExecutor.swift */; };
+		494C681DCCF75B2D9B087C1D698382D5 /* DiskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1A2DF4CFBEDC38235770C3DCEBE7EB /* DiskView.swift */; };
+		49893DBB7C7E3E36289B34A372A2C809 /* ProcessesWindowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5135068D8530A409E4F4BFEDDE89B08 /* ProcessesWindowModelTests.swift */; };
+		5003311E826C67C71887356FA0262AC2 /* EntryFacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9CAA238C3EF96FCA0BA1972BAD2B412 /* EntryFacts.swift */; };
+		52389D4B2506A0F6B1D6844EDBF756C5 /* ExplainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B396ED2E25506D2997F34D434EE8C2DC /* ExplainView.swift */; };
+		57F8B73DD970843979EE3FEAB77263B2 /* LiveAttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE65A2FE60C0F71C5A391662B18C372 /* LiveAttributionTests.swift */; };
+		603AF838723B4D58EEA6F2B980D9444D /* SystemMemoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D535973F819C935FA25407C6A9ED47A /* SystemMemoryTests.swift */; };
+		63CF7B5ECF501764397087AB52BFDDAF /* ProcessTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFFF11C009C69B7D19AF69FC2B7EFBF6 /* ProcessTree.swift */; };
+		6442CCA43D4A0E4C6ED98F4027FD4770 /* SimulatorRuntimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CCCECEF460E70DB7520689336DDA0EB /* SimulatorRuntimes.swift */; };
+		6557C56A047023B1025692134B167D99 /* SubsetSystemApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50AD7A5801F63E7AC263EB5A74D98F86 /* SubsetSystemApp.swift */; };
+		655F23168BBB9413FE0F140661E2FFD8 /* ReclaimRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01DF60431ECA7ACF9144BF0ACA958DE6 /* ReclaimRules.swift */; };
+		667C3218B089D2439D68A5F6F0AB17A4 /* CleanupCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C84219D80818B258A357C5DB831807 /* CleanupCommands.swift */; };
+		6DEB3CCE40E0888F6933EF7AEF763EE8 /* DockerCLITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08E33A809202DE6D1B0598A780785ACB /* DockerCLITests.swift */; };
+		73D8E225ECF92F281C8B3F599B7FEE5D /* DiskHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7FB4C74BA489FFCFB1E14CF7DE23C94 /* DiskHeader.swift */; };
+		76CB41E87EC62A2326F0B65E58BD0F7C /* FixtureSignalReaders.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8C7737D481AE3A1A0B861013F8AE733 /* FixtureSignalReaders.swift */; };
+		775E9DFA5F7E67AC4184F2FCC2181987 /* ProcessSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0254863FE35EDD34FCD888011ACBA665 /* ProcessSource.swift */; };
+		7BEE06999CF8A79B18653FCDA0458464 /* ProcessReadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28F721258DBFE76A33154F5DC9C39F81 /* ProcessReadTests.swift */; };
+		7D170A5284DF741D0528115B450C2E92 /* PrivateInterfaceReaders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CCD149859208B5C228CB5A98CF812BE /* PrivateInterfaceReaders.swift */; };
+		8774409F39504957919F7DD840A3F1BC /* StatusSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06B2B6823EEDABF4701CE4A063D37668 /* StatusSummaryTests.swift */; };
+		879AD44C8CCB51716A4685FDF5BDCAF5 /* TopGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5340987BA3912AFB3182A218AE1F6434 /* TopGroups.swift */; };
+		87D2D453DFEDD38B894160F66A2E34E7 /* ProcessesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FBE440C7CCD6DE0F0DC01A3D7A073AA /* ProcessesView.swift */; };
+		87F07644B05530B730D65E5586658299 /* GroupTotals.swift in Sources */ = {isa = PBXBuildFile; fileRef = B913195F218424F99BEF55C15F744B7B /* GroupTotals.swift */; };
+		88A21227275E39A75956097D6F3D0F75 /* ExplainRedactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3233FE4E657CFB74846777D336A05ED /* ExplainRedactor.swift */; };
+		8AB5B6A33C23DE8AB6320C670BEAE7D5 /* AttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B4E4436E54A98049935941D9EC10BB5 /* AttributionTests.swift */; };
+		8BEF9E89D2EFDE395E8C9B86217A9227 /* PrivateInterfaceReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 750CE895206651E3B29C33DBDABF91D6 /* PrivateInterfaceReaderTests.swift */; };
+		8DB41EFD62D85746CAE87758DEF99E83 /* ShellCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29506BF33270741B627FC033418E949 /* ShellCommand.swift */; };
+		90BDBDABA549805FD780C9B9150A2F7E /* DiskFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C6A34B02FDB7369F795DA97295334C /* DiskFixtures.swift */; };
+		927B8BA187C86E570EB2CF36E9F79011 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
+		92C313AE76E3E7111C4445322F65F14F /* ProcessGroupRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96DCA123818A83C800E54C169C55E23F /* ProcessGroupRunnerTests.swift */; };
+		935E6C6B55907AC5DEA978ADE15E9A5B /* CodeSignatureReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED077CE92D4E1E5CE24BFAEC2E8413E5 /* CodeSignatureReader.swift */; };
+		93C1A69A536D4BBCC19E9FB640838215 /* CommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAFD308F33B1CEBC17B714BE7CC6C33F /* CommandRunner.swift */; };
+		94DD6A7958DA0E846D73BB3C81F7E59F /* AIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8ACE776AB89945E9E3FFA18C94F4223 /* AIProvider.swift */; };
+		9530E0DDC2486C2E3183C5F5CA68C6F2 /* OriginExplanation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33BF731C7072AB285D25BF5003012700 /* OriginExplanation.swift */; };
+		963E35B5E6087DDC788003DF5481533F /* RowAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4159460B7A3178E14CDB96CF7E75BCDC /* RowAccessibilityTests.swift */; };
+		9893BD74FE4EC3B2726D395F9993F6FC /* UsageFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1D374B2B0606F59D2DF41A93054B5A5 /* UsageFormat.swift */; };
+		A7EF6C17856F03173EDEDF209542E798 /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
+		A9ED3DC53AB5BE601538E8BD8C8B54A4 /* WindowHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7346CAB12A4F952BB01DEFF0A733561C /* WindowHeader.swift */; };
+		AAF2C581B669FEAC447B93ED1B55D178 /* CleanupPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F3C3AF6F2F447DFD7AD4D3E069C1982 /* CleanupPlan.swift */; };
+		AC8A5DACF176F129A6AD23BB7D146955 /* ProcessExplain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 751F658E4E4D2929908A5B3E2B6D9E7A /* ProcessExplain.swift */; };
+		ACC52E0050348C020D2D3724A08094C4 /* SamplerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAF48C458D4E80CA2BD37140B4A009D3 /* SamplerTests.swift */; };
+		AE136E361978A7845EFFC5D51760430D /* libSystemCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */; };
+		AE454A0604CA08108BE87CEAE8E79321 /* LiveOriginSignalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 647BE02026FB0E3F97591FCC5637DD81 /* LiveOriginSignalTests.swift */; };
+		AE4AF0047AFF4AA41E5CACB52DABF8EB /* CleanupSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3C77D0197C2116B322433A8D68608A1 /* CleanupSafety.swift */; };
+		B047B05931817C63133B68F9C74E81B9 /* VolumeSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44DC8DBD2E6C8DFDDAFF6BC2992E65A3 /* VolumeSummaryTests.swift */; };
+		B6A2DF6ED51643A53E354912C86B92EC /* VolumeSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 360C25E54D7B25B7E24F22D8FE2C30A6 /* VolumeSummary.swift */; };
+		B86B63A6B0A9C6BFA63D49721653DDB6 /* ExplainCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 463E5A601AA0ABF28AA90999BB19B5AB /* ExplainCenter.swift */; };
+		B8BCBA482F3F1C72BC261E10DF8CEE1C /* DirectoryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F247449CBED7E4E58DA44B493472A8E9 /* DirectoryEntry.swift */; };
+		B9E63EC397A0F05448A710D5B63AD6CF /* DiskScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38DFA1D23E2E7827CF6C92FD2A27E2DC /* DiskScannerTests.swift */; };
+		BD72A3F43998C97337D6525B69737151 /* ContainerVMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E5687EFF95A3910A689557C24422A5 /* ContainerVMTests.swift */; };
+		BDBA2E49B723535B8086784C8A912B45 /* CleanupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F48DDBD3355646839EED82263227FBD /* CleanupTests.swift */; };
+		BFFA2B79279F5DD0FDE1B4DD793270EF /* Explanation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39E54714617BEF9C52592D646B945261 /* Explanation.swift */; };
+		C30CB850CEC7B70CDC695077106D7674 /* ExplainRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 458E6B26C785B0903A6EB4BDB8D3D45D /* ExplainRequest.swift */; };
+		C3C83458A378E760251AF9BD3D9977EA /* libSystemDisk.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */; };
+		C469C2F511A46AB04DE9CF7572454187 /* Sampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1EE709CC60FA08FF97706583A42E314 /* Sampler.swift */; };
+		C4F3158CD5835C9E92E5C9FC530C9BA2 /* libSystemProcesses.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */; };
+		CA9151C502B3252D6DA9AD9AFB22B775 /* ProcessGroupRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCF5BC74BE597B580C59472FA3EB909E /* ProcessGroupRunner.swift */; };
+		CC6C5490FB2242353CB06B16B97EB463 /* ProcessFacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C29B96E2DD09B27515C9F8F1A771B82B /* ProcessFacts.swift */; };
+		CC77E3CBE1D5609101456B559C5A1F89 /* OriginSignalReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 573D1F9BC78E85D003E3C191B6B5FE36 /* OriginSignalReaderTests.swift */; };
+		CE507C5D3C55B5B5F335A3488D309CC2 /* AppleIntelligenceProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED24B39A4D539E8CEC7621E3BB71A232 /* AppleIntelligenceProvider.swift */; };
+		CE5C8400A151CD72E069251A7D98D705 /* DiskOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6E245FC92A78E7C1DB68D68146D05D /* DiskOriginTests.swift */; };
+		CEF76A3BA954EADEC48D01F6A2E17034 /* StatusMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0C3E2F4413A860141EEA7139E721B5 /* StatusMenuController.swift */; };
+		D0521883491323DB364240F94E63BAB7 /* OriginSignalReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A0553B2A3465E71F03A5F50747BB4BF /* OriginSignalReader.swift */; };
+		D19E94F643A0288725512472B54677CE /* DockerCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DD75D8102945AAE0F5A07929E934F2 /* DockerCLI.swift */; };
+		D3E50E3061A6142D15283BBEC051BF5C /* DiskOrigins.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DD6DA0CD12FF9B57CE85729E79DB228 /* DiskOrigins.swift */; };
+		D53EC5400E0C7086F315B7A09BA977BD /* ProcessRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39121837176BC81E9FED1AFB7548FC0D /* ProcessRow.swift */; };
+		D624006AA1E5886BAE959533C8A61881 /* DiskExplainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 778D304D3F21A0A6AE723EA6C731054D /* DiskExplainTests.swift */; };
+		D669B66F9A11297BEF7F5A243181CF27 /* LibprocProcessSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A33F9AB88EAC6A5D655EB3380BAE79 /* LibprocProcessSource.swift */; };
+		D8C451ECE46ACB9B1135C344CFCC0525 /* DiskScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C837925D10A5FAD83768A4C1B226E1 /* DiskScanner.swift */; };
+		DD4B496F9E31F83C87061048ED76912F /* ProcessExplainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 663D53C35731F192E97D1FBC0BEC3FCF /* ProcessExplainTests.swift */; };
+		DFFC596D23E725ECC0943FE8CB91B706 /* DiskAccounting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F108666816389DAF2A2DA3D3EE8390 /* DiskAccounting.swift */; };
+		E1E026D27E016EF30F611BA4B093F8F6 /* LaunchdJobIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6ACF0B7A55D6CE7F9C4C20BE6D2531 /* LaunchdJobIndex.swift */; };
+		E56BC33B0CD6751CEF27A4E808B30B31 /* libSystemDisk.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */; };
+		E59B065092E756F0FA5BCCDA71884154 /* CleanupSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9D93C775CB01F982A75606DD1C05A0F /* CleanupSheetView.swift */; };
+		E898841181D4004A151A347503345837 /* DiskTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43EE6E9BACFDB9B8D1B576A2658DF478 /* DiskTree.swift */; };
+		E9D63359FE2373083BBDAAACE2D64C4E /* OriginSignalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943C3DF38109A6FB0FDC6713548AFB77 /* OriginSignalsView.swift */; };
+		EA3FFB18AA1303D4C01F8DDF8FEF035E /* PlaceholderWindows.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED6C60EDA905FF49DAE3A61CB5F8D0A4 /* PlaceholderWindows.swift */; };
+		ED6056FB332B9CBF70D0E27BBA66D4C5 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E5094382A6EA8E0FB85E7A4628B11B5B /* SwiftUI.framework */; };
+		F21A12411109188BFDAA773FE99BBBC6 /* LiveSamplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CE71DD711F1EF8FACDE8179735B7C23 /* LiveSamplingTests.swift */; };
+		F4B6A27ABAC91C97ABC9FC999FDDAB9A /* SystemMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C0B0433F28D4A38D3E5C5B732FDF2FB /* SystemMemory.swift */; };
+		F7B4F0C2E0E243C61B36687A8166F8D8 /* DiskRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3C7A949E9C4B240F4DEA9C9DA599E6 /* DiskRow.swift */; };
+		F98346EA6722A9787A3B15894DFA535F /* DiskEntryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E9785F4F8E8181097CCEBB8C50EFEE2 /* DiskEntryTests.swift */; };
+		FC3D11CF3425A274760C7C7E439A6F04 /* DockerDiskUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6FE358E82F8DF48856FC61ACDD8379 /* DockerDiskUsage.swift */; };
+		FE8B2269E31CFB4BB0166D9A0F4BCBE0 /* DiskWindowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E25454C0B6A2E3C6DD0E9A30570277 /* DiskWindowModel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		2E09A0D273F0CC7ECEA5A1EFC2E53AAA /* PBXContainerItemProxy */ = {
+		004257C017EBBD845B225AE2E584BCBC /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = C701E91F007F5BF95D236345BC8F614E;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
+		};
+		02D07AC2F97E0AF0AEBF849AA47B33C8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CE3240E1F665EBCEA90A13BE1381CFA2;
 			remoteInfo = SystemProcesses;
 		};
-		4699D8AD196A765BF9307B77ED078386 /* PBXContainerItemProxy */ = {
+		16E0D98C5221708A3057E4E830971910 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = C701E91F007F5BF95D236345BC8F614E;
-			remoteInfo = SystemProcesses;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
 		};
-		62BDCB0DDFB9F49DFCFF9138B149863A /* PBXContainerItemProxy */ = {
+		27AD4DCAFE7C0D48D1076282CB0B1478 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = 3642DA6EDECBF98321DF9947E2704594;
+			remoteGlobalIDString = CCEF68BA17DE4F302669FA35FBDE2779;
 			remoteInfo = SystemDisk;
 		};
-		7FCBD5C8E5E3766A43FFE58B224FDEE4 /* PBXContainerItemProxy */ = {
+		440E11FEB155CC318D8988ACE06B3732 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		A3CDE306E55BB46209D9C54C48E65F8D /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		A41CAFFBEE9269E8D60FC6C64E9DB902 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = C701E91F007F5BF95D236345BC8F614E;
+			remoteGlobalIDString = CE3240E1F665EBCEA90A13BE1381CFA2;
 			remoteInfo = SystemProcesses;
 		};
-		BF84847F83363BFC35F603A85010DCF0 /* PBXContainerItemProxy */ = {
+		5563D8D70934FB03D46FE8B1E2668D86 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		C3496FD97633D1167CE19DBCF699B123 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		DC8A33A1304FAF5DF2027EBF06A1B3E4 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = C701E91F007F5BF95D236345BC8F614E;
+			remoteGlobalIDString = CE3240E1F665EBCEA90A13BE1381CFA2;
 			remoteInfo = SystemProcesses;
 		};
-		F39542A48CC8D002D7AEAA7FE3CAE233 /* PBXContainerItemProxy */ = {
+		87B05A71B1258F871D0137508D3E935D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		F8ED927D4C052F3EC3D0A15074531698 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D815E696134D65B6518A875970458233;
-			remoteInfo = SystemCore;
-		};
-		FEDA35C4832F0E9EF5DEECF8F4C47135 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3642DA6EDECBF98321DF9947E2704594;
+			remoteGlobalIDString = CCEF68BA17DE4F302669FA35FBDE2779;
 			remoteInfo = SystemDisk;
+		};
+		93B1CEFA47006A93C6D9CF1482E60334 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
+		};
+		B91D4D0E26910588C59856F834567434 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
+		};
+		D7091B391E70944BC22D4E809BA0219E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
+		};
+		E80ECF21708FB0B8C48FF26845173019 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 980E79BD701FEAD8C456FFF22EB936C0;
+			remoteInfo = SystemCore;
+		};
+		F318AC1451F244D4BE3F1C08F066B67D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00DE5BD61D2CE6601052EBBFBDBF9DA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CE3240E1F665EBCEA90A13BE1381CFA2;
+			remoteInfo = SystemProcesses;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		05F8A26BE39170160DCDD2FD53FA0338 /* WindowHeader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowHeader.swift; sourceTree = "<group>"; };
-		08D59BD17F019C5541279F077BF36DDE /* LaunchdJobIndexTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LaunchdJobIndexTests.swift; sourceTree = "<group>"; };
-		0C2557FDAE901AEF4417C7726E96C132 /* UsageFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UsageFormat.swift; sourceTree = "<group>"; };
-		0D58ADF17F9B1C900F340C58F68D45C9 /* HostCPU.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HostCPU.swift; sourceTree = "<group>"; };
-		0E37AF75AC12AA305E2C5AB62DAA1ECD /* LiveAttributionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveAttributionTests.swift; sourceTree = "<group>"; };
-		114FDD807E1AC1AACECB537FE86A32AC /* SystemMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMonitor.swift; sourceTree = "<group>"; };
-		15EDA6F16389621209A855FBF0A50B3B /* StatusMenuController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusMenuController.swift; sourceTree = "<group>"; };
+		01DF60431ECA7ACF9144BF0ACA958DE6 /* ReclaimRules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimRules.swift; sourceTree = "<group>"; };
+		0254863FE35EDD34FCD888011ACBA665 /* ProcessSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessSource.swift; sourceTree = "<group>"; };
+		04D5A46A4AD43DD47ED42E7706C39F44 /* Attribution.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Attribution.swift; sourceTree = "<group>"; };
+		06B2B6823EEDABF4701CE4A063D37668 /* StatusSummaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusSummaryTests.swift; sourceTree = "<group>"; };
+		08E33A809202DE6D1B0598A780785ACB /* DockerCLITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerCLITests.swift; sourceTree = "<group>"; };
+		0D6B663A8DE8D5591234614374A1E0ED /* DockerOutputTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerOutputTests.swift; sourceTree = "<group>"; };
+		0DA127BAAC3A26F18F6BC0DBAD2EB394 /* CodeSignatureTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodeSignatureTests.swift; sourceTree = "<group>"; };
+		0EE65A2FE60C0F71C5A391662B18C372 /* LiveAttributionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveAttributionTests.swift; sourceTree = "<group>"; };
+		1410D91DC2F56F71B92D908219D38069 /* GroupBuilder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupBuilder.swift; sourceTree = "<group>"; };
 		192243E665A11C82D97EECEB2F369E09 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
-		1A5D3EFC19E487CC238F50020CCD85CD /* SubsetSystem.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = SubsetSystem.entitlements; sourceTree = "<group>"; };
-		1B3DCA6E6A227FAE14563F0DF5E9B275 /* ProcessDetailView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessDetailView.swift; sourceTree = "<group>"; };
-		1C256626B070E1ED589119F4DB47C9E6 /* MainWindowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
-		213913864623E37153FF4F72DBBAF4C5 /* TopGroups.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TopGroups.swift; sourceTree = "<group>"; };
-		2AB043902D32702D076D0306D5030914 /* ReclaimRules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimRules.swift; sourceTree = "<group>"; };
-		2BE3DC94A71DB1587839965B97E7DE87 /* ContainerVMView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMView.swift; sourceTree = "<group>"; };
-		2C68E3436CEBC8B2D383A8EBB73EEB29 /* LaunchdJobIndex.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LaunchdJobIndex.swift; sourceTree = "<group>"; };
-		343BF4B80055A9E7C67F2D7A48239963 /* StatusSummary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusSummary.swift; sourceTree = "<group>"; };
-		36EF7C854F5D7CC35EA35B2CFF94DAC8 /* DirectoryEntry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DirectoryEntry.swift; sourceTree = "<group>"; };
-		3783EBC542877753F0FF867D6D67B2B1 /* ProcessesWindowModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesWindowModel.swift; sourceTree = "<group>"; };
-		39423F8797049F9FF5D8E6E747AC9279 /* FixtureSignalReaders.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FixtureSignalReaders.swift; sourceTree = "<group>"; };
-		48B20A988E65AE1EAB767220F2F609A3 /* SystemMemoryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMemoryTests.swift; sourceTree = "<group>"; };
-		4AA21FF6B7410B946DF930761303B48D /* ContainerVMTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMTests.swift; sourceTree = "<group>"; };
-		4B0A611BC22D6E9129EE49493F85032F /* OriginExplanation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginExplanation.swift; sourceTree = "<group>"; };
-		4B7E9B91E74C1D374A30F9001FA8DF79 /* DiskWindowModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskWindowModel.swift; sourceTree = "<group>"; };
-		5343142A36A824A2B222B5827DB500A8 /* VolumeSummary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VolumeSummary.swift; sourceTree = "<group>"; };
-		579797E6F59D6CD060D2EA5ED4C49AC9 /* DiskView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskView.swift; sourceTree = "<group>"; };
-		57F60962958FED046E2DC0E209B0AC37 /* ProcessContextReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessContextReader.swift; sourceTree = "<group>"; };
-		57FECBECEF13D4D3B1B4743759B70314 /* EntryFacts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EntryFacts.swift; sourceTree = "<group>"; };
-		58AEA3902F86EB9A56E94D02A61B9C23 /* CleanupExecutor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupExecutor.swift; sourceTree = "<group>"; };
-		59F08D9AE67E8043B33E1D3E81E21327 /* CleanupCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupCommands.swift; sourceTree = "<group>"; };
-		5BA4A0D8AE5794A9CE2959046E7980B8 /* DiskWindowModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskWindowModelTests.swift; sourceTree = "<group>"; };
-		5CA862BBBFEDB23BEB89DF09C0A08978 /* ProcessGroupRunner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessGroupRunner.swift; sourceTree = "<group>"; };
+		1A6ACF0B7A55D6CE7F9C4C20BE6D2531 /* LaunchdJobIndex.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LaunchdJobIndex.swift; sourceTree = "<group>"; };
+		1B4E4436E54A98049935941D9EC10BB5 /* AttributionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AttributionTests.swift; sourceTree = "<group>"; };
+		1CCD149859208B5C228CB5A98CF812BE /* PrivateInterfaceReaders.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PrivateInterfaceReaders.swift; sourceTree = "<group>"; };
+		1D535973F819C935FA25407C6A9ED47A /* SystemMemoryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMemoryTests.swift; sourceTree = "<group>"; };
+		1FFFFD4F07A8991C127EFBFECE74EFF8 /* SubsetSystem.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = SubsetSystem.entitlements; sourceTree = "<group>"; };
+		229E9D24925D597D6A07DB6BEC4F3CE5 /* CleanupSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSheet.swift; sourceTree = "<group>"; };
+		25E8C020242526A118B14261FD7BB246 /* DiskWindowModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskWindowModelTests.swift; sourceTree = "<group>"; };
+		28F721258DBFE76A33154F5DC9C39F81 /* ProcessReadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessReadTests.swift; sourceTree = "<group>"; };
+		292CA2504EEE05A79D1065A1C636C6B7 /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		2CCCECEF460E70DB7520689336DDA0EB /* SimulatorRuntimes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SimulatorRuntimes.swift; sourceTree = "<group>"; };
+		2CE71DD711F1EF8FACDE8179735B7C23 /* LiveSamplingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveSamplingTests.swift; sourceTree = "<group>"; };
+		31C958380010C10DB8FDD1DB160422E9 /* HostCPU.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HostCPU.swift; sourceTree = "<group>"; };
+		32E2210C82AA6EA70A8C3923DD2C70E2 /* SystemMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMonitor.swift; sourceTree = "<group>"; };
+		33BF731C7072AB285D25BF5003012700 /* OriginExplanation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginExplanation.swift; sourceTree = "<group>"; };
+		3591B7B0CACC9AFBCFF0003BA208CF52 /* StatusSummary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusSummary.swift; sourceTree = "<group>"; };
+		360C25E54D7B25B7E24F22D8FE2C30A6 /* VolumeSummary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VolumeSummary.swift; sourceTree = "<group>"; };
+		38DFA1D23E2E7827CF6C92FD2A27E2DC /* DiskScannerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScannerTests.swift; sourceTree = "<group>"; };
+		39121837176BC81E9FED1AFB7548FC0D /* ProcessRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessRow.swift; sourceTree = "<group>"; };
+		39E54714617BEF9C52592D646B945261 /* Explanation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Explanation.swift; sourceTree = "<group>"; };
+		3A0553B2A3465E71F03A5F50747BB4BF /* OriginSignalReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalReader.swift; sourceTree = "<group>"; };
+		3CAF0335ECEEF0B6E8D5DE3234B7FDFD /* CleanupExecutor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupExecutor.swift; sourceTree = "<group>"; };
+		3F3C3AF6F2F447DFD7AD4D3E069C1982 /* CleanupPlan.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupPlan.swift; sourceTree = "<group>"; };
+		409F1DB6833A7CADDAB1D2AD2595B32C /* ReclaimRulesTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimRulesTests.swift; sourceTree = "<group>"; };
+		414EE304551EAFA99083C973CA85042A /* ProcessDetailView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessDetailView.swift; sourceTree = "<group>"; };
+		4159460B7A3178E14CDB96CF7E75BCDC /* RowAccessibilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RowAccessibilityTests.swift; sourceTree = "<group>"; };
+		41D3106F4084ADEFD0D212A98A68E0DC /* ReclaimMatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimMatcher.swift; sourceTree = "<group>"; };
+		4348B0E962E14FEDEEC4312F075A7A0D /* ContainerVMView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMView.swift; sourceTree = "<group>"; };
+		43EE6E9BACFDB9B8D1B576A2658DF478 /* DiskTree.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskTree.swift; sourceTree = "<group>"; };
+		44DC8DBD2E6C8DFDDAFF6BC2992E65A3 /* VolumeSummaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VolumeSummaryTests.swift; sourceTree = "<group>"; };
+		458E6B26C785B0903A6EB4BDB8D3D45D /* ExplainRequest.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExplainRequest.swift; sourceTree = "<group>"; };
+		463E5A601AA0ABF28AA90999BB19B5AB /* ExplainCenter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExplainCenter.swift; sourceTree = "<group>"; };
+		49E5687EFF95A3910A689557C24422A5 /* ContainerVMTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMTests.swift; sourceTree = "<group>"; };
+		4AAB6FDD29C0DF12B8F1E9A48200BA40 /* LaunchdJobIndexTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LaunchdJobIndexTests.swift; sourceTree = "<group>"; };
+		4B3C7A949E9C4B240F4DEA9C9DA599E6 /* DiskRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskRow.swift; sourceTree = "<group>"; };
+		50AD7A5801F63E7AC263EB5A74D98F86 /* SubsetSystemApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SubsetSystemApp.swift; sourceTree = "<group>"; };
+		52E25454C0B6A2E3C6DD0E9A30570277 /* DiskWindowModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskWindowModel.swift; sourceTree = "<group>"; };
+		5340987BA3912AFB3182A218AE1F6434 /* TopGroups.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TopGroups.swift; sourceTree = "<group>"; };
+		573D1F9BC78E85D003E3C191B6B5FE36 /* OriginSignalReaderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalReaderTests.swift; sourceTree = "<group>"; };
+		59191D90276864FC8E235C1E7251CFC4 /* MainWindowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
 		5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libSystemDisk.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		5D6DD6CFBC8DAA45953B85AF9A0CD3B5 /* CleanupSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSheet.swift; sourceTree = "<group>"; };
-		5F629FAE5792A38F0CBE838B69DB7E41 /* ReclaimMatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimMatcher.swift; sourceTree = "<group>"; };
+		5F48DDBD3355646839EED82263227FBD /* CleanupTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupTests.swift; sourceTree = "<group>"; };
 		611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libSystemCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		618C0F3B9AEC780F50F72531362CCC41 /* SubsetSystemApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SubsetSystemApp.swift; sourceTree = "<group>"; };
-		65D41235BACD942D3FC1A39E1E4C357B /* Sampler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Sampler.swift; sourceTree = "<group>"; };
-		663D65A4F8631C0BC18578F48E948BA2 /* DiskEntryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskEntryTests.swift; sourceTree = "<group>"; };
-		6ED1A3B5715417245D2D64890F546DEB /* CommandRunner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommandRunner.swift; sourceTree = "<group>"; };
-		6EEA830D46531D3DD9079FE7043B0109 /* ProcessTree.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessTree.swift; sourceTree = "<group>"; };
-		77936BAB4C1D69D3D2B89AADA333BCCC /* ProcessesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesView.swift; sourceTree = "<group>"; };
-		798218B0DDF1743CDB5F05317F22E50A /* CodeSignatureTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodeSignatureTests.swift; sourceTree = "<group>"; };
-		7A6BD54CF93F692A1E0F52D0748F36F6 /* CleanupTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupTests.swift; sourceTree = "<group>"; };
-		7C7FA501E178BB3510C6AB78550F790A /* ProcessSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessSource.swift; sourceTree = "<group>"; };
-		7E0758914ED77C899080F664C2DBF8DC /* AppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
-		7E29FF59EC019B56E312E727F13E0D86 /* DiskScannerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScannerTests.swift; sourceTree = "<group>"; };
-		7EBFF62FA43BC170A76F57A8FD0EDC36 /* VolumeSummaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VolumeSummaryTests.swift; sourceTree = "<group>"; };
-		7EE6EB97676440A2DEF8C949F5F0791E /* ProcessRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessRow.swift; sourceTree = "<group>"; };
-		814226E583E07B9B6C4F8D1FD3C835CE /* DockerCLITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerCLITests.swift; sourceTree = "<group>"; };
-		8253CB7F8045D2027622B3EB0ACCF033 /* ProcessesWindowModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesWindowModelTests.swift; sourceTree = "<group>"; };
-		8403DB6C9F75FCF308C888A90E711C70 /* Attribution.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Attribution.swift; sourceTree = "<group>"; };
-		86D1369BCFCC36710D40926D62BC4D16 /* DiskRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskRow.swift; sourceTree = "<group>"; };
+		647BE02026FB0E3F97591FCC5637DD81 /* LiveOriginSignalTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveOriginSignalTests.swift; sourceTree = "<group>"; };
+		663D53C35731F192E97D1FBC0BEC3FCF /* ProcessExplainTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessExplainTests.swift; sourceTree = "<group>"; };
+		66DD75D8102945AAE0F5A07929E934F2 /* DockerCLI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerCLI.swift; sourceTree = "<group>"; };
+		67C84219D80818B258A357C5DB831807 /* CleanupCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupCommands.swift; sourceTree = "<group>"; };
+		6E9785F4F8E8181097CCEBB8C50EFEE2 /* DiskEntryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskEntryTests.swift; sourceTree = "<group>"; };
+		7346CAB12A4F952BB01DEFF0A733561C /* WindowHeader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowHeader.swift; sourceTree = "<group>"; };
+		750CE895206651E3B29C33DBDABF91D6 /* PrivateInterfaceReaderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PrivateInterfaceReaderTests.swift; sourceTree = "<group>"; };
+		751F658E4E4D2929908A5B3E2B6D9E7A /* ProcessExplain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessExplain.swift; sourceTree = "<group>"; };
+		778D304D3F21A0A6AE723EA6C731054D /* DiskExplainTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskExplainTests.swift; sourceTree = "<group>"; };
+		7C18CA80D20500DC5EFB0A1EBAF18371 /* ProcessesWindowModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesWindowModel.swift; sourceTree = "<group>"; };
+		7D116B389421C27F9F85AC2393A26FA0 /* ContainerVMRecognizer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMRecognizer.swift; sourceTree = "<group>"; };
+		83F108666816389DAF2A2DA3D3EE8390 /* DiskAccounting.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskAccounting.swift; sourceTree = "<group>"; };
 		87EE5FE505E01A810F97C023227BEB25 /* SystemCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SystemCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		882B6F442E48F6F4E3E9AC14306FA161 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		8CA95105B4AED39B089C50D345EBDD38 /* ProcessGroupRunnerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessGroupRunnerTests.swift; sourceTree = "<group>"; };
-		93E3EF04821C65FCFF8E1D3E441BE4CD /* DockerDiskUsage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerDiskUsage.swift; sourceTree = "<group>"; };
-		94887BA858F75CCCE1C5E40AE67285FB /* LiveOriginSignalTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveOriginSignalTests.swift; sourceTree = "<group>"; };
-		94D6DD01AAC87578DE0D43A9B18D0202 /* CleanupPlan.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupPlan.swift; sourceTree = "<group>"; };
-		94FD86B6AEE512050BAD0B0F6C0354FF /* OriginSignalReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalReader.swift; sourceTree = "<group>"; };
-		9591E6ABF2131FE0E860DD17A16BCD12 /* PrivateInterfaceReaderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PrivateInterfaceReaderTests.swift; sourceTree = "<group>"; };
-		966CC6EE62BE2D9016D01D402EBFC84D /* PlaceholderWindows.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaceholderWindows.swift; sourceTree = "<group>"; };
-		99069B725B2409FEEF6EFA7A35DC54AD /* ShellCommand.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
-		9911E5A38A1B45F55D9DF389ADEFD2D0 /* CleanupSafety.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSafety.swift; sourceTree = "<group>"; };
-		9AC3896F678E827C5B89CD879E788E26 /* PrivateInterfaceReaders.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PrivateInterfaceReaders.swift; sourceTree = "<group>"; };
-		9AD0F2A36B478EEED967F30FC06492AA /* DiskScanService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScanService.swift; sourceTree = "<group>"; };
-		9BE4F4EAC5DEC7A7860210A78FE5A781 /* ProcessFacts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessFacts.swift; sourceTree = "<group>"; };
-		9DD9642F0A8FBCC6B54372F5090C4F3C /* OriginSignalReaderTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalReaderTests.swift; sourceTree = "<group>"; };
-		A3F51231816F0E94A17BC62B2DF5066C /* GroupBuilder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupBuilder.swift; sourceTree = "<group>"; };
-		A41926089D61AAF25E4F2C4DC7569394 /* DockerCLI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerCLI.swift; sourceTree = "<group>"; };
-		A45E548052E0903CDD24BD0E514E5921 /* DiskTree.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskTree.swift; sourceTree = "<group>"; };
-		A916584089305BDC9E28C49A4911A40A /* ReclaimRulesTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReclaimRulesTests.swift; sourceTree = "<group>"; };
-		AA854994498BB526092C8777D04647F3 /* ShellCommandTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommandTests.swift; sourceTree = "<group>"; };
+		8C0B0433F28D4A38D3E5C5B732FDF2FB /* SystemMemory.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMemory.swift; sourceTree = "<group>"; };
+		8E6E245FC92A78E7C1DB68D68146D05D /* DiskOriginTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskOriginTests.swift; sourceTree = "<group>"; };
+		8E6FE358E82F8DF48856FC61ACDD8379 /* DockerDiskUsage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerDiskUsage.swift; sourceTree = "<group>"; };
+		943C3DF38109A6FB0FDC6713548AFB77 /* OriginSignalsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalsView.swift; sourceTree = "<group>"; };
+		96DCA123818A83C800E54C169C55E23F /* ProcessGroupRunnerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessGroupRunnerTests.swift; sourceTree = "<group>"; };
+		9DD6DA0CD12FF9B57CE85729E79DB228 /* DiskOrigins.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskOrigins.swift; sourceTree = "<group>"; };
+		9FBE440C7CCD6DE0F0DC01A3D7A073AA /* ProcessesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesView.swift; sourceTree = "<group>"; };
+		A3C77D0197C2116B322433A8D68608A1 /* CleanupSafety.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSafety.swift; sourceTree = "<group>"; };
+		A6C837925D10A5FAD83768A4C1B226E1 /* DiskScanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScanner.swift; sourceTree = "<group>"; };
+		A7A33F9AB88EAC6A5D655EB3380BAE79 /* LibprocProcessSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LibprocProcessSource.swift; sourceTree = "<group>"; };
+		A7FB4C74BA489FFCFB1E14CF7DE23C94 /* DiskHeader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskHeader.swift; sourceTree = "<group>"; };
+		AA0C3E2F4413A860141EEA7139E721B5 /* StatusMenuController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusMenuController.swift; sourceTree = "<group>"; };
 		AAEBC7CFB148B1F9997DC55F0AB34235 /* SystemDiskTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SystemDiskTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		AD447AB0FFFDEBDC01CF6DC31FB15032 /* LibprocProcessSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LibprocProcessSource.swift; sourceTree = "<group>"; };
-		AEE6F5995678D5E8E23EAF61F4009EAF /* AttributionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AttributionModel.swift; sourceTree = "<group>"; };
-		B19A852FBFED7C107FFDE1DBDE070030 /* CleanupSheetView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSheetView.swift; sourceTree = "<group>"; };
-		B1B428118F898A5E77F79706984B7159 /* ContainerBreakdown.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerBreakdown.swift; sourceTree = "<group>"; };
+		AEF484A411C7BD0B5F377F99DFE56AB4 /* AttributionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AttributionModel.swift; sourceTree = "<group>"; };
+		B13202A794E1A2512F41C23F5E880916 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B396ED2E25506D2997F34D434EE8C2DC /* ExplainView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExplainView.swift; sourceTree = "<group>"; };
 		B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libSystemProcesses.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		B5F475D3D1E040F6284C7D615F4E41A7 /* ProcessReadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessReadTests.swift; sourceTree = "<group>"; };
-		BABEAB2D37556AFE9548499882BC3B83 /* SystemMemory.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SystemMemory.swift; sourceTree = "<group>"; };
-		BC4FE8E1D16589592408B3BB2D2A1851 /* SamplerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SamplerTests.swift; sourceTree = "<group>"; };
-		BE5DE7856E98753B6783920635E686C5 /* OriginSignalsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignalsView.swift; sourceTree = "<group>"; };
-		BF2059249CD76211732657562B977A1A /* DiskOrigins.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskOrigins.swift; sourceTree = "<group>"; };
-		BF908125AA1A605C761BC5EDFD7BD55F /* GroupTotals.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupTotals.swift; sourceTree = "<group>"; };
-		BFBB9FAF61A1A88DEFE08C137D7B1550 /* DiskScanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScanner.swift; sourceTree = "<group>"; };
-		C25E47046AC8D43C0B58D1DDD4245C3C /* DiskHeader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskHeader.swift; sourceTree = "<group>"; };
-		C4C6F1FB6311BD7C92020EDD695B72B8 /* DiskAccounting.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskAccounting.swift; sourceTree = "<group>"; };
+		B7C6A34B02FDB7369F795DA97295334C /* DiskFixtures.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskFixtures.swift; sourceTree = "<group>"; };
+		B913195F218424F99BEF55C15F744B7B /* GroupTotals.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupTotals.swift; sourceTree = "<group>"; };
+		BAFD308F33B1CEBC17B714BE7CC6C33F /* CommandRunner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommandRunner.swift; sourceTree = "<group>"; };
+		BB1A2DF4CFBEDC38235770C3DCEBE7EB /* DiskView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskView.swift; sourceTree = "<group>"; };
+		BCF5BC74BE597B580C59472FA3EB909E /* ProcessGroupRunner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessGroupRunner.swift; sourceTree = "<group>"; };
+		C27C90AE27906F76BAECE8311F5E4481 /* InstalledApps.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InstalledApps.swift; sourceTree = "<group>"; };
+		C29B96E2DD09B27515C9F8F1A771B82B /* ProcessFacts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessFacts.swift; sourceTree = "<group>"; };
+		C3233FE4E657CFB74846777D336A05ED /* ExplainRedactor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExplainRedactor.swift; sourceTree = "<group>"; };
+		C56D78DB8DE4DA84E998B1021B55433F /* DiskScanService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskScanService.swift; sourceTree = "<group>"; };
+		C8ACE776AB89945E9E3FFA18C94F4223 /* AIProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AIProvider.swift; sourceTree = "<group>"; };
+		C8C7737D481AE3A1A0B861013F8AE733 /* FixtureSignalReaders.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FixtureSignalReaders.swift; sourceTree = "<group>"; };
 		CB510987859834C152AF229F11D566BE /* SystemProcessesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SystemProcessesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		CD4FC38B93B3FB7CD9679FAA1B4A3813 /* StatusSummaryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StatusSummaryTests.swift; sourceTree = "<group>"; };
-		CEDFD4A26CA28618323435D7E6399CDD /* CodeSignatureReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodeSignatureReader.swift; sourceTree = "<group>"; };
-		D147F2601E0F62C1436F33D8AF4009FC /* InstalledApps.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InstalledApps.swift; sourceTree = "<group>"; };
-		D80592798D01D333F36FAB7AEC455165 /* SimulatorRuntimes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SimulatorRuntimes.swift; sourceTree = "<group>"; };
-		D934F2650B0A6AB2A18C4AE7A5F52782 /* AttributionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AttributionTests.swift; sourceTree = "<group>"; };
-		DA5CAC08D4D6F79B27FAA4269841AB10 /* DiskOriginTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskOriginTests.swift; sourceTree = "<group>"; };
-		E10A94C70E1E314616732E0B929233A4 /* OriginSignals.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignals.swift; sourceTree = "<group>"; };
+		D0DDDF247E56DBE5EB49F603F1DB724A /* ShellCommandTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommandTests.swift; sourceTree = "<group>"; };
+		D5135068D8530A409E4F4BFEDDE89B08 /* ProcessesWindowModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessesWindowModelTests.swift; sourceTree = "<group>"; };
+		D70575BD72622BE2337B0FBACB50B55E /* ExplainTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ExplainTests.swift; sourceTree = "<group>"; };
+		DA72E0E6979E5F159E92EBE4F21DAA4D /* OriginSignals.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OriginSignals.swift; sourceTree = "<group>"; };
+		DAD4830DF106017F6966BE703D883DDC /* ProcessContextReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessContextReader.swift; sourceTree = "<group>"; };
+		DC2464AFCE9B895CF526761425D85DB4 /* ContainerBreakdown.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerBreakdown.swift; sourceTree = "<group>"; };
+		E04F6846E2452825B5E23969B61DA03C /* ProcessFixtures.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessFixtures.swift; sourceTree = "<group>"; };
+		E1D374B2B0606F59D2DF41A93054B5A5 /* UsageFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UsageFormat.swift; sourceTree = "<group>"; };
+		E29506BF33270741B627FC033418E949 /* ShellCommand.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShellCommand.swift; sourceTree = "<group>"; };
 		E5094382A6EA8E0FB85E7A4628B11B5B /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		E5134D9A58638B66272C51B4A58737A5 /* Subset System.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = "Subset System.app"; path = "Subset System.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		E91687BB0CBBD102F65D2609B4115264 /* ProcessFixtures.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessFixtures.swift; sourceTree = "<group>"; };
-		F006E0D3294DBD5813CA2907F7559AAE /* ContainerVMRecognizer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContainerVMRecognizer.swift; sourceTree = "<group>"; };
-		F1EFD86EB58E452B20CEFBF731CBAB8A /* DiskFixtures.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskFixtures.swift; sourceTree = "<group>"; };
-		F54FD9C88F8726FAA670EEE597C2EBEA /* LiveSamplingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveSamplingTests.swift; sourceTree = "<group>"; };
-		F783FFB5C61458AE1B9016479FA03433 /* RowAccessibilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RowAccessibilityTests.swift; sourceTree = "<group>"; };
-		FD6A4DF319D37C431ED0FB9DBF1C02C8 /* DockerOutputTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DockerOutputTests.swift; sourceTree = "<group>"; };
+		E64AAF05A613ED08699E497B18BC546D /* DiskExplain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiskExplain.swift; sourceTree = "<group>"; };
+		E9D93C775CB01F982A75606DD1C05A0F /* CleanupSheetView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanupSheetView.swift; sourceTree = "<group>"; };
+		EAF48C458D4E80CA2BD37140B4A009D3 /* SamplerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SamplerTests.swift; sourceTree = "<group>"; };
+		ED077CE92D4E1E5CE24BFAEC2E8413E5 /* CodeSignatureReader.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodeSignatureReader.swift; sourceTree = "<group>"; };
+		ED24B39A4D539E8CEC7621E3BB71A232 /* AppleIntelligenceProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppleIntelligenceProvider.swift; sourceTree = "<group>"; };
+		ED6C60EDA905FF49DAE3A61CB5F8D0A4 /* PlaceholderWindows.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaceholderWindows.swift; sourceTree = "<group>"; };
+		EFFF11C009C69B7D19AF69FC2B7EFBF6 /* ProcessTree.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessTree.swift; sourceTree = "<group>"; };
+		F1EE709CC60FA08FF97706583A42E314 /* Sampler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Sampler.swift; sourceTree = "<group>"; };
+		F247449CBED7E4E58DA44B493472A8E9 /* DirectoryEntry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DirectoryEntry.swift; sourceTree = "<group>"; };
+		F9CAA238C3EF96FCA0BA1972BAD2B412 /* EntryFacts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EntryFacts.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		1C077C3D55496CC488CDD738AA1D615C /* Frameworks */ = {
+		11D0813B1CFB811927EC21B29C2EE514 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				127D7BFBA8A107C11FC514ECCC08CE38 /* libSystemCore.a in Frameworks */,
-				C2AAC84AD064792EAB027F5BE79300A9 /* libSystemProcesses.a in Frameworks */,
-				87ECBAE35236375548A0677F83564979 /* libSystemDisk.a in Frameworks */,
-				0849BE32AA421F68B45AFAB053A18BDA /* AppKit.framework in Frameworks */,
-				F28FF388057644E278591F8D7E51DBD6 /* SwiftUI.framework in Frameworks */,
+				039CA2AAE52C30CA240ACFDAC82E7416 /* libSystemCore.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		2498039EA206B66050C7D3D03E9604F4 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				AC285A09FEE64E94E5FB82774B43B072 /* libSystemCore.a in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		34262B3483424CE537837DC3CFB849BA /* Frameworks */ = {
+		31BB46F2D131F32B8E6104F236C76743 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		4CE0898EF4FD4E9F33B8F2B77CAAE20E /* Frameworks */ = {
+		5A3DF29EC1D4D083DF7AE421D16A794D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1ACAB680E8A565FDF1132F7059AAF14A /* libSystemCore.a in Frameworks */,
+				C4F3158CD5835C9E92E5C9FC530C9BA2 /* libSystemProcesses.a in Frameworks */,
+				C3C83458A378E760251AF9BD3D9977EA /* libSystemDisk.a in Frameworks */,
+				333BEB00922A94F095B617B3C23BB753 /* AppKit.framework in Frameworks */,
+				ED6056FB332B9CBF70D0E27BBA66D4C5 /* SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A5D072FCFC3EBC3AD8055356B2CCE0C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE136E361978A7845EFFC5D51760430D /* libSystemCore.a in Frameworks */,
+				1C0D28C63B3E3F18D6A82AE7830E3372 /* libSystemProcesses.a in Frameworks */,
+				E56BC33B0CD6751CEF27A4E808B30B31 /* libSystemDisk.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ADAF87E83993D0D32205D1D94BBB7AFC /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		615DC5A41A8D48EFD0DC76E17ED68246 /* Frameworks */ = {
+		B430F4E6BA314DD9AACC38E1E9F4F103 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				7E885DBA540494949C97740FC625089E /* libSystemCore.a in Frameworks */,
-				541336320E9DA3DB95B2A3A4161879D5 /* libSystemProcesses.a in Frameworks */,
-				1AC2442536439D3D8548AB8505465BB3 /* libSystemDisk.a in Frameworks */,
+				A7EF6C17856F03173EDEDF209542E798 /* libSystemCore.a in Frameworks */,
+				927B8BA187C86E570EB2CF36E9F79011 /* libSystemProcesses.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		C064A2828EA3CBCFBEA1392E74FE1715 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				6D2B0ADB218992B6BD4946A20FF7E0CE /* libSystemCore.a in Frameworks */,
-				285F573C60583F3F843F8454974E0070 /* libSystemProcesses.a in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		C86CEF9653DA2F66F7C988764069C241 /* Frameworks */ = {
+		DD3267974F1085951B206C651654902A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -369,91 +393,73 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		06050A9D146FC42EB2891D278F164449 /* DiskTests */ = {
+		134EF2F685BB063EACB3A4F1CF4B3F22 /* Core */ = {
 			isa = PBXGroup;
 			children = (
-				7A6BD54CF93F692A1E0F52D0748F36F6 /* CleanupTests.swift */,
-				F1EFD86EB58E452B20CEFBF731CBAB8A /* DiskFixtures.swift */,
-				5BA4A0D8AE5794A9CE2959046E7980B8 /* DiskWindowModelTests.swift */,
+				31C958380010C10DB8FDD1DB160422E9 /* HostCPU.swift */,
+				A7A33F9AB88EAC6A5D655EB3380BAE79 /* LibprocProcessSource.swift */,
+				C29B96E2DD09B27515C9F8F1A771B82B /* ProcessFacts.swift */,
+				0254863FE35EDD34FCD888011ACBA665 /* ProcessSource.swift */,
+				F1EE709CC60FA08FF97706583A42E314 /* Sampler.swift */,
+				E29506BF33270741B627FC033418E949 /* ShellCommand.swift */,
+				3591B7B0CACC9AFBCFF0003BA208CF52 /* StatusSummary.swift */,
+				8C0B0433F28D4A38D3E5C5B732FDF2FB /* SystemMemory.swift */,
+				3BC28C1A561CAB09B591FF9D49A3F915 /* Attribution */,
+				A2D13F7ABBD4774B3004B1A00462C52A /* Signals */,
+				E62114CDCB5C9049768EC140AAC6AAA4 /* Containers */,
+				F56C55F574B2452566D78EAFE13FDD00 /* Disk */,
+				B14D5436C397563A67870F4B5E022F0C /* AI */,
 			);
-			name = DiskTests;
-			path = Tests/DiskTests;
+			name = Core;
+			path = Core;
 			sourceTree = "<group>";
 		};
-		06611FDC10AAB5E2EBC16D2C32ED1803 /* Attribution */ = {
+		200AA38666C619435C7D68A07E3E5EE2 /* MacApp */ = {
 			isa = PBXGroup;
 			children = (
-				8403DB6C9F75FCF308C888A90E711C70 /* Attribution.swift */,
-				AEE6F5995678D5E8E23EAF61F4009EAF /* AttributionModel.swift */,
-				A3F51231816F0E94A17BC62B2DF5066C /* GroupBuilder.swift */,
-				BF908125AA1A605C761BC5EDFD7BD55F /* GroupTotals.swift */,
-				6EEA830D46531D3DD9079FE7043B0109 /* ProcessTree.swift */,
-			);
-			name = Attribution;
-			path = Attribution;
-			sourceTree = "<group>";
-		};
-		18C45F2D228504E4CB71132BBA791773 /* Tests */ = {
-			isa = PBXGroup;
-			children = (
-				D934F2650B0A6AB2A18C4AE7A5F52782 /* AttributionTests.swift */,
-				798218B0DDF1743CDB5F05317F22E50A /* CodeSignatureTests.swift */,
-				4AA21FF6B7410B946DF930761303B48D /* ContainerVMTests.swift */,
-				663D65A4F8631C0BC18578F48E948BA2 /* DiskEntryTests.swift */,
-				DA5CAC08D4D6F79B27FAA4269841AB10 /* DiskOriginTests.swift */,
-				7E29FF59EC019B56E312E727F13E0D86 /* DiskScannerTests.swift */,
-				814226E583E07B9B6C4F8D1FD3C835CE /* DockerCLITests.swift */,
-				FD6A4DF319D37C431ED0FB9DBF1C02C8 /* DockerOutputTests.swift */,
-				08D59BD17F019C5541279F077BF36DDE /* LaunchdJobIndexTests.swift */,
-				0E37AF75AC12AA305E2C5AB62DAA1ECD /* LiveAttributionTests.swift */,
-				94887BA858F75CCCE1C5E40AE67285FB /* LiveOriginSignalTests.swift */,
-				F54FD9C88F8726FAA670EEE597C2EBEA /* LiveSamplingTests.swift */,
-				9DD9642F0A8FBCC6B54372F5090C4F3C /* OriginSignalReaderTests.swift */,
-				9591E6ABF2131FE0E860DD17A16BCD12 /* PrivateInterfaceReaderTests.swift */,
-				8CA95105B4AED39B089C50D345EBDD38 /* ProcessGroupRunnerTests.swift */,
-				B5F475D3D1E040F6284C7D615F4E41A7 /* ProcessReadTests.swift */,
-				A916584089305BDC9E28C49A4911A40A /* ReclaimRulesTests.swift */,
-				BC4FE8E1D16589592408B3BB2D2A1851 /* SamplerTests.swift */,
-				AA854994498BB526092C8777D04647F3 /* ShellCommandTests.swift */,
-				CD4FC38B93B3FB7CD9679FAA1B4A3813 /* StatusSummaryTests.swift */,
-				48B20A988E65AE1EAB767220F2F609A3 /* SystemMemoryTests.swift */,
-				7EBFF62FA43BC170A76F57A8FD0EDC36 /* VolumeSummaryTests.swift */,
-			);
-			name = Tests;
-			path = Tests/CoreTests;
-			sourceTree = "<group>";
-		};
-		1C5E683FCBB9BAE842148FA4E5561DE6 /* MacApp */ = {
-			isa = PBXGroup;
-			children = (
-				7E0758914ED77C899080F664C2DBF8DC /* AppDelegate.swift */,
-				2BE3DC94A71DB1587839965B97E7DE87 /* ContainerVMView.swift */,
-				1C256626B070E1ED589119F4DB47C9E6 /* MainWindowView.swift */,
-				966CC6EE62BE2D9016D01D402EBFC84D /* PlaceholderWindows.swift */,
-				15EDA6F16389621209A855FBF0A50B3B /* StatusMenuController.swift */,
-				618C0F3B9AEC780F50F72531362CCC41 /* SubsetSystemApp.swift */,
-				114FDD807E1AC1AACECB537FE86A32AC /* SystemMonitor.swift */,
-				E74915DE4D392C102F82178CC8ED82F3 /* Processes */,
-				DA5A6B7F5A54BFE38263B04128AD418C /* Disk */,
-				882B6F442E48F6F4E3E9AC14306FA161 /* Info.plist */,
-				1A5D3EFC19E487CC238F50020CCD85CD /* SubsetSystem.entitlements */,
+				292CA2504EEE05A79D1065A1C636C6B7 /* AppDelegate.swift */,
+				4348B0E962E14FEDEEC4312F075A7A0D /* ContainerVMView.swift */,
+				B396ED2E25506D2997F34D434EE8C2DC /* ExplainView.swift */,
+				59191D90276864FC8E235C1E7251CFC4 /* MainWindowView.swift */,
+				ED6C60EDA905FF49DAE3A61CB5F8D0A4 /* PlaceholderWindows.swift */,
+				AA0C3E2F4413A860141EEA7139E721B5 /* StatusMenuController.swift */,
+				50AD7A5801F63E7AC263EB5A74D98F86 /* SubsetSystemApp.swift */,
+				32E2210C82AA6EA70A8C3923DD2C70E2 /* SystemMonitor.swift */,
+				91B224F1B07C4D3264189B9AB172D4F5 /* Processes */,
+				975DD8F63549FE053185F18896DDFF9A /* Disk */,
+				B13202A794E1A2512F41C23F5E880916 /* Info.plist */,
+				1FFFFD4F07A8991C127EFBFECE74EFF8 /* SubsetSystem.entitlements */,
 			);
 			name = MacApp;
 			path = MacApp;
 			sourceTree = "<group>";
 		};
-		5324231AA9388EE6D7CE24C233D25C42 /* Containers */ = {
+		2B6EE96311DE837BBBF645C2ECD25CEF /* Model */ = {
 			isa = PBXGroup;
 			children = (
-				6ED1A3B5715417245D2D64890F546DEB /* CommandRunner.swift */,
-				B1B428118F898A5E77F79706984B7159 /* ContainerBreakdown.swift */,
-				F006E0D3294DBD5813CA2907F7559AAE /* ContainerVMRecognizer.swift */,
-				A41926089D61AAF25E4F2C4DC7569394 /* DockerCLI.swift */,
-				93E3EF04821C65FCFF8E1D3E441BE4CD /* DockerDiskUsage.swift */,
-				5CA862BBBFEDB23BEB89DF09C0A08978 /* ProcessGroupRunner.swift */,
+				33BF731C7072AB285D25BF5003012700 /* OriginExplanation.swift */,
+				751F658E4E4D2929908A5B3E2B6D9E7A /* ProcessExplain.swift */,
+				39121837176BC81E9FED1AFB7548FC0D /* ProcessRow.swift */,
+				7C18CA80D20500DC5EFB0A1EBAF18371 /* ProcessesWindowModel.swift */,
+				5340987BA3912AFB3182A218AE1F6434 /* TopGroups.swift */,
+				E1D374B2B0606F59D2DF41A93054B5A5 /* UsageFormat.swift */,
+				7346CAB12A4F952BB01DEFF0A733561C /* WindowHeader.swift */,
 			);
-			name = Containers;
-			path = Containers;
+			name = Model;
+			path = Model;
+			sourceTree = "<group>";
+		};
+		3BC28C1A561CAB09B591FF9D49A3F915 /* Attribution */ = {
+			isa = PBXGroup;
+			children = (
+				04D5A46A4AD43DD47ED42E7706C39F44 /* Attribution.swift */,
+				AEF484A411C7BD0B5F377F99DFE56AB4 /* AttributionModel.swift */,
+				1410D91DC2F56F71B92D908219D38069 /* GroupBuilder.swift */,
+				B913195F218424F99BEF55C15F744B7B /* GroupTotals.swift */,
+				EFFF11C009C69B7D19AF69FC2B7EFBF6 /* ProcessTree.swift */,
+			);
+			name = Attribution;
+			path = Attribution;
 			sourceTree = "<group>";
 		};
 		5DE428FBC5BD354B6EECA65A2D40E330 = {
@@ -461,12 +467,42 @@
 			children = (
 				94CCF1349F49DF58501BF8C910668083 /* Products */,
 				8555722F4DCBA452D83D3342DBE23365 /* Frameworks */,
-				BCB9A31930AEE612E79177BCA9C8E444 /* Core */,
-				1C5E683FCBB9BAE842148FA4E5561DE6 /* MacApp */,
-				18C45F2D228504E4CB71132BBA791773 /* Tests */,
-				DE382D75DC84775853DC28299A313109 /* ProcessesTests */,
-				06050A9D146FC42EB2891D278F164449 /* DiskTests */,
+				134EF2F685BB063EACB3A4F1CF4B3F22 /* Core */,
+				200AA38666C619435C7D68A07E3E5EE2 /* MacApp */,
+				D5B5B7C3BCF7BA1871B4499A2741C49E /* Tests */,
+				6EDC74E0AF7F61EF36D9BD870BAB072F /* ProcessesTests */,
+				BC93F4E8C87F522335DEAFFEA525631C /* DiskTests */,
 			);
+			sourceTree = "<group>";
+		};
+		610C00249D5279F3E229187E69C5AAAC /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				67C84219D80818B258A357C5DB831807 /* CleanupCommands.swift */,
+				3CAF0335ECEEF0B6E8D5DE3234B7FDFD /* CleanupExecutor.swift */,
+				3F3C3AF6F2F447DFD7AD4D3E069C1982 /* CleanupPlan.swift */,
+				A3C77D0197C2116B322433A8D68608A1 /* CleanupSafety.swift */,
+				229E9D24925D597D6A07DB6BEC4F3CE5 /* CleanupSheet.swift */,
+				E64AAF05A613ED08699E497B18BC546D /* DiskExplain.swift */,
+				A7FB4C74BA489FFCFB1E14CF7DE23C94 /* DiskHeader.swift */,
+				4B3C7A949E9C4B240F4DEA9C9DA599E6 /* DiskRow.swift */,
+				C56D78DB8DE4DA84E998B1021B55433F /* DiskScanService.swift */,
+				52E25454C0B6A2E3C6DD0E9A30570277 /* DiskWindowModel.swift */,
+			);
+			name = Model;
+			path = Model;
+			sourceTree = "<group>";
+		};
+		6EDC74E0AF7F61EF36D9BD870BAB072F /* ProcessesTests */ = {
+			isa = PBXGroup;
+			children = (
+				663D53C35731F192E97D1FBC0BEC3FCF /* ProcessExplainTests.swift */,
+				E04F6846E2452825B5E23969B61DA03C /* ProcessFixtures.swift */,
+				D5135068D8530A409E4F4BFEDDE89B08 /* ProcessesWindowModelTests.swift */,
+				4159460B7A3178E14CDB96CF7E75BCDC /* RowAccessibilityTests.swift */,
+			);
+			name = ProcessesTests;
+			path = Tests/ProcessesTests;
 			sourceTree = "<group>";
 		};
 		8555722F4DCBA452D83D3342DBE23365 /* Frameworks */ = {
@@ -476,6 +512,18 @@
 				E5094382A6EA8E0FB85E7A4628B11B5B /* SwiftUI.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		91B224F1B07C4D3264189B9AB172D4F5 /* Processes */ = {
+			isa = PBXGroup;
+			children = (
+				943C3DF38109A6FB0FDC6713548AFB77 /* OriginSignalsView.swift */,
+				414EE304551EAFA99083C973CA85042A /* ProcessDetailView.swift */,
+				9FBE440C7CCD6DE0F0DC01A3D7A073AA /* ProcessesView.swift */,
+				2B6EE96311DE837BBBF645C2ECD25CEF /* Model */,
+			);
+			name = Processes;
+			path = Processes;
 			sourceTree = "<group>";
 		};
 		94CCF1349F49DF58501BF8C910668083 /* Products */ = {
@@ -492,143 +540,140 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		957E99E9323CEF59FB6EBBDE7E3EFE9F /* Disk */ = {
+		975DD8F63549FE053185F18896DDFF9A /* Disk */ = {
 			isa = PBXGroup;
 			children = (
-				36EF7C854F5D7CC35EA35B2CFF94DAC8 /* DirectoryEntry.swift */,
-				C4C6F1FB6311BD7C92020EDD695B72B8 /* DiskAccounting.swift */,
-				BF2059249CD76211732657562B977A1A /* DiskOrigins.swift */,
-				BFBB9FAF61A1A88DEFE08C137D7B1550 /* DiskScanner.swift */,
-				A45E548052E0903CDD24BD0E514E5921 /* DiskTree.swift */,
-				57FECBECEF13D4D3B1B4743759B70314 /* EntryFacts.swift */,
-				D147F2601E0F62C1436F33D8AF4009FC /* InstalledApps.swift */,
-				5F629FAE5792A38F0CBE838B69DB7E41 /* ReclaimMatcher.swift */,
-				2AB043902D32702D076D0306D5030914 /* ReclaimRules.swift */,
-				D80592798D01D333F36FAB7AEC455165 /* SimulatorRuntimes.swift */,
-				5343142A36A824A2B222B5827DB500A8 /* VolumeSummary.swift */,
+				E9D93C775CB01F982A75606DD1C05A0F /* CleanupSheetView.swift */,
+				BB1A2DF4CFBEDC38235770C3DCEBE7EB /* DiskView.swift */,
+				610C00249D5279F3E229187E69C5AAAC /* Model */,
 			);
 			name = Disk;
 			path = Disk;
 			sourceTree = "<group>";
 		};
-		BCB9A31930AEE612E79177BCA9C8E444 /* Core */ = {
+		A2D13F7ABBD4774B3004B1A00462C52A /* Signals */ = {
 			isa = PBXGroup;
 			children = (
-				0D58ADF17F9B1C900F340C58F68D45C9 /* HostCPU.swift */,
-				AD447AB0FFFDEBDC01CF6DC31FB15032 /* LibprocProcessSource.swift */,
-				9BE4F4EAC5DEC7A7860210A78FE5A781 /* ProcessFacts.swift */,
-				7C7FA501E178BB3510C6AB78550F790A /* ProcessSource.swift */,
-				65D41235BACD942D3FC1A39E1E4C357B /* Sampler.swift */,
-				99069B725B2409FEEF6EFA7A35DC54AD /* ShellCommand.swift */,
-				343BF4B80055A9E7C67F2D7A48239963 /* StatusSummary.swift */,
-				BABEAB2D37556AFE9548499882BC3B83 /* SystemMemory.swift */,
-				06611FDC10AAB5E2EBC16D2C32ED1803 /* Attribution */,
-				BCBD5C1F5FE7CE3E1E32A7F706545B3A /* Signals */,
-				5324231AA9388EE6D7CE24C233D25C42 /* Containers */,
-				957E99E9323CEF59FB6EBBDE7E3EFE9F /* Disk */,
-			);
-			name = Core;
-			path = Core;
-			sourceTree = "<group>";
-		};
-		BCBD5C1F5FE7CE3E1E32A7F706545B3A /* Signals */ = {
-			isa = PBXGroup;
-			children = (
-				CEDFD4A26CA28618323435D7E6399CDD /* CodeSignatureReader.swift */,
-				39423F8797049F9FF5D8E6E747AC9279 /* FixtureSignalReaders.swift */,
-				2C68E3436CEBC8B2D383A8EBB73EEB29 /* LaunchdJobIndex.swift */,
-				94FD86B6AEE512050BAD0B0F6C0354FF /* OriginSignalReader.swift */,
-				E10A94C70E1E314616732E0B929233A4 /* OriginSignals.swift */,
-				9AC3896F678E827C5B89CD879E788E26 /* PrivateInterfaceReaders.swift */,
-				57F60962958FED046E2DC0E209B0AC37 /* ProcessContextReader.swift */,
+				ED077CE92D4E1E5CE24BFAEC2E8413E5 /* CodeSignatureReader.swift */,
+				C8C7737D481AE3A1A0B861013F8AE733 /* FixtureSignalReaders.swift */,
+				1A6ACF0B7A55D6CE7F9C4C20BE6D2531 /* LaunchdJobIndex.swift */,
+				3A0553B2A3465E71F03A5F50747BB4BF /* OriginSignalReader.swift */,
+				DA72E0E6979E5F159E92EBE4F21DAA4D /* OriginSignals.swift */,
+				1CCD149859208B5C228CB5A98CF812BE /* PrivateInterfaceReaders.swift */,
+				DAD4830DF106017F6966BE703D883DDC /* ProcessContextReader.swift */,
 			);
 			name = Signals;
 			path = Signals;
 			sourceTree = "<group>";
 		};
-		C80CDA6A0F91E7F513ADC5F91CCEB810 /* Model */ = {
+		B14D5436C397563A67870F4B5E022F0C /* AI */ = {
 			isa = PBXGroup;
 			children = (
-				59F08D9AE67E8043B33E1D3E81E21327 /* CleanupCommands.swift */,
-				58AEA3902F86EB9A56E94D02A61B9C23 /* CleanupExecutor.swift */,
-				94D6DD01AAC87578DE0D43A9B18D0202 /* CleanupPlan.swift */,
-				9911E5A38A1B45F55D9DF389ADEFD2D0 /* CleanupSafety.swift */,
-				5D6DD6CFBC8DAA45953B85AF9A0CD3B5 /* CleanupSheet.swift */,
-				C25E47046AC8D43C0B58D1DDD4245C3C /* DiskHeader.swift */,
-				86D1369BCFCC36710D40926D62BC4D16 /* DiskRow.swift */,
-				9AD0F2A36B478EEED967F30FC06492AA /* DiskScanService.swift */,
-				4B7E9B91E74C1D374A30F9001FA8DF79 /* DiskWindowModel.swift */,
+				C8ACE776AB89945E9E3FFA18C94F4223 /* AIProvider.swift */,
+				ED24B39A4D539E8CEC7621E3BB71A232 /* AppleIntelligenceProvider.swift */,
+				463E5A601AA0ABF28AA90999BB19B5AB /* ExplainCenter.swift */,
+				C3233FE4E657CFB74846777D336A05ED /* ExplainRedactor.swift */,
+				458E6B26C785B0903A6EB4BDB8D3D45D /* ExplainRequest.swift */,
+				39E54714617BEF9C52592D646B945261 /* Explanation.swift */,
 			);
-			name = Model;
-			path = Model;
+			name = AI;
+			path = AI;
 			sourceTree = "<group>";
 		};
-		DA5A6B7F5A54BFE38263B04128AD418C /* Disk */ = {
+		BC93F4E8C87F522335DEAFFEA525631C /* DiskTests */ = {
 			isa = PBXGroup;
 			children = (
-				B19A852FBFED7C107FFDE1DBDE070030 /* CleanupSheetView.swift */,
-				579797E6F59D6CD060D2EA5ED4C49AC9 /* DiskView.swift */,
-				C80CDA6A0F91E7F513ADC5F91CCEB810 /* Model */,
+				5F48DDBD3355646839EED82263227FBD /* CleanupTests.swift */,
+				778D304D3F21A0A6AE723EA6C731054D /* DiskExplainTests.swift */,
+				B7C6A34B02FDB7369F795DA97295334C /* DiskFixtures.swift */,
+				25E8C020242526A118B14261FD7BB246 /* DiskWindowModelTests.swift */,
+			);
+			name = DiskTests;
+			path = Tests/DiskTests;
+			sourceTree = "<group>";
+		};
+		D5B5B7C3BCF7BA1871B4499A2741C49E /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				1B4E4436E54A98049935941D9EC10BB5 /* AttributionTests.swift */,
+				0DA127BAAC3A26F18F6BC0DBAD2EB394 /* CodeSignatureTests.swift */,
+				49E5687EFF95A3910A689557C24422A5 /* ContainerVMTests.swift */,
+				6E9785F4F8E8181097CCEBB8C50EFEE2 /* DiskEntryTests.swift */,
+				8E6E245FC92A78E7C1DB68D68146D05D /* DiskOriginTests.swift */,
+				38DFA1D23E2E7827CF6C92FD2A27E2DC /* DiskScannerTests.swift */,
+				08E33A809202DE6D1B0598A780785ACB /* DockerCLITests.swift */,
+				0D6B663A8DE8D5591234614374A1E0ED /* DockerOutputTests.swift */,
+				D70575BD72622BE2337B0FBACB50B55E /* ExplainTests.swift */,
+				4AAB6FDD29C0DF12B8F1E9A48200BA40 /* LaunchdJobIndexTests.swift */,
+				0EE65A2FE60C0F71C5A391662B18C372 /* LiveAttributionTests.swift */,
+				647BE02026FB0E3F97591FCC5637DD81 /* LiveOriginSignalTests.swift */,
+				2CE71DD711F1EF8FACDE8179735B7C23 /* LiveSamplingTests.swift */,
+				573D1F9BC78E85D003E3C191B6B5FE36 /* OriginSignalReaderTests.swift */,
+				750CE895206651E3B29C33DBDABF91D6 /* PrivateInterfaceReaderTests.swift */,
+				96DCA123818A83C800E54C169C55E23F /* ProcessGroupRunnerTests.swift */,
+				28F721258DBFE76A33154F5DC9C39F81 /* ProcessReadTests.swift */,
+				409F1DB6833A7CADDAB1D2AD2595B32C /* ReclaimRulesTests.swift */,
+				EAF48C458D4E80CA2BD37140B4A009D3 /* SamplerTests.swift */,
+				D0DDDF247E56DBE5EB49F603F1DB724A /* ShellCommandTests.swift */,
+				06B2B6823EEDABF4701CE4A063D37668 /* StatusSummaryTests.swift */,
+				1D535973F819C935FA25407C6A9ED47A /* SystemMemoryTests.swift */,
+				44DC8DBD2E6C8DFDDAFF6BC2992E65A3 /* VolumeSummaryTests.swift */,
+			);
+			name = Tests;
+			path = Tests/CoreTests;
+			sourceTree = "<group>";
+		};
+		E62114CDCB5C9049768EC140AAC6AAA4 /* Containers */ = {
+			isa = PBXGroup;
+			children = (
+				BAFD308F33B1CEBC17B714BE7CC6C33F /* CommandRunner.swift */,
+				DC2464AFCE9B895CF526761425D85DB4 /* ContainerBreakdown.swift */,
+				7D116B389421C27F9F85AC2393A26FA0 /* ContainerVMRecognizer.swift */,
+				66DD75D8102945AAE0F5A07929E934F2 /* DockerCLI.swift */,
+				8E6FE358E82F8DF48856FC61ACDD8379 /* DockerDiskUsage.swift */,
+				BCF5BC74BE597B580C59472FA3EB909E /* ProcessGroupRunner.swift */,
+			);
+			name = Containers;
+			path = Containers;
+			sourceTree = "<group>";
+		};
+		F56C55F574B2452566D78EAFE13FDD00 /* Disk */ = {
+			isa = PBXGroup;
+			children = (
+				F247449CBED7E4E58DA44B493472A8E9 /* DirectoryEntry.swift */,
+				83F108666816389DAF2A2DA3D3EE8390 /* DiskAccounting.swift */,
+				9DD6DA0CD12FF9B57CE85729E79DB228 /* DiskOrigins.swift */,
+				A6C837925D10A5FAD83768A4C1B226E1 /* DiskScanner.swift */,
+				43EE6E9BACFDB9B8D1B576A2658DF478 /* DiskTree.swift */,
+				F9CAA238C3EF96FCA0BA1972BAD2B412 /* EntryFacts.swift */,
+				C27C90AE27906F76BAECE8311F5E4481 /* InstalledApps.swift */,
+				41D3106F4084ADEFD0D212A98A68E0DC /* ReclaimMatcher.swift */,
+				01DF60431ECA7ACF9144BF0ACA958DE6 /* ReclaimRules.swift */,
+				2CCCECEF460E70DB7520689336DDA0EB /* SimulatorRuntimes.swift */,
+				360C25E54D7B25B7E24F22D8FE2C30A6 /* VolumeSummary.swift */,
 			);
 			name = Disk;
 			path = Disk;
 			sourceTree = "<group>";
 		};
-		DE382D75DC84775853DC28299A313109 /* ProcessesTests */ = {
-			isa = PBXGroup;
-			children = (
-				E91687BB0CBBD102F65D2609B4115264 /* ProcessFixtures.swift */,
-				8253CB7F8045D2027622B3EB0ACCF033 /* ProcessesWindowModelTests.swift */,
-				F783FFB5C61458AE1B9016479FA03433 /* RowAccessibilityTests.swift */,
-			);
-			name = ProcessesTests;
-			path = Tests/ProcessesTests;
-			sourceTree = "<group>";
-		};
-		E74915DE4D392C102F82178CC8ED82F3 /* Processes */ = {
-			isa = PBXGroup;
-			children = (
-				BE5DE7856E98753B6783920635E686C5 /* OriginSignalsView.swift */,
-				1B3DCA6E6A227FAE14563F0DF5E9B275 /* ProcessDetailView.swift */,
-				77936BAB4C1D69D3D2B89AADA333BCCC /* ProcessesView.swift */,
-				EAAD428B57971D318C63913668B16602 /* Model */,
-			);
-			name = Processes;
-			path = Processes;
-			sourceTree = "<group>";
-		};
-		EAAD428B57971D318C63913668B16602 /* Model */ = {
-			isa = PBXGroup;
-			children = (
-				4B0A611BC22D6E9129EE49493F85032F /* OriginExplanation.swift */,
-				7EE6EB97676440A2DEF8C949F5F0791E /* ProcessRow.swift */,
-				3783EBC542877753F0FF867D6D67B2B1 /* ProcessesWindowModel.swift */,
-				213913864623E37153FF4F72DBBAF4C5 /* TopGroups.swift */,
-				0C2557FDAE901AEF4417C7726E96C132 /* UsageFormat.swift */,
-				05F8A26BE39170160DCDD2FD53FA0338 /* WindowHeader.swift */,
-			);
-			name = Model;
-			path = Model;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXHeadersBuildPhase section */
-		A0A3C2BD10F62F8ABA3EF331F52A8683 /* Headers */ = {
+		55EDE06B2E948BB75E4930FF800610F0 /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		BD4F8D758FE5C15DB314942B75D1FE73 /* Headers */ = {
+		C119EAF15FB96A46333EC38052A6B778 /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		CF58B9739C4AB72094CFA3717ED54595 /* Headers */ = {
+		CEDCC8FA559F131D645A8363FF61CAC2 /* Headers */ = {
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -638,90 +683,70 @@
 /* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
-		227A4FBFF90AECAEFA7F70D442665659 /* SubsetSystem */ = {
+		0666D9B276342DD11B82984264FE468F /* SystemProcessesTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 3036768AE03DBCDE9937661A05D26CA2 /* Build configuration list for PBXNativeTarget "SubsetSystem" */;
+			buildConfigurationList = 148033C12CF3E7A1AADBD267E6F16EE9 /* Build configuration list for PBXNativeTarget "SystemProcessesTests" */;
 			buildPhases = (
-				04D95D49F27156535B222BB36027C2DA /* Sources */,
-				1C077C3D55496CC488CDD738AA1D615C /* Frameworks */,
-				2E91B8C9B5B2AC66B2F91145C8C62152 /* Resources */,
+				3C8B2B3BEBC9E2731EAAFEE6744DF905 /* Sources */,
+				B430F4E6BA314DD9AACC38E1E9F4F103 /* Frameworks */,
+				D412C628D8E29252A87AD4EFB305F2C6 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				1EF722FE9F199B7FBE7A578DCC36B3F7 /* PBXTargetDependency */,
-				A4528A8801049615393708CCB7C11080 /* PBXTargetDependency */,
-				B89AD357FE31B58BD5DB72A5EB324D2D /* PBXTargetDependency */,
+				61673BBD141342433D77A4EE13A5BAE2 /* PBXTargetDependency */,
+				BF93558E24683EBC27B495C105C26D4C /* PBXTargetDependency */,
+			);
+			name = SystemProcessesTests;
+			productName = SystemProcessesTests;
+			productReference = CB510987859834C152AF229F11D566BE /* SystemProcessesTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		3BA199AF0931DE60B9771B02280D91FD /* SubsetSystem */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EF2A7920D3B15A66D73845639608F20E /* Build configuration list for PBXNativeTarget "SubsetSystem" */;
+			buildPhases = (
+				5900C729989A8F0BBBB0CCFA825F6F30 /* Sources */,
+				5A3DF29EC1D4D083DF7AE421D16A794D /* Frameworks */,
+				3D4E4E914CCD24FFD43B52FC83BABF90 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				461F67D7A2FFD3334CF5149795811642 /* PBXTargetDependency */,
+				9BB373EC199D52B89AD1E4DD9BB587FA /* PBXTargetDependency */,
+				84E899ADBA6578E0C1C1C3FD57BFAA7C /* PBXTargetDependency */,
 			);
 			name = SubsetSystem;
 			productName = SubsetSystem;
 			productReference = E5134D9A58638B66272C51B4A58737A5 /* Subset System.app */;
 			productType = "com.apple.product-type.application";
 		};
-		3642DA6EDECBF98321DF9947E2704594 /* SystemDisk */ = {
+		7F00710301E59EDDB1F358B82361B606 /* SystemCoreTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = C9A25669619F1A33378F152FE1F4DE58 /* Build configuration list for PBXNativeTarget "SystemDisk" */;
+			buildConfigurationList = 7DFCE15783A258DB44DEF1ED2FDBD099 /* Build configuration list for PBXNativeTarget "SystemCoreTests" */;
 			buildPhases = (
-				A0A3C2BD10F62F8ABA3EF331F52A8683 /* Headers */,
-				DB37C6878BA0F4A0EDB822271700FBCC /* Sources */,
-				4CE0898EF4FD4E9F33B8F2B77CAAE20E /* Frameworks */,
+				1084D4F00FB98A44B17C7DBA38CB6D2D /* Sources */,
+				11D0813B1CFB811927EC21B29C2EE514 /* Frameworks */,
+				41EF41F7E63273C5AF6D6E956A177ACF /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				C1FBD6ACF7859A0348CD99B3408A9D6F /* PBXTargetDependency */,
-				DF5B98762C0F696B87C8AAAF81E0482A /* PBXTargetDependency */,
+				60E115410517A7CB92A1205F9D13A77C /* PBXTargetDependency */,
 			);
-			name = SystemDisk;
-			productName = SystemDisk;
-			productReference = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */;
-			productType = "com.apple.product-type.library.static";
-		};
-		368ACB235BE81B73CD09130492748C53 /* SystemDiskTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 7B8F1797FD24385C5AE20A85F78DC2FC /* Build configuration list for PBXNativeTarget "SystemDiskTests" */;
-			buildPhases = (
-				3DCA92586EB80E2BB21B74FFD73FDF9E /* Sources */,
-				615DC5A41A8D48EFD0DC76E17ED68246 /* Frameworks */,
-				9AFF741931BEEE7C6BB935DA5A457CAB /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				C9B6E3E6667B226114163044C5913EF3 /* PBXTargetDependency */,
-				88D9876F4C1685D297252899D111C642 /* PBXTargetDependency */,
-				E2E3B6E8074323F7968DDAAA15ADF821 /* PBXTargetDependency */,
-			);
-			name = SystemDiskTests;
-			productName = SystemDiskTests;
-			productReference = AAEBC7CFB148B1F9997DC55F0AB34235 /* SystemDiskTests.xctest */;
+			name = SystemCoreTests;
+			productName = SystemCoreTests;
+			productReference = 87EE5FE505E01A810F97C023227BEB25 /* SystemCoreTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */ = {
+		980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 6F10CEAFD6992C3D519BB4C8E6171A48 /* Build configuration list for PBXNativeTarget "SystemProcesses" */;
+			buildConfigurationList = E59649B3B7FD43B09B7DF0DC6F3DBECF /* Build configuration list for PBXNativeTarget "SystemCore" */;
 			buildPhases = (
-				BD4F8D758FE5C15DB314942B75D1FE73 /* Headers */,
-				D7A4462EB55375AB34019EC5CA0919B4 /* Sources */,
-				34262B3483424CE537837DC3CFB849BA /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				AA857A66E92EF1C6C8275F5D2D1B7C23 /* PBXTargetDependency */,
-			);
-			name = SystemProcesses;
-			productName = SystemProcesses;
-			productReference = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */;
-			productType = "com.apple.product-type.library.static";
-		};
-		D815E696134D65B6518A875970458233 /* SystemCore */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = DD2E523985B59ADED906567564C717D3 /* Build configuration list for PBXNativeTarget "SystemCore" */;
-			buildPhases = (
-				CF58B9739C4AB72094CFA3717ED54595 /* Headers */,
-				66EF305AE1C4F64C9B5CAA273D22605B /* Sources */,
-				C86CEF9653DA2F66F7C988764069C241 /* Frameworks */,
+				CEDCC8FA559F131D645A8363FF61CAC2 /* Headers */,
+				609FFB3CE2DEFD6FB9E2E86AF8EA43DA /* Sources */,
+				31BB46F2D131F32B8E6104F236C76743 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -732,42 +757,62 @@
 			productReference = 611F4155B1A352AAEFD064F41835E75A /* libSystemCore.a */;
 			productType = "com.apple.product-type.library.static";
 		};
-		DD2A6DAEA5BE20D7E3769590AA837790 /* SystemCoreTests */ = {
+		A8872A379A2E881E84EB8C2163AD0D5C /* SystemDiskTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = F8096EDAB6AD72C8A5471B6A4DA274EF /* Build configuration list for PBXNativeTarget "SystemCoreTests" */;
+			buildConfigurationList = 78420FFDC86C3B2595F738F3902E97BB /* Build configuration list for PBXNativeTarget "SystemDiskTests" */;
 			buildPhases = (
-				9CBCADC94363283BA9B196F3CEC31C6F /* Sources */,
-				2498039EA206B66050C7D3D03E9604F4 /* Frameworks */,
-				74CB951598B68E983B29AD72B7198C9B /* Resources */,
+				A98B156A47080CA641A12332FB4A6761 /* Sources */,
+				5A5D072FCFC3EBC3AD8055356B2CCE0C /* Frameworks */,
+				396E8669301713AB4AB156026521D054 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				4B1857419CC72E4D5C1CE3218F25AD17 /* PBXTargetDependency */,
+				72994A4E3A80F0D7BFB409CB0A5D356D /* PBXTargetDependency */,
+				52DF47E4CEDB226FA8C6AEA33FA5C9DF /* PBXTargetDependency */,
+				EDFF6376ED34B20E1C31B77128C84960 /* PBXTargetDependency */,
 			);
-			name = SystemCoreTests;
-			productName = SystemCoreTests;
-			productReference = 87EE5FE505E01A810F97C023227BEB25 /* SystemCoreTests.xctest */;
+			name = SystemDiskTests;
+			productName = SystemDiskTests;
+			productReference = AAEBC7CFB148B1F9997DC55F0AB34235 /* SystemDiskTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		EC01CF3D2698C1744E00ECC2E19F259D /* SystemProcessesTests */ = {
+		CCEF68BA17DE4F302669FA35FBDE2779 /* SystemDisk */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 2EB3B710061512B9F046C361B238E898 /* Build configuration list for PBXNativeTarget "SystemProcessesTests" */;
+			buildConfigurationList = 497D67B457F7C1B51BCCF6F44CE43824 /* Build configuration list for PBXNativeTarget "SystemDisk" */;
 			buildPhases = (
-				7CAB2951918C85203DB4A305AE7A5ADE /* Sources */,
-				C064A2828EA3CBCFBEA1392E74FE1715 /* Frameworks */,
-				703193C6142705DAF22BE34A82EABBFB /* Resources */,
+				55EDE06B2E948BB75E4930FF800610F0 /* Headers */,
+				0A461EEFA77BCAB7934C236533E4FC86 /* Sources */,
+				DD3267974F1085951B206C651654902A /* Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				26B59D1228DC40721F84BAFC1E7761D8 /* PBXTargetDependency */,
-				A5FF9D5F17087881A0D6BBC9C2602A7E /* PBXTargetDependency */,
+				AA3FA3EAC676259E8DF660AC42337DE8 /* PBXTargetDependency */,
+				E7EFA23C2479570F998A5CBB9F7312F5 /* PBXTargetDependency */,
 			);
-			name = SystemProcessesTests;
-			productName = SystemProcessesTests;
-			productReference = CB510987859834C152AF229F11D566BE /* SystemProcessesTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
+			name = SystemDisk;
+			productName = SystemDisk;
+			productReference = 5D695F9C4D79A79E25C834E28E4936A8 /* libSystemDisk.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A142455F2003828F82AED4239ED6E648 /* Build configuration list for PBXNativeTarget "SystemProcesses" */;
+			buildPhases = (
+				C119EAF15FB96A46333EC38052A6B778 /* Headers */,
+				184525260128165E4AB95E9BC3E6CD7B /* Sources */,
+				ADAF87E83993D0D32205D1D94BBB7AFC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A8425D49F623C15AEFB8EA8C9068388 /* PBXTargetDependency */,
+			);
+			name = SystemProcesses;
+			productName = SystemProcesses;
+			productReference = B3A209AC145BCF56E02B3D2B640DE3D2 /* libSystemProcesses.a */;
+			productType = "com.apple.product-type.library.static";
 		};
 /* End PBXNativeTarget section */
 
@@ -778,16 +823,16 @@
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
-					227A4FBFF90AECAEFA7F70D442665659 = {
+					0666D9B276342DD11B82984264FE468F = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					368ACB235BE81B73CD09130492748C53 = {
+					3BA199AF0931DE60B9771B02280D91FD = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					DD2A6DAEA5BE20D7E3769590AA837790 = {
+					7F00710301E59EDDB1F358B82361B606 = {
 						CreatedOnToolsVersion = 26.4;
 					};
-					EC01CF3D2698C1744E00ECC2E19F259D = {
+					A8872A379A2E881E84EB8C2163AD0D5C = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
@@ -807,40 +852,40 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				D815E696134D65B6518A875970458233 /* SystemCore */,
-				C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */,
-				3642DA6EDECBF98321DF9947E2704594 /* SystemDisk */,
-				227A4FBFF90AECAEFA7F70D442665659 /* SubsetSystem */,
-				DD2A6DAEA5BE20D7E3769590AA837790 /* SystemCoreTests */,
-				EC01CF3D2698C1744E00ECC2E19F259D /* SystemProcessesTests */,
-				368ACB235BE81B73CD09130492748C53 /* SystemDiskTests */,
+				980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */,
+				CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */,
+				CCEF68BA17DE4F302669FA35FBDE2779 /* SystemDisk */,
+				3BA199AF0931DE60B9771B02280D91FD /* SubsetSystem */,
+				7F00710301E59EDDB1F358B82361B606 /* SystemCoreTests */,
+				0666D9B276342DD11B82984264FE468F /* SystemProcessesTests */,
+				A8872A379A2E881E84EB8C2163AD0D5C /* SystemDiskTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		2E91B8C9B5B2AC66B2F91145C8C62152 /* Resources */ = {
+		396E8669301713AB4AB156026521D054 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		703193C6142705DAF22BE34A82EABBFB /* Resources */ = {
+		3D4E4E914CCD24FFD43B52FC83BABF90 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		74CB951598B68E983B29AD72B7198C9B /* Resources */ = {
+		41EF41F7E63273C5AF6D6E956A177ACF /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		9AFF741931BEEE7C6BB935DA5A457CAB /* Resources */ = {
+		D412C628D8E29252A87AD4EFB305F2C6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -850,298 +895,238 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		04D95D49F27156535B222BB36027C2DA /* Sources */ = {
+		0A461EEFA77BCAB7934C236533E4FC86 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C585C17EBD6FEB165D771F4B3F29C4DA /* AppDelegate.swift in Sources */,
-				BF4E95222EF634E1CACBF35C61BA8E59 /* ContainerVMView.swift in Sources */,
-				EA2D3F58F4ADB0063841462D2C09478D /* MainWindowView.swift in Sources */,
-				5FDCBF06A55ECB417799D0F90165EBFD /* PlaceholderWindows.swift in Sources */,
-				701D4841D6FD6143949DF0CF6351F009 /* StatusMenuController.swift in Sources */,
-				CAF5446165496074DB4B8D42B9C665C8 /* SubsetSystemApp.swift in Sources */,
-				37B8E5A88D11806156A0450F3514E0B6 /* SystemMonitor.swift in Sources */,
-				69FD1A5165723F2F11441F02AEF8E0DE /* OriginSignalsView.swift in Sources */,
-				F95C197B3C816690EDE6FC0269BE01C4 /* ProcessDetailView.swift in Sources */,
-				DB7A94A618836A2264419871BDB00E35 /* ProcessesView.swift in Sources */,
-				CB493077D8A477404ABEF2E5B8EA939C /* CleanupSheetView.swift in Sources */,
-				13E283C9899F32FD2F7E9AA0ADCD9AAF /* DiskView.swift in Sources */,
+				667C3218B089D2439D68A5F6F0AB17A4 /* CleanupCommands.swift in Sources */,
+				46EDDAA215275B2505DACEEA8EB54E15 /* CleanupExecutor.swift in Sources */,
+				AAF2C581B669FEAC447B93ED1B55D178 /* CleanupPlan.swift in Sources */,
+				AE4AF0047AFF4AA41E5CACB52DABF8EB /* CleanupSafety.swift in Sources */,
+				3933D6EF6F43AD50B5927BCB216D0B11 /* CleanupSheet.swift in Sources */,
+				13A388980B01346D6FF4D0B0BA747878 /* DiskExplain.swift in Sources */,
+				73D8E225ECF92F281C8B3F599B7FEE5D /* DiskHeader.swift in Sources */,
+				F7B4F0C2E0E243C61B36687A8166F8D8 /* DiskRow.swift in Sources */,
+				1F591D45277C208C0CABFB32509CE1F2 /* DiskScanService.swift in Sources */,
+				FE8B2269E31CFB4BB0166D9A0F4BCBE0 /* DiskWindowModel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		3DCA92586EB80E2BB21B74FFD73FDF9E /* Sources */ = {
+		1084D4F00FB98A44B17C7DBA38CB6D2D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				854325374E1C58B1C90D0651F0BE0591 /* CleanupTests.swift in Sources */,
-				426684D3BA8AB0438597126428B90F9E /* DiskFixtures.swift in Sources */,
-				AF565D84E6E5AD1A3EE5E51D939FFA4F /* DiskWindowModelTests.swift in Sources */,
+				8AB5B6A33C23DE8AB6320C670BEAE7D5 /* AttributionTests.swift in Sources */,
+				05A3681B6D07B90EA6FBFDB05167B236 /* CodeSignatureTests.swift in Sources */,
+				BD72A3F43998C97337D6525B69737151 /* ContainerVMTests.swift in Sources */,
+				F98346EA6722A9787A3B15894DFA535F /* DiskEntryTests.swift in Sources */,
+				CE5C8400A151CD72E069251A7D98D705 /* DiskOriginTests.swift in Sources */,
+				B9E63EC397A0F05448A710D5B63AD6CF /* DiskScannerTests.swift in Sources */,
+				6DEB3CCE40E0888F6933EF7AEF763EE8 /* DockerCLITests.swift in Sources */,
+				0F3F45F4B42C52B73D84F40C826B396E /* DockerOutputTests.swift in Sources */,
+				08CFE7EE7688B14978E8C35F68E522EA /* ExplainTests.swift in Sources */,
+				0FC1F43DFF67FCE6DF7FB33F39914854 /* LaunchdJobIndexTests.swift in Sources */,
+				57F8B73DD970843979EE3FEAB77263B2 /* LiveAttributionTests.swift in Sources */,
+				AE454A0604CA08108BE87CEAE8E79321 /* LiveOriginSignalTests.swift in Sources */,
+				F21A12411109188BFDAA773FE99BBBC6 /* LiveSamplingTests.swift in Sources */,
+				CC77E3CBE1D5609101456B559C5A1F89 /* OriginSignalReaderTests.swift in Sources */,
+				8BEF9E89D2EFDE395E8C9B86217A9227 /* PrivateInterfaceReaderTests.swift in Sources */,
+				92C313AE76E3E7111C4445322F65F14F /* ProcessGroupRunnerTests.swift in Sources */,
+				7BEE06999CF8A79B18653FCDA0458464 /* ProcessReadTests.swift in Sources */,
+				42C743B598EEECEC44B186BAA7DF45A9 /* ReclaimRulesTests.swift in Sources */,
+				ACC52E0050348C020D2D3724A08094C4 /* SamplerTests.swift in Sources */,
+				308E294D20C5407E20D4E18F206C8C1D /* ShellCommandTests.swift in Sources */,
+				8774409F39504957919F7DD840A3F1BC /* StatusSummaryTests.swift in Sources */,
+				603AF838723B4D58EEA6F2B980D9444D /* SystemMemoryTests.swift in Sources */,
+				B047B05931817C63133B68F9C74E81B9 /* VolumeSummaryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		66EF305AE1C4F64C9B5CAA273D22605B /* Sources */ = {
+		184525260128165E4AB95E9BC3E6CD7B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0AFA0E7FA2299A8F0DD5623B9DA3B066 /* HostCPU.swift in Sources */,
-				45238674257F5C982CEA5BC4F2BD6B8E /* LibprocProcessSource.swift in Sources */,
-				E471112DDB94B89683DD76829231DC45 /* ProcessFacts.swift in Sources */,
-				91C481201F2AAF86A1C67807AA5A7F25 /* ProcessSource.swift in Sources */,
-				FBF73E8C475E248AFAD549A88C25B056 /* Sampler.swift in Sources */,
-				05A5DEBCB0AA0F7D5FF77FE5DD596E35 /* ShellCommand.swift in Sources */,
-				B60498B0D3348A2FB69BE436580D8100 /* StatusSummary.swift in Sources */,
-				1C63BC8B1616C2CD6CBDBCB41895F503 /* SystemMemory.swift in Sources */,
-				31089C965EED252B6F8162B9F241E060 /* Attribution.swift in Sources */,
-				2CC7CC595A7FF1CB2C3E6BC2A14E02A1 /* AttributionModel.swift in Sources */,
-				C18F4FF30CD4C778B85340F98B0BEE8B /* GroupBuilder.swift in Sources */,
-				AD39A6AC1B4F65ECB52668154F53B429 /* GroupTotals.swift in Sources */,
-				2E34FC19ECE98580831AFFDE1307075C /* ProcessTree.swift in Sources */,
-				C601D890553FB2679A4D44A5AF556A7F /* CodeSignatureReader.swift in Sources */,
-				1F545218E754FC1F8AC0C33B5074D31D /* FixtureSignalReaders.swift in Sources */,
-				97F83378F02664C3A1A060762078468C /* LaunchdJobIndex.swift in Sources */,
-				652A3E9A02A503E0535B96A670F91E66 /* OriginSignalReader.swift in Sources */,
-				E3AE02788A840EAF5FCD609113F88472 /* OriginSignals.swift in Sources */,
-				7E2A2FC5FD3C5EC69C5FC4BE2C75AD87 /* PrivateInterfaceReaders.swift in Sources */,
-				50B20EB666F02BAD3E31B0D3F523666F /* ProcessContextReader.swift in Sources */,
-				277D97C80698621EAB0E51D387B754FB /* CommandRunner.swift in Sources */,
-				2C6865D84CD6DA35A09758EF22057058 /* ContainerBreakdown.swift in Sources */,
-				0FE43FF7AB95A3089E5BF43A349FA579 /* ContainerVMRecognizer.swift in Sources */,
-				A9BCDDF49518F50AF669AD3FAF5C7BF3 /* DockerCLI.swift in Sources */,
-				3429083D0BDA8A8FFE77C0C2B0A2D700 /* DockerDiskUsage.swift in Sources */,
-				61EF38A991040E0C939EBDDC70FDF7F1 /* ProcessGroupRunner.swift in Sources */,
-				06E37DC96C1E2F701303F1D01CBBB18F /* DirectoryEntry.swift in Sources */,
-				4645326283707FCEDFD003CD8AD65BD4 /* DiskAccounting.swift in Sources */,
-				EC2EBB8C8AAA56C8ADD117FAD87B1F4D /* DiskOrigins.swift in Sources */,
-				1BC8F2B24666D602504B118510221D7E /* DiskScanner.swift in Sources */,
-				3F8A6B46F6831AD5D18EFD87F758337A /* DiskTree.swift in Sources */,
-				F16EC271902271FF9DCDF56987FB5DE9 /* EntryFacts.swift in Sources */,
-				6C267DB2BCFB6B3C3F8E9843E86241C4 /* InstalledApps.swift in Sources */,
-				5A26901099927DB40A1B0C1DEF709C47 /* ReclaimMatcher.swift in Sources */,
-				884CA6D096B4A86A058EBA785DFFABF0 /* ReclaimRules.swift in Sources */,
-				BBE6FFF030D2C442389641C247C9623E /* SimulatorRuntimes.swift in Sources */,
-				458EE7CD6676902D1510AB4993745674 /* VolumeSummary.swift in Sources */,
+				9530E0DDC2486C2E3183C5F5CA68C6F2 /* OriginExplanation.swift in Sources */,
+				AC8A5DACF176F129A6AD23BB7D146955 /* ProcessExplain.swift in Sources */,
+				D53EC5400E0C7086F315B7A09BA977BD /* ProcessRow.swift in Sources */,
+				01CC8CD2C3EBBAA8D2331001DB881A4E /* ProcessesWindowModel.swift in Sources */,
+				879AD44C8CCB51716A4685FDF5BDCAF5 /* TopGroups.swift in Sources */,
+				9893BD74FE4EC3B2726D395F9993F6FC /* UsageFormat.swift in Sources */,
+				A9ED3DC53AB5BE601538E8BD8C8B54A4 /* WindowHeader.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		7CAB2951918C85203DB4A305AE7A5ADE /* Sources */ = {
+		3C8B2B3BEBC9E2731EAAFEE6744DF905 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F81E95054BA1CC17BCC3F7E0070760B3 /* ProcessFixtures.swift in Sources */,
-				634689230A79D36BFC91D7E2F13B8599 /* ProcessesWindowModelTests.swift in Sources */,
-				E4440E31B2507E178261A4314979D541 /* RowAccessibilityTests.swift in Sources */,
+				DD4B496F9E31F83C87061048ED76912F /* ProcessExplainTests.swift in Sources */,
+				2244B8115F7E315E67733B827EF45B26 /* ProcessFixtures.swift in Sources */,
+				49893DBB7C7E3E36289B34A372A2C809 /* ProcessesWindowModelTests.swift in Sources */,
+				963E35B5E6087DDC788003DF5481533F /* RowAccessibilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		9CBCADC94363283BA9B196F3CEC31C6F /* Sources */ = {
+		5900C729989A8F0BBBB0CCFA825F6F30 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				115E8F5E781A1786842035D728490E6C /* AttributionTests.swift in Sources */,
-				0AF9CCE684E81FBE632F13E78BD5FC99 /* CodeSignatureTests.swift in Sources */,
-				1E4611F3A0AC899C036F89EDC02F572F /* ContainerVMTests.swift in Sources */,
-				7960DEFB98934F57814DAA174E7E20AD /* DiskEntryTests.swift in Sources */,
-				ABA4C4000EA71F632618032FC3D68575 /* DiskOriginTests.swift in Sources */,
-				6998EA70696369FAC29822C1380F8689 /* DiskScannerTests.swift in Sources */,
-				72A18C6980D8866497C795B2D9C64BFA /* DockerCLITests.swift in Sources */,
-				547204DD8E449F1351D32B7233B90D25 /* DockerOutputTests.swift in Sources */,
-				65AB00A02E0767E0AFEA34DE0D5FA198 /* LaunchdJobIndexTests.swift in Sources */,
-				38877F1F53DC445553DCC831430604F9 /* LiveAttributionTests.swift in Sources */,
-				38F0EAA12D6FBF4D71A2967AA62700A7 /* LiveOriginSignalTests.swift in Sources */,
-				67D7E2D76868B7633E28D9A3A218694B /* LiveSamplingTests.swift in Sources */,
-				B52FC626351F0423177641C0970C65D6 /* OriginSignalReaderTests.swift in Sources */,
-				BB0CA1D56A46B4FAB5B65B6B15F3A183 /* PrivateInterfaceReaderTests.swift in Sources */,
-				2AC874D0D4BBA523C679D6FEF2544CAA /* ProcessGroupRunnerTests.swift in Sources */,
-				F6811C8E42CFD5D48DD649AF76E62294 /* ProcessReadTests.swift in Sources */,
-				580A305FD86A81C3C98431E1AC054CD6 /* ReclaimRulesTests.swift in Sources */,
-				3E9080198A6168956DF3AEEEB63E4984 /* SamplerTests.swift in Sources */,
-				04228C1A511A97820C8A1200874DF207 /* ShellCommandTests.swift in Sources */,
-				40F14DD27C14538C3AF7DBF2D18D68F5 /* StatusSummaryTests.swift in Sources */,
-				2ED87927B56E51E0E9362F2A4A2C036E /* SystemMemoryTests.swift in Sources */,
-				1500206FA6CA56D33C2A8590682AEFC5 /* VolumeSummaryTests.swift in Sources */,
+				3A0655C6125320A3DA18DC699A79AB2B /* AppDelegate.swift in Sources */,
+				169DA07C4926AAE54790C9B1DA71EB8F /* ContainerVMView.swift in Sources */,
+				52389D4B2506A0F6B1D6844EDBF756C5 /* ExplainView.swift in Sources */,
+				3E2330908571762836FB257D177C5478 /* MainWindowView.swift in Sources */,
+				EA3FFB18AA1303D4C01F8DDF8FEF035E /* PlaceholderWindows.swift in Sources */,
+				CEF76A3BA954EADEC48D01F6A2E17034 /* StatusMenuController.swift in Sources */,
+				6557C56A047023B1025692134B167D99 /* SubsetSystemApp.swift in Sources */,
+				0D2629D1A8C794F948943E0DB716539D /* SystemMonitor.swift in Sources */,
+				E9D63359FE2373083BBDAAACE2D64C4E /* OriginSignalsView.swift in Sources */,
+				291D89C3ECE931AA852A9D433B0A0B6B /* ProcessDetailView.swift in Sources */,
+				87D2D453DFEDD38B894160F66A2E34E7 /* ProcessesView.swift in Sources */,
+				E59B065092E756F0FA5BCCDA71884154 /* CleanupSheetView.swift in Sources */,
+				494C681DCCF75B2D9B087C1D698382D5 /* DiskView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		D7A4462EB55375AB34019EC5CA0919B4 /* Sources */ = {
+		609FFB3CE2DEFD6FB9E2E86AF8EA43DA /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CC657B198328DA5AE84CB396B27A71E6 /* OriginExplanation.swift in Sources */,
-				89CBB6E1F4FCBEAB60865E8576CA86E7 /* ProcessRow.swift in Sources */,
-				842D89B89ED7AF7BDDD707E08670D186 /* ProcessesWindowModel.swift in Sources */,
-				0558D35C4FA6D7B3F21390903D3251E7 /* TopGroups.swift in Sources */,
-				6CA26081999E5D776FEA9A07FB3D6F3F /* UsageFormat.swift in Sources */,
-				61B898AE13C83BA4A883DDE34F105C19 /* WindowHeader.swift in Sources */,
+				0246EB982812C750E8B47D46EA34E518 /* HostCPU.swift in Sources */,
+				D669B66F9A11297BEF7F5A243181CF27 /* LibprocProcessSource.swift in Sources */,
+				CC6C5490FB2242353CB06B16B97EB463 /* ProcessFacts.swift in Sources */,
+				775E9DFA5F7E67AC4184F2FCC2181987 /* ProcessSource.swift in Sources */,
+				C469C2F511A46AB04DE9CF7572454187 /* Sampler.swift in Sources */,
+				8DB41EFD62D85746CAE87758DEF99E83 /* ShellCommand.swift in Sources */,
+				2E0471A80F2C51E882778D83BBA32867 /* StatusSummary.swift in Sources */,
+				F4B6A27ABAC91C97ABC9FC999FDDAB9A /* SystemMemory.swift in Sources */,
+				1BEFAB4C3E3ECFF28F3BD9995D0578A2 /* Attribution.swift in Sources */,
+				120C6AC98E87B7872B6FE2C407DC53EA /* AttributionModel.swift in Sources */,
+				37DB1AC19EBE24221AB193C099A86741 /* GroupBuilder.swift in Sources */,
+				87F07644B05530B730D65E5586658299 /* GroupTotals.swift in Sources */,
+				63CF7B5ECF501764397087AB52BFDDAF /* ProcessTree.swift in Sources */,
+				935E6C6B55907AC5DEA978ADE15E9A5B /* CodeSignatureReader.swift in Sources */,
+				76CB41E87EC62A2326F0B65E58BD0F7C /* FixtureSignalReaders.swift in Sources */,
+				E1E026D27E016EF30F611BA4B093F8F6 /* LaunchdJobIndex.swift in Sources */,
+				D0521883491323DB364240F94E63BAB7 /* OriginSignalReader.swift in Sources */,
+				19E8486449159B170287A1AA399A98DF /* OriginSignals.swift in Sources */,
+				7D170A5284DF741D0528115B450C2E92 /* PrivateInterfaceReaders.swift in Sources */,
+				2FE3365B964A93669361DD7858762ECF /* ProcessContextReader.swift in Sources */,
+				93C1A69A536D4BBCC19E9FB640838215 /* CommandRunner.swift in Sources */,
+				17E4DD12F2954DC8AAAA037C6A17E7F5 /* ContainerBreakdown.swift in Sources */,
+				1C84D4A737F4F632FEDAFF5E7EB63E80 /* ContainerVMRecognizer.swift in Sources */,
+				D19E94F643A0288725512472B54677CE /* DockerCLI.swift in Sources */,
+				FC3D11CF3425A274760C7C7E439A6F04 /* DockerDiskUsage.swift in Sources */,
+				CA9151C502B3252D6DA9AD9AFB22B775 /* ProcessGroupRunner.swift in Sources */,
+				B8BCBA482F3F1C72BC261E10DF8CEE1C /* DirectoryEntry.swift in Sources */,
+				DFFC596D23E725ECC0943FE8CB91B706 /* DiskAccounting.swift in Sources */,
+				D3E50E3061A6142D15283BBEC051BF5C /* DiskOrigins.swift in Sources */,
+				D8C451ECE46ACB9B1135C344CFCC0525 /* DiskScanner.swift in Sources */,
+				E898841181D4004A151A347503345837 /* DiskTree.swift in Sources */,
+				5003311E826C67C71887356FA0262AC2 /* EntryFacts.swift in Sources */,
+				3C373750D5C3A38C1FADCD9355C9DF8D /* InstalledApps.swift in Sources */,
+				29D3B86CBC41533FE38973DAD431CE4A /* ReclaimMatcher.swift in Sources */,
+				655F23168BBB9413FE0F140661E2FFD8 /* ReclaimRules.swift in Sources */,
+				6442CCA43D4A0E4C6ED98F4027FD4770 /* SimulatorRuntimes.swift in Sources */,
+				B6A2DF6ED51643A53E354912C86B92EC /* VolumeSummary.swift in Sources */,
+				94DD6A7958DA0E846D73BB3C81F7E59F /* AIProvider.swift in Sources */,
+				CE507C5D3C55B5B5F335A3488D309CC2 /* AppleIntelligenceProvider.swift in Sources */,
+				B86B63A6B0A9C6BFA63D49721653DDB6 /* ExplainCenter.swift in Sources */,
+				88A21227275E39A75956097D6F3D0F75 /* ExplainRedactor.swift in Sources */,
+				C30CB850CEC7B70CDC695077106D7674 /* ExplainRequest.swift in Sources */,
+				BFFA2B79279F5DD0FDE1B4DD793270EF /* Explanation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		DB37C6878BA0F4A0EDB822271700FBCC /* Sources */ = {
+		A98B156A47080CA641A12332FB4A6761 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				51766006878DDE151AC470A31F4517EB /* CleanupCommands.swift in Sources */,
-				2169DA04689FAC7825DE034F9720222D /* CleanupExecutor.swift in Sources */,
-				73282B6129D6B8248A63DBDD1BE7D60F /* CleanupPlan.swift in Sources */,
-				AE28F3A737C859B5F2ADFE0C24BDC5C5 /* CleanupSafety.swift in Sources */,
-				5D93AF33F1EC7AB7143CD3164FBDF8C8 /* CleanupSheet.swift in Sources */,
-				AB938BD67CA776A420F534256ED70BF8 /* DiskHeader.swift in Sources */,
-				614FD970DE9C63F47861C3F2EFAFFDF9 /* DiskRow.swift in Sources */,
-				75E034DFA640C242A7060513C6524552 /* DiskScanService.swift in Sources */,
-				EE3F77BA651BA95EB0C89171F12C6950 /* DiskWindowModel.swift in Sources */,
+				BDBA2E49B723535B8086784C8A912B45 /* CleanupTests.swift in Sources */,
+				D624006AA1E5886BAE959533C8A61881 /* DiskExplainTests.swift in Sources */,
+				90BDBDABA549805FD780C9B9150A2F7E /* DiskFixtures.swift in Sources */,
+				2A37700A8E8CA232EB6F1A23EFA16D8C /* DiskWindowModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		1EF722FE9F199B7FBE7A578DCC36B3F7 /* PBXTargetDependency */ = {
+		1A8425D49F623C15AEFB8EA8C9068388 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = 7FCBD5C8E5E3766A43FFE58B224FDEE4 /* PBXContainerItemProxy */;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = 004257C017EBBD845B225AE2E584BCBC /* PBXContainerItemProxy */;
 		};
-		26B59D1228DC40721F84BAFC1E7761D8 /* PBXTargetDependency */ = {
+		461F67D7A2FFD3334CF5149795811642 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = BF84847F83363BFC35F603A85010DCF0 /* PBXContainerItemProxy */;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = 16E0D98C5221708A3057E4E830971910 /* PBXContainerItemProxy */;
 		};
-		4B1857419CC72E4D5C1CE3218F25AD17 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = F39542A48CC8D002D7AEAA7FE3CAE233 /* PBXContainerItemProxy */;
-		};
-		88D9876F4C1685D297252899D111C642 /* PBXTargetDependency */ = {
+		52DF47E4CEDB226FA8C6AEA33FA5C9DF /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemProcesses;
-			target = C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */;
-			targetProxy = DC8A33A1304FAF5DF2027EBF06A1B3E4 /* PBXContainerItemProxy */;
+			target = CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */;
+			targetProxy = 440E11FEB155CC318D8988ACE06B3732 /* PBXContainerItemProxy */;
 		};
-		A4528A8801049615393708CCB7C11080 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = SystemProcesses;
-			target = C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */;
-			targetProxy = 2E09A0D273F0CC7ECEA5A1EFC2E53AAA /* PBXContainerItemProxy */;
-		};
-		A5FF9D5F17087881A0D6BBC9C2602A7E /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = SystemProcesses;
-			target = C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */;
-			targetProxy = 4699D8AD196A765BF9307B77ED078386 /* PBXContainerItemProxy */;
-		};
-		AA857A66E92EF1C6C8275F5D2D1B7C23 /* PBXTargetDependency */ = {
+		60E115410517A7CB92A1205F9D13A77C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = A3CDE306E55BB46209D9C54C48E65F8D /* PBXContainerItemProxy */;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = D7091B391E70944BC22D4E809BA0219E /* PBXContainerItemProxy */;
 		};
-		B89AD357FE31B58BD5DB72A5EB324D2D /* PBXTargetDependency */ = {
+		61673BBD141342433D77A4EE13A5BAE2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = SystemCore;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = B91D4D0E26910588C59856F834567434 /* PBXContainerItemProxy */;
+		};
+		72994A4E3A80F0D7BFB409CB0A5D356D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = SystemCore;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = 93B1CEFA47006A93C6D9CF1482E60334 /* PBXContainerItemProxy */;
+		};
+		84E899ADBA6578E0C1C1C3FD57BFAA7C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemDisk;
-			target = 3642DA6EDECBF98321DF9947E2704594 /* SystemDisk */;
-			targetProxy = 62BDCB0DDFB9F49DFCFF9138B149863A /* PBXContainerItemProxy */;
+			target = CCEF68BA17DE4F302669FA35FBDE2779 /* SystemDisk */;
+			targetProxy = 87B05A71B1258F871D0137508D3E935D /* PBXContainerItemProxy */;
 		};
-		C1FBD6ACF7859A0348CD99B3408A9D6F /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = F8ED927D4C052F3EC3D0A15074531698 /* PBXContainerItemProxy */;
-		};
-		C9B6E3E6667B226114163044C5913EF3 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = SystemCore;
-			target = D815E696134D65B6518A875970458233 /* SystemCore */;
-			targetProxy = C3496FD97633D1167CE19DBCF699B123 /* PBXContainerItemProxy */;
-		};
-		DF5B98762C0F696B87C8AAAF81E0482A /* PBXTargetDependency */ = {
+		9BB373EC199D52B89AD1E4DD9BB587FA /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemProcesses;
-			target = C701E91F007F5BF95D236345BC8F614E /* SystemProcesses */;
-			targetProxy = A41CAFFBEE9269E8D60FC6C64E9DB902 /* PBXContainerItemProxy */;
+			target = CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */;
+			targetProxy = F318AC1451F244D4BE3F1C08F066B67D /* PBXContainerItemProxy */;
 		};
-		E2E3B6E8074323F7968DDAAA15ADF821 /* PBXTargetDependency */ = {
+		AA3FA3EAC676259E8DF660AC42337DE8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = SystemCore;
+			target = 980E79BD701FEAD8C456FFF22EB936C0 /* SystemCore */;
+			targetProxy = E80ECF21708FB0B8C48FF26845173019 /* PBXContainerItemProxy */;
+		};
+		BF93558E24683EBC27B495C105C26D4C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = SystemProcesses;
+			target = CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */;
+			targetProxy = 5563D8D70934FB03D46FE8B1E2668D86 /* PBXContainerItemProxy */;
+		};
+		E7EFA23C2479570F998A5CBB9F7312F5 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = SystemProcesses;
+			target = CE3240E1F665EBCEA90A13BE1381CFA2 /* SystemProcesses */;
+			targetProxy = 02D07AC2F97E0AF0AEBF849AA47B33C8 /* PBXContainerItemProxy */;
+		};
+		EDFF6376ED34B20E1C31B77128C84960 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = SystemDisk;
-			target = 3642DA6EDECBF98321DF9947E2704594 /* SystemDisk */;
-			targetProxy = FEDA35C4832F0E9EF5DEECF8F4C47135 /* PBXContainerItemProxy */;
+			target = CCEF68BA17DE4F302669FA35FBDE2779 /* SystemDisk */;
+			targetProxy = 27AD4DCAFE7C0D48D1076282CB0B1478 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		0F3E33CA8A8DE8B86617563417A83477 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		11322A5F3AAC78D1AE52EF3A170C678D /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "dev.subset.system.processes-tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		25161BD15B3A132A4634397FF046020D /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_PREFIX = lib;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_MODULE_NAME = SystemProcesses;
-				PRODUCT_NAME = SystemProcesses;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Release;
-		};
-		25F949C739E9DAE4D994F317355CB744 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_PREFIX = lib;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_MODULE_NAME = SystemCore;
-				PRODUCT_NAME = SystemCore;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		2E5A17DBBDF828FD384049A7519FAF89 /* Release */ = {
+		1B70FBC36C48295EC192809B12A3BCEA /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1158,7 +1143,7 @@
 			};
 			name = Release;
 		};
-		318EDA185324BB382E6C9B3B5AC99072 /* Debug */ = {
+		1E5BE87EE3B3E8D11DB39F5F2E4AD109 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1177,7 +1162,26 @@
 			};
 			name = Debug;
 		};
-		3E8A57D9292E17024ADE094B5AC1B22C /* Release */ = {
+		29EBC8243203C5F052D7BBB1681D9677 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_PREFIX = lib;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_MODULE_NAME = SystemDisk;
+				PRODUCT_NAME = SystemDisk;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		35BD5E59C23C20E7699877AC85BDF3F9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1202,9 +1206,9 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 			};
-			name = Release;
+			name = Debug;
 		};
-		67B5233250391C0A0A0801251C056ED6 /* Debug */ = {
+		4223BB5FC90E8B029F2F07B871E04FC5 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1223,51 +1227,56 @@
 			};
 			name = Debug;
 		};
-		822566319B54EC8B3F86B11C94CB82EC /* Release */ = {
+		68D66003ECB700CD99992CB79432BBE5 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGNING_ALLOWED = NO;
-				DEFINES_MODULE = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_PREFIX = lib;
+				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_MODULE_NAME = SystemCore;
-				PRODUCT_NAME = SystemCore;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Release;
-		};
-		97ACBC77C8AD1EE5E09DDBE54483E521 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = MacApp/SubsetSystem.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_NAME = SubsetSystem;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = MacApp/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system;
-				PRODUCT_MODULE_NAME = SubsetSystem;
-				PRODUCT_NAME = "Subset System";
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
+		};
+		823FD24D1347CE0F7DD1BA7A96FB3EE8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.subset.system.processes-tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		8FE7AF8C65566844288D7BA8AFAE3924 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
 		};
 		AF60B24D9C36ED5FDECC8CCDC6724557 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -1330,6 +1339,50 @@
 			};
 			name = Debug;
 		};
+		BCE7C4BCAA698E7444882BBE75C62794 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.subset.system.disk-tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		C36A4D7B9B56581BD36B7B313CDE5B9F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = MacApp/SubsetSystem.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_NAME = SubsetSystem;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MacApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system;
+				PRODUCT_MODULE_NAME = SubsetSystem;
+				PRODUCT_NAME = "Subset System";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 		CC50D551C17B78547A26CE6CE8A00404 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1384,41 +1437,26 @@
 			};
 			name = Release;
 		};
-		E353EAC64B1C61C70C2BFBE710474271 /* Debug */ = {
+		CE561C57F0A035914EEE622AC8BAF5E6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				EXECUTABLE_PREFIX = lib;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "dev.subset.system.disk-tests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = SystemProcesses;
+				PRODUCT_NAME = SystemProcesses;
 				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
-		};
-		E7C07AFED37BFD1739135B6F91F5B581 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.system.tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
-		F0C93D13743919FE5BF3405ABFA4023B /* Release */ = {
+		DED66C42B73B24F9FFA8D1B6300AA35F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1433,9 +1471,9 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 6.0;
 			};
-			name = Release;
+			name = Debug;
 		};
-		FCAE305A34AFB85977D60FFBACA96105 /* Release */ = {
+		E2E12F04B62C473BBA2006CC4E8179BB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -1444,8 +1482,27 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				EXECUTABLE_PREFIX = lib;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_MODULE_NAME = SystemDisk;
-				PRODUCT_NAME = SystemDisk;
+				PRODUCT_MODULE_NAME = SystemCore;
+				PRODUCT_NAME = SystemCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		FDCB7D6BE8C9E2A207FCB93705861D02 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_PREFIX = lib;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_MODULE_NAME = SystemCore;
+				PRODUCT_NAME = SystemCore;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
@@ -1457,20 +1514,20 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		2EB3B710061512B9F046C361B238E898 /* Build configuration list for PBXNativeTarget "SystemProcessesTests" */ = {
+		148033C12CF3E7A1AADBD267E6F16EE9 /* Build configuration list for PBXNativeTarget "SystemProcessesTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				F0C93D13743919FE5BF3405ABFA4023B /* Release */,
-				11322A5F3AAC78D1AE52EF3A170C678D /* Debug */,
+				823FD24D1347CE0F7DD1BA7A96FB3EE8 /* Release */,
+				DED66C42B73B24F9FFA8D1B6300AA35F /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		3036768AE03DBCDE9937661A05D26CA2 /* Build configuration list for PBXNativeTarget "SubsetSystem" */ = {
+		497D67B457F7C1B51BCCF6F44CE43824 /* Build configuration list for PBXNativeTarget "SystemDisk" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				3E8A57D9292E17024ADE094B5AC1B22C /* Release */,
-				97ACBC77C8AD1EE5E09DDBE54483E521 /* Debug */,
+				29EBC8243203C5F052D7BBB1681D9677 /* Release */,
+				4223BB5FC90E8B029F2F07B871E04FC5 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -1484,47 +1541,47 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		6F10CEAFD6992C3D519BB4C8E6171A48 /* Build configuration list for PBXNativeTarget "SystemProcesses" */ = {
+		78420FFDC86C3B2595F738F3902E97BB /* Build configuration list for PBXNativeTarget "SystemDiskTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				25161BD15B3A132A4634397FF046020D /* Release */,
-				318EDA185324BB382E6C9B3B5AC99072 /* Debug */,
+				1B70FBC36C48295EC192809B12A3BCEA /* Release */,
+				BCE7C4BCAA698E7444882BBE75C62794 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		7B8F1797FD24385C5AE20A85F78DC2FC /* Build configuration list for PBXNativeTarget "SystemDiskTests" */ = {
+		7DFCE15783A258DB44DEF1ED2FDBD099 /* Build configuration list for PBXNativeTarget "SystemCoreTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				2E5A17DBBDF828FD384049A7519FAF89 /* Release */,
-				E353EAC64B1C61C70C2BFBE710474271 /* Debug */,
+				8FE7AF8C65566844288D7BA8AFAE3924 /* Release */,
+				68D66003ECB700CD99992CB79432BBE5 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		C9A25669619F1A33378F152FE1F4DE58 /* Build configuration list for PBXNativeTarget "SystemDisk" */ = {
+		A142455F2003828F82AED4239ED6E648 /* Build configuration list for PBXNativeTarget "SystemProcesses" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				FCAE305A34AFB85977D60FFBACA96105 /* Release */,
-				67B5233250391C0A0A0801251C056ED6 /* Debug */,
+				CE561C57F0A035914EEE622AC8BAF5E6 /* Release */,
+				1E5BE87EE3B3E8D11DB39F5F2E4AD109 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		DD2E523985B59ADED906567564C717D3 /* Build configuration list for PBXNativeTarget "SystemCore" */ = {
+		E59649B3B7FD43B09B7DF0DC6F3DBECF /* Build configuration list for PBXNativeTarget "SystemCore" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				822566319B54EC8B3F86B11C94CB82EC /* Release */,
-				25F949C739E9DAE4D994F317355CB744 /* Debug */,
+				FDCB7D6BE8C9E2A207FCB93705861D02 /* Release */,
+				E2E12F04B62C473BBA2006CC4E8179BB /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		F8096EDAB6AD72C8A5471B6A4DA274EF /* Build configuration list for PBXNativeTarget "SystemCoreTests" */ = {
+		EF2A7920D3B15A66D73845639608F20E /* Build configuration list for PBXNativeTarget "SubsetSystem" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E7C07AFED37BFD1739135B6F91F5B581 /* Release */,
-				0F3E33CA8A8DE8B86617563417A83477 /* Debug */,
+				C36A4D7B9B56581BD36B7B313CDE5B9F /* Release */,
+				35BD5E59C23C20E7699877AC85BDF3F9 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
