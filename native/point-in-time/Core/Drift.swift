@@ -272,10 +272,16 @@ public enum DriftDetector {
         min(calendar.startOfDay(for: now), now.addingTimeInterval(-lookBack))..<Block.bucketStart(containing: now).addingTimeInterval(Block.length)
     }
 
-    /// The stored blocks in `readRange` at `now`, which the companion counts, and where the read began.
-    public static func readBlocks(from store: ActivityStore, now: Date, calendar: Calendar) throws -> (blocks: [Block], from: Date) {
+    /// What the companion reads at `now`, in one read through the end of today: today's ring from all of today's blocks
+    /// (the blocks the status command totals, including any starting after now), and the blocks in `readRange`, which
+    /// the rule counts, with where that read began.
+    public static func companionRead(from store: ActivityStore, now: Date, calendar: Calendar) throws
+        -> (ring: FocusRing, blocks: [Block], from: Date) {
         let range = readRange(now: now, calendar: calendar)
-        return (try store.blocks(from: range.lowerBound, to: range.upperBound), range.lowerBound)
+        let today = ReportPeriod.day(containing: now, calendar: calendar)
+        let blocks = try store.blocks(from: range.lowerBound, to: max(range.upperBound, today.end))
+        return (FocusRing(today: now, blocks: blocks, calendar: calendar), blocksInReadRange(blocks, now: now, calendar: calendar),
+                range.lowerBound)
     }
 
     /// The blocks of `blocks` that a read of `readRange` at `now` returns, for a caller that read a wider span.
@@ -314,7 +320,7 @@ public enum DriftDetector {
         return .prompt(episode)
     }
 
-    /// The companion's decision for a read: `blocks` read from `readFrom` (see `readBlocks`). First forgets, in a copy of
+    /// The companion's decision for a read: `blocks` read from `readFrom` (see `companionRead`). First forgets, in a copy of
     /// `state`, a drift offered whose block is not in the read (see `CompanionState.forgetOfferedEpisode`), then
     /// evaluates with that copy. Returns the decision and the copy, which the companion keeps and the status command does
     /// not; nothing is saved here.
@@ -335,7 +341,8 @@ public protocol DriftCompanionHost: AnyObject {
     var notificationFallback: Bool { get }
     /// Whether capture is recording; nothing is offered otherwise.
     var isRecording: Bool { get }
-    /// Reads the blocks in `DriftDetector.readRange` and updates the ring; nil when the store cannot be read.
+    /// Reads as `DriftDetector.companionRead` does: returns the blocks in `readRange` and updates the ring from all of
+    /// today's blocks; nil when the store cannot be read.
     func readBlocks(now: Date) -> (blocks: [Block], from: Date)?
     /// Shows the panel with the flow's `onOffer` and `actionError`; false when there is nowhere to show it.
     func showPanel() -> Bool

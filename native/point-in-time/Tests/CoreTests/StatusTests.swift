@@ -382,6 +382,36 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(drift["driftBlocks"] as? Int == 2)
     }
 
+    /// The companion's ring (`DriftCompanionController.readBlocks`) counts all of today's blocks, as the status totals
+    /// do, after the clock was set back, while its drift input stays the blocks through the one holding now.
+    @Test func theCompanionsRingCountsTheWholeDayAsTheStatusTotalsDo() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = newYork
+        let now = local(21, 12, 1).addingTimeInterval(30)
+        try store.save(segment("com.example.browser", "Browser", local(21, 11, 57), minutes: 6, url: "https://video.example.net/watch"))
+        try store.save(segment("com.example.editor", "Editor", local(21, 12, 3), minutes: 3))
+        func check(_ ring: (focus: Double, drift: Double, unclassified: Double)) throws {
+            let read = try DriftDetector.companionRead(from: store, now: now, calendar: calendar)
+            let day = try store.blocks(from: local(21, 0), to: local(22, 0))
+            #expect(read.blocks.map(\.start) == [local(21, 11, 57), local(21, 12)])
+            #expect(read.from == now.addingTimeInterval(-DriftDetector.lookBack))
+            #expect(read.ring == FocusRing(today: now, blocks: day, calendar: calendar))
+            #expect(read.ring.totals.focus == ring.focus && read.ring.totals.drift == ring.drift && read.ring.totals.unclassified == ring.unclassified)
+            let totals = try #require(validated(StatusCommand.run(["status", "--json"], environment: environment(directory, now: now)))["totals"] as? [String: Int])
+            #expect(totals["focus"].map(Double.init) == ring.focus && totals["drift"].map(Double.init) == ring.drift
+                    && totals["unclassified"].map(Double.init) == ring.unclassified)
+        }
+        try check((focus: 0, drift: 0, unclassified: 540))
+        try label(store, "com.example.browser", .drift, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        try label(store, "com.example.editor", .focus, from: local(21, 0), to: local(22, 0), at: local(21, 12, 10))
+        try check((focus: 180, drift: 360, unclassified: 0))
+        let read = try DriftDetector.companionRead(from: store, now: now, calendar: calendar)
+        #expect(read.ring.totals.share(of: .focus) == 1.0 / 3 && read.ring.totals.share(of: .drift) == 2.0 / 3)
+    }
+
     @Test func aDriftOfferedOutsideTheReadDoesNotMarkTheCurrentDriftOffered() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

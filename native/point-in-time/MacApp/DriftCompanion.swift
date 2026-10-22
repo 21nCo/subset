@@ -159,10 +159,10 @@ final class DriftCompanionController: NSObject, DriftCompanionHost, UNUserNotifi
             return nil
         }
         do {
-            let read = try DriftDetector.readBlocks(from: store, now: now, calendar: calendar)
+            let read = try DriftDetector.companionRead(from: store, now: now, calendar: calendar)
             readError = nil
-            ring = FocusRing(today: now, blocks: read.blocks, calendar: calendar)
-            return read
+            ring = read.ring
+            return (read.blocks, read.from)
         } catch {
             ring = nil
             readError = String(describing: error)
