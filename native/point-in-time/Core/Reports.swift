@@ -179,6 +179,12 @@ public enum ReportPeriod {
         Array(stride(from: day.start, to: day.end, by: 3_600))
     }
 
+    /// The hour from `start`, cut at the day's end, so on a day the clocks change by half an hour the last one is half
+    /// an hour long and never reaches into the next day.
+    public static func hour(startingAt start: Date, in day: DateInterval) -> DateInterval {
+        DateInterval(start: start, end: max(start, min(start.addingTimeInterval(3_600), day.end)))
+    }
+
     /// Minutes after local midnight as the clock shows them, so 09:00 is 540 on a day the clocks changed too.
     static func minuteOfDay(_ date: Date, calendar: Calendar) -> Int {
         let parts = calendar.dateComponents([.hour, .minute], from: date)

@@ -487,6 +487,36 @@ private func temporaryDirectory() -> URL {
         #expect(spring.hour == date(cal, 8, 20, month: 3))
         spring.showHour(containing: date(cal, 9, 0, month: 3))
         #expect(spring.hour == date(cal, 8, 20, month: 3))
+        // Whole-hour changes leave every hour an hour long, the last ending at midnight.
+        for day in [selection, spring] {
+            #expect(day.hours.allSatisfy { ReportPeriod.hour(startingAt: $0, in: day.interval).duration == 3_600 })
+            #expect(ReportPeriod.hour(startingAt: day.hours.last!, in: day.interval).end == day.interval.end)
+        }
+    }
+
+    @Test func theLastHourOfAHalfHourClockChangeDayStopsAtMidnight() {
+        let howe = calendar("Australia/Lord_Howe")
+        // The clocks go back half an hour on 5 April 2026 (24.5 hours) and forward on 4 October (23.5 hours).
+        for (day, month, count) in [(5, 4, 25), (4, 10, 24)] {
+            var selection = ReportSelection(now: date(howe, day, 12, month: month), calendar: howe)
+            #expect(selection.hours.count == count)
+            selection.showHour(containing: selection.interval.end.addingTimeInterval(-1))
+            let last = ReportPeriod.hour(startingAt: selection.hour, in: selection.interval)
+            #expect(last.start == date(howe, day, 23, 30, month: month))
+            #expect(last.end == selection.interval.end)
+            #expect(last.duration == 1_800)
+            #expect(selection.hours.dropLast().allSatisfy { ReportPeriod.hour(startingAt: $0, in: selection.interval).duration == 3_600 })
+            // The header names the same span, ending at midnight.
+            func time(_ date: Date, asEnd: Bool = false) -> String {
+                ReportText.time(date, calendar: howe, locale: Locale(identifier: "en_GB"), asEnd: asEnd)
+            }
+            #expect(time(last.end, asEnd: true) == time(selection.interval.start))
+            // The hour holds the day's last block and not the next day's first.
+            let midnight = selection.interval.end
+            let blocks = [block(midnight.addingTimeInterval(-Block.length), .focus), block(midnight, .drift)]
+            #expect(blocks.filter { last.start <= $0.start && $0.start < last.end }.map(\.start) == [blocks[0].start])
+            #expect(DayReport(day: last.start, blocks: blocks, calendar: howe).blocks.map(\.start) == [blocks[0].start])
+        }
     }
 }
 

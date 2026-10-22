@@ -166,10 +166,10 @@ final class ReportsModel: ObservableObject {
 
     func moveHour(by offset: Int) { selection.moveHour(by: offset) }
 
-    /// The span the timeline shows.
+    /// The span the timeline shows, never past the selected day's end.
     var visibleInterval: DateInterval? {
         guard let day else { return nil }
-        return zoom == .day ? day.interval : DateInterval(start: hour, duration: 3_600)
+        return zoom == .day ? day.interval : ReportPeriod.hour(startingAt: hour, in: day.interval)
     }
 
     var visibleBlocks: [Block] {

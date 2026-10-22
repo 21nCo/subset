@@ -154,7 +154,9 @@ private struct TimelineSection: View {
                     Button { model.moveHour(by: -1) } label: { Label("Previous Hour", systemImage: "chevron.left") }
                         .labelStyle(.iconOnly)
                         .disabled(model.hours.first == model.hour)
-                    Text(verbatim: "\(model.time(model.hour)) to \(model.time(model.hour.addingTimeInterval(3_600), asEnd: true))")
+                    if let shown = model.visibleInterval {
+                        Text(verbatim: "\(model.time(shown.start)) to \(model.time(shown.end, asEnd: true))")
+                    }
                     Button { model.moveHour(by: 1) } label: { Label("Next Hour", systemImage: "chevron.right") }
                         .labelStyle(.iconOnly)
                         .disabled(model.hours.last == model.hour)
