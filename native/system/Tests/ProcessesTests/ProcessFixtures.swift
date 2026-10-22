@@ -54,10 +54,11 @@ enum ProcessFixtures {
 
     /// Samples the processes twice, two seconds apart, and attributes the second sample. The project marker is
     /// `/Users/me/dev/subset/.git`; the launchd plists name `launchdJobs` (by executable) and could not all be read
-    /// when `launchdScanFailures` is not empty.
+    /// when `launchdScanFailures` is not empty. `mounts` is the mount table, `/` alone by default.
     static func sample(_ processes: [FixtureProcess], observedAt: Date = Date(timeIntervalSince1970: 1_000_000),
                        launchdJobs: [String: [LaunchdJob]] = [:],
-                       launchdScanFailures: [LaunchdScanFailure] = []) throws -> ProcessesSample {
+                       launchdScanFailures: [LaunchdScanFailure] = [],
+                       mounts: FixtureMountTable = FixtureMountTable()) throws -> ProcessesSample {
         let readers = FixtureSignalReaders()
         readers.launchdJobs = launchdJobs
         readers.launchdScanFailures = launchdScanFailures
@@ -95,7 +96,7 @@ enum ProcessFixtures {
         _ = try sampler.sample()
         let snapshot = try sampler.sample()
         let attribution = Attribution(projectMarkers: FixtureProjectMarkers(["/Users/me/dev/subset": [".git"]]),
-                                      mountTable: FixtureMountTable(), containerVM: nil)
+                                      mountTable: mounts, containerVM: nil)
             .attribute(snapshot.processes)
         return ProcessesSample(snapshot: snapshot, attribution: attribution, observedAt: observedAt)
     }

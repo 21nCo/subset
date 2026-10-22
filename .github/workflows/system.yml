@@ -56,3 +56,6 @@ jobs:
           xcodebuild -project System.xcodeproj -scheme SubsetSystem -configuration Debug \
             -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/derived" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build test
+
+      - name: FoundationModels is weak-linked
+        run: sh Tests/weak-link.sh "$RUNNER_TEMP/derived/Build/Products/Debug/Subset System.app"

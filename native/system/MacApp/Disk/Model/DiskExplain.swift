@@ -14,13 +14,14 @@ extension DiskWindowModel {
         }
     }
 
-    /// Kept across scans for the same path or suggestion, so its explanation is kept for the session; `nil` for a row
-    /// Explain does not offer.
+    /// Kept across scans for the same path, asked about as a folder or a leftover, or the same suggestion, so its
+    /// explanation is kept for the session; `nil` for a row Explain does not offer.
     public func explainKey(for id: DiskRowID) -> ExplainKey? {
         guard let tree = result?.tree else { return nil }
         switch id {
         case let .item(index), let .originItem(_, _, index), let .matchItem(_, index):
-            return index < tree.count ? ExplainKey("disk:\(tree.path(of: index))") : nil
+            guard index < tree.count else { return nil }
+            return ExplainKey("disk-\(itemKind(id, index: index).rawValue):\(tree.path(of: index))")
         case let .match(position):
             guard let match = analysis?.matches[safe: position] else { return nil }
             return ExplainKey("disk-suggestion:\(match.rule.id.rawValue):\(match.identifier ?? ""):"
@@ -35,12 +36,9 @@ extension DiskWindowModel {
         guard let tree = result?.tree else { return nil }
         let facts: ExplainFacts
         switch id {
-        case let .item(index), let .matchItem(_, index):
+        case let .item(index), let .originItem(_, _, index), let .matchItem(_, index):
             guard index < tree.count else { return nil }
-            facts = itemFacts(index, in: tree, leftover: false, redactor: redactor, now: now)
-        case let .originItem(_, key, index):
-            guard index < tree.count else { return nil }
-            facts = itemFacts(index, in: tree, leftover: key == .leftovers, redactor: redactor, now: now)
+            facts = itemFacts(index, in: tree, kind: itemKind(id, index: index), redactor: redactor, now: now)
         case let .match(position):
             guard let match = analysis?.matches[safe: position] else { return nil }
             facts = matchFacts(match, in: tree, redactor: redactor)
@@ -50,14 +48,20 @@ extension DiskWindowModel {
         return ExplainRequest(facts, redactor: redactor)
     }
 
-    private func itemFacts(_ index: Int, in tree: DiskTree, leftover: Bool, redactor: ExplainRedactor,
+    /// A scanned item is asked about as a leftover in the Leftovers origin group or when a rule found it is one, and
+    /// otherwise as a folder or file.
+    private func itemKind(_ id: DiskRowID, index: Int) -> ExplainItemKind {
+        if case .originItem(_, .leftovers, _) = id { return .leftover }
+        return analysis?.origins.entries.first { $0.index == index }?.rule == .leftover ? .leftover : .folder
+    }
+
+    private func itemFacts(_ index: Int, in tree: DiskTree, kind: ExplainItemKind, redactor: ExplainRedactor,
                            now: Date) -> ExplainFacts {
         let item = tree[index]
         let path = tree.path(of: index)
         let entry = analysis?.origins.entries.first { $0.index == index }
-        let isLeftover = leftover || entry?.rule == .leftover
         // Named as its path is sent: a placeholder deeper than the first level under ~ unless folder names are sent.
-        var facts = ExplainFacts(kind: isLeftover ? .leftover : .folder, name: redactor.name(Self.name(item.name), ofPath: path))
+        var facts = ExplainFacts(kind: kind, name: redactor.name(Self.name(item.name), ofPath: path))
         facts.type = item.kind.title + (entry.map { " in ~/\($0.folder.homePath)" } ?? "")
         facts.path = path
         facts.sizes = DiskFigures(item.sizes, flags: item.flags, format: format).accessibilityValue
@@ -89,9 +93,9 @@ extension DiskWindowModel {
         case let .scanned(privateBytes, allocated, complete, _):
             "\(complete ? "" : "at least ")\(format.diskBytes(allocated)) used, \(format.diskBytes(privateBytes)) private"
         case let .dockerReclaimable(upTo, _): "up to \(format.diskBytes(upTo)) reclaimable, as Docker reports"
-        case let .unavailable(reason): "Not measured: " + Self.redactingScannedPaths(reason, in: tree, redactor: redactor)
+        case let .unavailable(reason): "Not measured: " + redactingPaths(reason, in: tree, redactor: redactor)
         }
-        facts.evidence = ["Location: \(rule.location)", rule.rebuild, rule.yield.note]
+        facts.ruleEvidence = ["Location: \(rule.location)", rule.rebuild, rule.yield.note]
         // Items are named as their paths are sent, so a project's or download's name is a placeholder unless folder
         // names are sent.
         facts.members = ExplainFacts.countedNames(match.items.sorted { ($0.sizes?.allocated ?? 0) > ($1.sizes?.allocated ?? 0) }
@@ -99,9 +103,14 @@ extension DiskWindowModel {
         return facts
     }
 
-    /// Free text from the scan, such as why a suggestion was not measured, with each scanned path in it as the
-    /// redactor sends it. A reason names a path whole and a folder name may hold a space, so the path's end is found by
-    /// following the tree's names, the longest that matches at each level.
+    /// Free text from the scan, such as why a suggestion was not measured, with each path it names as the redactor
+    /// sends it: a scanned path, or an app's (`DiskAnalysis.appPaths`), which may be outside the scanned folder.
+    func redactingPaths(_ text: String, in tree: DiskTree, redactor: ExplainRedactor) -> String {
+        redactor.paths(in: Self.redactingScannedPaths(text, in: tree, redactor: redactor), known: analysis?.appPaths ?? [])
+    }
+
+    /// `text` with each scanned path in it as the redactor sends it. A reason names a path whole and a folder name may
+    /// hold a space, so the path's end is found by following the tree's names, the longest that matches at each level.
     static func redactingScannedPaths(_ text: String, in tree: DiskTree, redactor: ExplainRedactor) -> String {
         let root = tree.rootPath == "/" ? "" : tree.rootPath
         var result = ""

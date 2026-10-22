@@ -52,19 +52,64 @@ final class ExplainTests: XCTestCase {
 
     func testPathsInFreeTextHaveTheirDeepFolderNamesWithheldToo() {
         let client = redactor.placeholder("secret-client")
+        // A path in free text runs to the end of its clause, and a last name that is not a placeholder is withheld with
+        // the words after it, since a folder name may hold spaces.
         XCTAssertEqual(redactor.text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
-                       "~/dev/\(client)/\(redactor.placeholder("node_modules")) could not be read.")
+                       "~/dev/\(client)/\(redactor.placeholder("node_modules could not be read")).")
         XCTAssertEqual(redactor.text("Runs `~/dev/secret-client/tool`, see (~/dev/secret-client); ~/dev: ok"),
                        "Runs `~/dev/\(client)/\(redactor.placeholder("tool"))`, see (~/dev/\(client)); ~/dev: ok")
         // ~/Library's own folders are read whole, spaces included, and what is inside them is withheld.
         XCTAssertEqual(redactor.text("/Users/jdoe/Library/Application Support/Acme/db is not a folder."),
-                       "~/Library/Application Support/\(redactor.placeholder("Acme"))/\(redactor.placeholder("db")) is not a folder.")
-        // Text already redacted is unchanged, so a folder keeps one placeholder in every field.
-        let redacted = "Working directory \(redactor.path("/Users/jdoe/dev/secret-client/api"))"
+                       "~/Library/Application Support/\(redactor.placeholder("Acme"))/"
+                        + "\(redactor.placeholder("db is not a folder")).")
+        XCTAssertEqual(redactor.text("~/Library/Application Support could not be read."),
+                       "~/Library/Application Support could not be read.")
+        // Text already redacted is unchanged, so a folder keeps one placeholder in every field, and its words are kept.
+        let redacted = "Working directory \(redactor.path("/Users/jdoe/dev/secret-client/api")) could not be read: denied."
         XCTAssertEqual(redactor.text(redacted), redacted)
-        XCTAssertEqual(redactor.text("~ and ~/dev and /tmp/secret-client"), "~ and ~/dev and /tmp/secret-client")
+        XCTAssertEqual(redactor.text("~ and ~/dev; /tmp/secret-client"), "~ and ~/dev; /tmp/secret-client")
         XCTAssertEqual(redactor.sendingFolderNames(true).text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
                        "~/dev/secret-client/node_modules could not be read.")
+    }
+
+    func testARawPathWithSpacesInFreeTextLeavesNoWordOfAWithheldName() {
+        let raw = "/Users/jdoe/dev/Acme Merger/web client could not be read. 2 more places could not be searched."
+        let sent = redactor.text(raw)
+        for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(sent.contains(word), sent) }
+        XCTAssertTrue(sent.hasPrefix("~/dev/\(redactor.placeholder("Acme Merger"))/"), sent)
+        XCTAssertTrue(sent.hasSuffix(". 2 more places could not be searched."), "the next clause is kept: \(sent)")
+        // A name with a full stop, a bracket, or an apostrophe stays in the path.
+        for name in ["Notes v1.2.app", "Photos (old)", "Bob's Stuff"] {
+            let text = redactor.text("Runs ~/Applications/\(name)/Contents/MacOS/tool now")
+            XCTAssertFalse(text.contains(name), text)
+            XCTAssertFalse(text.contains("tool now"), text)
+        }
+        XCTAssertEqual(redactor.text(sent), sent, "redacting twice changes nothing")
+        // Another path in the clause starts its own.
+        XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
+                       "~/Library/Caches/\(redactor.placeholder("com.a.b may be data of"))"
+                        + " ~/Applications/\(redactor.placeholder("Acme Notes.app: unread")).")
+        XCTAssertEqual(redactor.sendingFolderNames(true).text(raw),
+                       "~/dev/Acme Merger/web client could not be read. 2 more places could not be searched.")
+    }
+
+    func testKnownPathsInFreeTextAreShownWholeAndKeepTheWordsAfterThem() {
+        let app = "/Users/jdoe/Applications/Acme Notes.app"
+        let text = "\(app) could not be read: Permission denied. /Users/jdoe/Applications is fine."
+        let shown = redactor.paths(in: text, known: [app, "/Users/jdoe/Applications/Acme", "/Applications/Other.app"])
+        XCTAssertEqual(shown, "~/Applications/\(redactor.placeholder("Acme Notes.app")) could not be read: Permission "
+            + "denied. /Users/jdoe/Applications is fine.")
+        XCTAssertEqual(redactor.text(shown), "~/Applications/\(redactor.placeholder("Acme Notes.app")) could not be read: "
+            + "Permission denied. ~/Applications is fine.")
+        XCTAssertEqual(redactor.sendingFolderNames(true).paths(in: text, known: [app]),
+                       "~/Applications/Acme Notes.app could not be read: Permission denied. /Users/jdoe/Applications is fine.")
+    }
+
+    func testTheProcessNameDisclosureIsInSettingsAndTheFieldGuide() throws {
+        XCTAssertTrue(ExplainRedactor.folderNamesCaption.contains("A process is still named by its executable"))
+        let name = try XCTUnwrap(ExplainRequest.fieldGuide.first { $0.name == "name" }).meaning
+        XCTAssertTrue(name.contains("process's name as macOS reports it"), name)
+        XCTAssertFalse(name.contains("process, file"), "a process's name is not said to be withheld: \(name)")
     }
 
     func testNoFieldOfARequestCarriesTheHomePathAccountNameOrDeepFolderNames() throws {

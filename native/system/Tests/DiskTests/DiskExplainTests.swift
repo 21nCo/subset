@@ -78,8 +78,8 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertEqual(suggestion.type, "Safe to reclaim suggestion")
         XCTAssertEqual(suggestion.matchedRule?.hasPrefix("Xcode DerivedData: "), true)
         XCTAssertEqual(suggestion.members, [redactor.placeholder("App-abc")], "a project's name is a folder name")
-        XCTAssertEqual(suggestion.evidence.first, "Location: ~/Library/Developer/\(redactor.placeholder("Xcode"))/"
-            + redactor.placeholder("DerivedData"))
+        XCTAssertEqual(suggestion.evidence.first, "Location: ~/Library/Developer/Xcode/DerivedData",
+                       "a rule's fixed location is System's own text, sent as it is")
         XCTAssertNil(suggestion.path)
         let named = try XCTUnwrap(model.explainRequest(for: derived.id, redactor: redactor.sendingFolderNames(true)))
         XCTAssertEqual(named.members, ["App-abc"])
@@ -125,6 +125,66 @@ final class DiskExplainTests: XCTestCase {
         }
         let named = try XCTUnwrap(model.explainRequest(for: stale, redactor: redactor.sendingFolderNames(true)))
         XCTAssertEqual(named.sizes, "Not measured: ~/dev/Acme Merger/webclient could not be read.")
+    }
+
+    func testAnUnreadableAppOutsideTheScannedFolderIsWithheldInASuggestionsReason() async throws {
+        // Scanned: ~/Library only. Not readable: ~/Applications/Acme Notes.app, so a cache and a preferences file named
+        // for bundle IDs no app has may be that app's, and App caches and App leftovers are not measured.
+        try FileManager.default.removeItem(atPath: fixture.path("Library/Caches/com.example.editor"))
+        try fixture.write("Library/Caches/com.removed.player/data", bytes: 4_000)
+        try fixture.write("Applications/Acme Notes.app/Contents/Info.plist", bytes: 10)
+        try fixture.lock("Applications/Acme Notes.app/Contents")
+        let read = InstalledApps.read(folders: [fixture.path("Applications")]) { _ in AppSigning(signature: nil, appGroups: nil) }
+        let app = fixture.path("Applications/Acme Notes.app")
+        XCTAssertEqual(read.unreadPaths, [app])
+        let apps = InstalledApps([DiskFixture.editor], unread: read.unread, unreadPaths: read.unreadPaths)
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: apps,
+                                                                    simulatorRuntimes: .installed([])))
+        }))
+        model.scope = .folder(path: fixture.path("Library"))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        model.tab = .suggestions
+
+        var checked = 0
+        for rule in ["App caches", "App leftovers"] {
+            guard let id = model.row(named: rule)?.id else { continue }
+            let request = try request(model, id)
+            let reason = try XCTUnwrap(request.sizes)
+            XCTAssertTrue(reason.hasSuffix(": ~/Applications/\(redactor.placeholder("Acme Notes.app")) has no readable "
+                + "bundle identifier."), reason)
+            let text = try sent(request)
+            for word in ["Acme", "Notes", "removed.player", "gone.app"] { XCTAssertFalse(text.contains(word), "\(rule): \(text)") }
+
+            let named = try XCTUnwrap(model.explainRequest(for: id, redactor: redactor.sendingFolderNames(true)))
+            XCTAssertTrue(named.sizes?.hasSuffix(": ~/Applications/Acme Notes.app has no readable bundle identifier.") == true,
+                          "\(named.sizes ?? "")")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 0, "\(model.rows.map(\.name))")
+    }
+
+    func testALeftoverAndAFolderAtOnePathAreExplainedSeparately() async throws {
+        let model = try await fixture.scanned()
+        model.tab = .origins
+        model.toggle(try XCTUnwrap(model.row(named: "Leftovers")).id)
+        let leftover = try XCTUnwrap(model.row(named: "com.gone.app.plist")).id
+        guard case let .originItem(_, _, index) = leftover else { return XCTFail("\(leftover)") }
+        let folder = DiskRowID.item(index)
+        XCTAssertEqual(try request(model, leftover).kind, .leftover)
+        XCTAssertEqual(try request(model, folder).kind, .leftover, "a rule found it is a leftover in the Folders tab too")
+        XCTAssertEqual(model.explainKey(for: leftover), model.explainKey(for: folder))
+
+        model.toggle(try XCTUnwrap(model.row(named: "Editor")).id)
+        let cache = try XCTUnwrap(model.row(named: "com.example.editor")).id
+        guard case let .originItem(section, _, cacheIndex) = cache else { return XCTFail("\(cache)") }
+        let asLeftover = DiskRowID.originItem(section, .leftovers, item: cacheIndex)
+        XCTAssertEqual(try request(model, cache).kind, .folder)
+        XCTAssertEqual(try request(model, asLeftover).kind, .leftover)
+        XCTAssertNotEqual(model.explainKey(for: cache), model.explainKey(for: asLeftover),
+                          "facts that differ by context are not answered from one cached explanation")
     }
 
     private func sent(_ request: ExplainRequest) throws -> String {

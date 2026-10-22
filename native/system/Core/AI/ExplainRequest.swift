@@ -37,6 +37,9 @@ public struct ExplainFacts: Sendable {
     /// The grouping or reclaim rule that placed it.
     public var matchedRule: String?
     public var evidence: [String] = []
+    /// Evidence that is System's own fixed rule text, such as a reclaim rule's location (`~/Library/Developer/Xcode/
+    /// DerivedData`): it holds nothing of the user's, so its folder names are sent as they are. Sent before `evidence`.
+    public var ruleEvidence: [String] = []
     /// A group's processes, or a suggestion's items, by name.
     public var members: [String] = []
     /// An Unattributed process group, the only kind that may get a suggested origin.
@@ -108,7 +111,7 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
 
     public init(_ facts: ExplainFacts, redactor: ExplainRedactor) {
         var truncated = false
-        func cap(_ value: String?, _ limit: Int = Self.fieldLimit) -> String? {
+        func cap(_ value: String?, _ limit: Int = Self.fieldLimit, redactor: ExplainRedactor = redactor) -> String? {
             guard let value else { return nil }
             let text = redactor.text(value).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
@@ -132,7 +135,10 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
         sizes = cap(facts.sizes)
         age = cap(facts.age)
         matchedRule = cap(facts.matchedRule)
-        evidence = list(facts.evidence, count: Self.evidenceLimit, limit: Self.fieldLimit)
+        let ruleEvidence = facts.ruleEvidence.prefix(Self.evidenceLimit)
+            .compactMap { cap($0, redactor: redactor.sendingFolderNames(true)) }
+        evidence = ruleEvidence + list(facts.evidence, count: Self.evidenceLimit - ruleEvidence.count, limit: Self.fieldLimit)
+        if facts.ruleEvidence.count > Self.evidenceLimit { truncated = true }
         members = list(facts.members, count: Self.memberLimit, limit: Self.memberNameLimit)
         maySuggestOrigin = facts.kind == .processGroup && facts.isUnattributedGroup
         self.truncated = truncated
@@ -187,7 +193,8 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
     /// Every field sent, with what it holds, for Settings. Tests check it names every field.
     public static let fieldGuide: [ExplainField] = [
         ExplainField(.kind, "Whether it is a process group, process, folder or file, leftover, or reclaim suggestion."),
-        ExplainField(.name, "The group, process, file, or rule name, or a placeholder when its path's last name is withheld."),
+        ExplainField(.name, "The group, file, or rule name, or a placeholder when its path's last name is withheld; a "
+            + "process's name as macOS reports it (its executable's), even when that name is withheld in its path."),
         ExplainField(.type, "What System knows it as, such as an app group or a folder."),
         ExplainField(.path, "Its path, with your home folder as ~ and deeper folder names, its own included, replaced "
             + "unless Send folder names is on."),
@@ -200,7 +207,8 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
         ExplainField(.sizes, "Memory and CPU, or disk sizes, or why they were not measured, with paths redacted the same way."),
         ExplainField(.age, "How long it has run, or when it last changed."),
         ExplainField(.matchedRule, "The grouping or reclaim rule that placed it."),
-        ExplainField(.evidence, "Why System grouped it there, with paths redacted the same way."),
+        ExplainField(.evidence, "Why System grouped it there, with paths redacted the same way, and a reclaim rule's fixed "
+            + "location, such as ~/Library/Developer/Xcode/DerivedData, as it is."),
         ExplainField(.members, "A group's process names, or a suggestion's item names (up to 10)."),
         ExplainField(.maySuggestOrigin, "Whether an origin may be suggested: only for an Unattributed process group."),
         ExplainField(.truncated, "Whether facts were shortened to keep the request small.")

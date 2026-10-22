@@ -5,11 +5,18 @@ import Foundation
 /// Redacts what Explain sends to a provider (shared with SET-50's OpenRouter provider). The home folder is sent as `~`
 /// and the account name is removed. Folder names deeper than the first level under `~` are replaced with placeholders
 /// unless the user turns on **Send folder names**, the item being explained's own name included; the only exception is
-/// macOS's own folders directly in `~/Library` (`libraryFolders`), whose names say nothing about the user. Command-line
+/// macOS's own folders directly in `~/Library` (`libraryFolders`), whose names say nothing about the user. A process is
+/// named as macOS reports it, by its executable, even when that name matches a folder withheld in its path. Command-line
 /// arguments and file contents are never sent: System never reads them.
 public struct ExplainRedactor: Sendable {
     /// What an account name is replaced with.
     public static let accountPlaceholder = "[user]"
+    /// What Settings says under **Send folder names**.
+    public static let folderNamesCaption = "When off, folder names deeper than the first level under your home folder "
+        + "are sent as placeholders such as folder-3fa2c1 in paths, names, and any text that mentions a path, the "
+        + "explained folder's, file's, project's, or app's own name included. A process is still named by its "
+        + "executable, as macOS reports it, even when that name matches a withheld folder. Only macOS's own folders in "
+        + "~/Library, such as Caches, are sent by name."
     /// macOS's own folders directly in `~/Library`, whose names say nothing about the user.
     public static let libraryFolders: Set<String> = Set(LibraryFolder.allCases.map(\.rawValue)).union([
         "Developer", "LaunchAgents", "Saved Application State", "WebKit", "Application Scripts", "Cookies"
@@ -80,29 +87,40 @@ public struct ExplainRedactor: Sendable {
 
     /// Free text as sent: the home folder's path shown as `~`, folder names in each `~/…` path withheld as `path(_:)`
     /// withholds them, and account names removed. Paths in the text should already have been passed through `path(_:)`
-    /// (a placeholder is kept as it is); this is the last line of defense. A path in free text ends at whitespace or
-    /// quoting punctuation, apart from `~/Library`'s own folder names, so a folder name with a space is only partly
-    /// withheld here: callers redact such paths whole first.
+    /// or `paths(in:known:)` where the text was built (a placeholder is kept as it is); this is the last line of
+    /// defense, and it fails closed: a folder name may hold spaces, so a `~/…` path runs to the end of its clause, and
+    /// a last component that is neither a placeholder nor one of `~/Library`'s own folders is withheld through that
+    /// end, words after it included.
     public func text(_ text: String) -> String {
         var result = text
         for home in homes {
             result = result.replacingOccurrences(of: home + "/", with: "~/")
             result = Self.replacing(home, in: result, with: "~", caseInsensitive: false)
         }
-        if !sendFolderNames {
-            let matches = Self.homePathPattern.matches(in: result, range: NSRange(result.startIndex..., in: result))
-            for match in matches.reversed() {
-                guard let range = Range(match.range, in: result) else { continue }
-                var found = result[range].dropFirst(2)
-                var trailing = ""
-                while let last = found.last, ".:!?".contains(last) {
-                    trailing = String(last) + trailing
-                    found = found.dropLast()
-                }
-                result.replaceSubrange(range, with: shown(found.split(separator: "/").map(String.init)) + trailing)
+        if !sendFolderNames { result = withholdingDeepNames(in: result) }
+        return removingAccountNames(result)
+    }
+
+    /// `text` with each path in it that is one of `known` (raw paths, such as the folders a scan read) shown as
+    /// `path(_:)` shows it, the longest that matches at each place. A known path names a folder whole, spaces included,
+    /// so text built from it keeps its words after the path.
+    public func paths(in text: String, known: [String]) -> String {
+        let known = known.filter { homeRelative($0) != nil }.sorted { $0.count > $1.count }
+        guard !known.isEmpty else { return text }
+        var result = ""
+        var rest = text[...]
+        while let match = homes.compactMap({ rest.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
+            result += rest[..<match.lowerBound]
+            let at = rest[match.lowerBound...]
+            if let path = known.first(where: { at.hasPrefix($0) && !Self.continuesName(at.dropFirst($0.count).first) }) {
+                result += self.path(path)
+                rest = at.dropFirst(path.count)
+            } else {
+                result += rest[match]
+                rest = rest[match.upperBound...]
             }
         }
-        return removingAccountNames(result)
+        return result + rest
     }
 
     func placeholder(_ name: String) -> String {
@@ -110,14 +128,66 @@ public struct ExplainRedactor: Sendable {
         return "folder-" + code.prefix(3).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// A `~/…` path in free text: components up to whitespace, a slash, or quoting punctuation, or one of `~/Library`'s
-    /// own folder names that has a space.
-    private static let homePathPattern: NSRegularExpression = {
-        let spaced = libraryFolders.filter { $0.contains(" ") }.sorted { $0.count > $1.count }
-            .map(NSRegularExpression.escapedPattern(for:))
-        let component = "(?:" + (spaced + ["[^/\\s`'\"“”‘’,;()]+"]).joined(separator: "|") + ")"
-        return try! NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}~/])~(?:/" + component + ")+")
-    }()
+    /// Each `~/…` path in `text` with its deep folder names withheld. A path runs from `~/` to the end of its clause
+    /// (`clauseEnd`). Each component a slash follows is shown as `path(_:)` shows it; the last component, which may run
+    /// on into the clause's words, is kept only when it starts with a placeholder or, directly in `~/Library`, one of
+    /// macOS's own folders, and is otherwise withheld whole.
+    private func withholdingDeepNames(in text: String) -> String {
+        var result = ""
+        var rest = text[...]
+        while let start = rest.range(of: "~/") {
+            result += rest[..<start.upperBound]
+            let path = rest[start.upperBound...]
+            let end = Self.clauseEnd(in: path)
+            var parts = path[..<end].split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            if parts.count > 1 {
+                let first = Substring(parts[0])
+                for position in 1..<parts.count - 1
+                where !parts[position].isEmpty && !isSent(parts[position], at: position, under: first) {
+                    parts[position] = placeholder(parts[position])
+                }
+                let last = parts[parts.count - 1]
+                if !last.isEmpty, !startsWithSentName(last, at: parts.count - 1, under: first) {
+                    parts[parts.count - 1] = placeholder(last)
+                }
+            }
+            result += parts.joined(separator: "/")
+            rest = path[end...]
+        }
+        return result + rest
+    }
+
+    /// Whether a path's last component in free text starts with a name sent as it is, a placeholder or one of
+    /// `~/Library`'s own folders, that only the text's words then follow.
+    private func startsWithSentName(_ part: String, at position: Int, under first: Substring) -> Bool {
+        if isPlaceholder(String(part.prefix(13))), !Self.continuesName(part.dropFirst(13).first) { return true }
+        guard position == 1, first == "Library" else { return false }
+        return Self.libraryFolders.contains { part.hasPrefix($0) && !Self.continuesName(part.dropFirst($0.count).first) }
+    }
+
+    /// Where a path in free text ends: at a line break; before a space that starts another `~/` path; or at `;`, a
+    /// backtick, a closing bracket, or a full stop that ends the clause, that is, one not followed by a letter, digit,
+    /// slash, or name punctuation, so `Notes.app`, `v1.2`, and `Photos (old)/` stay in the path.
+    private static func clauseEnd(in text: Substring) -> Substring.Index {
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character.isNewline { return index }
+            let next = text.index(after: index)
+            if character.isWhitespace, text[next...].hasPrefix("~/") { return index }
+            if ";`)]}.".contains(character), next == text.endIndex || !continuesName(text[next]) && text[next] != "/" {
+                return index
+            }
+            index = next
+        }
+        return index
+    }
+
+    /// Whether a character after a name is still part of it.
+    private static func continuesName(_ character: Character?) -> Bool {
+        guard let character else { return false }
+        return character.isLetter || character.isNumber || "-_.".contains(character)
+    }
 
     /// Home-relative components as sent.
     private func shown(_ parts: [String]) -> String {

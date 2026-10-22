@@ -112,6 +112,78 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertGreaterThan(checked, 40)
     }
 
+    func testAProjectOnANetworkVolumeWithASpaceInItsNameIsWithheldInEveryField() throws {
+        let volume = "/Users/me/Mounts/Acme Merger"
+        let cwd = volume + "/web client"
+        let model = ProcessesWindowModel(format: ProcessFixtures.format)
+        let mounts = FixtureMountTable([MountPoint(path: "/", isLocal: true), MountPoint(path: volume, isLocal: false)])
+        model.apply(try ProcessFixtures.sample([FixtureProcess(pid: 700, path: "/usr/local/bin/node", memory: ProcessFixtures.mib,
+                                                               cpu: 1, energy: 1, signature: ProcessFixtures.unsigned, cwd: cwd)],
+                                               mounts: mounts),
+                    memory: nil, cadence: .mainWindowVisible)
+        model.layer = .project
+        let group = RowID.group(OriginGroupID(.project(path: cwd)))
+        let process = RowID.process(ProcessFixtures.identity(700))
+        for row in [group, process] {
+            let request = try XCTUnwrap(model.explainRequest(for: row, redactor: redactor), "\(row)")
+            XCTAssertTrue(request.evidence.contains { $0.contains("network volume at ~/Mounts/\(redactor.placeholder("Acme Merger"))") },
+                          "\(request.evidence)")
+            let text = try sent(request) + request.promptText
+            for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(text.contains(word), "\(row): \(text)") }
+
+            let named = try XCTUnwrap(model.explainRequest(for: row, redactor: redactor.sendingFolderNames(true)))
+            XCTAssertTrue(named.evidence.contains { $0.hasSuffix("network volume at ~/Mounts/Acme Merger") }, "\(named.evidence)")
+        }
+    }
+
+    /// Every kind of evidence that holds a path shows it through the redactor where its text is built, so no word of a
+    /// withheld folder name with spaces is left for the last line of defense; with folder names sent, the names appear.
+    func testEveryKindOfEvidenceShowsItsPathsAsTheRedactorSendsThem() throws {
+        let deep = "/Users/me/dev/Acme Merger/web client"
+        let bundle = "/Users/me/Applications/Secret Notes.app"
+        let process = try XCTUnwrap(try model().sample?.snapshot.processes.first { $0.pid == 600 })
+        let job = LaunchdJob(label: "com.example.agent", plistPath: "/Users/me/Library/LaunchAgents/Acme Merger/agent.plist",
+                             domain: .userAgent, program: deep + "/agent", resolution: .missing)
+        let scan = SignalFailure.incompleteScan([LaunchdScanFailure(path: deep + "/plists", code: EACCES)])
+        let evidence: [AttributionEvidence] = [
+            .executable(path: deep + "/tool", name: "tool"), .executable(path: nil, name: "tool"), .appBundle(path: bundle),
+            .systemLocation(prefix: "/System", platformBinary: true), .containerVM(ContainerVM(name: "Podman", detail: "vfkit")),
+            .codingAgent(name: "claude", pid: process.pid), .terminalApp(name: "Terminal", pid: 2, bundlePath: bundle),
+            .controllingTerminal(device: "/dev/ttys001"), .responsibleProcess(pid: 2, bundlePath: bundle),
+            .coalitionLeader(coalition: 3, pid: 2, bundlePath: bundle), .launchdJob(job), .orphanedLaunchdJob(job),
+            .homebrew(formula: "wget"), .signature(ProcessFixtures.google), .signatureUnavailable(scan),
+            .signatureUnavailable(nil), .loginItem(bundlePath: bundle), .parentIsLaunchd, .inheritedFrom(pid: 2),
+            .parentNotSampled(ppid: 9), .workingDirectory(deep), .workingDirectoryUnavailable(scan),
+            .workingDirectoryUnavailable(nil), .projectMarker(directory: deep, marker: ".git"),
+            .projectMarkersSkipped(volume: deep)
+        ]
+        // Fails to compile when a kind of evidence is added, so this list is extended with it.
+        func listed(_ evidence: AttributionEvidence) -> Bool {
+            switch evidence {
+            case .executable, .appBundle, .systemLocation, .containerVM, .codingAgent, .terminalApp, .controllingTerminal,
+                 .responsibleProcess, .coalitionLeader, .launchdJob, .orphanedLaunchdJob, .homebrew, .signature,
+                 .signatureUnavailable, .loginItem, .parentIsLaunchd, .inheritedFrom, .parentNotSampled, .workingDirectory,
+                 .workingDirectoryUnavailable, .projectMarker, .projectMarkersSkipped: true
+            }
+        }
+        XCTAssertTrue(evidence.allSatisfy(listed))
+        let withheld = OriginExplanation(process: process, format: ProcessFixtures.format, path: { [redactor] in redactor.path($0) }) { _ in "helper" }
+        let named = redactor.sendingFolderNames(true)
+        let shown = OriginExplanation(process: process, format: ProcessFixtures.format, path: { named.path($0) }) { _ in "helper" }
+        var withNames = ""
+        for item in evidence {
+            let text = withheld.describe(item)
+            for word in ["Acme", "Merger", "web", "client", "Secret", "Notes", "subset"] {
+                XCTAssertFalse(text.contains(word), "\(item): \(text)")
+            }
+            XCTAssertFalse(text.contains("/Users/me"), text)
+            withNames += shown.describe(item) + "\n"
+        }
+        for name in ["Acme Merger/web client", "Secret Notes.app", "~/dev/subset/webclient-x"] {
+            XCTAssertTrue(withNames.contains(name), "\(name) in \(withNames)")
+        }
+    }
+
     func testOnlyAnUnattributedGroupMayGetASuggestedOriginAndGroupingIsUnchanged() throws {
         let model = try model()
         let group = OriginGroupID(.unattributed(executable: syncd))

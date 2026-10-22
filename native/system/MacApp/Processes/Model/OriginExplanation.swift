@@ -114,7 +114,7 @@ public struct OriginExplanation: Sendable {
         case let .signature(signature):
             return describe(signature)
         case let .signatureUnavailable(failure):
-            return failure.map { "Signature unavailable: \($0.reason)" } ?? "Signature not read yet"
+            return failure.map { "Signature unavailable: \(reason($0))" } ?? "Signature not read yet"
         case let .loginItem(bundlePath):
             return "Login item inside `\(bundleName(bundlePath))`"
         case .parentIsLaunchd:
@@ -126,11 +126,11 @@ public struct OriginExplanation: Sendable {
         case let .workingDirectory(path):
             return "Working directory \(showPath(path))"
         case let .workingDirectoryUnavailable(failure):
-            return failure.map { "Working directory unavailable: \($0.reason)" } ?? "Working directory not read yet"
+            return failure.map { "Working directory unavailable: \(reason($0))" } ?? "Working directory not read yet"
         case let .projectMarker(directory, marker):
             return "`\(marker)` in \(showPath(directory))"
         case let .projectMarkersSkipped(volume):
-            return "Project markers not looked for on the network volume at \(volume)"
+            return "Project markers not looked for on the network volume at \(showPath(volume))"
         }
     }
 
@@ -145,6 +145,13 @@ public struct OriginExplanation: Sendable {
         guard let signingID = signature.signingID else { return "Unsigned" }
         guard let teamID = signature.teamID else { return "Ad hoc signed as \(signingID), no Team ID" }
         return "Signed by \(signature.teamName.map { "\($0) (\(teamID))" } ?? "team \(teamID)") as \(signingID)"
+    }
+
+    /// Why a signal is unavailable, with any path in it shown as the other paths are.
+    private func reason(_ failure: SignalFailure) -> String {
+        guard case let .incompleteScan(failures) = failure else { return failure.reason }
+        return "no readable plist names it, but the launchd plists were not all read: "
+            + failures.map { "\(showPath($0.path)) (\($0.reason))" }.joined(separator: ", ")
     }
 
     private var workingDirectorySuffix: String {

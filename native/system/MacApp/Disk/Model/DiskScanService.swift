@@ -59,10 +59,14 @@ public enum DiskScope: Hashable, Sendable {
 public struct DiskAnalysis: Sendable {
     public let origins: DiskOriginReport
     public let matches: [ReclaimMatch]
+    /// Paths the reasons may name besides the scanned tree's: the installed apps and the apps that could not be read,
+    /// so Explain shows them as it shows other paths.
+    public let appPaths: [String]
 
-    public init(origins: DiskOriginReport, matches: [ReclaimMatch]) {
+    public init(origins: DiskOriginReport, matches: [ReclaimMatch], appPaths: [String] = []) {
         self.origins = origins
         self.matches = matches
+        self.appPaths = appPaths
     }
 
     /// Attributes the tree's Library entries and matches the reclaim rules with `context`.
@@ -71,7 +75,7 @@ public struct DiskAnalysis: Sendable {
         let matches = ReclaimMatcher.matches(in: tree, origins: entries, context: context)
         self.init(origins: DiskOrigins.report(entries: entries, matches: matches, tree: tree, home: context.home,
                                               apps: context.installedApps),
-                  matches: matches)
+                  matches: matches, appPaths: context.installedApps.apps.map(\.path) + context.installedApps.unreadPaths)
     }
 }
 
