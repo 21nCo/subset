@@ -1,7 +1,9 @@
 import AppKit
 import PointInTimeCore
 
-/// The menu bar item and its menu. Every control is an explicit action on `CaptureSettings` or the store.
+/// The menu bar item and its menu. Every control is an explicit action on `CaptureSettings`, the store, or the drift
+/// companion. The item is a ring of today's focus, neutral, and drift shares of classified time, with a mark in its
+/// middle while tracking is paused, off, or failing.
 @MainActor
 final class StatusMenuController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -10,42 +12,92 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let capture: CaptureController
     private let store: ActivityStore?
     private let classification: ClassificationController
+    private let companion: DriftCompanionController
     private let showWelcome: () -> Void
     private let showClassification: () -> Void
     private let showReports: () -> Void
+    private let showDriftSettings: () -> Void
 
     init(settings: CaptureSettings, capture: CaptureController, store: ActivityStore?, classification: ClassificationController,
-         showWelcome: @escaping () -> Void, showClassification: @escaping () -> Void, showReports: @escaping () -> Void) {
+         companion: DriftCompanionController, showWelcome: @escaping () -> Void, showClassification: @escaping () -> Void,
+         showReports: @escaping () -> Void, showDriftSettings: @escaping () -> Void) {
         self.settings = settings
         self.capture = capture
         self.store = store
         self.classification = classification
+        self.companion = companion
         self.showWelcome = showWelcome
         self.showClassification = showClassification
         self.showReports = showReports
+        self.showDriftSettings = showDriftSettings
         super.init()
         menu.delegate = self
         item.menu = menu
         refreshIcon()
     }
 
+    /// Redraws the ring from the companion's latest read of today's blocks, and the mark for the tracking state.
     func refreshIcon() {
-        let (symbol, label): (String, String) = switch capture.state {
-        case .recording, .idle: ("record.circle", "pointInTime is tracking")
-        case .paused: ("pause.circle", "pointInTime is paused")
-        case .storeUnavailable: ("exclamationmark.circle", "pointInTime cannot open or read its activity store")
-        case .writesBacklogged: ("exclamationmark.circle", "pointInTime cannot save to its activity store")
-        case .clockBehind: ("clock.badge.exclamationmark", "pointInTime is not recording until the clock passes recorded activity")
-        default: ("circle.dashed", "pointInTime is not tracking")
+        let (mark, state): (String?, String) = switch capture.state {
+        case .recording, .idle: (nil, "pointInTime is tracking")
+        case .paused: ("pause.fill", "pointInTime is paused")
+        case .storeUnavailable: ("exclamationmark", "pointInTime cannot open or read its activity store")
+        case .writesBacklogged: ("exclamationmark", "pointInTime cannot save to its activity store")
+        case .clockBehind: ("clock", "pointInTime is not recording until the clock passes recorded activity")
+        default: ("minus", "pointInTime is not tracking")
         }
-        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        let today = companion.ring?.accessibilityText
+            ?? (companion.readError == nil ? "Today’s balance has not been read yet" : "Today’s balance could not be read")
+        let label = "\(state). \(today)."
+        item.button?.image = Self.ringImage(companion.ring, mark: mark, label: label)
         item.button?.setAccessibilityLabel(label)
+    }
+
+    /// The menu bar item's frame on screen, where the companion panel is placed; nil while the item is not shown.
+    func anchorFrame() -> NSRect? {
+        guard item.isVisible, let window = item.button?.window, window.isVisible else { return nil }
+        return window.frame
+    }
+
+    /// An 18-point ring: a faint track, then focus, neutral, and drift arcs clockwise from the top in the window's
+    /// colors, each as long as its share of today's classified time. Drawn when shown, so the track and mark follow
+    /// the menu bar's appearance.
+    static func ringImage(_ ring: FocusRing?, mark: String?, label: String) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius: CGFloat = 6.5
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+            track.lineWidth = 3
+            NSColor.labelColor.withAlphaComponent(0.3).setStroke()
+            track.stroke()
+            var angle: CGFloat = 90
+            for arc in ring?.arcs ?? [] {
+                let end = angle - CGFloat(arc.fraction) * 360
+                let path = NSBezierPath()
+                path.appendArc(withCenter: center, radius: radius, startAngle: angle, endAngle: end, clockwise: true)
+                path.lineWidth = 3
+                arc.category.menuBarColor.setStroke()
+                path.stroke()
+                angle = end
+            }
+            if let mark, let symbol = NSImage(systemSymbolName: mark, accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 7, weight: .bold)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [.labelColor]))) {
+                let size = symbol.size
+                symbol.draw(in: NSRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height))
+            }
+            return true
+        }
+        image.accessibilityDescription = label
+        return image
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(disabled(statusLine()))
-        if let recorded = todayRecorded() { menu.addItem(disabled(recorded)) }
+        for line in todayLines() { menu.addItem(disabled(line)) }
+        addCompanionItems(to: menu)
         menu.addItem(action("Open Timeline and Reports…", key: "t", showReports))
         if let error = capture.lastError { menu.addItem(disabled("Store error: \(error)")) }
         menu.addItem(disabled(AccessibilityAccess.isGranted ? "Window titles: Accessibility granted" : "Window titles: Accessibility not granted"))
@@ -88,6 +140,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(disabled(classificationLine()))
         menu.addItem(action("Classification…", showClassification))
+        menu.addItem(action("Drift Companion…", showDriftSettings))
         menu.addItem(.separator())
         menu.addItem(action("Delete Today’s Data…") { [weak self] in self?.confirmDelete(all: false) })
         menu.addItem(action("Delete All Data…") { [weak self] in self?.confirmDelete(all: true) })
@@ -113,23 +166,64 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     private func classificationLine() -> String {
-        guard classification.settings.provider != .off else { return "Classification: off" }
+        let provider = switch classification.settings.provider {
+        case .off: ""
+        case .openRouter: "OpenRouter"
+        }
+        guard !provider.isEmpty else { return "Classification: off" }
         let status = classification.status
-        return status.lastError != nil && status.pending > 0
-            ? "Classification: \(status.pending) pending, retrying"
-            : "Classification: \(status.pending) pending"
+        var line = "Classification (\(provider)): \(status.pending) pending"
+        if status.failed > 0 { line += ", \(status.failed) failed" }
+        if status.lastError != nil && status.pending > 0 { line += ", retrying" }
+        return line
     }
 
-    private func todayRecorded() -> String? {
-        guard let store else { return nil }
-        let start = Calendar.current.startOfDay(for: Date())
-        guard let blocks = try? store.blocks(from: start, to: Date().addingTimeInterval(Block.length)) else { return nil }
+    /// Today's recorded time and its focus, neutral, and drift, from the same day totals as the window.
+    private func todayLines() -> [String] {
+        guard let store else { return [] }
+        let now = Date()
+        let calendar = Calendar.autoupdatingCurrent
+        guard let blocks = try? store.blocks(from: calendar.startOfDay(for: now), to: now.addingTimeInterval(Block.length)) else {
+            return ["Today: the activity store could not be read"]
+        }
+        let ring = FocusRing(today: now, blocks: blocks, calendar: calendar)
         // Anonymous excluded time is recorded time too.
-        let seconds = blocks.reduce(0) { $0 + $1.activeSeconds + $1.excludedSeconds }
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute]
-        formatter.unitsStyle = .abbreviated
-        return "Today: \(formatter.string(from: seconds) ?? "0m") recorded"
+        let recorded = "Today: \(ReportText.duration(ring.totals.recorded)) recorded"
+        guard !ring.isEmpty else { return [recorded, "Nothing classified yet today"] }
+        let shares = FocusRing.categories.map { category in
+            "\(category.title) \(ReportText.duration(ring.totals[category])) (\(ReportText.percent(ring.totals.share(of: category) ?? 0)))"
+        }
+        return [recorded, shares.joined(separator: ", ")]
+    }
+
+    /// The focus window, and the companion's actions while it offers a drift, so each can be reached from the keyboard
+    /// through the menu bar as well as in the panel.
+    private func addCompanionItems(to menu: NSMenu) {
+        let now = Date()
+        if let window = companion.state.activeFocusWindow(at: now) {
+            menu.addItem(disabled("Focus window until \(window.end.formatted(date: .omitted, time: .shortened))"))
+            menu.addItem(action("End Focus Window") { [companion] in companion.endFocusWindow() })
+        }
+        guard let episode = companion.offered else { return }
+        menu.addItem(.separator())
+        menu.addItem(disabled("Drifting? \(companion.summary(of: episode))"))
+        menu.addItem(action("Return to Focus") { [companion] in companion.returnToFocus() })
+        let rest = NSMenuItem(title: "Take a Break", action: nil, keyEquivalent: "")
+        rest.submenu = NSMenu()
+        for length in CompanionState.breakLengths {
+            rest.submenu?.addItem(action("For \(Int(length / 60)) Minutes") { [companion] in companion.takeBreak(for: length) })
+        }
+        menu.addItem(rest)
+        let notDrift = NSMenuItem(title: "Not a Drift", action: nil, keyEquivalent: "")
+        notDrift.submenu = NSMenu()
+        for label in [BlockLabel.focus, .neutral] {
+            notDrift.submenu?.addItem(action("Label These Blocks \(label == .focus ? "Focus" : "Neutral")") { [companion] in
+                companion.notADrift(episode, as: label)
+            })
+        }
+        menu.addItem(notDrift)
+        menu.addItem(action("Dismiss Drift Prompt") { [companion] in companion.dismiss() })
+        menu.addItem(.separator())
     }
 
     private func excludedAppsItem() -> NSMenuItem {
@@ -237,4 +331,17 @@ private final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError("not used") }
 
     @objc private func run() { handler() }
+}
+
+extension TimeCategory {
+    /// The window's category colors, for the menu bar ring.
+    var menuBarColor: NSColor {
+        switch self {
+        case .focus: .systemGreen
+        case .neutral: .systemBlue
+        case .drift: .systemOrange
+        case .unclassified: .systemGray
+        case .excluded: .systemPurple
+        }
+    }
 }
