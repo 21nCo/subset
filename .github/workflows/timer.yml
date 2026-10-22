@@ -1,0 +1,58 @@
+name: Timer macOS
+
+# Builds and tests the Timer daemon client on macOS: the TimerCore package tests, including a real daemon run from the
+# built CLI. No signing credentials are available or needed here.
+on:
+  pull_request:
+    paths:
+      - 'native/timer/**'
+      - 'packages/timer/**'
+      - 'packages/timer-cli/**'
+      - 'apps/timer/**'
+      - '.github/workflows/timer.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'native/timer/**'
+      - 'packages/timer/**'
+      - 'packages/timer-cli/**'
+      - 'apps/timer/**'
+      - '.github/workflows/timer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: timer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "No Xcode 26 on this runner." >&2; exit 1; fi
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      # Builds packages/timer-cli/dist/cli.mjs for the integration test. No dependency's install script is needed.
+      - name: Build the Timer CLI runtime
+        run: npm ci --ignore-scripts && npm run build
+
+      - name: Package tests
+        working-directory: native/timer
+        env:
+          SUBSET_TIMER_CLI_PATH: ${{ github.workspace }}/packages/timer-cli/dist/cli.mjs
+        run: swift test
