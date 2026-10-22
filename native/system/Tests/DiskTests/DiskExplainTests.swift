@@ -267,6 +267,82 @@ final class DiskExplainTests: XCTestCase {
                           "facts that differ by context are not answered from one cached explanation")
     }
 
+    func testADockerSocketInAWithheldFolderIsNotSentByName() async throws {
+        // Docker's image space was not measured: the context's socket, in a folder outside the scan, does not exist.
+        let socket = fixture.path("Clients/Acme Inc. Holdings")
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: InstalledApps([DiskFixture.editor]),
+                                                                    simulatorRuntimes: .installed([]),
+                                                                    dockerImages: .unavailable(.noSocket(at: socket))))
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        let analysis = try XCTUnwrap(model.analysis)
+        let docker = DiskRowID.match(try XCTUnwrap(analysis.matches.firstIndex { $0.rule.id == .dockerImages }))
+        let request = try request(model, docker)
+        XCTAssertEqual(request.sizes, "Not measured: The Docker daemon is not running. No socket at "
+            + "~/Clients/\(redactor.placeholder("Acme Inc. Holdings")).", "the socket is shown whole, as other paths are")
+        let text = try sent(request)
+        for word in ["Acme", "Inc", "Holdings"] { XCTAssertFalse(text.contains(word), "\(word): \(text)") }
+        XCTAssertEqual(model.explainRequest(for: docker, redactor: redactor.sendingFolderNames(true))?.sizes,
+                       "Not measured: The Docker daemon is not running. No socket at ~/Clients/Acme Inc. Holdings.")
+
+        // Every reason that names a path on this Mac gives it, so it is shown the same way.
+        XCTAssertEqual(ContainerUnavailable.noSocket(at: "unix://" + socket).paths, [socket])
+        XCTAssertEqual(ContainerUnavailable.contextUnreadable(path: socket, message: "denied").paths, [socket])
+        XCTAssertEqual(ContainerUnavailable.contextNotRecognized(name: "x", host: "unix://" + socket).paths, [socket])
+        XCTAssertEqual(ContainerUnavailable.remoteContext(name: "x", host: "tcp://10.0.0.2:2375").paths, [])
+    }
+
+    func testAScanOfTheHomeFolderThroughTheDataVolumeIsRedactedAsTheHomeFolder() async throws {
+        let model = fixture.model()
+        model.scope = .folder(path: "/System/Volumes/Data" + fixture.home)
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.result?.tree.rootPath, "/System/Volumes/Data" + fixture.home)
+        model.open(try XCTUnwrap(model.row(named: "Documents")).id)
+        let sub = try XCTUnwrap(model.row(named: "Sub")).id
+        let request = try request(model, sub)
+        XCTAssertEqual(request.path, "~/Documents/\(redactor.placeholder("Sub"))")
+        XCTAssertEqual(request.name, redactor.placeholder("Sub"))
+        XCTAssertFalse(try sent(request).contains("/System/Volumes"))
+        XCTAssertEqual(model.explainRequest(for: sub, redactor: redactor.sendingFolderNames(true))?.path, "~/Documents/Sub")
+    }
+
+    func testAScanNotYetAnalyzedIsNotExplainedAndACancelledOneIsNotAnsweredAsAnAnalyzedOne() async throws {
+        let gate = AsyncGate()
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            await gate.pass()
+            return DiskFixture.analysis(result, home: home)
+        }))
+        model.scan()
+        await fulfillment(of: [gate.reached], timeout: 30)
+        XCTAssertEqual(model.phase, .analyzing)
+        let analyzing = try XCTUnwrap(model.row(named: "Documents")).id
+        XCTAssertFalse(model.canExplain(analyzing), "its origin and suggestions are still being worked out")
+        XCTAssertNil(model.explainKey(for: analyzing))
+        XCTAssertNil(model.explainRequest(for: analyzing, redactor: redactor))
+
+        model.cancel()
+        gate.open()
+        XCTAssertEqual(model.phase, .cancelled)
+        let cancelled = try XCTUnwrap(model.row(named: "Documents")).id
+        let unanalyzed = try XCTUnwrap(model.explainKey(for: cancelled))
+        XCTAssertNotNil(model.explainRequest(for: cancelled, key: unanalyzed, redactor: redactor))
+
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.phase, .completed)
+        let documents = try XCTUnwrap(model.row(named: "Documents")).id
+        let analyzed = try XCTUnwrap(model.explainKey(for: documents))
+        XCTAssertNotEqual(analyzed, unanalyzed, "an answer about fewer facts is not kept for the analyzed item")
+        XCTAssertNil(model.explainRequest(for: cancelled, key: unanalyzed, redactor: redactor),
+                     "a sheet opened on the cancelled scan finds its item gone")
+        XCTAssertNotNil(model.explainRequest(for: documents, key: analyzed, redactor: redactor))
+    }
+
     private func sent(_ request: ExplainRequest) throws -> String {
         String(decoding: try JSONEncoder().encode(request), as: UTF8.self) + "\n" + request.promptText
     }

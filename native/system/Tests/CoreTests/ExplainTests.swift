@@ -56,8 +56,10 @@ final class ExplainTests: XCTestCase {
         // the words after it, since a folder name may hold spaces.
         XCTAssertEqual(redactor.text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
                        "~/dev/\(client)/\(redactor.placeholder("node_modules could not be read")).")
+        // A withheld name that punctuation ends may go on past it, so the words after it up to the next path are withheld
+        // too; punctuation alone is kept.
         XCTAssertEqual(redactor.text("Runs `~/dev/secret-client/tool`, see (~/dev/secret-client); ~/dev: ok"),
-                       "Runs `~/dev/\(client)/\(redactor.placeholder("tool"))`, see (~/dev/\(client)); ~/dev: ok")
+                       "Runs `~/dev/\(client)/\(redactor.placeholder("tool`, see")) (~/dev/\(client)); ~/dev: ok")
         // ~/Library's own folders are read whole, spaces included, and what is inside them is withheld.
         XCTAssertEqual(redactor.text("/Users/jdoe/Library/Application Support/Acme/db is not a folder."),
                        "~/Library/Application Support/\(redactor.placeholder("Acme"))/"
@@ -76,8 +78,9 @@ final class ExplainTests: XCTestCase {
         let raw = "/Users/jdoe/dev/Acme Merger/web client could not be read. 2 more places could not be searched."
         let sent = redactor.text(raw)
         for word in ["Acme", "Merger", "web", "client"] { XCTAssertFalse(sent.contains(word), sent) }
-        XCTAssertTrue(sent.hasPrefix("~/dev/\(redactor.placeholder("Acme Merger"))/"), sent)
-        XCTAssertTrue(sent.hasSuffix(". 2 more places could not be searched."), "the next clause is kept: \(sent)")
+        XCTAssertEqual(sent, "~/dev/\(redactor.placeholder("Acme Merger"))/"
+            + redactor.placeholder("web client could not be read. 2 more places could not be searched."),
+            "the full stop may be inside the name, so the rest of the line is withheld")
         // A name with a full stop, a bracket, or an apostrophe stays in the path.
         for name in ["Notes v1.2.app", "Photos (old)", "Bob's Stuff"] {
             let text = redactor.text("Runs ~/Applications/\(name)/Contents/MacOS/tool now")
@@ -104,6 +107,45 @@ final class ExplainTests: XCTestCase {
                         + " ~/Applications/\(redactor.placeholder("Acme Notes.app: unread")).")
         XCTAssertEqual(redactor.sendingFolderNames(true).text(raw),
                        "~/dev/Acme Merger/web client could not be read. 2 more places could not be searched.")
+    }
+
+    func testAWithheldNameThatPunctuationSeemsToEndLeavesNoWordOfIt() {
+        // No slash follows these clause ends, so only the rest of the line tells whether they were inside the name.
+        for raw in ["No socket at /Users/jdoe/Clients/Acme Inc. Holdings.",
+                    "No socket at /Users/jdoe/Clients/Acme Inc. Holdings",
+                    "See (~/Clients/Acme Inc) Holdings) now", "Runs `~/Clients/Acme Inc` Holdings`",
+                    "At ~/Clients/Acme Inc; Holdings] and more", "At ~/Clients/Acme Inc} Holdings."] {
+            let sent = redactor.text(raw)
+            for word in ["Acme", "Inc", "Holdings"] { XCTAssertFalse(sent.contains(word), "\(word): \(sent)") }
+            XCTAssertTrue(sent.contains("~/Clients/folder-"), sent)
+        }
+        // The next line and the next path are their own.
+        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings\nDone."),
+                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings"))\nDone.")
+        XCTAssertEqual(redactor.text("~/Clients/Acme Inc. Holdings, then /Applications/Other.app."),
+                       "~/Clients/\(redactor.placeholder("Acme Inc. Holdings, then")) /Applications/Other.app.")
+        XCTAssertEqual(redactor.sendingFolderNames(true).text("No socket at /Users/jdoe/Clients/Acme Inc. Holdings."),
+                       "No socket at ~/Clients/Acme Inc. Holdings.")
+    }
+
+    func testTheHomeFolderThroughTheDataVolumeIsTheHomeFolder() {
+        let raw = "/System/Volumes/Data/Users/jdoe/dev/acme-merger/bin/tool"
+        let client = redactor.placeholder("acme-merger")
+        let shown = "~/dev/\(client)/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool"))"
+        XCTAssertEqual(redactor.path(raw), shown)
+        XCTAssertEqual(redactor.name("tool", ofPath: raw), redactor.placeholder("tool"))
+        XCTAssertTrue(redactor.isInHome(raw))
+        XCTAssertEqual(redactor.text("\(raw) could not be read."),
+                       "~/dev/\(client)/\(redactor.placeholder("bin"))/\(redactor.placeholder("tool could not be read")).")
+        XCTAssertEqual(redactor.paths(in: "\(raw) could not be read.", known: [raw]), shown + " could not be read.")
+        XCTAssertEqual(redactor.sendingFolderNames(true).path(raw), "~/dev/acme-merger/bin/tool")
+        XCTAssertEqual(redactor.path("/System/Volumes/Data/Users/jdoe"), "~")
+        // A home folder given through the Data volume is not given it twice.
+        let onData = ExplainRedactor(homes: ["/System/Volumes/Data/Users/jdoe"], accountNames: [], sendFolderNames: false,
+                                     key: Array(repeating: 7, count: 32))
+        XCTAssertEqual(onData.path(raw), shown)
+        XCTAssertEqual(onData.path("/System/Volumes/Data/System/Volumes/Data/Users/jdoe/x"),
+                       "/System/Volumes/Data/System/Volumes/Data/Users/jdoe/x")
     }
 
     func testKnownPathsInFreeTextAreShownWholeAndKeepTheWordsAfterThem() {

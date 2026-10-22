@@ -49,6 +49,10 @@ struct DiskView: View {
                         explaining = nil
                     }
                 }
+                // A new scan replaces the rows, as it closes the cleanup sheet.
+                .onChange(of: model.isScanning) { _, scanning in
+                    if scanning { explaining = nil }
+                }
             actionBar
         }
         .sheet(item: Binding(get: { model.cleanupSheet }, set: { if $0 == nil { model.dismissCleanup() } })) { sheet in
@@ -390,7 +394,9 @@ private struct ExplainSheet: View {
             Text(target.name).font(.title3.bold()).lineLimit(2)
             ScrollView {
                 ExplainPanel(center: explain, key: target.key,
-                             request: { [model, id = target.id] in model.explainRequest(for: id, redactor: $0) },
+                             request: { [model, id = target.id, key = target.key] in
+                                 model.explainRequest(for: id, key: key, redactor: $0)
+                             },
                              openSettings: openSettings, startsAtOnce: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

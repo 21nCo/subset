@@ -5,9 +5,10 @@ import SystemProcesses
 /// What Explain sends for a scanned item, leftover, or suggestion: the facts the Disk section already shows, with paths
 /// redacted. Groups and Show more rows are not explained.
 extension DiskWindowModel {
-    /// Whether Explain is offered for a row: a scanned item, an origin group's or suggestion's item, or a suggestion.
+    /// Whether Explain is offered for a row: a scanned item, an origin group's or suggestion's item, or a suggestion,
+    /// once the scan is no longer being read or analyzed.
     public func canExplain(_ id: DiskRowID) -> Bool {
-        guard result != nil else { return false }
+        guard result != nil, !isScanning else { return false }
         switch id {
         case .item, .originItem, .match, .matchItem: return true
         case .originGroup, .more: return false
@@ -15,13 +16,15 @@ extension DiskWindowModel {
     }
 
     /// Kept across scans for the same path, asked about as a folder or a leftover, or the same suggestion, so its
-    /// explanation is kept for the session; `nil` for a row Explain does not offer.
+    /// explanation is kept for the session; `nil` for a row Explain does not offer. An item of a scan without origins
+    /// and suggestions, which was cancelled before they were worked out, has fewer facts, so it has its own key.
     public func explainKey(for id: DiskRowID) -> ExplainKey? {
-        guard let tree = result?.tree else { return nil }
+        guard let tree = result?.tree, canExplain(id) else { return nil }
         switch id {
         case let .item(index), let .originItem(_, _, index), let .matchItem(_, index):
             guard index < tree.count else { return nil }
-            return ExplainKey("disk-\(itemKind(id, index: index).rawValue):\(tree.path(of: index))")
+            let analyzed = analysis == nil ? "unanalyzed-" : ""
+            return ExplainKey("disk-\(analyzed)\(itemKind(id, index: index).rawValue):\(tree.path(of: index))")
         case let .match(position):
             guard let match = analysis?.matches[safe: position] else { return nil }
             return ExplainKey("disk-suggestion:\(match.rule.id.rawValue):\(match.identifier ?? ""):"
@@ -31,9 +34,15 @@ extension DiskWindowModel {
         }
     }
 
+    /// The request for a row Explain was chosen for under `key`, or `nil` when the row now has another key (a newer scan
+    /// put another item at its place, or the scan is analyzed differently) or Explain no longer offers it.
+    public func explainRequest(for id: DiskRowID, key: ExplainKey, redactor: ExplainRedactor) -> ExplainRequest? {
+        explainKey(for: id) == key ? explainRequest(for: id, redactor: redactor) : nil
+    }
+
     /// The request for a row of the scan shown, or `nil` for a row Explain does not offer.
     public func explainRequest(for id: DiskRowID, redactor: ExplainRedactor, now: Date = .now) -> ExplainRequest? {
-        guard let tree = result?.tree else { return nil }
+        guard let tree = result?.tree, canExplain(id) else { return nil }
         let facts: ExplainFacts
         switch id {
         case let .item(index), let .originItem(_, _, index), let .matchItem(_, index):
@@ -110,9 +119,11 @@ extension DiskWindowModel {
     }
 
     /// Free text from the scan, such as why a suggestion was not measured, with each path it names as the redactor
-    /// sends it: a scanned path, or an app's (`DiskAnalysis.appPaths`), which may be outside the scanned folder.
+    /// sends it: a scanned path, or one outside the scanned folder that a reason names (`DiskAnalysis.knownPaths`),
+    /// such as an app's or the Docker socket's. Known paths go first: a scan of the home folder would otherwise show
+    /// only the part of such a path the scan read.
     func redactingPaths(_ text: String, in tree: DiskTree, redactor: ExplainRedactor) -> String {
-        redactor.paths(in: Self.redactingScannedPaths(text, in: tree, redactor: redactor), known: analysis?.appPaths ?? [])
+        Self.redactingScannedPaths(redactor.paths(in: text, known: analysis?.knownPaths ?? []), in: tree, redactor: redactor)
     }
 
     /// `text` with each scanned path in it as the redactor sends it. A reason names a path whole and a folder name may

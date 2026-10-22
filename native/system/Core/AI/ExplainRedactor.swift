@@ -22,7 +22,11 @@ public struct ExplainRedactor: Sendable {
         "Developer", "LaunchAgents", "Saved Application State", "WebKit", "Application Scripts", "Cookies"
     ])
 
-    /// The home folder's paths, longest first: as macOS reports it and its real path.
+    /// Where the Data volume is also mounted, so `/System/Volumes/Data/Users/<name>` is the home folder too.
+    static let dataVolume = "/System/Volumes/Data"
+
+    /// The home folder's paths, longest first: as macOS reports it and its real path, each also through the Data
+    /// volume's firmlink.
     let homes: [String]
     /// The account's short and full names, longest first.
     let accountNames: [String]
@@ -33,7 +37,8 @@ public struct ExplainRedactor: Sendable {
 
     public init(homes: [String], accountNames: [String], sendFolderNames: Bool, key: [UInt8]) {
         let homes = homes.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }.filter { !$0.isEmpty && $0 != "/" }
-        self.homes = Array(Set(homes)).sorted { $0.count > $1.count }
+        let onDataVolume = homes.filter { $0.hasPrefix("/") && !$0.hasPrefix(Self.dataVolume + "/") }.map { Self.dataVolume + $0 }
+        self.homes = Array(Set(homes + onDataVolume)).sorted { $0.count > $1.count }
         self.accountNames = Array(Set(accountNames.filter { !$0.isEmpty })).sorted { $0.count > $1.count }
         self.sendFolderNames = sendFolderNames
         self.key = key
@@ -90,7 +95,8 @@ public struct ExplainRedactor: Sendable {
     /// or `paths(in:known:)` where the text was built (a placeholder is kept as it is); this is the last line of
     /// defense, and it fails closed: a folder name may hold spaces, so a `~/…` path runs to the end of its clause, and
     /// a last component that is neither a placeholder nor one of `~/Library`'s own folders is withheld through that
-    /// end, words after it included.
+    /// end, words after it included. A clause end found by punctuation may be inside that name (`Acme Inc. Holdings`),
+    /// so such a name is withheld on through its line or to the next path.
     public func text(_ text: String) -> String {
         var result = text
         for home in homes {
@@ -112,7 +118,7 @@ public struct ExplainRedactor: Sendable {
         while let match = homes.compactMap({ rest.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
             result += rest[..<match.lowerBound]
             let at = rest[match.lowerBound...]
-            if let path = known.first(where: { at.hasPrefix($0) && !Self.continuesName(at.dropFirst($0.count).first) }) {
+            if let path = known.first(where: { at.hasPrefix($0) && Self.endsName(at.dropFirst($0.count)) }) {
                 result += self.path(path)
                 rest = at.dropFirst(path.count)
             } else {
@@ -138,7 +144,7 @@ public struct ExplainRedactor: Sendable {
         while let start = rest.range(of: "~/") {
             result += rest[..<start.upperBound]
             let path = rest[start.upperBound...]
-            let end = Self.clauseEnd(in: path)
+            var end = Self.clauseEnd(in: path)
             var parts = path[..<end].split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             if parts.count > 1 {
                 let first = Substring(parts[0])
@@ -146,8 +152,16 @@ public struct ExplainRedactor: Sendable {
                 where !parts[position].isEmpty && !isSent(parts[position], at: position, under: first) {
                     parts[position] = placeholder(parts[position])
                 }
-                let last = parts[parts.count - 1]
+                var last = parts[parts.count - 1]
                 if !last.isEmpty, !startsWithSentName(last, at: parts.count - 1, under: first) {
+                    // Punctuation may end the clause inside the name (`Acme Inc. Holdings`): any words after it in
+                    // the line, up to another path, are withheld with it.
+                    let through = end < path.endIndex && Self.clausePunctuation.contains(path[end])
+                        ? Self.lineOrPathEnd(in: path[end...]) : end
+                    if path[end..<through].contains(where: { $0.isLetter || $0.isNumber }) {
+                        last += path[end..<through]
+                        end = through
+                    }
                     parts[parts.count - 1] = placeholder(last)
                 }
             }
@@ -177,7 +191,7 @@ public struct ExplainRedactor: Sendable {
             if character.isNewline { return index }
             let next = text.index(after: index)
             if character.isWhitespace, text[next...].hasPrefix("~/") { return index }
-            if ";`)]}.".contains(character), next == text.endIndex || !continuesName(text[next]) && text[next] != "/",
+            if clausePunctuation.contains(character), next == text.endIndex || !continuesName(text[next]) && text[next] != "/",
                !slashBeforeNextPath(text[next...]) {
                 return index
             }
@@ -186,19 +200,26 @@ public struct ExplainRedactor: Sendable {
         return index
     }
 
-    /// Whether `text`, after a clause end, has a slash before a line break or the start of another path, so the
-    /// clause end was part of a folder name.
-    private static func slashBeforeNextPath(_ text: Substring) -> Bool {
+    /// What may end a clause, and so a path, in free text.
+    private static let clausePunctuation = ";`)]}."
+
+    /// Where `text`, after a clause end, reaches a line break or a space that starts another path.
+    private static func lineOrPathEnd(in text: Substring) -> Substring.Index {
         var index = text.startIndex
         while index < text.endIndex {
             let character = text[index]
-            if character == "/" { return true }
-            if character.isNewline { return false }
+            if character.isNewline { return index }
             let next = text.index(after: index)
-            if character.isWhitespace, startsPath(text[next...]) { return false }
+            if character.isWhitespace, startsPath(text[next...]) { return index }
             index = next
         }
-        return false
+        return index
+    }
+
+    /// Whether `text`, after a clause end, has a slash before a line break or the start of another path, so the
+    /// clause end was part of a folder name.
+    private static func slashBeforeNextPath(_ text: Substring) -> Bool {
+        text[..<lineOrPathEnd(in: text)].contains("/")
     }
 
     /// Whether `text` starts another path after a space: `~/` or `/`, alone or after an opening backtick, bracket, or
@@ -206,6 +227,13 @@ public struct ExplainRedactor: Sendable {
     private static func startsPath(_ text: Substring) -> Bool {
         let path = text.first.map { "`([{\"'".contains($0) } == true ? text.dropFirst() : text
         return path.hasPrefix("~/") || path.hasPrefix("/")
+    }
+
+    /// Whether a name ends where `after` starts: what follows is not part of a name, or is a full stop that ends a
+    /// sentence rather than starting an extension (`Holdings.` but not `Notes.app`).
+    private static func endsName(_ after: Substring) -> Bool {
+        guard let next = after.first, continuesName(next) else { return true }
+        return next == "." && !continuesName(after.dropFirst().first)
     }
 
     /// Whether a character after a name is still part of it.
