@@ -166,6 +166,42 @@ final class DiskExplainTests: XCTestCase {
         XCTAssertGreaterThan(checked, 0, "\(model.rows.map(\.name))")
     }
 
+    func testAnInstalledAppInTheHomeFolderIsNamedAsProcessesNamesItsGroup() async throws {
+        // ~/Applications/Acme Notes.app is deeper than the first level under ~, so its name is its bundle's placeholder
+        // unless folder names are sent, in its cache's rule and its App caches suggestion alike, as in Processes
+        // (ProcessExplainTests.testAProjectOrAppGroupInTheHomeFolderIsNamedAsItsPathIsSent).
+        try fixture.write("Library/Caches/com.acme.notes/cache.db", bytes: 200_000)
+        let notes = InstalledApp(path: fixture.path("Applications/Acme Notes.app"), bundleID: "com.acme.notes",
+                                 name: "Acme Notes", signature: nil)
+        let home = fixture.home
+        let model = fixture.model(service: fixture.service(analyze: { result, _ in
+            DiskAnalysis(tree: result.tree, context: ReclaimContext(home: home, installedApps: InstalledApps([DiskFixture.editor, notes]),
+                                                                    simulatorRuntimes: .installed([])))
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        model.tab = .origins
+        model.toggle(try XCTUnwrap(model.row(named: "Acme Notes")).id)
+        let cache = try XCTUnwrap(model.row(named: "com.acme.notes")).id
+        model.tab = .suggestions
+        let suggestion = try XCTUnwrap(model.row(named: "App caches: Acme Notes")).id
+        let placeholder = redactor.placeholder("Acme Notes.app")
+
+        let item = try request(model, cache)
+        XCTAssertEqual(item.matchedRule, "Named for an installed app's bundle ID: \(placeholder)")
+        XCTAssertEqual(item.bundleID, "com.acme.notes")
+        let match = try request(model, suggestion)
+        XCTAssertEqual(match.name, "App caches: \(placeholder)")
+        for request in [item, match] {
+            let text = try sent(request)
+            for word in ["Acme", "Notes"] { XCTAssertFalse(text.contains(word), text) }
+        }
+
+        let named = redactor.sendingFolderNames(true)
+        XCTAssertEqual(model.explainRequest(for: cache, redactor: named)?.matchedRule, "Named for an installed app's bundle ID: Acme Notes")
+        XCTAssertEqual(model.explainRequest(for: suggestion, redactor: named)?.name, "App caches: Acme Notes")
+    }
+
     func testALeftoverAndAFolderAtOnePathAreExplainedSeparately() async throws {
         let model = try await fixture.scanned()
         model.tab = .origins

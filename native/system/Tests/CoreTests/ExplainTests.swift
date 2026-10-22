@@ -85,6 +85,20 @@ final class ExplainTests: XCTestCase {
             XCTAssertFalse(text.contains("tool now"), text)
         }
         XCTAssertEqual(redactor.text(sent), sent, "redacting twice changes nothing")
+        // A clause end a slash follows is inside a folder name, so the path goes on.
+        for name in ["Acme Inc. Holdings", "Photos (Paris) backup", "Acme; Merger", "Draft] v2"] {
+            let text = redactor.text("/Users/jdoe/Clients/\(name)/node_modules could not be read.")
+            for word in name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                XCTAssertFalse(text.contains(word), "\(word): \(text)")
+            }
+            XCTAssertTrue(text.hasPrefix("~/Clients/\(redactor.placeholder(name))/"), text)
+        }
+        // A path after it starts its own, so the clause end stays the end.
+        let unread = "~/Applications/\(redactor.placeholder("Acme Notes.app")) has no readable bundle identifier."
+        for next in [" /Applications/Other.app could not be read.", " Runs `/usr/bin/tool`.", " See (~/dev)."] {
+            XCTAssertEqual(redactor.text(unread + next), unread + next)
+        }
+        // Another path in the clause starts its own.        XCTAssertEqual(redactor.text(sent), sent, "redacting twice changes nothing")
         // Another path in the clause starts its own.
         XCTAssertEqual(redactor.text("~/Library/Caches/com.a.b may be data of ~/Applications/Acme Notes.app: unread."),
                        "~/Library/Caches/\(redactor.placeholder("com.a.b may be data of"))"

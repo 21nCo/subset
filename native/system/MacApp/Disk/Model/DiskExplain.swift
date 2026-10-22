@@ -72,7 +72,7 @@ extension DiskWindowModel {
             facts.bundleID = entry.app?.bundleID ?? (entry.rule == .unattributed ? nil : entry.identifier)
             facts.teamID = entry.teamID ?? entry.app?.signature?.teamID
             facts.vendor = entry.app?.signature?.teamName
-            facts.matchedRule = Self.ruleText(entry.rule) + (entry.app.map { ": \($0.name)" } ?? "")
+            facts.matchedRule = Self.ruleText(entry.rule) + (entry.app.map { ": " + Self.appName($0, redactor: redactor) } ?? "")
         }
         for match in analysis?.matches ?? [] where match.items.contains(where: { $0.index == index }) {
             facts.evidence.append("Matches the reclaim rule \(match.rule.name) (\(match.risk.title)): \(match.rule.explanation)")
@@ -83,7 +83,8 @@ extension DiskWindowModel {
     private func matchFacts(_ match: ReclaimMatch, in tree: DiskTree, redactor: ExplainRedactor) -> ExplainFacts {
         let rule = match.rule
         var facts = ExplainFacts(kind: .suggestion,
-                                 name: [rule.name, match.app?.name ?? match.identifier].compactMap { $0 }.joined(separator: ": "))
+                                 name: [rule.name, match.app.map { Self.appName($0, redactor: redactor) } ?? match.identifier]
+                                     .compactMap { $0 }.joined(separator: ": "))
         facts.type = "\(match.risk.title) suggestion"
         facts.bundleID = match.app?.bundleID ?? match.identifier
         facts.teamID = match.app?.signature?.teamID
@@ -137,6 +138,13 @@ extension DiskWindowModel {
             }
         }
         return result + rest
+    }
+
+    /// An installed app's name as sent, the same as Processes names its group: its bundle's name, or the bundle's
+    /// placeholder for an app deeper than the first level under ~ (`~/Applications/Acme Notes.app`) unless folder names
+    /// are sent.
+    static func appName(_ app: InstalledApp, redactor: ExplainRedactor) -> String {
+        redactor.name(app.name, ofPath: app.path)
     }
 
     static func ruleText(_ rule: DiskOriginRule) -> String {

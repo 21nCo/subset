@@ -167,7 +167,9 @@ public struct ExplainRedactor: Sendable {
 
     /// Where a path in free text ends: at a line break; before a space that starts another `~/` path; or at `;`, a
     /// backtick, a closing bracket, or a full stop that ends the clause, that is, one not followed by a letter, digit,
-    /// slash, or name punctuation, so `Notes.app`, `v1.2`, and `Photos (old)/` stay in the path.
+    /// slash, or name punctuation, so `Notes.app`, `v1.2`, and `Photos (old)/` stay in the path. It fails closed: a
+    /// clause end that a slash follows before the next path starts (`Acme Inc. Holdings/x`, `Photos (Paris) backup/x`)
+    /// is inside a folder name, so the path goes on.
     private static func clauseEnd(in text: Substring) -> Substring.Index {
         var index = text.startIndex
         while index < text.endIndex {
@@ -175,12 +177,35 @@ public struct ExplainRedactor: Sendable {
             if character.isNewline { return index }
             let next = text.index(after: index)
             if character.isWhitespace, text[next...].hasPrefix("~/") { return index }
-            if ";`)]}.".contains(character), next == text.endIndex || !continuesName(text[next]) && text[next] != "/" {
+            if ";`)]}.".contains(character), next == text.endIndex || !continuesName(text[next]) && text[next] != "/",
+               !slashBeforeNextPath(text[next...]) {
                 return index
             }
             index = next
         }
         return index
+    }
+
+    /// Whether `text`, after a clause end, has a slash before a line break or the start of another path, so the
+    /// clause end was part of a folder name.
+    private static func slashBeforeNextPath(_ text: Substring) -> Bool {
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character == "/" { return true }
+            if character.isNewline { return false }
+            let next = text.index(after: index)
+            if character.isWhitespace, startsPath(text[next...]) { return false }
+            index = next
+        }
+        return false
+    }
+
+    /// Whether `text` starts another path after a space: `~/` or `/`, alone or after an opening backtick, bracket, or
+    /// quote.
+    private static func startsPath(_ text: Substring) -> Bool {
+        let path = text.first.map { "`([{\"'".contains($0) } == true ? text.dropFirst() : text
+        return path.hasPrefix("~/") || path.hasPrefix("/")
     }
 
     /// Whether a character after a name is still part of it.
