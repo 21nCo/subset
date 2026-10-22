@@ -21,8 +21,7 @@ extension ProcessesWindowModel {
     }
 
     private func explainFacts(_ group: OriginGroup, redactor: ExplainRedactor) -> ExplainFacts {
-        var result = ExplainFacts(kind: .processGroup, name: Self.explainName(group.id, group.displayName, redactor: redactor,
-                                                                             isSubject: true))
+        var result = ExplainFacts(kind: .processGroup, name: Self.explainName(group.id, group.displayName, redactor: redactor))
         let layer = group.id.layer
         result.type = "\(group.id.subgroup == nil ? "Group" : "Subgroup") in the \(layer.title) layer"
         result.path = Self.path(of: group.id)
@@ -81,16 +80,15 @@ extension ProcessesWindowModel {
         }
         return PlacementDetail(layer: layer, attribution: placed, explanation: explanation) { [groups] id in
             Self.explainName(id, groups[id]?.displayName ?? OriginGroup.displayName(id.name(members: [process])),
-                             redactor: redactor, isSubject: false)
+                             redactor: redactor)
         }
     }
 
-    /// A group's name as sent. A group standing for a path in the home folder (a project, or an Unattributed
-    /// executable, which is named by its path) is named as the redactor shows that path; `isSubject` keeps the name of
-    /// the group being explained.
-    private static func explainName(_ id: OriginGroupID, _ name: String, redactor: ExplainRedactor, isSubject: Bool) -> String {
+    /// A group's name as sent. A group standing for a path in the home folder (an app, a login item, a project, or an
+    /// Unattributed executable, which is named by its path) is named as the redactor shows that path, the explained
+    /// group's own name included.
+    private static func explainName(_ id: OriginGroupID, _ name: String, redactor: ExplainRedactor) -> String {
         guard let path = path(of: id), redactor.isInHome(path) else { return name }
-        if name == path { return redactor.path(path, isSubject: isSubject) }
-        return isSubject ? name : redactor.name(ofPath: path)
+        return name == path ? redactor.path(path) : redactor.name(name, ofPath: path)
     }
 }

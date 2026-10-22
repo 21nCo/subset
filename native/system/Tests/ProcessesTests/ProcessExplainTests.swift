@@ -12,11 +12,15 @@ final class ProcessExplainTests: XCTestCase {
                                            key: Array(repeating: 1, count: 32))
     /// Unsigned, outside any app, Homebrew, or terminal, and started by launchd: no rule identifies it.
     private let syncd = "/Users/me/tools/acme-sync/bin/syncd"
+    /// An app in the home folder's own Applications folder.
+    private let notes = "/Users/me/Applications/Acme Notes.app"
 
     private func model() throws -> ProcessesWindowModel {
         let model = ProcessesWindowModel(format: ProcessFixtures.format)
         let processes = ProcessFixtures.workload()
-            + [FixtureProcess(pid: 500, path: syncd, memory: 30 * ProcessFixtures.mib, cpu: 2, energy: 1, signature: ProcessFixtures.unsigned)]
+            + [FixtureProcess(pid: 500, path: syncd, memory: 30 * ProcessFixtures.mib, cpu: 2, energy: 1, signature: ProcessFixtures.unsigned),
+               FixtureProcess(pid: 600, path: notes + "/Contents/MacOS/notesd", memory: 10 * ProcessFixtures.mib, cpu: 1,
+                              energy: 1, signature: ProcessFixtures.unsigned, cwd: "/Users/me/dev/subset/webclient-x")]
         model.apply(try ProcessFixtures.sample(processes, observedAt: t0), memory: nil, cadence: .mainWindowVisible)
         return model
     }
@@ -55,7 +59,7 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(request.matchedRule, "Coding agent session")
         XCTAssertEqual(request.age, "Running for 2 hours")
         XCTAssertEqual(request.path, "~/.local/\(redactor.placeholder("share"))/\(redactor.placeholder("claude"))/"
-            + "\(redactor.placeholder("versions"))/2.1.304")
+            + "\(redactor.placeholder("versions"))/\(redactor.placeholder("2.1.304"))")
         XCTAssertTrue(request.evidence.contains("Runs claude in ~/dev/\(subset)"), "\(request.evidence)")
         let json = try sent(request)
         XCTAssertFalse(json.contains("/Users/me"), json)
@@ -67,12 +71,54 @@ final class ProcessExplainTests: XCTestCase {
         XCTAssertEqual(named.path, "~/.local/share/claude/versions/2.1.304")
     }
 
+    func testAProjectOrAppGroupInTheHomeFolderIsNamedAsItsPathIsSent() throws {
+        let model = try model()
+        let project = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.project(path: "/Users/me/dev/subset"))),
+                                                         redactor: redactor))
+        XCTAssertEqual(project.name, redactor.placeholder("subset"))
+        XCTAssertEqual(project.path, "~/dev/\(redactor.placeholder("subset"))")
+        let app = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.app(bundlePath: notes))), redactor: redactor))
+        XCTAssertEqual(app.name, redactor.placeholder("Acme Notes.app"))
+        XCTAssertEqual(app.path, "~/Applications/\(redactor.placeholder("Acme Notes.app"))")
+        XCTAssertEqual(app.members, ["notesd"], "a process is named by its executable, not a folder")
+
+        let named = redactor.sendingFolderNames(true)
+        let shown = try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.project(path: "/Users/me/dev/subset"))),
+                                                       redactor: named))
+        XCTAssertEqual(shown.name, "subset")
+        XCTAssertEqual(try XCTUnwrap(model.explainRequest(for: .group(OriginGroupID(.app(bundlePath: notes))), redactor: named)).name,
+                       "Acme Notes")
+    }
+
+    func testWithFolderNamesOffNoGroupOrProcessRequestInAnyLayerCarriesADeepFolderName() throws {
+        let model = try model()
+        let attribution = try XCTUnwrap(model.sample?.attribution)
+        let processes = try XCTUnwrap(model.sample?.snapshot.processes)
+        let deep = ["subset", "Acme Notes", "acme-sync", "versions", "webclient-x"]
+        var checked = 0
+        for layer in AttributionLayer.allCases {
+            model.layer = layer
+            let groups = attribution.groups(layer).flatMap { [$0] + $0.subgroups }
+            for row in groups.map({ RowID.group($0.id) }) + processes.map({ RowID.process($0.identity) }) {
+                let request = try XCTUnwrap(model.explainRequest(for: row, redactor: redactor), "\(row)")
+                let text = try sent(request) + request.promptText
+                for name in deep {
+                    XCTAssertFalse(text.contains(name), "\(layer) \(row): \(text)")
+                }
+                XCTAssertFalse(text.contains("/Users/me"), text)
+                checked += 1
+            }
+        }
+        XCTAssertGreaterThan(checked, 40)
+    }
+
     func testOnlyAnUnattributedGroupMayGetASuggestedOriginAndGroupingIsUnchanged() throws {
         let model = try model()
         let group = OriginGroupID(.unattributed(executable: syncd))
         let request = try XCTUnwrap(model.explainRequest(for: .group(group), redactor: redactor))
         XCTAssertTrue(request.maySuggestOrigin)
-        XCTAssertEqual(request.name, "~/tools/\(redactor.placeholder("acme-sync"))/\(redactor.placeholder("bin"))/syncd",
+        XCTAssertEqual(request.name, "~/tools/\(redactor.placeholder("acme-sync"))/\(redactor.placeholder("bin"))/"
+            + redactor.placeholder("syncd"),
                        "an Unattributed group is named by its executable's path, redacted like any path")
         XCTAssertEqual(request.matchedRule, "No origin found; grouped by executable")
         let draft = ExplanationDraft(summary: "A sync daemon.", whatItIs: "Syncs files.", removalSafety: "review",

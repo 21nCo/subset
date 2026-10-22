@@ -16,13 +16,17 @@ final class ExplainTests: XCTestCase {
 
     func testPathsShowHomeAsTildeAndReplaceDeeperFolderNamesUnlessFolderNamesAreSent() {
         XCTAssertEqual(redactor.path("/Users/jdoe"), "~")
-        let deep = redactor.path("/Users/jdoe/dev/acme-merger/api/server", isSubject: true)
+        let deep = redactor.path("/Users/jdoe/dev/acme-merger/api/server")
         let client = redactor.placeholder("acme-merger")
-        XCTAssertEqual(deep, "~/dev/\(client)/\(redactor.placeholder("api"))/server")
+        XCTAssertEqual(deep, "~/dev/\(client)/\(redactor.placeholder("api"))/\(redactor.placeholder("server"))")
         XCTAssertTrue(client.hasPrefix("folder-"))
-        // The same folder name gets the same placeholder, and the item's own name is kept only when it is the subject.
+        // The same folder name gets the same placeholder, the explained item's own name included.
         XCTAssertEqual(redactor.path("/Users/jdoe/dev/acme-merger"), "~/dev/\(client)")
-        XCTAssertEqual(redactor.path("/Users/jdoe/dev/acme-merger", isSubject: true), "~/dev/acme-merger")
+        XCTAssertEqual(redactor.name("acme-merger", ofPath: "/Users/jdoe/dev/acme-merger"), client)
+        XCTAssertEqual(redactor.name("Developer", ofPath: "/Users/jdoe/dev"), "Developer", "the first level is sent")
+        XCTAssertEqual(redactor.name("Editor", ofPath: "/Applications/Editor.app"), "Editor", "outside the home folder")
+        XCTAssertEqual(redactor.sendingFolderNames(true).name("acme-merger", ofPath: "/Users/jdoe/dev/acme-merger"),
+                       "acme-merger")
         // macOS's own folders in ~/Library say nothing about the user; what is inside them does.
         XCTAssertEqual(redactor.path("/Users/jdoe/Library/Caches/com.example.app/data"),
                        "~/Library/Caches/\(redactor.placeholder("com.example.app"))/\(redactor.placeholder("data"))")
@@ -38,7 +42,7 @@ final class ExplainTests: XCTestCase {
     }
 
     func testTheAccountNameIsRemovedWhereverItAppearsButNotInsideOtherWords() {
-        XCTAssertEqual(redactor.path("/Users/jdoe/jdoe-notes/file", isSubject: true), "~/[user]-notes/file")
+        XCTAssertEqual(redactor.path("/Users/jdoe/jdoe-notes/file"), "~/[user]-notes/\(redactor.placeholder("file"))")
         XCTAssertEqual(redactor.text("Started by JDOE in /Users/jdoe/dev for Jane Doe; see /Users/jdoe"),
                        "Started by [user] in ~/dev for [user]; see ~")
         XCTAssertEqual(redactor.text("jdoesmith and /Users/jdoeother"), "jdoesmith and /Users/jdoeother")
@@ -46,12 +50,30 @@ final class ExplainTests: XCTestCase {
         XCTAssertEqual(redactor.sendingFolderNames(true).path("/Users/jdoe/dev/jdoe/x"), "~/dev/[user]/x")
     }
 
+    func testPathsInFreeTextHaveTheirDeepFolderNamesWithheldToo() {
+        let client = redactor.placeholder("secret-client")
+        XCTAssertEqual(redactor.text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
+                       "~/dev/\(client)/\(redactor.placeholder("node_modules")) could not be read.")
+        XCTAssertEqual(redactor.text("Runs `~/dev/secret-client/tool`, see (~/dev/secret-client); ~/dev: ok"),
+                       "Runs `~/dev/\(client)/\(redactor.placeholder("tool"))`, see (~/dev/\(client)); ~/dev: ok")
+        // ~/Library's own folders are read whole, spaces included, and what is inside them is withheld.
+        XCTAssertEqual(redactor.text("/Users/jdoe/Library/Application Support/Acme/db is not a folder."),
+                       "~/Library/Application Support/\(redactor.placeholder("Acme"))/\(redactor.placeholder("db")) is not a folder.")
+        // Text already redacted is unchanged, so a folder keeps one placeholder in every field.
+        let redacted = "Working directory \(redactor.path("/Users/jdoe/dev/secret-client/api"))"
+        XCTAssertEqual(redactor.text(redacted), redacted)
+        XCTAssertEqual(redactor.text("~ and ~/dev and /tmp/secret-client"), "~ and ~/dev and /tmp/secret-client")
+        XCTAssertEqual(redactor.sendingFolderNames(true).text("/Users/jdoe/dev/secret-client/node_modules could not be read."),
+                       "~/dev/secret-client/node_modules could not be read.")
+    }
+
     func testNoFieldOfARequestCarriesTheHomePathAccountNameOrDeepFolderNames() throws {
         var facts = ExplainFacts(kind: .process, name: "server")
         facts.path = "/Users/jdoe/dev/acme-merger/bin/server"
         facts.type = "Process in jdoe's terminal"
         facts.evidence = ["Working directory \(redactor.path("/Users/jdoe/dev/acme-merger"))",
-                          "Child of zsh in /Users/jdoe"]
+                          "Child of zsh in /Users/jdoe", "/Users/jdoe/dev/acme-merger/.git could not be read."]
+        facts.sizes = "Not measured: /Users/jdoe/dev/acme-merger could not be read."
         facts.members = ["Jane Doe helper"]
         facts.matchedRule = "Terminal session"
         let request = ExplainRequest(facts, redactor: redactor)
@@ -62,11 +84,13 @@ final class ExplainTests: XCTestCase {
             XCTAssertFalse(sent.contains("Jane Doe"), sent)
             XCTAssertFalse(sent.contains("acme-merger"), sent)
         }
-        XCTAssertEqual(request.path, "~/dev/\(redactor.placeholder("acme-merger"))/\(redactor.placeholder("bin"))/server")
+        XCTAssertEqual(request.path, "~/dev/\(redactor.placeholder("acme-merger"))/\(redactor.placeholder("bin"))/"
+            + redactor.placeholder("server"))
         XCTAssertEqual(request.type, "Process in [user]'s terminal")
 
         let named = ExplainRequest(facts, redactor: redactor.sendingFolderNames(true))
         XCTAssertEqual(named.path, "~/dev/acme-merger/bin/server")
+        XCTAssertEqual(named.sizes, "Not measured: ~/dev/acme-merger could not be read.")
     }
 
     func testSettingsListEveryFieldThatIsSent() throws {
@@ -274,6 +298,54 @@ final class ExplainTests: XCTestCase {
         guard case .explained = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
     }
 
+    func testClearingTheProviderWhileItsAvailabilityIsReadSendsNothing() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.availabilityGate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request() } }
+        await gate.reached()
+        center.choice = .none
+        gate.open()
+        await asked.value
+        XCTAssertEqual(provider.explained, 0, "the request is not sent to a provider no longer chosen")
+        XCTAssertNil(center.availability)
+        center.choice = .appleIntelligence
+        XCTAssertEqual(center.state(for: key), .idle)
+    }
+
+    func testAnAnswerThatArrivesAfterTheProviderWasClearedIsNotKept() async throws {
+        let provider = FakeProvider()
+        let gate = AnswerGate()
+        provider.gate = gate
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("process:1")
+        let asked = Task { await center.explain(key) { _ in self.request() } }
+        await gate.reached()
+        center.choice = .none
+        gate.open()
+        await asked.value
+        XCTAssertEqual(provider.explained, 1)
+        center.choice = .appleIntelligence
+        XCTAssertEqual(center.state(for: key), .idle, "no answer is kept, and the item can be explained again")
+    }
+
+    func testAnItemGoneBeforeItsRequestIsBuiltSaysSoAndSendsNothing() async {
+        let provider = FakeProvider()
+        let center = center(defaults(), provider: provider)
+        center.choice = .appleIntelligence
+        let key = ExplainKey("disk:/gone")
+        await center.explain(key) { _ in nil }
+        XCTAssertEqual(center.state(for: key), .gone)
+        XCTAssertEqual(provider.availabilityReads, 0)
+        XCTAssertEqual(provider.explained, 0)
+        await center.explain(key) { _ in self.request() }
+        guard case .explained = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
+    }
+
     func testTheSettingIsKeptAndSendFolderNamesChangesTheRedactor() {
         let defaults = defaults()
         let center = center(defaults, provider: nil)
@@ -322,6 +394,8 @@ final class FakeProvider: AIProvider, @unchecked Sendable {
     private var _explained = 0
     private var _availabilityReads = 0
     var gate: AnswerGate?
+    /// Holds the availability read until the test opens it.
+    var availabilityGate: AnswerGate?
 
     var status: AIAvailability {
         get { lock.withLock { _status } }
@@ -335,7 +409,8 @@ final class FakeProvider: AIProvider, @unchecked Sendable {
     var availabilityReads: Int { lock.withLock { _availabilityReads } }
 
     func availability() async -> AIAvailability {
-        lock.withLock {
+        await availabilityGate?.pass()
+        return lock.withLock {
             _availabilityReads += 1
             return _status
         }

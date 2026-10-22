@@ -38,6 +38,11 @@ struct ExplainPanel: View {
             case let .failed(message, _):
                 Text(verbatim: message).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                 Button("Try Again", action: start)
+            case .gone:
+                Text("This item is no longer in the sample or scan, so nothing was sent.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try Again", action: start)
             }
         }
         .task(id: key) { if startsAtOnce { start() } }
@@ -142,7 +147,8 @@ struct SettingsView: View {
                 }
                 Toggle("Send folder names", isOn: $center.sendFolderNames)
                 Text("When off, folder names deeper than the first level under your home folder are sent as placeholders "
-                    + "such as folder-3fa2c1, except macOS's own folders in ~/Library and the name of the item explained.")
+                    + "such as folder-3fa2c1, the explained item's own name included, in its path, its name, and any "
+                    + "text that mentions a path. Only macOS's own folders in ~/Library, such as Caches, are sent by name.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("What Explain sends") {

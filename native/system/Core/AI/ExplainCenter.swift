@@ -21,6 +21,8 @@ public enum ExplainState: Equatable, Sendable {
     /// The provider cannot answer now; nothing was sent.
     case unavailable(AIAvailability)
     case failed(String, ExplainRequest)
+    /// The item left the sample or scan before its request was built; nothing was sent.
+    case gone
 }
 
 /// The Explain setting and each item's explanation. Nothing is sent until the user picks a provider (`choice` starts
@@ -94,7 +96,8 @@ public final class ExplainCenter {
     }
 
     /// Explains an item with the chosen provider, building its request with the current redactor. Does nothing without
-    /// a provider, while the item is being explained, or once it has been. Returns when the answer is in.
+    /// a provider, while the item is being explained, or once it has been. Returns when the answer is in. When the
+    /// user changes the provider meanwhile, the request is not sent if it has not been yet, and no answer is kept.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
         let key = StateKey(choice: choice, item: item)
@@ -102,25 +105,35 @@ public final class ExplainCenter {
         case .working?, .explained?: return
         default: break
         }
-        guard choice != .none, let provider = makeProvider(choice), let request = build(redactor) else { return }
+        guard choice != .none, let provider = makeProvider(choice) else { return }
+        guard let request = build(redactor) else {
+            states[key] = .gone
+            return
+        }
         states[key] = .working(request)
         let availability = await provider.availability()
-        if choice == self.choice { self.availability = availability }
+        guard choice == self.choice else {
+            states[key] = nil
+            return
+        }
+        self.availability = availability
         guard availability.isAvailable else {
             states[key] = .unavailable(availability)
             return
         }
+        let outcome: ExplainState?
         do {
             let draft = try await provider.explain(request)
-            states[key] = .explained(try Explanation(validating: draft, for: request), request)
+            outcome = .explained(try Explanation(validating: draft, for: request), request)
         } catch let ExplainError.unavailable(availability) {
-            states[key] = .unavailable(availability)
+            outcome = .unavailable(availability)
         } catch let error as ExplainError {
-            states[key] = .failed(error.message, request)
+            outcome = .failed(error.message, request)
         } catch is CancellationError {
-            states[key] = nil
+            outcome = nil
         } catch {
-            states[key] = .failed(error.localizedDescription, request)
+            outcome = .failed(error.localizedDescription, request)
         }
+        states[key] = choice == self.choice ? outcome : nil
     }
 }

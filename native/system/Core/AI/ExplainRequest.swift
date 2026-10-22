@@ -123,7 +123,7 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
         kind = facts.kind
         name = cap(facts.name, Self.nameLimit) ?? "Unnamed"
         type = cap(facts.type)
-        path = cap(facts.path.map { redactor.path($0, isSubject: true) })
+        path = cap(facts.path.map(redactor.path))
         bundleID = cap(facts.bundleID)
         signingID = cap(facts.signingID)
         teamID = cap(facts.teamID)
@@ -187,15 +187,17 @@ public struct ExplainRequest: Codable, Equatable, Sendable {
     /// Every field sent, with what it holds, for Settings. Tests check it names every field.
     public static let fieldGuide: [ExplainField] = [
         ExplainField(.kind, "Whether it is a process group, process, folder or file, leftover, or reclaim suggestion."),
-        ExplainField(.name, "The item's name: the group, process, file, or rule name."),
+        ExplainField(.name, "The group, process, file, or rule name, or a placeholder when its path's last name is withheld."),
         ExplainField(.type, "What System knows it as, such as an app group or a folder."),
-        ExplainField(.path, "Its path, with your home folder as ~ and deeper folder names replaced unless Send folder names is on."),
-        ExplainField(.bundleID, "The app's bundle ID, or the identifier a Library entry is named for."),
+        ExplainField(.path, "Its path, with your home folder as ~ and deeper folder names, its own included, replaced "
+            + "unless Send folder names is on."),
+        ExplainField(.bundleID, "The app's bundle ID, or the bundle ID, Team ID, or app name a Library entry is named for "
+            + "when a rule recognized it."),
         ExplainField(.signingID, "The code signature's identifier."),
         ExplainField(.teamID, "The code signature's Team ID."),
         ExplainField(.vendor, "The signing team's name, or Apple."),
         ExplainField(.launchdLabel, "The launchd job's label."),
-        ExplainField(.sizes, "Memory and CPU, or disk sizes."),
+        ExplainField(.sizes, "Memory and CPU, or disk sizes, or why they were not measured, with paths redacted the same way."),
         ExplainField(.age, "How long it has run, or when it last changed."),
         ExplainField(.matchedRule, "The grouping or reclaim rule that placed it."),
         ExplainField(.evidence, "Why System grouped it there, with paths redacted the same way."),
