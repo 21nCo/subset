@@ -3,7 +3,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
-import { ACK_TIMEOUT_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
+import { ACK_TIMEOUT_MS, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
@@ -287,6 +287,59 @@ test('an acknowledgement is answered only once it is saved; one that fails to sa
   assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['finish']);
   assert.deepEqual(saved, [['a1'], []]);
   assert.equal(handlers.acknowledge('a1', 's1').status, 410);
+});
+
+/** Alert handlers on a fake clock with ids `a1`, `a2`, … and handler `s1` registered. */
+function sequentialHandlers() {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  let next = 0;
+  const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, newId: () => `a${++next}` });
+  handlers.register('s1');
+  return { clock, sink, handlers };
+}
+
+test('an acknowledgement whose reply is lost gets its 200 on retry however many alerts settle meanwhile', () => {
+  const { clock, sink, handlers } = sequentialHandlers();
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
+  // The daemon takes the alert, but its reply never reaches the handler.
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  // 50 timers alerting every second settle about 100 alerts a second; the retry comes 15 s later,
+  // after 1,500 more have settled, half of them acknowledged and half fallen back.
+  for (let second = 0; second < 15; second++) {
+    const first = 2 + second * 100;
+    for (let index = 0; index < 100; index++) handlers.deliver({ timerId: 't_2', kind: 'tick', at: clock.now() }, timer);
+    for (let index = 0; index < 50; index++) assert.equal(handlers.acknowledge(`a${first + index}`, 's1').ok, true);
+    clock.advance(1_000);
+  }
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.equal(handlers.status.fallbacks, 1_500 / 2);
+  // The handler retries until it gets a definitive answer, and plays only on a 200.
+  let playedByHandler = 0;
+  const retry = handlers.acknowledge('a1', 's1');
+  if (retry.ok) playedByHandler += 1;
+  assert.deepEqual([retry.ok, playedByHandler], [true, 1]);
+  assert.equal(sink.received.filter(({ alert }) => alert.kind === 'finish').length, 0);
+  // A fallen-back alert from the start of the run still answers 410, not 404.
+  assert.equal(handlers.acknowledge('a52', 's1').status, 410);
+});
+
+test(`a settled outcome is kept for ${SETTLED_RETENTION_MS / 1000} s on the monotonic clock, then forgotten`, () => {
+  const { clock, handlers } = sequentialHandlers();
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
+  handlers.deliver({ timerId: 't_1', kind: 'tick', at: clock.now() }, timer);
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  clock.advance(ACK_TIMEOUT_MS);
+  // A wall clock set forward neither ages nor drops an outcome.
+  clock.jump(10 * SETTLED_RETENTION_MS);
+  clock.advance(SETTLED_RETENTION_MS - ACK_TIMEOUT_MS);
+  assert.deepEqual([handlers.acknowledge('a1', 's1').ok, handlers.acknowledge('a2', 's1').status], [true, 410]);
+  clock.advance(1);
+  assert.equal(handlers.acknowledge('a1', 's1').status, 404);
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.equal(handlers.acknowledge('a2', 's1').status, 404);
 });
 
 /**

@@ -3,8 +3,13 @@ import { deliverToSink } from './alerts.mjs';
 
 /** How long a registered handler has to acknowledge an alert before the daemon's sink plays it. */
 export const ACK_TIMEOUT_MS = 2_000;
-/** How many settled alerts are remembered, so a late or repeated acknowledgement gets its answer. */
-export const SETTLED_LIMIT = 1_000;
+/**
+ * How long a settled alert's outcome is remembered, on the monotonic clock, so a late or repeated
+ * acknowledgement gets its answer. It comfortably outlasts the handler's retries of an
+ * acknowledgement whose reply was lost (each request has a 10 s deadline), and outcomes are never
+ * dropped sooner, however many alerts settle meanwhile; the timer limits bound how many that is.
+ */
+export const SETTLED_RETENTION_MS = 60_000;
 
 export const newAlertId = () => randomBytes(16).toString('hex');
 
@@ -37,13 +42,23 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, owns = 
   let handler = null;
   /** alertId → { alert, timer, subscriberId, handle }, for alerts the handler has not yet acknowledged. */
   const pending = new Map();
-  /** alertId → { outcome: 'acknowledged' | 'fallback', subscriberId }, oldest first. */
+  /** alertId → { outcome: 'acknowledged' | 'fallback', subscriberId, at }, oldest first. */
   const settled = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
+  const monotonic = () => (clock.monotonic ?? clock.now)();
+
+  /** Forgets the outcomes settled more than `SETTLED_RETENTION_MS` ago. */
+  function forgetExpired() {
+    const cutoff = monotonic() - SETTLED_RETENTION_MS;
+    for (const [alertId, { at }] of settled) {
+      if (at >= cutoff) break;
+      settled.delete(alertId);
+    }
+  }
 
   function remember(alertId, outcome, subscriberId) {
-    settled.set(alertId, { outcome, subscriberId });
-    if (settled.size > SETTLED_LIMIT) settled.delete(settled.keys().next().value);
+    forgetExpired();
+    settled.set(alertId, { outcome, subscriberId, at: monotonic() });
   }
 
   const handoffs = (except = null) => [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer }]) => ({ alertId, alert, timer }));
@@ -153,6 +168,7 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, owns = 
      * acknowledgement gets the same answer.
      */
     acknowledge(alertId, subscriberId) {
+      forgetExpired();
       const entry = pending.get(alertId);
       const owner = entry?.subscriberId ?? settled.get(alertId)?.subscriberId;
       if (owner === undefined) return refused(404, 'not_found', 'No alert has that id.');
