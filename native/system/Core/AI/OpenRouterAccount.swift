@@ -2,8 +2,9 @@ import Foundation
 import Observation
 
 /// The OpenRouter part of Settings: **Add key**, **Test key**, **Remove key**, and the model ID. Only whether a key is
-/// stored is kept here; the key itself stays in the Keychain (`OpenRouterKeyStore`) and is read only to send a request
-/// or the key test. The model ID is kept in user defaults; the key never is.
+/// stored is kept here; the key itself stays in the Keychain (`OpenRouterKeyStore`) and is read, off the main actor, only
+/// to send a request or the key test and, while a key is stored, to check that a model ID entered does not contain it.
+/// The model ID is kept in user defaults; the key never is.
 @MainActor
 @Observable
 public final class OpenRouterAccount {
@@ -18,11 +19,12 @@ public final class OpenRouterAccount {
     /// Why the latest Add key, Remove key, or Keychain read failed; cleared by the next one that works.
     public private(set) var keyError: String?
     public private(set) var keyTest: KeyTest?
-    /// The model ID as the user entered it; empty sends `openrouter/auto` (`OpenRouterProvider.model(_:)`). An entry
-    /// that looks like an API key, or is the key stored, whichever was entered first, is refused: it is cleared, never
-    /// kept in user defaults, and `modelError` says why. Unless no key is known to be stored, an entry is kept in user
-    /// defaults only once a read of the key, off the main actor, shows it is not the key (`keep(_:)`); while the key
-    /// cannot be read, it is not kept, and it is checked again when whether a key is stored is next read.
+    /// The model ID as the user entered it. An entry with an API key anywhere in it (`sk-or-`, or the key stored,
+    /// whichever was entered first) is refused: it is cleared, never kept in user defaults or used, and `modelError`
+    /// says why. One that is not a model ID (`OpenRouterProvider.isModelID(_:)`) is not kept or used either:
+    /// `openrouter/auto` is. Unless no key is known to be stored, an entry is kept and used only once a read of the
+    /// key, off the main actor, shows it does not contain the key (`keep(_:)`); while the key cannot be read, it is
+    /// not, and it is checked again when whether a key is stored is next read.
     public var model: String {
         didSet {
             modelCheck?.cancel()
@@ -36,8 +38,11 @@ public final class OpenRouterAccount {
             keep(model)
         }
     }
-    /// Why the model ID entered was cleared; cleared by the next one kept.
+    /// Why the model ID entered was cleared, or is not used; cleared by the next one kept.
     public private(set) var modelError: String?
+    /// The model ID requests use: the latest entry shown not to contain the key, or empty for `openrouter/auto`.
+    /// User defaults hold only this, so neither the preview nor a request ever has an entry that was not checked.
+    public private(set) var checkedModel: String
 
     /// Called once a key is removed, or found no longer stored, so the provider setting stops being OpenRouter.
     @ObservationIgnored var onKeyRemoved: (() -> Void)?
@@ -58,12 +63,16 @@ public final class OpenRouterAccount {
     @ObservationIgnored private(set) var presenceFailed = false
     /// The check of the model ID entered against the key stored.
     @ObservationIgnored private var modelCheck: Task<Void, Never>?
+    /// Whether the latest check of the model ID entered could not read the key, so it is checked again.
+    @ObservationIgnored private var modelUnchecked = false
 
     static let modelKey = "openRouterModel"
-    public static let keyAsModelMessage = "That looks like an API key, not a model ID, so it was cleared and not "
-        + "kept: openrouter/auto is used. Add the key with Add Key."
-    public static let modelUncheckedMessage = "The Keychain could not be read to check that this model ID is not your "
-        + "API key, so it is not kept for next time yet. It is checked again when Settings is next shown."
+    public static let keyAsModelMessage = "That contains an API key, so it was cleared and not kept: openrouter/auto "
+        + "is used. Add the key with Add Key."
+    public static let modelUncheckedMessage = "The Keychain could not be read to check that this model ID does not "
+        + "contain your API key, so it is not used or kept yet. It is checked again when Settings is next shown."
+    public static let notAModelMessage = "That is not a model ID such as anthropic/claude-sonnet-4, so openrouter/auto "
+        + "is used."
     public static let invalidKeyMessage = "That is not an API key: paste the whole key from openrouter.ai, with no spaces "
         + "inside it."
 
@@ -73,10 +82,11 @@ public final class OpenRouterAccount {
         self.client = client
         self.defaults = defaults
         self.log = log
-        let stored = defaults.string(forKey: Self.modelKey) ?? ""
-        let refused = OpenRouterProvider.looksLikeKey(stored)
+        let stored = (defaults.string(forKey: Self.modelKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let refused = !stored.isEmpty && !OpenRouterProvider.isModelID(stored)
         if refused { defaults.set("", forKey: Self.modelKey) }
         model = refused ? "" : stored
+        checkedModel = ""
         do {
             hasKey = try keys.containsKey()
         } catch {
@@ -84,11 +94,13 @@ public final class OpenRouterAccount {
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
             presenceFailed = true
         }
+        // Kept before, it is still checked against the key stored now before it is used.
+        keep(model)
     }
 
-    /// The provider for the model ID set now.
+    /// The provider for the model ID checked last (`checkedModel`).
     public func provider() -> OpenRouterProvider {
-        OpenRouterProvider(keys: keys, model: model, client: client)
+        OpenRouterProvider(keys: keys, model: checkedModel, client: client)
     }
 
     /// Stores `entered` as the key, replacing the one stored. Returns whether it was stored; an entry that cannot be a
@@ -100,12 +112,13 @@ public final class OpenRouterAccount {
             return false
         }
         stopKeyTest()
-        // A key entered as the model ID before is not kept there, nor one kept before an entry not checked yet.
-        if model.trimmingCharacters(in: .whitespacesAndNewlines) == key {
+        // A model ID entered or kept before that contains the key is neither kept nor used.
+        if OpenRouterProvider.contains(key: key, in: model) {
             model = ""
             modelError = Self.keyAsModelMessage
         }
-        if defaults.string(forKey: Self.modelKey)?.trimmingCharacters(in: .whitespacesAndNewlines) == key {
+        if OpenRouterProvider.contains(key: key, in: checkedModel) {
+            checkedModel = ""
             defaults.set("", forKey: Self.modelKey)
         }
         do {
@@ -164,7 +177,7 @@ public final class OpenRouterAccount {
                 hasKey = stored
             }
             // A model ID that could not be checked against the key is checked again.
-            if modelError == Self.modelUncheckedMessage, modelCheck == nil { keep(model) }
+            if modelUnchecked, modelCheck == nil { keep(model) }
         case let .failure(error):
             // Whether a key is stored is not known: what is shown stays.
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
@@ -183,14 +196,21 @@ public final class OpenRouterAccount {
         keyTest = nil
     }
 
-    /// Keeps `entered` in user defaults. Unless no key is known to be stored, a non-empty entry is first compared with
-    /// the key, read off the main actor: one that is the key is cleared instead (`keyAsModelMessage`), and one that
-    /// cannot be compared, because the key cannot be read, is not kept (`modelUncheckedMessage`), so user defaults keep
-    /// what they held. A later entry ends the check.
+    /// Uses and keeps `entered` (`checkedModel`). An empty entry, or one that is not a model ID, is not kept: it uses
+    /// `openrouter/auto` at once. Unless no key is known to be stored, a non-empty entry is then compared with the key,
+    /// read off the main actor: one that contains it is cleared (`keyAsModelMessage`), and a model ID that cannot be
+    /// compared, because the key cannot be read, is not used or kept (`modelUncheckedMessage`), so what was checked
+    /// before stays. A later entry ends the check.
     private func keep(_ entered: String) {
         let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isModelID = OpenRouterProvider.isModelID(candidate)
+        modelUnchecked = false
+        if !isModelID {
+            use("")
+            if !candidate.isEmpty { modelError = Self.notAModelMessage }
+        }
         guard !candidate.isEmpty, hasKey || presenceFailed else {
-            defaults.set(entered, forKey: Self.modelKey)
+            if isModelID { use(candidate) }
             return
         }
         let keys = self.keys
@@ -199,17 +219,24 @@ public final class OpenRouterAccount {
             guard !Task.isCancelled, model == entered else { return }
             modelCheck = nil
             switch read {
-            case .success(candidate):
+            case let .success(key?) where OpenRouterProvider.contains(key: key, in: candidate):
                 model = ""
                 modelError = Self.keyAsModelMessage
             case .success:
+                guard isModelID else { return }
                 if modelError == Self.modelUncheckedMessage { modelError = nil }
-                defaults.set(entered, forKey: Self.modelKey)
+                use(candidate)
             case .failure:
-                modelError = Self.modelUncheckedMessage
+                modelUnchecked = true
+                if isModelID { modelError = Self.modelUncheckedMessage }
             }
         }
         modelCheck = task
+    }
+
+    private func use(_ checked: String) {
+        checkedModel = checked
+        defaults.set(checked, forKey: Self.modelKey)
     }
 
     /// Waits for the model ID entered to be checked against the key and kept.

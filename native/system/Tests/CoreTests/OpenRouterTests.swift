@@ -800,73 +800,128 @@ final class OpenRouterTests: XCTestCase {
 
     // MARK: Model ID
 
-    func testAKeyEnteredAsTheModelIDIsNeverKeptLoggedOrSent() async throws {
+    func testOnlyAModelIDShapedEntryIsSentAsTheModel() {
+        for model in ["openrouter/auto", "anthropic/claude-sonnet-4", "meta-llama/llama-3.1-8b-instruct:free",
+                      "~anthropic/claude-sonnet-latest", " openai/gpt-4o\n"] {
+            XCTAssertTrue(OpenRouterProvider.isModelID(model.trimmingCharacters(in: .whitespacesAndNewlines)), model)
+            XCTAssertEqual(OpenRouterProvider.model(model), model.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        for entry in ["", "gpt-4o", "\"a/b\"", "a/b c", "a/b/c", "<a/b>", "a/b:", "a/b\nc/d", "ā/b", "x/sk-or-v1-abc",
+                      "x/SK-OR-v1-abc", "sk-or-v1-abc:free", "a/" + String(repeating: "b", count: 199)] {
+            XCTAssertFalse(OpenRouterProvider.isModelID(entry), entry)
+            XCTAssertEqual(OpenRouterProvider.model(entry), OpenRouterProvider.defaultModel, entry)
+        }
+    }
+
+    func testAKeyAnywhereInTheModelIDIsNeverKeptPreviewedLoggedOrSent() async throws {
         let defaults = defaults()
         let log = RecordingLog()
         let keychain = FakeKeychain()
         let (center, account) = center(defaults, keychain: keychain, key: Self.key, log: log)
-        XCTAssertEqual(OpenRouterProvider.model(" SK-OR-v1-abc "), OpenRouterProvider.defaultModel)
-        account.model = Self.key
-        XCTAssertEqual(account.model, "")
-        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
-        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        let wrapped = { (key: String) in ["\(key)", "\"\(key)\"", "x/\(key)", "\(key):free", "openai/gpt-\(key)-mini",
+                                          "a/b\(key)c", "~X/" + key.uppercased()] }
+
+        // An OpenRouter key, alone or inside other text, is cleared as it is entered.
+        for entry in wrapped(Self.key) + [" SK-OR-v1-abc "] {
+            account.model = entry
+            XCTAssertEqual(account.model, "", entry)
+            XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage, entry)
+            XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "", entry)
+            XCTAssertEqual(OpenRouterProvider.model(entry), OpenRouterProvider.defaultModel, entry)
+        }
         account.model = "anthropic/claude-sonnet"
         XCTAssertNil(account.modelError)
 
-        // A key with another prefix, entered as the model before it was added, is cleared once it is added.
-        account.model = "or-token-0123456789"
-        XCTAssertTrue(account.addKey("or-token-0123456789"))
+        // A key with another prefix, inside a model ID entered before it was added, is cleared once it is added.
+        let key = "tok-0123456789abcdef"
+        account.removeKey()
+        account.model = "x/\(key)"
+        await account.modelChecked()
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "x/\(key)", "no key to compare it with yet")
+        XCTAssertTrue(account.addKey(key))
         XCTAssertEqual(account.model, "")
         XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
 
-        // The same key, added first and then entered as the model: cleared once checked against the key, never kept.
-        account.model = "or-token-0123456789"
-        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "", "not kept before it is checked")
+        // The same key, added first and then entered inside the model: neither kept nor used, then cleared once checked.
+        for entry in wrapped(key) {
+            account.model = entry
+            XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "", "not kept before it is checked: \(entry)")
+            XCTAssertEqual(account.provider().model, OpenRouterProvider.defaultModel, entry)
+            await account.modelChecked()
+            XCTAssertEqual(account.model, "", entry)
+            XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage, entry)
+            XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "", entry)
+        }
+
+        // Entered while the preview is built and before it is checked: the preview and the body have the model
+        // checked before, never the entry.
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsDataReads = true
+        account.model = "x/\(key)"
+        try await until { keychain.heldDataReads == 1 }
+        let item = ExplainKey("pending")
+        let task = Task { await center.explain(item) { _ in self.request() } }
+        let preview = try await confirming(center, item)
+        XCTAssertFalse(preview.text.lowercased().contains(key), preview.text)
+        XCTAssertTrue(preview.text.contains(#""model" : "openrouter/auto""#), preview.text)
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
         await account.modelChecked()
         XCTAssertEqual(account.model, "")
-        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
-        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
-        // Sent before that check ends, it is refused and nothing is sent.
-        let early = OpenRouterProvider(keys: OpenRouterKeyStore(items: keychain), model: "or-token-0123456789",
-                                       client: client(log: log))
-        do {
-            _ = try await early.explain(request())
-            XCTFail("sent")
-        } catch {
-            XCTAssertEqual(error as? ExplainError, .failed(OpenRouterProvider.keyAsModelFailure))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        center.confirmSend(item)
+        await task.value
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(preview.text.utf8)])
+
+        // A provider given such a model ID by any other way reads the key, refuses it, and sends nothing.
+        for entry in wrapped(key) where OpenRouterProvider.isModelID(entry) {
+            let early = OpenRouterProvider(keys: OpenRouterKeyStore(items: keychain), model: entry, client: client(log: log))
+            do {
+                _ = try await early.explain(request())
+                XCTFail("sent \(entry)")
+            } catch {
+                XCTAssertEqual(error as? ExplainError, .failed(OpenRouterProvider.keyAsModelFailure), entry)
+            }
         }
-        XCTAssertTrue(StubProtocol.requests.isEmpty)
-        for (name, value) in defaults.dictionaryRepresentation() {
-            XCTAssertFalse("\(name) \(value)".contains("or-token"), name)
-        }
-        XCTAssertTrue(account.addKey(Self.key))
+        XCTAssertEqual(StubProtocol.requests.count, 1)
 
         // A custom model ID is sent, and kept once checked, but never logged.
         account.model = "anthropic/claude-sonnet"
         await account.modelChecked()
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
-        center.choose(.openRouter)
         StubProtocol.enqueue(status: 200, json: completion(Self.answer))
         await explainConfirmed(center, ExplainKey("custom"))
         let customBody = try XCTUnwrap(StubProtocol.requests.last?.body)
         let custom = try XCTUnwrap(JSONSerialization.jsonObject(with: customBody) as? [String: Any])
         XCTAssertEqual(custom["model"] as? String, "anthropic/claude-sonnet")
-        XCTAssertFalse(log.messages.isEmpty)
-        for message in log.messages { XCTAssertFalse(message.contains("anthropic"), message) }
-        account.model = ""
 
-        // One stored before is not used either.
-        defaults.set(Self.key, forKey: "openRouterModel")
-        let (_, reopened) = self.center(defaults, keychain: FakeKeychain(), key: Self.key, log: log)
+        // One kept before that holds the key now stored is not used at launch, and is cleared once checked.
+        defaults.set("x/\(key)", forKey: "openRouterModel")
+        let (_, reopened) = self.center(defaults, keychain: keychain, log: log)
+        XCTAssertEqual(reopened.provider().model, OpenRouterProvider.defaultModel)
+        await reopened.modelChecked()
         XCTAssertEqual(reopened.model, "")
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        defaults.set("\"\(Self.key)\"", forKey: "openRouterModel")
+        let (_, refused) = self.center(defaults, keychain: FakeKeychain(), log: log)
+        XCTAssertEqual(refused.model, "")
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        // One kept before that does not hold it is used once checked.
+        defaults.set("anthropic/claude-sonnet", forKey: "openRouterModel")
+        let (_, kept) = self.center(defaults, keychain: keychain, log: log)
+        await kept.modelChecked()
+        XCTAssertEqual(kept.provider().model, "anthropic/claude-sonnet")
 
-        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
-        await explainConfirmed(center, ExplainKey("a"))
-        let body = try XCTUnwrap(StubProtocol.requests.last?.body)
-        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(sent["model"] as? String, OpenRouterProvider.defaultModel)
-        for message in log.messages { XCTAssertFalse(message.contains("or-token") || message.contains("sk-or-v1"), message) }
+        XCTAssertFalse(log.messages.isEmpty)
+        for message in log.messages {
+            XCTAssertFalse(message.lowercased().contains(key) || message.contains("sk-or-v1") || message.contains("anthropic"),
+                           message)
+        }
+        for (name, value) in defaults.dictionaryRepresentation() {
+            XCTAssertFalse("\(name) \(value)".lowercased().contains(key) || "\(name) \(value)".contains("sk-or-v1"), name)
+        }
     }
 
     func testAModelIDIsNotKeptWhileTheKeyCannotBeReadToCompareItWith() async throws {
@@ -874,23 +929,24 @@ final class OpenRouterTests: XCTestCase {
         let log = RecordingLog()
         let keychain = FakeKeychain()
         let (_, account) = center(defaults, keychain: keychain, log: log)
-        let key = "or-token-0123456789"
+        let key = "tok-0123456789abcdef"
         XCTAssertTrue(account.addKey(key))
         account.model = "anthropic/claude-sonnet"
         await account.modelChecked()
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
 
-        // The key, entered as the model while the Keychain cannot be read: not kept, and what was kept stays.
+        // The key inside a model ID entered while the Keychain cannot be read: not kept or used; what was kept stays.
         keychain.failure = errSecInteractionNotAllowed
-        account.model = key
+        account.model = "x/\(key)"
         await account.modelChecked()
         XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
+        XCTAssertEqual(account.provider().model, "anthropic/claude-sonnet")
         for (name, value) in defaults.dictionaryRepresentation() {
             XCTAssertFalse("\(name) \(value)".contains(key), name)
         }
 
-        // Checked again once the Keychain can be read: found to be the key, it is cleared.
+        // Checked again once the Keychain can be read: found to hold the key, it is cleared.
         keychain.failure = nil
         await account.refreshKey()
         await account.modelChecked()
@@ -898,13 +954,26 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
 
+        // Not a model ID, with the key in quotes: openrouter/auto at once, and cleared once the key can be read.
+        keychain.failure = errSecInteractionNotAllowed
+        account.model = "\"\(key)\""
+        await account.modelChecked()
+        XCTAssertEqual(account.modelError, OpenRouterAccount.notAModelMessage)
+        XCTAssertEqual(account.provider().model, OpenRouterProvider.defaultModel)
+        keychain.failure = nil
+        await account.refreshKey()
+        await account.modelChecked()
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+
         // Whether a key is stored unknown at launch: an entry is still checked before it is kept.
         keychain.failure = errSecInteractionNotAllowed
         let (_, unread) = center(defaults, keychain: keychain, log: log)
         XCTAssertFalse(unread.hasKey)
-        unread.model = key
+        unread.model = "x/\(key)"
         await unread.modelChecked()
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        XCTAssertEqual(unread.provider().model, OpenRouterProvider.defaultModel)
         keychain.failure = nil
         await unread.refreshKey()
         await unread.modelChecked()

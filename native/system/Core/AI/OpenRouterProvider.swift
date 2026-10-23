@@ -24,8 +24,8 @@ public struct SystemExplainLog: ExplainLog {
 /// the Keychain for each request and goes only into its `Authorization` header.
 public struct OpenRouterProvider: AIProvider {
     public static let defaultModel = "openrouter/auto"
-    static let keyAsModelFailure = "The model ID in Settings is your API key, so nothing was sent. Clear the Model "
-        + "field in Settings, then ask again."
+    static let keyAsModelFailure = "The model ID in Settings contains your API key, so nothing was sent. Clear the "
+        + "Model field in Settings, then ask again."
     /// The longest model ID accepted.
     static let modelLimit = 200
 
@@ -39,19 +39,30 @@ public struct OpenRouterProvider: AIProvider {
         self.client = client
     }
 
-    /// The model ID sent: what the user entered, without the whitespace around it, or `openrouter/auto` when that is
-    /// empty, is not one run of visible ASCII characters, or looks like an API key (`looksLikeKey(_:)`), so a key
-    /// pasted there is never sent, logged, or shown as the model.
+    /// The model ID sent: what the user entered, without the whitespace around it, when it is a model ID
+    /// (`isModelID(_:)`), otherwise `openrouter/auto`, so a key pasted there, alone or inside other text, is never
+    /// sent, logged, or shown as the model.
     public static func model(_ entered: String) -> String {
         let model = entered.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty, model.count <= modelLimit, !looksLikeKey(model),
-              model.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else { return defaultModel }
-        return model
+        return isModelID(model) ? model : defaultModel
     }
 
-    /// Whether `text` starts like an OpenRouter API key (`sk-or-`), which no model ID does.
+    /// Whether `text` is shaped like an OpenRouter model ID, `[~]author/model[:variant]` in letters, digits, `.`, `_`
+    /// and `-`, at most `modelLimit` characters, with no `sk-or-` anywhere in it. Quotes, brackets, spaces and the
+    /// like cannot wrap a key in one.
+    public static func isModelID(_ text: String) -> Bool {
+        text.count <= modelLimit && !looksLikeKey(text)
+            && text.wholeMatch(of: /~?[A-Za-z0-9._\-]+\/[A-Za-z0-9._\-]+(:[A-Za-z0-9._\-]+)?/) != nil
+    }
+
+    /// Whether `text` holds an OpenRouter API key (`sk-or-`, in any case) anywhere in it, which no model ID does.
     public static func looksLikeKey(_ text: String) -> Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("sk-or-")
+        text.lowercased().contains("sk-or-")
+    }
+
+    /// Whether `text` holds `key` anywhere in it, in any case.
+    public static func contains(key: String, in text: String) -> Bool {
+        !key.isEmpty && text.lowercased().contains(key.lowercased())
     }
 
     /// Available while a key is stored; it is not read, and nothing is sent.
@@ -74,7 +85,7 @@ public struct OpenRouterProvider: AIProvider {
     }
 
     /// Asks `submitting` only right before an attempt is handed to the network: not when the key cannot be read, the
-    /// model ID is the key, or it is cancelled first.
+    /// model ID contains the key, or it is cancelled first.
     public func explain(_ request: ExplainRequest,
                         submitting: @escaping @Sendable () -> Bool) async throws -> ExplanationDraft {
         let key: String?
@@ -84,8 +95,8 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.unavailable(.openRouterKeyUnreadable)
         }
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
-        // The key entered as the model ID, before Settings has cleared it: not sent in the body.
-        guard model != key else { throw ExplainError.failed(Self.keyAsModelFailure) }
+        // The key inside the model ID, however Settings came to keep it: not sent in the body.
+        guard !Self.contains(key: key, in: model) else { throw ExplainError.failed(Self.keyAsModelFailure) }
         let data = try await client.send(.chat(try body(for: request)), key: key, submitting: submitting)
         return try Self.draft(from: data, key: key)
     }
