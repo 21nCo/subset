@@ -24,8 +24,9 @@ struct OpenRouterSection: View {
             }
             if account.hasKey {
                 HStack {
+                    // Not while Add Key or Remove Key waits for the Keychain: the key it would test may be going.
                     Button("Test Key") { Task { await account.testKey() } }
-                        .disabled(account.keyTest == .testing)
+                        .disabled(account.keyTest == .testing || account.isChangingKey)
                     Button("Remove Key", role: .destructive) { Task { await account.removeKey() } }
                     Spacer()
                     keyTest

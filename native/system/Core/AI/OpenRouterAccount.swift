@@ -34,6 +34,8 @@ public final class OpenRouterAccount {
             if modelUnchecked, modelCheck == nil, presence == .stored || presence == .absent { keep(model) }
         }
     }
+    /// Whether an Add key or Remove key is waiting for the Keychain; Settings does not offer Test key meanwhile.
+    public var isChangingKey: Bool { pendingKeyChanges > 0 }
     /// Whether Settings shows a key stored: Test key and Remove key are offered then.
     public var hasKey: Bool {
         switch presence {
@@ -88,11 +90,13 @@ public final class OpenRouterAccount {
     @ObservationIgnored private var keyTestTask: Task<Void, Never>?
     /// Counts Add key and Remove key, so a presence read, or one of them, that a later one overtakes changes nothing.
     @ObservationIgnored private var keyChanges = 0
-    /// The Add key and Remove key calls not finished yet. While there is one, no key is known not to be stored.
-    @ObservationIgnored private(set) var pendingKeyChanges = 0
-    /// Makes the Keychain calls that store or remove the key, read whether one is stored, or read it to check a model
-    /// ID, one at a time in the order they are asked for and off the main actor, so a slow or prompting Keychain
-    /// cannot hold the app, and what the Keychain holds after overlapping changes is what the last one asked for.
+    /// The Add key and Remove key calls not finished yet. While there is one, no key is known not to be stored, and
+    /// Settings does not offer Test key.
+    private(set) var pendingKeyChanges = 0
+    /// Makes the Keychain calls that store or remove the key, read whether one is stored, or read it for the key test
+    /// or to check a model ID, one at a time in the order they are asked for and off the main actor, so a slow or
+    /// prompting Keychain cannot hold the app, and what the Keychain holds after overlapping changes is what the last
+    /// one asked for.
     @ObservationIgnored private let keychainQueue = DispatchQueue(label: "dev.subset.system.openrouter.keychain")
     /// The check of the model ID entered against the key stored.
     @ObservationIgnored private var modelCheck: Task<Void, Never>?
@@ -323,7 +327,8 @@ public final class OpenRouterAccount {
 
     /// Sends the key test, which carries no user data (`OpenRouterClient.Request.keyTest`), and shows whether the key
     /// works or OpenRouter's error. A test that a later one, or Add key or Remove key, overtakes is not shown.
-    /// Add key and Remove key cancel it: once either is pressed, nothing more is sent with the key it read.
+    /// The key is read after every Add key and Remove key pressed before the test, so it is the key they leave stored,
+    /// or none; Add key and Remove key pressed after it cancel it: nothing more is sent with the key it read.
     public func testKey() async {
         keyTestTask?.cancel()
         tests += 1
@@ -338,10 +343,10 @@ public final class OpenRouterAccount {
     private func runKeyTest(_ test: Int) async {
         let outcome: KeyTest?
         do {
-            // Read off the main actor, as a request reads it, so a slow or prompting Keychain cannot hold the app.
-            let keys = self.keys
-            let key = try await Task.detached(operation: { try keys.readKey() }).value
-            // Add key or Remove key while it was read: what was read is not the key stored now, so it is not used.
+            // Read off the main actor, so a slow or prompting Keychain cannot hold the app, and on the Keychain queue,
+            // after the Add key and Remove key in flight, so a key being replaced or removed is never sent.
+            let key = try await onKeychainQueue { try $0.readKey() }.get()
+            // Add key or Remove key pressed after the test: what was read is not the key stored now, so it is not used.
             guard test == tests, !Task.isCancelled else { return }
             guard let key else {
                 presence = .absent

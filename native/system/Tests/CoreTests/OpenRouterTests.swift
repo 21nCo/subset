@@ -400,15 +400,19 @@ final class OpenRouterTests: XCTestCase {
         let keychain = FakeKeychain()
         let account = await account(defaults(), keychain: keychain, key: Self.key)
 
-        // Removed, then another added, after the test read the first key: neither key is sent by it.
+        // Removed, then another added, after the test read the first key: neither key is sent by it. Both wait for
+        // the test's read, which is made before them.
         keychain.holdsDataReads = true
         let first = Task { await account.testKey() }
         try await until { keychain.heldDataReads == 1 }
-        await account.removeKey()
-        let replaced = await account.addKey("sk-or-v1-replacement")
-        XCTAssertTrue(replaced)
+        let remove = Task { await account.removeKey() }
+        let replace = Task { await account.addKey("sk-or-v1-replacement") }
+        try await until { account.pendingKeyChanges == 2 }
         keychain.releaseDataRead()
         await first.value
+        await remove.value
+        let replaced = await replace.value
+        XCTAssertTrue(replaced)
         XCTAssertTrue(StubProtocol.requests.isEmpty, "the removed key is not sent")
         XCTAssertNil(account.keyTest)
         XCTAssertTrue(account.hasKey)
@@ -417,15 +421,60 @@ final class OpenRouterTests: XCTestCase {
         try OpenRouterKeyStore(items: keychain).remove()
         let second = Task { await account.testKey() }
         try await until { keychain.heldDataReads == 1 }
-        let added = await account.addKey("sk-or-v1-third")
-        XCTAssertTrue(added)
+        let add = Task { await account.addKey("sk-or-v1-third") }
+        try await until { account.pendingKeyChanges == 1 }
         keychain.releaseDataRead()
         await second.value
+        let added = await add.value
         keychain.holdsDataReads = false
+        XCTAssertTrue(added)
         XCTAssertTrue(account.hasKey, "the stale read does not hide the key just added")
         XCTAssertNil(account.keyTest)
         XCTAssertNil(account.keyError)
         XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testAKeyTestStartedWhileAKeyIsBeingReplacedOrRemovedTestsOnlyTheKeyLeftStored() async throws {
+        let keychain = FakeKeychain()
+        let account = await account(defaults(), keychain: keychain, key: Self.key)
+        let replacement = "sk-or-v1-" + String(repeating: "f", count: 64)
+
+        // Replace Key waits for the Keychain, and Test Key is pressed meanwhile: the key tested is the replacement.
+        keychain.holdsOtherCalls = true
+        let replace = Task { await account.addKey(replacement) }
+        try await until { keychain.heldOtherCalls == 1 }
+        XCTAssertTrue(account.isChangingKey, "Settings does not offer Test Key")
+        StubProtocol.enqueue(status: 200, json: #"{"data":{"label":"x"}}"#)
+        let test = Task { await account.testKey() }
+        try await until { account.keyTest != nil }
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        let replaced = await replace.value
+        await test.value
+        XCTAssertTrue(replaced)
+        XCTAssertFalse(account.isChangingKey)
+        XCTAssertEqual(StubProtocol.requests.map { $0.headers["Authorization"] }, ["Bearer \(replacement)"],
+                       "the key being replaced is never sent")
+        XCTAssertEqual(account.keyTest, .passed)
+        XCTAssertEqual(account.presence, .stored)
+
+        // Remove Key waits for the Keychain, and Test Key is pressed meanwhile: nothing is sent, and no key is shown.
+        StubProtocol.reset()
+        StubProtocol.enqueue(status: 200, json: #"{"data":{"label":"x"}}"#)
+        keychain.holdsOtherCalls = true
+        let remove = Task { await account.removeKey() }
+        try await until { keychain.heldOtherCalls == 1 }
+        XCTAssertTrue(account.isChangingKey)
+        let testAgain = Task { await account.testKey() }
+        try await until { account.keyTest != nil }
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        await remove.value
+        await testAgain.value
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "the key being removed is never sent")
+        XCTAssertEqual(account.keyTest, .failed(ExplainError.unavailable(.noOpenRouterKey).message))
+        XCTAssertEqual(account.presence, .absent)
+        XCTAssertEqual(keychain.count, 0)
     }
 
     func testRemovingTheKeyDuringTheKeyTestsBackoffSendsNoRetry() async throws {
