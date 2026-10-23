@@ -195,7 +195,8 @@ test('a finish the disk refused is recorded at a later run, shown to subscribers
   } finally {
     chmodSync(daemon.paths.dataDir, 0o700);
   }
-  assert.ok(logs.some((line) => /could not save finished timers/.test(line)));
+  // scheduler.json is saved first; while it is behind, the finish is not recorded either.
+  assert.ok(logs.some((line) => /could not save scheduler\.json/.test(line)));
   assert.equal(storedStatus(), 'running');
   assert.equal(daemon.store.timers[0].runtime.status, 'running');
 

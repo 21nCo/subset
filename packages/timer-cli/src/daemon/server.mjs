@@ -3,7 +3,8 @@ import { chmodSync, lstatSync, readdirSync, renameSync, unlinkSync } from 'node:
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
-import { createRecordingSink, deliverToSink } from './alerts.mjs';
+import { ACK_TIMEOUT_MS, createAlertHandlers, replayHandoffs } from './alert-handlers.mjs';
+import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
@@ -21,9 +22,13 @@ const SUBSCRIBER_STALL_MS = 30_000;
 const MAX_QUEUED_ALERT_BYTES = 1024 * 1024;
 /** How long requests already being handled get to finish, with a 503 at most, once shutdown begins. */
 const SHUTDOWN_GRACE_MS = 1_000;
+/** How long shutdown waits for the sink to finish the alerts it played at shutdown (the finish's Glass sounds take about 3 s). */
+const SINK_DRAIN_MS = 5_000;
 const STATUS_BY_CODE = { invalid_input: 400, not_found: 404, invalid_state: 409, limit_reached: 409 };
 /** The name a socket is bound under before it is renamed to `daemon.sock`; no longer than that name. */
 const BIND_NAME = /^\.ds-[0-9a-f]{6}$/;
+/** The longest subscriber or alert id a request may name. */
+const MAX_ID_LENGTH = 128;
 
 export class DaemonRunningError extends Error {
   constructor(pid) {
@@ -91,10 +96,13 @@ export async function startDaemon({
   let stateStore;
   let store;
   let marks;
+  let unsettled;
+  let acknowledged;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
+    ({ handoffs: unsettled, acknowledged } = stateStore.loadAlerts());
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -111,9 +119,12 @@ export async function startDaemon({
   }
 
   const startedAt = clock.now();
-  /** Each subscriber's response, with the frames waiting for it to drain the earlier ones. */
+  /** Each subscriber's response, with its id and the frames waiting for it to drain the earlier ones. */
   const subscribers = new Map();
+  /** Each open subscriber's response by its id. */
+  const subscriberIds = new Map();
   let closing = false;
+  let lockLost = false;
   let resolveClosed;
   const closed = new Promise((resolve) => {
     resolveClosed = resolve;
@@ -151,6 +162,16 @@ export async function startDaemon({
     for (const response of subscribers.keys()) send(response, event, data);
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
+  const alertHandlers = createAlertHandlers({
+    clock,
+    sink,
+    log,
+    publish: (alert) => broadcast('alert', alert),
+    isOpen: (id) => subscriberIds.has(id),
+    owns: () => stillHeld(),
+    save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
+    acknowledged
+  });
 
   /**
    * True while this daemon still holds `daemon.lock`. It is checked on every scheduler run (at
@@ -167,6 +188,7 @@ export async function startDaemon({
     }
     if (held) return true;
     if (!closing) {
+      lockLost = true;
       log('daemon.lock is no longer held by this daemon; exiting without writing.');
       void shutdown(1);
     }
@@ -186,8 +208,13 @@ export async function startDaemon({
     updateIdle();
   }
 
-  /** Records running timers whose time is up as finished. A failed save is retried at the next run. */
+  /**
+   * Records running timers whose time is up as finished. A failed save is retried at the next run.
+   * While `scheduler.json` is behind, nothing is recorded: a running timer is then how a restarted
+   * daemon finds an alert whose handoff was never saved.
+   */
   function settleFinished(now) {
+    if (marksDirty) return;
     const timers = store.timers.map((timer) => settle(timer, now));
     if (timers.every((timer, index) => timer === store.timers[index])) return;
     try {
@@ -200,8 +227,14 @@ export async function startDaemon({
   /** The stretches `scheduler.json` holds marks for, and whether a failed save left it behind. */
   let savedStretches = new Set((marks ?? []).map(stretchKey));
   let marksDirty = false;
-  function saveMarks(list) {
-    write(() => stateStore.saveMarks(list));
+  /** Saves `list` and, with them, the alert handoffs and remembered acknowledgements. */
+  function saveMarks(list, checkpoint = alertHandlers.checkpoint) {
+    try {
+      write(() => stateStore.saveMarks(list, checkpoint));
+    } catch (error) {
+      marksDirty = true;
+      throw error;
+    }
     savedStretches = new Set(list.map(stretchKey));
     marksDirty = false;
   }
@@ -213,10 +246,9 @@ export async function startDaemon({
     onRun(alerts, now) {
       // A successor that took the lock delivers these alerts itself.
       if (!stillHeld()) return;
-      for (const { alert, timer } of alerts) {
-        broadcast('alert', alert);
-        deliverToSink(sink, alert, timer, log);
-      }
+      // An alert handed to the handler is saved below with the marks that pass it, so a daemon that
+      // ends before it is acknowledged leaves it for the next daemon to play.
+      for (const { alert, timer } of alerts) alertHandlers.deliver(alert, timer);
       const current = scheduler.marks;
       const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
       // A save that failed is retried at every later run, so a restart never reports as missed
@@ -291,7 +323,8 @@ export async function startDaemon({
     });
   }
 
-  async function runOp(request, response, name) {
+  /** Reads a JSON body: `{ ok: true, input }`, with `input` undefined for an empty body, or `{ ok: false }` once it has answered. */
+  async function readJson(request, response) {
     let text;
     try {
       text = await readBody(request);
@@ -302,17 +335,20 @@ export async function startDaemon({
         response.on('finish', () => request.destroy());
         fail(response, error.status, 'invalid_input', error.message);
       }
-      return;
+      return { ok: false };
     }
-    let input;
-    if (text.trim() !== '') {
-      try {
-        input = JSON.parse(text);
-      } catch {
-        fail(response, 400, 'invalid_input', 'The request body is not JSON.');
-        return;
-      }
+    if (text.trim() === '') return { ok: true, input: undefined };
+    try {
+      return { ok: true, input: JSON.parse(text) };
+    } catch {
+      fail(response, 400, 'invalid_input', 'The request body is not JSON.');
+      return { ok: false };
     }
+  }
+
+  async function runOp(request, response, name) {
+    const { ok, input } = await readJson(request, response);
+    if (!ok) return;
     if (closing) {
       fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
       return;
@@ -339,11 +375,13 @@ export async function startDaemon({
     try {
       // A stretch the change begins (a start, resume or skip) is marked from now before the change
       // is saved, so a daemon that stops before its next run neither repeats nor reports as missed
-      // what the stretch jumped over. A mark for a stretch that never began is dropped later.
+      // what the stretch jumped over. A mark for a stretch that never began is dropped later. A
+      // checkpoint that is behind is saved first, so no change removes the running timer a restart
+      // would recover an unsaved handoff from.
       const known = scheduler.marks;
       const knownKeys = new Set(known.map(stretchKey));
       const begun = scheduler.marksFor(next.timers, now).filter((mark) => !savedStretches.has(stretchKey(mark)) && !knownKeys.has(stretchKey(mark)));
-      if (begun.length) saveMarks([...known, ...begun]);
+      if (begun.length || marksDirty) saveMarks([...known, ...begun]);
       commit(next);
     } catch (error) {
       if (error instanceof LockLostError) {
@@ -360,21 +398,98 @@ export async function startDaemon({
 
   function subscribe(request, response) {
     response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
-    subscribers.set(response, { queue: [], waitingSince: null });
+    const id = randomBytes(16).toString('hex');
+    subscribers.set(response, { id, queue: [], waitingSince: null });
+    subscriberIds.set(id, response);
+    // The id names this stream when its client registers as the alert handler.
+    send(response, 'subscriber', { subscriberId: id });
     send(response, 'state', agentTimerResult(store, clock.now()));
     updateIdle();
     response.on('close', () => {
       subscribers.delete(response);
+      subscriberIds.delete(id);
+      // Closing the stream unregisters its handler at once; what it had not acknowledged falls back.
+      alertHandlers.disconnected(id);
       updateIdle({ activity: true });
     });
+  }
+
+  /** The `subscriberId` of a JSON body, or null once it has answered. */
+  async function subscriberIdOf(request, response) {
+    const { ok, input } = await readJson(request, response);
+    if (!ok) return null;
+    const id = input?.subscriberId;
+    if (!isId(id)) {
+      fail(response, 400, 'invalid_input', 'The body must be { "subscriberId": string } with the id from the event stream.');
+      return null;
+    }
+    return id;
+  }
+  const isId = (value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH;
+
+  /** Answers an alert handler request with its result. */
+  function settleRequest(response, result, body) {
+    if (result.ok) reply(response, 200, body);
+    else fail(response, result.status, result.code, result.message);
+  }
+
+  async function registerHandler(request, response) {
+    const id = await subscriberIdOf(request, response);
+    if (id === null) return;
+    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+    settleRequest(response, alertHandlers.register(id), { subscriberId: id, ackTimeoutMs: ACK_TIMEOUT_MS });
+  }
+
+  function unregisterHandler(request, response, id) {
+    reply(response, 200, { unregistered: alertHandlers.unregister(id) });
+  }
+
+  async function acknowledge(request, response, alertId) {
+    const id = await subscriberIdOf(request, response);
+    if (id === null) return;
+    // The alert is the handler's only once that is saved; until then it stays pending, so a retry
+    // gets the answer and the sink plays it if none is saved in time. One already being handled
+    // when shutdown begins gets the outcome stop() settled; one that arrives after gets 503.
+    let result;
+    try {
+      result = alertHandlers.acknowledge(alertId, id);
+    } catch (error) {
+      if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      log(`could not save scheduler.json: ${error.message}`);
+      return fail(response, 500, 'storage_failed', 'The daemon could not record the acknowledgement.');
+    }
+    settleRequest(response, result, { alertId, acknowledged: true });
+  }
+
+  /** The handler read the 200 for that alert, so the daemon need no longer answer it. */
+  async function received(request, response, alertId) {
+    const id = await subscriberIdOf(request, response);
+    if (id === null) return;
+    const result = alertHandlers.received(alertId, id);
+    settleRequest(response, result, { alertId, forgotten: result.forgotten });
+  }
+
+  /** The id in `pathname` after `prefix` and before `suffix`, or null when it does not match. */
+  function idIn(pathname, prefix, suffix = '') {
+    if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return null;
+    const raw = pathname.slice(prefix.length, pathname.length - suffix.length);
+    let id;
+    try {
+      id = decodeURIComponent(raw);
+    } catch {
+      return null;
+    }
+    return isId(id) && !id.includes('/') ? id : null;
   }
 
   const routes = {
     '/v1/timers': { GET: (request, response) => reply(response, 200, agentTimerResult(store, clock.now())) },
     '/v1/presets': { GET: (request, response) => reply(response, 200, runOperation('presets.list', store, {}, clock.now()).result) },
     '/v1/events': { GET: subscribe },
+    '/v1/alert-handlers': { POST: registerHandler },
     '/v1/daemon': {
-      GET: (request, response) => reply(response, 200, { pid: process.pid, dataDir: paths.dataDir, socket: paths.socket, alerts: sink.name, startedAt })
+      GET: (request, response) =>
+        reply(response, 200, { pid: process.pid, dataDir: paths.dataDir, socket: paths.socket, alerts: sink.name, alertHandler: alertHandlers.status, startedAt })
     },
     '/v1/shutdown': {
       POST: (request, response) => {
@@ -402,6 +517,21 @@ export async function startDaemon({
       if (!OPERATION_NAMES.includes(name)) return fail(response, 404, 'not_found', `Unknown operation ${name}.`);
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
       return runOp(request, response, name);
+    }
+    const handlerId = idIn(pathname, '/v1/alert-handlers/');
+    if (handlerId !== null) {
+      if (request.method !== 'DELETE') return methodNotAllowed(response, ['DELETE']);
+      return unregisterHandler(request, response, handlerId);
+    }
+    const alertId = idIn(pathname, '/v1/alerts/', '/ack');
+    if (alertId !== null) {
+      if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
+      return acknowledge(request, response, alertId);
+    }
+    const receivedId = idIn(pathname, '/v1/alerts/', '/received');
+    if (receivedId !== null) {
+      if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
+      return received(request, response, receivedId);
     }
     const route = Object.hasOwn(routes, pathname) ? routes[pathname] : null;
     if (!route) return fail(response, 404, 'not_found', `No route ${pathname}.`);
@@ -447,13 +577,17 @@ export async function startDaemon({
     if (closing) return closed;
     closing = true;
     scheduler.stop();
+    // Alerts the handler has not acknowledged are played here rather than lost, unless a successor
+    // holds the lock and plays them.
+    const played = alertHandlers.stop({ lockLost });
     for (const handle of [idleHandle, heartbeatHandle]) if (handle !== null) clock.clearTimeout(handle);
     for (const response of subscribers.keys()) response.end();
     subscribers.clear();
+    subscriberIds.clear();
     // Requests already being handled answer (a change not yet applied gets 503) before their
     // connections are closed; those still open after the grace are closed then.
     const grace = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
-    server.close(() => {
+    server.close(async () => {
       clearTimeout(grace);
       // Another daemon may have bound the path since; only this daemon's own socket is removed.
       try {
@@ -466,6 +600,15 @@ export async function startDaemon({
       } catch (error) {
         log(`could not remove the lock: ${error.message}`);
       }
+      // The process may exit once closed resolves, so the sink first finishes what shutdown played.
+      await new Promise((resolve) => {
+        const bound = setTimeout(resolve, SINK_DRAIN_MS);
+        const drained = () => {
+          clearTimeout(bound);
+          resolve();
+        };
+        played.then(drained, drained);
+      });
       resolveClosed(code);
     });
     server.closeIdleConnections();
@@ -473,6 +616,12 @@ export async function startDaemon({
   }
 
   heartbeatHandle = clock.setTimeout(heartbeat, heartbeatMs);
+  // Alerts an earlier daemon handed over and that were never settled are played once, and the first
+  // run saves scheduler.json without them.
+  if (unsettled.length) {
+    replayHandoffs(unsettled, sink, log);
+    marksDirty = true;
+  }
   scheduler.run();
   updateIdle({ activity: true });
   log(`listening on ${paths.socket} (pid ${process.pid}).`);
@@ -489,6 +638,9 @@ export async function startDaemon({
     },
     get subscriberCount() {
       return subscribers.size;
+    },
+    get alertHandler() {
+      return alertHandlers.status;
     }
   };
 }

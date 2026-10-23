@@ -12,7 +12,7 @@ import { intervalStep } from '@subset/timer';
  * @property {1 | 2 | 3} [secondsLeft] For `tick`.
  * @property {number} [missed] For `missedWhileAway`: how many transitions it stands for.
  *
- * @typedef {object} AlertSink Plays or shows alerts. The daemon never waits for a sink, and a sink
+ * @typedef {object} AlertSink Plays or shows alerts. The daemon waits for a sink only at shutdown, and a sink
  *   that throws or rejects is logged and ignored. A sink honours `timer.sound` itself.
  * @property {string} name Shown by `daemon status`.
  * @property {(alert: TimerAlert, timer: import('@subset/timer').TimerDefinition) => void | Promise<void>} alert
@@ -60,13 +60,24 @@ export function createRecordingSink({ limit = RECORDING_LIMIT } = {}) {
   };
 }
 
-/** Calls the sink without waiting for it and without letting it fail the daemon. */
+/**
+ * Calls the sink without waiting for it and without letting it fail the daemon. Returns, for a sink
+ * that answers with a promise, one that fulfils (never rejects) when the sink is done, even when
+ * `log` throws while reporting the sink's failure.
+ */
 export function deliverToSink(sink, alert, timer, log) {
-  const report = (error) => log(`alert sink ${sink.name} failed: ${error?.message ?? error}`);
+  const report = (error) => {
+    try {
+      log(`alert sink ${sink.name} failed: ${error?.message ?? error}`);
+    } catch {
+      // A log that cannot be written must not turn a failed sound into a daemon failure.
+    }
+  };
   try {
     const pending = sink.alert(alert, timer);
-    if (pending && typeof pending.then === 'function') pending.then(undefined, report);
+    if (pending && typeof pending.then === 'function') return pending.then(undefined, report);
   } catch (error) {
     report(error);
   }
+  return undefined;
 }
