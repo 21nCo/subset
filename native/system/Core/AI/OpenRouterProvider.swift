@@ -20,8 +20,9 @@ public struct SystemExplainLog: ExplainLog {
 
 /// OpenRouter's chat completions endpoint with the user's own key (SET-50). The request is the same `ExplainRequest`
 /// Apple Intelligence gets, as its prompt text, in a JSON body with a JSON schema `response_format` matching
-/// `Explanation`; the body is built once per request and is exactly what the send preview shows. The key is read from
-/// the Keychain for each request and goes only into its `Authorization` header.
+/// `Explanation`; the body (`body(for:)`) has the same bytes each time it is built, and the client sends exactly it, so
+/// SET-160's send preview can show it. The key is read from the Keychain for each request and goes only into its
+/// `Authorization` header.
 public struct OpenRouterProvider: AIProvider {
     public static let defaultModel = "openrouter/auto"
     static let keyAsModelFailure = "The model ID in Settings contains your API key, so nothing was sent. Clear the "
@@ -74,20 +75,8 @@ public struct OpenRouterProvider: AIProvider {
         }
     }
 
-    public var needsSendPreview: Bool { true }
-
-    public func sentText(for request: ExplainRequest) throws -> String {
-        String(decoding: try body(for: request), as: UTF8.self)
-    }
-
+    /// Sends nothing when the key cannot be read or the model ID contains it.
     public func explain(_ request: ExplainRequest) async throws -> ExplanationDraft {
-        try await explain(request, submitting: { true })
-    }
-
-    /// Asks `submitting` only right before an attempt is handed to the network: not when the key cannot be read, the
-    /// model ID contains the key, or it is cancelled first.
-    public func explain(_ request: ExplainRequest,
-                        submitting: @escaping @Sendable () -> Bool) async throws -> ExplanationDraft {
         let key: String?
         do {
             key = try keys.readKey()
@@ -97,11 +86,11 @@ public struct OpenRouterProvider: AIProvider {
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
         // The key inside the model ID, however Settings came to keep it: not sent in the body.
         guard !Self.contains(key: key, in: model) else { throw ExplainError.failed(Self.keyAsModelFailure) }
-        let data = try await client.send(.chat(try body(for: request)), key: key, submitting: submitting)
+        let data = try await client.send(.chat(try body(for: request)), key: key)
         return try Self.draft(from: data, key: key)
     }
 
-    /// The JSON body sent for `request`: its bytes are the same each time, so the preview shows what is sent.
+    /// The JSON body sent for `request`: its bytes are the same each time it is built.
     public func body(for request: ExplainRequest) throws -> Data {
         let body: [String: Any] = [
             "model": model,
@@ -245,20 +234,14 @@ public struct OpenRouterClient: Sendable {
         return urlRequest
     }
 
-    /// The body of OpenRouter's 2xx answer. Throws `ExplainError.failed` with the status and OpenRouter's message, or
-    /// with the timeout or connection failure; `CancellationError` when cancelled, before the request or its retry
-    /// is sent, during the backoff, or while it is on its way. `submitting` is asked just before each attempt is
-    /// handed to the session, after the backoff for the retry, and not when it is cancelled before that; when it
-    /// returns `false`, that attempt is not sent and this throws `ExplainError.outdated`.
-    public func send(_ request: Request, key: String,
-                     submitting: @Sendable () -> Bool = { true }) async throws -> Data {
+    /// The body of OpenRouter's 2xx answer. A chat completion sends exactly the body it is given, the retry included.
+    /// Throws `ExplainError.failed` with the status and OpenRouter's message, or with the timeout or connection
+    /// failure; `CancellationError` when cancelled, before the request or its retry is sent, during the backoff, or
+    /// while it is on its way.
+    public func send(_ request: Request, key: String) async throws -> Data {
         let urlRequest = Self.urlRequest(request, key: key)
         for attempt in 1...2 {
             try Task.checkCancellation()
-            guard submitting() else {
-                log.record("OpenRouter \(request.name) not sent" + (attempt == 1 ? "" : " again") + ": it is out of date")
-                throw ExplainError.outdated
-            }
             log.record("OpenRouter \(request.name) sent" + (attempt == 1 ? "" : " again"))
             let (data, response): (Data, URLResponse)
             do {

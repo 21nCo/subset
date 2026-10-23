@@ -2,7 +2,8 @@ import SwiftUI
 import SystemCore
 
 /// Settings' OpenRouter section: Add key (or Replace key), Test key, Remove key, and the model ID. The key is typed or
-/// pasted into a secure field, stored in the Keychain, and never shown again.
+/// pasted into a secure field, stored in the Keychain, and never shown again. Whether a key is stored is read again
+/// each time it is shown.
 struct OpenRouterSection: View {
     @Bindable var account: OpenRouterAccount
     @State private var entered = ""
@@ -38,9 +39,11 @@ struct OpenRouterSection: View {
             }
             Text("The OpenRouter model ID to use; when empty, openrouter/auto picks a model for each request. Test Key "
                 + "asks OpenRouter whether the key works and sends none of your data. The key is kept only in this "
-                + "Mac's Keychain and is sent only in each request's Authorization header, to openrouter.ai.")
+                + "Mac's Keychain and is sent only in each request's Authorization header, to openrouter.ai. Explain "
+                + "cannot use OpenRouter yet.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        .task { await account.refreshKey() }
     }
 
     @ViewBuilder private var keyTest: some View {
@@ -59,39 +62,5 @@ struct OpenRouterSection: View {
 
     private func add() {
         if account.addKey(entered) { entered = "" }
-    }
-}
-
-/// The send preview: before the first request of the session to OpenRouter, the exact JSON body, for the user to send
-/// or cancel. It is shown as plain text and never run.
-struct SendPreviewSheet: View {
-    let preview: SendPreview
-    let send: () -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Send this to \(preview.provider.title)?").font(.headline)
-            Text("This is exactly what System will send. Your API key is sent only in the request's Authorization "
-                + "header and is not shown. Once you send it, System does not ask again until it is next opened.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            ScrollView {
-                Text(verbatim: preview.text)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-            }
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-            .accessibilityLabel("Request body")
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel, action: cancel).keyboardShortcut(.cancelAction)
-                Button("Send", action: send).keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .frame(minWidth: 520, idealWidth: 600, minHeight: 420, idealHeight: 520)
     }
 }

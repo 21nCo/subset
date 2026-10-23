@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let processes = ProcessesWindowModel()
     private let disk = DiskWindowModel()
     private let explain = ExplainCenter.live()
+    private let openRouter = OpenRouterAccount.live()
     private let mainWindowState = MainWindowState()
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
@@ -33,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title: "Settings",
         autosaveName: "SystemSettingsWindow",
         size: NSSize(width: 560, height: 640),
-        content: SettingsView(center: explain)
+        content: SettingsView(center: explain, openRouter: openRouter)
     )
     private var statusMenu: StatusMenuController?
 
