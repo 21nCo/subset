@@ -25,8 +25,8 @@ public struct SystemExplainLog: ExplainLog {
 /// `Authorization` header.
 public struct OpenRouterProvider: AIProvider {
     public static let defaultModel = "openrouter/auto"
-    static let keyAsModelFailure = "The model ID in Settings contains your API key, so nothing was sent. Clear the "
-        + "Model field in Settings, then ask again."
+    /// How `OpenRouterClient.failure(status:data:key:)` begins each answer outside 2xx, which OpenRouter received.
+    static let answeredPrefix = "OpenRouter answered "
     /// The longest model ID accepted.
     static let modelLimit = 200
 
@@ -75,7 +75,9 @@ public struct OpenRouterProvider: AIProvider {
         }
     }
 
-    /// Sends nothing when the key cannot be read or the model ID contains it.
+    /// Sends nothing when the key cannot be read or the model ID contains it (`ExplainError.unavailable`). An answer
+    /// OpenRouter gave that is not an explanation, its status outside 2xx included, is `ExplainError.rejected`, so
+    /// `ExplainCenter` knows the request reached it; a connection failure or timeout is `ExplainError.failed`.
     public func explain(_ request: ExplainRequest) async throws -> ExplanationDraft {
         let key: String?
         do {
@@ -85,8 +87,13 @@ public struct OpenRouterProvider: AIProvider {
         }
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
         // The key inside the model ID, however Settings came to keep it: not sent in the body.
-        guard !Self.contains(key: key, in: model) else { throw ExplainError.failed(Self.keyAsModelFailure) }
-        let data = try await client.send(.chat(try body(for: request)), key: key)
+        guard !Self.contains(key: key, in: model) else { throw ExplainError.unavailable(.openRouterModelHeldKey) }
+        let data: Data
+        do {
+            data = try await client.send(.chat(try body(for: request)), key: key)
+        } catch let ExplainError.failed(message) where message.hasPrefix(Self.answeredPrefix) {
+            throw ExplainError.rejected(message)
+        }
         return try Self.draft(from: data, key: key)
     }
 
@@ -149,7 +156,7 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.invalidResponse("OpenRouter's answer has no message.")
         }
         if let refusal = message["refusal"] as? String, !refusal.isEmpty {
-            throw ExplainError.failed("The model declined to explain this item.")
+            throw ExplainError.rejected("The model declined to explain this item.")
         }
         guard let content = message["content"] as? String else {
             throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
@@ -160,7 +167,7 @@ public struct OpenRouterProvider: AIProvider {
     /// "OpenRouter could not answer: …", with OpenRouter's message as `OpenRouterClient.message(in:key:)` gives it.
     private static func failure(_ error: Any?, key: String) -> ExplainError {
         let message = error.flatMap { OpenRouterClient.message(in: $0, key: key) }
-        return .failed(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
+        return .rejected(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
     }
 }
 

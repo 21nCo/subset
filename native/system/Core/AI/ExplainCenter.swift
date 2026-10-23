@@ -63,8 +63,9 @@ public struct SendPreview: Equatable, Sendable {
 /// provider that cannot run, and what is stored is always what is shown. Until OpenRouter has answered a request whose
 /// body the user confirmed in the send preview this session, every request to it waits in `.confirming` for its own
 /// preview, and cancelling it sends nothing; the body sent is the one shown. Add Key and Remove Key end the OpenRouter
-/// work in flight, and changing **Send folder names** ends the previews and sends off this Mac built with the setting
-/// before, so nothing built with it goes out, a retry included.
+/// work in flight as they start, and until they finish no request to OpenRouter is begun or sent
+/// (`keyChanging`), so nothing is sent with the key being replaced or removed. Changing **Send folder names** ends the
+/// previews and sends off this Mac built with the setting before, so nothing built with it goes out, a retry included.
 @MainActor
 @Observable
 public final class ExplainCenter {
@@ -79,7 +80,10 @@ public final class ExplainCenter {
     /// Why the choice was set back from OpenRouter; cleared when the user next chooses a provider.
     public private(set) var notice: String?
     /// Whether OpenRouter answered a request whose body the user confirmed in the send preview this session, so the
-    /// preview is not shown again. A confirmed request that fails or is cancelled first leaves the preview required.
+    /// preview is not shown again: with an explanation, or with an error or refusal (`ExplainError.rejected`), which
+    /// shows the request reached it. A confirmed request that is cancelled, refused before it is sent, or not answered
+    /// (no connection, or no answer in time, when whether it reached OpenRouter is not known) leaves the preview
+    /// required.
     public private(set) var sendConfirmed = false
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
@@ -129,6 +133,8 @@ public final class ExplainCenter {
         + "with the setting as it is now."
     static let changedWhileSending = "Send folder names changed while this request was being sent, so nothing more was "
         + "sent. Try again."
+    static let keyChanging = "The OpenRouter key is being changed, so nothing was sent. Try again once Settings shows "
+        + "it."
 
     private struct StateKey: Hashable {
         let choice: AIProviderChoice
@@ -249,17 +255,25 @@ public final class ExplainCenter {
         }
     }
 
-    /// Sets the choice back from OpenRouter when what it answered means it cannot be used, and reads whether a key is
-    /// stored again, so Settings shows it as it is.
-    private func noteOpenRouter(_ availability: AIAvailability) {
-        let setback: OpenRouterAccount.Setback
+    /// Sets the choice back from OpenRouter when what `provider` answered means it cannot be used. When no key is
+    /// found, or it cannot be read, whether one is stored is read again, so Settings shows it as it is; a model ID that
+    /// held the key is cleared (`OpenRouterAccount.refuseModel(sent:)`).
+    private func noteOpenRouter(_ availability: AIAvailability, from provider: any AIProvider) {
         switch availability {
-        case .noOpenRouterKey: setback = .noKey
-        case .openRouterKeyUnreadable: setback = .keyUnreadable
-        default: return
+        case .noOpenRouterKey, .openRouterKeyUnreadable:
+            setBack(availability == .noOpenRouterKey ? .noKey : .keyUnreadable)
+            if let openRouter { Task { await openRouter.refreshKey() } }
+        case .openRouterModelHeldKey:
+            setBack(.modelHeldKey)
+            if let sent = (provider as? OpenRouterProvider)?.model { openRouter?.refuseModel(sent: sent) }
+        default: break
         }
-        setBack(setback)
-        if let openRouter { Task { await openRouter.refreshKey() } }
+    }
+
+    /// Whether `choice` is OpenRouter while Add Key or Remove Key waits for the Keychain: no request to it is begun or
+    /// sent then, since what it would read is the key being replaced or removed.
+    private func keyChanging(_ choice: AIProviderChoice) -> Bool {
+        choice == .openRouter && openRouter?.isChangingKey == true
     }
 
     /// Reads the chosen provider's availability, for Settings, each time it is shown, when the provider changes, and
@@ -292,7 +306,7 @@ public final class ExplainCenter {
         if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
         }
-        if selection == self.selection, let availability { noteOpenRouter(availability) }
+        if selection == self.selection, let availability { noteOpenRouter(availability, from: provider) }
         return availability
     }
 
@@ -304,7 +318,7 @@ public final class ExplainCenter {
     /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
     /// asked again. When the caller is cancelled, nothing more is sent, no failure is kept, and the item can be asked
-    /// again.
+    /// again. While the OpenRouter key is being changed, an OpenRouter request fails at once and nothing is sent.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
         let selection = self.selection
@@ -317,6 +331,10 @@ public final class ExplainCenter {
         let sendFolderNames = self.sendFolderNames
         guard var request = build(redactor) else {
             states[key] = .gone
+            return
+        }
+        guard !keyChanging(choice) else {
+            states[key] = .failed(Self.keyChanging, request)
             return
         }
         states[key] = .working(request)
@@ -388,8 +406,13 @@ public final class ExplainCenter {
 
     /// Asks `provider` to explain `request`, whose body sent off this Mac, if any, is `body`, and keeps the outcome
     /// unless the provider changed since `selection`. `confirmed` is whether the user confirmed `body` in the preview.
+    /// Sends nothing while the OpenRouter key is being changed.
     private func send(_ request: ExplainRequest, body: Data?, with provider: any AIProvider, for key: StateKey,
                       in selection: Int, confirmed: Bool) async {
+        guard !keyChanging(key.choice) else {
+            if selection == self.selection { states[key] = .failed(Self.keyChanging, request) }
+            return
+        }
         let folderNamesChanges = self.folderNamesChanges
         var answered = false
         let outcome: ExplainState?
@@ -407,8 +430,11 @@ public final class ExplainCenter {
         } catch let ExplainError.unavailable(availability) {
             outcome = .unavailable(availability)
         } catch let error as ExplainError {
-            // Rejected answers came from the provider, so the request went out.
-            if case .invalidResponse = error { answered = true }
+            // Rejected answers came from the provider, so the request reached it.
+            switch error {
+            case .invalidResponse, .rejected: answered = true
+            default: break
+            }
             outcome = .failed(error.message, request)
         } catch is CancellationError {
             outcome = folderNamesChanges == self.folderNamesChanges ? nil : .failed(Self.changedWhileSending, request)
@@ -419,7 +445,7 @@ public final class ExplainCenter {
         guard selection == self.selection else { return }
         states[key] = outcome
         sentBodies[key] = body
-        if case let .unavailable(availability)? = outcome { noteOpenRouter(availability) }
+        if case let .unavailable(availability)? = outcome { noteOpenRouter(availability, from: provider) }
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does, and so does

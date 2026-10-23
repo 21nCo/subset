@@ -328,6 +328,15 @@ public final class OpenRouterAccount {
         onSetback?(.modelHeldKey)
     }
 
+    /// Clears the model ID that a request was refused with because it holds the key stored now, as Explain reports it
+    /// (`AIAvailability.openRouterModelHeldKey`), such as when the key was replaced outside System: like an entry
+    /// that holds the key, it is neither kept nor used, and that is reported (`onSetback`). `sent` is the model ID the
+    /// request had (`OpenRouterProvider.model`); once another one is used, it has been checked since, and stays.
+    public func refuseModel(sent: String) {
+        guard OpenRouterProvider.model(checkedModel) == sent else { return }
+        refuseModel()
+    }
+
     /// Applies one outcome of checking the model ID entered, in one step: the model ID used and kept (`nil` keeps what
     /// was checked before), the message Settings shows under it, and whether it is checked again once whether a key is
     /// stored is next known.

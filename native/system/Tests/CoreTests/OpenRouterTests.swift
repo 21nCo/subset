@@ -260,7 +260,7 @@ final class OpenRouterTests: XCTestCase {
                 let draft = try await provider.explain(request())
                 XCTFail("a draft from \(content): \(draft)")
             } catch {
-                XCTAssertEqual(error as? ExplainError, .failed("OpenRouter could not answer: Upstream failed for [key]."), content)
+                XCTAssertEqual(error as? ExplainError, .rejected("OpenRouter could not answer: Upstream failed for [key]."), content)
             }
         }
         // The error alone, or finish_reason "error" alone.
@@ -335,11 +335,11 @@ final class OpenRouterTests: XCTestCase {
         let waits = WaitRecorder()
         let provider = provider(keychain, sleep: waits)
         StubProtocol.enqueue(error: URLError(.timedOut))
-        await assertFails(provider, containing: "OpenRouter did not answer within 30 seconds.")
+        await assertFails(provider, containing: "OpenRouter did not answer within 30 seconds.", rejected: false)
         XCTAssertEqual(StubProtocol.requests.count, 1)
         XCTAssertTrue(waits.durations.isEmpty)
         StubProtocol.enqueue(error: URLError(.notConnectedToInternet))
-        await assertFails(provider, containing: "Could not reach OpenRouter")
+        await assertFails(provider, containing: "Could not reach OpenRouter", rejected: false)
 
         let configuration = OpenRouterClient.configuration(.ephemeral)
         XCTAssertEqual(configuration.timeoutIntervalForRequest, 30)
@@ -797,7 +797,7 @@ final class OpenRouterTests: XCTestCase {
                 _ = try await early.explain(request())
                 XCTFail("sent \(entry)")
             } catch {
-                XCTAssertEqual(error as? ExplainError, .failed(OpenRouterProvider.keyAsModelFailure), entry)
+                XCTAssertEqual(error as? ExplainError, .unavailable(.openRouterModelHeldKey), entry)
             }
         }
         XCTAssertEqual(StubProtocol.requests.count, 1)
@@ -1117,13 +1117,16 @@ final class OpenRouterTests: XCTestCase {
         throw CancellationError()
     }
 
-    private func assertFails(_ provider: OpenRouterProvider, containing text: String, line: UInt = #line) async {
+    /// `rejected`: whether the failure is an answer OpenRouter gave (`ExplainError.rejected`), not a request that did not
+    /// reach it (`ExplainError.failed`).
+    private func assertFails(_ provider: OpenRouterProvider, containing text: String, rejected: Bool = true,
+                             line: UInt = #line) async {
         do {
             _ = try await provider.explain(request())
             XCTFail("answered", line: line)
         } catch let error as ExplainError {
-            guard case let .failed(message) = error else { return XCTFail("\(error)", line: line) }
-            XCTAssertTrue(message.contains(text), message, line: line)
+            XCTAssertEqual(error, rejected ? .rejected(error.message) : .failed(error.message), line: line)
+            XCTAssertTrue(error.message.contains(text), error.message, line: line)
         } catch {
             XCTFail("\(error)", line: line)
         }

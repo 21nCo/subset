@@ -66,6 +66,8 @@ public enum AIAvailability: Equatable, Sendable {
     case noOpenRouterKey
     /// The Keychain did not return the stored OpenRouter key.
     case openRouterKeyUnreadable
+    /// The OpenRouter model ID in use holds the key stored now, so nothing was sent.
+    case openRouterModelHeldKey
 
     public var isAvailable: Bool { self == .available || self == .availableOnOpenRouter }
 
@@ -80,6 +82,7 @@ public enum AIAvailability: Equatable, Sendable {
         case .notInThisBuild: "Not in this build"
         case .noOpenRouterKey: "No OpenRouter key"
         case .openRouterKeyUnreadable: "The OpenRouter key could not be read"
+        case .openRouterModelHeldKey: "The OpenRouter model ID held your API key"
         }
     }
 
@@ -96,6 +99,8 @@ public enum AIAvailability: Equatable, Sendable {
         case .noOpenRouterKey: "Add your OpenRouter API key in Settings."
         case .openRouterKeyUnreadable: "The Keychain did not return the key. Unlock this Mac, or remove the key and add "
             + "it again."
+        case .openRouterModelHeldKey: "Nothing was sent, and the model ID was cleared. Choose OpenRouter again to use "
+            + "another model ID or openrouter/auto."
         }
     }
 }
