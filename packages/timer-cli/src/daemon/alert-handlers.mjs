@@ -20,11 +20,16 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * acknowledgement gets `410` and the handler never plays it too. With no handler, the sink plays
  * every alert as it is published.
  *
+ * Pending alerts are `handoffs`, which the daemon saves with its scheduler marks, so a daemon that
+ * ends abruptly leaves them for the next one to play (`replayHandoffs`). An acknowledgement is
+ * answered only once `save(handoffs)` has recorded the alert as taken; when that throws, the alert
+ * stays pending and the error is thrown to the caller.
+ *
  * `publish(alert)` sends the `alert` event to every subscriber; `isOpen(subscriberId)` says
  * whether that subscriber's event stream is still open. Results are `{ ok: true, ... }` or
  * `{ ok: false, status, code, message }`.
  */
-export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId = newAlertId, ackTimeoutMs = ACK_TIMEOUT_MS }) {
+export function createAlertHandlers({ clock, sink, log, publish, isOpen, save = () => {}, newId = newAlertId, ackTimeoutMs = ACK_TIMEOUT_MS }) {
   let handler = null;
   /** alertId → { alert, timer, subscriberId, handle }, for alerts the handler has not yet acknowledged. */
   const pending = new Map();
@@ -37,20 +42,37 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
     if (settled.size > SETTLED_LIMIT) settled.delete(settled.keys().next().value);
   }
 
+  const handoffs = (except = null) => [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer }]) => ({ alertId, alert, timer }));
+
+  /**
+   * Saves the handoffs left once the sink has played some. A failed save is logged; the next save
+   * of the marks records them, and until then a restart may play them again rather than never.
+   */
+  function saveAfterFallback() {
+    try {
+      save(handoffs());
+    } catch (error) {
+      log(`could not record played alerts: ${error.message}`);
+    }
+  }
+
   /** Plays a pending alert through the sink, once, and records the fallback. */
   function fallBack(alertId, reason) {
     const entry = pending.get(alertId);
-    if (!entry) return;
+    if (!entry) return false;
     pending.delete(alertId);
     clock.clearTimeout(entry.handle);
     remember(alertId, 'fallback', entry.subscriberId);
     counts.fallbacks += 1;
     log(`alert ${alertId} (${entry.alert.kind} of ${entry.alert.timerId}) ${reason}; the ${sink.name} sink plays it.`);
     deliverToSink(sink, entry.alert, entry.timer, log);
+    return true;
   }
 
   function fallBackAll(subscriberId, reason) {
-    for (const [alertId, entry] of [...pending]) if (subscriberId === null || entry.subscriberId === subscriberId) fallBack(alertId, reason);
+    let played = false;
+    for (const [alertId, entry] of [...pending]) if (subscriberId === null || entry.subscriberId === subscriberId) played = fallBack(alertId, reason) || played;
+    if (played) saveAfterFallback();
   }
 
   const refused = (status, code, message) => ({ ok: false, status, code, message });
@@ -62,6 +84,10 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
     },
     get status() {
       return { registered: handler !== null, pending: pending.size, ...counts };
+    },
+    /** The alerts waiting for an acknowledgement, as `save` and `replayHandoffs` take them. */
+    get handoffs() {
+      return handoffs();
     },
 
     /** Registers `subscriberId`; registering the handler again is a no-op. */
@@ -98,13 +124,16 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
       const alertId = newId();
       const entry = { alert, timer, subscriberId: handler, handle: null };
       pending.set(alertId, entry);
-      entry.handle = clock.setTimeout(() => fallBack(alertId, `was not acknowledged within ${ackTimeoutMs / 1000} s`), ackTimeoutMs);
+      entry.handle = clock.setTimeout(() => {
+        if (fallBack(alertId, `was not acknowledged within ${ackTimeoutMs / 1000} s`)) saveAfterFallback();
+      }, ackTimeoutMs);
       publish({ ...alert, alertId, ackRequired: true, timerName: timer.name, sound: timer.sound });
     },
 
     /**
-     * The handler `subscriberId` takes `alertId`. Acknowledging an alert it already took is a
-     * no-op, so a retried acknowledgement gets the same answer.
+     * The handler `subscriberId` takes `alertId`, once that is saved; a failed save throws and
+     * leaves the alert pending. Acknowledging an alert it already took is a no-op, so a retried
+     * acknowledgement gets the same answer.
      */
     acknowledge(alertId, subscriberId) {
       const entry = pending.get(alertId);
@@ -112,6 +141,7 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
       if (owner === undefined) return refused(404, 'not_found', 'No alert has that id.');
       if (owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
       if (entry) {
+        save(handoffs(alertId));
         pending.delete(alertId);
         clock.clearTimeout(entry.handle);
         remember(alertId, 'acknowledged', subscriberId);
@@ -122,10 +152,28 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
       return refused(410, 'alert_expired', 'The daemon already played that alert.');
     },
 
-    /** At shutdown: every pending alert falls back and the handler is dropped. */
-    stop() {
+    /**
+     * At shutdown: the handler is dropped and every pending alert falls back. A daemon that lost
+     * `daemon.lock` plays none: the daemon that holds it plays those this one saved, and delivers
+     * again those whose marks this one could not save.
+     */
+    stop({ lockLost = false } = {}) {
       handler = null;
-      fallBackAll(null, 'was pending when the daemon stopped');
+      if (!lockLost) return fallBackAll(null, 'was pending when the daemon stopped');
+      for (const entry of pending.values()) clock.clearTimeout(entry.handle);
+      if (pending.size) log(`${pending.size} unacknowledged alert(s) are left to the daemon that holds daemon.lock.`);
+      pending.clear();
     }
   };
+}
+
+/**
+ * Plays through the sink, at startup, the handoffs an earlier daemon saved and never settled
+ * because it ended abruptly: no handler acknowledged them, and no sink played them.
+ */
+export function replayHandoffs(handoffs, sink, log) {
+  for (const { alertId, alert, timer } of handoffs) {
+    log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was unacknowledged when the last daemon ended; the ${sink.name} sink plays it.`);
+    deliverToSink(sink, alert, timer, log);
+  }
 }

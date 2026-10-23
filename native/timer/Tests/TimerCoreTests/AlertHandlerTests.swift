@@ -13,6 +13,9 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var registerError: DaemonError?
     private var lostRegistrations: [Lost] = []
     private var lostUnregistrations: [Lost] = []
+    private var lostAcks: [Lost] = []
+    /// The alerts the daemon handed over; acknowledging one again gets `.acknowledged`.
+    private var taken: Set<String> = []
     private var holder: String?
 
     var log: [String] { lock.withLock { entries } }
@@ -32,11 +35,12 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
         lock.withLock { registerError = error }
     }
 
-    /// The next registrations and unregistrations that get no answer, in order.
-    func lose(registrations: [Lost] = [], unregistrations: [Lost] = []) {
+    /// The next registrations, unregistrations and acknowledgements that get no answer, in order.
+    func lose(registrations: [Lost] = [], unregistrations: [Lost] = [], acks: [Lost] = []) {
         lock.withLock {
             lostRegistrations = registrations
             lostUnregistrations = unregistrations
+            lostAcks = acks
         }
     }
 
@@ -59,7 +63,20 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
 
     func acknowledgeAlert(_ alertId: String, subscriberId: String) async throws -> AlertAcknowledgement {
         record("ack \(alertId) \(subscriberId)")
-        let answer = lock.withLock { acks.isEmpty ? .success(.acknowledged) : acks.removeFirst() }
+        let answer: Result<AlertAcknowledgement, DaemonError> = lock.withLock {
+            switch lostAcks.isEmpty ? nil : lostAcks.removeFirst() {
+            case .beforeApplying?:
+                return .failure(.timedOut)
+            case .afterApplying?:
+                taken.insert(alertId)
+                return .failure(.timedOut)
+            case nil:
+                if taken.contains(alertId) { return .success(.acknowledged) }
+                let answer = acks.isEmpty ? .success(.acknowledged) : acks.removeFirst()
+                if case .success(.acknowledged) = answer { taken.insert(alertId) }
+                return answer
+            }
+        }
         return try answer.get()
     }
 }
@@ -75,7 +92,7 @@ struct AlertHandlerTests {
     let daemon = FakeAlertDaemon()
 
     func handler(permitted: Bool = true, subscriber: String? = "s1", retryDelay: Duration = .milliseconds(1)) async -> AlertHandler {
-        let handler = AlertHandler(daemon: daemon, retryDelay: retryDelay) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        let handler = AlertHandler(daemon: daemon, retryDelay: retryDelay, ackRetryDelay: .milliseconds(1)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
         handler.setPermitted(permitted)
         handler.subscribed(subscriber)
         await handler.settled()
@@ -104,14 +121,30 @@ struct AlertHandlerTests {
         #expect(daemon.log == ["register s1", "ack a1 s1"])
     }
 
-    @Test func aFailedAcknowledgementIsTriedOnceMoreAndPlaysOnlyOnTheDaemonsYes() async {
+    @Test func anAcknowledgementTheDaemonTookIsSentUntilAnsweredAndPlaysOnce() async {
         let handler = await handler()
-        daemon.answerAcks([.failure(.timedOut), .success(.acknowledged), .failure(.timedOut), .success(.expired),
-                           .failure(.timedOut), .failure(.connectionFailed("gone"))])
+        // The daemon took the acknowledgement, and its reply was lost three times.
+        daemon.lose(acks: [.afterApplying, .afterApplying, .afterApplying])
+        await handler.receive(alert("a1"))
+        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "play a1"])
+    }
+
+    @Test func anAcknowledgementTheDaemonNeverSawIsSentUntilItsSinkPlayedTheAlertAndNeverPlays() async {
+        let handler = await handler()
+        daemon.lose(acks: [.beforeApplying, .beforeApplying])
+        daemon.answerAcks([.success(.expired)])
+        await handler.receive(alert("a1"))
+        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1"])
+    }
+
+    @Test func aServerErrorIsTriedAgainAndADaemonThatIsGoneEndsTheAcknowledgementUnplayed() async {
+        let handler = await handler()
+        let failedSave = DaemonError.rejected(status: 500, TimerError(code: "storage_failed", message: "", issues: nil))
+        daemon.answerAcks([.failure(failedSave), .success(.acknowledged), .failure(.shuttingDown), .failure(.notListening)])
         await handler.receive(alert("a1"))
         await handler.receive(alert("a2"))
         await handler.receive(alert("a3"))
-        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "play a1", "ack a2 s1", "ack a2 s1", "ack a3 s1", "ack a3 s1"])
+        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "play a1", "ack a2 s1", "ack a3 s1"])
     }
 
     @Test func itRegistersOnlyWhilePermittedAndUnregistersWhenPermissionIsRevoked() async {

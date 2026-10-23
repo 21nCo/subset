@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
-import { ACK_TIMEOUT_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler } from '../../src/daemon/index.mjs';
-import { eventually, rawRequest, startTestDaemon, subscribe } from './helpers.mjs';
+import { ACK_TIMEOUT_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
+import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
 
@@ -185,6 +187,100 @@ test('shutdown plays the alerts the handler has not acknowledged', async (t) => 
   await handler.waitFor(() => alertsOf(handler).length === 1);
   await context.daemon.shutdown();
   assert.deepEqual(context.sink.received.map(({ alert }) => alert.kind), ['finish']);
+});
+
+test('a daemon that loses its lock leaves the alerts it handed over to the daemon that holds it', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true });
+  handlers.register('s1');
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, { id: 't_1', name: 'Egg', sound: true });
+  handlers.stop({ lockLost: true });
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.deepEqual([sink.received.length, handlers.handoffs], [0, []]);
+});
+
+test('an acknowledgement is answered only once it is saved; one that fails to save leaves the alert to the sink', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  const saved = [];
+  let failNext = true;
+  const handlers = createAlertHandlers({
+    clock,
+    sink,
+    log: () => {},
+    publish: () => {},
+    isOpen: () => true,
+    newId: (() => {
+      let next = 0;
+      return () => `a${++next}`;
+    })(),
+    save(handoffs) {
+      if (failNext) {
+        failNext = false;
+        throw new Error('disk full');
+      }
+      saved.push(handoffs.map(({ alertId }) => alertId));
+    }
+  });
+  handlers.register('s1');
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
+  handlers.deliver({ timerId: 't_1', kind: 'tick', at: clock.now() }, timer);
+  assert.deepEqual(handlers.handoffs.map(({ alertId, timer: { name } }) => [alertId, name]), [['a1', 'Egg'], ['a2', 'Egg']]);
+  assert.throws(() => handlers.acknowledge('a1', 's1'), /disk full/);
+  assert.equal(handlers.status.pending, 2);
+  // The acknowledgement that saves records the alert as taken before it is answered.
+  assert.equal(handlers.acknowledge('a2', 's1').ok, true);
+  assert.deepEqual(saved, [['a1']]);
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['finish']);
+  assert.deepEqual(saved, [['a1'], []]);
+  assert.equal(handlers.acknowledge('a1', 's1').status, 410);
+});
+
+/**
+ * Runs a daemon process, registers a handler, finishes a countdown and kills the daemon with
+ * SIGKILL once the handler has the alert, acknowledging it first when `acknowledgeFirst`. Returns
+ * the data directory and the countdown's id.
+ */
+async function killDaemonDuringHandoff(t, { acknowledgeFirst }) {
+  const dataDir = tempDataDir(t);
+  const crashed = spawnDaemonProcess(dataDir);
+  const socket = join(dataDir, 'daemon.sock');
+  await eventually(() => existsSync(socket), 10_000);
+  const stream = subscribe(socket);
+  t.after(stream.close);
+  await stream.waitFor((list) => list.length >= 1);
+  assert.equal((await socketRequest(socket, 'POST', '/v1/alert-handlers', { subscriberId: stream.subscriberId })).status, 200);
+  const started = await socketRequest(socket, 'POST', '/v1/ops/start', { timer: { kind: 'countdown', durationMs: 1_000, countdownTicks: false, name: 'Egg' } });
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  await stream.waitFor(() => alertsOf(stream).length === 1);
+  const [alert] = alertsOf(stream);
+  if (acknowledgeFirst) assert.equal((await socketRequest(socket, 'POST', `/v1/alerts/${alert.alertId}/ack`, { subscriberId: stream.subscriberId })).status, 200);
+  crashed.child.kill('SIGKILL');
+  await crashed.exited;
+  const saved = JSON.parse(readFileSync(join(dataDir, 'scheduler.json'), 'utf8'));
+  assert.deepEqual((saved.handoffs ?? []).map(({ alertId }) => alertId), acknowledgeFirst ? [] : [alert.alertId]);
+  return { dataDir, id: started.body.timer.definition.id };
+}
+
+test('an alert handed over but unacknowledged when the daemon is killed is played once by the next daemon', async (t) => {
+  const { dataDir, id } = await killDaemonDuringHandoff(t, { acknowledgeFirst: false });
+  const next = await startTestDaemon(t, { dataDir });
+  next.clock.advance(60_000);
+  assert.deepEqual(next.sink.received.map(({ alert, timer }) => [alert.timerId, alert.kind, timer.name]), [[id, 'finish', 'Egg']]);
+  await next.daemon.shutdown();
+  const after = await startTestDaemon(t, { dataDir });
+  after.clock.advance(60_000);
+  assert.equal(after.sink.received.length, 0);
+});
+
+test('an alert the handler acknowledged before the daemon was killed is not played again', async (t) => {
+  const { dataDir } = await killDaemonDuringHandoff(t, { acknowledgeFirst: true });
+  const next = await startTestDaemon(t, { dataDir });
+  next.clock.advance(60_000);
+  assert.equal(next.sink.received.length, 0);
 });
 
 /** A small seeded generator (mulberry32), so a failing sequence can be replayed from its seed. */

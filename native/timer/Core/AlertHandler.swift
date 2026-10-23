@@ -111,6 +111,7 @@ public final class AlertHandler {
     private let daemon: AlertHandlerDaemon
     private let play: (TimerAlert) -> Void
     private let retryDelay: Duration
+    private let ackRetryDelay: Duration
     private var subscriberId: String?
     private var permitted = false
     /// The stream the daemon may hold as its handler: `confirmed` once the daemon said so, unconfirmed while a request
@@ -119,11 +120,13 @@ public final class AlertHandler {
     private var reconciling: Task<Void, Never>?
     private var retrying: Task<Void, Never>?
 
-    /// `play` presents an alert the app has taken over. A request the daemon did not answer is tried again after
-    /// `retryDelay`, and at the next permission check.
-    public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), play: @escaping (TimerAlert) -> Void) {
+    /// `play` presents an alert the app has taken over. A registration request the daemon did not answer is tried again
+    /// after `retryDelay`, and at the next permission check; an acknowledgement, after `ackRetryDelay`.
+    public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), ackRetryDelay: Duration = .milliseconds(250),
+                play: @escaping (TimerAlert) -> Void) {
         self.daemon = daemon
         self.retryDelay = retryDelay
+        self.ackRetryDelay = ackRetryDelay
         self.play = play
     }
 
@@ -148,11 +151,13 @@ public final class AlertHandler {
         while let task = reconciling ?? retrying { await task.value }
     }
 
-    /// Whether the daemon answered `error`, so the request is known not to have registered anything: it refused it, is
-    /// shutting down (and drops its handler), or is not running. Any other failure leaves the outcome unknown.
+    /// Whether the daemon answered `error`, so the request is known to have changed nothing: it refused it, is shutting
+    /// down (and drops its handler and plays what is pending), or is not running. Any other failure, including a server
+    /// error such as a failed save, leaves the outcome unknown.
     private static func answered(_ error: Error) -> Bool {
         switch error as? DaemonError {
-        case .rejected?, .shuttingDown?, .notListening?: true
+        case .rejected(let status, _)?: status < 500
+        case .shuttingDown?, .notListening?: true
         default: false
         }
     }
@@ -229,17 +234,19 @@ public final class AlertHandler {
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
-        // The daemon decides who owns the alert, so a registration still in flight does not matter. A failed request is
-        // tried once more: an acknowledgement the daemon took gets `.acknowledged` again, one it never saw `.expired`.
-        for _ in 0..<2 {
+        // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
+        // the daemon did not answer is sent again until it does: one it took gets `.acknowledged` again, and one it never
+        // saw gets `.expired` once its sink has played the alert, so the alert plays once whichever was lost.
+        while !Task.isCancelled {
             do {
                 if try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId) == .acknowledged { play(alert) }
                 return
-            } catch DaemonError.rejected {
-                // Not this app's alert (404 or 409), so the daemon or another handler plays it.
+            } catch where Self.answered(error) {
+                // Not this app's alert (404 or 409), or the daemon is gone: whoever holds it plays it. A daemon that
+                // stops plays what is pending; one that crashed leaves it to the next daemon.
                 return
             } catch {
-                continue
+                try? await Task.sleep(for: ackRetryDelay)
             }
         }
     }

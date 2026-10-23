@@ -103,6 +103,18 @@ test('scheduler marks read back; an unreadable or older file is ignored', (t) =>
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
   stateStore.saveMarks(marks);
   assert.deepEqual(stateStore.loadMarks(), marks);
+  assert.deepEqual(stateStore.loadHandoffs(), []);
+});
+
+test('alert handoffs are saved with the marks and read back; malformed ones are dropped', (t) => {
+  const { paths, stateStore } = storeIn(t);
+  assert.deepEqual(stateStore.loadHandoffs(), []);
+  const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
+  const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false } };
+  stateStore.saveMarks(marks, [handoff]);
+  assert.deepEqual([stateStore.loadMarks(), stateStore.loadHandoffs()], [marks, [handoff]]);
+  writeFileSync(paths.scheduler, JSON.stringify({ version: 1, marks, handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, null] }));
+  assert.deepEqual(stateStore.loadHandoffs(), [handoff]);
 });
 
 test('a directory fsync that fails after the rename keeps the new file and is logged, not thrown', (t) => {

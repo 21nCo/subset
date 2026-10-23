@@ -8,6 +8,9 @@ const MARKS_VERSION = 1;
 
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.startedAt) && isTime(mark.base) && isTime(mark.through);
+const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isHandoff = (handoff) =>
+  typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
@@ -74,7 +77,8 @@ function syncDirectory(directory, fs) {
 /**
  * The daemon's persistent state in its data directory: `state.json` (the SET-74 store, schema
  * version 1) and `scheduler.json` (for each running stretch, the time through which its alerts were
- * handled). Only the daemon holding `daemon.lock` creates one.
+ * handled, and the alerts handed to the alert handler that it has not yet acknowledged). Only the
+ * daemon holding `daemon.lock` creates one.
  */
 export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Date.now } = {}) {
   /** Removes temp files a crash left between a write and its rename. */
@@ -145,9 +149,24 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     return value.marks.filter(isMark);
   }
 
-  function saveMarks(marks) {
-    writeFileAtomic(paths.scheduler, `${JSON.stringify({ version: MARKS_VERSION, marks })}\n`, { fs, log });
+  /** The alert handoffs `saveMarks` recorded (see `createAlertHandlers`); none when unknown. */
+  function loadHandoffs() {
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(paths.scheduler, 'utf8'));
+    } catch (error) {
+      if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
+      return [];
+    }
+    if (value?.version !== MARKS_VERSION || !Array.isArray(value.handoffs)) return [];
+    return value.handoffs.filter(isHandoff);
   }
 
-  return { load, save, loadMarks, saveMarks };
+  /** Saves the marks and, in the same write, the handoffs still waiting for an acknowledgement. */
+  function saveMarks(marks, handoffs = []) {
+    const value = handoffs.length ? { version: MARKS_VERSION, marks, handoffs } : { version: MARKS_VERSION, marks };
+    writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
+  }
+
+  return { load, save, loadMarks, loadHandoffs, saveMarks };
 }

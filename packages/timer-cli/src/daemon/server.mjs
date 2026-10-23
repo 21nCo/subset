@@ -3,7 +3,7 @@ import { chmodSync, lstatSync, readdirSync, renameSync, unlinkSync } from 'node:
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
-import { ACK_TIMEOUT_MS, createAlertHandlers } from './alert-handlers.mjs';
+import { ACK_TIMEOUT_MS, createAlertHandlers, replayHandoffs } from './alert-handlers.mjs';
 import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
@@ -94,10 +94,12 @@ export async function startDaemon({
   let stateStore;
   let store;
   let marks;
+  let unsettled;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
+    unsettled = stateStore.loadHandoffs();
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -119,6 +121,7 @@ export async function startDaemon({
   /** Each open subscriber's response by its id. */
   const subscriberIds = new Map();
   let closing = false;
+  let lockLost = false;
   let resolveClosed;
   const closed = new Promise((resolve) => {
     resolveClosed = resolve;
@@ -156,7 +159,14 @@ export async function startDaemon({
     for (const response of subscribers.keys()) send(response, event, data);
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
-  const alertHandlers = createAlertHandlers({ clock, sink, log, publish: (alert) => broadcast('alert', alert), isOpen: (id) => subscriberIds.has(id) });
+  const alertHandlers = createAlertHandlers({
+    clock,
+    sink,
+    log,
+    publish: (alert) => broadcast('alert', alert),
+    isOpen: (id) => subscriberIds.has(id),
+    save: (handoffs) => saveMarks(scheduler.marks, handoffs)
+  });
 
   /**
    * True while this daemon still holds `daemon.lock`. It is checked on every scheduler run (at
@@ -173,6 +183,7 @@ export async function startDaemon({
     }
     if (held) return true;
     if (!closing) {
+      lockLost = true;
       log('daemon.lock is no longer held by this daemon; exiting without writing.');
       void shutdown(1);
     }
@@ -206,8 +217,14 @@ export async function startDaemon({
   /** The stretches `scheduler.json` holds marks for, and whether a failed save left it behind. */
   let savedStretches = new Set((marks ?? []).map(stretchKey));
   let marksDirty = false;
-  function saveMarks(list) {
-    write(() => stateStore.saveMarks(list));
+  /** Saves `list` and, with them, the alert handoffs not yet acknowledged. */
+  function saveMarks(list, handoffs = alertHandlers.handoffs) {
+    try {
+      write(() => stateStore.saveMarks(list, handoffs));
+    } catch (error) {
+      marksDirty = true;
+      throw error;
+    }
     savedStretches = new Set(list.map(stretchKey));
     marksDirty = false;
   }
@@ -219,6 +236,8 @@ export async function startDaemon({
     onRun(alerts, now) {
       // A successor that took the lock delivers these alerts itself.
       if (!stillHeld()) return;
+      // An alert handed to the handler is saved below with the marks that pass it, so a daemon that
+      // ends before it is acknowledged leaves it for the next daemon to play.
       for (const { alert, timer } of alerts) alertHandlers.deliver(alert, timer);
       const current = scheduler.marks;
       const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
@@ -417,7 +436,17 @@ export async function startDaemon({
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
     if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
-    settleRequest(response, alertHandlers.acknowledge(alertId, id), { alertId, acknowledged: true });
+    // The alert is the handler's only once that is saved; until then it stays pending, so a retry
+    // gets the answer and the sink plays it if none is saved in time.
+    let result;
+    try {
+      result = alertHandlers.acknowledge(alertId, id);
+    } catch (error) {
+      if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      log(`could not save scheduler.json: ${error.message}`);
+      return fail(response, 500, 'storage_failed', 'The daemon could not record the acknowledgement.');
+    }
+    settleRequest(response, result, { alertId, acknowledged: true });
   }
 
   /** The id in `pathname` after `prefix` and before `suffix`, or null when it does not match. */
@@ -523,8 +552,9 @@ export async function startDaemon({
     if (closing) return closed;
     closing = true;
     scheduler.stop();
-    // Alerts the handler has not acknowledged are played here rather than lost.
-    alertHandlers.stop();
+    // Alerts the handler has not acknowledged are played here rather than lost, unless a successor
+    // holds the lock and plays them.
+    alertHandlers.stop({ lockLost });
     for (const handle of [idleHandle, heartbeatHandle]) if (handle !== null) clock.clearTimeout(handle);
     for (const response of subscribers.keys()) response.end();
     subscribers.clear();
@@ -552,6 +582,12 @@ export async function startDaemon({
   }
 
   heartbeatHandle = clock.setTimeout(heartbeat, heartbeatMs);
+  // Alerts an earlier daemon handed over and that were never settled are played once, and the first
+  // run saves scheduler.json without them.
+  if (unsettled.length) {
+    replayHandoffs(unsettled, sink, log);
+    marksDirty = true;
+  }
   scheduler.run();
   updateIdle({ activity: true });
   log(`listening on ${paths.socket} (pid ${process.pid}).`);
