@@ -57,6 +57,9 @@ public final class OpenRouterAccount {
     /// Told when Add key or Remove key starts, before the Keychain is changed, so `ExplainCenter` ends the OpenRouter
     /// work in flight and nothing more is sent with the key being replaced or removed.
     @ObservationIgnored public var onKeyChange: (@MainActor () -> Void)?
+    /// Told when the last Add key or Remove key in flight has finished, once Settings shows what it found, so
+    /// `ExplainCenter` reads OpenRouter's availability again for Settings.
+    @ObservationIgnored public var onKeyChangeEnd: (@MainActor () -> Void)?
     /// Whether an Add key or Remove key is waiting for the Keychain; Settings does not offer Test key meanwhile.
     public var isChangingKey: Bool { pendingKeyChanges > 0 }
     /// Whether Settings shows a key stored: Test key and Remove key are offered then.
@@ -174,6 +177,7 @@ public final class OpenRouterAccount {
             return false
         }
         let change = startKeyChange()
+        defer { endKeyChange() }
         // A model ID entered or kept before that contains the key is neither kept nor used.
         if OpenRouterProvider.contains(key: key, in: model) { refuseModel() }
         if OpenRouterProvider.contains(key: key, in: checkedModel) {
@@ -203,6 +207,7 @@ public final class OpenRouterAccount {
     /// finishes, what that one finds is what Settings shows.
     public func removeKey() async {
         let change = startKeyChange()
+        defer { endKeyChange() }
         let removed = await onKeychainQueue { try $0.remove() }
         pendingKeyChanges -= 1
         switch removed {
@@ -227,6 +232,12 @@ public final class OpenRouterAccount {
         onKeyChange?()
         pendingKeyChanges += 1
         return keyChanges
+    }
+
+    /// Ends Add key or Remove key, once what it found is shown: when no other is in flight, that is reported
+    /// (`onKeyChangeEnd`).
+    private func endKeyChange() {
+        if pendingKeyChanges == 0 { onKeyChangeEnd?() }
     }
 
     /// Reads again whether a key is stored, without reading the key, off the main actor: at launch and each time

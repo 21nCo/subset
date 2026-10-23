@@ -218,7 +218,10 @@ final class OpenRouterExplainTests: XCTestCase {
         try OpenRouterKeyStore(items: keychain).save(other)
 
         let item = ExplainKey("process:1")
+        let reads = keychain.dataReads
         await center.explain(item) { _ in self.request() }
+        XCTAssertEqual(keychain.dataReads, reads + 1, "the key was read to check the model ID with")
+        XCTAssertEqual(keychain.mainThreadDataReads, 0, "off the main thread")
         // Set back as availability was read, before a preview could be built.
         XCTAssertEqual(center.choice, .appleIntelligence)
         XCTAssertEqual(center.state(for: item), .idle, "never previewed")
@@ -484,6 +487,25 @@ final class OpenRouterExplainTests: XCTestCase {
         keychain.holdsOtherCalls = false
         keychain.releaseOtherCall()
         await removing.value
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    /// Add Key ends the status Settings shows for OpenRouter as it starts; once the key is replaced and OpenRouter is
+    /// still chosen, it is read again, so Settings does not fall back to a bare Check. Nothing is sent.
+    func testReplacingTheKeyReadsOpenRouterAvailabilityAgain() async throws {
+        let (center, keychain, account) = await chosen()
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter))
+        keychain.holdsOtherCalls = true
+        let replacing = Task { await account.addKey("sk-or-v1-" + String(repeating: "f", count: 64)) }
+        try await until { keychain.heldOtherCalls == 1 }
+        XCTAssertNil(center.availabilityStatus, "ended as the change starts")
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        let stored = await replacing.value
+        XCTAssertTrue(stored)
+        try await until { center.availabilityStatus == .read(.availableOnOpenRouter) }
+        XCTAssertEqual(center.choice, .openRouter)
         XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 

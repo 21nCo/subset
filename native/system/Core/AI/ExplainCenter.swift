@@ -173,6 +173,11 @@ public final class ExplainCenter {
         openRouter?.onKeyChange = { [weak self] in
             if self?.choice == .openRouter { self?.endWork() }
         }
+        // The change ended the status Settings showed; it is read again while OpenRouter is still chosen.
+        openRouter?.onKeyChangeEnd = { [weak self] in
+            guard let self, choice == .openRouter else { return }
+            Task { await self.refreshAvailability() }
+        }
     }
 
     /// This Mac's account, with placeholders keyed for this session, and OpenRouter with `openRouter`'s key and model.
