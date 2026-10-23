@@ -305,8 +305,9 @@ public final class ExplainCenter {
     /// is cancelled or the provider changes, which is not a timeout. Settings shows it as checking while it is read,
     /// then what it answered or that it did not answer in time, only while no later read has started and the provider
     /// has not changed since `selection`, so a slow read never replaces a newer one. OpenRouter's answer that no key is
-    /// stored, that it cannot be read, or that the model ID holds it sets the choice back, and so does its latest read
-    /// not answering in time (a read cancelled, or overtaken by a later one, does not). `beforeSending` reads it as
+    /// stored, that it cannot be read, or that the model ID holds it sets the choice back, as does it not answering in
+    /// time, only from its latest read: a read cancelled, or overtaken by a later one, sets nothing back and ends no
+    /// newer work, and only its own caller acts on what it answered. `beforeSending` reads it as
     /// a request is about to be built (`OpenRouterProvider.availabilityBeforeSending()`), so a model ID holding the key
     /// sets the choice back before anything is previewed.
     private func readAvailability(of provider: any AIProvider, in selection: Int,
@@ -333,10 +334,13 @@ public final class ExplainCenter {
         }
         if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
-            // OpenRouter reads only the Keychain to answer, so the Keychain did not say whether its key is stored.
-            if availability == nil { setBack(.keyUnreadable) }
+            if let availability {
+                noteOpenRouter(availability, from: provider)
+            } else {
+                // OpenRouter reads only the Keychain to answer, so the Keychain did not say whether its key is stored.
+                setBack(.keyUnreadable)
+            }
         }
-        if selection == self.selection, let availability { noteOpenRouter(availability, from: provider) }
         return availability
     }
 

@@ -283,6 +283,61 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
+    /// An OpenRouter read that a later one overtook, which then finds the key unreadable, sets nothing back: the
+    /// newer read, an Explain whose preview is shown or Settings', stands, and only the overtaken request ends, unsent.
+    /// The latest read finding it unreadable still sets the choice back.
+    func testAnOvertakenOpenRouterReadThatFindsTheKeyUnreadableSetsNothingBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        let first = ExplainKey("process:1"), second = ExplainKey("process:2"), third = ExplainKey("process:3")
+
+        /// Explains `item` with its read of the key failing, held until `overtake` has run.
+        func overtaken(_ item: ExplainKey, by overtake: () async throws -> Void) async throws {
+            keychain.failure = errSecInteractionNotAllowed
+            keychain.holdsDataReads = true
+            let held = Task { await center.explain(item) { _ in self.request() } }
+            try await until { keychain.heldDataReads == 1 }
+            keychain.holdsDataReads = false
+            keychain.failure = nil
+            try await overtake()
+            keychain.releaseDataRead()
+            await held.value
+            XCTAssertEqual(center.choice, .openRouter)
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(center.state(for: item), .unavailable(.openRouterKeyUnreadable), "only its own item ends")
+            XCTAssertNil(center.sentText(for: item))
+            XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is shown")
+        }
+
+        // Overtaken by another item's Explain, which read the key and shows its preview.
+        var preview: SendPreview?
+        try await overtaken(first) {
+            await center.explain(second) { _ in self.request("backupd") }
+            preview = try XCTUnwrap(confirming(center, second))
+        }
+        XCTAssertEqual(confirming(center, second), preview, "the newer preview is kept")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.confirmSend(second)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [try XCTUnwrap(preview).body])
+
+        // Overtaken by Settings' read, which found the key stored.
+        try await overtaken(third) { await center.refreshAvailability() }
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+
+        // The latest read finding the key unreadable sets the choice back.
+        keychain.failure = errSecInteractionNotAllowed
+        await center.explain(third) { _ in self.request() }
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+    }
+
     /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
     /// request is refused before it is previewed, so the key is never shown as the model or sent, and that sets the
     /// choice back, says why, and clears the model ID.
