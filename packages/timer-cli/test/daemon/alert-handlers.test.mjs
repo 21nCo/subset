@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
 import { ACK_TIMEOUT_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
-import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir } from './helpers.mjs';
+import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
 
@@ -198,6 +198,56 @@ test('a daemon that loses its lock leaves the alerts it handed over to the daemo
   handlers.stop({ lockLost: true });
   clock.advance(ACK_TIMEOUT_MS);
   assert.deepEqual([sink.received.length, handlers.handoffs], [0, []]);
+});
+
+for (const [path, settle] of [
+  ['the 2 s timeout', (handlers, clock) => clock.advance(ACK_TIMEOUT_MS)],
+  ['a disconnect', (handlers) => handlers.disconnected('s1')],
+  ['unregistering', (handlers) => handlers.unregister('s1')],
+  ['a graceful stop', (handlers) => handlers.stop()]
+]) {
+  test(`a pending alert is not played on ${path} once the daemon has lost its lock`, () => {
+    const clock = createFakeClock();
+    const sink = createRecordingSink();
+    let held = true;
+    const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, owns: () => held });
+    handlers.register('s1');
+    const timer = { id: 't_1', name: 'Egg', sound: true };
+    handlers.deliver({ timerId: 't_1', kind: 'segment', at: clock.now() }, timer);
+    handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
+    held = false;
+    settle(handlers, clock);
+    clock.advance(60_000);
+    assert.deepEqual([sink.received.length, handlers.status.pending, handlers.status.fallbacks], [0, 0, 0]);
+  });
+}
+
+test('a pending alert falls back through the sink while the daemon holds its lock', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  let checks = 0;
+  const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, owns: () => ++checks > 0 });
+  handlers.register('s1');
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, { id: 't_1', name: 'Egg', sound: true });
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.deepEqual([sink.received.length, checks], [1, 1]);
+});
+
+test('a daemon whose lock is replaced while an alert is pending leaves it to the next daemon, which plays it once', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  const id = await startCountdown(context);
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  writeFileSync(context.daemon.paths.lock, JSON.stringify({ pid: 1, token: 'another daemon' }));
+  context.clock.advance(ACK_TIMEOUT_MS);
+  assert.equal(await within(context.daemon.closed), 1);
+  assert.equal(context.sink.received.length, 0);
+  // The daemon that replaced the lock has gone, so the next one takes it.
+  unlinkSync(context.daemon.paths.lock);
+  const next = await startTestDaemon(t, { dataDir: context.daemon.paths.dataDir });
+  next.clock.advance(60_000);
+  assert.deepEqual(next.sink.received.map(({ alert, timer }) => [alert.timerId, alert.kind, timer.name]), [[id, 'finish', 'Egg']]);
 });
 
 test('an acknowledgement is answered only once it is saved; one that fails to save leaves the alert to the sink', () => {

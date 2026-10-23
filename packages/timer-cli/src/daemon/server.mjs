@@ -165,6 +165,7 @@ export async function startDaemon({
     log,
     publish: (alert) => broadcast('alert', alert),
     isOpen: (id) => subscriberIds.has(id),
+    owns: () => stillHeld(),
     save: (handoffs) => saveMarks(scheduler.marks, handoffs)
   });
 

@@ -25,11 +25,15 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * answered only once `save(handoffs)` has recorded the alert as taken; when that throws, the alert
  * stays pending and the error is thrown to the caller.
  *
+ * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting and
+ * stopping) first asks `owns()` whether this daemon still holds `daemon.lock`. One that lost it
+ * plays none of its pending alerts: the daemon that holds it plays those this one saved.
+ *
  * `publish(alert)` sends the `alert` event to every subscriber; `isOpen(subscriberId)` says
  * whether that subscriber's event stream is still open. Results are `{ ok: true, ... }` or
  * `{ ok: false, status, code, message }`.
  */
-export function createAlertHandlers({ clock, sink, log, publish, isOpen, save = () => {}, newId = newAlertId, ackTimeoutMs = ACK_TIMEOUT_MS }) {
+export function createAlertHandlers({ clock, sink, log, publish, isOpen, owns = () => true, save = () => {}, newId = newAlertId, ackTimeoutMs = ACK_TIMEOUT_MS }) {
   let handler = null;
   /** alertId → { alert, timer, subscriberId, handle }, for alerts the handler has not yet acknowledged. */
   const pending = new Map();
@@ -56,8 +60,21 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, save = 
     }
   }
 
-  /** Plays a pending alert through the sink, once, and records the fallback. */
+  /** Drops every pending alert unplayed, for the daemon that holds `daemon.lock` to play. */
+  function leaveToLockHolder() {
+    for (const entry of pending.values()) clock.clearTimeout(entry.handle);
+    if (pending.size) log(`${pending.size} unacknowledged alert(s) are left to the daemon that holds daemon.lock.`);
+    pending.clear();
+  }
+
+  /** Plays a pending alert through the sink, once, and records the fallback, while this daemon holds the lock. */
   function fallBack(alertId, reason) {
+    if (!pending.has(alertId)) return false;
+    // `owns` may itself begin the lost-lock shutdown, which leaves the pending alerts first.
+    if (!owns()) {
+      leaveToLockHolder();
+      return false;
+    }
     const entry = pending.get(alertId);
     if (!entry) return false;
     pending.delete(alertId);
@@ -159,10 +176,8 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, save = 
      */
     stop({ lockLost = false } = {}) {
       handler = null;
-      if (!lockLost) return fallBackAll(null, 'was pending when the daemon stopped');
-      for (const entry of pending.values()) clock.clearTimeout(entry.handle);
-      if (pending.size) log(`${pending.size} unacknowledged alert(s) are left to the daemon that holds daemon.lock.`);
-      pending.clear();
+      if (lockLost) return leaveToLockHolder();
+      fallBackAll(null, 'was pending when the daemon stopped');
     }
   };
 }
