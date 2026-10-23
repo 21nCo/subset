@@ -132,17 +132,20 @@ public struct OpenRouterProvider: AIProvider {
         ]
     }
 
-    /// The draft in a chat completion: the first choice's message content, read as `ExplanationDraft(json:)`.
+    /// The draft in a chat completion: the first choice's message content, read as `ExplanationDraft(json:)`. An
+    /// error, whether the answer's or the first choice's (which comes with `finish_reason` `error` and whatever content
+    /// was generated before it), fails with OpenRouter's reason, and no content is read.
     static func draft(from data: Data, key: String) throws -> ExplanationDraft {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ExplainError.invalidResponse("OpenRouter's answer is not a JSON object.")
         }
-        if let error = object["error"] {
-            let message = OpenRouterClient.message(in: error, key: key)
-            throw ExplainError.failed(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
+        if let error = object["error"] { throw failure(error, key: key) }
+        guard let choices = object["choices"] as? [Any], let choice = choices.first as? [String: Any] else {
+            throw ExplainError.invalidResponse("OpenRouter's answer has no message.")
         }
-        guard let choices = object["choices"] as? [Any], let choice = choices.first as? [String: Any],
-              let message = choice["message"] as? [String: Any] else {
+        let choiceError = choice["error"].flatMap { $0 is NSNull ? nil : $0 }
+        if choiceError != nil || choice["finish_reason"] as? String == "error" { throw failure(choiceError, key: key) }
+        guard let message = choice["message"] as? [String: Any] else {
             throw ExplainError.invalidResponse("OpenRouter's answer has no message.")
         }
         if let refusal = message["refusal"] as? String, !refusal.isEmpty {
@@ -152,6 +155,12 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
         }
         return try ExplanationDraft(json: Data(content.utf8))
+    }
+
+    /// "OpenRouter could not answer: …", with OpenRouter's message as `OpenRouterClient.message(in:key:)` gives it.
+    private static func failure(_ error: Any?, key: String) -> ExplainError {
+        let message = error.flatMap { OpenRouterClient.message(in: $0, key: key) }
+        return .failed(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
     }
 }
 

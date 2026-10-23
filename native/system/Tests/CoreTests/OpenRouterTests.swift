@@ -50,7 +50,7 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertNoThrow(try store.remove(), "removing no key is not an error")
     }
 
-    func testWithoutTheDataProtectionKeychainNoKeyIsStoredAnywhereAndAddKeySaysWhy() throws {
+    func testWithoutTheDataProtectionKeychainNoKeyIsStoredAnywhereAndAddKeySaysWhy() async throws {
         let keychain = FakeKeychain(entitled: false)
         let store = OpenRouterKeyStore(items: keychain)
         XCTAssertThrowsError(try store.save(Self.key)) { error in
@@ -63,8 +63,9 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertNoThrow(try store.remove())
 
         // Add Key shows that, and no key is shown as stored.
-        let account = account(defaults(), keychain: keychain)
-        XCTAssertFalse(account.addKey(Self.key))
+        let account = await account(defaults(), keychain: keychain)
+        let stored = await account.addKey(Self.key)
+        XCTAssertFalse(stored)
         XCTAssertFalse(account.hasKey)
         XCTAssertEqual(account.keyError, KeychainError(status: errSecMissingEntitlement).message)
         XCTAssertEqual(keychain.count, 0)
@@ -98,10 +99,12 @@ final class OpenRouterTests: XCTestCase {
         let defaults = defaults()
         let log = RecordingLog()
         let keychain = FakeKeychain()
-        let account = account(defaults, keychain: keychain, log: log)
-        XCTAssertFalse(account.addKey("sk-or bad"), "refused")
+        let account = await account(defaults, keychain: keychain, log: log)
+        let refused = await account.addKey("sk-or bad")
+        XCTAssertFalse(refused, "refused")
         XCTAssertEqual(account.keyError, OpenRouterAccount.invalidKeyMessage)
-        XCTAssertTrue(account.addKey(Self.key))
+        let stored = await account.addKey(Self.key)
+        XCTAssertTrue(stored)
         XCTAssertNil(account.keyError)
         account.model = "anthropic/claude-sonnet"
         await account.modelChecked()
@@ -124,7 +127,7 @@ final class OpenRouterTests: XCTestCase {
             XCTAssertFalse(message.contains(Self.key), message)
             XCTAssertTrue(message.contains("Invalid key [key]"), message)
         }
-        account.removeKey()
+        await account.removeKey()
 
         XCTAssertFalse(log.messages.isEmpty)
         for message in log.messages {
@@ -245,6 +248,32 @@ final class OpenRouterTests: XCTestCase {
         await assertFails(provider, containing: "declined")
     }
 
+    func testAnErrorOnTheChoiceFailsWithOpenRoutersReasonWhateverContentCameWithIt() async throws {
+        let keychain = FakeKeychain()
+        try OpenRouterKeyStore(items: keychain).save(Self.key)
+        let provider = provider(keychain)
+        let error = #"{"code":502,"message":"Upstream failed for \#(Self.key)","metadata":{"provider_name":"x"}}"#
+        // As OpenRouter documents a generation that fails part way: finish_reason "error", with what came before it.
+        for content in ["null", #""{\"summary\":\"A sy""#, try jsonString(Self.answer)] {
+            StubProtocol.enqueue(status: 200, json: #"{"choices":[{"finish_reason":"error","error":\#(error),"message":{"role":"assistant","content":\#(content)}}]}"#)
+            do {
+                let draft = try await provider.explain(request())
+                XCTFail("a draft from \(content): \(draft)")
+            } catch {
+                XCTAssertEqual(error as? ExplainError, .failed("OpenRouter could not answer: Upstream failed for [key]."), content)
+            }
+        }
+        // The error alone, or finish_reason "error" alone.
+        StubProtocol.enqueue(status: 200, json: #"{"choices":[{"error":{"message":"Model overloaded"}}]}"#)
+        await assertFails(provider, containing: "OpenRouter could not answer: Model overloaded.")
+        StubProtocol.enqueue(status: 200, json: #"{"choices":[{"finish_reason":"error","error":null,"message":{"content":\#(try jsonString(Self.answer))}}]}"#)
+        await assertFails(provider, containing: "OpenRouter could not answer: no reason given.")
+        // A null error on a finished choice is no error.
+        StubProtocol.enqueue(status: 200, json: #"{"choices":[{"finish_reason":"stop","error":null,"message":{"content":\#(try jsonString(Self.answer))}}]}"#)
+        let draft = try await provider.explain(request())
+        XCTAssertEqual(draft.summary, "A sync agent.")
+    }
+
     func testA429IsTriedOnceMoreAfterABackoff() async throws {
         let keychain = FakeKeychain()
         try OpenRouterKeyStore(items: keychain).save(Self.key)
@@ -343,8 +372,8 @@ final class OpenRouterTests: XCTestCase {
 
     func testTheKeyTestSendsNoUserDataAndReportsSuccessOrTheError() async throws {
         let keychain = FakeKeychain()
-        let account = account(defaults(), keychain: keychain)
-        account.addKey(Self.key)
+        let account = await account(defaults(), keychain: keychain)
+        await account.addKey(Self.key)
         StubProtocol.enqueue(status: 200, json: #"{"data":{"label":"x"}}"#)
         await account.testKey()
         XCTAssertEqual(account.keyTest, .passed)
@@ -363,20 +392,21 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(account.keyTest, .failed("OpenRouter answered 401 (unauthorized): User not found."))
 
         // Adding another key clears the result, which was the old key's.
-        account.addKey("sk-or-v1-other")
+        await account.addKey("sk-or-v1-other")
         XCTAssertNil(account.keyTest)
     }
 
     func testAddingOrRemovingTheKeyStopsAKeyTestThatHasReadTheKeyBefore() async throws {
         let keychain = FakeKeychain()
-        let account = account(defaults(), keychain: keychain, key: Self.key)
+        let account = await account(defaults(), keychain: keychain, key: Self.key)
 
         // Removed, then another added, after the test read the first key: neither key is sent by it.
         keychain.holdsDataReads = true
         let first = Task { await account.testKey() }
         try await until { keychain.heldDataReads == 1 }
-        account.removeKey()
-        XCTAssertTrue(account.addKey("sk-or-v1-replacement"))
+        await account.removeKey()
+        let replaced = await account.addKey("sk-or-v1-replacement")
+        XCTAssertTrue(replaced)
         keychain.releaseDataRead()
         await first.value
         XCTAssertTrue(StubProtocol.requests.isEmpty, "the removed key is not sent")
@@ -387,7 +417,8 @@ final class OpenRouterTests: XCTestCase {
         try OpenRouterKeyStore(items: keychain).remove()
         let second = Task { await account.testKey() }
         try await until { keychain.heldDataReads == 1 }
-        XCTAssertTrue(account.addKey("sk-or-v1-third"))
+        let added = await account.addKey("sk-or-v1-third")
+        XCTAssertTrue(added)
         keychain.releaseDataRead()
         await second.value
         keychain.holdsDataReads = false
@@ -399,7 +430,7 @@ final class OpenRouterTests: XCTestCase {
 
     func testRemovingTheKeyDuringTheKeyTestsBackoffSendsNoRetry() async throws {
         let backoff = WaitRecorder()
-        let account = account(defaults(), keychain: FakeKeychain(), key: Self.key, sleep: { duration in
+        let account = await account(defaults(), keychain: FakeKeychain(), key: Self.key, sleep: { duration in
             await backoff.record(duration)
             // Long enough that a retry sent after it would be seen; a cancelled task ends it at once.
             try await Task.sleep(for: .seconds(2))
@@ -408,7 +439,7 @@ final class OpenRouterTests: XCTestCase {
         StubProtocol.enqueue(status: 200, json: #"{"data":{"label":"x"}}"#)
         let test = Task { await account.testKey() }
         try await until { !backoff.durations.isEmpty }
-        account.removeKey()
+        await account.removeKey()
         await test.value
         try await Task.sleep(for: .milliseconds(2_100))
         XCTAssertEqual(StubProtocol.requests.count, 1, "no retry with the removed key")
@@ -420,7 +451,7 @@ final class OpenRouterTests: XCTestCase {
         let keychain = FakeKeychain()
         try OpenRouterKeyStore(items: keychain).save(Self.key)
         keychain.failure = errSecInteractionNotAllowed
-        let account = account(defaults(), keychain: keychain)
+        let account = await account(defaults(), keychain: keychain)
         XCTAssertFalse(account.hasKey)
         XCTAssertEqual(account.keyError, KeychainError(status: errSecInteractionNotAllowed).message)
 
@@ -442,21 +473,123 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
-    func testAFailedReplaceKeyKeepsWhetherAKeyIsStoredInStep() {
+    func testNoKeychainCallIsMadeOnTheMainActorAndTheLastAddOrRemoveKeyIsWhatStays() async throws {
+        // Stops at the first failure: a call made on the main actor would wait there for a held call forever.
+        continueAfterFailure = false
         let keychain = FakeKeychain()
-        let account = account(defaults(), keychain: keychain, key: Self.key)
+        let store = OpenRouterKeyStore(items: keychain)
+        try store.save(Self.key)
+        let before = keychain.mainThreadCalls
+
+        // Launch, Add key, a failed Remove key and the read after it, and Remove key: no call on the main thread.
+        let unheld = OpenRouterAccount(keys: store, client: client(), defaults: defaults())
+        XCTAssertEqual(keychain.mainThreadCalls, before, "nothing is read as it is made")
+        XCTAssertEqual(unheld.presence, .unknown(shown: false))
+        await unheld.refreshKey()
+        XCTAssertEqual(unheld.presence, .stored)
+        let stored = await unheld.addKey("sk-or-v1-replacement")
+        XCTAssertTrue(stored)
+        keychain.failure = errSecInteractionNotAllowed
+        await unheld.removeKey()
+        XCTAssertEqual(unheld.presence, .unknown(shown: true))
+        keychain.failure = nil
+        await unheld.removeKey()
+        XCTAssertEqual(unheld.presence, .absent)
+        XCTAssertEqual(keychain.mainThreadCalls, before)
+        try store.save(Self.key)
+
+        // Launch: nothing is read until refreshKey, which waits for the Keychain without holding the main actor.
+        keychain.holdsOtherCalls = true
+        let account = OpenRouterAccount(keys: store, client: client(), defaults: defaults())
+        XCTAssertEqual(account.presence, .unknown(shown: false))
+        let launch = Task { await account.refreshKey() }
+        try await until { keychain.heldOtherCalls == 1 }
+        keychain.releaseOtherCall()
+        await launch.value
+        XCTAssertEqual(account.presence, .stored)
+
+        // Add key, then Remove key while it waits: the key is removed, and none is shown.
+        let add = Task { await account.addKey("sk-or-v1-replacement") }
+        try await until { keychain.heldOtherCalls == 1 }
+        XCTAssertEqual(account.presence, .stored, "unchanged until the Keychain answers")
+        let remove = Task { await account.removeKey() }
+        try await until { account.pendingKeyChanges == 2 }
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        let added = await add.value
+        await remove.value
+        XCTAssertTrue(added)
+        XCTAssertEqual(account.presence, .absent)
+        XCTAssertEqual(keychain.count, 0)
+
+        // Remove key, then Add key while it waits: the key added is stored and shown.
+        keychain.holdsOtherCalls = true
+        let removeAgain = Task { await account.removeKey() }
+        try await until { keychain.heldOtherCalls == 1 }
+        let addAgain = Task { await account.addKey("sk-or-v1-third") }
+        try await until { account.pendingKeyChanges == 2 }
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        await removeAgain.value
+        _ = await addAgain.value
+        XCTAssertEqual(account.presence, .stored)
+        XCTAssertEqual(try store.readKey(), "sk-or-v1-third")
+
+        // A presence read that Remove key overtakes changes nothing.
+        keychain.holdsOtherCalls = true
+        let refresh = Task { await account.refreshKey() }
+        try await until { keychain.heldOtherCalls == 1 }
+        let removeLast = Task { await account.removeKey() }
+        try await until { account.pendingKeyChanges == 1 }
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        await refresh.value
+        await removeLast.value
+        XCTAssertEqual(account.presence, .absent)
+        XCTAssertNil(account.keyError)
+        XCTAssertEqual(keychain.mainThreadCalls - before, 3, "only the test's own save (an update, then an add) and read")
+    }
+
+    func testAModelIDEnteredWhileAKeyIsBeingAddedIsComparedWithThatKey() async throws {
+        let key = "tok-0123456789abcdef"
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        XCTAssertEqual(account.presence, .absent)
+
+        keychain.holdsOtherCalls = true
+        let add = Task { await account.addKey(key) }
+        try await until { keychain.heldOtherCalls == 1 }
+        account.modelEntry = "x/\(key)"
+        account.commitModel()
+        XCTAssertEqual(account.checkedModel, "", "not used while the key may be being stored")
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        _ = await add.value
+        await account.modelChecked()
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+    }
+
+    func testAFailedReplaceKeyKeepsWhetherAKeyIsStoredInStep() async {
+        let keychain = FakeKeychain()
+        let account = await account(defaults(), keychain: keychain, key: Self.key)
         let replacement = "sk-or-v1-" + String(repeating: "f", count: 64)
 
         // Neither stored nor known whether a key is still stored: the key stays as shown.
         keychain.failure = errSecInteractionNotAllowed
-        XCTAssertFalse(account.addKey(replacement))
+        let replaced = await account.addKey(replacement)
+        XCTAssertFalse(replaced)
         XCTAssertEqual(account.keyError, KeychainError(status: errSecInteractionNotAllowed).message)
         XCTAssertTrue(account.hasKey)
 
         // Not stored, and no key found any more: no key is shown.
         keychain.failure = nil
         keychain.entitled = false
-        XCTAssertFalse(account.addKey(replacement))
+        let replacedAgain = await account.addKey(replacement)
+        XCTAssertFalse(replacedAgain)
         XCTAssertFalse(account.hasKey)
     }
 
@@ -470,8 +603,9 @@ final class OpenRouterTests: XCTestCase {
         let keychain = FakeKeychain()
         try OpenRouterKeyStore(items: keychain).save(key)
         keychain.failure = errSecInteractionNotAllowed
-        let account = account(defaults, keychain: keychain, log: log)
-        XCTAssertFalse(account.addKey("tok-replacement-0000"))
+        let account = await account(defaults, keychain: keychain, log: log)
+        let replaced = await account.addKey("tok-replacement-0000")
+        XCTAssertFalse(replaced)
         XCTAssertEqual(account.presence, .unknown(shown: false))
         account.model = leaked
         await account.modelChecked()
@@ -489,9 +623,9 @@ final class OpenRouterTests: XCTestCase {
         // Remove Key fails and so does the read after it: the key is still shown, and an entry still compared.
         let removeDefaults = self.defaults()
         let removeKeychain = FakeKeychain()
-        let removing = self.account(removeDefaults, keychain: removeKeychain, key: key, log: log)
+        let removing = await self.account(removeDefaults, keychain: removeKeychain, key: key, log: log)
         removeKeychain.failure = errSecInteractionNotAllowed
-        removing.removeKey()
+        await removing.removeKey()
         XCTAssertEqual(removing.presence, .unknown(shown: true))
         XCTAssertTrue(removing.hasKey)
         removing.model = leaked
@@ -504,7 +638,7 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(removing.checkedModel, "")
 
         // Only once no key is known to be stored is an entry kept without reading the key.
-        removing.removeKey()
+        await removing.removeKey()
         XCTAssertEqual(removing.presence, .absent)
         let reads = removeKeychain.dataReads
         removing.model = "anthropic/claude-sonnet"
@@ -522,7 +656,7 @@ final class OpenRouterTests: XCTestCase {
 
     func testAKeyTestThatCannotReadTheKeyLeavesWhetherOneIsStoredUnknown() async throws {
         let keychain = FakeKeychain()
-        let account = account(defaults(), keychain: keychain, key: "tok-0123456789abcdef")
+        let account = await account(defaults(), keychain: keychain, key: "tok-0123456789abcdef")
         keychain.failure = errSecInteractionNotAllowed
         await account.testKey()
         XCTAssertEqual(account.keyTest, .failed(KeychainError(status: errSecInteractionNotAllowed).message))
@@ -552,7 +686,7 @@ final class OpenRouterTests: XCTestCase {
         let defaults = defaults()
         let log = RecordingLog()
         let keychain = FakeKeychain()
-        let account = account(defaults, keychain: keychain, key: Self.key, log: log)
+        let account = await account(defaults, keychain: keychain, key: Self.key, log: log)
         let wrapped = { (key: String) in ["\(key)", "\"\(key)\"", "x/\(key)", "\(key):free", "openai/gpt-\(key)-mini",
                                           "a/b\(key)c", "~X/" + key.uppercased()] }
 
@@ -569,11 +703,12 @@ final class OpenRouterTests: XCTestCase {
 
         // A key with another prefix, inside a model ID entered before it was added, is cleared once it is added.
         let key = "tok-0123456789abcdef"
-        account.removeKey()
+        await account.removeKey()
         account.model = "x/\(key)"
         await account.modelChecked()
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "x/\(key)", "no key to compare it with yet")
-        XCTAssertTrue(account.addKey(key))
+        let added = await account.addKey(key)
+        XCTAssertTrue(added)
         XCTAssertEqual(account.model, "")
         XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
         XCTAssertEqual(account.checkedModel, "")
@@ -630,18 +765,18 @@ final class OpenRouterTests: XCTestCase {
 
         // One kept before that holds the key now stored is not used at launch, and is cleared once checked.
         defaults.set("x/\(key)", forKey: "openRouterModel")
-        let reopened = self.account(defaults, keychain: keychain, log: log)
+        let reopened = await self.account(defaults, keychain: keychain, log: log)
         XCTAssertEqual(reopened.provider().model, OpenRouterProvider.defaultModel)
         await reopened.modelChecked()
         XCTAssertEqual(reopened.model, "")
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
         defaults.set("\"\(Self.key)\"", forKey: "openRouterModel")
-        let refused = self.account(defaults, keychain: FakeKeychain(), log: log)
+        let refused = await self.account(defaults, keychain: FakeKeychain(), log: log)
         XCTAssertEqual(refused.model, "")
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
         // One kept before that does not hold it is used once checked.
         defaults.set("anthropic/claude-sonnet", forKey: "openRouterModel")
-        let kept = self.account(defaults, keychain: keychain, log: log)
+        let kept = await self.account(defaults, keychain: keychain, log: log)
         await kept.modelChecked()
         XCTAssertEqual(kept.provider().model, "anthropic/claude-sonnet")
 
@@ -659,9 +794,10 @@ final class OpenRouterTests: XCTestCase {
         let defaults = defaults()
         let log = RecordingLog()
         let keychain = FakeKeychain()
-        let account = account(defaults, keychain: keychain, log: log)
+        let account = await account(defaults, keychain: keychain, log: log)
         let key = "tok-0123456789abcdef"
-        XCTAssertTrue(account.addKey(key))
+        let added = await account.addKey(key)
+        XCTAssertTrue(added)
         account.model = "anthropic/claude-sonnet"
         await account.modelChecked()
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
@@ -699,7 +835,7 @@ final class OpenRouterTests: XCTestCase {
 
         // Whether a key is stored unknown at launch: an entry is still checked before it is kept.
         keychain.failure = errSecInteractionNotAllowed
-        let unread = self.account(defaults, keychain: keychain, log: log)
+        let unread = await self.account(defaults, keychain: keychain, log: log)
         XCTAssertFalse(unread.hasKey)
         unread.model = "x/\(key)"
         await unread.modelChecked()
@@ -716,7 +852,7 @@ final class OpenRouterTests: XCTestCase {
     func testEmptyingTheModelIDClearsItsErrorButAKeyEntryStillSaysWhyItWasCleared() async throws {
         let defaults = defaults()
         let keychain = FakeKeychain()
-        let account = account(defaults, keychain: keychain)
+        let account = await account(defaults, keychain: keychain)
 
         // Not a model ID, then emptied: openrouter/auto, with no error left under the empty field.
         account.model = "gpt-4o"
@@ -728,7 +864,8 @@ final class OpenRouterTests: XCTestCase {
 
         // A model ID that cannot be checked while the key cannot be read, then emptied.
         let key = "tok-0123456789abcdef"
-        XCTAssertTrue(account.addKey(key))
+        let added = await account.addKey(key)
+        XCTAssertTrue(added)
         keychain.failure = errSecInteractionNotAllowed
         account.model = "anthropic/claude-sonnet"
         await account.modelChecked()
@@ -757,7 +894,7 @@ final class OpenRouterTests: XCTestCase {
         func unchecked() async throws -> (OpenRouterAccount, FakeKeychain, UserDefaults) {
             let defaults = self.defaults()
             let keychain = FakeKeychain()
-            let account = self.account(defaults, keychain: keychain, key: key)
+            let account = await self.account(defaults, keychain: keychain, key: key)
             keychain.failure = errSecInteractionNotAllowed
             account.model = entry
             await account.modelChecked()
@@ -784,7 +921,7 @@ final class OpenRouterTests: XCTestCase {
 
         // Remove Key.
         (account, keychain, defaults) = try await unchecked()
-        account.removeKey()
+        await account.removeKey()
         XCTAssertEqual(account.presence, .absent)
         await assertUsed(account, defaults)
 
@@ -805,16 +942,67 @@ final class OpenRouterTests: XCTestCase {
         // A check whose read failed, finished after Remove Key: no key is stored, so the entry is used.
         let removed = self.defaults()
         let held = FakeKeychain()
-        let removing = self.account(removed, keychain: held, key: key)
+        let removing = await self.account(removed, keychain: held, key: key)
         held.holdsDataReads = true
         held.failure = errSecInteractionNotAllowed
         removing.model = entry
         try await until { held.heldDataReads == 1 }
         held.failure = nil
-        removing.removeKey()
+        // Remove Key's call waits behind the read, on the Keychain queue.
+        let remove = Task { await removing.removeKey() }
+        try await until { removing.pendingKeyChanges == 1 }
         held.holdsDataReads = false
         held.releaseDataRead()
+        await remove.value
         await assertUsed(removing, removed)
+    }
+
+    func testTheModelIDIsCheckedAndKeptOnlyWhenCommittedButAKeyIsClearedAsItIsTyped() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain, key: "tok-0123456789abcdef")
+        account.modelEntry = "anthropic/claude-sonnet"
+        account.commitModel()
+        await account.modelChecked()
+        XCTAssertEqual(account.checkedModel, "anthropic/claude-sonnet")
+        let reads = keychain.dataReads
+
+        // Typed a character at a time: what was committed stays used and kept, with no message and no key read.
+        let next = "openai/gpt-4o"
+        for end in next.indices.dropFirst() + [next.endIndex] {
+            account.modelEntry = String(next[..<end])
+            XCTAssertEqual(account.model, "anthropic/claude-sonnet")
+            XCTAssertEqual(account.checkedModel, "anthropic/claude-sonnet")
+            XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "anthropic/claude-sonnet")
+            XCTAssertNil(account.modelError, account.modelEntry)
+        }
+        await account.modelChecked()
+        XCTAssertEqual(keychain.dataReads, reads)
+
+        // Return, then leaving the field: checked once against the key, then kept.
+        account.commitModel()
+        account.commitModel()
+        await account.modelChecked()
+        XCTAssertEqual(account.checkedModel, next)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), next)
+        XCTAssertEqual(keychain.dataReads, reads + 1)
+
+        // Not a model ID: said only once committed.
+        account.modelEntry = "gpt-4o"
+        XCTAssertNil(account.modelError)
+        account.commitModel()
+        XCTAssertEqual(account.modelError, OpenRouterAccount.notAModelMessage)
+
+        // An OpenRouter key is cleared as soon as it is typed, without being committed.
+        for character in "x/sk-or" {
+            account.modelEntry += String(character)
+            XCTAssertEqual(account.modelError, OpenRouterAccount.notAModelMessage, account.modelEntry)
+        }
+        account.modelEntry += "-"
+        XCTAssertEqual(account.modelEntry, "", "cleared at sk-or-")
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
     }
 
     func testAppleIntelligenceStillSaysExplanationsAreGeneratedOnThisMac() {
@@ -825,6 +1013,11 @@ final class OpenRouterTests: XCTestCase {
     // MARK: Helpers
 
     private static let answer = #"{"summary":"A sync agent.","whatItIs":"It syncs files.","removalSafety":"review","howToRemove":"Quit it.","confidence":"medium","suggestedOrigin":null}"#
+
+    /// `text` as a JSON string literal.
+    private func jsonString(_ text: String) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: text, options: .fragmentsAllowed), as: UTF8.self)
+    }
 
     private func completion(_ content: String) -> String {
         let message = try! JSONSerialization.data(withJSONObject: ["choices": [["message": ["role": "assistant", "content": content]]]])
@@ -848,13 +1041,17 @@ final class OpenRouterTests: XCTestCase {
         OpenRouterProvider(keys: OpenRouterKeyStore(items: keychain), model: model, client: client(sleep: sleep))
     }
 
-    /// An account that uses `keychain` and the stub; `key`, when given, is stored first.
+    /// An account that uses `keychain` and the stub, once it has read whether a key is stored, as the app does at
+    /// launch; `key`, when given, is stored first.
     private func account(_ defaults: UserDefaults, keychain: FakeKeychain, key: String? = nil,
                          log: RecordingLog = RecordingLog(),
-                         sleep: (@Sendable (Duration) async throws -> Void)? = nil) -> OpenRouterAccount {
+                         sleep: (@Sendable (Duration) async throws -> Void)? = nil) async -> OpenRouterAccount {
         if let key { try? OpenRouterKeyStore(items: keychain).save(key) }
         let client = sleep.map { OpenRouterClient(session: StubProtocol.session(), log: log, sleep: $0) } ?? client(log: log)
-        return OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults, log: log)
+        let account = OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults,
+                                        log: log)
+        await account.refreshKey()
+        return account
     }
 
     private func request(_ name: String = "syncd") -> ExplainRequest {
@@ -898,6 +1095,10 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     private var _holdsDataReads = false
     private var _heldDataReads = 0
     private let readGate = DispatchSemaphore(value: 0)
+    private var _holdsOtherCalls = false
+    private var _heldOtherCalls = 0
+    private var _mainThreadCalls = 0
+    private let otherGate = DispatchSemaphore(value: 0)
 
     init(entitled: Bool = true) {
         _entitled = entitled
@@ -925,6 +1126,32 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
         readGate.signal()
     }
     var mainThreadDataReads: Int { lock.withLock { _mainThreadDataReads } }
+    /// Each call that does not read the key (a search for whether one is stored, an add, an update, a delete) waits
+    /// for `releaseOtherCall()` before it is made while this is set.
+    var holdsOtherCalls: Bool {
+        get { lock.withLock { _holdsOtherCalls } }
+        set { lock.withLock { _holdsOtherCalls = newValue } }
+    }
+    var heldOtherCalls: Int { lock.withLock { _heldOtherCalls } }
+
+    func releaseOtherCall() {
+        otherGate.signal()
+    }
+    /// Calls of every kind made on the main thread.
+    var mainThreadCalls: Int { lock.withLock { _mainThreadCalls } }
+
+    /// Counts a call made on the main thread, and holds one that does not read the key while `holdsOtherCalls`.
+    private func begin(readsData: Bool) {
+        let hold = lock.withLock {
+            if Thread.isMainThread { _mainThreadCalls += 1 }
+            let hold = _holdsOtherCalls && !readsData
+            if hold { _heldOtherCalls += 1 }
+            return hold
+        }
+        guard hold else { return }
+        otherGate.wait()
+        lock.withLock { _heldOtherCalls -= 1 }
+    }
 
     func item(dataProtection: Bool) -> [String: Any]? {
         lock.withLock { items[dataProtection] }
@@ -952,7 +1179,8 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
 
     func add(_ attributes: [String: Any]) -> OSStatus {
-        lock.withLock {
+        begin(readsData: false)
+        return lock.withLock {
             switch keychain(attributes) {
             case let .failure(error): return error.status
             case let .success(dataProtection):
@@ -967,6 +1195,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
 
     func copyMatching(_ query: [String: Any]) -> (OSStatus, Data?) {
+        begin(readsData: query[kSecReturnData as String] as? Bool == true)
         let (result, hold) = lock.withLock {
             let result = search(query)
             let hold = _holdsDataReads && query[kSecReturnData as String] as? Bool == true
@@ -994,7 +1223,8 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
 
     func update(_ query: [String: Any], _ attributes: [String: Any]) -> OSStatus {
-        lock.withLock {
+        begin(readsData: false)
+        return lock.withLock {
             switch keychain(query) {
             case let .failure(error): return error.status
             case let .success(dataProtection):
@@ -1008,7 +1238,8 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
 
     func delete(_ query: [String: Any]) -> OSStatus {
-        lock.withLock {
+        begin(readsData: false)
+        return lock.withLock {
             switch keychain(query) {
             case let .failure(error): return error.status
             case let .success(dataProtection):

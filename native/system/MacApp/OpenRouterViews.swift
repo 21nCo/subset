@@ -7,6 +7,7 @@ import SystemCore
 struct OpenRouterSection: View {
     @Bindable var account: OpenRouterAccount
     @State private var entered = ""
+    @FocusState private var modelFocused: Bool
 
     var body: some View {
         Section("OpenRouter") {
@@ -25,7 +26,7 @@ struct OpenRouterSection: View {
                 HStack {
                     Button("Test Key") { Task { await account.testKey() } }
                         .disabled(account.keyTest == .testing)
-                    Button("Remove Key", role: .destructive) { account.removeKey() }
+                    Button("Remove Key", role: .destructive) { Task { await account.removeKey() } }
                     Spacer()
                     keyTest
                 }
@@ -33,7 +34,13 @@ struct OpenRouterSection: View {
             if let error = account.keyError {
                 Text(verbatim: error).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
-            TextField("Model", text: $account.model, prompt: Text(verbatim: OpenRouterProvider.defaultModel))
+            // Checked and kept on Return or when the field loses focus, not as each character is typed.
+            TextField("Model", text: $account.modelEntry, prompt: Text(verbatim: OpenRouterProvider.defaultModel))
+                .focused($modelFocused)
+                .onSubmit { account.commitModel() }
+                .onChange(of: modelFocused) { _, focused in
+                    if !focused { account.commitModel() }
+                }
             if let error = account.modelError {
                 Text(verbatim: error).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
@@ -60,6 +67,10 @@ struct OpenRouterSection: View {
     }
 
     private func add() {
-        if account.addKey(entered) { entered = "" }
+        let key = entered
+        Task {
+            // Cleared once stored, unless something else was typed or pasted meanwhile.
+            if await account.addKey(key), entered == key { entered = "" }
+        }
     }
 }

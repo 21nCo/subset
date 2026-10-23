@@ -4,8 +4,10 @@ import Observation
 /// The OpenRouter part of Settings: **Add key**, **Test key**, **Remove key**, and the model ID. Only whether a key is
 /// stored is kept here; the key itself stays in the Keychain (`OpenRouterKeyStore`) and is read, off the main actor, only
 /// to send a request or the key test and, unless no key is known to be stored (`presence`), to check that a model ID
-/// entered does not contain it. The model ID is kept in user defaults; the key never is. Explain does not use
-/// OpenRouter yet: SET-160 adds it to the provider setting, with the send preview, through `provider()`.
+/// entered does not contain it. No Keychain call is made on the main actor: whether a key is stored is read when the
+/// app asks (`refreshKey()`, at launch and each time Settings is shown), and Add key and Remove key wait for theirs.
+/// The model ID is kept in user defaults; the key never is. Explain does not use OpenRouter yet: SET-160 adds it to the
+/// provider setting, with the send preview, through `provider()`.
 @MainActor
 @Observable
 public final class OpenRouterAccount {
@@ -20,7 +22,7 @@ public final class OpenRouterAccount {
     public enum KeyPresence: Equatable, Sendable {
         case stored
         case absent
-        /// The latest read of it failed; `shown` is whether Settings shows a key stored meanwhile.
+        /// Not read yet, or the latest read of it failed; `shown` is whether Settings shows a key stored meanwhile.
         case unknown(shown: Bool)
     }
 
@@ -43,12 +45,20 @@ public final class OpenRouterAccount {
     /// Why the latest Add key, Remove key, or Keychain read failed; cleared by the next one that works.
     public private(set) var keyError: String?
     public private(set) var keyTest: KeyTest?
-    /// The model ID as the user entered it. An entry with an API key anywhere in it (`sk-or-`, or the key stored,
-    /// whichever was entered first) is refused: it is cleared, never kept in user defaults or used, and `modelError`
-    /// says why. One that is not a model ID (`OpenRouterProvider.isModelID(_:)`) is not kept or used either:
-    /// `openrouter/auto` is. Unless no key is known to be stored, an entry is kept and used only once a read of the
-    /// key, off the main actor, shows it does not contain the key (`keep(_:)`); while the key cannot be read, it is
-    /// not, and it is checked again when whether a key is stored is next read.
+    /// The Model field's text while it is edited. Nothing in it is checked, kept or used until it is committed
+    /// (`commitModel()`, on Return or when the field loses focus), so a partial entry changes neither the model ID used
+    /// nor what Settings says about it. An entry with `sk-or-` in it is cleared at once, as `model` clears it.
+    public var modelEntry: String {
+        didSet {
+            if OpenRouterProvider.looksLikeKey(modelEntry) { model = modelEntry }
+        }
+    }
+    /// The model ID as the user entered and committed it. An entry with an API key anywhere in it (`sk-or-`, or the
+    /// key stored, whichever was entered first) is refused: it is cleared, never kept in user defaults or used, and
+    /// `modelError` says why. One that is not a model ID (`OpenRouterProvider.isModelID(_:)`) is not kept or used
+    /// either: `openrouter/auto` is. Unless no key is known to be stored, an entry is kept and used only once a read
+    /// of the key, off the main actor, shows it does not contain the key (`keep(_:)`); while the key cannot be read,
+    /// it is not, and it is checked again when whether a key is stored is next read.
     public var model: String {
         didSet {
             modelCheck?.cancel()
@@ -58,6 +68,8 @@ public final class OpenRouterAccount {
             } else {
                 keep(model)
             }
+            // The field shows what is committed, a cleared entry included.
+            if modelEntry != model { modelEntry = model }
         }
     }
     /// Why the model ID entered was cleared, or is not used; set with `checkedModel` by each outcome of `keep(_:)`.
@@ -74,8 +86,14 @@ public final class OpenRouterAccount {
     @ObservationIgnored private var tests = 0
     /// The key test in flight; Add key and Remove key cancel it, so it sends nothing more with the key it read.
     @ObservationIgnored private var keyTestTask: Task<Void, Never>?
-    /// Counts Add key and Remove key, so a presence read they overtake changes nothing.
+    /// Counts Add key and Remove key, so a presence read, or one of them, that a later one overtakes changes nothing.
     @ObservationIgnored private var keyChanges = 0
+    /// The Add key and Remove key calls not finished yet. While there is one, no key is known not to be stored.
+    @ObservationIgnored private(set) var pendingKeyChanges = 0
+    /// Makes the Keychain calls that store or remove the key, read whether one is stored, or read it to check a model
+    /// ID, one at a time in the order they are asked for and off the main actor, so a slow or prompting Keychain
+    /// cannot hold the app, and what the Keychain holds after overlapping changes is what the last one asked for.
+    @ObservationIgnored private let keychainQueue = DispatchQueue(label: "dev.subset.system.openrouter.keychain")
     /// The check of the model ID entered against the key stored.
     @ObservationIgnored private var modelCheck: Task<Void, Never>?
     /// Whether the latest check of the model ID entered could not read the key, so it is checked again.
@@ -106,13 +124,10 @@ public final class OpenRouterAccount {
         let refused = !stored.isEmpty && !OpenRouterProvider.isModelID(stored)
         if refused { defaults.set("", forKey: Self.modelKey) }
         model = refused ? "" : stored
+        modelEntry = refused ? "" : stored
         checkedModel = ""
-        do {
-            presence = try keys.containsKey() ? .stored : .absent
-        } catch {
-            presence = .unknown(shown: false)
-            keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
-        }
+        // Read off the main actor by `refreshKey()`, which the app calls at launch.
+        presence = .unknown(shown: false)
         // Kept before, it is still checked against the key stored now before it is used.
         keep(model)
     }
@@ -122,59 +137,76 @@ public final class OpenRouterAccount {
         OpenRouterProvider(keys: keys, model: checkedModel, client: client)
     }
 
-    /// Stores `entered` as the key, replacing the one stored. Returns whether it was stored; an entry that cannot be a
-    /// key is refused and nothing is stored.
+    /// Stores `entered` as the key, replacing the one stored, off the main actor. Returns whether it was stored; an
+    /// entry that cannot be a key is refused and nothing is stored. When a later Add key or Remove key is pressed
+    /// before it finishes, what that one finds is what Settings shows.
     @discardableResult
-    public func addKey(_ entered: String) -> Bool {
+    public func addKey(_ entered: String) async -> Bool {
         guard let key = OpenRouterKeyStore.normalized(entered) else {
             keyError = Self.invalidKeyMessage
             return false
         }
-        stopKeyTest()
+        let change = startKeyChange()
         // A model ID entered or kept before that contains the key is neither kept nor used.
         if OpenRouterProvider.contains(key: key, in: model) { refuseModel() }
         if OpenRouterProvider.contains(key: key, in: checkedModel) {
             checkedModel = ""
             defaults.set("", forKey: Self.modelKey)
         }
-        do {
-            try keys.save(key)
+        let saved = await onKeychainQueue { try $0.save(key) }
+        pendingKeyChanges -= 1
+        switch saved {
+        case .success:
+            log.record("OpenRouter key stored in the Keychain")
+            guard change == keyChanges else { return true }
             presence = .stored
             keyError = nil
-            log.record("OpenRouter key stored in the Keychain")
             return true
-        } catch {
+        case let .failure(error):
+            log.record("OpenRouter key could not be stored")
+            guard change == keyChanges else { return false }
             keyError = (error as? KeychainError)?.message ?? "The key could not be stored."
             // Whether a key is still stored: when that cannot be read either, it is not known, and what is shown stays.
-            reread(shown: hasKey)
-            log.record("OpenRouter key could not be stored")
+            await reread(after: change, shown: hasKey)
             return false
         }
     }
 
-    /// Removes the key from the Keychain.
-    public func removeKey() {
-        stopKeyTest()
-        do {
-            try keys.remove()
+    /// Removes the key from the Keychain, off the main actor. When a later Add key or Remove key is pressed before it
+    /// finishes, what that one finds is what Settings shows.
+    public func removeKey() async {
+        let change = startKeyChange()
+        let removed = await onKeychainQueue { try $0.remove() }
+        pendingKeyChanges -= 1
+        switch removed {
+        case .success:
+            log.record("OpenRouter key removed from the Keychain")
+            guard change == keyChanges else { return }
             presence = .absent
             keyError = nil
-            log.record("OpenRouter key removed from the Keychain")
-        } catch {
+        case let .failure(error):
+            log.record("OpenRouter key could not be removed")
+            guard change == keyChanges else { return }
             keyError = (error as? KeychainError)?.message ?? "The key could not be removed."
             // Whether the key is still stored: when that cannot be read either, it is not known, and it is shown.
-            reread(shown: true)
-            log.record("OpenRouter key could not be removed")
+            await reread(after: change, shown: true)
         }
     }
 
-    /// Reads again whether a key is stored, without reading the key, off the main actor: each time Settings is shown,
-    /// so a Keychain read that failed once is not kept for the session. A read that Add key or Remove key overtakes
-    /// changes nothing.
+    /// Starts Add key or Remove key: ends the key test in flight, and returns the change's number, so only the latest
+    /// change, and a presence read made after it, set whether a key is stored.
+    private func startKeyChange() -> Int {
+        stopKeyTest()
+        pendingKeyChanges += 1
+        return keyChanges
+    }
+
+    /// Reads again whether a key is stored, without reading the key, off the main actor: at launch and each time
+    /// Settings is shown, so a Keychain read that failed once is not kept for the session. A read that Add key or
+    /// Remove key overtakes changes nothing.
     public func refreshKey() async {
         let changes = keyChanges
-        let keys = self.keys
-        let read = await Task.detached { Result { try keys.containsKey() } }.value
+        let read = await onKeychainQueue { try $0.containsKey() }
         guard changes == keyChanges else { return }
         switch read {
         case let .success(stored):
@@ -188,12 +220,23 @@ public final class OpenRouterAccount {
         }
     }
 
-    /// Reads whether a key is stored after Add key or Remove key failed; a read that fails too leaves it not known.
-    private func reread(shown: Bool) {
-        do {
-            presence = try keys.containsKey() ? .stored : .absent
-        } catch {
-            presence = .unknown(shown: shown)
+    /// Reads whether a key is stored after Add key or Remove key failed; a read that fails too leaves it not known. A
+    /// read that a later Add key or Remove key overtakes changes nothing.
+    private func reread(after change: Int, shown: Bool) async {
+        let read = await onKeychainQueue { try $0.containsKey() }
+        guard change == keyChanges else { return }
+        switch read {
+        case let .success(stored): presence = stored ? .stored : .absent
+        case .failure: presence = .unknown(shown: shown)
+        }
+    }
+
+    /// Makes `call` on the Keychain queue (`keychainQueue`), after every call asked for before it.
+    private func onKeychainQueue<T: Sendable>(_ call: @escaping @Sendable (OpenRouterKeyStore) throws -> T) async
+        -> Result<T, any Error> {
+        let keys = self.keys
+        return await withCheckedContinuation { continuation in
+            keychainQueue.async { continuation.resume(returning: Result { try call(keys) }) }
         }
     }
 
@@ -208,11 +251,11 @@ public final class OpenRouterAccount {
     }
 
     /// Uses and keeps `entered` (`checkedModel`). An empty entry, or one that is not a model ID, is not kept: it uses
-    /// `openrouter/auto` at once. Unless no key is known to be stored, a non-empty entry is then compared with the key,
-    /// read off the main actor: one that contains it is cleared (`keyAsModelMessage`), and a model ID that cannot be
-    /// compared, because the key cannot be read, is not used or kept (`modelUncheckedMessage`), so what was checked
-    /// before stays. A later entry ends the check. Each outcome sets the model ID used and its message together
-    /// (`settle(using:error:unchecked:)`).
+    /// `openrouter/auto` at once. Unless no key is known to be stored, with no Add key or Remove key in flight, a
+    /// non-empty entry is then compared with the key, read off the main actor after those calls: one that contains it
+    /// is cleared (`keyAsModelMessage`), and a model ID that cannot be compared, because the key cannot be read, is not
+    /// used or kept (`modelUncheckedMessage`), so what was checked before stays. A later entry ends the check. Each
+    /// outcome sets the model ID used and its message together (`settle(using:error:unchecked:)`).
     private func keep(_ entered: String) {
         let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
         let isModelID = OpenRouterProvider.isModelID(candidate)
@@ -220,16 +263,15 @@ public final class OpenRouterAccount {
             settle(using: "", error: nil)
         } else if !isModelID {
             settle(using: "", error: Self.notAModelMessage)
-        } else if presence == .absent {
+        } else if presence == .absent, pendingKeyChanges == 0 {
             settle(using: candidate, error: nil)
         } else {
             // Until it is checked, what was checked before is used.
             settle(using: nil, error: nil)
         }
-        guard !candidate.isEmpty, presence != .absent else { return }
-        let keys = self.keys
+        guard !candidate.isEmpty, presence != .absent || pendingKeyChanges > 0 else { return }
         let task = Task {
-            let read = await Task.detached { Result { try keys.readKey() } }.value
+            let read = await onKeychainQueue { try $0.readKey() }
             guard !Task.isCancelled, model == entered else { return }
             modelCheck = nil
             switch read {
@@ -237,7 +279,7 @@ public final class OpenRouterAccount {
                 refuseModel()
             case .success:
                 if isModelID { settle(using: candidate, error: nil) }
-            case .failure where presence == .absent:
+            case .failure where presence == .absent && pendingKeyChanges == 0:
                 // The key was removed meanwhile: no key is known to be stored, so the entry is used as it is.
                 keep(entered)
             case .failure:
@@ -266,6 +308,12 @@ public final class OpenRouterAccount {
         }
         modelError = error
         modelUnchecked = unchecked
+    }
+
+    /// Commits the Model field's entry (`modelEntry`): it is checked and kept as `model` says. Committing the entry
+    /// committed already, as Return and then leaving the field do, checks nothing again.
+    public func commitModel() {
+        if modelEntry != model { model = modelEntry }
     }
 
     /// Waits for the model ID entered to be checked against the key and kept.

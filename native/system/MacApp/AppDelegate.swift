@@ -61,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusMenu.update(monitor.summary, logicalCoreCount: nil, topGroups: TopGroups(attribution: nil, samplingFailed: false))
         monitor.start()
+        // Whether an OpenRouter key is stored, read off the main actor.
+        Task { await openRouter.refreshKey() }
     }
 
     func applicationWillTerminate(_: Notification) {
