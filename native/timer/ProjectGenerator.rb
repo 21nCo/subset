@@ -131,7 +131,8 @@ project.predictabilize_uuids
 # both saves succeed. What the generator does not write, such as xcuserdata and project.xcworkspace, is left alone.
 # The scheme names a target ID from the project, so the files are installed as a pair: each old copy is hard-linked
 # into a backup folder first, and if any step fails or is interrupted, every file already moved is put back before the
-# error is raised. If a file cannot be put back, the backup folder is kept and the error names it.
+# error is raised again. If a file cannot be put back, the backup folder is kept and the error, still of the install
+# error's class, names it.
 Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
   staged_path = File.join(staging, File.basename(project_path))
   project.save(staged_path)
@@ -168,9 +169,11 @@ Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
       unrestored << "#{target} (#{restore_error.class}: #{restore_error.message})"
     end
     raise error if unrestored.empty?
-    raise "Installing #{project_path} failed (#{error.class}: #{error.message}), and these files could not be put " \
-      "back: #{unrestored.join(", ")}. The previous files are kept in #{backup_path}; copy them back into " \
+    message = "Installing #{project_path} failed (#{error.class}: #{error.message}), and these files could not be " \
+      "put back: #{unrestored.join(", ")}. The previous files are kept in #{backup_path}; copy them back into " \
       "#{project_path}, or run ruby ProjectGenerator.rb again."
+    # Keep the install error's class and backtrace, so a caller that rescues that class still sees the recovery note.
+    raise error.exception(message).tap { |reported| reported.set_backtrace(error.backtrace) }
   ensure
     FileUtils.rm_rf(backup_path) if backup_path && unrestored.empty?
   end

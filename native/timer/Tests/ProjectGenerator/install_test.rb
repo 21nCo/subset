@@ -61,15 +61,20 @@ class ProjectGeneratorInstallTest < Minitest::Test
                                { operation: "rename", file: "project.pbxproj", error: "Errno::EACCES", restore: true })
     refute success
     assert_includes output, "Errno::EIO: Input/output error"
+    assert_match(/ProjectGenerator\.rb again\. \(Errno::EIO\)$/, output, "the install error's class is raised")
     assert_includes output, "project.pbxproj (Errno::EACCES"
     assert_equal @previous["xcshareddata/xcschemes/Timer.xcscheme"], File.binread(project_file(GENERATED[1]))
     assert_previous_files_recoverable(output)
   end
 
   def test_failed_scheme_restore_still_restores_project
-    success, output = generate({ operation: "rename", file: "Timer.xcscheme", error: "Interrupt", after: true },
-                               { operation: "rename", file: "Timer.xcscheme", error: "Errno::EACCES", restore: true })
+    success, output, status = generate(
+      { operation: "rename", file: "Timer.xcscheme", error: "Interrupt", after: true },
+      { operation: "rename", file: "Timer.xcscheme", error: "Errno::EACCES", restore: true }
+    )
     refute success
+    # An uncaught Interrupt, unlike a RuntimeError, ends the process with SIGINT.
+    assert_equal Signal.list["INT"], status.termsig, output
     assert_includes output, "(Interrupt: Interrupt)"
     assert_includes output, "Timer.xcscheme (Errno::EACCES"
     # The scheme was restored first and failed, so the project's restore after it shows that every restore is tried.
@@ -83,9 +88,9 @@ class ProjectGeneratorInstallTest < Minitest::Test
     File.join(@dir, "Timer.xcodeproj", file)
   end
 
-  # Loads the generator in a child process and returns its success and output. Each fault makes File.link or File.rename
-  # raise its error when it installs the named file, or with restore: true, when it puts the file's old copy back; with
-  # after: true, the operation completes before the error is raised.
+  # Loads the generator in a child process and returns its success, output and status. Each fault makes File.link or
+  # File.rename raise its error when it installs the named file, or with restore: true, when it puts the file's old copy
+  # back; with after: true, the operation completes before the error is raised.
   def generate(*faults)
     inject = faults.empty? ? "" : <<~RB
       FAULTS = #{faults.inspect}
@@ -103,12 +108,12 @@ class ProjectGeneratorInstallTest < Minitest::Test
       end)
     RB
     output, status = Open3.capture2e(RbConfig.ruby, "-e", "#{inject}load 'ProjectGenerator.rb'", chdir: @dir)
-    [status.success?, output]
+    [status.success?, output, status]
   end
 
   # Each generated file is either installed as its previous copy or kept in the backup folder the error names.
   def assert_previous_files_recoverable(output)
-    kept = output[/The previous files are kept in (\S+);/, 1]
+    kept = output[/The previous files are kept in (.+?); copy them back/, 1]
     assert kept, output
     GENERATED.each do |file|
       next if File.binread(project_file(file)) == @previous[file]
