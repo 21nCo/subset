@@ -1,6 +1,7 @@
 #!/bin/sh
 # Checks that the Debug and Release builds of the Hop app target are different apps to macOS: Debug resolves to
-# dev.subset.hop.debug and "Hop Debug" and is set up for the team's Apple Development signing, Release to
+# dev.subset.hop.debug and "Hop Debug" and is set up for the team's Apple Development signing, on only when
+# scripts/development-signing.sh found that certificate (HOP_DEVELOPMENT_SIGNING_ALLOWED), Release to
 # dev.subset.hop and "Hop" with its signing left to release-macos.mjs, and the two never share a bundle ID or a name.
 # Reads the resolved build settings of Hop.xcodeproj; given built apps (--debug-app and --release-app, both or
 # neither), also checks the values in their Info.plist files. Needs Xcode.
@@ -53,6 +54,8 @@ expect Debug PRODUCT_NAME Hop
 expect Debug DEVELOPMENT_TEAM SAZVPX4CAA
 expect Debug CODE_SIGN_STYLE Automatic
 expect Debug CODE_SIGN_IDENTITY "Apple Development"
+case "$(setting Debug HOP_DEVELOPMENT_SIGNING_ALLOWED)" in YES | NO) ;; *) fail "Debug HOP_DEVELOPMENT_SIGNING_ALLOWED is not YES or NO" ;; esac
+expect Debug CODE_SIGNING_ALLOWED "$(setting Debug HOP_DEVELOPMENT_SIGNING_ALLOWED)"
 
 expect Release PRODUCT_BUNDLE_IDENTIFIER dev.subset.hop
 expect Release HOP_DISPLAY_NAME Hop

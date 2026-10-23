@@ -35,6 +35,26 @@
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
+      <PreActions>
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "Development signing"
+               scriptText = "/bin/sh &quot;$PROJECT_DIR/scripts/development-signing.sh&quot;
+"
+               shellToInvoke = "/bin/sh">
+               <EnvironmentBuildable>
+                  <BuildableReference
+                     BuildableIdentifier = "primary"
+                     BlueprintIdentifier = "7C99B8DD96406F28F431331599458BF2"
+                     BuildableName = "Hop.app"
+                     BlueprintName = "Hop"
+                     ReferencedContainer = "container:Hop.xcodeproj">
+                  </BuildableReference>
+               </EnvironmentBuildable>
+            </ActionContent>
+         </ExecutionAction>
+      </PreActions>
    </BuildAction>
    <TestAction
       buildConfiguration = "Debug"

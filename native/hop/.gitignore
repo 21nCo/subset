@@ -4,3 +4,4 @@
 build/
 xcuserdata/
 .derivedData/
+MacApp/DevelopmentSigning.local.xcconfig*

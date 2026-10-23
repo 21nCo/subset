@@ -2,7 +2,8 @@ name: Hop macOS
 
 # Builds and tests the Hop native app on macOS, checks that its Debug and Release builds are separate apps, and fails
 # if it links a private macOS API. No signing credentials are available or needed here: the app is built unsigned
-# (CODE_SIGNING_ALLOWED=NO overrides the Debug configuration's team signing), and releases go through
+# (CODE_SIGNING_ALLOWED=NO overrides the Debug configuration's team signing, and a Debug build with signing left on
+# comes out unsigned because this runner has no Apple Development certificate), and releases go through
 # release-macos.yml.
 on:
   pull_request:
@@ -72,6 +73,12 @@ jobs:
         run: |
           products="$RUNNER_TEMP/derived/Build/Products"
           sh Tests/app-identity.sh --debug-app "$products/Debug/Hop.app" --release-app "$products/Release/Hop.app"
+
+      - name: Debug build without a development certificate is unsigned
+        run: |
+          xcodebuild -project Hop.xcodeproj -scheme Hop -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/signing" build
+          sh Tests/development-signing.sh --debug-app "$RUNNER_TEMP/signing/Build/Products/Debug/Hop.app"
 
       - name: No private API symbols
         run: |

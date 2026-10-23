@@ -81,11 +81,14 @@ app_target.build_configurations.each do |config|
   # of the notarized build (dev.subset.hop). Release keeps its identity and signing, which release-macos.mjs supplies.
   config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.subset.hop.debug"
   config.build_settings["HOP_DISPLAY_NAME"] = "Hop Debug"
-  # Signed with the team's Apple Development certificate when signing is on, so macOS identifies the build by team
-  # and bundle ID rather than by a per-build cdhash, and its grants survive rebuilds. Scripted builds pass
-  # CODE_SIGNING_ALLOWED=NO and stay unsigned.
+  # Signed with the team's Apple Development certificate when this Mac has one, so macOS identifies the build by team
+  # and bundle ID rather than by a per-build cdhash, and its grants survive rebuilds. Without the certificate the
+  # build is unsigned instead of failing: HOP_DEVELOPMENT_SIGNING_ALLOWED is NO in MacApp/DevelopmentSigning.xcconfig
+  # unless scripts/development-signing.sh, the scheme's pre-action below, found the certificate. Scripted builds pass
+  # CODE_SIGNING_ALLOWED=NO and stay unsigned either way.
   config.build_settings["DEVELOPMENT_TEAM"] = "SAZVPX4CAA"
   config.build_settings["CODE_SIGN_IDENTITY"] = "Apple Development"
+  config.build_settings["CODE_SIGNING_ALLOWED"] = "$(HOP_DEVELOPMENT_SIGNING_ALLOWED)"
 end
 
 test_target.build_configurations.each do |config|
@@ -107,6 +110,10 @@ add_sources(app_group, app_target, "MacApp/*.swift")
 add_sources(tests_group, test_target, "Tests/CoreTests/*.swift")
 app_group.new_file("Info.plist")
 app_group.new_file("Hop.entitlements")
+# Defines HOP_DEVELOPMENT_SIGNING_ALLOWED for Debug builds, which only the app target reads (see its settings above).
+# Attached at the project level and in the main group, so the targets and their object IDs are unaffected.
+project.build_configuration_list["Debug"].base_configuration_reference =
+  project.main_group.new_file("MacApp/DevelopmentSigning.xcconfig")
 
 app_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
 test_target.frameworks_build_phase.add_file_reference(core_target.product_reference)
@@ -135,6 +142,16 @@ begin
   scheme = Xcodeproj::XCScheme.new
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, test_target, launch_target: true)
+  # Before every build (run, test, archive), decide whether a Debug build can be team-signed on this Mac. The build
+  # settings it reads (CONFIGURATION, DEVELOPMENT_TEAM, PROJECT_DIR) come from the app target.
+  signing_check = Xcodeproj::XCScheme::ShellScriptActionContent.new
+  signing_check.title = "Development signing"
+  signing_check.script_text = "/bin/sh \"$PROJECT_DIR/scripts/development-signing.sh\"\n"
+  signing_check.shell_to_invoke = "/bin/sh"
+  signing_check.buildable_reference = Xcodeproj::XCScheme::BuildableReference.new(app_target)
+  pre_action = Xcodeproj::XCScheme::ExecutionAction.new(nil, :shell_script)
+  pre_action.action_content = signing_check
+  scheme.build_action.add_pre_action(pre_action)
   scheme.save_as(staged_path, "Hop", true)
 
   generated = Dir.glob("**/*", base: staged_path).select { |path| File.file?(File.join(staged_path, path)) }.sort
