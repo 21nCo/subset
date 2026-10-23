@@ -123,6 +123,10 @@ In hosts with the MCP Apps extension (`io.modelcontextprotocol/ui`), the results
 
 `release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
 
+## macOS app runtime (SET-81)
+
+The build also stages `app-runtime` (`dist`, `web`, `mcp-app` and `skills`), which the Timer menu bar app embeds ([native/timer](../../native/timer/README.md)). Each build assembles its own copy under `.app-runtime/` and then points the `app-runtime` link at it, so the link always names a complete copy, even when builds overlap or one is interrupted. A build removes the copies no link names whose builds are gone. Both are git-ignored and not in the npm package.
+
 ## Daemon (SET-76)
 
 ### Data directory

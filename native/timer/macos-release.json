@@ -1,0 +1,7 @@
+{
+  "project": "Timer.xcodeproj",
+  "scheme": "Timer",
+  "app": "Timer",
+  "team": "SAZVPX4CAA",
+  "workspaces": ["@subset/timer", "@subset/timer-web", "@subset.dev/timer"]
+}

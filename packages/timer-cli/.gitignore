@@ -1,2 +1,4 @@
 web/
 mcp-app/
+app-runtime
+.app-runtime/

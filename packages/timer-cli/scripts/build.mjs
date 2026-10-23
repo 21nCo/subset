@@ -2,12 +2,14 @@
 // dependency) inlined into dist/cli.mjs, and copies the built board from apps/timer/dist into web/
 // for `serve`. The apps/timer build writes the MCP App view to mcp-app/board.html itself. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
 // dist/mcp-server.mjs, and code both use to dist/common.mjs. The published package has no runtime dependencies,
-// so dist/THIRD_PARTY_NOTICES.md carries the licences of the packages bundled into it.
+// so dist/THIRD_PARTY_NOTICES.md carries the licences of the packages bundled into it. The build also stages
+// app-runtime, the copy the Timer macOS app embeds (dist, web, mcp-app and skills); it is not part of the npm package.
 import { builtinModules } from 'node:module';
-import { chmod, cp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, readdir, readFile, readlink, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'rolldown';
+import { pidAlive } from '../src/daemon/lock.mjs';
 import { notices } from './notices.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -26,6 +28,12 @@ if (process.argv.includes('--check')) {
   // Code lines only: a kept JSDoc type such as import('@subset/timer').TimerDefinition is not an import.
   const code = (source) => source.split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
   if (sources.some((source) => /(?:\bfrom|\bimport\()\s*["'](?!node:)[^."'/]/.test(code(source)))) { console.error('dist/ still imports a package; bundle it instead.'); process.exit(1); }
+  process.exit(0);
+}
+
+if (process.argv.includes('--stage-app-runtime')) {
+  // Restages app-runtime/ from the current build alone.
+  await stageAppRuntime();
   process.exit(0);
 }
 
@@ -52,3 +60,37 @@ await chmod(cliFile, 0o755);
 await writeFile(path.join(root, 'dist/THIRD_PARTY_NOTICES.md'), await notices(output));
 await rm(path.join(root, 'web'), { recursive: true, force: true });
 await cp(webSource, path.join(root, 'web'), { recursive: true });
+
+await stageAppRuntime();
+
+// Stages the macOS app runtime from the built dist, web, mcp-app and skills. Each build assembles its own generation,
+// .app-runtime/<pid>-<time>, which is never changed once complete, and publishes it by renaming a symlink over
+// app-runtime, so app-runtime always names a complete generation, even across overlapping or interrupted builds. The
+// Embed Timer CLI phase copies the generation the link names and copies again if it was removed meanwhile. A
+// generation is removed only when no link names it and its build is gone, and is renamed away first, so a copy that
+// still finds it afterwards copied all of it.
+async function stageAppRuntime() {
+  const runtime = path.join(root, 'app-runtime');
+  const generations = path.join(root, '.app-runtime');
+  const name = `${process.pid}-${Date.now()}`;
+  const link = path.join(generations, `${name}.link`);
+  try {
+    for (const folder of ['dist', 'web', 'mcp-app', 'skills']) await cp(path.join(root, folder), path.join(generations, name, folder), { recursive: true });
+    await symlink(path.join('.app-runtime', name), link);
+    // A build before generations left app-runtime as a folder, which a link cannot replace.
+    if (!(await lstat(runtime).then((entry) => entry.isSymbolicLink(), () => true))) await rm(runtime, { recursive: true, force: true });
+    await rename(link, runtime);
+  } catch (error) {
+    await rm(path.join(generations, name), { recursive: true, force: true });
+    await rm(link, { force: true });
+    throw error;
+  }
+  for (const entry of await readdir(generations)) {
+    // This build's own generation once replaced, and those of builds that are gone. The link is read after the
+    // liveness check, because a build that is gone publishes nothing more.
+    const pid = Number(/^\d+/.exec(entry)?.[0]);
+    if ((pid !== process.pid && pidAlive(pid)) || entry === path.basename(await readlink(runtime))) continue;
+    const doomed = path.join(generations, `${process.pid}-removing-${entry}`);
+    await rename(path.join(generations, entry), doomed).then(() => rm(doomed, { recursive: true, force: true }), () => {});
+  }
+}
