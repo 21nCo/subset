@@ -1,21 +1,40 @@
-/// Generates explanations. SET-49 has the on-device Apple Intelligence provider; SET-50 adds OpenRouter behind the same
-/// contract, and SET-160 offers it in the provider setting. A provider returns the model's answer unvalidated;
+import Foundation
+
+/// Generates explanations: the on-device Apple Intelligence provider (SET-49) and OpenRouter (SET-50, offered in the
+/// provider setting by SET-160) behind the same contract. A provider returns the model's answer unvalidated;
 /// `ExplainCenter` validates it.
 public protocol AIProvider: Sendable {
     /// Whether it can answer now.
     func availability() async -> AIAvailability
     func explain(_ request: ExplainRequest) async throws -> ExplanationDraft
+    /// Exactly the bytes `explain(_:)` sends off this Mac for `request`, which the send preview shows and What was sent
+    /// repeats; `nil` for a provider that sends nothing off this Mac.
+    func sentBody(for request: ExplainRequest) throws -> Data?
+}
+
+extension AIProvider {
+    public func sentBody(for _: ExplainRequest) throws -> Data? { nil }
+}
+
+extension OpenRouterProvider {
+    /// The JSON body, as `explain(_:)` builds and sends it (`body(for:)`, the same bytes each time it is built).
+    public func sentBody(for request: ExplainRequest) throws -> Data? {
+        try body(for: request)
+    }
 }
 
 /// The provider the user chose. By owner decision none is used until the user picks one, the on-device one included.
+/// OpenRouter can be picked only while its key is stored (`ExplainCenter.canChoose(_:)`).
 public enum AIProviderChoice: String, CaseIterable, Sendable {
     case none
     case appleIntelligence
+    case openRouter
 
     public var title: String {
         switch self {
         case .none: "None"
         case .appleIntelligence: "Apple Intelligence"
+        case .openRouter: "OpenRouter"
         }
     }
 
@@ -23,6 +42,8 @@ public enum AIProviderChoice: String, CaseIterable, Sendable {
         switch self {
         case .none: "Explain is off. System works fully without it."
         case .appleIntelligence: "Generated on this Mac by Apple's on-device model. Nothing leaves this Mac."
+        case .openRouter: "Generated off this Mac by OpenRouter, with your API key. Before the first request each time "
+            + "System opens, you see exactly what will be sent and confirm it."
         }
     }
 }

@@ -1,0 +1,452 @@
+import Foundation
+import Security
+@testable import SystemCore
+import XCTest
+
+/// Choosing OpenRouter for Explain and the send preview (SET-160), with the Keychain double and the `URLProtocol` stub
+/// of `OpenRouterTests`, never the network or the real Keychain: OpenRouter chosen only while its key is stored; the
+/// choice set back, with a notice, by every check that finds it cannot be used; the first request of the session sent
+/// only once its preview is confirmed, with exactly the body shown; and the work in flight ended by a provider change,
+/// Add Key or Remove Key, and Send folder names.
+@MainActor
+final class OpenRouterExplainTests: XCTestCase {
+    private static let key = "sk-or-v1-" + String(repeating: "0123456789abcdef", count: 4)
+    private static let answer = #"{"summary":"A sync agent.","whatItIs":"It syncs files.","removalSafety":"review","howToRemove":"Quit it.","confidence":"medium","suggestedOrigin":null}"#
+    private let redactor = ExplainRedactor(homes: ["/Users/jdoe"], accountNames: ["jdoe"], sendFolderNames: false,
+                                           key: Array(repeating: 7, count: 32))
+
+    override func setUp() {
+        super.setUp()
+        StubProtocol.reset()
+    }
+
+    // MARK: Choosing OpenRouter
+
+    func testOpenRouterCanBeChosenOnlyWhileItsKeyIsStored() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain, key: nil)
+        let center = center(defaults, account)
+        XCTAssertFalse(center.canChoose(.openRouter))
+        XCTAssertFalse(center.choose(.openRouter), "no key stored")
+        XCTAssertEqual(center.choice, .none)
+        XCTAssertNil(defaults.string(forKey: ExplainCenter.choiceKey))
+
+        await account.addKey(Self.key)
+        XCTAssertTrue(center.canChoose(.openRouter))
+        XCTAssertTrue(center.choose(.openRouter))
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter")
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .availableOnOpenRouter)
+
+        // Without the account, OpenRouter is not offered.
+        let bare = ExplainCenter(defaults: self.defaults(), redactor: redactor, provider: { _ in nil })
+        XCTAssertFalse(bare.choose(.openRouter))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testRemovingTheKeySetsTheChoiceBackAndSaysWhy() async throws {
+        let defaults = defaults()
+        let account = await account(defaults, keychain: FakeKeychain())
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        await account.removeKey()
+        XCTAssertEqual(center.choice, .appleIntelligence, "never left on a provider that cannot run")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.noKey))
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+        XCTAssertFalse(center.choose(.openRouter))
+
+        // Choosing a provider clears the notice.
+        center.choose(.none)
+        XCTAssertNil(center.notice)
+    }
+
+    func testAKeychainThatDoesNotAnswerWhetherAKeyIsStoredSetsTheChoiceBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.failure = errSecInteractionNotAllowed
+        await account.refreshKey()
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
+        XCTAssertFalse(center.canChoose(.openRouter), "not while whether a key is stored is unknown")
+
+        // Once it answers again, OpenRouter can be chosen again, but is not chosen for the user.
+        keychain.failure = nil
+        await account.refreshKey()
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertTrue(center.choose(.openRouter))
+    }
+
+    func testAStoredChoiceOfOpenRouterFollowsTheFirstReadOfWhetherAKeyIsStored() async throws {
+        // A key stored: kept.
+        let kept = defaults()
+        kept.set("openRouter", forKey: ExplainCenter.choiceKey)
+        let keychain = FakeKeychain()
+        try OpenRouterKeyStore(items: keychain).save(Self.key)
+        let account = launching(kept, keychain: keychain)
+        let center = center(kept, account)
+        XCTAssertEqual(center.choice, .openRouter, "kept until the launch read answers")
+        await account.refreshKey()
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertNil(center.notice)
+
+        // No key stored: set back, and stored so.
+        let gone = defaults()
+        gone.set("openRouter", forKey: ExplainCenter.choiceKey)
+        let empty = launching(gone, keychain: FakeKeychain())
+        let setBack = self.center(gone, empty)
+        await empty.refreshKey()
+        XCTAssertEqual(setBack.choice, .appleIntelligence)
+        XCTAssertEqual(setBack.notice, ExplainCenter.notice(.noKey))
+        XCTAssertEqual(self.center(gone, empty).choice, .appleIntelligence, "the next launch shows what was shown")
+
+        // The Keychain failing at launch: set back too.
+        let failing = defaults()
+        failing.set("openRouter", forKey: ExplainCenter.choiceKey)
+        let locked = FakeKeychain()
+        try OpenRouterKeyStore(items: locked).save(Self.key)
+        locked.failure = errSecInteractionNotAllowed
+        let unread = launching(failing, keychain: locked)
+        let unreadCenter = self.center(failing, unread)
+        await unread.refreshKey()
+        XCTAssertEqual(unreadCenter.choice, .appleIntelligence)
+        XCTAssertEqual(failing.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+
+        // Without the account, or with no key known to be stored when it is made, it starts set back.
+        let bare = defaults()
+        bare.set("openRouter", forKey: ExplainCenter.choiceKey)
+        XCTAssertEqual(ExplainCenter(defaults: bare, redactor: redactor, provider: { _ in nil }).choice, .appleIntelligence)
+        gone.set("openRouter", forKey: ExplainCenter.choiceKey)
+        let late = self.center(gone, empty)
+        XCTAssertEqual(late.choice, .appleIntelligence)
+        XCTAssertEqual(late.notice, ExplainCenter.notice(.noKey))
+        XCTAssertEqual(gone.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testAModelIDThatHeldTheKeyOrCouldNotBeCheckedSetsTheChoiceBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        account.model = "x/\(Self.key)"
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.failure = errSecInteractionNotAllowed
+        account.model = "anthropic/claude-sonnet-4"
+        await account.modelChecked()
+        XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelUnchecked))
+
+        // A model ID that is not one uses openrouter/auto: OpenRouter still runs, so the choice stays.
+        keychain.failure = nil
+        await account.refreshKey()
+        XCTAssertTrue(center.choose(.openRouter))
+        account.model = "not a model"
+        await account.modelChecked()
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testOpenRouterSayingNoKeyIsStoredSetsTheChoiceBackAndSendsNothing() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        // Removed outside System, after the account last read it.
+        try OpenRouterKeyStore(items: keychain).remove()
+        await center.explain(ExplainKey("process:1")) { _ in self.request() }
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.noKey))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+        try await until { !account.hasKey }
+    }
+
+    // MARK: Send preview
+
+    func testTheFirstRequestWaitsForThePreviewAndTheBodySentIsTheBodyShownByteForByte() async throws {
+        let (center, _, _) = await chosen()
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let first = ExplainKey("process:1")
+        await center.explain(first) { _ in self.request("syncd") }
+        let preview = try XCTUnwrap(confirming(center, first))
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing is sent before the user confirms")
+        XCTAssertEqual(preview.provider, .openRouter)
+        XCTAssertEqual(preview.request, request("syncd"))
+        XCTAssertTrue(preview.text.contains(request("syncd").promptText.jsonEscaped), "the redacted request, as JSON")
+        XCTAssertFalse(preview.text.contains(Self.key))
+
+        await center.confirmSend(first)
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+        XCTAssertEqual(StubProtocol.requests.first?.body, preview.body, "sent byte for byte as shown")
+        guard case .explained = center.state(for: first) else { return XCTFail("\(center.state(for: first))") }
+        XCTAssertTrue(center.sendConfirmed)
+        XCTAssertEqual(center.sentText(for: first), preview.text, "What was sent shows the body")
+
+        // Not shown again this session.
+        let second = ExplainKey("process:2")
+        await center.explain(second) { _ in self.request("cloudd") }
+        guard case .explained = center.state(for: second) else { return XCTFail("\(center.state(for: second))") }
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+    }
+
+    func testCancellingThePreviewSendsNothingAndItIsShownAgain() async throws {
+        let (center, _, _) = await chosen()
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        XCTAssertNotNil(confirming(center, item))
+        center.cancelSend(item)
+        XCTAssertEqual(center.state(for: item), .idle)
+        await center.confirmSend(item)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "a cancelled preview cannot be sent")
+        XCTAssertFalse(center.sendConfirmed)
+
+        await center.explain(item) { _ in self.request() }
+        XCTAssertNotNil(confirming(center, item), "still required")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testAConfirmedRequestThatOpenRouterDidNotAnswerLeavesThePreviewRequired() async throws {
+        let (center, _, _) = await chosen()
+        StubProtocol.enqueue(error: URLError(.notConnectedToInternet))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        await center.confirmSend(item)
+        guard case .failed = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertFalse(center.sendConfirmed)
+        await center.explain(ExplainKey("process:2")) { _ in self.request("cloudd") }
+        XCTAssertNotNil(confirming(center, ExplainKey("process:2")))
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+    }
+
+    /// Every request sent before OpenRouter answered a confirmed one was itself previewed and confirmed: one asked for
+    /// while the first confirmed request is on its way waits for its own preview.
+    func testEveryRequestBeforeTheFirstAnswerIsPreviewedItself() async throws {
+        let (center, keychain, _) = await chosen()
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let a = ExplainKey("process:a"), b = ExplainKey("process:b"), c = ExplainKey("process:c")
+        await center.explain(a) { _ in self.request("alpha") }
+        await center.explain(b) { _ in self.request("beta") }
+        let previewA = try XCTUnwrap(confirming(center, a))
+        let previewB = try XCTUnwrap(confirming(center, b))
+        XCTAssertNotEqual(previewA.body, previewB.body)
+
+        keychain.holdsDataReads = true
+        let sendingA = Task { await center.confirmSend(a) }
+        try await until { keychain.heldDataReads == 1 }
+        await center.explain(c) { _ in self.request("gamma") }
+        XCTAssertNotNil(confirming(center, c), "A has not been answered yet")
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await sendingA.value
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [previewA.body])
+        XCTAssertTrue(center.sendConfirmed)
+        XCTAssertNotNil(confirming(center, b), "a preview already shown waits for the user")
+
+        await center.confirmSend(b)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [previewA.body, previewB.body])
+        let d = ExplainKey("process:d")
+        await center.explain(d) { _ in self.request("delta") }
+        guard case .explained = center.state(for: d) else { return XCTFail("\(center.state(for: d))") }
+    }
+
+    func testChangingTheProviderEndsAPreviewAndAConfirmedRequestBeforeItIsSent() async throws {
+        let (center, keychain, _) = await chosen()
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        XCTAssertNotNil(confirming(center, item))
+        center.choose(.appleIntelligence)
+        XCTAssertTrue(center.choose(.openRouter))
+        XCTAssertEqual(center.state(for: item), .idle, "the preview is withdrawn")
+        await center.confirmSend(item)
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.explain(item) { _ in self.request() }
+        keychain.holdsDataReads = true
+        let sending = Task { await center.confirmSend(item) }
+        try await until { keychain.heldDataReads == 1 }
+        center.choose(.none)
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await sending.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "cancelled before it went out")
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertTrue(center.choose(.openRouter))
+        XCTAssertEqual(center.state(for: item), .idle)
+    }
+
+    func testRemovingTheKeyWhileARequestReadsItSendsNothing() async throws {
+        let (center, keychain, account) = await chosen()
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        keychain.holdsDataReads = true
+        let sending = Task { await center.confirmSend(item) }
+        try await until { keychain.heldDataReads == 1 }
+        // The removal is held, so only Remove Key starting can end the request.
+        keychain.holdsOtherCalls = true
+        let removing = Task { await account.removeKey() }
+        try await until { keychain.heldOtherCalls == 1 }
+        XCTAssertEqual(center.state(for: item), .idle, "ended as Remove Key starts, before the Keychain is changed")
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await sending.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key being removed")
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+        await removing.value
+        XCTAssertEqual(center.choice, .appleIntelligence)
+    }
+
+    func testTurningFolderNamesOffWithdrawsAPreviewAndStopsASendBuiltWithThem() async throws {
+        let (center, keychain, _) = await chosen()
+        center.sendFolderNames = true
+        let item = ExplainKey("disk:/Users/jdoe/dev/secret-client")
+        let build = { (redactor: ExplainRedactor) -> ExplainRequest? in
+            var facts = ExplainFacts(kind: .folder, name: redactor.name(ofPath: "/Users/jdoe/dev/secret-client"))
+            facts.path = "/Users/jdoe/dev/secret-client"
+            return ExplainRequest(facts, redactor: redactor)
+        }
+        await center.explain(item, request: build)
+        XCTAssertTrue(try XCTUnwrap(confirming(center, item)).text.contains("secret-client"))
+        center.sendFolderNames = false
+        XCTAssertEqual(center.state(for: item), .failed(ExplainCenter.changedBeforeSending, build(redactor.sendingFolderNames(true))!))
+        await center.confirmSend(item)
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+
+        // Confirmed, then turned off while the key is read: nothing is sent.
+        center.sendFolderNames = true
+        await center.explain(item, request: build)
+        keychain.holdsDataReads = true
+        let sending = Task { await center.confirmSend(item) }
+        try await until { keychain.heldDataReads == 1 }
+        center.sendFolderNames = false
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await sending.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+        guard case let .failed(message, _) = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertEqual(message, ExplainCenter.changedWhileSending)
+    }
+
+    func testTurningFolderNamesOffDuringTheBackoffSendsNoRetry() async throws {
+        let backoff = WaitRecorder()
+        let (center, _, _) = await chosen(sleep: { duration in
+            await backoff.record(duration)
+            // Long enough that a retry sent after it would be seen; a cancelled task ends it at once.
+            try await Task.sleep(for: .seconds(2))
+        })
+        center.sendFolderNames = true
+        StubProtocol.enqueue(status: 503, json: #"{"error":{"code":503,"message":"Busy"}}"#)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        let sending = Task { await center.confirmSend(item) }
+        try await until { !backoff.durations.isEmpty }
+        center.sendFolderNames = false
+        await sending.value
+        try await Task.sleep(for: .milliseconds(2_100))
+        XCTAssertEqual(StubProtocol.requests.count, 1, "no retry of a body built with folder names")
+        guard case let .failed(message, _) = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertEqual(message, ExplainCenter.changedWhileSending)
+    }
+
+    func testTheOnDeviceProviderIsNeverPreviewed() async throws {
+        let provider = FakeProvider()
+        let center = ExplainCenter(defaults: defaults(), redactor: redactor, provider: { $0 == .appleIntelligence ? provider : nil })
+        center.choose(.appleIntelligence)
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
+        XCTAssertFalse(center.sendConfirmed)
+    }
+
+    // MARK: Helpers
+
+    private func defaults() -> UserDefaults {
+        let name = "OpenRouterExplainTests-\(UUID().uuidString)"
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
+        return UserDefaults(suiteName: name)!
+    }
+
+    private func completion(_ content: String) -> String {
+        let message = try! JSONSerialization.data(withJSONObject: ["choices": [["message": ["role": "assistant", "content": content]]]])
+        return String(decoding: message, as: UTF8.self)
+    }
+
+    /// An account as the app makes it at launch, before it reads whether a key is stored.
+    private func launching(_ defaults: UserDefaults, keychain: FakeKeychain,
+                           sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }) -> OpenRouterAccount {
+        let client = OpenRouterClient(session: StubProtocol.session(), log: RecordingLog(), sleep: sleep)
+        return OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults,
+                                 log: RecordingLog())
+    }
+
+    /// An account that has read whether a key is stored; `key`, when given, is stored first.
+    private func account(_ defaults: UserDefaults, keychain: FakeKeychain, key: String? = OpenRouterExplainTests.key,
+                         sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }) async -> OpenRouterAccount {
+        if let key { try? OpenRouterKeyStore(items: keychain).save(key) }
+        let account = launching(defaults, keychain: keychain, sleep: sleep)
+        await account.refreshKey()
+        return account
+    }
+
+    /// Explain with the live providers and `account`.
+    private func center(_ defaults: UserDefaults, _ account: OpenRouterAccount) -> ExplainCenter {
+        ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account)
+    }
+
+    /// Explain with OpenRouter chosen and a key stored.
+    private func chosen(sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }) async
+        -> (ExplainCenter, FakeKeychain, OpenRouterAccount) {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain, sleep: sleep)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        return (center, keychain, account)
+    }
+
+    private func request(_ name: String = "syncd") -> ExplainRequest {
+        ExplainRequest(ExplainFacts(kind: .process, name: name), redactor: redactor)
+    }
+
+    private func confirming(_ center: ExplainCenter, _ item: ExplainKey) -> SendPreview? {
+        if case let .confirming(preview) = center.state(for: item) { preview } else { nil }
+    }
+
+    /// Waits until `condition` holds.
+    private func until(_ condition: () -> Bool) async throws {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("never")
+        throw CancellationError()
+    }
+}
+
+private extension String {
+    /// As a JSON string's contents, with `/` unescaped as the body writes it.
+    var jsonEscaped: String {
+        let data = try! JSONSerialization.data(withJSONObject: self, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+        return String(String(decoding: data, as: UTF8.self).dropFirst().dropLast())
+    }
+}

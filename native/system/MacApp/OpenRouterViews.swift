@@ -48,7 +48,7 @@ struct OpenRouterSection: View {
             Text("The OpenRouter model ID to use; when empty, openrouter/auto picks a model for each request. Test Key "
                 + "asks OpenRouter whether the key works and sends none of your data. The key is kept only in this "
                 + "Mac's Keychain and is sent only in each request's Authorization header, to openrouter.ai. Explain "
-                + "cannot use OpenRouter yet.")
+                + "uses OpenRouter only once you choose it as the provider above.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

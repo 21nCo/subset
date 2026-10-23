@@ -5,8 +5,8 @@ import XCTest
 
 /// OpenRouter without the network or the real Keychain (SET-50): the key store against a Keychain double, the key
 /// kept out of user defaults and every log call, the request and its retries against a `URLProtocol` stub, the key
-/// test, and the model ID. Choosing OpenRouter for Explain and the send preview are SET-160's; a live OpenRouter run
-/// is SET-56's.
+/// test, and the model ID. Choosing OpenRouter for Explain and the send preview are tested in `OpenRouterExplainTests`
+/// (SET-160); a live OpenRouter run is SET-56's.
 @MainActor
 final class OpenRouterTests: XCTestCase {
     private static let key = "sk-or-v1-" + String(repeating: "0123456789abcdef", count: 4)

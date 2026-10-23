@@ -8,8 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = SystemMonitor()
     private let processes = ProcessesWindowModel()
     private let disk = DiskWindowModel()
-    private let explain = ExplainCenter.live()
-    private let openRouter = OpenRouterAccount.live()
+    private let openRouter: OpenRouterAccount
+    /// Made with the OpenRouter account before whether a key is stored is first read, so it hears every check.
+    private let explain: ExplainCenter
     private let mainWindowState = MainWindowState()
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
@@ -37,6 +38,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         content: SettingsView(center: explain, openRouter: openRouter)
     )
     private var statusMenu: StatusMenuController?
+
+    override init() {
+        let openRouter = OpenRouterAccount.live()
+        self.openRouter = openRouter
+        explain = ExplainCenter.live(openRouter: openRouter)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the

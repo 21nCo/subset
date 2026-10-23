@@ -6,8 +6,9 @@ import Observation
 /// to send a request or the key test and, unless no key is known to be stored (`presence`), to check that a model ID
 /// entered does not contain it. No Keychain call is made on the main actor: whether a key is stored is read when the
 /// app asks (`refreshKey()`, at launch and each time Settings is shown), and Add key and Remove key wait for theirs.
-/// The model ID is kept in user defaults; the key never is. Explain does not use OpenRouter yet: SET-160 adds it to the
-/// provider setting, with the send preview, through `provider()`.
+/// The model ID is kept in user defaults; the key never is. Explain uses OpenRouter through `provider()` once the user
+/// chooses it (SET-160); each check here that leaves it unusable is reported (`onSetback`), so the choice goes back to
+/// the on-device provider.
 @MainActor
 @Observable
 public final class OpenRouterAccount {
@@ -26,14 +27,36 @@ public final class OpenRouterAccount {
         case unknown(shown: Bool)
     }
 
+    /// A check that found OpenRouter cannot be used as it is: no key is stored, the Keychain did not answer whether one
+    /// is, or the model ID entered held the key or could not be compared with it.
+    public enum Setback: Equatable, Sendable {
+        case noKey
+        case keyUnreadable
+        case modelHeldKey
+        case modelUnchecked
+    }
+
     /// Set by every read of whether a key is stored, and by Add key, Remove key and the key test. A model ID entry is
     /// kept without comparing it with the key only while this is `absent`. Once it is known again, an entry that could
-    /// not be checked is checked again, so what is used, and what Settings says about it, follow it.
+    /// not be checked is checked again, so what is used, and what Settings says about it, follow it. Each time it is
+    /// set to anything but `stored`, that is reported (`onSetback`).
     public private(set) var presence: KeyPresence {
         didSet {
             if modelUnchecked, modelCheck == nil, presence == .stored || presence == .absent { keep(model) }
+            switch presence {
+            case .stored: break
+            case .absent: onSetback?(.noKey)
+            case .unknown: onSetback?(.keyUnreadable)
+            }
         }
     }
+    /// Told each time a check finds OpenRouter cannot be used as it is: whether a key is stored is set to anything but
+    /// stored, or a model ID entered is cleared because it held the key or is not used because it could not be compared
+    /// with it. `ExplainCenter` sets it.
+    @ObservationIgnored public var onSetback: (@MainActor (Setback) -> Void)?
+    /// Told when Add key or Remove key starts, before the Keychain is changed, so `ExplainCenter` ends the OpenRouter
+    /// work in flight and nothing more is sent with the key being replaced or removed.
+    @ObservationIgnored public var onKeyChange: (@MainActor () -> Void)?
     /// Whether an Add key or Remove key is waiting for the Keychain; Settings does not offer Test key meanwhile.
     public var isChangingKey: Bool { pendingKeyChanges > 0 }
     /// Whether Settings shows a key stored: Test key and Remove key are offered then.
@@ -197,10 +220,11 @@ public final class OpenRouterAccount {
         }
     }
 
-    /// Starts Add key or Remove key: ends the key test in flight, and returns the change's number, so only the latest
-    /// change, and a presence read made after it, set whether a key is stored.
+    /// Starts Add key or Remove key: ends the key test, and Explain's OpenRouter work, in flight, and returns the
+    /// change's number, so only the latest change, and a presence read made after it, set whether a key is stored.
     private func startKeyChange() -> Int {
         stopKeyTest()
+        onKeyChange?()
         pendingKeyChanges += 1
         return keyChanges
     }
@@ -289,6 +313,7 @@ public final class OpenRouterAccount {
             case .failure:
                 settle(using: isModelID ? nil : "", error: isModelID ? Self.modelUncheckedMessage : Self.notAModelMessage,
                        unchecked: true)
+                if isModelID { onSetback?(.modelUnchecked) }
             }
         }
         modelCheck = task
@@ -300,6 +325,7 @@ public final class OpenRouterAccount {
         modelCheck = nil
         if !model.isEmpty { model = "" }
         settle(using: "", error: Self.keyAsModelMessage)
+        onSetback?(.modelHeldKey)
     }
 
     /// Applies one outcome of checking the model ID entered, in one step: the model ID used and kept (`nil` keeps what
