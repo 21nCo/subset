@@ -3,9 +3,9 @@ import Observation
 
 /// The OpenRouter part of Settings: **Add key**, **Test key**, **Remove key**, and the model ID. Only whether a key is
 /// stored is kept here; the key itself stays in the Keychain (`OpenRouterKeyStore`) and is read, off the main actor, only
-/// to send a request or the key test and, while a key is stored, to check that a model ID entered does not contain it.
-/// The model ID is kept in user defaults; the key never is. Explain does not use OpenRouter yet: SET-160 adds it to the
-/// provider setting, with the send preview, through `provider()`.
+/// to send a request or the key test and, unless no key is known to be stored (`presence`), to check that a model ID
+/// entered does not contain it. The model ID is kept in user defaults; the key never is. Explain does not use
+/// OpenRouter yet: SET-160 adds it to the provider setting, with the send preview, through `provider()`.
 @MainActor
 @Observable
 public final class OpenRouterAccount {
@@ -16,7 +16,25 @@ public final class OpenRouterAccount {
         case failed(String)
     }
 
-    public private(set) var hasKey: Bool
+    /// Whether a key is stored, as last read or changed here.
+    public enum KeyPresence: Equatable, Sendable {
+        case stored
+        case absent
+        /// The latest read of it failed; `shown` is whether Settings shows a key stored meanwhile.
+        case unknown(shown: Bool)
+    }
+
+    /// Set by every read of whether a key is stored, and by Add key, Remove key and the key test. A model ID entry is
+    /// kept without comparing it with the key only while this is `absent`.
+    public private(set) var presence: KeyPresence
+    /// Whether Settings shows a key stored: Test key and Remove key are offered then.
+    public var hasKey: Bool {
+        switch presence {
+        case .stored: true
+        case .absent: false
+        case let .unknown(shown): shown
+        }
+    }
     /// Why the latest Add key, Remove key, or Keychain read failed; cleared by the next one that works.
     public private(set) var keyError: String?
     public private(set) var keyTest: KeyTest?
@@ -55,9 +73,6 @@ public final class OpenRouterAccount {
     @ObservationIgnored private var keyTestTask: Task<Void, Never>?
     /// Counts Add key and Remove key, so a presence read they overtake changes nothing.
     @ObservationIgnored private var keyChanges = 0
-    /// Whether the latest read of whether a key is stored failed, so that is not known; `keyError` is then its
-    /// failure, which the next read that works clears.
-    @ObservationIgnored private var presenceFailed = false
     /// The check of the model ID entered against the key stored.
     @ObservationIgnored private var modelCheck: Task<Void, Never>?
     /// Whether the latest check of the model ID entered could not read the key, so it is checked again.
@@ -90,11 +105,10 @@ public final class OpenRouterAccount {
         model = refused ? "" : stored
         checkedModel = ""
         do {
-            hasKey = try keys.containsKey()
+            presence = try keys.containsKey() ? .stored : .absent
         } catch {
-            hasKey = false
+            presence = .unknown(shown: false)
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
-            presenceFailed = true
         }
         // Kept before, it is still checked against the key stored now before it is used.
         keep(model)
@@ -125,16 +139,14 @@ public final class OpenRouterAccount {
         }
         do {
             try keys.save(key)
-            hasKey = true
+            presence = .stored
             keyError = nil
-            presenceFailed = false
             log.record("OpenRouter key stored in the Keychain")
             return true
         } catch {
             keyError = (error as? KeychainError)?.message ?? "The key could not be stored."
-            presenceFailed = false
-            // Whether a key is still stored: when that cannot be read either, what is shown stays.
-            if let stored = try? keys.containsKey() { hasKey = stored }
+            // Whether a key is still stored: when that cannot be read either, it is not known, and what is shown stays.
+            reread(shown: hasKey)
             log.record("OpenRouter key could not be stored")
             return false
         }
@@ -143,15 +155,15 @@ public final class OpenRouterAccount {
     /// Removes the key from the Keychain.
     public func removeKey() {
         stopKeyTest()
-        presenceFailed = false
         do {
             try keys.remove()
-            hasKey = false
+            presence = .absent
             keyError = nil
             log.record("OpenRouter key removed from the Keychain")
         } catch {
             keyError = (error as? KeychainError)?.message ?? "The key could not be removed."
-            hasKey = (try? keys.containsKey()) ?? true
+            // Whether the key is still stored: when that cannot be read either, it is not known, and it is shown.
+            reread(shown: true)
             log.record("OpenRouter key could not be removed")
         }
     }
@@ -166,15 +178,23 @@ public final class OpenRouterAccount {
         guard changes == keyChanges else { return }
         switch read {
         case let .success(stored):
-            if presenceFailed { keyError = nil }
-            presenceFailed = false
-            hasKey = stored
+            if case .unknown = presence { keyError = nil }
+            presence = stored ? .stored : .absent
             // A model ID that could not be checked against the key is checked again.
             if modelUnchecked, modelCheck == nil { keep(model) }
         case let .failure(error):
             // Whether a key is stored is not known: what is shown stays.
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
-            presenceFailed = true
+            presence = .unknown(shown: hasKey)
+        }
+    }
+
+    /// Reads whether a key is stored after Add key or Remove key failed; a read that fails too leaves it not known.
+    private func reread(shown: Bool) {
+        do {
+            presence = try keys.containsKey() ? .stored : .absent
+        } catch {
+            presence = .unknown(shown: shown)
         }
     }
 
@@ -201,7 +221,7 @@ public final class OpenRouterAccount {
             use("")
             if !candidate.isEmpty { modelError = Self.notAModelMessage }
         }
-        guard !candidate.isEmpty, hasKey || presenceFailed else {
+        guard !candidate.isEmpty, presence != .absent else {
             if isModelID { use(candidate) }
             return
         }
@@ -259,14 +279,17 @@ public final class OpenRouterAccount {
             // Add key or Remove key while it was read: what was read is not the key stored now, so it is not used.
             guard test == tests, !Task.isCancelled else { return }
             guard let key else {
-                hasKey = false
+                presence = .absent
                 throw ExplainError.unavailable(.noOpenRouterKey)
             }
+            presence = .stored
             _ = try await client.send(.keyTest, key: key)
             outcome = .passed
         } catch let error as ExplainError {
             outcome = .failed(error.message)
         } catch let error as KeychainError {
+            // The key could not be read, so whether one is stored is not known.
+            if test == tests { presence = .unknown(shown: hasKey) }
             outcome = .failed(error.message)
         } catch is CancellationError {
             outcome = nil

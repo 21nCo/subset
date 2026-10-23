@@ -458,6 +458,79 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertFalse(account.hasKey)
     }
 
+    func testAModelIDIsComparedWithTheKeyWhileAFailedAddOrRemoveKeyLeavesWhetherOneIsStoredUnknown() async throws {
+        let key = "tok-0123456789abcdef"
+        let leaked = "x/\(key)"
+
+        // Unreadable at launch, then Replace Key fails and so does the read after it.
+        let defaults = defaults()
+        let log = RecordingLog()
+        let keychain = FakeKeychain()
+        try OpenRouterKeyStore(items: keychain).save(key)
+        keychain.failure = errSecInteractionNotAllowed
+        let account = account(defaults, keychain: keychain, log: log)
+        XCTAssertFalse(account.addKey("tok-replacement-0000"))
+        XCTAssertEqual(account.presence, .unknown(shown: false))
+        account.model = leaked
+        await account.modelChecked()
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertEqual(account.provider().model, OpenRouterProvider.defaultModel)
+        XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
+        keychain.failure = nil
+        await account.refreshKey()
+        await account.modelChecked()
+        XCTAssertEqual(account.presence, .stored)
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+
+        // Remove Key fails and so does the read after it: the key is still shown, and an entry still compared.
+        let removeDefaults = self.defaults()
+        let removeKeychain = FakeKeychain()
+        let removing = self.account(removeDefaults, keychain: removeKeychain, key: key, log: log)
+        removeKeychain.failure = errSecInteractionNotAllowed
+        removing.removeKey()
+        XCTAssertEqual(removing.presence, .unknown(shown: true))
+        XCTAssertTrue(removing.hasKey)
+        removing.model = leaked
+        await removing.modelChecked()
+        XCTAssertEqual(removing.checkedModel, "")
+        removeKeychain.failure = nil
+        await removing.refreshKey()
+        await removing.modelChecked()
+        XCTAssertEqual(removing.model, "")
+        XCTAssertEqual(removing.checkedModel, "")
+
+        // Only once no key is known to be stored is an entry kept without reading the key.
+        removing.removeKey()
+        XCTAssertEqual(removing.presence, .absent)
+        let reads = removeKeychain.dataReads
+        removing.model = "anthropic/claude-sonnet"
+        await removing.modelChecked()
+        XCTAssertEqual(removing.checkedModel, "anthropic/claude-sonnet")
+        XCTAssertEqual(removeKeychain.dataReads, reads)
+
+        for store in [defaults, removeDefaults] {
+            for (name, value) in store.dictionaryRepresentation() {
+                XCTAssertFalse("\(name) \(value)".contains(key), name)
+            }
+        }
+        for message in log.messages { XCTAssertFalse(message.contains(key), message) }
+    }
+
+    func testAKeyTestThatCannotReadTheKeyLeavesWhetherOneIsStoredUnknown() async throws {
+        let keychain = FakeKeychain()
+        let account = account(defaults(), keychain: keychain, key: "tok-0123456789abcdef")
+        keychain.failure = errSecInteractionNotAllowed
+        await account.testKey()
+        XCTAssertEqual(account.keyTest, .failed(KeychainError(status: errSecInteractionNotAllowed).message))
+        XCTAssertEqual(account.presence, .unknown(shown: true))
+        account.model = "x/tok-0123456789abcdef"
+        await account.modelChecked()
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
     // MARK: Model ID
 
     func testOnlyAModelIDShapedEntryIsSentAsTheModel() {

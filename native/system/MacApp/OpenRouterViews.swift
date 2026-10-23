@@ -3,7 +3,7 @@ import SystemCore
 
 /// Settings' OpenRouter section: Add key (or Replace key), Test key, Remove key, and the model ID. The key is typed or
 /// pasted into a secure field, stored in the Keychain, and never shown again. Whether a key is stored is read again
-/// each time it is shown.
+/// each time Settings is shown (`AppDelegate.perform(.settings)`).
 struct OpenRouterSection: View {
     @Bindable var account: OpenRouterAccount
     @State private var entered = ""
@@ -43,7 +43,6 @@ struct OpenRouterSection: View {
                 + "cannot use OpenRouter yet.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .task { await account.refreshKey() }
     }
 
     @ViewBuilder private var keyTest: some View {

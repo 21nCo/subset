@@ -87,8 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openSystem: mainWindow.show()
         case .settings:
             settingsWindow.show()
-            // Closing Settings only hides it, so the provider's availability is read again each time it is shown.
+            // Closing Settings only hides it, so the provider's availability, and whether an OpenRouter key is
+            // stored, are read again each time it is shown.
             Task { await explain.refreshAvailability() }
+            Task { await openRouter.refreshKey() }
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
