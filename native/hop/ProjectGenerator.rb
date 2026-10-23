@@ -61,6 +61,8 @@ app_target.build_configurations.each do |config|
   config.build_settings["EXECUTABLE_NAME"] = "Hop"
   config.build_settings["PRODUCT_MODULE_NAME"] = "Hop"
   config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.subset.hop"
+  # The name macOS shows for the app (CFBundleName and CFBundleDisplayName in MacApp/Info.plist).
+  config.build_settings["HOP_DISPLAY_NAME"] = "Hop"
   config.build_settings["GENERATE_INFOPLIST_FILE"] = "NO"
   config.build_settings["INFOPLIST_FILE"] = "MacApp/Info.plist"
   # The entitlements file is intentionally empty: no App Sandbox and no exceptions, only the hardened runtime.
@@ -73,6 +75,17 @@ app_target.build_configurations.each do |config|
   config.build_settings.delete("ASSETCATALOG_COMPILER_APPICON_NAME")
   config.build_settings.delete("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME")
   config.build_settings["LD_RUNPATH_SEARCH_PATHS"] = ["$(inherited)", "@executable_path/../Frameworks"]
+  next unless config.name == "Debug"
+
+  # A Debug build is a separate app to macOS, so it can never take over the Accessibility or Screen Recording record
+  # of the notarized build (dev.subset.hop). Release keeps its identity and signing, which release-macos.mjs supplies.
+  config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.subset.hop.debug"
+  config.build_settings["HOP_DISPLAY_NAME"] = "Hop Debug"
+  # Signed with the team's Apple Development certificate when signing is on, so macOS identifies the build by team
+  # and bundle ID rather than by a per-build cdhash, and its grants survive rebuilds. Scripted builds pass
+  # CODE_SIGNING_ALLOWED=NO and stay unsigned.
+  config.build_settings["DEVELOPMENT_TEAM"] = "SAZVPX4CAA"
+  config.build_settings["CODE_SIGN_IDENTITY"] = "Apple Development"
 end
 
 test_target.build_configurations.each do |config|

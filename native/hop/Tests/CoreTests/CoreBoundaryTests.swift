@@ -21,4 +21,25 @@ final class CoreBoundaryTests: XCTestCase {
             XCTAssertNil(forbidden.firstMatch(in: text, range: range), "\(source.lastPathComponent) imports a host framework")
         }
     }
+
+    /// The Debug and Release builds have different bundle IDs, so app and core code reads Hop's identity from the
+    /// running bundle (`HopIdentity`) or a build setting. Any mention of the release ID there fails, comments
+    /// included, so no literal slips through a string this check would have to parse.
+    func testAppAndCoreNeverNameTheReleaseBundleIdentifier() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let releaseIdentifier = ["dev", "subset", "hop"].joined(separator: ".")
+        var checked = 0
+        for folder in ["Core", "MacApp"] {
+            let files = try FileManager.default.contentsOfDirectory(
+                at: root.appendingPathComponent(folder), includingPropertiesForKeys: nil
+            )
+            for file in files {
+                let text = try String(contentsOf: file, encoding: .utf8)
+                checked += 1
+                XCTAssertFalse(text.contains(releaseIdentifier), "\(folder)/\(file.lastPathComponent) names \(releaseIdentifier)")
+            }
+        }
+        XCTAssertGreaterThan(checked, 10, "found too few sources under \(root.path)")
+    }
 }

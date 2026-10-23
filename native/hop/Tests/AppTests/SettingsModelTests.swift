@@ -237,7 +237,7 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(applied.map(\.showWindowPreviews), [true])
         XCTAssertTrue(SettingsStore(defaults: defaults).load().showWindowPreviews, "saved at once")
         XCTAssertEqual(settings.screenRecording, .denied)
-        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording isn't allowed for Hop, so the switcher shows app icons.")
+        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording isn't allowed for \(HopIdentity.appName), so the switcher shows app icons.")
         XCTAssertFalse(settings.capturesThumbnails())
 
         settings.setShowWindowPreviews(false)
@@ -265,7 +265,7 @@ final class SettingsModelTests: XCTestCase {
         screenRecording.granted = false
         XCTAssertFalse(settings.capturesThumbnails(), "the switcher shows icons")
         XCTAssertEqual(settings.screenRecording, .revoked)
-        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording was turned off for Hop, so the switcher shows app icons.")
+        XCTAssertEqual(settings.screenRecording.notice, "Screen Recording was turned off for \(HopIdentity.appName), so the switcher shows app icons.")
         XCTAssertEqual(screenRecording.calls, [], "never asks while switching")
     }
 

@@ -507,6 +507,36 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1C1A521BA1C0CAC48F901E3456DD088A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = MacApp/Hop.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = SAZVPX4CAA;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				EXECUTABLE_NAME = Hop;
+				GENERATE_INFOPLIST_FILE = NO;
+				HOP_DISPLAY_NAME = "Hop Debug";
+				INFOPLIST_FILE = MacApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.hop.debug;
+				PRODUCT_MODULE_NAME = Hop;
+				PRODUCT_NAME = Hop;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
 		1FCC69CB81D6C2CF45D8F3575E52AB4D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -579,7 +609,7 @@
 			};
 			name = Release;
 		};
-		90398B46B94365831F96552672D77C7B /* Release */ = {
+		CD1C407344B06AC2A04A3A5D8FCBC4E5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -592,6 +622,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				EXECUTABLE_NAME = Hop;
 				GENERATE_INFOPLIST_FILE = NO;
+				HOP_DISPLAY_NAME = Hop;
 				INFOPLIST_FILE = MacApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -605,33 +636,6 @@
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
-		};
-		A526F7510A8BD0FA9E0B8D9D03892EF5 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = MacApp/Hop.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				EXECUTABLE_NAME = Hop;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = MacApp/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.subset.hop;
-				PRODUCT_MODULE_NAME = Hop;
-				PRODUCT_NAME = Hop;
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 6.0;
-			};
-			name = Debug;
 		};
 		DC7776B2599FEC5D0DAED69FC48F9623 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -763,8 +767,8 @@
 		8DC6C80643BA4E941D90FD248822C821 /* Build configuration list for PBXNativeTarget "Hop" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				90398B46B94365831F96552672D77C7B /* Release */,
-				A526F7510A8BD0FA9E0B8D9D03892EF5 /* Debug */,
+				CD1C407344B06AC2A04A3A5D8FCBC4E5 /* Release */,
+				1C1A521BA1C0CAC48F901E3456DD088A /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

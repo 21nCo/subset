@@ -172,8 +172,11 @@ final class SettingsStoreTests: XCTestCase {
         let settings = try changedSettings()
         store.save(settings)
         XCTAssertEqual(store.load(), settings)
-        XCTAssertEqual(Settings.defaultsKey, "dev.subset.hop.settings")
-        let data = try XCTUnwrap(defaults.data(forKey: "dev.subset.hop.settings"))
+        // Named by the running bundle: dev.subset.hop.settings in the release app, dev.subset.hop.debug.settings in
+        // a Debug build.
+        let runningIdentifier = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        XCTAssertEqual(Settings.defaultsKey, "\(runningIdentifier).settings")
+        let data = try XCTUnwrap(defaults.data(forKey: "\(runningIdentifier).settings"))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(json["schemaVersion"] as? Int, 1)
         XCTAssertEqual(json["shortcut"] as? [String: AnyHashable], ["holdModifier": "control", "keyCode": 0x32])

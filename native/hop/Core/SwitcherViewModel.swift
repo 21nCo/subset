@@ -330,7 +330,7 @@ public struct SwitcherViewModel: Sendable, Equatable {
         case .done:
             nil
         case .notPermitted:
-            "Hop needs Accessibility access"
+            "\(HopIdentity.appName) needs Accessibility access"
         case .appGone:
             operation == .quitApp ? nil : "\(appName) has quit"
         case .windowGone:
