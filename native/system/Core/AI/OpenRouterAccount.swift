@@ -25,8 +25,13 @@ public final class OpenRouterAccount {
     }
 
     /// Set by every read of whether a key is stored, and by Add key, Remove key and the key test. A model ID entry is
-    /// kept without comparing it with the key only while this is `absent`.
-    public private(set) var presence: KeyPresence
+    /// kept without comparing it with the key only while this is `absent`. Once it is known again, an entry that could
+    /// not be checked is checked again, so what is used, and what Settings says about it, follow it.
+    public private(set) var presence: KeyPresence {
+        didSet {
+            if modelUnchecked, modelCheck == nil, presence == .stored || presence == .absent { keep(model) }
+        }
+    }
     /// Whether Settings shows a key stored: Test key and Remove key are offered then.
     public var hasKey: Bool {
         switch presence {
@@ -49,15 +54,13 @@ public final class OpenRouterAccount {
             modelCheck?.cancel()
             modelCheck = nil
             if OpenRouterProvider.looksLikeKey(model) {
-                model = ""
-                modelError = Self.keyAsModelMessage
+                refuseModel()
             } else {
-                modelError = nil
+                keep(model)
             }
-            keep(model)
         }
     }
-    /// Why the model ID entered was cleared, or is not used; cleared by the next one kept.
+    /// Why the model ID entered was cleared, or is not used; set with `checkedModel` by each outcome of `keep(_:)`.
     public private(set) var modelError: String?
     /// The model ID requests use: the latest entry shown not to contain the key, or empty for `openrouter/auto`.
     /// User defaults hold only this, so a request never has an entry that was not checked.
@@ -129,10 +132,7 @@ public final class OpenRouterAccount {
         }
         stopKeyTest()
         // A model ID entered or kept before that contains the key is neither kept nor used.
-        if OpenRouterProvider.contains(key: key, in: model) {
-            model = ""
-            modelError = Self.keyAsModelMessage
-        }
+        if OpenRouterProvider.contains(key: key, in: model) { refuseModel() }
         if OpenRouterProvider.contains(key: key, in: checkedModel) {
             checkedModel = ""
             defaults.set("", forKey: Self.modelKey)
@@ -179,9 +179,8 @@ public final class OpenRouterAccount {
         switch read {
         case let .success(stored):
             if case .unknown = presence { keyError = nil }
+            // A model ID that could not be checked against the key is checked again (`presence`).
             presence = stored ? .stored : .absent
-            // A model ID that could not be checked against the key is checked again.
-            if modelUnchecked, modelCheck == nil { keep(model) }
         case let .failure(error):
             // Whether a key is stored is not known: what is shown stays.
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
@@ -212,19 +211,22 @@ public final class OpenRouterAccount {
     /// `openrouter/auto` at once. Unless no key is known to be stored, a non-empty entry is then compared with the key,
     /// read off the main actor: one that contains it is cleared (`keyAsModelMessage`), and a model ID that cannot be
     /// compared, because the key cannot be read, is not used or kept (`modelUncheckedMessage`), so what was checked
-    /// before stays. A later entry ends the check.
+    /// before stays. A later entry ends the check. Each outcome sets the model ID used and its message together
+    /// (`settle(using:error:unchecked:)`).
     private func keep(_ entered: String) {
         let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
         let isModelID = OpenRouterProvider.isModelID(candidate)
-        modelUnchecked = false
-        if !isModelID {
-            use("")
-            if !candidate.isEmpty { modelError = Self.notAModelMessage }
+        if candidate.isEmpty {
+            settle(using: "", error: nil)
+        } else if !isModelID {
+            settle(using: "", error: Self.notAModelMessage)
+        } else if presence == .absent {
+            settle(using: candidate, error: nil)
+        } else {
+            // Until it is checked, what was checked before is used.
+            settle(using: nil, error: nil)
         }
-        guard !candidate.isEmpty, presence != .absent else {
-            if isModelID { use(candidate) }
-            return
-        }
+        guard !candidate.isEmpty, presence != .absent else { return }
         let keys = self.keys
         let task = Task {
             let read = await Task.detached { Result { try keys.readKey() } }.value
@@ -232,23 +234,38 @@ public final class OpenRouterAccount {
             modelCheck = nil
             switch read {
             case let .success(key?) where OpenRouterProvider.contains(key: key, in: candidate):
-                model = ""
-                modelError = Self.keyAsModelMessage
+                refuseModel()
             case .success:
-                guard isModelID else { return }
-                if modelError == Self.modelUncheckedMessage { modelError = nil }
-                use(candidate)
+                if isModelID { settle(using: candidate, error: nil) }
+            case .failure where presence == .absent:
+                // The key was removed meanwhile: no key is known to be stored, so the entry is used as it is.
+                keep(entered)
             case .failure:
-                modelUnchecked = true
-                if isModelID { modelError = Self.modelUncheckedMessage }
+                settle(using: isModelID ? nil : "", error: isModelID ? Self.modelUncheckedMessage : Self.notAModelMessage,
+                       unchecked: true)
             }
         }
         modelCheck = task
     }
 
-    private func use(_ checked: String) {
-        checkedModel = checked
-        defaults.set(checked, forKey: Self.modelKey)
+    /// Clears an entry that holds an API key: `openrouter/auto` is used and kept, and `keyAsModelMessage` says why.
+    private func refuseModel() {
+        modelCheck?.cancel()
+        modelCheck = nil
+        if !model.isEmpty { model = "" }
+        settle(using: "", error: Self.keyAsModelMessage)
+    }
+
+    /// Applies one outcome of checking the model ID entered, in one step: the model ID used and kept (`nil` keeps what
+    /// was checked before), the message Settings shows under it, and whether it is checked again once whether a key is
+    /// stored is next known.
+    private func settle(using checked: String?, error: String?, unchecked: Bool = false) {
+        if let checked {
+            checkedModel = checked
+            defaults.set(checked, forKey: Self.modelKey)
+        }
+        modelError = error
+        modelUnchecked = unchecked
     }
 
     /// Waits for the model ID entered to be checked against the key and kept.

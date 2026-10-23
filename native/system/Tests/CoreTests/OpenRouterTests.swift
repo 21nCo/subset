@@ -749,6 +749,74 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
     }
 
+    func testAnUncheckedModelIDIsUsedWithNoErrorOnceWhetherAKeyIsStoredIsKnownAgain() async throws {
+        let key = "tok-0123456789abcdef"
+        let entry = "anthropic/claude-sonnet"
+
+        /// An account with `key` stored and `entry` entered while the key could not be read to check it.
+        func unchecked() async throws -> (OpenRouterAccount, FakeKeychain, UserDefaults) {
+            let defaults = self.defaults()
+            let keychain = FakeKeychain()
+            let account = self.account(defaults, keychain: keychain, key: key)
+            keychain.failure = errSecInteractionNotAllowed
+            account.model = entry
+            await account.modelChecked()
+            XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
+            XCTAssertEqual(account.checkedModel, "")
+            keychain.failure = nil
+            return (account, keychain, defaults)
+        }
+
+        func assertUsed(_ account: OpenRouterAccount, _ defaults: UserDefaults, line: UInt = #line) async {
+            await account.modelChecked()
+            XCTAssertEqual(account.checkedModel, entry, line: line)
+            XCTAssertEqual(defaults.string(forKey: "openRouterModel"), entry, line: line)
+            XCTAssertEqual(account.provider().model, entry, line: line)
+            XCTAssertNil(account.modelError, line: line)
+        }
+
+        // Removed outside System, then Settings is shown again: no key is stored, so the entry is used.
+        var (account, keychain, defaults) = try await unchecked()
+        try OpenRouterKeyStore(items: keychain).remove()
+        await account.refreshKey()
+        XCTAssertEqual(account.presence, .absent)
+        await assertUsed(account, defaults)
+
+        // Remove Key.
+        (account, keychain, defaults) = try await unchecked()
+        account.removeKey()
+        XCTAssertEqual(account.presence, .absent)
+        await assertUsed(account, defaults)
+
+        // A key test that finds no key.
+        (account, keychain, defaults) = try await unchecked()
+        try OpenRouterKeyStore(items: keychain).remove()
+        await account.testKey()
+        XCTAssertEqual(account.presence, .absent)
+        await assertUsed(account, defaults)
+
+        // The key still stored and readable again: checked against it, then used.
+        (account, keychain, defaults) = try await unchecked()
+        let reads = keychain.dataReads
+        await account.refreshKey()
+        await assertUsed(account, defaults)
+        XCTAssertEqual(keychain.dataReads, reads + 1, "compared with the key")
+
+        // A check whose read failed, finished after Remove Key: no key is stored, so the entry is used.
+        let removed = self.defaults()
+        let held = FakeKeychain()
+        let removing = self.account(removed, keychain: held, key: key)
+        held.holdsDataReads = true
+        held.failure = errSecInteractionNotAllowed
+        removing.model = entry
+        try await until { held.heldDataReads == 1 }
+        held.failure = nil
+        removing.removeKey()
+        held.holdsDataReads = false
+        held.releaseDataRead()
+        await assertUsed(removing, removed)
+    }
+
     func testAppleIntelligenceStillSaysExplanationsAreGeneratedOnThisMac() {
         XCTAssertEqual(AIAvailability.available.meaning, "Explanations are generated on this Mac.")
         XCTAssertNotEqual(AIAvailability.availableOnOpenRouter.meaning, AIAvailability.available.meaning)
