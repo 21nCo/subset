@@ -470,9 +470,17 @@ public final class ExplainCenter {
         }
         if confirmed, answered { sendConfirmed = true }
         guard selection == self.selection else { return }
+        if case let .unavailable(availability)? = outcome {
+            // Refused before it was sent: nothing left this Mac. A refusal that sets the choice back ends this work,
+            // so it is not kept as the item's state when OpenRouter is chosen again.
+            noteOpenRouter(availability, from: provider)
+            guard selection == self.selection else { return }
+            states[key] = outcome
+            sentBodies[key] = nil
+            return
+        }
         states[key] = outcome
-        sentBodies[key] = body
-        if case let .unavailable(availability)? = outcome { noteOpenRouter(availability, from: provider) }
+        sentBodies[key] = outcome == nil ? nil : body
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does, and so does

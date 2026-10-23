@@ -246,12 +246,42 @@ final class OpenRouterExplainTests: XCTestCase {
 
         // Set back however the refusal comes, the model ID in use having changed since included.
         let refusing = ExplainCenter(defaults: self.defaults(), redactor: redactor, openRouter: account,
-                                     provider: { $0 == .openRouter ? HeldKeyProvider() : nil })
+                                     provider: { $0 == .openRouter ? RefusingProvider() : nil })
         XCTAssertTrue(refusing.choose(.openRouter))
         await refusing.explain(item) { _ in self.request() }
         await refusing.confirmSend(item)
         XCTAssertEqual(refusing.choice, .appleIntelligence)
         XCTAssertEqual(refusing.notice, ExplainCenter.notice(.modelHeldKey))
+    }
+
+    func testARequestRefusedBeforeItIsSentKeepsNeitherItsStateNorItsBody() async throws {
+        let defaults = defaults()
+        let account = await account(defaults, keychain: FakeKeychain())
+        let item = ExplainKey("process:1")
+        for refusal in [AIAvailability.openRouterModelHeldKey, .noOpenRouterKey, .openRouterKeyUnreadable] {
+            let center = ExplainCenter(defaults: self.defaults(), redactor: redactor, openRouter: account,
+                                       provider: { $0 == .openRouter ? RefusingProvider(refusal: refusal) : nil })
+            XCTAssertTrue(center.choose(.openRouter))
+            await center.explain(item) { _ in self.request() }
+            await center.confirmSend(item)
+            XCTAssertEqual(center.choice, .appleIntelligence, "\(refusal)")
+            // The key is still stored, so the reason the request was refused is not shown once chosen again.
+            await account.refreshKey()
+            XCTAssertTrue(center.choose(.openRouter), "\(refusal)")
+            XCTAssertEqual(center.state(for: item), .idle, "\(refusal)")
+            XCTAssertNil(center.sentText(for: item), "\(refusal): nothing left this Mac")
+        }
+
+        // A refusal that does not set the choice back is shown, with nothing sent.
+        let center = ExplainCenter(defaults: self.defaults(), redactor: redactor, openRouter: account,
+                                   provider: { $0 == .openRouter ? RefusingProvider(refusal: .notInThisBuild) : nil })
+        XCTAssertTrue(center.choose(.openRouter))
+        await center.explain(item) { _ in self.request() }
+        await center.confirmSend(item)
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertEqual(center.state(for: item), .unavailable(.notInThisBuild))
+        XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
     // MARK: Send preview
@@ -639,10 +669,13 @@ final class OpenRouterExplainTests: XCTestCase {
     }
 }
 
-/// Refuses every request because the model ID holds the key, as `OpenRouterProvider` does.
-private struct HeldKeyProvider: AIProvider {
+/// Available, then refuses every request before sending it, by default because the model ID holds the key, as
+/// `OpenRouterProvider` does.
+private struct RefusingProvider: AIProvider {
+    var refusal = AIAvailability.openRouterModelHeldKey
+
     func availability() async -> AIAvailability { .availableOnOpenRouter }
-    func explain(_: ExplainRequest) async throws -> ExplanationDraft { throw ExplainError.unavailable(.openRouterModelHeldKey) }
+    func explain(_: ExplainRequest) async throws -> ExplanationDraft { throw ExplainError.unavailable(refusal) }
     func sentBody(for _: ExplainRequest) throws -> Data? { Data("{}".utf8) }
 }
 
