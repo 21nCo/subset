@@ -284,8 +284,8 @@ final class OpenRouterExplainTests: XCTestCase {
     }
 
     /// An OpenRouter read that a later one overtook, which then finds the key unreadable, sets nothing back: the
-    /// newer read, an Explain whose preview is shown or Settings', stands, and only the overtaken request ends, unsent.
-    /// The latest read finding it unreadable still sets the choice back.
+    /// newer read, an Explain whose preview is shown or Settings', stands, and only the overtaken request ends, unsent,
+    /// saying so without claiming a set-back. The latest read finding it unreadable still sets the choice back.
     func testAnOvertakenOpenRouterReadThatFindsTheKeyUnreadableSetsNothingBack() async throws {
         let defaults = defaults()
         let keychain = FakeKeychain()
@@ -308,7 +308,8 @@ final class OpenRouterExplainTests: XCTestCase {
             XCTAssertEqual(center.choice, .openRouter)
             XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
             XCTAssertNil(center.notice)
-            XCTAssertEqual(center.state(for: item), .unavailable(.openRouterKeyUnreadable), "only its own item ends")
+            XCTAssertEqual(center.state(for: item), .failed(try XCTUnwrap(ExplainCenter.overtaken(.openRouterKeyUnreadable)),
+                                                            request()), "only its own item ends")
             XCTAssertNil(center.sentText(for: item))
             XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is shown")
         }
@@ -336,6 +337,49 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
         XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
         XCTAssertEqual(StubProtocol.requests.count, 1)
+    }
+
+    /// A read overtaken by Settings' read, which then finds the model ID holds the key stored now, sets nothing back
+    /// and clears nothing, so its item says only that nothing was sent, never that the model ID was cleared or to
+    /// choose OpenRouter again; the latest read finding it does both.
+    func testAnOvertakenOpenRouterReadThatFindsTheModelIDHoldsTheKeyClaimsNoClear() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        let other = "tok-0123456789abcdef"
+        account.model = "acme/\(other)"
+        await account.modelChecked()
+        XCTAssertTrue(center.choose(.openRouter))
+        try OpenRouterKeyStore(items: keychain).save(other)
+        let item = ExplainKey("process:1")
+
+        keychain.holdsDataReads = true
+        let held = Task { await center.explain(item) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .availableOnOpenRouter)
+        keychain.releaseDataRead()
+        await held.value
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+        XCTAssertNil(center.notice)
+        XCTAssertEqual(account.checkedModel, "acme/\(other)", "not cleared by an overtaken read")
+        let message = try XCTUnwrap(ExplainCenter.overtaken(.openRouterModelHeldKey))
+        XCTAssertEqual(center.state(for: item), .failed(message, request()))
+        XCTAssertFalse(message.contains("cleared"), message)
+        XCTAssertFalse(message.contains("Choose OpenRouter again"), message)
+        XCTAssertNil(center.sentText(for: item))
+        XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is shown")
+
+        // Asked again, the latest read sets the choice back and clears the model ID.
+        await center.explain(item) { _ in self.request() }
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
     }
 
     /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
