@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
@@ -189,6 +190,77 @@ test('shutdown plays the alerts the handler has not acknowledged', async (t) => 
   assert.deepEqual(context.sink.received.map(({ alert }) => alert.kind), ['finish']);
 });
 
+/** Sends an acknowledgement whose body arrives only after `beforeBody` has run. */
+function acknowledgeLate(socketPath, alertId, subscriberId, beforeBody) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ subscriberId });
+    const outgoing = request(
+      { socketPath, method: 'POST', path: `/v1/alerts/${alertId}/ack`, agent: false, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+      }
+    );
+    outgoing.on('error', reject);
+    outgoing.flushHeaders();
+    setTimeout(async () => {
+      await beforeBody();
+      outgoing.end(body);
+    }, 50);
+  });
+}
+
+test('an acknowledgement retried while the daemon shuts down gets the outcome stop() settled, not 503', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  await startCountdown(context, 'Tea');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 2);
+  const [taken, left] = alertsOf(handler);
+  assert.equal((await acknowledge(context, taken.alertId, handler.subscriberId)).status, 200);
+  let closed;
+  const retried = acknowledgeLate(context.daemon.paths.socket, taken.alertId, handler.subscriberId, () => {
+    closed = context.daemon.shutdown();
+  });
+  const late = acknowledgeLate(context.daemon.paths.socket, left.alertId, handler.subscriberId, () => {});
+  assert.deepEqual([(await retried).status, (await late).status], [200, 410]);
+  await closed;
+  assert.deepEqual(context.sink.received.map(({ timer }) => timer.name), [left.timerName]);
+});
+
+test('while a handoff is not saved, the timer stays running on disk, so a daemon that ends before the fallback leaves the alert to the next one', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  const id = await startCountdown(context);
+  const scheduler = join(context.dataDir, 'scheduler.json');
+  const lastSaved = readFileSync(scheduler);
+  // Each save of scheduler.json fails from now on: a directory is where the new file is renamed to.
+  unlinkSync(scheduler);
+  mkdirSync(join(scheduler, 'in-the-way'), { recursive: true });
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const stateOnDisk = () => JSON.parse(readFileSync(join(context.dataDir, 'state.json'), 'utf8'));
+  const before = readFileSync(join(context.dataDir, 'state.json'), 'utf8');
+  // The daemon ends abruptly now, before the handler acknowledges or the 2 s fallback: the next one
+  // starts from the files as they are.
+  const next = tempDataDir(t);
+  mkdirSync(next, { recursive: true });
+  writeFileSync(join(next, 'state.json'), before);
+  writeFileSync(join(next, 'scheduler.json'), lastSaved);
+  const successor = await startTestDaemon(t, { dataDir: next });
+  successor.clock.advance(60_000);
+  assert.deepEqual(successor.sink.received.map(({ alert, timer }) => [alert.timerId, timer.name]), [[id, 'Egg']]);
+  // No operation records a change that removes the running timer while the handoff is not saved.
+  assert.equal((await context.op('remove', { id })).status, 500);
+  assert.equal(readFileSync(join(context.dataDir, 'state.json'), 'utf8'), before);
+  // The first daemon, once scheduler.json can be saved again, records the timer as finished.
+  rmSync(scheduler, { recursive: true });
+  context.clock.advance(60_000);
+  await eventually(() => stateOnDisk().timers.every((timer) => timer.runtime?.status === 'finished'));
+});
+
 test('a daemon that loses its lock leaves the alerts it handed over to the daemon that holds it', () => {
   const clock = createFakeClock();
   const sink = createRecordingSink();
@@ -265,12 +337,12 @@ test('an acknowledgement is answered only once it is saved; one that fails to sa
       let next = 0;
       return () => `a${++next}`;
     })(),
-    save(handoffs) {
+    save({ handoffs, acknowledged }) {
       if (failNext) {
         failNext = false;
         throw new Error('disk full');
       }
-      saved.push(handoffs.map(({ alertId }) => alertId));
+      saved.push([handoffs.map(({ alertId }) => alertId), acknowledged]);
     }
   });
   handlers.register('s1');
@@ -280,12 +352,14 @@ test('an acknowledgement is answered only once it is saved; one that fails to sa
   assert.deepEqual(handlers.handoffs.map(({ alertId, timer: { name } }) => [alertId, name]), [['a1', 'Egg'], ['a2', 'Egg']]);
   assert.throws(() => handlers.acknowledge('a1', 's1'), /disk full/);
   assert.equal(handlers.status.pending, 2);
-  // The acknowledgement that saves records the alert as taken before it is answered.
+  // The acknowledgement that saves records the alert as taken before it is answered, and it stays
+  // saved until its 200 has been written.
   assert.equal(handlers.acknowledge('a2', 's1').ok, true);
-  assert.deepEqual(saved, [['a1']]);
+  assert.deepEqual(saved, [[['a1'], [{ alertId: 'a2', subscriberId: 's1' }]]]);
+  handlers.answered('a2');
   clock.advance(ACK_TIMEOUT_MS);
   assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['finish']);
-  assert.deepEqual(saved, [['a1'], []]);
+  assert.deepEqual(saved.at(-1), [[], []]);
   assert.equal(handlers.acknowledge('a1', 's1').status, 410);
 });
 
@@ -325,21 +399,48 @@ test('an acknowledgement whose reply is lost gets its 200 on retry however many 
   assert.equal(handlers.acknowledge('a52', 's1').status, 410);
 });
 
-test(`a settled outcome is kept for ${SETTLED_RETENTION_MS / 1000} s on the monotonic clock, then forgotten`, () => {
+test(`a settled outcome is kept while its handler keeps asking, and forgotten ${SETTLED_RETENTION_MS / 1000} s after the last request on the monotonic clock`, () => {
   const { clock, handlers } = sequentialHandlers();
   const timer = { id: 't_1', name: 'Egg', sound: true };
   handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
   handlers.deliver({ timerId: 't_1', kind: 'tick', at: clock.now() }, timer);
+  handlers.deliver({ timerId: 't_1', kind: 'segment', at: clock.now() }, timer);
   assert.equal(handlers.acknowledge('a1', 's1').ok, true);
   clock.advance(ACK_TIMEOUT_MS);
   // A wall clock set forward neither ages nor drops an outcome.
   clock.jump(10 * SETTLED_RETENTION_MS);
-  clock.advance(SETTLED_RETENTION_MS - ACK_TIMEOUT_MS);
-  assert.deepEqual([handlers.acknowledge('a1', 's1').ok, handlers.acknowledge('a2', 's1').status], [true, 410]);
-  clock.advance(1);
+  // A handler whose replies keep getting lost asks again and again, long past the retention.
+  for (let request = 0; request < 5; request++) {
+    clock.advance(SETTLED_RETENTION_MS - ACK_TIMEOUT_MS);
+    assert.deepEqual([handlers.acknowledge('a1', 's1').ok, handlers.acknowledge('a2', 's1').status], [true, 410]);
+  }
+  clock.advance(SETTLED_RETENTION_MS + 1);
+  assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.acknowledge('a2', 's1').status], [404, 404]);
+  // An outcome nobody asked about is forgotten 60 s after it settled.
+  assert.equal(handlers.acknowledge('a3', 's1').status, 404);
+});
+
+test('a daemon answers 200 for the unanswered acknowledgements an earlier daemon saved, and only for their handler', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  const saved = [];
+  const handlers = createAlertHandlers({
+    clock,
+    sink,
+    log: () => {},
+    publish: () => {},
+    isOpen: () => true,
+    save: (checkpoint) => saved.push(checkpoint),
+    acknowledged: [{ alertId: 'a1', subscriberId: 's1' }]
+  });
+  assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [{ alertId: 'a1', subscriberId: 's1' }] });
+  assert.equal(handlers.acknowledge('a1', 's2').status, 409);
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  handlers.answered('a1');
+  assert.deepEqual(handlers.checkpoint.acknowledged, []);
+  clock.advance(SETTLED_RETENTION_MS + 1);
   assert.equal(handlers.acknowledge('a1', 's1').status, 404);
-  clock.advance(ACK_TIMEOUT_MS);
-  assert.equal(handlers.acknowledge('a2', 's1').status, 404);
+  assert.equal(sink.received.length, 0);
 });
 
 /**
@@ -365,25 +466,34 @@ async function killDaemonDuringHandoff(t, { acknowledgeFirst }) {
   await crashed.exited;
   const saved = JSON.parse(readFileSync(join(dataDir, 'scheduler.json'), 'utf8'));
   assert.deepEqual((saved.handoffs ?? []).map(({ alertId }) => alertId), acknowledgeFirst ? [] : [alert.alertId]);
-  return { dataDir, id: started.body.timer.definition.id };
+  assert.deepEqual(saved.acknowledged ?? [], acknowledgeFirst ? [{ alertId: alert.alertId, subscriberId: stream.subscriberId }] : []);
+  return { dataDir, id: started.body.timer.definition.id, alertId: alert.alertId, subscriberId: stream.subscriberId };
 }
 
 test('an alert handed over but unacknowledged when the daemon is killed is played once by the next daemon', async (t) => {
-  const { dataDir, id } = await killDaemonDuringHandoff(t, { acknowledgeFirst: false });
+  const { dataDir, id, alertId, subscriberId } = await killDaemonDuringHandoff(t, { acknowledgeFirst: false });
   const next = await startTestDaemon(t, { dataDir });
   next.clock.advance(60_000);
   assert.deepEqual(next.sink.received.map(({ alert, timer }) => [alert.timerId, alert.kind, timer.name]), [[id, 'finish', 'Egg']]);
+  // A handler still asking about it is told it is not its to play.
+  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 404);
   await next.daemon.shutdown();
   const after = await startTestDaemon(t, { dataDir });
   after.clock.advance(60_000);
   assert.equal(after.sink.received.length, 0);
 });
 
-test('an alert the handler acknowledged before the daemon was killed is not played again', async (t) => {
-  const { dataDir } = await killDaemonDuringHandoff(t, { acknowledgeFirst: true });
+test('an alert the handler acknowledged before the daemon was killed is not played again, and its retried acknowledgement gets 200 from the next daemon', async (t) => {
+  const { dataDir, alertId, subscriberId } = await killDaemonDuringHandoff(t, { acknowledgeFirst: true });
   const next = await startTestDaemon(t, { dataDir });
-  next.clock.advance(60_000);
+  // The handler whose 200 was lost when the daemon ended asks the next one, and plays on its 200.
+  assert.equal((await acknowledge(next, alertId, 'another stream')).status, 409);
+  assert.deepEqual((await acknowledge(next, alertId, subscriberId)).body, { alertId, acknowledged: true });
+  next.clock.advance(SETTLED_RETENTION_MS);
   assert.equal(next.sink.received.length, 0);
+  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 200);
+  next.clock.advance(SETTLED_RETENTION_MS + 1);
+  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 404);
 });
 
 /** A small seeded generator (mulberry32), so a failing sequence can be replayed from its seed. */

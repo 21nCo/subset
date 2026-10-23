@@ -230,20 +230,27 @@ public final class AlertHandler {
         onChange()
     }
 
+    /// Whether the daemon refused an acknowledgement (404 or 409): the alert is not this app's to play. A daemon that is
+    /// shutting down or not running gives no answer, because it may have taken the alert before it went.
+    private static func refused(_ error: Error) -> Bool {
+        if case .rejected(let status, _)? = error as? DaemonError { return status < 500 }
+        return false
+    }
+
     /// Handles an `alert` event from the current stream: acknowledges one that asks for it, then plays it only if the
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
-        // the daemon did not answer is sent again until it does: one it took gets `.acknowledged` again, and one it never
-        // saw gets `.expired` once its sink has played the alert, so the alert plays once whichever was lost.
+        // no daemon answered is sent again until one does: one it took gets `.acknowledged` again, from the next daemon
+        // too, which the event stream starts, and one it never saw gets `.expired` once its sink has played the alert, or
+        // a 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
         while !Task.isCancelled {
             do {
                 if try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId) == .acknowledged { play(alert) }
                 return
-            } catch where Self.answered(error) {
-                // Not this app's alert (404 or 409), or the daemon is gone: whoever holds it plays it. A daemon that
-                // stops plays what is pending; one that crashed leaves it to the next daemon.
+            } catch where Self.refused(error) {
+                // Not this app's alert (404 or 409): whoever holds it plays it.
                 return
             } catch {
                 try? await Task.sleep(for: ackRetryDelay)

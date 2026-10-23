@@ -137,14 +137,19 @@ struct AlertHandlerTests {
         #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1"])
     }
 
-    @Test func aServerErrorIsTriedAgainAndADaemonThatIsGoneEndsTheAcknowledgementUnplayed() async {
+    @Test func anAcknowledgementIsSentUntilADaemonAnswersItAcrossAFailedSaveAndARestart() async {
         let handler = await handler()
         let failedSave = DaemonError.rejected(status: 500, TimerError(code: "storage_failed", message: "", issues: nil))
-        daemon.answerAcks([.failure(failedSave), .success(.acknowledged), .failure(.shuttingDown), .failure(.notListening)])
+        let notFound = DaemonError.rejected(status: 404, TimerError(code: "not_found", message: "", issues: nil))
+        // a1: a failed save, then the daemon shuts down and is gone until the next one answers from its saved
+        // acknowledgement. a2: the next daemon played it at startup. a3: handed to another stream.
+        daemon.answerAcks([.failure(failedSave), .failure(.shuttingDown), .failure(.notListening), .success(.acknowledged),
+                           .failure(.notListening), .failure(notFound), .failure(.shuttingDown), .failure(conflict)])
         await handler.receive(alert("a1"))
         await handler.receive(alert("a2"))
         await handler.receive(alert("a3"))
-        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "play a1", "ack a2 s1", "ack a3 s1"])
+        #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "play a1",
+                               "ack a2 s1", "ack a2 s1", "ack a3 s1", "ack a3 s1"])
     }
 
     @Test func itRegistersOnlyWhilePermittedAndUnregistersWhenPermissionIsRevoked() async {

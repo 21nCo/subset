@@ -95,11 +95,12 @@ export async function startDaemon({
   let store;
   let marks;
   let unsettled;
+  let unanswered;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
-    unsettled = stateStore.loadHandoffs();
+    ({ handoffs: unsettled, acknowledged: unanswered } = stateStore.loadAlerts());
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -166,7 +167,8 @@ export async function startDaemon({
     publish: (alert) => broadcast('alert', alert),
     isOpen: (id) => subscriberIds.has(id),
     owns: () => stillHeld(),
-    save: (handoffs) => saveMarks(scheduler.marks, handoffs)
+    save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
+    acknowledged: unanswered
   });
 
   /**
@@ -204,8 +206,13 @@ export async function startDaemon({
     updateIdle();
   }
 
-  /** Records running timers whose time is up as finished. A failed save is retried at the next run. */
+  /**
+   * Records running timers whose time is up as finished. A failed save is retried at the next run.
+   * While `scheduler.json` is behind, nothing is recorded: a running timer is then how a restarted
+   * daemon finds an alert whose handoff was never saved.
+   */
   function settleFinished(now) {
+    if (marksDirty) return;
     const timers = store.timers.map((timer) => settle(timer, now));
     if (timers.every((timer, index) => timer === store.timers[index])) return;
     try {
@@ -218,10 +225,10 @@ export async function startDaemon({
   /** The stretches `scheduler.json` holds marks for, and whether a failed save left it behind. */
   let savedStretches = new Set((marks ?? []).map(stretchKey));
   let marksDirty = false;
-  /** Saves `list` and, with them, the alert handoffs not yet acknowledged. */
-  function saveMarks(list, handoffs = alertHandlers.handoffs) {
+  /** Saves `list` and, with them, the alert handoffs and unanswered acknowledgements. */
+  function saveMarks(list, checkpoint = alertHandlers.checkpoint) {
     try {
-      write(() => stateStore.saveMarks(list, handoffs));
+      write(() => stateStore.saveMarks(list, checkpoint));
     } catch (error) {
       marksDirty = true;
       throw error;
@@ -366,11 +373,13 @@ export async function startDaemon({
     try {
       // A stretch the change begins (a start, resume or skip) is marked from now before the change
       // is saved, so a daemon that stops before its next run neither repeats nor reports as missed
-      // what the stretch jumped over. A mark for a stretch that never began is dropped later.
+      // what the stretch jumped over. A mark for a stretch that never began is dropped later. A
+      // checkpoint that is behind is saved first, so no change removes the running timer a restart
+      // would recover an unsaved handoff from.
       const known = scheduler.marks;
       const knownKeys = new Set(known.map(stretchKey));
       const begun = scheduler.marksFor(next.timers, now).filter((mark) => !savedStretches.has(stretchKey(mark)) && !knownKeys.has(stretchKey(mark)));
-      if (begun.length) saveMarks([...known, ...begun]);
+      if (begun.length || marksDirty) saveMarks([...known, ...begun]);
       commit(next);
     } catch (error) {
       if (error instanceof LockLostError) {
@@ -436,9 +445,9 @@ export async function startDaemon({
   async function acknowledge(request, response, alertId) {
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
-    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
     // The alert is the handler's only once that is saved; until then it stays pending, so a retry
-    // gets the answer and the sink plays it if none is saved in time.
+    // gets the answer and the sink plays it if none is saved in time. While closing, stop() has
+    // already settled every pending alert, so a retry still gets its outcome.
     let result;
     try {
       result = alertHandlers.acknowledge(alertId, id);
@@ -447,6 +456,8 @@ export async function startDaemon({
       log(`could not save scheduler.json: ${error.message}`);
       return fail(response, 500, 'storage_failed', 'The daemon could not record the acknowledgement.');
     }
+    // Until its 200 is written the acknowledgement stays saved, for the next daemon to answer.
+    if (result.ok) response.on('finish', () => alertHandlers.answered(alertId));
     settleRequest(response, result, { alertId, acknowledged: true });
   }
 

@@ -11,6 +11,7 @@ const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.starte
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isHandoff = (handoff) =>
   typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
+const isAcknowledged = (entry) => typeof entry?.alertId === 'string' && typeof entry.subscriberId === 'string';
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
@@ -77,8 +78,9 @@ function syncDirectory(directory, fs) {
 /**
  * The daemon's persistent state in its data directory: `state.json` (the SET-74 store, schema
  * version 1) and `scheduler.json` (for each running stretch, the time through which its alerts were
- * handled, and the alerts handed to the alert handler that it has not yet acknowledged). Only the
- * daemon holding `daemon.lock` creates one.
+ * handled, the alerts handed to the alert handler that it has not yet acknowledged, and those it
+ * acknowledged whose answer it may not have received). Only the daemon holding `daemon.lock` creates
+ * one.
  */
 export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Date.now } = {}) {
   /** Removes temp files a crash left between a write and its rename. */
@@ -149,24 +151,29 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     return value.marks.filter(isMark);
   }
 
-  /** The alert handoffs `saveMarks` recorded (see `createAlertHandlers`); none when unknown. */
-  function loadHandoffs() {
+  /**
+   * The alert checkpoint `saveMarks` recorded (see `createAlertHandlers`): `{ handoffs, acknowledged }`,
+   * each empty when unknown.
+   */
+  function loadAlerts() {
     let value;
     try {
       value = JSON.parse(fs.readFileSync(paths.scheduler, 'utf8'));
     } catch (error) {
       if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
-      return [];
+      return { handoffs: [], acknowledged: [] };
     }
-    if (value?.version !== MARKS_VERSION || !Array.isArray(value.handoffs)) return [];
-    return value.handoffs.filter(isHandoff);
+    const list = (key, valid) => (value?.version === MARKS_VERSION && Array.isArray(value[key]) ? value[key].filter(valid) : []);
+    return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged) };
   }
 
-  /** Saves the marks and, in the same write, the handoffs still waiting for an acknowledgement. */
-  function saveMarks(marks, handoffs = []) {
-    const value = handoffs.length ? { version: MARKS_VERSION, marks, handoffs } : { version: MARKS_VERSION, marks };
+  /** Saves the marks and, in the same write, the alert checkpoint: handoffs and unanswered acknowledgements. */
+  function saveMarks(marks, { handoffs = [], acknowledged = [] } = {}) {
+    const value = { version: MARKS_VERSION, marks };
+    if (handoffs.length) value.handoffs = handoffs;
+    if (acknowledged.length) value.acknowledged = acknowledged;
     writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
-  return { load, save, loadMarks, loadHandoffs, saveMarks };
+  return { load, save, loadMarks, loadAlerts, saveMarks };
 }
