@@ -248,7 +248,7 @@ final class SettingsModel: ObservableObject {
         panel.canChooseDirectories = false
         panel.treatsFilePackagesAsDirectories = false
         panel.prompt = "Exclude"
-        panel.message = "Choose apps whose windows Hop never shows."
+        panel.message = "Choose apps whose windows \(HopIdentity.appName) never shows."
         panel.begin { [weak self] response in
             guard response == .OK else { return }
             let identifiers = panel.urls.compactMap { Bundle(url: $0)?.bundleIdentifier }

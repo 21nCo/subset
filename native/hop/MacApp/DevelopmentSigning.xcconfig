@@ -1,0 +1,5 @@
+// Whether a Debug build of the Hop app is signed with the team's Apple Development certificate (see the README's
+// App identity section). Unsigned unless scripts/development-signing.sh, which the Hop scheme runs before each build,
+// found that certificate on this Mac and wrote YES to the gitignored DevelopmentSigning.local.xcconfig.
+HOP_DEVELOPMENT_SIGNING_ALLOWED = NO
+#include? "DevelopmentSigning.local.xcconfig"

@@ -328,9 +328,9 @@ public enum ScreenRecordingAccess: Sendable, Equatable {
     public var notice: String? {
         switch self {
         case .granted: nil
-        case .notDetermined: "Hop hasn't asked for Screen Recording yet, so the switcher shows app icons."
-        case .denied: "Screen Recording isn't allowed for Hop, so the switcher shows app icons."
-        case .revoked: "Screen Recording was turned off for Hop, so the switcher shows app icons."
+        case .notDetermined: "\(HopIdentity.appName) hasn't asked for Screen Recording yet, so the switcher shows app icons."
+        case .denied: "Screen Recording isn't allowed for \(HopIdentity.appName), so the switcher shows app icons."
+        case .revoked: "Screen Recording was turned off for \(HopIdentity.appName), so the switcher shows app icons."
         }
     }
 }

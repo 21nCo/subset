@@ -298,8 +298,8 @@ final class SwitcherViewModelTests: XCTestCase {
             (.appGone, .focus, "Xcode has quit"),
             (.appGone, .hideApp, "Xcode has quit"),
             (.appGone, .quitApp, nil),
-            (.notPermitted, .focus, "Hop needs Accessibility access"),
-            (.notPermitted, .close, "Hop needs Accessibility access"),
+            (.notPermitted, .focus, "\(HopIdentity.appName) needs Accessibility access"),
+            (.notPermitted, .close, "\(HopIdentity.appName) needs Accessibility access"),
         ]
         for (result, operation, expected) in cases {
             XCTAssertEqual(SwitcherViewModel.message(for: result, of: operation, appName: "Xcode"), expected,

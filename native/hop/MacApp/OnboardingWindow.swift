@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import HopCore
 import SwiftUI
 
 /// The Accessibility permission, through public API only.
@@ -96,12 +97,12 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Hop needs Accessibility access")
+            Text("\(HopIdentity.appName) needs Accessibility access")
                 .font(.title2.bold())
                 .accessibilityAddTraits(.isHeader)
-            Text("Hop uses Accessibility to see your open windows and raise the one you pick, and to notice its shortcut: hold \(shortcutPhrase).")
-            Text("Nothing leaves your Mac. Hop makes no network connections and never stores or sends window titles.")
-            Text("In Privacy & Security, under Accessibility, turn on Hop. This window closes once access is allowed.")
+            Text("\(HopIdentity.appName) uses Accessibility to see your open windows and raise the one you pick, and to notice its shortcut: hold \(shortcutPhrase).")
+            Text("Nothing leaves your Mac. \(HopIdentity.appName) makes no network connections and never stores or sends window titles.")
+            Text("In Privacy & Security, under Accessibility, turn on \(HopIdentity.appName). This window closes once access is allowed.")
                 .foregroundStyle(.secondary)
             HStack {
                 Spacer()

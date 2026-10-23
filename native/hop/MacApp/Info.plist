@@ -7,13 +7,13 @@
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Hop</string>
+	<string>$(HOP_DISPLAY_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Hop</string>
+	<string>$(HOP_DISPLAY_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -29,6 +29,6 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright 21N</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Hop uses Screen Recording only to show window previews in the switcher. Images stay in memory and are never saved.</string>
+	<string>$(HOP_DISPLAY_NAME) uses Screen Recording only to show window previews in the switcher. Images stay in memory and are never saved.</string>
 </dict>
 </plist>

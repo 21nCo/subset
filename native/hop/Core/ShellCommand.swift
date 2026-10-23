@@ -1,8 +1,31 @@
-/// The app's identity, shared by the menu-bar host and its tests. Matches the bundle settings in
-/// ProjectGenerator.rb and MacApp/Info.plist.
-public enum HopIdentity {
-    public static let appName = "Hop"
-    public static let bundleIdentifier = "dev.subset.hop"
+import Foundation
+
+/// The app's identity, read from the running bundle: the Debug and Release builds are separate apps to macOS
+/// (ProjectGenerator.rb sets their bundle IDs and display names), so nothing names one of them in code. Everything
+/// that depends on which app is running (the settings key, log subsystems, queue labels, the own-app window filter
+/// and the names in menus and notices) goes through `current`.
+public struct HopIdentity: Sendable, Equatable {
+    public let bundleIdentifier: String
+    public let appName: String
+
+    /// The identity in a bundle's Info.plist values. A process without a bundle ID (the SwiftPM executable) is
+    /// identified by its process name, the domain macOS gives its user defaults; without a display name or bundle name
+    /// it is named by the process name too.
+    public init(infoDictionary: [String: Any]?, processName: String) {
+        func value(_ key: String) -> String? {
+            (infoDictionary?[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        bundleIdentifier = value("CFBundleIdentifier") ?? processName
+        appName = value("CFBundleDisplayName") ?? value("CFBundleName") ?? processName
+    }
+
+    public static let current = HopIdentity(
+        infoDictionary: Bundle.main.infoDictionary,
+        processName: ProcessInfo.processInfo.processName
+    )
+
+    public static var bundleIdentifier: String { current.bundleIdentifier }
+    public static var appName: String { current.appName }
 }
 
 /// The commands the menu-bar status item offers, in menu order. The host maps each one to an action; later

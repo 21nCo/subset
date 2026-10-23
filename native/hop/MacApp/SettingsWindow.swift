@@ -19,7 +19,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             defer: true
         )
         super.init()
-        window.title = "Hop Settings"
+        window.title = "\(HopIdentity.appName) Settings"
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: SettingsView(model: model))
         window.contentMinSize = NSSize(width: 460, height: 360)
@@ -189,7 +189,7 @@ private struct ExcludedAppsSection: View {
         } header: {
             Text("Excluded apps")
         } footer: {
-            Text("Hop never shows windows of excluded apps.")
+            Text("\(HopIdentity.appName) never shows windows of excluded apps.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -235,7 +235,7 @@ private struct LoginSection: View {
 
     var body: some View {
         Section {
-            Toggle("Open Hop at login", isOn: Binding(
+            Toggle("Open \(HopIdentity.appName) at login", isOn: Binding(
                 get: { model.loginItem.isOn },
                 set: { model.setLaunchAtLogin($0) }
             ))
@@ -270,7 +270,7 @@ private struct PermissionsSection: View {
                 )
                 .foregroundStyle(model.isAccessibilityTrusted ? .green : .orange)
             }
-            Text("Hop uses Accessibility to list and raise windows and to notice its shortcut.")
+            Text("\(HopIdentity.appName) uses Accessibility to list and raise windows and to notice its shortcut.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Button("Open Privacy & Security") { model.openAccessibilitySettings() }

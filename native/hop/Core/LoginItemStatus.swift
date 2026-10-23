@@ -25,8 +25,8 @@ public enum LoginItemStatus: Sendable, Equatable {
     public var note: String? {
         switch self {
         case .notRegistered, .enabled: nil
-        case .requiresApproval: "Hop won't start at login until you allow it in System Settings > General > Login Items."
-        case .notFound: "This copy of Hop can't start at login. Use Hop.app from the Applications folder."
+        case .requiresApproval: "\(HopIdentity.appName) won't start at login until you allow it in System Settings > General > Login Items."
+        case .notFound: "This copy of \(HopIdentity.appName) can't start at login. Move it to the Applications folder and open it from there."
         }
     }
 }
