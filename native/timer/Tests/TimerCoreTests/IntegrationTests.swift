@@ -152,6 +152,12 @@ func realDaemonHandsAlertsToOneHandlerAndRefusesALateAcknowledgement() async thr
     #expect(first.timerName == "Egg" && first.sound == false)
     let alertId = try #require(first.alertId)
     #expect(try await client.acknowledgeAlert(alertId, subscriberId: handlerId) == .acknowledged)
+    // Until the app says it read that answer, the daemon gives it again; after, it no longer knows the alert.
+    #expect(try await client.acknowledgeAlert(alertId, subscriberId: handlerId) == .acknowledged)
+    try await client.confirmAlert(alertId, subscriberId: handlerId)
+    await #expect(throws: DaemonError.rejected(status: 404, TimerError(code: "not_found", message: "No alert has that id.", issues: nil))) {
+        try await client.acknowledgeAlert(alertId, subscriberId: handlerId)
+    }
 
     // Not acknowledged within 2 seconds: the daemon played it, so a late acknowledgement is refused.
     try await client.perform("start", countdown)

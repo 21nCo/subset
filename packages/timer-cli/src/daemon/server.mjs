@@ -448,8 +448,8 @@ export async function startDaemon({
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
     // The alert is the handler's only once that is saved; until then it stays pending, so a retry
-    // gets the answer and the sink plays it if none is saved in time. While closing, stop() has
-    // already settled every pending alert, so a retry still gets its outcome.
+    // gets the answer and the sink plays it if none is saved in time. One already being handled
+    // when shutdown begins gets the outcome stop() settled; one that arrives after gets 503.
     let result;
     try {
       result = alertHandlers.acknowledge(alertId, id);
@@ -459,6 +459,14 @@ export async function startDaemon({
       return fail(response, 500, 'storage_failed', 'The daemon could not record the acknowledgement.');
     }
     settleRequest(response, result, { alertId, acknowledged: true });
+  }
+
+  /** The handler read the 200 for that alert, so the daemon need no longer answer it. */
+  async function received(request, response, alertId) {
+    const id = await subscriberIdOf(request, response);
+    if (id === null) return;
+    const result = alertHandlers.received(alertId, id);
+    settleRequest(response, result, { alertId, forgotten: result.forgotten });
   }
 
   /** The id in `pathname` after `prefix` and before `suffix`, or null when it does not match. */
@@ -519,6 +527,11 @@ export async function startDaemon({
     if (alertId !== null) {
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
       return acknowledge(request, response, alertId);
+    }
+    const receivedId = idIn(pathname, '/v1/alerts/', '/received');
+    if (receivedId !== null) {
+      if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
+      return received(request, response, receivedId);
     }
     const route = Object.hasOwn(routes, pathname) ? routes[pathname] : null;
     if (!route) return fail(response, 404, 'not_found', `No route ${pathname}.`);
@@ -590,10 +603,11 @@ export async function startDaemon({
       // The process may exit once closed resolves, so the sink first finishes what shutdown played.
       await new Promise((resolve) => {
         const bound = setTimeout(resolve, SINK_DRAIN_MS);
-        played.then(() => {
+        const drained = () => {
           clearTimeout(bound);
           resolve();
-        });
+        };
+        played.then(drained, drained);
       });
       resolveClosed(code);
     });

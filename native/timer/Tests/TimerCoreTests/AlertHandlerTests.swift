@@ -17,10 +17,14 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// The alerts the daemon handed over; acknowledging one again gets `.acknowledged`.
     private var taken: Set<String> = []
     private var holder: String?
+    private var confirmations: [String] = []
+    private var lostConfirmations = 0
 
     var log: [String] { lock.withLock { entries } }
     /// The subscriber the daemon holds as its handler.
     var handler: String? { lock.withLock { holder } }
+    /// Each "received" the app sent, as "<alertId> <subscriberId>", kept apart from `log`.
+    var confirmed: [String] { lock.withLock { confirmations } }
 
     func record(_ entry: String) {
         lock.withLock { entries.append(entry) }
@@ -36,11 +40,12 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     }
 
     /// The next registrations, unregistrations and acknowledgements that get no answer, in order.
-    func lose(registrations: [Lost] = [], unregistrations: [Lost] = [], acks: [Lost] = []) {
+    func lose(registrations: [Lost] = [], unregistrations: [Lost] = [], acks: [Lost] = [], confirmations: Int = 0) {
         lock.withLock {
             lostRegistrations = registrations
             lostUnregistrations = unregistrations
             lostAcks = acks
+            lostConfirmations = confirmations
         }
     }
 
@@ -78,6 +83,16 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
             }
         }
         return try answer.get()
+    }
+
+    func confirmAlert(_ alertId: String, subscriberId: String) async throws {
+        let lost = lock.withLock {
+            confirmations.append("\(alertId) \(subscriberId)")
+            guard lostConfirmations > 0 else { return false }
+            lostConfirmations -= 1
+            return true
+        }
+        if lost { throw DaemonError.timedOut }
     }
 }
 
@@ -132,6 +147,33 @@ struct AlertHandlerTests {
         daemon.lose(acks: [.afterApplying, .afterApplying, .afterApplying])
         await handler.receive(alert("a1"))
         #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "play a1"])
+    }
+
+    @Test func afterPlayingItTellsTheDaemonItReceivedTheAnswerUntilADaemonHearsIt() async {
+        let handler = await handler()
+        daemon.lose(confirmations: 2)
+        await handler.receive(alert("a1"))
+        daemon.answerAcks([.success(.expired)])
+        await handler.receive(alert("a2"))
+        #expect(daemon.log == ["register s1", "ack a1 s1", "play a1", "ack a2 s1"])
+        #expect(daemon.confirmed == ["a1 s1", "a1 s1", "a1 s1"])
+    }
+
+    @Test func anAcknowledgementIsSentForTheStreamTheAlertCameOnAfterTheStreamReconnects() async {
+        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.lose(acks: Array(repeating: .afterApplying, count: 5))
+        let receiving = Task { await handler.receive(alert("a1")) }
+        for _ in 0..<500 where !daemon.log.contains("ack a1 s1") { try? await Task.sleep(nanoseconds: 1_000_000) }
+        handler.subscribed("s2")
+        await handler.settled()
+        await receiving.value
+        let log = daemon.log
+        #expect(log.filter { $0.hasPrefix("ack") }.allSatisfy { $0 == "ack a1 s1" })
+        #expect(log.lastIndex(of: "ack a1 s1")! > log.firstIndex(of: "register s2")!)
+        #expect(log.filter { $0 == "play a1" }.count == 1 && daemon.confirmed == ["a1 s1"])
     }
 
     @Test func anAcknowledgementTheDaemonNeverSawIsSentUntilItsSinkPlayedTheAlertAndNeverPlays() async {

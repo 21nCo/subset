@@ -56,6 +56,7 @@ public protocol AlertHandlerDaemon: Sendable {
     func registerAlertHandler(subscriberId: String) async throws
     func unregisterAlertHandler(subscriberId: String) async throws
     func acknowledgeAlert(_ alertId: String, subscriberId: String) async throws -> AlertAcknowledgement
+    func confirmAlert(_ alertId: String, subscriberId: String) async throws
 }
 
 extension DaemonClient: AlertHandlerDaemon {
@@ -81,6 +82,13 @@ extension DaemonClient: AlertHandlerDaemon {
         if reply.status == 410 { return .expired }
         _ = try Self.decode(Ignored.self, status: reply.status, body: reply.body)
         return .acknowledged
+    }
+
+    /// `POST /v1/alerts/<alertId>/received`: the app read the 200 for that alert, so the daemon stops keeping it.
+    public func confirmAlert(_ alertId: String, subscriberId: String) async throws {
+        let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/received",
+                                   body: try JSONEncoder().encode(SubscriberBody(subscriberId: subscriberId)))
+        _ = try Self.decode(Ignored.self, status: reply.status, body: reply.body)
     }
 
     /// An id as one path segment: the daemon's ids are hex, and anything else is percent-encoded.
@@ -251,19 +259,29 @@ public final class AlertHandler {
             return
         }
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
-        // no daemon answered is sent again until one does: one it took gets `.acknowledged` again, from the next daemon
-        // too, which the event stream starts, and one it never saw gets `.expired` once its sink has played the alert, or
-        // a 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
+        // no daemon answered is sent again until one does, always for the stream the alert came on, even after the stream
+        // reconnects: one it took gets `.acknowledged` again, from the next daemon too, which the event stream starts, until
+        // the app says it received that answer; one it never saw gets `.expired` once its sink has played the alert, or a
+        // 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
+        let daemon = daemon
+        guard await untilAnswered({ try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId) }) == .acknowledged
+        else { return }
+        play(alert)
+        _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+    }
+
+    /// Sends `request` every `ackRetryDelay` until a daemon answers it. Nil when the daemon refused it (404 or 409: not
+    /// this app's alert, so whoever holds it plays it) or the task was cancelled.
+    private func untilAnswered<Answer>(_ request: () async throws -> Answer) async -> Answer? {
         while !Task.isCancelled {
             do {
-                if try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId) == .acknowledged { play(alert) }
-                return
+                return try await request()
             } catch where Self.refused(error) {
-                // Not this app's alert (404 or 409): whoever holds it plays it.
-                return
+                return nil
             } catch {
                 try? await Task.sleep(for: ackRetryDelay)
             }
         }
+        return nil
     }
 }

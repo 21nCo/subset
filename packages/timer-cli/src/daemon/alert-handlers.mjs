@@ -4,12 +4,17 @@ import { deliverToSink } from './alerts.mjs';
 /** How long a registered handler has to acknowledge an alert before the daemon's sink plays it. */
 export const ACK_TIMEOUT_MS = 2_000;
 /**
- * How long a settled alert's outcome is remembered after its last acknowledgement request, on the
- * monotonic clock, so a late or repeated acknowledgement gets its answer. Each request restarts it,
- * so an outcome is kept while its handler is still asking (every 250 ms until answered), however
- * many alerts settle meanwhile; the timer limits bound how many outcomes that is.
+ * How long an alert the sink played is remembered after its last acknowledgement request, on the
+ * monotonic clock, so a late or repeated acknowledgement gets 410. Each request restarts it. Once it
+ * is forgotten the answer is 404, which tells the handler not to play it either.
  */
 export const SETTLED_RETENTION_MS = 60_000;
+/**
+ * How many acknowledged alerts the daemon keeps that no handler has said it received; the oldest
+ * is dropped beyond this. A running handler says so right after each 200, so only a handler that
+ * ended between a 200 and saying so leaves one behind.
+ */
+export const MAX_UNRECEIVED = 1_000;
 
 export const newAlertId = () => randomBytes(16).toString('hex');
 
@@ -29,10 +34,10 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * ends abruptly leaves them for the next one to play (`replayHandoffs`). An acknowledgement is
  * answered only once `save(checkpoint)` has recorded the alert as taken, in `acknowledged`; when
  * that throws, the alert stays pending and the error is thrown to the caller. An acknowledged alert
- * stays in `acknowledged`, and so in every later save, for as long as its outcome is remembered: a
- * written reply does not mean the handler read it. The next daemon takes the saved ones as
- * `acknowledged`, remembered afresh from its start, so a handler whose 200 was lost when the daemon
- * ended gets it from that daemon.
+ * stays in `acknowledged`, and so in every later save, until its handler says it received the 200
+ * (`received`), however long that takes: a written reply does not mean the handler read it. The
+ * next daemon takes the saved ones as `acknowledged`, so a handler whose 200 was lost gets it from
+ * that daemon too.
  *
  * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting and
  * stopping) first asks `owns()` whether this daemon still holds `daemon.lock`. One that lost it
@@ -57,14 +62,16 @@ export function createAlertHandlers({
   let handler = null;
   /** alertId → { alert, timer, subscriberId, handle }, for alerts the handler has not yet acknowledged. */
   const pending = new Map();
-  /** alertId → { outcome: 'acknowledged' | 'fallback', subscriberId, at }, least recently asked first. */
+  /** alertId → { subscriberId, at }, for alerts the sink played, least recently asked first. */
   const settled = new Map();
+  /** alertId → subscriberId, for acknowledged alerts whose handler has not said it received the 200, oldest first. */
+  const taken = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
   /** The sink's plays of fallen-back alerts that have not finished, so shutdown can wait for them. */
   const playing = new Set();
   const monotonic = () => (clock.monotonic ?? clock.now)();
 
-  /** Forgets the outcomes settled more than `SETTLED_RETENTION_MS` ago. */
+  /** Forgets the fallbacks last asked about more than `SETTLED_RETENTION_MS` ago. */
   function forgetExpired() {
     const cutoff = monotonic() - SETTLED_RETENTION_MS;
     for (const [alertId, { at }] of settled) {
@@ -73,23 +80,27 @@ export function createAlertHandlers({
     }
   }
 
-  function remember(alertId, outcome, subscriberId) {
+  function remember(alertId, subscriberId) {
     forgetExpired();
     settled.delete(alertId);
-    settled.set(alertId, { outcome, subscriberId, at: monotonic() });
+    settled.set(alertId, { subscriberId, at: monotonic() });
   }
-  // A daemon that ended while it remembered these acknowledgements left them for this one.
-  for (const { alertId, subscriberId } of acknowledged) remember(alertId, 'acknowledged', subscriberId);
+  function take(alertId, subscriberId) {
+    taken.set(alertId, subscriberId);
+    if (taken.size <= MAX_UNRECEIVED) return;
+    const [oldest] = taken.keys();
+    taken.delete(oldest);
+    log(`alert ${oldest} was acknowledged but its handler never said it received the reply; it is forgotten.`);
+  }
+  // A daemon that ended before these handlers said they received their 200 left them for this one.
+  for (const { alertId, subscriberId } of acknowledged) take(alertId, subscriberId);
 
   const handoffs = (except = null) => [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer }]) => ({ alertId, alert, timer }));
-  /** What `save` records: the pending alerts and the remembered acknowledged ones, plus `taken`. */
-  function checkpoint(taken = null) {
-    forgetExpired();
-    const acknowledgements = [...settled]
-      .filter(([, entry]) => entry.outcome === 'acknowledged')
-      .map(([alertId, { subscriberId }]) => ({ alertId, subscriberId }));
-    if (taken) acknowledgements.push(taken);
-    return { handoffs: handoffs(taken?.alertId), acknowledged: acknowledgements };
+  /** What `save` records: the pending alerts and the acknowledged ones not yet received, plus `next`. */
+  function checkpoint(next = null) {
+    const acknowledgements = [...taken].map(([alertId, subscriberId]) => ({ alertId, subscriberId }));
+    if (next) acknowledgements.push(next);
+    return { handoffs: handoffs(next?.alertId), acknowledged: acknowledgements };
   }
 
   /**
@@ -123,13 +134,14 @@ export function createAlertHandlers({
     if (!entry) return false;
     pending.delete(alertId);
     clock.clearTimeout(entry.handle);
-    remember(alertId, 'fallback', entry.subscriberId);
+    remember(alertId, entry.subscriberId);
     counts.fallbacks += 1;
     log(`alert ${alertId} (${entry.alert.kind} of ${entry.alert.timerId}) ${reason}; the ${sink.name} sink plays it.`);
     const played = deliverToSink(sink, entry.alert, entry.timer, log);
     if (played) {
       playing.add(played);
-      played.then(() => playing.delete(played));
+      const done = () => playing.delete(played);
+      played.then(done, done);
     }
     return true;
   }
@@ -202,28 +214,37 @@ export function createAlertHandlers({
     /**
      * The handler `subscriberId` takes `alertId`, once that is saved; a failed save throws and
      * leaves the alert pending. Acknowledging an alert it already took is a no-op, so a retried
-     * acknowledgement gets the same answer, and each one keeps the outcome for another
-     * `SETTLED_RETENTION_MS`.
+     * acknowledgement gets the same answer until the handler says it received it. A retry for a
+     * fallback keeps its 410 for another `SETTLED_RETENTION_MS`.
      */
     acknowledge(alertId, subscriberId) {
       forgetExpired();
       const entry = pending.get(alertId);
       const outcome = settled.get(alertId);
-      const owner = entry?.subscriberId ?? outcome?.subscriberId;
+      const owner = entry?.subscriberId ?? taken.get(alertId) ?? outcome?.subscriberId;
       if (owner === undefined) return refused(404, 'not_found', 'No alert has that id.');
       if (owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
       if (entry) {
         save(checkpoint({ alertId, subscriberId }));
         pending.delete(alertId);
         clock.clearTimeout(entry.handle);
-        remember(alertId, 'acknowledged', subscriberId);
+        take(alertId, subscriberId);
         counts.acknowledged += 1;
         return { ok: true };
       }
-      settled.delete(alertId);
-      settled.set(alertId, { ...outcome, at: monotonic() });
-      if (outcome.outcome === 'acknowledged') return { ok: true };
+      if (taken.has(alertId)) return { ok: true };
+      remember(alertId, subscriberId);
       return refused(410, 'alert_expired', 'The daemon already played that alert.');
+    },
+
+    /**
+     * The handler `subscriberId` received the 200 for `alertId`, so the daemon forgets it; the next
+     * save leaves it out. Saying so again, or for an alert the daemon does not hold, changes nothing.
+     */
+    received(alertId, subscriberId) {
+      const owner = taken.get(alertId);
+      if (owner !== undefined && owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
+      return { ok: true, forgotten: taken.delete(alertId) };
     },
 
     /**
@@ -236,7 +257,7 @@ export function createAlertHandlers({
       handler = null;
       if (lockLost) leaveToLockHolder();
       else fallBackAll(null, 'was pending when the daemon stopped');
-      return Promise.all(playing);
+      return Promise.allSettled([...playing]);
     }
   };
 }

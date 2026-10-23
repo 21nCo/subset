@@ -4,7 +4,7 @@ import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
-import { ACK_TIMEOUT_MS, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
+import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
@@ -19,6 +19,7 @@ async function openStream(t, context) {
 
 const register = (context, subscriberId) => context.call('POST', '/v1/alert-handlers', { subscriberId });
 const acknowledge = (context, alertId, subscriberId) => context.call('POST', `/v1/alerts/${alertId}/ack`, { subscriberId });
+const received = (context, alertId, subscriberId) => context.call('POST', `/v1/alerts/${alertId}/received`, { subscriberId });
 const alertsOf = (stream) => stream.events.filter(({ event }) => event === 'alert').map(({ data }) => data);
 
 /** Starts a one-second countdown without ticks, so its only alert is the finish. */
@@ -216,6 +217,26 @@ test('shutdown resolves closed only once the sink has finished the alerts it pla
   assert.deepEqual([playing, closedWith], [['Egg'], null]);
   finishPlaying();
   assert.equal(await within(context.daemon.closed), 0);
+});
+
+test('shutdown is not held up or failed by a sink that rejects while the log cannot report it', async (t) => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason?.message ?? String(reason));
+  process.on('unhandledRejection', onUnhandled);
+  t.after(() => process.off('unhandledRejection', onUnhandled));
+  const sink = { name: 'broken', alert: () => Promise.reject(new Error('afplay failed')) };
+  const log = (message) => {
+    if (message.startsWith('alert sink')) throw new Error('log closed');
+  };
+  const context = await startTestDaemon(t, { sink, log });
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context);
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const started = Date.now();
+  assert.equal(await within(context.daemon.shutdown(), 3_000), 0);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual([Date.now() - started < 3_000, unhandled], [true, []]);
 });
 
 /** Sends an acknowledgement whose body arrives only after `beforeBody` has run. */
@@ -426,7 +447,7 @@ test('an acknowledgement whose reply is lost gets its 200 on retry however many 
   assert.equal(handlers.acknowledge('a52', 's1').status, 410);
 });
 
-test(`a settled outcome is kept while its handler keeps asking, and forgotten ${SETTLED_RETENTION_MS / 1000} s after the last request on the monotonic clock`, () => {
+test(`an acknowledged alert is answered 200 until its handler says it received it; a fallback, until ${SETTLED_RETENTION_MS / 1000} s after the last request`, () => {
   const { clock, handlers } = sequentialHandlers();
   const timer = { id: 't_1', name: 'Egg', sound: true };
   handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
@@ -436,15 +457,32 @@ test(`a settled outcome is kept while its handler keeps asking, and forgotten ${
   clock.advance(ACK_TIMEOUT_MS);
   // A wall clock set forward neither ages nor drops an outcome.
   clock.jump(10 * SETTLED_RETENTION_MS);
-  // A handler whose replies keep getting lost asks again and again, long past the retention.
+  // A fallback is kept while its handler keeps asking, on the monotonic clock.
   for (let request = 0; request < 5; request++) {
     clock.advance(SETTLED_RETENTION_MS - ACK_TIMEOUT_MS);
-    assert.deepEqual([handlers.acknowledge('a1', 's1').ok, handlers.acknowledge('a2', 's1').status], [true, 410]);
+    assert.equal(handlers.acknowledge('a2', 's1').status, 410);
   }
   clock.advance(SETTLED_RETENTION_MS + 1);
-  assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.acknowledge('a2', 's1').status], [404, 404]);
-  // An outcome nobody asked about is forgotten 60 s after it settled.
-  assert.equal(handlers.acknowledge('a3', 's1').status, 404);
+  assert.deepEqual([handlers.acknowledge('a2', 's1').status, handlers.acknowledge('a3', 's1').status], [404, 404]);
+  // The handler whose 200 was lost asks again however long it was away, and gets it.
+  clock.advance(10 * SETTLED_RETENTION_MS);
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  assert.equal(handlers.received('a1', 's2').status, 409);
+  assert.deepEqual(handlers.received('a1', 's1'), { ok: true, forgotten: true });
+  assert.deepEqual(handlers.received('a1', 's1'), { ok: true, forgotten: false });
+  assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.checkpoint.acknowledged], [404, []]);
+});
+
+test(`at most ${MAX_UNRECEIVED} acknowledged alerts nobody said they received are kept, the oldest dropped first`, () => {
+  const { clock, handlers } = sequentialHandlers();
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  for (let index = 1; index <= MAX_UNRECEIVED + 1; index++) {
+    handlers.deliver({ timerId: 't_1', kind: 'tick', at: clock.now() }, timer);
+    assert.equal(handlers.acknowledge(`a${index}`, 's1').ok, true);
+  }
+  const kept = handlers.checkpoint.acknowledged;
+  assert.deepEqual([kept.length, kept[0].alertId, kept.at(-1).alertId], [MAX_UNRECEIVED, 'a2', `a${MAX_UNRECEIVED + 1}`]);
+  assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.acknowledge('a2', 's1').ok], [404, true]);
 });
 
 test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and only for their handler', () => {
@@ -463,13 +501,13 @@ test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and
   assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [{ alertId: 'a1', subscriberId: 's1' }] });
   assert.equal(handlers.acknowledge('a1', 's2').status, 409);
   assert.equal(handlers.acknowledge('a1', 's1').ok, true);
-  // Answering it does not drop it: the handler may never read that 200.
-  clock.advance(SETTLED_RETENTION_MS);
+  // Answering it does not drop it, however long the handler takes: it may never have read that 200.
+  clock.advance(10 * SETTLED_RETENTION_MS);
   assert.deepEqual(handlers.checkpoint.acknowledged, [{ alertId: 'a1', subscriberId: 's1' }]);
-  clock.advance(1);
+  assert.equal(handlers.received('a1', 's1').ok, true);
   assert.deepEqual(handlers.checkpoint.acknowledged, []);
   assert.equal(handlers.acknowledge('a1', 's1').status, 404);
-  assert.equal(sink.received.length, 0);
+  assert.deepEqual([saved, sink.received.length], [[], 0]);
 });
 
 /**
@@ -518,10 +556,10 @@ test('an alert the handler acknowledged before the daemon was killed is not play
   // The handler whose 200 was lost when the daemon ended asks the next one, and plays on its 200.
   assert.equal((await acknowledge(next, alertId, 'another stream')).status, 409);
   assert.deepEqual((await acknowledge(next, alertId, subscriberId)).body, { alertId, acknowledged: true });
-  next.clock.advance(SETTLED_RETENTION_MS);
+  next.clock.advance(SETTLED_RETENTION_MS + 1_000);
   assert.equal(next.sink.received.length, 0);
   assert.equal((await acknowledge(next, alertId, subscriberId)).status, 200);
-  next.clock.advance(SETTLED_RETENTION_MS + 1);
+  assert.deepEqual((await received(next, alertId, subscriberId)).body, { alertId, forgotten: true });
   assert.equal((await acknowledge(next, alertId, subscriberId)).status, 404);
 });
 
@@ -556,7 +594,40 @@ test('an acknowledgement stays saved after its 200 is written, so a handler that
   assert.deepEqual([playedByHandler, next.sink.received.filter(({ timer }) => timer.name === 'Egg').length], [1, 0]);
 });
 
-test(`an acknowledgement nobody asks about for ${SETTLED_RETENTION_MS / 1000} s is left out of the next save, and the next daemon answers it 404`, async (t) => {
+/** Starts another countdown, so the daemon saves scheduler.json again, and waits for that save. */
+async function saveAgain(context, name) {
+  const id = await startCountdown(context, name);
+  await eventually(() => JSON.parse(readFileSync(join(context.dataDir, 'scheduler.json'), 'utf8')).marks.some(({ timerId }) => timerId === id));
+}
+
+test('an acknowledgement whose 200 was lost stays saved until its handler says it received it, however long that takes', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const [alert] = alertsOf(handler);
+  // The 200 is written but never reaches the handler, which then asks nothing for over a minute.
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
+  context.clock.advance(SETTLED_RETENTION_MS + 1_000);
+  await saveAgain(context, 'Tea');
+  const owned = [{ alertId: alert.alertId, subscriberId: handler.subscriberId }];
+  assert.deepEqual(savedAcknowledged(context), owned);
+  const next = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
+  next.clock.advance(SETTLED_RETENTION_MS + 1_000);
+  let playedByHandler = 0;
+  if ((await acknowledge(next, alert.alertId, handler.subscriberId)).status === 200) playedByHandler += 1;
+  const sinkPlays = [context, next].flatMap(({ sink }) => sink.received).filter(({ timer }) => timer.name === 'Egg').length;
+  assert.deepEqual([playedByHandler, sinkPlays], [1, 0]);
+  // Once the handler says it received the 200, the next save leaves it out.
+  assert.equal((await received(next, alert.alertId, handler.subscriberId)).status, 200);
+  await saveAgain(next, 'Rice');
+  assert.deepEqual(savedAcknowledged(next), []);
+  const after = await startTestDaemon(t, { dataDir: filesLeftByKill(t, next) });
+  assert.equal((await acknowledge(after, alert.alertId, handler.subscriberId)).status, 404);
+});
+
+test('a handler whose stream reconnects gets the 200 it lost when it asks with the stream the alert was handed to', async (t) => {
   const context = await startTestDaemon(t);
   const handler = await registeredHandler(t, context);
   await startCountdown(context, 'Egg');
@@ -564,18 +635,16 @@ test(`an acknowledgement nobody asks about for ${SETTLED_RETENTION_MS / 1000} s 
   await handler.waitFor(() => alertsOf(handler).length === 1);
   const [alert] = alertsOf(handler);
   assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
-  const saveNow = async (name) => {
-    await startCountdown(context, name);
-    await eventually(() => JSON.parse(readFileSync(join(context.dataDir, 'scheduler.json'), 'utf8')).marks.some(({ timerId }) => timerId !== alert.timerId));
-  };
-  context.clock.advance(SETTLED_RETENTION_MS - 1_000);
-  await saveNow('Tea');
-  assert.deepEqual(savedAcknowledged(context), [{ alertId: alert.alertId, subscriberId: handler.subscriberId }]);
-  context.clock.advance(1_001);
-  await saveNow('Rice');
-  assert.deepEqual(savedAcknowledged(context), []);
-  const next = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
-  assert.equal((await acknowledge(next, alert.alertId, handler.subscriberId)).status, 404);
+  handler.close();
+  await eventually(() => context.daemon.alertHandler.registered === false);
+  const again = await registeredHandler(t, context);
+  context.clock.advance(SETTLED_RETENTION_MS + 1_000);
+  await saveAgain(context, 'Tea');
+  assert.equal((await acknowledge(context, alert.alertId, again.subscriberId)).status, 409);
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
+  assert.equal((await received(context, alert.alertId, again.subscriberId)).status, 409);
+  assert.equal((await received(context, alert.alertId, handler.subscriberId)).status, 200);
+  assert.equal(context.sink.received.filter(({ timer }) => timer.name === 'Egg').length, 0);
 });
 
 /** A small seeded generator (mulberry32), so a failing sequence can be replayed from its seed. */

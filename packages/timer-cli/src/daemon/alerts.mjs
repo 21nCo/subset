@@ -62,10 +62,17 @@ export function createRecordingSink({ limit = RECORDING_LIMIT } = {}) {
 
 /**
  * Calls the sink without waiting for it and without letting it fail the daemon. Returns, for a sink
- * that answers with a promise, one that settles (never rejects) when the sink is done.
+ * that answers with a promise, one that fulfils (never rejects) when the sink is done, even when
+ * `log` throws while reporting the sink's failure.
  */
 export function deliverToSink(sink, alert, timer, log) {
-  const report = (error) => log(`alert sink ${sink.name} failed: ${error?.message ?? error}`);
+  const report = (error) => {
+    try {
+      log(`alert sink ${sink.name} failed: ${error?.message ?? error}`);
+    } catch {
+      // A log that cannot be written must not turn a failed sound into a daemon failure.
+    }
+  };
   try {
     const pending = sink.alert(alert, timer);
     if (pending && typeof pending.then === 'function') return pending.then(undefined, report);
