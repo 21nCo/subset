@@ -75,6 +75,19 @@ public struct OpenRouterProvider: AIProvider {
         }
     }
 
+    /// Before a request is built: available while a key is stored and the model ID does not hold it, so a body whose
+    /// model would be the key is never previewed or sent. The key is read only to check that; nothing is sent.
+    public func availabilityBeforeSending() async -> AIAvailability {
+        let key: String?
+        do {
+            key = try keys.readKey()
+        } catch {
+            return .openRouterKeyUnreadable
+        }
+        guard let key else { return .noOpenRouterKey }
+        return Self.contains(key: key, in: model) ? .openRouterModelHeldKey : .availableOnOpenRouter
+    }
+
     /// Sends nothing when the key cannot be read or the model ID contains it (`ExplainError.unavailable`). An answer
     /// OpenRouter gave that is not an explanation, its status outside 2xx included, is `ExplainError.rejected`, so
     /// `ExplainCenter` knows the request reached it; a connection failure or timeout is `ExplainError.failed`.
@@ -86,7 +99,8 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.unavailable(.openRouterKeyUnreadable)
         }
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
-        // The key inside the model ID, however Settings came to keep it: not sent in the body.
+        // The key inside the model ID, however Settings came to keep it, the key replaced since availability was read
+        // included: not sent in the body.
         guard !Self.contains(key: key, in: model) else { throw ExplainError.unavailable(.openRouterModelHeldKey) }
         let data: Data
         do {

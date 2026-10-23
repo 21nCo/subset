@@ -2,7 +2,7 @@ import SwiftUI
 import SystemCore
 
 /// Explain for one item: asks to choose a provider when there is none, starts and shows the explanation, shows the
-/// send preview before the session's first request off this Mac, and says why it failed, the provider is unavailable,
+/// send preview for each request off this Mac until one confirmed this session has been answered, and says why it failed, the provider is unavailable,
 /// or the choice was set back. Every answer is shown as plain text (`Text(verbatim:)`), never as Markdown or anything
 /// run.
 struct ExplainPanel: View {
@@ -36,7 +36,8 @@ struct ExplainPanel: View {
                 }
                 .accessibilityElement(children: .combine)
             case let .confirming(preview):
-                Text("Before the first request to \(preview.provider.title) this session, review exactly what will be sent.")
+                Text("Until \(preview.provider.title) has answered a request you confirmed this session, review each "
+                    + "one exactly as it will be sent.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Review and Send…") { showingPreview = true }
@@ -169,8 +170,8 @@ struct SettingsView: View {
                 if let notice = center.notice {
                     Text(verbatim: notice).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 }
-                if !center.canChoose(.openRouter) {
-                    Text("OpenRouter can be chosen once its API key is stored below.")
+                if let reason = center.openRouterUnavailableReason {
+                    Text(reason)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if center.choice != .none {
@@ -210,8 +211,9 @@ struct SettingsView: View {
                 Text("Only these fields are sent. Your home folder's path is sent as ~ and your account name is removed. "
                     + "Tools' messages and error text are never sent; a reason is sent as one of a fixed list. Command-line "
                     + "arguments and file contents are never sent: System never reads them. Nothing is sent until you "
-                    + "choose a provider and press Explain; with OpenRouter, the first request each time System opens is "
-                    + "shown to you, exactly as it will be sent, and sent only once you confirm it.")
+                    + "choose a provider and press Explain; with OpenRouter, until it has answered a request you confirmed since "
+                    + "System opened, each request is shown to you, exactly as it will be sent, and sent only once you "
+                    + "confirm it.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             OpenRouterSection(account: openRouter)
@@ -232,7 +234,8 @@ private struct SendPreviewSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Send to \(preview.provider.title)?").font(.title3.bold())
             Text("This is exactly what will be sent to openrouter.ai, with your API key in the request's Authorization "
-                + "header. You are asked once each time System opens; nothing is sent unless you choose Send.")
+                + "header. You are asked for each request until OpenRouter has answered one you sent since System opened; "
+                + "nothing is sent unless you choose Send.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {

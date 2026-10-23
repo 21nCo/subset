@@ -30,8 +30,8 @@ public enum ExplainState: Equatable, Sendable {
     /// Not asked yet with the chosen provider.
     case idle
     case working(ExplainRequest)
-    /// Waiting for the user to confirm the send preview, before the session's first request off this Mac; nothing has
-    /// been sent.
+    /// Waiting for the user to confirm the send preview, shown for each request off this Mac until one the user
+    /// confirmed this session has been answered; nothing has been sent.
     case confirming(SendPreview)
     case explained(Explanation, ExplainRequest)
     /// The provider cannot answer now; nothing was sent.
@@ -196,6 +196,19 @@ public final class ExplainCenter {
         return openRouter.presence == .stored && !openRouter.isChangingKey
     }
 
+    /// Why OpenRouter cannot be picked now, for Settings to say beside the provider; `nil` when it can.
+    public var openRouterUnavailableReason: String? {
+        guard !canChoose(.openRouter) else { return nil }
+        guard let openRouter else { return Self.waitsForKey }
+        if openRouter.isChangingKey { return Self.waitsForKeyChange }
+        return openRouter.presence == .absent ? Self.waitsForKey : Self.waitsForKeychain
+    }
+
+    static let waitsForKey = "OpenRouter can be chosen once its API key is stored below."
+    static let waitsForKeyChange = "OpenRouter can be chosen once the key change below is finished."
+    static let waitsForKeychain = "OpenRouter can be chosen once the Keychain says whether its API key is stored. "
+        + "Settings asks again each time it is opened."
+
     /// Picks the provider when it can be picked now (`canChoose(_:)`), and returns whether it was.
     @discardableResult
     public func choose(_ choice: AIProviderChoice) -> Bool {
@@ -287,8 +300,11 @@ public final class ExplainCenter {
     /// is cancelled or the provider changes, which is not a timeout. Settings shows it as checking while it is read,
     /// then what it answered or that it did not answer in time, only while no later read has started and the provider
     /// has not changed since `selection`, so a slow read never replaces a newer one. OpenRouter's answer that no key is
-    /// stored, or that it cannot be read, sets the choice back.
-    private func readAvailability(of provider: any AIProvider, in selection: Int) async throws -> AIAvailability? {
+    /// stored, that it cannot be read, or that the model ID holds it sets the choice back. `beforeSending` reads it as
+    /// a request is about to be built (`OpenRouterProvider.availabilityBeforeSending()`), so a model ID holding the key
+    /// sets the choice back before anything is previewed.
+    private func readAvailability(of provider: any AIProvider, in selection: Int,
+                                  beforeSending: Bool = false) async throws -> AIAvailability? {
         availabilityReads += 1
         let read = availabilityReads
         availabilityStatus = .checking
@@ -296,7 +312,13 @@ public final class ExplainCenter {
         do {
             let timeout = availabilityTimeout
             availability = try await untilProviderChanges {
-                try await answer(within: timeout, { await provider.availability() })
+                try await answer(within: timeout, {
+                    if beforeSending, let openRouter = provider as? OpenRouterProvider {
+                        await openRouter.availabilityBeforeSending()
+                    } else {
+                        await provider.availability()
+                    }
+                })
             }
         } catch {
             // Cancelled, as when Settings closes: not a status; the next read shows one.
@@ -340,7 +362,7 @@ public final class ExplainCenter {
         states[key] = .working(request)
         let read: AIAvailability?
         do {
-            read = try await readAvailability(of: provider, in: selection)
+            read = try await readAvailability(of: provider, in: selection, beforeSending: true)
         } catch {
             // Cancelled by the caller or a provider change, which is not the provider failing to answer: no failure is
             // kept. After a provider change the item's state is no longer this call's.

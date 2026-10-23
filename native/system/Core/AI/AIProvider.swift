@@ -42,8 +42,8 @@ public enum AIProviderChoice: String, CaseIterable, Sendable {
         switch self {
         case .none: "Explain is off. System works fully without it."
         case .appleIntelligence: "Generated on this Mac by Apple's on-device model. Nothing leaves this Mac."
-        case .openRouter: "Generated off this Mac by OpenRouter, with your API key. Before the first request each time "
-            + "System opens, you see exactly what will be sent and confirm it."
+        case .openRouter: "Generated off this Mac by OpenRouter, with your API key. Until OpenRouter has answered a "
+            + "request you confirmed since System opened, you see each one exactly as it will be sent and confirm it."
         }
     }
 }
