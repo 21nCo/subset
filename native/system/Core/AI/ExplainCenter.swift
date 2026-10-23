@@ -231,8 +231,8 @@ public final class ExplainCenter {
         return states[StateKey(choice: choice, item: item)] ?? .idle
     }
 
-    /// Exactly what was sent off this Mac for the item explained with the chosen provider; `nil` when nothing left
-    /// this Mac.
+    /// Exactly what was sent off this Mac for the item with the chosen provider, once the provider answered it; `nil`
+    /// when nothing left this Mac or it is not known to have reached the provider.
     public func sentText(for item: ExplainKey) -> String? {
         sentBodies[StateKey(choice: choice, item: item)].map { String(decoding: $0, as: UTF8.self) }
     }
@@ -478,16 +478,15 @@ public final class ExplainCenter {
         if confirmed, answered { sendConfirmed = true }
         guard selection == self.selection else { return }
         if case let .unavailable(availability)? = outcome {
-            // Refused before it was sent: nothing left this Mac. A refusal that sets the choice back ends this work,
-            // so it is not kept as the item's state when OpenRouter is chosen again.
+            // Refused before it was sent. A refusal that sets the choice back ends this work, so it is not kept as
+            // the item's state when OpenRouter is chosen again.
             noteOpenRouter(availability, from: provider)
             guard selection == self.selection else { return }
-            states[key] = outcome
-            sentBodies[key] = nil
-            return
         }
         states[key] = outcome
-        sentBodies[key] = outcome == nil ? nil : body
+        // Only an answer shows the body reached the provider; one refused, cancelled, failed or not answered in time
+        // may never have left this Mac.
+        sentBodies[key] = answered ? body : nil
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does, and so does

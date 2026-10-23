@@ -506,9 +506,34 @@ final class OpenRouterExplainTests: XCTestCase {
         await center.confirmSend(item)
         guard case .failed = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
         XCTAssertFalse(center.sendConfirmed)
+        XCTAssertNil(center.sentText(for: item), "not known to have reached OpenRouter")
         await center.explain(ExplainKey("process:2")) { _ in self.request("cloudd") }
         XCTAssertNotNil(confirming(center, ExplainKey("process:2")))
         XCTAssertEqual(StubProtocol.requests.count, 1)
+    }
+
+    /// A confirmed request that does not answer in time while its key is read never left this Mac: no body is kept.
+    func testAConfirmedRequestThatTimesOutBeforeItIsSentKeepsNoBody() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account,
+                                   answerTimeout: .milliseconds(200))
+        XCTAssertTrue(center.choose(.openRouter))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        XCTAssertNotNil(confirming(center, item))
+        keychain.holdsDataReads = true
+        await center.confirmSend(item)
+        XCTAssertEqual(keychain.heldDataReads, 1, "timed out while the key was read")
+        guard case let .failed(message, _) = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertTrue(message.contains("did not answer"), message)
+        XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
+        XCTAssertFalse(center.sendConfirmed)
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
     /// OpenRouter answering a confirmed request with an error status, after the retry, with an error, or with a refusal
@@ -527,9 +552,11 @@ final class OpenRouterExplainTests: XCTestCase {
             for (status, json) in answer { StubProtocol.enqueue(status: status, json: json) }
             let item = ExplainKey("process:1")
             await center.explain(item) { _ in self.request() }
+            let preview = try XCTUnwrap(confirming(center, item))
             await center.confirmSend(item)
             guard case .failed = center.state(for: item) else { return XCTFail("\(answer): \(center.state(for: item))") }
             XCTAssertTrue(center.sendConfirmed, "\(answer)")
+            XCTAssertEqual(center.sentText(for: item), preview.text, "\(answer): it reached OpenRouter")
 
             StubProtocol.enqueue(status: 200, json: completion(Self.answer))
             let next = ExplainKey("process:2")
@@ -737,6 +764,7 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty)
         guard case let .failed(message, _) = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
         XCTAssertEqual(message, ExplainCenter.changedWhileSending)
+        XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
     }
 
     func testTurningFolderNamesOffDuringTheBackoffSendsNoRetry() async throws {
