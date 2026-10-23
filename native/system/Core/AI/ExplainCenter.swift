@@ -59,7 +59,9 @@ public struct SendPreview: Equatable, Sendable {
 /// (OpenRouter), the item waits while the user reviews exactly what will be sent and confirms it, and that request is the
 /// session's first: every other request to the provider waits until it has ended. Once it has gone out, no preview is
 /// shown again this session; when it ends before it went out (the key could not be read, it was cancelled or timed out,
-/// or the provider changed), the preview is still required, and the items that waited for it are previewed instead.
+/// **Send folder names** changed, or the provider changed), the preview is still required, and the items that waited
+/// for it are previewed instead. Each attempt to send a request, the retry included, goes out only while **Send folder
+/// names** is as it was when the request was built.
 @MainActor
 @Observable
 public final class ExplainCenter {
@@ -90,7 +92,11 @@ public final class ExplainCenter {
     public private(set) var sendConfirmed = false
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
-        didSet { defaults.set(sendFolderNames, forKey: Self.sendFolderNamesKey) }
+        didSet {
+            let sending = sendFolderNames
+            sendingFolderNames.withLock { $0 = sending }
+            defaults.set(sendFolderNames, forKey: Self.sendFolderNamesKey)
+        }
     }
     /// The chosen provider's availability from its latest read, which may still be checking or may not have answered
     /// in time; `nil` before any read and for `.none`.
@@ -115,6 +121,8 @@ public final class ExplainCenter {
     @ObservationIgnored private var confirmations: [StateKey: CheckedContinuation<Resumption, Never>] = [:]
     /// Exactly what was sent for each item, for What was sent.
     @ObservationIgnored private var sentTexts: [StateKey: String] = [:]
+    /// `sendFolderNames`, read where a request is handed to the network, off the main actor, right before each attempt.
+    @ObservationIgnored private let sendingFolderNames = OSAllocatedUnfairLock(initialState: false)
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let makeProvider: @MainActor (AIProviderChoice) -> (any AIProvider)?
@@ -159,6 +167,8 @@ public final class ExplainCenter {
         openRouterSetAside = setAside && openRouter?.presenceFailed == true
         if setAside, !openRouterSetAside { defaults.set(AIProviderChoice.none.rawValue, forKey: Self.choiceKey) }
         sendFolderNames = defaults.bool(forKey: Self.sendFolderNamesKey)
+        let sending = sendFolderNames
+        sendingFolderNames.withLock { $0 = sending }
         openRouter?.onKeyRemoved = { [weak self] in
             if self?.choice == .openRouter { self?.choice = .none }
         }
@@ -264,8 +274,10 @@ public final class ExplainCenter {
     /// Explains an item with the chosen provider, building its request with the current redactor. Does nothing without
     /// a provider, while the item is being explained, or once it has been. Returns when the answer is in. When the
     /// user changes the provider meanwhile, even back to this one, the work is cancelled, the request is not sent if it
-    /// has not been yet, no answer is kept, and the item can be explained again at once; when
-    /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
+    /// has not been yet, no answer is kept, and the item can be explained again at once. When the user changes **Send
+    /// folder names** before the request goes out, even while its key is read, it is not sent: it is built again with
+    /// the setting as it is then, and previewed again while the session's preview is still required; when they change
+    /// it before the retry of a request that went out, the retry is not sent and the item fails. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
     /// asked again. When the caller is cancelled, nothing more is sent, no failure is kept, and the item can be asked
     /// again.
@@ -309,106 +321,137 @@ public final class ExplainCenter {
             return
         }
         var builtWith = sendFolderNames
-        var isFirstSend = false
-        let submitted = OSAllocatedUnfairLock(initialState: false)
         while true {
-            // Built with the setting the user has now, so a folder name is never sent once they turn it off.
-            if builtWith != self.sendFolderNames {
-                guard let rebuilt = build(redactor) else {
-                    states[key] = .gone
+            var isFirstSend = false
+            while true {
+                // Built with the setting the user has now, so a folder name is never sent once they turn it off.
+                if builtWith != self.sendFolderNames {
+                    guard let rebuilt = build(redactor) else {
+                        states[key] = .gone
+                        return
+                    }
+                    request = rebuilt
+                    builtWith = self.sendFolderNames
+                    states[key] = .working(request)
+                }
+                guard provider.needsSendPreview else { break }
+                if firstSendInFlight {
+                    // The request the user confirmed has not ended yet: this one waits, so that one is sent first, then
+                    // is sent, or previewed if that one did not go out.
+                    states[key] = .working(request)
+                    let resumption = await confirmation(for: key)
+                    guard selection == self.selection else { return }
+                    guard resumption != .stop, !Task.isCancelled else {
+                        states[key] = nil
+                        return
+                    }
+                    continue
+                }
+                if sendConfirmed { break }
+                let text: String
+                do {
+                    text = try provider.sentText(for: request)
+                } catch {
+                    states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
                     return
                 }
-                request = rebuilt
-                builtWith = self.sendFolderNames
-                states[key] = .working(request)
-            }
-            guard provider.needsSendPreview else { break }
-            if firstSendInFlight {
-                // The request the user confirmed has not ended yet: this one waits, so that one is sent first, then is
-                // sent, or previewed if that one did not go out.
-                states[key] = .working(request)
+                states[key] = .confirming(SendPreview(provider: choice, text: text, request: request))
                 let resumption = await confirmation(for: key)
+                // The provider changed meanwhile: this item's state is no longer this call's.
                 guard selection == self.selection else { return }
                 guard resumption != .stop, !Task.isCancelled else {
                     states[key] = nil
                     return
                 }
-                continue
+                states[key] = .working(request)
+                // Released once another item's confirmed request ended, or confirmed while another one is on its way:
+                // sent once that one went out, otherwise previewed again.
+                guard resumption == .confirmed, !firstSendInFlight, !sendConfirmed else { continue }
+                // What was shown is sent only if Send folder names is as it was; otherwise it is built again and shown.
+                guard builtWith != self.sendFolderNames else {
+                    firstSendInFlight = true
+                    isFirstSend = true
+                    // Every other item waiting for a preview waits until this request has ended, without its preview:
+                    // it is then sent, built with the setting as it is then, if this one went out, and previewed
+                    // otherwise.
+                    for (other, state) in states where other != key && other.choice == choice {
+                        if case let .confirming(preview) = state { states[other] = .working(preview.request) }
+                    }
+                    break
+                }
             }
-            if sendConfirmed { break }
-            let text: String
+            // Each attempt, the retry included, goes out only while Send folder names is as it was when the request was
+            // built; whether one went out is noted then.
+            let submitted = OSAllocatedUnfairLock(initialState: false)
+            let current = sendingFolderNames
+            let folderNames = builtWith
+            let submitting: @Sendable () -> Bool = {
+                guard current.withLock({ $0 }) == folderNames else { return false }
+                submitted.withLock { $0 = true }
+                return true
+            }
+            let outcome: ExplainState?
+            var outdated = false
             do {
-                text = try provider.sentText(for: request)
-            } catch {
-                states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
-                return
+                defer {
+                    if isFirstSend {
+                        // Only a confirmed body that went out ends the preview for the session; one that did not (no
+                        // key read, cancelled, timed out, Send folder names changed, or the provider changed first)
+                        // leaves it required.
+                        if submitted.withLock({ $0 }) { sendConfirmed = true }
+                        // The first request ended: the others waiting for it go on now. After a provider change they
+                        // were already ended, and the requests waiting then are not this one's.
+                        if selection == self.selection {
+                            firstSendInFlight = false
+                            resolveAllConfirmations(.released)
+                        }
+                    }
+                }
+                do {
+                    sentTexts[key] = try provider.sentText(for: request)
+                } catch {
+                    states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
+                    return
+                }
+                do {
+                    let sent = request
+                    let timeout = answerTimeout
+                    let draft = try await untilProviderChanges {
+                        try await answer(within: timeout, { try await provider.explain(sent, submitting: submitting) })
+                    }
+                    if let draft {
+                        outcome = .explained(try Explanation(validating: draft, for: request), request)
+                    } else {
+                        outcome = .failed(Self.late(choice, answerTimeout), request)
+                    }
+                } catch ExplainError.outdated {
+                    outcome = nil
+                    outdated = true
+                } catch let ExplainError.unavailable(availability) {
+                    outcome = .unavailable(availability)
+                } catch let error as ExplainError {
+                    outcome = .failed(error.message, request)
+                } catch is CancellationError {
+                    outcome = nil
+                } catch {
+                    outcome = .failed(error.localizedDescription, request)
+                }
             }
-            states[key] = .confirming(SendPreview(provider: choice, text: text, request: request))
-            let resumption = await confirmation(for: key)
-            // The provider changed meanwhile: this item's state is no longer this call's.
             guard selection == self.selection else { return }
-            guard resumption != .stop, !Task.isCancelled else {
-                states[key] = nil
+            guard outdated, !Task.isCancelled else {
+                states[key] = outcome
                 return
             }
+            guard !submitted.withLock({ $0 }) else {
+                // The request went out, and its retry was not sent.
+                states[key] = .failed("Send folder names changed before \(choice.title) was asked again, so it was not "
+                    + "asked again. Ask again.", request)
+                return
+            }
+            // Nothing went out: built again with the setting as it is now, and previewed again while required.
+            sentTexts[key] = nil
             states[key] = .working(request)
-            // Released once another item's confirmed request ended, or confirmed while another one is on its way: sent
-            // once that one went out, otherwise previewed again.
-            guard resumption == .confirmed, !firstSendInFlight, !sendConfirmed else { continue }
-            // What was shown is sent only if Send folder names is as it was; otherwise it is built again and shown.
-            guard builtWith != self.sendFolderNames else {
-                firstSendInFlight = true
-                isFirstSend = true
-                // Every other item waiting for a preview waits until this request has ended, without its preview: it
-                // is then sent, built with the setting as it is then, if this one went out, and previewed otherwise.
-                for (other, state) in states where other != key && other.choice == choice {
-                    if case let .confirming(preview) = state { states[other] = .working(preview.request) }
-                }
-                break
-            }
         }
-        defer {
-            if isFirstSend {
-                // Only a confirmed body that went out ends the preview for the session; one that did not (no key read,
-                // cancelled, timed out, or the provider changed first) leaves it required.
-                if submitted.withLock({ $0 }) { sendConfirmed = true }
-                // The first request ended: the others waiting for it go on now. After a provider change they were
-                // already ended, and the requests waiting then are not this one's.
-                if selection == self.selection {
-                    firstSendInFlight = false
-                    resolveAllConfirmations(.released)
-                }
-            }
-        }
-        do {
-            sentTexts[key] = try provider.sentText(for: request)
-        } catch {
-            states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
-            return
-        }
-        let outcome: ExplainState?
-        do {
-            let sent = request
-            let timeout = answerTimeout
-            let draft = try await untilProviderChanges {
-                try await answer(within: timeout, { try await provider.explain(sent) { submitted.withLock { $0 = true } } })
-            }
-            if let draft {
-                outcome = .explained(try Explanation(validating: draft, for: request), request)
-            } else {
-                outcome = .failed(Self.late(choice, answerTimeout), request)
-            }
-        } catch let ExplainError.unavailable(availability) {
-            outcome = .unavailable(availability)
-        } catch let error as ExplainError {
-            outcome = .failed(error.message, request)
-        } catch is CancellationError {
-            outcome = nil
-        } catch {
-            outcome = .failed(error.localizedDescription, request)
-        }
-        guard selection == self.selection else { return }
-        states[key] = outcome
     }
 
     /// Whether the user confirms the send preview shown for `key`, or the confirmed request `key` waits for ended:

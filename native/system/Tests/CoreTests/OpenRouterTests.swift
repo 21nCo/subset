@@ -728,6 +728,76 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
+    func testTurningFolderNamesOffWhileTheKeyIsReadSendsTheRequestOnlyBuiltAgainAndThenPreviewedAgain() async throws {
+        let keychain = FakeKeychain()
+        let (center, _) = center(defaults(), keychain: keychain, key: Self.key)
+        center.choose(.openRouter)
+        center.sendFolderNames = true
+        let item = ExplainKey("disk:/Users/jdoe/dev/acme-merger")
+        keychain.holdsDataReads = true
+        let task = Task { await center.explain(item, request: self.folder("acme-merger")) }
+        let shown = try await confirming(center, item)
+        XCTAssertTrue(shown.text.contains("acme-merger"))
+        center.confirmSend(item)
+        try await until { keychain.heldDataReads == 1 }
+        center.sendFolderNames = false
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        // The confirmed body is out of date once its key is read: not sent, but built again and shown, as nothing went
+        // out yet this session.
+        let rebuilt = try await confirming(center, item) { $0.text != shown.text }
+        XCTAssertFalse(rebuilt.text.contains("acme-merger"))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertNil(center.sentText(for: item))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        center.confirmSend(item)
+        await task.value
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(rebuilt.text.utf8)])
+        XCTAssertTrue(center.sendConfirmed)
+
+        // Once the session's preview is done, it is built again and sent without one.
+        center.sendFolderNames = true
+        let later = ExplainKey("disk:/Users/jdoe/dev/zeta-plan")
+        keychain.holdsDataReads = true
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let laterTask = Task { await center.explain(later, request: self.folder("zeta-plan")) }
+        try await until { keychain.heldDataReads == 1 }
+        center.sendFolderNames = false
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        try await until { if case .explained = center.state(for: later) { true } else { false } }
+        await laterTask.value
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        let sent = String(decoding: StubProtocol.requests[1].body ?? Data(), as: UTF8.self)
+        XCTAssertFalse(sent.contains("zeta-plan"))
+        XCTAssertEqual(center.sentText(for: later), sent)
+    }
+
+    func testTurningFolderNamesOffDuringTheBackoffSendsNoRetry() async throws {
+        let backoff = WaitRecorder()
+        let (center, _) = center(defaults(), keychain: FakeKeychain(), key: Self.key, sleep: { duration in
+            await backoff.record(duration)
+            try await Task.sleep(for: .milliseconds(300))
+        })
+        center.choose(.openRouter)
+        center.sendFolderNames = true
+        let item = ExplainKey("disk:/Users/jdoe/dev/acme-merger")
+        StubProtocol.enqueue(status: 503, json: #"{"error":{"code":503,"message":"Busy"}}"#)
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        let task = Task { await center.explain(item, request: self.folder("acme-merger")) }
+        let shown = try await confirming(center, item)
+        center.confirmSend(item)
+        try await until { !backoff.durations.isEmpty }
+        center.sendFolderNames = false
+        await task.value
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [Data(shown.text.utf8)], "no retry with the folder name")
+        guard case let .failed(message, _) = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertTrue(message.contains("Send folder names changed"), message)
+        XCTAssertTrue(center.sendConfirmed, "the confirmed body went out")
+        XCTAssertEqual(center.sentText(for: item), shown.text)
+    }
+
     // MARK: Model ID
 
     func testAKeyEnteredAsTheModelIDIsNeverKeptLoggedOrSent() async throws {
@@ -884,6 +954,15 @@ final class OpenRouterTests: XCTestCase {
                                         defaults: defaults, log: log)
         let center = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account)
         return (center, account)
+    }
+
+    /// Builds the request for the folder `name` in `/Users/jdoe/dev`, whose name is sent only with Send folder names.
+    private func folder(_ name: String) -> (ExplainRedactor) -> ExplainRequest? {
+        { redactor in
+            var facts = ExplainFacts(kind: .folder, name: redactor.name(name, ofPath: "/Users/jdoe/dev/\(name)"))
+            facts.path = "/Users/jdoe/dev/\(name)"
+            return ExplainRequest(facts, redactor: redactor)
+        }
     }
 
     private func request(_ name: String = "syncd") -> ExplainRequest {

@@ -134,12 +134,16 @@ public enum ExplainError: Error, Equatable, Sendable {
     case unavailable(AIAvailability)
     /// The provider failed to answer.
     case failed(String)
+    /// The request was built with a **Send folder names** setting the user changed before it went out, so it was not
+    /// sent.
+    case outdated
 
     public var message: String {
         switch self {
         case let .invalidResponse(reason): "The answer was rejected: \(reason)"
         case let .unavailable(availability): "\(availability.title). \(availability.meaning)"
         case let .failed(reason): reason
+        case .outdated: "Send folder names changed before the request went out, so it was not sent. Ask again."
         }
     }
 }

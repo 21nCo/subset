@@ -4,9 +4,11 @@ public protocol AIProvider: Sendable {
     /// Whether it can answer now.
     func availability() async -> AIAvailability
     func explain(_ request: ExplainRequest) async throws -> ExplanationDraft
-    /// As `explain(_:)`, calling `submitted` once the request is handed over to be sent off this Mac, so the send
+    /// As `explain(_:)`, asking `submitting` right before each attempt is handed over to be sent off this Mac, the
+    /// retry included: when it returns `false`, that attempt is not sent and this throws `ExplainError.outdated`. So
+    /// a body built with a **Send folder names** setting the user has since changed never goes out, and the send
     /// preview counts as used only once a body the user confirmed has actually gone out.
-    func explain(_ request: ExplainRequest, submitted: @escaping @Sendable () -> Void) async throws -> ExplanationDraft
+    func explain(_ request: ExplainRequest, submitting: @escaping @Sendable () -> Bool) async throws -> ExplanationDraft
     /// Exactly what `explain(_:)` sends for `request`, as the send preview and What was sent show it.
     func sentText(for request: ExplainRequest) throws -> String
     /// Whether the user confirms what is sent before the first request of each app session: a provider off this Mac.
@@ -15,8 +17,8 @@ public protocol AIProvider: Sendable {
 
 extension AIProvider {
     public func explain(_ request: ExplainRequest,
-                        submitted: @escaping @Sendable () -> Void) async throws -> ExplanationDraft {
-        submitted()
+                        submitting: @escaping @Sendable () -> Bool) async throws -> ExplanationDraft {
+        guard submitting() else { throw ExplainError.outdated }
         return try await explain(request)
     }
     public func sentText(for request: ExplainRequest) throws -> String { request.promptText }
