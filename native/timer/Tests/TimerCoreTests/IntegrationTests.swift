@@ -145,10 +145,11 @@ func realDaemonHandsAlertsToOneHandlerAndRefusesALateAcknowledgement() async thr
     }
 
     // Acknowledged in time: the handler owns the finish.
-    let countdown = OperationInput(timer: TimerSpec(kind: .countdown, countdownTicks: false, durationMs: 1_000))
+    let countdown = OperationInput(timer: TimerSpec(kind: .countdown, name: "Egg", sound: false, countdownTicks: false, durationMs: 1_000))
     try await client.perform("start", countdown)
     let first = try await waitFor("the first finish") { await handler.alerts.first }
     #expect(first.kind == .finish && first.ackRequired == true)
+    #expect(first.timerName == "Egg" && first.sound == false)
     let alertId = try #require(first.alertId)
     #expect(try await client.acknowledgeAlert(alertId, subscriberId: handlerId) == .acknowledged)
 

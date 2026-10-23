@@ -11,8 +11,10 @@ export const newAlertId = () => randomBytes(16).toString('hex');
 /**
  * Hands each alert to exactly one player: the registered alert handler (the Timer app) or the
  * daemon's own sink. At most one handler is registered at a time, tied to one open `/v1/events`
- * subscriber. While one is registered, each alert is published with an `alertId` and
- * `ackRequired: true`, and the handler owns it once it acknowledges within `ACK_TIMEOUT_MS`.
+ * subscriber. While one is registered, each alert is published with an `alertId`,
+ * `ackRequired: true` and its timer's `timerName` and `sound` as they were when it fell due, so the
+ * handler plays it as the sink would even if the timer changes or is removed meanwhile. The handler
+ * owns it once it acknowledges within `ACK_TIMEOUT_MS`.
  * An alert not acknowledged by then, or still pending when its handler unregisters or disconnects
  * or the daemon stops, is played by the sink at once and settled as a fallback, so a later
  * acknowledgement gets `410` and the handler never plays it too. With no handler, the sink plays
@@ -97,7 +99,7 @@ export function createAlertHandlers({ clock, sink, log, publish, isOpen, newId =
       const entry = { alert, timer, subscriberId: handler, handle: null };
       pending.set(alertId, entry);
       entry.handle = clock.setTimeout(() => fallBack(alertId, `was not acknowledged within ${ackTimeoutMs / 1000} s`), ackTimeoutMs);
-      publish({ ...alert, alertId, ackRequired: true });
+      publish({ ...alert, alertId, ackRequired: true, timerName: timer.name, sound: timer.sound });
     },
 
     /**

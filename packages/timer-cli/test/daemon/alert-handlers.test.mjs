@@ -52,7 +52,7 @@ test('with no handler the sink plays each alert as it is published, and the aler
   await stream.waitFor(() => alertsOf(stream).length === 1);
   const [alert] = alertsOf(stream);
   assert.equal(alert.kind, 'finish');
-  assert.equal('alertId' in alert || 'ackRequired' in alert, false);
+  assert.equal(['alertId', 'ackRequired', 'timerName', 'sound'].some((field) => field in alert), false);
 });
 
 test('a registered handler that acknowledges in time owns the alert: the sink is never called', async (t) => {
@@ -64,6 +64,8 @@ test('a registered handler that acknowledges in time owns the alert: the sink is
   await handler.waitFor(() => alertsOf(handler).length === 1);
   const [alert] = alertsOf(handler);
   assert.deepEqual([alert.timerId, alert.kind, alert.ackRequired], [id, 'finish', true]);
+  // The handler gets the timer's name and sound with the alert, so removing the timer meanwhile changes nothing.
+  assert.deepEqual([alert.timerName, alert.sound], ['Egg', true]);
   assert.match(alert.alertId, /^[0-9a-f]{32}$/);
   // Every subscriber sees the same alert; only the handler may take it.
   await observer.waitFor(() => alertsOf(observer).length === 1);

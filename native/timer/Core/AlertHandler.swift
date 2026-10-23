@@ -1,7 +1,8 @@
 import Foundation
 
 /// An `alert` event (packages/timer-cli/src/daemon/alerts.mjs). While an alert handler is registered, the daemon adds
-/// `alertId` and `ackRequired` (alert-handlers.mjs).
+/// `alertId`, `ackRequired`, and the timer's `timerName` and `sound` as they were when the alert fell due
+/// (alert-handlers.mjs).
 public struct TimerAlert: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case segment, tick, finish, missedWhileAway
@@ -24,9 +25,11 @@ public struct TimerAlert: Codable, Equatable, Sendable {
     public var missed: Int?
     public var alertId: String?
     public var ackRequired: Bool?
+    public var timerName: String?
+    public var sound: Bool?
 
     public init(timerId: String, kind: Kind, at: Int, segment: Step? = nil, secondsLeft: Int? = nil, missed: Int? = nil,
-                alertId: String? = nil, ackRequired: Bool? = nil) {
+                alertId: String? = nil, ackRequired: Bool? = nil, timerName: String? = nil, sound: Bool? = nil) {
         self.timerId = timerId
         self.kind = kind
         self.at = at
@@ -35,6 +38,8 @@ public struct TimerAlert: Codable, Equatable, Sendable {
         self.missed = missed
         self.alertId = alertId
         self.ackRequired = ackRequired
+        self.timerName = timerName
+        self.sound = sound
     }
 }
 
@@ -105,15 +110,20 @@ public final class AlertHandler {
 
     private let daemon: AlertHandlerDaemon
     private let play: (TimerAlert) -> Void
+    private let retryDelay: Duration
     private var subscriberId: String?
     private var permitted = false
-    /// The subscriber the daemon accepted, as far as this app knows.
-    private var registeredId: String?
+    /// The stream the daemon may hold as its handler: `confirmed` once the daemon said so, unconfirmed while a request
+    /// that may have registered it got no answer. Either way it is unregistered before the app counts as unregistered.
+    private var claim: (id: String, confirmed: Bool)?
     private var reconciling: Task<Void, Never>?
+    private var retrying: Task<Void, Never>?
 
-    /// `play` presents an alert the app has taken over.
-    public init(daemon: AlertHandlerDaemon, play: @escaping (TimerAlert) -> Void) {
+    /// `play` presents an alert the app has taken over. A request the daemon did not answer is tried again after
+    /// `retryDelay`, and at the next permission check.
+    public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), play: @escaping (TimerAlert) -> Void) {
         self.daemon = daemon
+        self.retryDelay = retryDelay
         self.play = play
     }
 
@@ -122,57 +132,90 @@ public final class AlertHandler {
     public func subscribed(_ id: String?) {
         guard id != subscriberId else { return }
         subscriberId = id
-        registeredId = nil
+        claim = nil
         reconcile()
     }
 
-    /// Whether the app may post notifications. It registers only while it may.
+    /// Whether the app may post notifications. It registers only while it may. Each check also retries what is
+    /// unsettled: a refused registration, or a request the daemon did not answer.
     public func setPermitted(_ granted: Bool) {
-        guard granted != permitted else {
-            // A refused registration is tried again whenever permission is checked.
-            if case .refused = registration { reconcile() }
-            return
-        }
         permitted = granted
         reconcile()
     }
 
-    /// Waits for the registration work in flight; for tests.
+    /// Waits for the registration work in flight, including retries; for tests.
     public func settled() async {
-        while let task = reconciling { await task.value }
+        while let task = reconciling ?? retrying { await task.value }
+    }
+
+    /// Whether the daemon answered `error`, so the request is known not to have registered anything: it refused it, is
+    /// shutting down (and drops its handler), or is not running. Any other failure leaves the outcome unknown.
+    private static func answered(_ error: Error) -> Bool {
+        switch error as? DaemonError {
+        case .rejected?, .shuttingDown?, .notListening?: true
+        default: false
+        }
     }
 
     /// Brings the daemon's registration in line with `subscriberId` and `permitted`, one request at a time.
     private func reconcile() {
+        retrying?.cancel()
+        retrying = nil
         guard reconciling == nil else { return }
         reconciling = Task {
             var refused: (id: String, message: String)?
+            var unanswered = false
             while true {
                 let wanted = permitted ? subscriberId : nil
-                if registeredId == wanted { break }
-                if let current = registeredId {
-                    registeredId = nil
+                if let held = claim, held.id != wanted {
                     // The daemon's sink plays whatever this app had not acknowledged.
-                    try? await daemon.unregisterAlertHandler(subscriberId: current)
+                    do {
+                        try await daemon.unregisterAlertHandler(subscriberId: held.id)
+                    } catch where !Self.answered(error) {
+                        // The daemon may still hold this stream, so it is unregistered again later.
+                        unanswered = true
+                        break
+                    } catch {}
+                    if claim?.id == held.id { claim = nil }
                     continue
                 }
+                if claim?.confirmed == true { break }
                 // A refused stream is not asked again until the next check; a new stream is.
                 guard let wanted, wanted != refused?.id else { break }
                 do {
                     try await daemon.registerAlertHandler(subscriberId: wanted)
-                    registeredId = wanted
+                    claim = (wanted, true)
                 } catch {
                     refused = (wanted, error.localizedDescription)
+                    if Self.answered(error) {
+                        if claim?.id == wanted { claim = nil }
+                    } else {
+                        // The daemon may have registered it, so it is registered or unregistered again later.
+                        claim = (wanted, false)
+                        unanswered = true
+                        break
+                    }
                 }
             }
-            if registeredId != nil {
+            let wanted = permitted ? subscriberId : nil
+            if let claim, claim.confirmed, claim.id == wanted {
                 update(.registered)
-            } else if let refused, refused.id == (permitted ? subscriberId : nil) {
+            } else if let refused, refused.id == wanted {
                 update(.refused(refused.message))
             } else {
                 update(.inactive)
             }
             reconciling = nil
+            if unanswered { retryLater() }
+        }
+    }
+
+    private func retryLater() {
+        retrying = Task { [weak self, retryDelay] in
+            try? await Task.sleep(for: retryDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.retrying = nil
+            self.reconcile()
         }
     }
 

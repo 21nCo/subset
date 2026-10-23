@@ -36,10 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenu: StatusMenuController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        notifications.onAction = { [controller] action, timerId in controller.run(action, timerId: timerId) }
-        notifications.activate()
         statusMenu = StatusMenuController(controller: controller)
         controller.start()
+        // After `start()`, so an action that launched the app waits for the runtime rather than failing.
+        notifications.onAction = { [controller] action, timerId in controller.run(action, timerId: timerId) }
+        notifications.activate()
         // Asks for notification permission the first time; while it is granted, the app plays Timer's alerts.
         controller.checkNotifications(ask: true)
     }

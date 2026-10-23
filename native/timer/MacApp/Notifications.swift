@@ -138,9 +138,10 @@ struct AlertPresenter {
     let notifications: UserNotifying
     let sounds: SoundPlaying
 
-    /// `timer` is the alert's timer as last published, or nil if the app has not seen it; it is then named "Timer".
-    func present(_ alert: TimerAlert, timer: TimerDefinition?) {
-        sounds.play(SystemSound.sequence(for: alert.kind, soundOn: timer?.sound ?? true))
-        if let notification = TimerNotification(alert, name: timer?.name ?? "Timer") { notifications.post(notification) }
+    /// Uses the alert's `timerName` and `sound`. An alert without them names its timer "Timer" and plays its sounds,
+    /// as the daemon's sink would for a timer it no longer knows.
+    func present(_ alert: TimerAlert) {
+        sounds.play(SystemSound.sequence(for: alert.kind, soundOn: alert.sound ?? true))
+        if let notification = TimerNotification(alert, name: alert.timerName ?? "Timer") { notifications.post(notification) }
     }
 }

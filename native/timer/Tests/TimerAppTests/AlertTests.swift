@@ -15,14 +15,24 @@ private final class FakeDaemon: AlertHandlerDaemon, @unchecked Sendable {
     let log: Log
     private let lock = NSLock()
     private var expired: Set<String> = []
+    private var holdAcks = false
+    private var held: CheckedContinuation<Void, Never>?
 
     init(log: Log) { self.log = log }
 
     func expire(_ alertId: String) { lock.withLock { _ = expired.insert(alertId) } }
+    /// Keeps the next acknowledgement's answer until `release()`.
+    func holdNextAck() { lock.withLock { holdAcks = true } }
+    var holding: Bool { lock.withLock { held != nil } }
+    func release() { lock.withLock { held.take() }?.resume() }
+
     func registerAlertHandler(subscriberId: String) async throws { log.add("register \(subscriberId)") }
     func unregisterAlertHandler(subscriberId: String) async throws { log.add("unregister \(subscriberId)") }
     func acknowledgeAlert(_ alertId: String, subscriberId: String) async throws -> AlertAcknowledgement {
         log.add("ack \(alertId)")
+        if lock.withLock({ holdAcks }) {
+            await withCheckedContinuation { continuation in lock.withLock { holdAcks = false; held = continuation } }
+        }
         return lock.withLock { expired.contains(alertId) } ? .expired : .acknowledged
     }
 }
@@ -64,6 +74,10 @@ private func event(_ name: String, _ json: String) -> EventSubscription.Update {
     .event(ServerSentEvent(event: name, data: json))
 }
 
+private func noTimers() -> EventSubscription.Update {
+    event("state", #"{"structuredContent":{"schemaVersion":1,"observedAt":0,"timers":[]},"text":"","viewId":"subset.timer.board@1"}"#)
+}
+
 private func state(timerName: String, sound: Bool) -> EventSubscription.Update {
     let timer = """
     {"definition":{"kind":"countdown","id":"t_1","name":"\(timerName)","sound":\(sound),"countdownTicks":false,"createdAt":0,"durationMs":1000},
@@ -88,19 +102,13 @@ struct AlertTests {
         return (AlertPresenter(notifications: notifications, sounds: FakeSounds(log: log)), notifications)
     }
 
-    private func definition(sound: Bool) throws -> TimerDefinition {
-        let json = #"{"kind":"interval","id":"t_1","name":"Tabata","sound":\#(sound),"countdownTicks":true,"createdAt":0}"#
-        return try JSONDecoder().decode(TimerDefinition.self, from: Data(json.utf8))
-    }
-
     @Test func eachKindPlaysItsSoundAndTheFinishAndMissedAlertsNameTheTimer() throws {
         let (presenter, notifications) = presenter()
-        let tabata = try definition(sound: true)
         let work = TimerAlert.Step(index: 1, round: 1, phase: .work, label: "Work", durationMs: 20_000)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 3), timer: tabata)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .segment, at: 2, segment: work), timer: tabata)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 3, alertId: "a3", ackRequired: true), timer: tabata)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 4, segment: work, missed: 3), timer: tabata)
+        presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 3, timerName: "Tabata", sound: true))
+        presenter.present(TimerAlert(timerId: "t_1", kind: .segment, at: 2, segment: work, timerName: "Tabata", sound: true))
+        presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 3, alertId: "a3", ackRequired: true, timerName: "Tabata", sound: true))
+        presenter.present(TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 4, segment: work, missed: 3, timerName: "Tabata", sound: true))
         #expect(log.all == ["sound Tink", "sound Pop", "sound Glass Glass Glass", "notify Tabata: Finished.",
                             "notify Tabata: Missed 3 alerts while away. Now: Work."])
         #expect(notifications.posted.map(\.id).first == "a3")
@@ -109,10 +117,9 @@ struct AlertTests {
 
     @Test func aTimerWithSoundOffOnlyNotifies() throws {
         let (presenter, _) = presenter()
-        let quiet = try definition(sound: false)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 1), timer: quiet)
-        presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 2), timer: quiet)
-        presenter.present(TimerAlert(timerId: "t_9", kind: .missedWhileAway, at: 3, missed: 1), timer: nil)
+        presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 1, timerName: "Tabata", sound: false))
+        presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 2, timerName: "Tabata", sound: false))
+        presenter.present(TimerAlert(timerId: "t_9", kind: .missedWhileAway, at: 3, missed: 1))
         #expect(log.all == ["notify Tabata: Finished.", "notify Timer: Missed 1 alert while away."])
     }
 
@@ -159,6 +166,72 @@ struct AlertTests {
         controller.handle(event("alert", #"{"timerId":"t_1","kind":"finish","at":4000,"alertId":"a4","ackRequired":true}"#))
         try? await Task.sleep(nanoseconds: 100_000_000)
         #expect(log.all.suffix(2) == ["ack a2", "unregister s1"])
+    }
+
+    /// A finish whose timer is removed while its acknowledgement is answered plays as that timer, quietly.
+    @Test(arguments: [#","timerName":"Quiet","sound":false"#, ""])
+    func anAlertKeepsItsTimersNameAndSoundWhenTheTimerIsRemovedDuringTheAcknowledgement(_ fromDaemon: String) async {
+        let daemon = FakeDaemon(log: log)
+        let notifications = FakeNotifications(log: log, authorized: true)
+        let controller = TimerController(paths: DaemonPaths(dataDir: "/tmp/unused"), alertDaemon: daemon, notifications: notifications, sounds: FakeSounds(log: log))
+        controller.checkNotifications()
+        controller.handle(event("subscriber", #"{"subscriberId":"s1"}"#))
+        controller.handle(state(timerName: "Quiet", sound: false))
+        await until { controller.alerts.registration == .registered }
+        daemon.holdNextAck()
+        // The daemon sends the alert, then the `state` without the removed timer, before the app's ack is answered.
+        // A daemon that names the timer is used as is; for one that does not, the app takes it on receipt.
+        controller.handle(event("alert", #"{"timerId":"t_1","kind":"finish","at":1000,"alertId":"a1","ackRequired":true\#(fromDaemon)}"#))
+        await until { daemon.holding }
+        controller.handle(noTimers())
+        #expect(controller.timers.isEmpty)
+        daemon.release()
+        await until { !notifications.posted.isEmpty }
+        #expect(log.all == ["register s1", "ack a1", "notify Quiet: Finished."])
+    }
+
+    /// A Restart that launches the app arrives while Node.js is still being located; it runs once it is found.
+    @Test func aRestartBeforeTheRuntimeIsLocatedRunsResetThenStartOnceItIs() async {
+        let (located, locate) = AsyncStream.makeStream(of: Result<Runtime, RuntimeProblem>.self)
+        let controller = TimerController(paths: DaemonPaths(dataDir: "/tmp/unused"), services: services(located), alertDaemon: FakeDaemon(log: log),
+                                         notifications: FakeNotifications(log: log, authorized: false), sounds: FakeSounds(log: log))
+        var errors: [String] = []
+        controller.onError = { errors.append($0) }
+        controller.start()
+        controller.run(.restart, timerId: "t_1")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(log.all.isEmpty && errors.isEmpty)
+        locate.yield(.success(Runtime(node: "/node", nodeVersion: "22.13.0", cli: "/cli.mjs", cliSource: .bundled)))
+        await until { log.all.count == 2 }
+        #expect(log.all == ["reset t_1", "start t_1"])
+        #expect(errors.isEmpty)
+    }
+
+    /// When locating fails, the action reports that problem, not a missing Node.js.
+    @Test func aRestartBeforeTheRuntimeIsLocatedReportsTheRealSetupProblem() async {
+        let (located, locate) = AsyncStream.makeStream(of: Result<Runtime, RuntimeProblem>.self)
+        let controller = TimerController(paths: DaemonPaths(dataDir: "/tmp/unused"), services: services(located), alertDaemon: FakeDaemon(log: log),
+                                         notifications: FakeNotifications(log: log, authorized: false), sounds: FakeSounds(log: log))
+        var errors: [String] = []
+        controller.onError = { errors.append($0) }
+        controller.start()
+        controller.run(.restart, timerId: "t_1")
+        locate.yield(.failure(.bundledMissing("/Timer.app/cli")))
+        await until { !errors.isEmpty }
+        #expect(errors == [RuntimeProblem.bundledMissing("/Timer.app/cli").message])
+        #expect(log.all.isEmpty)
+    }
+
+    /// Locates the runtime from `located`, logs operations instead of running them, and has no event stream.
+    private func services(_ located: AsyncStream<Result<Runtime, RuntimeProblem>>) -> TimerController.Services {
+        let log = log
+        return TimerController.Services(
+            locate: {
+                for await result in located { return result }
+                return .failure(.nodeMissing)
+            },
+            perform: { operation, input, _ in log.add("\(operation) \(input.id ?? "")") },
+            events: { _ in AsyncStream { $0.finish() } })
     }
 
     @Test func aDeniedAppNeverRegisters() async {
