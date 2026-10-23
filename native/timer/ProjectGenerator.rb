@@ -128,18 +128,37 @@ project.predictabilize_uuids
 project.predictabilize_uuids
 
 # Write the project and its scheme to a temporary folder, then move each generated file over its old copy only after
-# both saves succeed. Each move replaces one whole file, and what the generator does not write, such as xcuserdata and
-# project.xcworkspace, is left alone.
+# both saves succeed. What the generator does not write, such as xcuserdata and project.xcworkspace, is left alone.
+# The scheme names a target ID from the project, so the files are installed as a pair: each old copy is hard-linked
+# aside first, and if any step fails or is interrupted, the files already moved are put back before the error is raised.
 Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
   staged_path = File.join(staging, File.basename(project_path))
+  backup_path = File.join(staging, "backup")
   project.save(staged_path)
   scheme = Xcodeproj::XCScheme.new
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, nil, launch_target: true)
   scheme.save_as(staged_path, "Timer", true)
-  Dir.glob("**/*", base: staged_path).reject { |file| File.directory?(File.join(staged_path, file)) }.each do |file|
-    FileUtils.mkdir_p(File.dirname(File.join(project_path, file)))
-    File.rename(File.join(staged_path, file), File.join(project_path, file))
+  installed = []
+  begin
+    Dir.glob("**/*", base: staged_path).sort.reject { |file| File.directory?(File.join(staged_path, file)) }.each do |file|
+      target = File.join(project_path, file)
+      backup = File.exist?(target) ? File.join(backup_path, file) : nil
+      if backup
+        FileUtils.mkdir_p(File.dirname(backup))
+        File.link(target, backup)
+      end
+      FileUtils.mkdir_p(File.dirname(target))
+      installed << [target, backup]
+      File.rename(File.join(staged_path, file), target)
+    end
+  rescue Exception
+    installed.reverse_each do |target, backup|
+      next FileUtils.rm_f(target) unless backup
+      # A rename that did not happen leaves the old copy, which is still the backup's file, in place.
+      File.rename(backup, target) unless File.identical?(backup, target)
+    end
+    raise
   end
 end
 

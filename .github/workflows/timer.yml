@@ -67,6 +67,7 @@ jobs:
           # Regeneration replaces only the files it writes, so local Xcode user data survives it.
           mkdir -p Timer.xcodeproj/xcuserdata/ci.xcuserdatad Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad
           touch Timer.xcodeproj/xcuserdata/ci.xcuserdatad/keep Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad/keep
+          ruby Tests/ProjectGenerator/install_test.rb
           ruby ProjectGenerator.rb
           test -f Timer.xcodeproj/xcuserdata/ci.xcuserdatad/keep && test -f Timer.xcodeproj/project.xcworkspace/xcuserdata/ci.xcuserdatad/keep
           git diff --exit-code -- Timer.xcodeproj
