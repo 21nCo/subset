@@ -69,7 +69,7 @@ public struct OpenRouterProvider: AIProvider {
     /// Available while a key is stored; it is not read, and nothing is sent.
     public func availability() async -> AIAvailability {
         do {
-            return try keys.containsKey() ? .available : .noOpenRouterKey
+            return try keys.containsKey() ? .availableOnOpenRouter : .noOpenRouterKey
         } catch {
             return .openRouterKeyUnreadable
         }

@@ -51,7 +51,7 @@ public final class OpenRouterAccount {
             if OpenRouterProvider.looksLikeKey(model) {
                 model = ""
                 modelError = Self.keyAsModelMessage
-            } else if !model.isEmpty {
+            } else {
                 modelError = nil
             }
             keep(model)

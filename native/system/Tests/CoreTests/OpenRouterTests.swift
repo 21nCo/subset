@@ -144,7 +144,9 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(none, .noOpenRouterKey)
         try? OpenRouterKeyStore(items: keychain).save(Self.key)
         let stored = await provider.availability()
-        XCTAssertEqual(stored, .available)
+        XCTAssertEqual(stored, .availableOnOpenRouter)
+        XCTAssertTrue(stored.isAvailable)
+        XCTAssertFalse(stored.meaning.contains("this Mac"), "it does not say explanations stay on this Mac")
         keychain.failure = errSecInteractionNotAllowed
         let failed = await provider.availability()
         XCTAssertEqual(failed, .openRouterKeyUnreadable)
@@ -709,6 +711,47 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(unread.model, "")
         XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
         for message in log.messages { XCTAssertFalse(message.contains(key), message) }
+    }
+
+    func testEmptyingTheModelIDClearsItsErrorButAKeyEntryStillSaysWhyItWasCleared() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = account(defaults, keychain: keychain)
+
+        // Not a model ID, then emptied: openrouter/auto, with no error left under the empty field.
+        account.model = "gpt-4o"
+        XCTAssertEqual(account.modelError, OpenRouterAccount.notAModelMessage)
+        account.model = ""
+        await account.modelChecked()
+        XCTAssertNil(account.modelError)
+        XCTAssertEqual(account.provider().model, OpenRouterProvider.defaultModel)
+
+        // A model ID that cannot be checked while the key cannot be read, then emptied.
+        let key = "tok-0123456789abcdef"
+        XCTAssertTrue(account.addKey(key))
+        keychain.failure = errSecInteractionNotAllowed
+        account.model = "anthropic/claude-sonnet"
+        await account.modelChecked()
+        XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage)
+        account.model = ""
+        await account.modelChecked()
+        XCTAssertNil(account.modelError)
+        XCTAssertEqual(account.provider().model, OpenRouterProvider.defaultModel)
+
+        // An entry cleared because it holds a key still says why.
+        keychain.failure = nil
+        account.model = "x/sk-or-v1-abc"
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        account.model = "x/\(key)"
+        await account.modelChecked()
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+    }
+
+    func testAppleIntelligenceStillSaysExplanationsAreGeneratedOnThisMac() {
+        XCTAssertEqual(AIAvailability.available.meaning, "Explanations are generated on this Mac.")
+        XCTAssertNotEqual(AIAvailability.availableOnOpenRouter.meaning, AIAvailability.available.meaning)
     }
 
     // MARK: Helpers
