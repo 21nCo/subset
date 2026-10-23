@@ -88,6 +88,11 @@ private func alert(_ id: String?, kind: TimerAlert.Kind = .finish) -> TimerAlert
 private let conflict = DaemonError.rejected(status: 409, TimerError(code: "handler_registered", message: "Another alert handler is registered.", issues: nil))
 
 @MainActor
+private final class Permission {
+    var granted = true
+}
+
+@MainActor
 struct AlertHandlerTests {
     let daemon = FakeAlertDaemon()
 
@@ -150,6 +155,22 @@ struct AlertHandlerTests {
         await handler.receive(alert("a3"))
         #expect(daemon.log == ["register s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "ack a1 s1", "play a1",
                                "ack a2 s1", "ack a2 s1", "ack a3 s1", "ack a3 s1"])
+    }
+
+    @Test func permissionRevokedWithoutACheckIsSeenBeforeTheAckAndHandsAlertsBackToTheDaemon() async {
+        let permission = Permission()
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        await handler.receive(alert("a1"))
+        // Revoked in System Settings: no activation or menu check has run since.
+        permission.granted = false
+        await handler.receive(alert("a2"))
+        await handler.settled()
+        #expect(handler.registration == .inactive)
+        #expect(daemon.log == ["register s1", "ack a1 s1", "play a1", "unregister s1"])
     }
 
     @Test func itRegistersOnlyWhilePermittedAndUnregistersWhenPermissionIsRevoked() async {

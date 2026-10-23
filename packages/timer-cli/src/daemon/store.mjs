@@ -163,11 +163,11 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
       if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
       return { handoffs: [], acknowledged: [] };
     }
-    const list = (key, valid) => (value?.version === MARKS_VERSION && Array.isArray(value[key]) ? value[key].filter(valid) : []);
+    const list = (key, valid) => (value?.version === MARKS_VERSION && Array.isArray(value[key]) ? value[key].filter((item) => valid(item)) : []);
     return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged) };
   }
 
-  /** Saves the marks and, in the same write, the alert checkpoint: handoffs and unanswered acknowledgements. */
+  /** Saves the marks and, in the same write, the alert checkpoint: handoffs and remembered acknowledgements. */
   function saveMarks(marks, { handoffs = [], acknowledged = [] } = {}) {
     const value = { version: MARKS_VERSION, marks };
     if (handoffs.length) value.handoffs = handoffs;

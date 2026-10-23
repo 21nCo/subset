@@ -106,7 +106,7 @@ test('scheduler marks read back; an unreadable or older file is ignored', (t) =>
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
 });
 
-test('alert handoffs and unanswered acknowledgements are saved with the marks and read back; malformed ones are dropped', (t) => {
+test('alert handoffs and acknowledgements are saved with the marks and read back; malformed ones are dropped', (t) => {
   const { paths, stateStore } = storeIn(t);
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];

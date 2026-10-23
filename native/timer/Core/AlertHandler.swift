@@ -110,6 +110,7 @@ public final class AlertHandler {
 
     private let daemon: AlertHandlerDaemon
     private let play: (TimerAlert) -> Void
+    private let isPermitted: @MainActor () async -> Bool
     private let retryDelay: Duration
     private let ackRetryDelay: Duration
     private var subscriberId: String?
@@ -121,12 +122,14 @@ public final class AlertHandler {
     private var retrying: Task<Void, Never>?
 
     /// `play` presents an alert the app has taken over. A registration request the daemon did not answer is tried again
-    /// after `retryDelay`, and at the next permission check; an acknowledgement, after `ackRetryDelay`.
+    /// after `retryDelay`, and at the next permission check; an acknowledgement, after `ackRetryDelay`. `isPermitted`
+    /// reads whether the app may still post notifications, before each acknowledgement.
     public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), ackRetryDelay: Duration = .milliseconds(250),
-                play: @escaping (TimerAlert) -> Void) {
+                isPermitted: @escaping @MainActor () async -> Bool = { true }, play: @escaping (TimerAlert) -> Void) {
         self.daemon = daemon
         self.retryDelay = retryDelay
         self.ackRetryDelay = ackRetryDelay
+        self.isPermitted = isPermitted
         self.play = play
     }
 
@@ -241,6 +244,12 @@ public final class AlertHandler {
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
+        // Permission revoked in System Settings since the last check: the app takes no alert it may not show, and gives
+        // up the handler role, so the daemon plays this alert and the next ones.
+        guard await isPermitted() else {
+            setPermitted(false)
+            return
+        }
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
         // no daemon answered is sent again until one does: one it took gets `.acknowledged` again, from the next daemon
         // too, which the event stream starts, and one it never saw gets `.expired` once its sink has played the alert, or

@@ -22,6 +22,8 @@ const SUBSCRIBER_STALL_MS = 30_000;
 const MAX_QUEUED_ALERT_BYTES = 1024 * 1024;
 /** How long requests already being handled get to finish, with a 503 at most, once shutdown begins. */
 const SHUTDOWN_GRACE_MS = 1_000;
+/** How long shutdown waits for the sink to finish the alerts it played at shutdown (the finish's Glass sounds take about 3 s). */
+const SINK_DRAIN_MS = 5_000;
 const STATUS_BY_CODE = { invalid_input: 400, not_found: 404, invalid_state: 409, limit_reached: 409 };
 /** The name a socket is bound under before it is renamed to `daemon.sock`; no longer than that name. */
 const BIND_NAME = /^\.ds-[0-9a-f]{6}$/;
@@ -95,12 +97,12 @@ export async function startDaemon({
   let store;
   let marks;
   let unsettled;
-  let unanswered;
+  let acknowledged;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
-    ({ handoffs: unsettled, acknowledged: unanswered } = stateStore.loadAlerts());
+    ({ handoffs: unsettled, acknowledged } = stateStore.loadAlerts());
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -168,7 +170,7 @@ export async function startDaemon({
     isOpen: (id) => subscriberIds.has(id),
     owns: () => stillHeld(),
     save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
-    acknowledged: unanswered
+    acknowledged
   });
 
   /**
@@ -225,7 +227,7 @@ export async function startDaemon({
   /** The stretches `scheduler.json` holds marks for, and whether a failed save left it behind. */
   let savedStretches = new Set((marks ?? []).map(stretchKey));
   let marksDirty = false;
-  /** Saves `list` and, with them, the alert handoffs and unanswered acknowledgements. */
+  /** Saves `list` and, with them, the alert handoffs and remembered acknowledgements. */
   function saveMarks(list, checkpoint = alertHandlers.checkpoint) {
     try {
       write(() => stateStore.saveMarks(list, checkpoint));
@@ -456,8 +458,6 @@ export async function startDaemon({
       log(`could not save scheduler.json: ${error.message}`);
       return fail(response, 500, 'storage_failed', 'The daemon could not record the acknowledgement.');
     }
-    // Until its 200 is written the acknowledgement stays saved, for the next daemon to answer.
-    if (result.ok) response.on('finish', () => alertHandlers.answered(alertId));
     settleRequest(response, result, { alertId, acknowledged: true });
   }
 
@@ -566,7 +566,7 @@ export async function startDaemon({
     scheduler.stop();
     // Alerts the handler has not acknowledged are played here rather than lost, unless a successor
     // holds the lock and plays them.
-    alertHandlers.stop({ lockLost });
+    const played = alertHandlers.stop({ lockLost });
     for (const handle of [idleHandle, heartbeatHandle]) if (handle !== null) clock.clearTimeout(handle);
     for (const response of subscribers.keys()) response.end();
     subscribers.clear();
@@ -574,7 +574,7 @@ export async function startDaemon({
     // Requests already being handled answer (a change not yet applied gets 503) before their
     // connections are closed; those still open after the grace are closed then.
     const grace = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
-    server.close(() => {
+    server.close(async () => {
       clearTimeout(grace);
       // Another daemon may have bound the path since; only this daemon's own socket is removed.
       try {
@@ -587,6 +587,14 @@ export async function startDaemon({
       } catch (error) {
         log(`could not remove the lock: ${error.message}`);
       }
+      // The process may exit once closed resolves, so the sink first finishes what shutdown played.
+      await new Promise((resolve) => {
+        const bound = setTimeout(resolve, SINK_DRAIN_MS);
+        played.then(() => {
+          clearTimeout(bound);
+          resolve();
+        });
+      });
       resolveClosed(code);
     });
     server.closeIdleConnections();

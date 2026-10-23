@@ -32,7 +32,9 @@ final class TimerController {
     private var locating: Task<Void, Never>?
 
     /// Makes this app the daemon's alert handler while it may post notifications.
-    private(set) lazy var alerts = AlertHandler(daemon: alertDaemon) { [presenter] alert in presenter.present(alert) }
+    private(set) lazy var alerts = AlertHandler(daemon: alertDaemon,
+                                                isPermitted: { [notifications] in await notifications.isAuthorized() },
+                                                play: { [presenter] alert in presenter.present(alert) })
     private let alertDaemon: AlertHandlerDaemon
     private let notifications: UserNotifying
     private let presenter: AlertPresenter
