@@ -122,9 +122,11 @@ private struct Badge: View {
     }
 }
 
-/// Settings: the Explain provider, its availability, Send folder names, and exactly which fields Explain sends.
+/// Settings: the Explain provider, its availability, Send folder names, exactly which fields Explain sends, and the
+/// OpenRouter key and model.
 struct SettingsView: View {
     @Bindable var center: ExplainCenter
+    let openRouter: OpenRouterAccount
 
     var body: some View {
         Form {
@@ -173,6 +175,7 @@ struct SettingsView: View {
                     + "choose a provider and press Explain.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            OpenRouterSection(account: openRouter)
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 420)

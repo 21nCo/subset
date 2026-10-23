@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let processes = ProcessesWindowModel()
     private let disk = DiskWindowModel()
     private let explain = ExplainCenter.live()
+    private let openRouter = OpenRouterAccount.live()
     private let mainWindowState = MainWindowState()
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
@@ -33,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title: "Settings",
         autosaveName: "SystemSettingsWindow",
         size: NSSize(width: 560, height: 640),
-        content: SettingsView(center: explain)
+        content: SettingsView(center: explain, openRouter: openRouter)
     )
     private var statusMenu: StatusMenuController?
 
@@ -60,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusMenu.update(monitor.summary, logicalCoreCount: nil, topGroups: TopGroups(attribution: nil, samplingFailed: false))
         monitor.start()
+        // Whether an OpenRouter key is stored, read off the main actor.
+        Task { await openRouter.refreshKey() }
     }
 
     func applicationWillTerminate(_: Notification) {
@@ -86,8 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openSystem: mainWindow.show()
         case .settings:
             settingsWindow.show()
-            // Closing Settings only hides it, so the provider's availability is read again each time it is shown.
+            // Closing Settings only hides it, so the provider's availability, and whether an OpenRouter key is
+            // stored, are read again each time it is shown.
             Task { await explain.refreshAvailability() }
+            Task { await openRouter.refreshKey() }
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
