@@ -202,6 +202,87 @@ final class OpenRouterExplainTests: XCTestCase {
         try await until { !account.hasKey }
     }
 
+    /// OpenRouter answers whether it is available from the Keychain alone, so a read that does not answer in time, for
+    /// Settings or as a request is about to be built, is the Keychain not answering: the choice is set back, stored so,
+    /// with the reason, and nothing is previewed or sent.
+    func testAnOpenRouterAvailabilityReadThatDoesNotAnswerInTimeSetsTheChoiceBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account,
+                                   availabilityTimeout: .milliseconds(200))
+        XCTAssertTrue(center.choose(.openRouter))
+
+        // Settings: whether a key is stored is held past the timeout.
+        keychain.holdsOtherCalls = true
+        await center.refreshAvailability()
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
+        keychain.holdsOtherCalls = false
+        keychain.releaseOtherCall()
+
+        // Explain: the read of the key that checks the model ID before the preview is held past the timeout.
+        XCTAssertTrue(center.choose(.openRouter), "the key is still shown as stored")
+        let item = ExplainKey("process:1")
+        keychain.holdsDataReads = true
+        await center.explain(item) { _ in self.request() }
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        XCTAssertTrue(center.choose(.openRouter))
+        XCTAssertEqual(center.state(for: item), .idle, "never previewed, and no failure kept")
+        XCTAssertNil(center.sentText(for: item))
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    /// Only the latest OpenRouter read, not cancelled, that does not answer in time sets the choice back; the on-device
+    /// provider not answering in time keeps its choice.
+    func testOnlyTheLatestOpenRouterReadNotAnsweringInTimeSetsTheChoiceBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let silent = FakeProvider()
+        silent.availabilityGate = AnswerGate()
+        let center = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account, provider: {
+            $0 == .appleIntelligence ? silent : ExplainCenter.liveProvider($0, openRouter: account)
+        }, availabilityTimeout: .milliseconds(300))
+
+        center.choose(.appleIntelligence)
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availabilityStatus, .noAnswer(seconds: 0))
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertNil(center.notice)
+        silent.availabilityGate?.open()
+
+        // Cancelled, as when Settings closes: not set back.
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsOtherCalls = true
+        let cancelled = Task { await center.refreshAvailability() }
+        try await until { keychain.heldOtherCalls == 1 }
+        cancelled.cancel()
+        await cancelled.value
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertNil(center.notice)
+
+        // Overtaken by a later read that answers before it would time out: not set back.
+        let overtaken = Task { await center.refreshAvailability() }
+        try await until { keychain.heldOtherCalls == 2 }
+        keychain.holdsOtherCalls = false
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .availableOnOpenRouter)
+        await overtaken.value
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is kept")
+        XCTAssertNil(center.notice)
+        keychain.releaseOtherCall()
+        keychain.releaseOtherCall()
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
     /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
     /// request is refused before it is previewed, so the key is never shown as the model or sent, and that sets the
     /// choice back, says why, and clears the model ID.
@@ -252,6 +333,38 @@ final class OpenRouterExplainTests: XCTestCase {
         await refusing.confirmSend(item)
         XCTAssertEqual(refusing.choice, .appleIntelligence)
         XCTAssertEqual(refusing.notice, ExplainCenter.notice(.modelHeldKey))
+    }
+
+    /// The key replaced outside System, after the preview was built, by one the model ID holds: OpenRouter refuses the
+    /// confirmed body as it is sent, which sets the choice back, says why, and clears that model ID.
+    func testAModelIDThatHoldsAKeyReplacedAfterThePreviewIsRefusedAsItIsSentAndCleared() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        let other = "tok-0123456789abcdef"
+        account.model = "acme/\(other)"
+        await account.modelChecked()
+        XCTAssertEqual(account.checkedModel, "acme/\(other)")
+        XCTAssertTrue(center.choose(.openRouter))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        XCTAssertNotNil(confirming(center, item), "the model ID does not hold the key stored as it is built")
+
+        try OpenRouterKeyStore(items: keychain).save(other)
+        await center.confirmSend(item)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+        XCTAssertEqual(account.checkedModel, "")
+        XCTAssertEqual(account.model, "")
+        XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+        XCTAssertEqual(defaults.string(forKey: "openRouterModel"), "")
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertTrue(center.choose(.openRouter))
+        XCTAssertEqual(center.state(for: item), .idle)
+        XCTAssertNil(center.sentText(for: item))
     }
 
     func testARequestRefusedBeforeItIsSentKeepsNeitherItsStateNorItsBody() async throws {

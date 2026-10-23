@@ -58,7 +58,7 @@ public struct SendPreview: Equatable, Sendable {
 /// picks that provider again before it finishes.
 ///
 /// OpenRouter (SET-160) can be chosen only while its key is stored. A check that finds it cannot be used (the key
-/// removed or not found, the Keychain not answering, or a model ID entry that held the key or could not be compared
+/// removed or not found, the Keychain not answering, in time or at all, or a model ID entry that held the key or could not be compared
 /// with it) sets the choice back to the on-device provider and says why (`notice`), so the choice never stays on a
 /// provider that cannot run, and what is stored is always what is shown. Until OpenRouter has answered a request whose
 /// body the user confirmed in the send preview this session, every request to it waits in `.confirming` for its own
@@ -305,7 +305,8 @@ public final class ExplainCenter {
     /// is cancelled or the provider changes, which is not a timeout. Settings shows it as checking while it is read,
     /// then what it answered or that it did not answer in time, only while no later read has started and the provider
     /// has not changed since `selection`, so a slow read never replaces a newer one. OpenRouter's answer that no key is
-    /// stored, that it cannot be read, or that the model ID holds it sets the choice back. `beforeSending` reads it as
+    /// stored, that it cannot be read, or that the model ID holds it sets the choice back, and so does its latest read
+    /// not answering in time (a read cancelled, or overtaken by a later one, does not). `beforeSending` reads it as
     /// a request is about to be built (`OpenRouterProvider.availabilityBeforeSending()`), so a model ID holding the key
     /// sets the choice back before anything is previewed.
     private func readAvailability(of provider: any AIProvider, in selection: Int,
@@ -332,6 +333,8 @@ public final class ExplainCenter {
         }
         if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
+            // OpenRouter reads only the Keychain to answer, so the Keychain did not say whether its key is stored.
+            if availability == nil { setBack(.keyUnreadable) }
         }
         if selection == self.selection, let availability { noteOpenRouter(availability, from: provider) }
         return availability
@@ -344,7 +347,7 @@ public final class ExplainCenter {
     /// has not been yet, no answer is kept, and the item can be explained again at once; when
     /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
-    /// asked again. When the caller is cancelled, nothing more is sent, no failure is kept, and the item can be asked
+    /// asked again; OpenRouter not saying in time whether it is available sets the choice back instead. When the caller is cancelled, nothing more is sent, no failure is kept, and the item can be asked
     /// again. While the OpenRouter key is being changed, an OpenRouter request fails at once and nothing is sent.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
