@@ -130,17 +130,20 @@ project.predictabilize_uuids
 # Write the project and its scheme to a temporary folder, then move each generated file over its old copy only after
 # both saves succeed. What the generator does not write, such as xcuserdata and project.xcworkspace, is left alone.
 # The scheme names a target ID from the project, so the files are installed as a pair: each old copy is hard-linked
-# aside first, and if any step fails or is interrupted, the files already moved are put back before the error is raised.
+# into a backup folder first, and if any step fails or is interrupted, every file already moved is put back before the
+# error is raised. If a file cannot be put back, the backup folder is kept and the error names it.
 Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
   staged_path = File.join(staging, File.basename(project_path))
-  backup_path = File.join(staging, "backup")
   project.save(staged_path)
   scheme = Xcodeproj::XCScheme.new
   scheme.doc.root.attributes["LastUpgradeVersion"] = "2640"
   scheme.configure_with_targets(app_target, nil, launch_target: true)
   scheme.save_as(staged_path, "Timer", true)
+  backup_path = nil
   installed = []
+  unrestored = []
   begin
+    backup_path = Dir.mktmpdir("Timer-xcodeproj-backup", __dir__)
     Dir.glob("**/*", base: staged_path).sort.reject { |file| File.directory?(File.join(staged_path, file)) }.each do |file|
       target = File.join(project_path, file)
       backup = File.exist?(target) ? File.join(backup_path, file) : nil
@@ -152,13 +155,24 @@ Dir.mktmpdir("Timer-xcodeproj", __dir__) do |staging|
       installed << [target, backup]
       File.rename(File.join(staged_path, file), target)
     end
-  rescue Exception
+  rescue Exception => error
+    # Try every restore, even after one fails.
     installed.reverse_each do |target, backup|
-      next FileUtils.rm_f(target) unless backup
+      if backup.nil?
+        File.unlink(target) if File.exist?(target)
       # A rename that did not happen leaves the old copy, which is still the backup's file, in place.
-      File.rename(backup, target) unless File.identical?(backup, target)
+      elsif !File.identical?(backup, target)
+        File.rename(backup, target)
+      end
+    rescue Exception => restore_error
+      unrestored << "#{target} (#{restore_error.class}: #{restore_error.message})"
     end
-    raise
+    raise error if unrestored.empty?
+    raise "Installing #{project_path} failed (#{error.class}: #{error.message}), and these files could not be put " \
+      "back: #{unrestored.join(", ")}. The previous files are kept in #{backup_path}; copy them back into " \
+      "#{project_path}, or run ruby ProjectGenerator.rb again."
+  ensure
+    FileUtils.rm_rf(backup_path) if backup_path && unrestored.empty?
   end
 end
 
