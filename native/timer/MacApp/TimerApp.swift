@@ -31,12 +31,22 @@ enum TimerApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let controller = TimerController()
+    private let notifications = SystemUserNotifications()
+    private lazy var controller = TimerController(notifications: notifications)
     private var statusMenu: StatusMenuController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        notifications.onAction = { [controller] action, timerId in controller.run(action, timerId: timerId) }
+        notifications.activate()
         statusMenu = StatusMenuController(controller: controller)
         controller.start()
+        // Asks for notification permission the first time; while it is granted, the app plays Timer's alerts.
+        controller.checkNotifications(ask: true)
+    }
+
+    /// Permission may have changed in System Settings meanwhile.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        controller.checkNotifications()
     }
 
     /// Quitting stops only the board server this app started; the daemon and its timers keep running.

@@ -72,9 +72,14 @@ export function rawRequest(socketPath, method, path, body) {
   });
 }
 
-/** Collects server-sent events from `/v1/events` in arrival order. */
+/**
+ * Collects server-sent events from `/v1/events` in arrival order. The `subscriber` event that opens
+ * each stream is kept apart, as `subscriberId`, so `events` holds what follows it.
+ */
 export function subscribe(socketPath) {
   const events = [];
+  let subscriberId = null;
+  let firstEvent = null;
   const waiters = [];
   let buffer = '';
   const check = () => {
@@ -98,7 +103,9 @@ export function subscribe(socketPath) {
           buffer = buffer.slice(end + 2);
           const event = /^event: (.*)$/m.exec(block)?.[1];
           const data = /^data: (.*)$/m.exec(block)?.[1];
-          events.push({ event, data: JSON.parse(data) });
+          firstEvent ??= event;
+          if (event === 'subscriber') subscriberId = JSON.parse(data).subscriberId;
+          else events.push({ event, data: JSON.parse(data) });
         }
         check();
       });
@@ -115,6 +122,13 @@ export function subscribe(socketPath) {
     connected,
     get ended() {
       return ended;
+    },
+    get subscriberId() {
+      return subscriberId;
+    },
+    /** The name of the stream's first event. */
+    get firstEvent() {
+      return firstEvent;
     },
     waitFor(predicate, timeoutMs = 5_000) {
       if (predicate(events)) return Promise.resolve(events);

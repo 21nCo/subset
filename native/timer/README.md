@@ -2,7 +2,7 @@
 
 **Timer** shows the running timer that ends soonest in the menu bar and lists every timer with its controls. From the menu you can start presets and countdowns and open the web board. It is a native client of the per-user Timer daemon, the same one the `subset-timer` CLI, its MCP server and the web board use ([`@subset.dev/timer`](../../packages/timer-cli/README.md)). The app embeds the CLI runtime, as [Minutes](../minutes/README.md) does, so it needs no separate `npm install`. **Node.js 22.13 or later must be installed** (the CLI's `engines`). The app does not bundle Node.
 
-Status: builds and passes its tests. It is not signed or released, and no surface is listed as available. Using it on a real Mac and the visual review are deferred to SET-85, VoiceOver to SET-86, and the signed beta to SET-87. Native notifications and sounds are SET-82; until then the daemon's own alert sink plays them.
+Status: builds and passes its tests. It is not signed or released, and no surface is listed as available. Using it on a real Mac and the visual review are deferred to SET-85, VoiceOver to SET-86, and the signed beta to SET-87. While it is allowed to post notifications, the app plays Timer's alerts itself (see [Alerts](#alerts)); the real permission prompt, audible sounds, visible notifications and the locked screen are checked in SET-85, not here.
 
 ## Capability boundary
 
@@ -12,7 +12,7 @@ Status: builds and passes its tests. It is not signed or released, and no surfac
 | Source of truth | The daemon's `state.json`, in `~/.local/share/subset/timer` (or `SUBSET_TIMER_DATA_DIR`). The app holds no timer state. It shows what the daemon last published and works out the time left from the timestamps. |
 | Writes | Only through daemon operations (`POST /v1/ops/<name>`). The app never writes the store. |
 | Network | None. The app talks to the daemon over its Unix socket only. **Download Node.js** opens nodejs.org in the browser, and only when you choose it. |
-| Not included | Launch at login, iOS, bundling Node.js, editing interval sequences (the web board does that), native notifications and sounds (SET-82), signing and releases. |
+| Not included | Launch at login, iOS, bundling Node.js, editing interval sequences (the web board does that), signing and releases. For alerts: Focus or Do Not Disturb overrides, critical alerts and custom sounds. |
 
 ### Menu
 
@@ -23,11 +23,22 @@ Status: builds and passes its tests. It is not signed or released, and no surfac
 | Start ▸ | The built-in presets, then the saved ones, from `GET /v1/presets`. Choosing one runs `start` with that preset. |
 | New Countdown… | A small window with a duration field (`90s`, `25m`, `1h30m`, `1:30` or `1:02:03`, from 1 second to 24 hours, checked as the CLI checks it) and an optional name. **Start** stays disabled until the duration is valid, and the daemon's own errors appear in the window. The fields take the usual Command-X, C, V, A and Z. |
 | Open Board | Runs `node cli.mjs serve --json`, which starts the local web board and opens it in the browser. While that server starts or runs, choosing Open Board again starts no second server; once it is serving, it reopens its URL. If `serve` fails, the app shows the CLI's error. Quitting the app stops the server. |
-| About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path, the connection state and any timer state the app could not read, or the setup problem. |
+| About Timer | The standard About panel, with the Node.js and CLI the app uses, the socket path, the connection state, whether the app or the daemon plays alerts, and any timer state the app could not read, or the setup problem. |
 | Daemon problems | While the event stream is down, the menu shows **Reconnecting to the Timer daemon…** and the error. A `state` event the app cannot read (another schema version or a malformed body) shows its error without that heading, until a readable one arrives. |
 | Setup problems | Without a supported Node.js, the menu shows "Node.js 22.13 or later is required" and **Download Node.js from nodejs.org…**. A missing CLI shows its path. **Check Again** searches again. |
 
 While the menu is closed, only the status item updates, about once a second, at the moment its shown second changes. While the menu is open, the timer rows update with it, and a row whose timer finishes gets the controls of a finished timer. Quitting the app does not stop the daemon or the timers.
+
+## Alerts
+
+When the app runs and may post notifications, it owns Timer's alerts; otherwise the daemon's own sink (`osascript` and `afplay`, see the [CLI alerts](../../packages/timer-cli/README.md#alerts)) plays them. Each alert plays exactly once, through the daemon's [alert handler protocol](../../packages/timer-cli/README.md#alert-handler).
+
+- **Permission:** at launch the app asks for permission to post notifications. macOS shows the prompt only until the user answers; after that it returns their answer. The app checks again whenever it becomes active and whenever its menu opens, so a change in System Settings takes effect then. Outside an app bundle (`swift run`) there is no notification center, so the app leaves alerts to the daemon.
+- **Ownership:** each `/v1/events` stream starts with a `subscriber` event. While permission is granted, the app registers that stream with `POST /v1/alert-handlers`, and when permission is revoked it unregisters with `DELETE`. A dropped stream is unregistered by the daemon. When the stream reconnects, the app registers the new stream. If another handler is already registered (409), the About panel says so, and the app tries again at the next check.
+- **Ack, then play:** for each alert with `ackRequired`, the app first sends `POST /v1/alerts/<alertId>/ack`. It plays the alert only if the daemon answers 200. A 410 means the daemon already played it after 2 seconds without an ack, so the app plays nothing. A failed request is retried once; a repeated ack gets the same answer. Alerts without `ackRequired` belong to the daemon.
+- **What plays:** when the timer's `sound` is on, a tick plays Tink, a new step plays Pop and the finish plays Glass three times, one after another (`NSSound`, built-in sounds only). A finish or a `missedWhileAway` alert also posts a notification titled with the timer's name, with the daemon's wording ("Finished.", "Missed 3 alerts while away. Now: Work."). The notification uses the normal interruption level, so Focus applies, and has no sound of its own.
+- **Actions:** **Restart** runs `reset`, then `start` (only if the reset succeeded), on the notification's timer, and shows a failure as any other operation's. **Dismiss** just closes the notification.
+- **About Timer** shows whether alerts are played by the app or by the daemon.
 
 ## Daemon client (TimerCore)
 
@@ -69,7 +80,9 @@ The app target is named `Timer` and its bundle ID is `dev.subset.timer` (`LSUIEl
 - **Projection and formatting:** the Swift projection reproduces every fixture projection, and `TimerFormat.line` reproduces the agent result's text exactly. Also covered: time left from timestamps, the soonest-running choice, `until` countdowns, and duration parsing.
 - **`RuntimeLocator` order:** checked with a fake file system and process runner.
 - **Board process and menu state:** with a fake `serve`, Open Board while the server starts launches no second process, Quit stops it, and a `serve --json` failure shows the CLI's error. A `state` event the app cannot read (an unsupported schema or a malformed body) shows as its own problem, not as reconnecting, until a readable one arrives; a disconnect shows reconnecting until the stream connects again.
-- **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down.
+- **Alert handler (`AlertHandlerTests`, fake daemon):** the ack comes before the play; nothing plays after a 410, after a 409 or for an alert without `ackRequired`; a failed ack is retried once and plays only on the daemon's 200; the app registers only while permitted and unregisters when permission is revoked, after which it acks nothing; a new event stream is registered without unregistering the closed one; a refused registration is reported and retried at the next check; the daemon's alert JSON decodes.
+- **Alerts in the app (`AlertTests`, fake notification center and sound player):** Tink, Pop and Glass ×3 by kind; notifications for the finish and missed alerts name the timer, or "Timer" for one the app has not seen; a timer with sound off only notifies; Restart runs `reset` then `start` and stops after a failed reset, and Dismiss runs nothing; through `TimerController`, the launch asks for permission, registers the stream from its `subscriber` event, acks before it plays, plays nothing after a 410, and unregisters and stops acking once permission is revoked; a denied app never registers.
+- **Integration (only when `SUBSET_TIMER_CLI_PATH` is set):** launches a real daemon in a temporary folder, starts a Tabata over the socket, receives the `state` events, checks a rejected operation, and shuts the daemon down. A second run checks the alert handler routes against the real daemon: two streams get their subscriber ids, the second registration is refused 409, an ack within 2 seconds is accepted, and one sent after 2.5 seconds gets 410.
 
 The **Timer macOS** workflow (`.github/workflows/timer.yml`, `macos-26`) runs `npm ci --ignore-scripts && npm run build`, `swift test` with `SUBSET_TIMER_CLI_PATH` set, the project-regeneration check, and an unsigned Release `xcodebuild`, then checks that the embedded runtime is present.
 

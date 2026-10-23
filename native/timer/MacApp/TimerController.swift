@@ -24,9 +24,27 @@ final class TimerController {
     /// Shows an operation's failure.
     var onError: (String) -> Void = { _ in }
 
-    let paths = DaemonPaths.resolve()
+    let paths: DaemonPaths
     private var client: DaemonClient { DaemonClient(paths: paths) }
     private var subscription: Task<Void, Never>?
+
+    /// Makes this app the daemon's alert handler while it may post notifications.
+    private(set) lazy var alerts = AlertHandler(daemon: alertDaemon) { [weak self] alert in self?.present(alert) }
+    private let alertDaemon: AlertHandlerDaemon
+    private let notifications: UserNotifying
+    private let presenter: AlertPresenter
+    /// Counts permission checks, so an older answer that arrives late is ignored.
+    private var permissionChecks = 0
+    /// Set while macOS may be asking the user; its answer is the one that counts.
+    private var askingPermission = false
+
+    init(paths: DaemonPaths = .resolve(), alertDaemon: AlertHandlerDaemon? = nil, notifications: UserNotifying = SystemUserNotifications(),
+         sounds: SoundPlaying = SystemSoundPlayer()) {
+        self.paths = paths
+        self.alertDaemon = alertDaemon ?? DaemonClient(paths: paths)
+        self.notifications = notifications
+        presenter = AlertPresenter(notifications: notifications, sounds: sounds)
+    }
 
     func start() {
         subscription?.cancel()
@@ -67,7 +85,17 @@ final class TimerController {
         switch update {
         case .connected:
             connectionProblem = nil
+            alerts.subscribed(nil)
             refreshPresets()
+        case .event(let event) where event.event == "subscriber":
+            struct Subscriber: Decodable { var subscriberId: String }
+            alerts.subscribed(try? JSONDecoder().decode(Subscriber.self, from: Data(event.data.utf8)).subscriberId)
+            return
+        case .event(let event) where event.event == "alert":
+            // An alert this app cannot read is not acknowledged, so the daemon plays it.
+            guard let alert = try? JSONDecoder().decode(TimerAlert.self, from: Data(event.data.utf8)) else { return }
+            Task { await alerts.receive(alert) }
+            return
         case .event(let event) where event.event == "state":
             do {
                 timers = try DaemonClient.board(from: Data(event.data.utf8)).timers.map(\.stored)
@@ -79,8 +107,36 @@ final class TimerController {
             return
         case .disconnected(let error, _):
             connectionProblem = error?.localizedDescription ?? "The Timer daemon closed the connection."
+            alerts.subscribed(nil)
         }
         onChange()
+    }
+
+    /// Reads whether the app may post notifications, asking first when `ask` is set (macOS asks the user only until they
+    /// answer), and registers as the alert handler only while it may.
+    func checkNotifications(ask: Bool = false) {
+        if askingPermission, !ask { return }
+        askingPermission = ask
+        permissionChecks += 1
+        let check = permissionChecks
+        Task {
+            let granted = ask ? await notifications.requestAuthorization() : await notifications.isAuthorized()
+            guard check == permissionChecks else { return }
+            askingPermission = false
+            alerts.setPermitted(granted)
+        }
+    }
+
+    /// Plays an alert the daemon handed over, naming its timer as last published.
+    private func present(_ alert: TimerAlert) {
+        presenter.present(alert, timer: timers.first { $0.definition.id == alert.timerId }?.definition)
+    }
+
+    /// Runs a notification action on its timer and shows a failure.
+    func run(_ action: NotificationAction, timerId: String) {
+        Task {
+            if let message = await action.run(timerId: timerId, perform: { await self.perform($0, $1) }) { onError(message) }
+        }
     }
 
     func refreshPresets() {
