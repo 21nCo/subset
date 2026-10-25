@@ -423,6 +423,32 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.tree.item(at: "plain.d")?.kind, .directory, "an extension alone does not make a package")
         XCTAssertEqual(result.entriesRead, 6, "the package's contents are read for its total")
         XCTAssertEqual(result.tree.count, 3)
+        XCTAssertEqual(result.largestFiles, [package.index], "the package is one item; folders are never listed")
+    }
+
+    func testTheLargestFilesAreWorkedOutOnceLargestFirstUpToTheLimit() async throws {
+        let limit = DiskScanResult.largestFileLimit
+        // More files than the limit, in nested folders, with distinct allocated sizes, and two of the same size.
+        for folder in 0..<3 {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("f\(folder)"),
+                                                    withIntermediateDirectories: false)
+        }
+        for number in 1...(limit + 5) {
+            try Self.write(root.appendingPathComponent("f\(number % 3)/file\(number)"), bytes: number * 8_192)
+        }
+        try Self.write(root.appendingPathComponent("f0/twin"), bytes: (limit + 5) * 8_192)
+
+        let result = try await DiskScanner().scan(root)
+        let tree = result.tree
+        XCTAssertEqual(result.largestFiles, tree.largestFiles(limit: limit))
+        XCTAssertEqual(result.largestFiles.count, limit)
+        let sizes = result.largestFiles.map { tree[$0].sizes?.allocated ?? 0 }
+        XCTAssertEqual(sizes, sizes.sorted(by: >))
+        let names = result.largestFiles.map { tree[$0].name }
+        XCTAssertEqual(Array(names.prefix(2)).sorted(), ["file\(limit + 5)", "twin"])
+        XCTAssertLessThan(try XCTUnwrap(result.largestFiles.first), try XCTUnwrap(result.largestFiles.dropFirst().first),
+                          "items of the same size are in tree order")
+        XCTAssertFalse(names.contains("file1"), "only the largest are kept")
     }
 
     func testLaunchServicesIsNotAskedInsideAPackage() async throws {
@@ -483,6 +509,7 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertEqual(result.totals?.logical, 101_000)
         XCTAssertEqual(result.entriesRead, expected.entries)
         XCTAssertEqual(result.outcome, .completed)
+        XCTAssertEqual(result.largestFiles, [0], "a package chosen as the root is one item, and the largest")
     }
 
     func testRootsOwnAllocationCountsOnAVolumeThatAllocatesFolders() async throws {
@@ -589,6 +616,7 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertNil(chosen.totals)
         XCTAssertTrue(chosen.tree.root.flags.contains(.unreadable))
         XCTAssertEqual(chosen.unreadablePaths, [bundle.path])
+        XCTAssertEqual(chosen.largestFiles, [], "a package that could not be read has no size to list")
     }
 
     func testUnreadableFolderInsideAPackageLeavesThePackageSizedAndIncomplete() async throws {

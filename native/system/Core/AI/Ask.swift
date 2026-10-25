@@ -69,7 +69,7 @@ public struct AskSendGate: Sendable {
     }
 
     /// Sends nothing that needs confirming: for tests and providers on this Mac.
-    public static let none = AskSendGate(confirm: { _ in false }, answered: { _, _ in })
+    public static let none = AskSendGate(confirm: { _ in false }, answered: { _, _ in /* Nothing was confirmed. */ })
 
     public func check() async throws -> Int {
         try await startCheck()

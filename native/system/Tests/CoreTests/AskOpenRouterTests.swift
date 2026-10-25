@@ -20,8 +20,8 @@ final class AskOpenRouterTests: XCTestCase {
 
     func testToolResultsGoBackInTheNextRequestAfterTheFirstIsPreviewed() async throws {
         let (ask, explain, source, _) = try await chosen()
-        StubProtocol.enqueue(status: 200, json: toolCalls([("call-1", "topGroups", #"{"metric":"memory","layer":"project"}"#)]))
-        StubProtocol.enqueue(status: 200, json: completion("Your project [g2] uses the most."))
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("call-1", "topGroups", #"{"metric":"memory","layer":"project"}"#)]))
+        StubProtocol.enqueue(status: 200, json: try completion("Your project [g2] uses the most."))
         XCTAssertTrue(ask.ask("What is using the most memory?"))
         let preview = try await previewShown(ask)
         XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing is sent before Send")
@@ -56,7 +56,7 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(exchange.sent, sent, "What was sent shows both bodies")
 
         // A follow-up is sent without a preview, with the thread's question and answer.
-        StubProtocol.enqueue(status: 200, json: completion("Yes."))
+        StubProtocol.enqueue(status: 200, json: try completion("Yes."))
         XCTAssertTrue(ask.ask("Is that normal?"))
         await ask.settled()
         let followUp = try XCTUnwrap(try json(StubProtocol.requests[2].body ?? Data())["messages"] as? [[String: Any]])
@@ -79,9 +79,9 @@ final class AskOpenRouterTests: XCTestCase {
     func testAfterFourToolCallsOpenRouterIsAskedToAnswer() async throws {
         let (ask, explain, source, _) = try await chosen()
         explain.sendConfirmed = true
-        StubProtocol.enqueue(status: 200, json: toolCalls((1...3).map { ("a\($0)", "memoryState", "{}") }))
-        StubProtocol.enqueue(status: 200, json: toolCalls([("b1", "diskSummary", "{}"), ("b2", "reclaimSuggestions", "{}")]))
-        StubProtocol.enqueue(status: 200, json: completion("Memory is under pressure."))
+        StubProtocol.enqueue(status: 200, json: try toolCalls((1...3).map { ("a\($0)", "memoryState", "{}") }))
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("b1", "diskSummary", "{}"), ("b2", "reclaimSuggestions", "{}")]))
+        StubProtocol.enqueue(status: 200, json: try completion("Memory is under pressure."))
         try await answer(ask, "Why is my Mac slow?")
         XCTAssertEqual(source.ran, ["memoryState", "memoryState", "memoryState", "diskSummary"])
         let bodies = try StubProtocol.requests.map { try json($0.body ?? Data()) }
@@ -93,8 +93,8 @@ final class AskOpenRouterTests: XCTestCase {
 
         // Tools asked for after the limit are outside the format.
         StubProtocol.reset()
-        StubProtocol.enqueue(status: 200, json: toolCalls((1...4).map { ("c\($0)", "memoryState", "{}") }))
-        StubProtocol.enqueue(status: 200, json: toolCalls([("d1", "memoryState", "{}")]))
+        StubProtocol.enqueue(status: 200, json: try toolCalls((1...4).map { ("c\($0)", "memoryState", "{}") }))
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("d1", "memoryState", "{}")]))
         try await answer(ask, "And now?")
         XCTAssertEqual(ask.exchanges.last?.state,
                        .failed("The answer was rejected: The model asked for more tools after its 4."))
@@ -111,6 +111,20 @@ final class AskOpenRouterTests: XCTestCase {
         await ask.settled()
         XCTAssertEqual(ask.exchanges.last?.state, .failed(OpenRouterProvider.keyChanged))
         XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
+    func testAQuestionFailingAfterAToolRoundTripKeepsWhatWasSentAndTheTools() async throws {
+        let (ask, explain, _, _) = try await chosen()
+        explain.sendConfirmed = true
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("call-1", "memoryState", "{}")]))
+        StubProtocol.enqueue(status: 400, json: #"{"error":{"code":400,"message":"No endpoints support tools."}}"#)
+        try await answer(ask, "Why?")
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed("OpenRouter answered 400 (bad request): No endpoints support tools."))
+        let sent = StubProtocol.requests.compactMap(\.body)
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(exchange.sent, sent, "both bodies left this Mac, the second with the tool's result")
+        XCTAssertEqual(exchange.tools, [AskToolRecord(call: "memoryState()", ran: true)])
     }
 
     func testAnOpenRouterErrorIsShownAndNothingMoreIsSent() async throws {
@@ -131,7 +145,8 @@ final class AskOpenRouterTests: XCTestCase {
         for afterPreview in [false, true] {
             StubProtocol.reset()
             let setup = try await openRouterChosen()
-            let ask = setup.ask, explain = setup.explain
+            let ask = setup.ask
+            let explain = setup.explain
             if afterPreview {
                 XCTAssertTrue(ask.ask("Why is my Mac slow?"))
                 let preview = try await previewShown(ask)
@@ -179,8 +194,9 @@ final class AskOpenRouterTests: XCTestCase {
     /// exactly the body shown is sent.
     func testAnOlderFailingCheckOvertakenByAQuestionSetsNothingBack() async throws {
         let setup = try await openRouterChosen()
-        let ask = setup.ask, keychain = setup.keychain
-        StubProtocol.enqueue(status: 200, json: completion("Earlier."))
+        let ask = setup.ask
+        let keychain = setup.keychain
+        StubProtocol.enqueue(status: 200, json: try completion("Earlier."))
         setup.explain.sendConfirmed = true
         try await answer(ask, "What is using the most memory?")
         setup.explain.sendConfirmed = false
@@ -201,7 +217,7 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(ask.exchanges.count, 2, "the thread is kept")
         XCTAssertEqual(ask.exchanges.last?.state, .confirming(preview), "the newer preview is kept")
 
-        StubProtocol.enqueue(status: 200, json: completion("Memory is under pressure."))
+        StubProtocol.enqueue(status: 200, json: try completion("Memory is under pressure."))
         ask.confirmSend(preview)
         await ask.settled()
         XCTAssertEqual(StubProtocol.requests.last?.body, preview.body)
@@ -212,8 +228,9 @@ final class AskOpenRouterTests: XCTestCase {
     /// stored again: it fails only its own question, saying what it found, and changes no provider and no thread.
     func testAQuestionsRefusalOvertakenByALaterCheckEndsOnlyThatQuestion() async throws {
         let setup = try await openRouterChosen()
-        let ask = setup.ask, keychain = setup.keychain
-        StubProtocol.enqueue(status: 200, json: completion("Earlier."))
+        let ask = setup.ask
+        let keychain = setup.keychain
+        StubProtocol.enqueue(status: 200, json: try completion("Earlier."))
         setup.explain.sendConfirmed = true
         try await answer(ask, "What is using the most memory?")
         setup.explain.sendConfirmed = false
@@ -247,9 +264,10 @@ final class AskOpenRouterTests: XCTestCase {
         for replacing in [false, true] {
             StubProtocol.reset()
             let setup = try await openRouterChosen()
-            let ask = setup.ask, keychain = setup.keychain
+            let ask = setup.ask
+            let keychain = setup.keychain
             setup.explain.sendConfirmed = true
-            StubProtocol.enqueue(status: 200, json: completion("Answered."))
+            StubProtocol.enqueue(status: 200, json: try completion("Answered."))
             keychain.holdsDataReads = true
             XCTAssertTrue(ask.ask("Why is my Mac slow?"))
             try await until { keychain.heldDataReads == 1 }
@@ -293,7 +311,8 @@ final class AskOpenRouterTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         let keychain = FakeKeychain()
         try OpenRouterKeyStore(items: keychain).save(Self.key)
-        let client = OpenRouterClient(session: StubProtocol.session(), log: RecordingLog(), sleep: { _ in })
+        let client = OpenRouterClient(session: StubProtocol.session(), log: RecordingLog(),
+                                      sleep: { _ in /* Retries are not waited for in tests. */ })
         let account = OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults,
                                         log: RecordingLog())
         await account.refreshKey()
@@ -337,19 +356,19 @@ final class AskOpenRouterTests: XCTestCase {
         throw CancellationError()
     }
 
-    private func completion(_ content: String) -> String {
-        text(["choices": [["message": ["role": "assistant", "content": content]]]])
+    private func completion(_ content: String) throws -> String {
+        try text(["choices": [["message": ["role": "assistant", "content": content]]]])
     }
 
-    private func toolCalls(_ calls: [(id: String, name: String, arguments: String)]) -> String {
-        text(["choices": [["finish_reason": "tool_calls", "message": [
+    private func toolCalls(_ calls: [(id: String, name: String, arguments: String)]) throws -> String {
+        try text(["choices": [["finish_reason": "tool_calls", "message": [
             "role": "assistant", "content": NSNull(),
             "tool_calls": calls.map { ["id": $0.id, "type": "function", "function": ["name": $0.name, "arguments": $0.arguments]] }
         ] as [String: Any]]]])
     }
 
-    private func text(_ object: [String: Any]) -> String {
-        String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    private func text(_ object: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 
     private func json(_ data: Data?) throws -> [String: Any] {

@@ -160,6 +160,49 @@ final class AskTests: XCTestCase {
         XCTAssertNil(ask.notice)
     }
 
+    func testResultsStayWithinTheirBudgetAndThingsLeftOutGetNoID() throws {
+        let source = FakeAskSource()
+        source.bulky = true
+        let toolbox = AskToolbox(source: source, redactor: redactor)
+        toolbox.begin(1, redactor: redactor)
+        func listed(_ result: String, prefix: String, total: Int) throws -> Int {
+            XCTAssertLessThanOrEqual(result.count, AskToolbox.resultLimit)
+            let object = try json(result)
+            let ids = (object["results"] as? [[String: Any]] ?? []).map { $0["id"] as? String }
+            XCTAssertEqual(object["notListed"] as? Int, total - ids.count, "everything left out is counted")
+            XCTAssertEqual(ids, (0..<ids.count).map { "\(prefix)\($0 + 1)" })
+            return ids.count
+        }
+        // Twenty suggestions with every text at its cap, five more not listed by the source, and twenty long items.
+        let suggestions = toolbox.call("reclaimSuggestions", arguments: Data(), question: 1)
+        let suggestionsListed = try listed(suggestions, prefix: "s", total: 25)
+        XCTAssertTrue((1..<20).contains(suggestionsListed), suggestions)
+        XCTAssertNil(toolbox.target(for: "s\(suggestionsListed + 1)"), "what is left out has no id")
+        let items = toolbox.call("largestItems", arguments: Data(#"{"limit":20}"#.utf8), question: 1)
+        let itemsListed = try listed(items, prefix: "d", total: 20)
+        XCTAssertTrue((1..<20).contains(itemsListed), items)
+        XCTAssertNil(toolbox.target(for: "d\(itemsListed + 1)"), "what is left out has no id")
+
+        // Results list things only within the question's budget, until it is used up.
+        var used = suggestions.count + items.count
+        XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit)
+        var later: [Int] = []
+        for _ in 1...2 {
+            let result = toolbox.call("largestItems", arguments: Data(), question: 1)
+            let count = try listed(result, prefix: "d", total: 20)
+            if count > 0 { XCTAssertLessThanOrEqual(used + result.count, AskToolbox.questionLimit) }
+            used += result.count
+            later.append(count)
+        }
+        XCTAssertEqual(later.last, 0, "the question's budget is used up: \(later)")
+
+        // The next question has its own budget, and the same things keep their ids.
+        toolbox.begin(2, redactor: redactor)
+        let again = toolbox.call("reclaimSuggestions", arguments: Data(), question: 2)
+        XCTAssertEqual(try listed(again, prefix: "s", total: 25), suggestionsListed)
+        XCTAssertEqual(again, suggestions)
+    }
+
     // MARK: Answers
 
     func testAnswersArePlainTextWithinTheLimit() throws {
@@ -360,28 +403,28 @@ final class AskTests: XCTestCase {
 /// A provider that makes its scripted tool calls, keeps their results, and answers `answer`.
 final class ScriptedProvider: AIProvider, @unchecked Sendable {
     private let lock = NSLock()
-    private var _calls: [(String, String)] = []
-    private var _answer = "An answer."
-    private var _failure: (any Error)?
-    private var _prompts: [AskPrompt] = []
-    private var _results: [String] = []
+    private var storedCalls: [(String, String)] = []
+    private var storedAnswer = "An answer."
+    private var storedFailure: (any Error)?
+    private var storedPrompts: [AskPrompt] = []
+    private var storedResults: [String] = []
     /// Holds each answer, after the tool calls, until the test opens it.
     var hold: AnswerGate?
 
     var calls: [(String, String)] {
-        get { lock.withLock { _calls } }
-        set { lock.withLock { _calls = newValue } }
+        get { lock.withLock { storedCalls } }
+        set { lock.withLock { storedCalls = newValue } }
     }
     var answer: String {
-        get { lock.withLock { _answer } }
-        set { lock.withLock { _answer = newValue } }
+        get { lock.withLock { storedAnswer } }
+        set { lock.withLock { storedAnswer = newValue } }
     }
     var failure: (any Error)? {
-        get { lock.withLock { _failure } }
-        set { lock.withLock { _failure = newValue } }
+        get { lock.withLock { storedFailure } }
+        set { lock.withLock { storedFailure = newValue } }
     }
-    var prompts: [AskPrompt] { lock.withLock { _prompts } }
-    var results: [String] { lock.withLock { _results } }
+    var prompts: [AskPrompt] { lock.withLock { storedPrompts } }
+    var results: [String] { lock.withLock { storedResults } }
 
     func availability() async -> AIAvailability { .available }
 
@@ -390,10 +433,10 @@ final class ScriptedProvider: AIProvider, @unchecked Sendable {
     }
 
     func ask(_ prompt: AskPrompt, tools: AskTools, gate _: AskSendGate) async throws -> String {
-        lock.withLock { _prompts.append(prompt) }
+        lock.withLock { storedPrompts.append(prompt) }
         for (name, arguments) in calls {
             let result = await tools.call(name, arguments: Data(arguments.utf8))
-            lock.withLock { _results.append(result) }
+            lock.withLock { storedResults.append(result) }
         }
         await hold?.pass()
         if let failure { throw failure }
@@ -408,6 +451,9 @@ final class FakeAskSource: AskSource {
     static let project = OriginGroupID(.project(path: "/Users/jdoe/dev/secret-project"))
     private(set) var ran: [String] = []
     private(set) var selected: [AskTarget] = []
+    /// Lists twenty disk items and twenty suggestions, every text at its cap, as the largest results could be.
+    var bulky = false
+    private static let long = String(repeating: "long text ", count: 40)
 
     func topGroups(by metric: AskMetric, layer: AttributionLayer, limit: Int, redactor: ExplainRedactor) -> AskOutput {
         ran.append("topGroups \(metric.rawValue) \(layer.rawValue) \(limit)")
@@ -435,12 +481,27 @@ final class FakeAskSource: AskSource {
 
     func largestItems(limit: Int, redactor: ExplainRedactor) -> AskOutput {
         ran.append("largestItems \(limit)")
+        if bulky {
+            return AskOutput([:], entries: (1...20).map { number in
+                let path = "/Volumes/Archive/" + String(repeating: "folder/", count: 30) + "file\(number).mov"
+                return AskEntry(.diskItem(path: path), ["path": .path(redactor.path(path)), "name": .name(Self.long),
+                                                        "size": .words(Self.long)])
+            })
+        }
         let path = "/Users/jdoe/Movies/trip.mov"
         return AskOutput([:], entries: [AskEntry(.diskItem(path: path), ["path": .path(redactor.path(path))])])
     }
 
     func reclaimSuggestions(redactor _: ExplainRedactor) -> AskOutput {
         ran.append("reclaimSuggestions")
+        if bulky {
+            return AskOutput(["notListed": .count(5)], entries: (1...20).map { number in
+                AskEntry(.suggestion("disk-suggestion:rule\(number)::"), [
+                    "rule": .words(Self.long), "whatItIs": .words(Self.long), "comesBack": .words(Self.long),
+                    "cleanup": .words(Self.long), "itemNames": .names(Array(repeating: Self.long, count: 5))
+                ])
+            })
+        }
         return AskOutput([:], entries: [AskEntry(.suggestion("disk-suggestion:xcodeDerivedData::"),
                                                  ["rule": .words("Xcode DerivedData")])])
     }

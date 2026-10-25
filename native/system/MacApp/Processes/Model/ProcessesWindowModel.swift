@@ -14,7 +14,7 @@ public final class ProcessesWindowModel {
     public private(set) var sample: ProcessesSample?
     public private(set) var memory: SystemMemory?
     /// When `memory` was read: with the sample, or by a failed sample that still read it.
-    @ObservationIgnored private var memoryObservedAt: Date?
+    @ObservationIgnored private(set) var memoryObservedAt: Date?
     /// Why the latest sample failed, or `nil` when it succeeded.
     public private(set) var failure: String?
     /// When the latest sample failed.
@@ -22,7 +22,7 @@ public final class ProcessesWindowModel {
     public private(set) var cadence: SamplingCadence = .mainWindowVisible
     /// The cadence in effect at the latest attempt. Until the next one, staleness is measured against the longer of
     /// this and `cadence`, so opening the window does not call a menu-bar sample stale.
-    @ObservationIgnored private var attemptCadence: SamplingCadence = .mainWindowVisible
+    @ObservationIgnored private(set) var attemptCadence: SamplingCadence = .mainWindowVisible
 
     public var layer: AttributionLayer = .app {
         didSet { if layer != oldValue { layerDidChange() } }

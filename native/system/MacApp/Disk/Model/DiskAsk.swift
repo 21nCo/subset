@@ -27,10 +27,12 @@ extension DiskWindowModel {
         return AskOutput(fields)
     }
 
-    /// The `limit` largest files and packages in the scan shown.
+    /// The `limit` largest files and packages in the scan shown, from the list the scan made, so nothing walks the
+    /// tree on the main actor.
     public func askLargestItems(limit: Int, redactor: ExplainRedactor, now: Date = .now) -> AskOutput {
-        guard let tree = result?.tree else { return AskOutput(["status": .words("No disk scan has finished yet.")]) }
-        let entries = tree.largestFiles(limit: limit).map { index in
+        guard let result else { return AskOutput(["status": .words("No disk scan has finished yet.")]) }
+        let tree = result.tree
+        let entries = result.largestFiles.prefix(max(0, limit)).map { index in
             let item = tree[index]
             let path = tree.path(of: index)
             var fields: [String: AskValue] = [

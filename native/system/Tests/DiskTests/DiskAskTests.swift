@@ -52,6 +52,30 @@ final class DiskAskTests: XCTestCase {
         XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["localSnapshots"], .words("2, sizes unavailable"))
     }
 
+    func testANewScanReplacesTheLargestItems() async throws {
+        let model = try await fixture.scanned()
+        let first = model.askLargestItems(limit: 1, redactor: redactor).entries.map(\.target)
+        XCTAssertEqual(first, [.diskItem(path: fixture.path("Documents/big.bin"))])
+        try fixture.write("Movies/huge.mov", bytes: 2_000_000)
+        model.scan()
+        try await DiskFixture.wait { model.phase == .completed }
+        XCTAssertEqual(model.askLargestItems(limit: 2, redactor: redactor).entries.map(\.target),
+                       [.diskItem(path: fixture.path("Movies/huge.mov")), .diskItem(path: fixture.path("Documents/big.bin"))])
+    }
+
+    func testAPackageChosenAsTheScansRootIsItsLargestItem() async throws {
+        let bundle = fixture.path("Tool.app")
+        try fixture.write("Tool.app/Contents/MacOS/Tool", bytes: 100_000)
+        let model = fixture.model(service: fixture.service(scan: { _, onProgress in
+            await DiskScanService.scan(DiskScanner(workers: 2), root: bundle, onProgress: onProgress)
+        }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning }
+        let output = model.askLargestItems(limit: 5, redactor: redactor)
+        XCTAssertEqual(output.entries.map(\.target), [.diskItem(path: bundle)])
+        XCTAssertEqual(output.entries.first?.fields["type"], .words("Package"))
+    }
+
     func testAVolumeWithoutANameSendsItsMountPointOnlyAsARedactedPath() async throws {
         let mountPoint = fixture.path("Private/Work")
         let unnamed = VolumeSummary(values: VolumeCapacityValues(mountPoint: mountPoint, capacity: 500_000_000_000),
@@ -62,7 +86,8 @@ final class DiskAskTests: XCTestCase {
         XCTAssertEqual(model.volumeHeader?.title, mountPoint, "the header on screen still shows the mount point")
 
         let toolbox = AskToolbox(source: AskWindowSource(processes: ProcessesWindowModel(), disk: model,
-                                                         showProcesses: {}, showDisk: {}), redactor: redactor)
+                                                         showProcesses: { /* Not cited here. */ },
+                                                         showDisk: { /* Not cited here. */ }), redactor: redactor)
         toolbox.begin(1, redactor: redactor)
         let sent = toolbox.call("diskSummary", arguments: Data("{}".utf8), question: 1)
         XCTAssertFalse(sent.contains(fixture.home), sent)

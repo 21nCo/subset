@@ -35,12 +35,15 @@ extension ProcessesWindowModel {
         ]) { $1 }, entries: subgroups.map { AskEntry(.group($0.id), askFields($0, redactor: redactor)) })
     }
 
-    /// The memory read with the latest sample, with the header's CPU and process counts.
+    /// The latest memory read, with when it was made and whether it is current, and the header's CPU and process
+    /// counts with the process sample's state. A failed process sample still reads memory, so the two are told apart.
     public func askMemoryState(now: Date = .now) -> AskOutput {
         let header = header(now: now)
-        guard let memory else {
+        guard let memory, let memoryObservedAt else {
             return AskOutput(askSampling(header).merging(["status": .words("Memory has not been read yet.")]) { $1 })
         }
+        let allowed = SamplingState.allowedAge(cadence: cadence, attemptCadence: attemptCadence)
+        let memoryCurrent = SamplingState.age(of: memoryObservedAt, now: now) <= allowed
         let fields: [String: AskValue] = [
             "pressure": .words(memory.pressure?.title ?? "Unknown"),
             "physicalMemory": .words(format.bytes(memory.physicalMemory)),
@@ -50,6 +53,8 @@ extension ProcessesWindowModel {
             "compressed": .words(format.bytes(memory.compressed)),
             "swapUsed": .words(format.bytes(memory.swapUsed)),
             "swapTotal": .words(format.bytes(memory.swapTotal)),
+            "memoryRead": .words("Read at \(format.time(memoryObservedAt))"),
+            "memoryReading": .words(memoryCurrent ? "Current" : "Stale: no recent memory read"),
             "cpu": .words(header.cpuText),
             "processes": .words(header.processText)
         ]

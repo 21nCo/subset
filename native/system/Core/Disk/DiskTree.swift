@@ -217,11 +217,12 @@ public struct DiskTree: Sendable {
     }
 
     /// The `limit` largest files and packages anywhere in the tree by allocated size, largest first, then in tree
-    /// order; folders, links, and items that could not be read are left out. One pass keeps only the `limit` largest.
+    /// order; folders, links, and items that could not be read are left out. A package chosen as the scan's root is
+    /// one item, so it is listed too. One pass keeps only the `limit` largest.
     public func largestFiles(limit: Int) -> [Int] {
         guard limit > 0 else { return [] }
         var largest: [(allocated: UInt64, index: Int)] = []
-        for index in nodes.indices.dropFirst() {
+        for index in nodes.indices {
             let node = nodes[index]
             guard node.kind == .file || node.kind == .package, !node.flags.contains(.unreadable) else { continue }
             guard largest.count < limit || node.sizes.allocated > largest[largest.count - 1].allocated else { continue }

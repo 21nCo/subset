@@ -88,6 +88,34 @@ final class ProcessAskTests: XCTestCase {
         XCTAssertEqual(try sampling(now: t0 + 31), Array(repeating: .words("Current"), count: 3))
     }
 
+    func testMemoryStateSaysWhenItsOwnReadWasMadeApartFromTheProcessSample() throws {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let memory = ProcessFixtures.memory(level: 4, physical: 16 << 30)
+        let time = ProcessFixtures.format.time
+        let model = try model()
+        XCTAssertEqual(model.askMemoryState(now: t0 + 1).fields["memoryRead"], .words("Read at \(time(t0))"))
+        XCTAssertEqual(model.askMemoryState(now: t0 + 1).fields["memoryReading"], .words("Current"))
+
+        // A failed process sample still reads memory: that read is current and has its own time, while the process
+        // figures stay the earlier sample's.
+        model.applyFailure("Could not list processes: listFailed(1)", memory: memory, at: t0 + 15, cadence: .mainWindowVisible)
+        let failed = model.askMemoryState(now: t0 + 16)
+        XCTAssertEqual(failed.fields["pressure"], .words("Critical"))
+        XCTAssertEqual(failed.fields["memoryRead"], .words("Read at \(time(t0 + 15))"))
+        XCTAssertEqual(failed.fields["memoryReading"], .words("Current"))
+        XCTAssertEqual(failed.fields["sample"], .words("Observed at \(time(t0))"))
+        XCTAssertEqual(model.askMemoryState(now: t0 + 40).fields["memoryReading"], .words("Stale: no recent memory read"))
+
+        // With no process sample yet, the memory read is still reported as read, and current.
+        let first = ProcessesWindowModel(format: ProcessFixtures.format)
+        first.applyFailure("Could not list processes: listFailed(1)", memory: memory, at: t0, cadence: .mainWindowVisible)
+        let firstState = first.askMemoryState(now: t0 + 1)
+        XCTAssertEqual(firstState.fields["memoryRead"], .words("Read at \(time(t0))"))
+        XCTAssertEqual(firstState.fields["memoryReading"], .words("Current"))
+        XCTAssertEqual(firstState.fields["sample"], .words("Not observed yet"))
+        XCTAssertFalse(String(describing: firstState).contains("listFailed"))
+    }
+
     func testMemoryStateIsTheMemoryReadWithTheSample() throws {
         let memory = try model().askMemoryState()
         XCTAssertEqual(memory.fields["pressure"], .words("Warning"))

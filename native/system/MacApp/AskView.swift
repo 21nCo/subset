@@ -138,6 +138,8 @@ private struct ExchangeView: View {
                 details
             case let .failed(message):
                 Text(verbatim: message).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                // A question can fail after a tool round trip: what was already sent stays inspectable.
+                details
             }
         }
     }

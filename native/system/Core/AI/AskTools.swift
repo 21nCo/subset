@@ -12,7 +12,8 @@ public enum AskTool: String, CaseIterable, Sendable {
             + "layer, each with its id."
         case .groupDetail: "One process group's facts: what it is, its usage, its processes, and why System placed them "
             + "there. Takes a group id a tool returned, like g1."
-        case .memoryState: "The Mac's memory now: pressure, used, app, wired, and compressed memory, and swap."
+        case .memoryState: "The Mac's latest memory read: pressure, used, app, wired, and compressed memory, and swap, "
+            + "with when it was read; CPU and process counts are the latest process sample's."
         case .diskSummary: "The scanned volume's capacity, available and purgeable space, and the latest disk scan's "
             + "folder, state, and total."
         case .largestItems: "The largest files and packages in the latest disk scan, anywhere in it, each with its id."
@@ -31,7 +32,8 @@ public enum AskTool: String, CaseIterable, Sendable {
             AskParameter("limit", .count(1...10), required: false, "How many groups, 1 to 10; 5 by default")
         ]
         case .groupDetail: [AskParameter("id", .id(AskTarget.groupPrefix), required: true, "A group id, like g1")]
-        case .largestItems: [AskParameter("limit", .count(1...20), required: false, "How many items, 1 to 20; 10 by default")]
+        case .largestItems: [AskParameter("limit", .count(1...DiskScanResult.largestFileLimit), required: false,
+                                                     "How many items, 1 to \(DiskScanResult.largestFileLimit); 10 by default")]
         case .memoryState, .diskSummary, .reclaimSuggestions: []
         }
     }
@@ -161,11 +163,21 @@ public struct AskToolRecord: Equatable, Sendable {
 
 /// Runs the model's tool calls for one Ask thread: validates the tool and its arguments, runs at most `callLimit` per
 /// question, gives every listed thing an id that stays the same for the thread, and encodes results as JSON with
-/// every text value on one line and capped. A call it refuses runs nothing and returns `{"error": …}`.
+/// every text value on one line and capped, within a size budget. A call it refuses runs nothing and returns
+/// `{"error": …}`.
 @MainActor
 public final class AskToolbox {
     public nonisolated static let callLimit = 4
     nonisolated static let textLimit = 300
+    /// The most characters one result may take. Listed things that do not fit are left out from the end, counted in
+    /// `notListed`, and given no id; a result's own facts are always sent, each already capped.
+    nonisolated static let resultLimit = 4_000
+    /// The most characters a question's results may take together, about 2,000 tokens at Explain's estimate of four
+    /// characters a token, so the results of all `callLimit` calls fit the on-device model's context with the
+    /// instructions and the thread. Once it is used up, results list nothing more.
+    nonisolated static let questionLimit = 8_000
+    /// At least as long as any id a thread gives, to measure a listed thing before it is given its id.
+    private nonisolated static let widestID = "x999999"
 
     private let source: AskSource
     private var redactor: ExplainRedactor
@@ -174,6 +186,8 @@ public final class AskToolbox {
     /// The question whose calls run now; calls made for an earlier one are refused.
     private var question = 0
     private var calls = 0
+    /// The characters of the question's results so far.
+    private var used = 0
     public private(set) var records: [AskToolRecord] = []
 
     public init(source: AskSource, redactor: ExplainRedactor) {
@@ -186,6 +200,7 @@ public final class AskToolbox {
         self.question = question
         self.redactor = redactor
         calls = 0
+        used = 0
         records = []
     }
 
@@ -227,7 +242,9 @@ public final class AskToolbox {
         }
         let argumentsShown = values.keys.sorted().map { "\($0): \(values[$0]!)" }.joined(separator: ", ")
         records.append(AskToolRecord(call: "\(name)(\(argumentsShown))", ran: true))
-        return encode(run(tool, values))
+        let result = encode(run(tool, values), limit: min(Self.resultLimit, max(0, Self.questionLimit - used)))
+        used += result.count
+        return result
     }
 
     private func run(_ tool: AskTool, _ values: [String: Any]) -> AskOutput {
@@ -301,17 +318,30 @@ public final class AskToolbox {
         return values
     }
 
-    /// The result as JSON, sorted, each listed thing with its id first given now or earlier in the thread.
-    private func encode(_ output: AskOutput) -> String {
-        var object = output.fields.mapValues(json)
-        if !output.entries.isEmpty {
-            object["results"] = output.entries.map { entry -> [String: Any] in
-                var fields = entry.fields.mapValues(json)
-                if let target = entry.target { fields["id"] = id(for: target) }
-                return fields
+    /// The result as JSON, sorted, with as many of its listed things, from the first, as fit in `limit` characters,
+    /// each with its id first given now or earlier in the thread; those left out are added to `notListed`.
+    private func encode(_ output: AskOutput, limit: Int) -> String {
+        let entries = output.entries.map { (target: $0.target, fields: $0.fields.mapValues(json)) }
+        func object(listing count: Int, id: (AskTarget) -> String) -> [String: Any] {
+            var object = output.fields.mapValues(json)
+            if count < entries.count {
+                let earlier = if case let .count(notListed)? = output.fields["notListed"] { notListed } else { 0 }
+                object["notListed"] = earlier + entries.count - count
             }
+            if count > 0 {
+                object["results"] = entries.prefix(count).map { entry -> [String: Any] in
+                    var fields = entry.fields
+                    if let target = entry.target { fields["id"] = id(target) }
+                    return fields
+                }
+            }
+            return object
         }
-        return Self.text(object)
+        var count = entries.count
+        while count > 0, Self.text(object(listing: count) { _ in Self.widestID }).count > limit {
+            count -= 1
+        }
+        return Self.text(object(listing: count, id: id(for:)))
     }
 
     private func id(for target: AskTarget) -> String {
