@@ -116,11 +116,11 @@ public final class AskCenter {
         }, question: questionText)
         nextExchange += 1
         exchanges.append(Exchange(id: nextExchange, question: questionText, state: .working))
+        toolbox.begin(question, redactor: explain.redactor)
         guard !explain.keyChanging(explain.choice) else {
             finish(question, .failed(ExplainCenter.keyChanging))
             return true
         }
-        toolbox.begin(question, redactor: explain.redactor)
         let tools = toolbox.tools(for: question)
         let gate = AskSendGate(check: { [weak self] in
             guard let self else { throw CancellationError() }
@@ -257,6 +257,7 @@ public final class AskCenter {
                 let late = "\(explain.choice.title) did not answer within \(timeout.components.seconds) seconds. Ask again."
                 end()
                 exchanges[exchanges.count - 1].state = .failed(late)
+                exchanges[exchanges.count - 1].tools = toolbox.records
                 return
             }
             try? await Task.sleep(until: deadline, clock: .continuous)
@@ -313,6 +314,7 @@ public final class AskCenter {
             guard isBusy else { return }
             self.end()
             exchanges[exchanges.count - 1].state = .failed(Self.keyChanged)
+            exchanges[exchanges.count - 1].tools = toolbox.records
         }
     }
 }

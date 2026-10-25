@@ -189,6 +189,16 @@ final class AskTests: XCTestCase {
         XCTAssertEqual(try AskAnswer(validating: answer.text, target: known), answer)
     }
 
+    func testAnAnswerLeftWithNothingOnceUnknownIDsAreRemovedIsEmpty() throws {
+        let chrome = AskTarget.group(FakeAskSource.chrome)
+        let none: (String) -> AskTarget? = { _ in nil }
+        XCTAssertThrowsError(try AskAnswer(validating: "[g99]", target: none))
+        XCTAssertThrowsError(try AskAnswer(validating: "[g99, x5].", target: none))
+        XCTAssertEqual(try AskAnswer(validating: "[g1]", target: { $0 == "g1" ? chrome : nil }).parts,
+                       [.citation(id: "g1", target: chrome)])
+        XCTAssertEqual(try AskAnswer(validating: "No [g99] 2.", target: none).text, "No 2.")
+    }
+
     func testAFollowUpGetsTheThreadAndTheThreadTakesFiveFollowUps() async throws {
         let provider = ScriptedProvider()
         provider.calls = [("topGroups", #"{"metric":"memory"}"#)]
@@ -233,6 +243,21 @@ final class AskTests: XCTestCase {
         provider.answer = "   "
         try await answer(ask, "Empty?")
         XCTAssertEqual(ask.exchanges.last?.state, .failed("The answer was rejected: The answer is empty."))
+    }
+
+    func testAnAnswerCitingOnlyUnknownIDsFailsAndIsNotCounted() async throws {
+        let provider = ScriptedProvider()
+        provider.calls = [("memoryState", "{}")]
+        provider.answer = "[g99]"
+        let (ask, _, _) = center(provider)
+        try await answer(ask, "Why?")
+        XCTAssertEqual(ask.exchanges.map(\.state), [.failed("The answer was rejected: The answer is empty.")])
+        XCTAssertEqual(ask.exchanges.last?.tools.map(\.call), ["memoryState()"], "the tools it called are kept")
+        XCTAssertEqual(ask.questionsLeft, 6)
+        provider.answer = "Memory is fine."
+        try await answer(ask, "Why, again?")
+        XCTAssertEqual(ask.exchanges.map(\.question), ["Why, again?"])
+        XCTAssertEqual(ask.questionsLeft, 5)
     }
 
     func testAskIsRefusedWhileAQuestionRunsAndForEmptyOrLongQuestions() async throws {
@@ -285,10 +310,12 @@ final class AskTests: XCTestCase {
     func testAQuestionNotAnsweredInTimeFails() async throws {
         let provider = ScriptedProvider()
         provider.hold = AnswerGate()
+        provider.calls = [("memoryState", "{}")]
         let (ask, _, _) = center(provider, timeout: .milliseconds(50))
         XCTAssertTrue(ask.ask("Why?"))
         try await until { !ask.isBusy }
         XCTAssertEqual(ask.exchanges.map(\.state), [.failed("Apple Intelligence did not answer within 0 seconds. Ask again.")])
+        XCTAssertEqual(ask.exchanges[0].tools.map(\.call), ["memoryState()"], "the tools it called are kept")
         provider.hold?.open()
         XCTAssertTrue(ask.ask("Why, again?"), "asked again at once")
         await ask.settled()

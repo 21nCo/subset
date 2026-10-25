@@ -98,7 +98,8 @@ public struct AskAnswer: Equatable, Sendable {
     public static let limit = 2_000
 
     /// Accepts any non-empty text: control and format characters are removed as from an explanation, and text past
-    /// `limit` is cut off.
+    /// `limit` is cut off. Text left with no citation and no letter or digit once unknown ids are removed, such as
+    /// `[g99].`, is empty too.
     public init(validating raw: String, target: (String) -> AskTarget?) throws {
         var text = Explanation.plainText(raw)
         guard !text.isEmpty else { throw ExplainError.invalidResponse("The answer is empty.") }
@@ -131,6 +132,11 @@ public struct AskAnswer: Equatable, Sendable {
             rest = rest[match.range.upperBound...]
         }
         add(rest)
+        let kept = parts.contains { if case .citation = $0 { true } else { false } }
+        guard kept || parts.contains(where: { part in
+            guard case let .text(text) = part else { return false }
+            return text.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
+        }) else { throw ExplainError.invalidResponse("The answer is empty.") }
         self.parts = parts
     }
 
