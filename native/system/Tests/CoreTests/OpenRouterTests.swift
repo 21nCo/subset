@@ -1149,6 +1149,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     private let readGate = DispatchSemaphore(value: 0)
     private var _holdsOtherCalls = false
     private var _heldOtherCalls = 0
+    private var _otherCalls = 0
     private var _mainThreadCalls = 0
     private let otherGate = DispatchSemaphore(value: 0)
 
@@ -1185,6 +1186,8 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
         set { lock.withLock { _holdsOtherCalls = newValue } }
     }
     var heldOtherCalls: Int { lock.withLock { _heldOtherCalls } }
+    /// Calls begun that do not read the key.
+    var otherCalls: Int { lock.withLock { _otherCalls } }
 
     func releaseOtherCall() {
         otherGate.signal()
@@ -1196,6 +1199,7 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     private func begin(readsData: Bool) {
         let hold = lock.withLock {
             if Thread.isMainThread { _mainThreadCalls += 1 }
+            if !readsData { _otherCalls += 1 }
             let hold = _holdsOtherCalls && !readsData
             if hold { _heldOtherCalls += 1 }
             return hold

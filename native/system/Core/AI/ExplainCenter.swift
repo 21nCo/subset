@@ -108,7 +108,8 @@ public final class ExplainCenter {
         }
     }
     /// The chosen provider's availability from its latest read, which may still be checking or may not have answered
-    /// in time; `nil` before any read and for `.none`.
+    /// in time; `nil` before any read, for `.none`, and after a read a key read as a request is sent overtook that
+    /// found OpenRouter cannot be used or did not answer in time (SET-165), so Settings offers Check.
     public private(set) var availabilityStatus: AvailabilityStatus?
     /// The chosen provider's availability when the latest read answered.
     public var availability: AIAvailability? { availabilityStatus?.availability }
@@ -327,7 +328,9 @@ public final class ExplainCenter {
     /// `provider`'s availability, or `nil` when it does not answer in time, and whether it was the latest read; throws
     /// `CancellationError` when its caller is cancelled or the provider changes, which is not a timeout. Settings shows
     /// it as checking while it is read, then what it answered or that it did not answer in time, only while no later
-    /// read has started and the provider has not changed since `selection`, so a slow read never replaces a newer one. OpenRouter's answer that no key is
+    /// read has started and the provider has not changed since `selection`, so a slow read never replaces a newer one;
+    /// one overtaken by a key read as a request is sent that found OpenRouter cannot be used, or did not answer in
+    /// time, is not shown (Settings offers Check), since it set nothing back. OpenRouter's answer that no key is
     /// stored, that it cannot be read, or that the model ID holds it sets the choice back, as does it not answering in
     /// time, only from the latest check (`checks`): a read cancelled, or overtaken by a later read or by a key read as
     /// a request is sent, sets nothing back and ends no newer work, and only its own caller acts on what it answered
@@ -359,10 +362,14 @@ public final class ExplainCenter {
             throw CancellationError()
         }
         let availability = checked?.availability
-        if selection == self.selection, read == availabilityReads {
-            availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
-        }
         let latest = selection == self.selection && check == checks
+        if selection == self.selection, read == availabilityReads {
+            // Overtaken by a key read as a request is sent, a read that found OpenRouter cannot be used set nothing
+            // back, so it is not shown while OpenRouter stays chosen: Settings offers Check instead.
+            let setsBack = choice == .openRouter && (availability.map { Self.overtaken($0) != nil } ?? true)
+            availabilityStatus = !latest && setsBack ? nil
+                : availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
+        }
         if latest {
             if let availability {
                 noteOpenRouter(availability, from: provider)
