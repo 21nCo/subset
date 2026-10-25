@@ -1,0 +1,118 @@
+import Foundation
+
+/// Ask (SET-51) through OpenRouter: chat completions with Ask's tools as functions. Each request's body goes through
+/// the send gate first, so it is previewed as Explain's are; tool results, redacted by the toolbox, go back in the next
+/// request. After `AskToolbox.callLimit` calls the request asks for an answer with `tool_choice` `none`, so a question
+/// takes at most `callLimit + 1` requests. The key is read for each request and must be the one read as the question
+/// began, so a key replaced meanwhile is never used.
+extension OpenRouterProvider {
+    public func ask(_ prompt: AskPrompt, tools: AskTools, gate: AskSendGate) async throws -> String {
+        let checked = OpenRouterKeyIdentity(try sendingKey())
+        if let checkedKey, checkedKey != checked { throw ExplainError.failed(Self.keyChanged) }
+        var messages: [[String: Any]] = [["role": "system", "content": AskPrompt.instructions]]
+        for turn in prompt.history {
+            messages.append(["role": "user", "content": turn.question])
+            messages.append(["role": "assistant", "content": turn.answer])
+        }
+        messages.append(["role": "user", "content": prompt.question])
+        var calls = 0
+        for _ in 0...AskToolbox.callLimit {
+            let toolsAllowed = calls < AskToolbox.callLimit
+            let body = try askBody(messages, toolsAllowed: toolsAllowed)
+            let confirmed = try await gate.confirm(body)
+            let key = try sendingKey()
+            guard OpenRouterKeyIdentity(key) == checked else { throw ExplainError.failed(Self.keyChanged) }
+            let data: Data
+            do {
+                data = try await client.send(.chat(body), key: key)
+            } catch let ExplainError.failed(message) where message.hasPrefix(Self.answeredPrefix) {
+                await gate.answered(body, confirmed: confirmed)
+                throw ExplainError.rejected(message)
+            }
+            await gate.answered(body, confirmed: confirmed)
+            let message = try Self.message(from: data, key: key)
+            if let refusal = message["refusal"] as? String, !refusal.isEmpty {
+                throw ExplainError.rejected("The model declined to answer this question.")
+            }
+            if let requested = try Self.toolCalls(in: message) {
+                guard toolsAllowed else {
+                    throw ExplainError.invalidResponse("The model asked for more tools after its \(AskToolbox.callLimit).")
+                }
+                messages.append(["role": "assistant", "content": message["content"] as? String ?? NSNull(),
+                                 "tool_calls": requested.map(\.json)])
+                for call in requested {
+                    calls += 1
+                    let result = await tools.call(call.name, arguments: Data(call.arguments.utf8))
+                    messages.append(["role": "tool", "tool_call_id": call.id, "content": result])
+                }
+                continue
+            }
+            guard let content = message["content"] as? String,
+                  !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
+            }
+            return content
+        }
+        throw ExplainError.invalidResponse("The model did not answer after \(AskToolbox.callLimit) tool calls.")
+    }
+
+    /// The JSON body of one Ask request: its bytes are the same each time it is built.
+    func askBody(_ messages: [[String: Any]], toolsAllowed: Bool) throws -> Data {
+        let functions = AskTool.allCases.map { tool -> [String: Any] in
+            ["type": "function",
+             "function": ["name": tool.rawValue, "description": tool.summary, "parameters": tool.schema]]
+        }
+        let body: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "tools": functions,
+            "tool_choice": toolsAllowed ? "auto" : "none",
+            // Routes only to providers that support tool calls.
+            "provider": ["require_parameters": true]
+        ]
+        return try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// The key a request is sent with: not when it cannot be read, none is stored, or the model ID holds it, so nothing
+    /// is sent then.
+    private func sendingKey() throws -> String {
+        let key: String?
+        do {
+            key = try keys.readKey()
+        } catch {
+            throw ExplainError.unavailable(.openRouterKeyUnreadable)
+        }
+        guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
+        guard !Self.contains(key: key, in: model) else { throw ExplainError.unavailable(.openRouterModelHeldKey) }
+        return key
+    }
+
+    struct ToolCall {
+        let id: String
+        let name: String
+        let arguments: String
+
+        var json: [String: Any] {
+            ["id": id, "type": "function", "function": ["name": name, "arguments": arguments]]
+        }
+    }
+
+    /// The message's tool calls, or `nil` when it has none. A call without an id, a function name, or text arguments
+    /// is outside the format, and so is the whole answer.
+    static func toolCalls(in message: [String: Any]) throws -> [ToolCall]? {
+        guard let raw = message["tool_calls"], !(raw is NSNull) else { return nil }
+        guard let list = raw as? [Any] else { throw ExplainError.invalidResponse("OpenRouter's tool calls are not a list.") }
+        guard !list.isEmpty else { return nil }
+        return try list.map { item in
+            guard let call = item as? [String: Any], let id = call["id"] as? String, !id.isEmpty,
+                  let function = call["function"] as? [String: Any], let name = function["name"] as? String else {
+                throw ExplainError.invalidResponse("OpenRouter's answer has a tool call System cannot read.")
+            }
+            let arguments = function["arguments"].flatMap { $0 is NSNull ? nil : $0 }
+            guard arguments == nil || arguments is String else {
+                throw ExplainError.invalidResponse("OpenRouter's answer has a tool call System cannot read.")
+            }
+            return ToolCall(id: id, name: name, arguments: arguments as? String ?? "")
+        }
+    }
+}

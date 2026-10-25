@@ -10,6 +10,8 @@ public struct DiskVolumeHeader: Equatable, Sendable {
     public let availableForImportantUse: String
     public let purgeable: String
     public let snapshots: String
+    /// How many local snapshots there are; `nil` when they could not be listed.
+    public let snapshotCount: Int?
     public let accessibilityLabel: String
 
     public init(_ summary: VolumeSummary, format: UsageFormat) {
@@ -19,9 +21,11 @@ public struct DiskVolumeHeader: Equatable, Sendable {
         purgeable = format.diskBytes(summary.purgeable)
         switch summary.snapshots {
         case let .count(count):
+            snapshotCount = count
             snapshots = count == 0 ? "No local snapshots"
                 : "\(format.count(count)) local snapshot\(count == 1 ? "" : "s"), sizes unavailable"
         case let .unavailable(reason):
+            snapshotCount = nil
             snapshots = "Local snapshots unavailable: \(reason)"
         }
         accessibilityLabel = "\(title): capacity \(capacity), \(availableForImportantUse) available for important use, "

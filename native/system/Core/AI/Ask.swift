@@ -1,0 +1,132 @@
+import Foundation
+
+/// One Ask question as a provider is given it (SET-51): the thread's earlier questions and answers, kept in memory
+/// only, then the question. Tool results are not repeated; each question calls the tools again.
+public struct AskPrompt: Equatable, Sendable {
+    public struct Turn: Equatable, Sendable {
+        public let question: String
+        /// The answer as shown, its citations kept as `[id]`.
+        public let answer: String
+    }
+
+    public let history: [Turn]
+    public let question: String
+
+    public static let instructions = """
+        You answer the user's questions about their Mac right now, using only what System's tools return: the latest \
+        process sample and the latest disk scan, both kept in memory. Call a tool only when you need its facts, at most \
+        \(AskToolbox.callLimit) times per question. The tools only read: nothing you say can change, clean up, or \
+        remove anything, so never say you did or will. If the tools do not answer the question, say what is missing, \
+        such as no disk scan yet. You cannot see history or trends, so say so when asked what changed over time.
+        Answer in at most six short sentences of plain text: no Markdown, HTML, links, or code blocks. When you name a \
+        group, item, or suggestion a tool returned, put its id in square brackets right after it, like Google Chrome \
+        [g1]. Use only ids the tools returned. Paths show the home folder as ~, and folder-… names stand for folders \
+        whose names were withheld.
+        """
+
+    public init(history: [Turn], question: String) {
+        self.history = history
+        self.question = question
+    }
+
+    /// The prompt for a model given one text: the earlier questions and answers, then the question.
+    public var text: String {
+        let earlier = history.map { "Earlier question: \($0.question)\nYour answer: \($0.answer)" }
+        return (earlier + ["Question: \(question)"]).joined(separator: "\n\n")
+    }
+}
+
+/// The question's tools, as a provider calls them from any actor: a tool's name and its JSON arguments in, its JSON
+/// result out. Refusals are results too (`{"error": …}`), so the model can answer with what it has.
+public struct AskTools: Sendable {
+    private let run: @Sendable (_ name: String, _ arguments: Data) async -> String
+
+    public init(_ run: @escaping @Sendable (_ name: String, _ arguments: Data) async -> String) {
+        self.run = run
+    }
+
+    public func call(_ name: String, arguments: Data) async -> String {
+        await run(name, arguments)
+    }
+}
+
+/// What a provider that sends off this Mac does around each body it sends, so Ask keeps Explain's send preview
+/// (SET-160): `confirm` before sending, which returns whether the user confirmed the body in the preview (`false` when
+/// none was needed) and throws when it must not be sent; `answered` once the provider answered it.
+public struct AskSendGate: Sendable {
+    private let confirmBody: @Sendable (Data) async throws -> Bool
+    private let answeredBody: @Sendable (Data, Bool) async -> Void
+
+    public init(confirm: @escaping @Sendable (Data) async throws -> Bool,
+                answered: @escaping @Sendable (Data, Bool) async -> Void) {
+        confirmBody = confirm
+        answeredBody = answered
+    }
+
+    /// Sends nothing that needs confirming: for tests and providers on this Mac.
+    public static let none = AskSendGate(confirm: { _ in false }, answered: { _, _ in })
+
+    public func confirm(_ body: Data) async throws -> Bool {
+        try await confirmBody(body)
+    }
+
+    public func answered(_ body: Data, confirmed: Bool) async {
+        await answeredBody(body, confirmed)
+    }
+}
+
+/// An answer as shown: plain text, with each cited id a tool returned in this thread kept as a link, and every other
+/// `[id]` removed.
+public struct AskAnswer: Equatable, Sendable {
+    public enum Part: Equatable, Sendable {
+        case text(String)
+        case citation(id: String, target: AskTarget)
+    }
+
+    public let parts: [Part]
+
+    public static let limit = 2_000
+
+    /// Accepts any non-empty text: control and format characters are removed as from an explanation, and text past
+    /// `limit` is cut off.
+    public init(validating raw: String, target: (String) -> AskTarget?) throws {
+        var text = Explanation.plainText(raw)
+        guard !text.isEmpty else { throw ExplainError.invalidResponse("The answer is empty.") }
+        if text.count > Self.limit { text = String(text.prefix(Self.limit - 1)) + "…" }
+        var parts: [Part] = []
+        var rest = Substring(text)
+        func add(_ piece: Substring) {
+            guard !piece.isEmpty else { return }
+            if case let .text(previous)? = parts.last {
+                parts[parts.count - 1] = .text(previous + piece)
+            } else {
+                parts.append(.text(String(piece)))
+            }
+        }
+        while let match = rest.firstMatch(of: /\[([a-z])([0-9]{1,6})\]/) {
+            var before = rest[..<match.range.lowerBound]
+            let id = String(match.output.1 + match.output.2)
+            if let found = target(id) {
+                add(before)
+                parts.append(.citation(id: id, target: found))
+            } else {
+                // A dropped id takes the space before it, so "Chrome [x9]." reads "Chrome.".
+                if before.last == " " { before = before.dropLast() }
+                add(before)
+            }
+            rest = rest[match.range.upperBound...]
+        }
+        add(rest)
+        self.parts = parts
+    }
+
+    /// The answer's text with its citations as `[id]`, as a follow-up gives it back.
+    public var text: String {
+        parts.map { part in
+            switch part {
+            case let .text(text): text
+            case let .citation(id, _): "[\(id)]"
+            }
+        }.joined()
+    }
+}

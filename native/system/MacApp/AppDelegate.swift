@@ -12,6 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Made with the OpenRouter account before whether a key is stored is first read, so it hears every check.
     private let explain: ExplainCenter
     private let mainWindowState = MainWindowState()
+    /// Ask (SET-51), with the provider Explain uses; a citation shows its section and selects what it cites.
+    private lazy var ask = AskCenter(explain: explain, source: AskWindowSource(
+        processes: processes, disk: disk,
+        showProcesses: { [mainWindowState] in mainWindowState.section = .processes },
+        showDisk: { [mainWindowState] in mainWindowState.section = .disk }
+    ))
     /// Whether `mainWindow` exists, so checking whether it is key does not create it.
     private var mainWindowCreated = false
     /// Created on first open: a list updated while its window has never been on screen trips AppKit's
@@ -23,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             autosaveName: "SystemMainWindow",
             size: NSSize(width: 980, height: 640),
             content: MainWindowView(state: mainWindowState, processes: processes, disk: disk, monitor: monitor,
-                                    explain: explain) { [weak self] in self?.perform(.settings) }
+                                    explain: explain, ask: ask) { [weak self] in self?.perform(.settings) }
         )
         controller.onVisibilityChange = { [monitor, processes] visible in
             monitor.setMainWindowVisible(visible)

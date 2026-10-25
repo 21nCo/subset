@@ -216,6 +216,22 @@ public struct DiskTree: Sendable {
         return self[current]
     }
 
+    /// The `limit` largest files and packages anywhere in the tree by allocated size, largest first, then in tree
+    /// order; folders, links, and items that could not be read are left out. One pass keeps only the `limit` largest.
+    public func largestFiles(limit: Int) -> [Int] {
+        guard limit > 0 else { return [] }
+        var largest: [(allocated: UInt64, index: Int)] = []
+        for index in nodes.indices.dropFirst() {
+            let node = nodes[index]
+            guard node.kind == .file || node.kind == .package, !node.flags.contains(.unreadable) else { continue }
+            guard largest.count < limit || node.sizes.allocated > largest[largest.count - 1].allocated else { continue }
+            let position = largest.firstIndex { node.sizes.allocated > $0.allocated } ?? largest.count
+            largest.insert((node.sizes.allocated, index), at: position)
+            if largest.count > limit { largest.removeLast() }
+        }
+        return largest.map(\.index)
+    }
+
     /// The latest time the item, or for a package an entry read inside it, was touched; `nil` when one has no time.
     /// A package's own time does not change when a file inside it is written.
     func newestTouch(_ index: Int) -> Date? {

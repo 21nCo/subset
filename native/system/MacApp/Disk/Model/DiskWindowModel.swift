@@ -348,6 +348,40 @@ public final class DiskWindowModel {
         rebuild()
     }
 
+    /// Shows the scanned item at `path` in the Folders tab, in its folder, and selects it, as an Ask citation does
+    /// (SET-51); `false`, changing nothing, when the scan shown has no item there.
+    @discardableResult
+    public func reveal(path: String) -> Bool {
+        guard let tree = result?.tree else { return false }
+        let root = tree.rootPath == "/" ? "" : tree.rootPath
+        let relative: String
+        if path == tree.rootPath {
+            relative = ""
+        } else if path.hasPrefix(root + "/") {
+            relative = String(path.dropFirst(root.count + 1))
+        } else {
+            return false
+        }
+        guard let item = tree.item(at: relative) else { return false }
+        tab = .folders
+        folder = item.parent ?? 0
+        selection = item.index == 0 ? nil : .item(item.index)
+        rebuild()
+        return true
+    }
+
+    /// Shows the suggestion whose Explain key is `key` in the Suggestions tab and selects it; `false`, changing nothing,
+    /// when the scan shown has no such suggestion.
+    @discardableResult
+    public func revealSuggestion(_ key: String) -> Bool {
+        guard let position = analysis?.matches.indices.first(where: { explainKey(for: .match($0))?.id == key })
+        else { return false }
+        tab = .suggestions
+        selection = .match(position)
+        rebuild()
+        return true
+    }
+
     /// Goes to a folder on the breadcrumb path, selecting the folder below it that was open.
     public func navigate(to breadcrumb: Int) {
         guard let position = breadcrumbs.firstIndex(where: { $0.id == breadcrumb }) else { return }

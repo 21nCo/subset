@@ -10,10 +10,17 @@ public protocol AIProvider: Sendable {
     /// Exactly the bytes `explain(_:)` sends off this Mac for `request`, which the send preview shows and What was sent
     /// repeats; `nil` for a provider that sends nothing off this Mac.
     func sentBody(for request: ExplainRequest) throws -> Data?
+    /// Answers an Ask question (SET-51) with the read-only `tools`, returning the model's text unvalidated; `AskCenter`
+    /// validates it. A provider that sends off this Mac passes each body through `gate` (the send preview).
+    func ask(_ prompt: AskPrompt, tools: AskTools, gate: AskSendGate) async throws -> String
 }
 
 extension AIProvider {
     public func sentBody(for _: ExplainRequest) throws -> Data? { nil }
+
+    public func ask(_: AskPrompt, tools _: AskTools, gate _: AskSendGate) async throws -> String {
+        throw ExplainError.failed("This provider cannot answer questions.")
+    }
 }
 
 extension OpenRouterProvider {

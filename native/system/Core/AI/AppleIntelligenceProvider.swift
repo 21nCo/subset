@@ -1,3 +1,4 @@
+import Foundation
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -35,6 +36,27 @@ public struct AppleIntelligenceProvider: AIProvider {
         throw ExplainError.unavailable(.notInThisBuild)
         #endif
     }
+
+    /// Answers an Ask question in a new session given Ask's tools; nothing leaves this Mac, so `gate` is not used.
+    public func ask(_ prompt: AskPrompt, tools: AskTools, gate _: AskSendGate) async throws -> String {
+        let availability = await availability()
+        guard availability.isAvailable else { throw ExplainError.unavailable(availability) }
+        #if canImport(FoundationModels)
+        if #available(macOS 26, *) {
+            let session = LanguageModelSession(tools: AskModelTools.all(tools), instructions: AskPrompt.instructions)
+            do {
+                return try await session.respond(to: prompt.text).content
+            } catch let error as LanguageModelSession.GenerationError {
+                throw ExplainError(error, declined: "Apple Intelligence declined to answer this question.")
+            } catch is LanguageModelSession.ToolCallError {
+                throw ExplainError.failed("Apple Intelligence could not use System's tools to answer.")
+            }
+        }
+        throw ExplainError.unavailable(.requiresNewerMacOS)
+        #else
+        throw ExplainError.unavailable(.notInThisBuild)
+        #endif
+    }
 }
 
 #if canImport(FoundationModels)
@@ -55,10 +77,11 @@ extension AIAvailability {
 
 @available(macOS 26, *)
 extension ExplainError {
-    init(_ error: LanguageModelSession.GenerationError) {
+    init(_ error: LanguageModelSession.GenerationError,
+         declined: String = "Apple Intelligence declined to explain this item.") {
         switch error {
         case .assetsUnavailable: self = .unavailable(.modelNotReady)
-        case .guardrailViolation, .refusal: self = .failed("Apple Intelligence declined to explain this item.")
+        case .guardrailViolation, .refusal: self = .failed(declined)
         case .exceededContextWindowSize: self = .failed("The request was too long for the on-device model.")
         case .decodingFailure: self = .invalidResponse("The on-device model's answer did not fit the schema.")
         default: self = .failed("Apple Intelligence could not answer: \(error.localizedDescription)")
@@ -113,5 +136,79 @@ enum GeneratedConfidence {
         case .high: .high
         }
     }
+}
+#endif
+
+#if canImport(FoundationModels)
+/// Ask's tools as FoundationModels tools: each forwards its arguments, as JSON, to the toolbox, which validates and runs
+/// them as it does OpenRouter's.
+@available(macOS 26, *)
+enum AskModelTools {
+    static func all(_ tools: AskTools) -> [any Tool] {
+        [
+            AskModelTool<TopGroupsArguments>(tool: .topGroups, tools: tools),
+            AskModelTool<GroupDetailArguments>(tool: .groupDetail, tools: tools),
+            AskModelTool<NoArguments>(tool: .memoryState, tools: tools),
+            AskModelTool<NoArguments>(tool: .diskSummary, tools: tools),
+            AskModelTool<LargestItemsArguments>(tool: .largestItems, tools: tools),
+            AskModelTool<NoArguments>(tool: .reclaimSuggestions, tools: tools)
+        ]
+    }
+}
+
+@available(macOS 26, *)
+protocol AskModelArguments: Generable {
+    var json: [String: Any] { get }
+}
+
+@available(macOS 26, *)
+struct AskModelTool<Arguments: AskModelArguments>: Tool {
+    let tool: AskTool
+    let tools: AskTools
+
+    var name: String { tool.rawValue }
+    var description: String { tool.summary }
+
+    func call(arguments: Arguments) async throws -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: arguments.json)) ?? Data("{}".utf8)
+        return await tools.call(tool.rawValue, arguments: data)
+    }
+}
+
+@available(macOS 26, *)
+@Generable
+struct TopGroupsArguments: AskModelArguments {
+    @Guide(description: "What to order groups by", .anyOf(AskMetric.allCases.map(\.rawValue)))
+    var metric: String
+    @Guide(description: "How processes are grouped", .anyOf(AttributionLayer.allCases.map(\.rawValue)))
+    var layer: String
+    @Guide(description: "How many groups", .range(1...10))
+    var limit: Int
+
+    var json: [String: Any] { ["metric": metric, "layer": layer, "limit": limit] }
+}
+
+@available(macOS 26, *)
+@Generable
+struct GroupDetailArguments: AskModelArguments {
+    @Guide(description: "A group id a tool returned, like g1")
+    var id: String
+
+    var json: [String: Any] { ["id": id] }
+}
+
+@available(macOS 26, *)
+@Generable
+struct LargestItemsArguments: AskModelArguments {
+    @Guide(description: "How many items", .range(1...20))
+    var limit: Int
+
+    var json: [String: Any] { ["limit": limit] }
+}
+
+@available(macOS 26, *)
+@Generable
+struct NoArguments: AskModelArguments {
+    var json: [String: Any] { [:] }
 }
 #endif

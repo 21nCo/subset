@@ -171,6 +171,11 @@ public final class ProcessesWindowModel {
         isFilterFocusPending = false
     }
 
+    /// Whether the group is in the current sample.
+    public func contains(_ id: OriginGroupID) -> Bool {
+        groups[id] != nil
+    }
+
     /// Shows a group, as the menu bar's top groups do: switches to its layer, opens the group holding a subgroup,
     /// clears a filter that hides it, and selects it. A group gone from the current sample only switches the layer,
     /// keeping its selection and filter.
