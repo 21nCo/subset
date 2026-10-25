@@ -3,7 +3,7 @@ import { chmodSync, lstatSync, readdirSync, renameSync, unlinkSync } from 'node:
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
-import { ACK_TIMEOUT_MS, createAlertHandlers, replayHandoffs } from './alert-handlers.mjs';
+import { ACK_TIMEOUT_MS, createAlertHandlers } from './alert-handlers.mjs';
 import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
@@ -644,9 +644,9 @@ export async function startDaemon({
 
   heartbeatHandle = clock.setTimeout(heartbeat, heartbeatMs);
   // Alerts an earlier daemon handed over and that were never settled are played once, and the first
-  // run saves scheduler.json without them.
+  // run saves scheduler.json without them; shutdown still waits for the sink to finish them.
   if (unsettled.length) {
-    replayHandoffs(unsettled, sink, log);
+    alertHandlers.replay(unsettled);
     marksDirty = true;
   }
   scheduler.run();

@@ -12,8 +12,10 @@ import { intervalStep } from '@subset/timer';
  * @property {1 | 2 | 3} [secondsLeft] For `tick`.
  * @property {number} [missed] For `missedWhileAway`: how many transitions it stands for.
  *
- * @typedef {object} AlertSink Plays or shows alerts. The daemon waits for a sink only at shutdown, and a sink
- *   that throws or rejects is logged and ignored. A sink honours `timer.sound` itself.
+ * @typedef {object} AlertSink Plays or shows alerts. The daemon waits for a sink only at shutdown (at most
+ *   5 s, for every play it started), and a sink that throws or rejects is logged and ignored. A sink
+ *   honours `timer.sound` itself. Delivery through a sink is at least once: a daemon that ends after
+ *   the sink played an alert, but before it could save that, leaves the alert to the next daemon.
  * @property {string} name Shown by `daemon status`.
  * @property {(alert: TimerAlert, timer: import('@subset/timer').TimerDefinition) => void | Promise<void>} alert
  */

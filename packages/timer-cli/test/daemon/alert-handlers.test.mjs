@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -240,6 +240,80 @@ test('shutdown is not held up or failed by a sink that rejects while the log can
   assert.equal(await within(context.daemon.shutdown(), 3_000), 0);
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.deepEqual([Date.now() - started < 3_000, unhandled], [true, []]);
+});
+
+/** A sink whose plays last until `finishAll()`. */
+function slowSink() {
+  const finishes = [];
+  return {
+    name: 'slow',
+    received: [],
+    alert(alert, timer) {
+      this.received.push({ alert, timer });
+      return new Promise((resolve) => finishes.push(resolve));
+    },
+    finishAll: () => {
+      for (const finish of finishes.splice(0)) finish();
+    }
+  };
+}
+
+/** Shuts the daemon down while its slow sink plays: closed waits until the sink has finished. */
+async function assertShutdownWaitsForSink(context) {
+  let closedWith = null;
+  context.daemon.shutdown().then((code) => {
+    closedWith = code;
+  });
+  await eventually(() => !existsSync(context.daemon.paths.lock));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(closedWith, null);
+  context.sink.finishAll();
+  assert.equal(await within(context.daemon.closed), 0);
+}
+
+test('shutdown waits for a handoff the daemon replayed at startup, though scheduler.json no longer holds it', async (t) => {
+  const dataDir = tempDataDir(t);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const handoff = { alertId: 'h1', alert: { timerId: 't_1', kind: 'finish', at: 0 }, timer: { id: 't_1', name: 'Egg', sound: true } };
+  writeFileSync(join(dataDir, 'scheduler.json'), JSON.stringify({ version: 1, marks: [], handoffs: [handoff] }));
+  const context = await startTestDaemon(t, { dataDir, sink: slowSink() });
+  assert.deepEqual(context.sink.received.map(({ timer }) => timer.name), ['Egg']);
+  assert.equal(JSON.parse(readFileSync(join(dataDir, 'scheduler.json'), 'utf8')).handoffs, undefined);
+  await assertShutdownWaitsForSink(context);
+});
+
+test('shutdown waits for an alert the sink plays with no handler registered', async (t) => {
+  const context = await startTestDaemon(t, { sink: slowSink() });
+  await startCountdown(context);
+  context.clock.advance(1_000);
+  await eventually(() => context.sink.received.length === 1);
+  await assertShutdownWaitsForSink(context);
+});
+
+test('stop() waits for every sink play, with or without a handler, and once stopped nothing more plays', async () => {
+  const clock = createFakeClock();
+  const sink = slowSink();
+  let next = 0;
+  const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, newId: () => `a${++next}` });
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  const alert = (kind) => ({ timerId: 't_1', kind, at: clock.now() });
+  handlers.replay([{ alertId: 'h1', alert: alert('finish'), timer }]);
+  handlers.deliver(alert('segment'), timer);
+  let stopped = false;
+  const stopping = handlers.stop().then(() => {
+    stopped = true;
+  });
+  // Once stopped: a replay, an alert with no handler and a handler's timeout all play nothing.
+  handlers.replay([{ alertId: 'h2', alert: alert('finish'), timer }]);
+  handlers.deliver(alert('tick'), timer);
+  handlers.register('s1');
+  handlers.deliver(alert('tick'), timer);
+  clock.advance(ACK_TIMEOUT_MS);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual([sink.received.map(({ alert: { kind } }) => kind), stopped], [['finish', 'segment'], false]);
+  sink.finishAll();
+  await stopping;
+  assert.equal(stopped, true);
 });
 
 /** Sends an acknowledgement (or another `route` for the alert) whose body arrives only after `beforeBody` has run. */
@@ -676,6 +750,35 @@ test('a handback whose save fails gets 500 and plays nothing, so the handler tha
   successor.clock.advance(60_000);
   const plays = [context, successor].flatMap(({ sink }) => sink.received).filter(({ timer }) => timer.name === 'Egg').length;
   assert.equal(plays, 1);
+});
+
+test('a handback whose save after the play fails still gets 200, and the next run saves it, so the next daemon plays nothing', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const [alert] = alertsOf(handler);
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
+  // The handoff is saved before the play; while the sink plays, scheduler.json becomes unwritable.
+  const scheduler = join(context.dataDir, 'scheduler.json');
+  const play = context.sink.alert.bind(context.sink);
+  context.sink.alert = (...args) => {
+    play(...args);
+    renameSync(scheduler, `${scheduler}.saved`);
+    mkdirSync(join(scheduler, 'in-the-way'), { recursive: true });
+  };
+  const release = (target) => target.call('POST', `/v1/alerts/${alert.alertId}/release`, { subscriberId: handler.subscriberId });
+  assert.equal((await release(context)).status, 200);
+  assert.equal(JSON.parse(readFileSync(`${scheduler}.saved`, 'utf8')).handoffs.length, 1);
+  // Once it can be written again, the next run saves it without the handoff.
+  rmSync(scheduler, { recursive: true });
+  renameSync(`${scheduler}.saved`, scheduler);
+  context.clock.advance(60_000);
+  await eventually(() => JSON.parse(readFileSync(scheduler, 'utf8')).handoffs === undefined);
+  const successor = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
+  assert.equal((await release(successor)).status, 404);
+  assert.deepEqual([context.sink.received.length, successor.sink.received.length], [1, 0]);
 });
 
 test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and only for their handler', () => {
