@@ -242,12 +242,12 @@ test('shutdown is not held up or failed by a sink that rejects while the log can
   assert.deepEqual([Date.now() - started < 3_000, unhandled], [true, []]);
 });
 
-/** Sends an acknowledgement whose body arrives only after `beforeBody` has run. */
-function acknowledgeLate(socketPath, alertId, subscriberId, beforeBody) {
+/** Sends an acknowledgement (or another `route` for the alert) whose body arrives only after `beforeBody` has run. */
+function acknowledgeLate(socketPath, alertId, subscriberId, beforeBody, route = 'ack') {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ subscriberId });
     const outgoing = request(
-      { socketPath, method: 'POST', path: `/v1/alerts/${alertId}/ack`, agent: false, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+      { socketPath, method: 'POST', path: `/v1/alerts/${alertId}/${route}`, agent: false, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
       (response) => {
         const chunks = [];
         response.on('data', (chunk) => chunks.push(chunk));
@@ -280,6 +280,40 @@ test('an acknowledgement retried while the daemon shuts down gets the outcome st
   assert.deepEqual([(await retried).status, (await late).status], [200, 410]);
   await closed;
   assert.deepEqual(context.sink.received.map(({ timer }) => timer.name), [left.timerName]);
+});
+
+test('a handback or receipt whose body arrives once shutdown has begun gets 503 and the alert stays saved, so the next daemon plays it once', async (t) => {
+  let finishPlaying = () => {};
+  const sink = {
+    name: 'slow',
+    received: [],
+    alert(alert, timer) {
+      this.received.push(timer.name);
+      return new Promise((resolve) => {
+        finishPlaying = resolve;
+      });
+    }
+  };
+  const context = await startTestDaemon(t, { sink });
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const [alert] = alertsOf(handler);
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
+  let closed;
+  const released = acknowledgeLate(context.daemon.paths.socket, alert.alertId, handler.subscriberId, () => {
+    closed = context.daemon.shutdown();
+  }, 'release');
+  const confirmed = acknowledgeLate(context.daemon.paths.socket, alert.alertId, handler.subscriberId, () => {}, 'received');
+  assert.deepEqual([(await released).status, (await confirmed).status], [503, 503]);
+  assert.equal(await within(closed), 0);
+  assert.deepEqual([sink.received, savedAcknowledged(context)], [[], [{ alertId: alert.alertId, subscriberId: handler.subscriberId }]]);
+  finishPlaying();
+  // The handler sends its handback again; the next daemon takes it and its sink plays the alert once.
+  const next = await startTestDaemon(t, { dataDir: context.dataDir });
+  assert.equal((await next.call('POST', `/v1/alerts/${alert.alertId}/release`, { subscriberId: handler.subscriberId })).status, 200);
+  assert.deepEqual(next.sink.received.map(({ timer }) => timer.name), ['Egg']);
 });
 
 test('while a handoff is not saved, the timer stays running on disk, so a daemon that ends before the fallback leaves the alert to the next one', async (t) => {
@@ -563,6 +597,85 @@ test('a handler hands back an alert it may no longer present, pending or taken, 
   const successor = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, acknowledged: [{ alertId: 'a3', subscriberId: 's1', alert: { timerId: 't_1', kind: 'segment', at: 0 }, timer }] });
   assert.equal(successor.release('a3', 's1').ok, true);
   assert.deepEqual([sink.received.map(({ alert }) => alert.kind), successor.checkpoint.acknowledged], [['finish', 'tick', 'segment'], []]);
+});
+
+test('a taken alert handed back is saved as a handoff before the sink plays it; one whose save fails stays taken and plays nothing', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  const saved = [];
+  let failNext = false;
+  let next = 0;
+  const handlers = createAlertHandlers({
+    clock,
+    sink,
+    log: () => {},
+    publish: () => {},
+    isOpen: () => true,
+    newId: () => `a${++next}`,
+    save({ handoffs, acknowledged }) {
+      if (failNext) {
+        failNext = false;
+        throw new Error('disk full');
+      }
+      saved.push({ handoffs: handoffs.map(({ alertId }) => alertId), acknowledged: ids(acknowledged), played: sink.received.length });
+    }
+  });
+  handlers.register('s1');
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, { id: 't_1', name: 'Egg', sound: false });
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  failNext = true;
+  assert.throws(() => handlers.release('a1', 's1'), /disk full/);
+  assert.deepEqual([sink.received.length, handlers.status.pending, ids(handlers.checkpoint.acknowledged)], [0, 0, [{ alertId: 'a1', subscriberId: 's1' }]]);
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.equal(sink.received.length, 0);
+  // The handler sends it again: saved as a handoff first, then played once, then left out.
+  assert.deepEqual(handlers.release('a1', 's1'), { ok: true });
+  assert.deepEqual(saved.slice(-2), [
+    { handoffs: ['a1'], acknowledged: [], played: 0 },
+    { handoffs: [], acknowledged: [], played: 1 }
+  ]);
+  // A daemon that ended after the first of those starts with no acknowledgement for it, so a retried handback gets 404.
+  const successor = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true });
+  assert.equal(successor.release('a1', 's1').status, 404);
+  assert.equal(sink.received.length, 1);
+});
+
+test('once stopped, the handlers hand nothing more to the sink: a handback gets 503 and the alert stays taken', () => {
+  const { clock, sink, handlers } = sequentialHandlers();
+  const timer = { id: 't_1', name: 'Egg', sound: false };
+  for (const kind of ['finish', 'tick']) handlers.deliver({ timerId: 't_1', kind, at: clock.now() }, timer);
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  handlers.stop();
+  assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['tick']);
+  assert.equal(handlers.release('a1', 's1').status, 503);
+  assert.deepEqual([sink.received.length, ids(handlers.checkpoint.acknowledged)], [1, [{ alertId: 'a1', subscriberId: 's1' }]]);
+});
+
+test('a handback whose save fails gets 500 and plays nothing, so the handler that sends it again to the next daemon hears the alert once', async (t) => {
+  const context = await startTestDaemon(t);
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const [alert] = alertsOf(handler);
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
+  const scheduler = join(context.dataDir, 'scheduler.json');
+  const lastSaved = readFileSync(scheduler);
+  // Each save of scheduler.json fails from now on: a directory is where the new file is renamed to.
+  unlinkSync(scheduler);
+  mkdirSync(join(scheduler, 'in-the-way'), { recursive: true });
+  const release = (target) => target.call('POST', `/v1/alerts/${alert.alertId}/release`, { subscriberId: handler.subscriberId });
+  assert.equal((await release(context)).status, 500);
+  // The daemon is killed before the handler hears back; the next one starts from the files as they are.
+  const next = tempDataDir(t);
+  mkdirSync(next, { recursive: true });
+  writeFileSync(join(next, 'state.json'), readFileSync(join(context.dataDir, 'state.json')));
+  writeFileSync(join(next, 'scheduler.json'), lastSaved);
+  const successor = await startTestDaemon(t, { dataDir: next });
+  assert.equal((await release(successor)).status, 200);
+  successor.clock.advance(60_000);
+  const plays = [context, successor].flatMap(({ sink }) => sink.received).filter(({ timer }) => timer.name === 'Egg').length;
+  assert.equal(plays, 1);
 });
 
 test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and only for their handler', () => {

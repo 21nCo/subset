@@ -39,11 +39,14 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * (`received`), however long that takes: a written reply does not mean the handler read it. The
  * next daemon takes the saved ones as `acknowledged`, so a handler whose 200 was lost gets it from
  * that daemon too. A handler that may no longer present an alert it took hands it back
- * (`release`), and the sink plays it.
+ * (`release`), and the sink plays it once that is saved: the alert is saved as a handoff again, so
+ * a daemon that ends before the sink has played it leaves it for the next one to play. When that
+ * save throws, the alert stays taken and the error is thrown to the caller.
  *
  * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting and
  * stopping) first asks `owns()` whether this daemon still holds `daemon.lock`. One that lost it
- * plays none of its pending alerts: the daemon that holds it plays those this one saved.
+ * plays none of its pending alerts: the daemon that holds it plays those this one saved. Once
+ * stopped, nothing more is handed to the sink, so what shutdown waits for is all it plays.
  *
  * `publish(alert)` sends the `alert` event to every subscriber; `isOpen(subscriberId)` says
  * whether that subscriber's event stream is still open. Results are `{ ok: true, ... }` or
@@ -71,6 +74,7 @@ export function createAlertHandlers({
   const counts = { acknowledged: 0, fallbacks: 0 };
   /** The sink's plays of fallen-back alerts that have not finished, so shutdown can wait for them. */
   const playing = new Set();
+  let stopped = false;
   const monotonic = () => (clock.monotonic ?? clock.now)();
 
   /** Forgets the fallbacks last asked about more than `SETTLED_RETENTION_MS` ago. */
@@ -119,7 +123,7 @@ export function createAlertHandlers({
 
   /** Plays a pending alert through the sink, once, and records the fallback, while this daemon holds the lock. */
   function fallBack(alertId, reason) {
-    if (!pending.has(alertId)) return false;
+    if (stopped || !pending.has(alertId)) return false;
     // `owns` may itself begin the lost-lock shutdown, which leaves the pending alerts first.
     if (!owns()) {
       leaveToLockHolder();
@@ -149,6 +153,7 @@ export function createAlertHandlers({
 
   const refused = (status, code, message) => ({ ok: false, status, code, message });
   const expired = () => refused(410, 'alert_expired', 'The daemon already played that alert.');
+  const unavailable = () => refused(503, 'daemon_unavailable', 'The daemon is shutting down.');
 
   /** A refusal unless `subscriberId` holds `alertId`: pending, taken, or played by the sink. */
   function notOwnedBy(alertId, subscriberId) {
@@ -159,9 +164,9 @@ export function createAlertHandlers({
     return null;
   }
 
-  /** The sink plays pending `alertId` now; 503 when the daemon that holds `daemon.lock` will instead. */
+  /** The sink plays pending `alertId` now; 503 once stopped, or when the daemon that holds `daemon.lock` will instead. */
   function fallBackNow(alertId, reason) {
-    if (!fallBack(alertId, reason)) return refused(503, 'daemon_unavailable', 'The daemon is shutting down.');
+    if (!fallBack(alertId, reason)) return unavailable();
     saveAfterFallback();
     return { ok: true };
   }
@@ -266,33 +271,45 @@ export function createAlertHandlers({
     /**
      * The handler `subscriberId` hands `alertId` back unplayed, whether pending or taken, for
      * example because it may no longer post notifications: the sink plays it once, and a later
-     * acknowledgement or release gets 410, as for any alert the sink played. A daemon that lost
-     * `daemon.lock` answers 503, so the handler asks the daemon that holds it, which has the alert
-     * saved.
+     * acknowledgement or release gets 410, as for any alert the sink played. A taken one is first
+     * saved as a handoff; a failed save throws and leaves it taken. A daemon that is stopping, or
+     * lost `daemon.lock`, answers 503 and changes nothing, so the handler asks the next daemon,
+     * which has the alert saved.
      */
     release(alertId, subscriberId) {
       const refusal = notOwnedBy(alertId, subscriberId);
       if (refusal) return refusal;
       const held = taken.get(alertId);
+      if (!held && !pending.has(alertId)) {
+        remember(alertId, subscriberId);
+        return expired();
+      }
+      if (stopped || !owns()) return unavailable();
       if (held) {
         taken.delete(alertId);
         pending.set(alertId, { ...held, handle: null });
+        try {
+          save(checkpoint());
+        } catch (error) {
+          pending.delete(alertId);
+          taken.set(alertId, held);
+          throw error;
+        }
       }
-      if (pending.has(alertId)) return fallBackNow(alertId, 'was handed back by its handler');
-      remember(alertId, subscriberId);
-      return expired();
+      return fallBackNow(alertId, 'was handed back by its handler');
     },
 
     /**
      * At shutdown: the handler is dropped and every pending alert falls back. A daemon that lost
      * `daemon.lock` plays none: the daemon that holds it plays those this one saved, and delivers
      * again those whose marks this one could not save. Returns a promise that settles once the sink
-     * has finished every fallback it is still playing.
+     * has finished every fallback it is still playing; nothing falls back after that.
      */
     stop({ lockLost = false } = {}) {
       handler = null;
       if (lockLost) leaveToLockHolder();
       else fallBackAll(null, 'was pending when the daemon stopped');
+      stopped = true;
       return Promise.allSettled([...playing]);
     }
   };

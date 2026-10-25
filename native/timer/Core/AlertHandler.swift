@@ -289,12 +289,13 @@ public final class AlertHandler {
         }
     }
 
-    /// Hands back an alert the daemon may have handed over, until a daemon answers, so its sink plays it; then gives up
-    /// the handler role.
+    /// Gives up the handler role as soon as the revocation is seen, then hands back an alert the daemon may have handed
+    /// over, until a daemon answers, so its sink plays it. A grant that arrives meanwhile is kept, so the app registers
+    /// again.
     private func handBack(_ alertId: String, subscriberId: String) async {
+        setPermitted(false)
         let daemon = daemon
         _ = await untilAnswered { try await daemon.releaseAlert(alertId, subscriberId: subscriberId) }
-        setPermitted(false)
     }
 
     /// How a request sent until a daemon answers it ended.

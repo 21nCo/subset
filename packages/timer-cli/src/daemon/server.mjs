@@ -465,15 +465,30 @@ export async function startDaemon({
   async function received(request, response, alertId) {
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
+    // Once shutting down the daemon saves no more, so the handler says so again to the next daemon.
+    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
     const result = alertHandlers.received(alertId, id);
     settleRequest(response, result, { alertId, forgotten: result.forgotten });
   }
 
-  /** The handler hands that alert back unplayed, so the sink plays it. */
+  /**
+   * The handler hands that alert back unplayed, so the sink plays it once that is saved. One whose
+   * body arrives once shutdown has begun gets 503 and stays taken, so nothing plays that shutdown
+   * does not wait for, and the handler asks the next daemon.
+   */
   async function release(request, response, alertId) {
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
-    settleRequest(response, alertHandlers.release(alertId, id), { alertId, released: true });
+    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+    let result;
+    try {
+      result = alertHandlers.release(alertId, id);
+    } catch (error) {
+      if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      log(`could not save scheduler.json: ${error.message}`);
+      return fail(response, 500, 'storage_failed', 'The daemon could not record the handback.');
+    }
+    settleRequest(response, result, { alertId, released: true });
   }
 
   /** The id in `pathname` after `prefix` and before `suffix`, or null when it does not match. */

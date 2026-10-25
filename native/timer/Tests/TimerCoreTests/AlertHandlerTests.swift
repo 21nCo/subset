@@ -21,6 +21,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var lostConfirmations = 0
     private var released: Set<String> = []
     private var duringAck: (@Sendable () async -> Void)?
+    private var duringRelease: (@Sendable () async -> Void)?
 
     var log: [String] { lock.withLock { entries } }
     /// The subscriber the daemon holds as its handler.
@@ -40,6 +41,11 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// Runs `action` while the next acknowledgement is on its way, before its answer.
     func whileNextAckIsAnswered(_ action: @escaping @Sendable () async -> Void) {
         lock.withLock { duringAck = action }
+    }
+
+    /// Runs `action` while the next handback is on its way, before the daemon takes it.
+    func whileNextReleaseIsAnswered(_ action: @escaping @Sendable () async -> Void) {
+        lock.withLock { duringRelease = action }
     }
 
     func refuseRegistration(_ error: DaemonError?) {
@@ -106,6 +112,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// Hands the alert back: the daemon's sink plays it ("sink <alertId>"), once, whether it was taken or still pending.
     func releaseAlert(_ alertId: String, subscriberId: String) async throws {
         record("release \(alertId) \(subscriberId)")
+        if let action = lock.withLock({ duringRelease.take() }) { await action() }
         if lock.withLock({ released.insert(alertId).inserted }) { record("sink \(alertId)") }
     }
 }
@@ -244,7 +251,33 @@ struct AlertHandlerTests {
         await handler.receive(alert("a1", kind: .finish))
         await handler.settled()
         #expect(handler.registration == .inactive)
-        #expect(daemon.log == ["register s1", "ack a1 s1", "release a1 s1", "sink a1", "unregister s1"])
+        // It unregisters as soon as it sees the revocation, while the handback is on its way.
+        #expect(daemon.log.prefix(2) == ["register s1", "ack a1 s1"])
+        #expect(daemon.log.dropFirst(2).sorted() == ["release a1 s1", "sink a1", "unregister s1"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Permission granted again while a handback is still on its way: the handback still goes through, so the daemon's
+    /// sink plays that alert, and the newer grant is kept, so the app is the handler again afterwards.
+    @Test func permissionGrantedAgainWhileAnAlertIsHandedBackKeepsTheAppRegistered() async {
+        let permission = Permission()
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.whileNextAckIsAnswered { await MainActor.run { permission.granted = false } }
+        daemon.whileNextReleaseIsAnswered {
+            await MainActor.run {
+                permission.granted = true
+                handler.setPermitted(true)
+            }
+        }
+        await handler.receive(alert("a1", kind: .finish))
+        await handler.settled()
+        #expect(handler.registration == .registered)
+        #expect(daemon.handler == "s1")
+        #expect(daemon.log.filter { $0.hasPrefix("sink") || $0.hasPrefix("play") } == ["sink a1"])
         #expect(daemon.confirmed.isEmpty)
     }
 
