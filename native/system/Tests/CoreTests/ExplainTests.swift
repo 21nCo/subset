@@ -509,7 +509,7 @@ final class ExplainTests: XCTestCase {
         let provider = FakeProvider()
         provider.answer = draft(summary: String(repeating: "s", count: 300))
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         await center.explain(key) { _ in self.request() }
         guard case let .failed(message, _) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
@@ -528,9 +528,9 @@ final class ExplainTests: XCTestCase {
         await center.explain(ExplainKey("process:2")) { _ in self.request() }
         XCTAssertEqual(provider.explained, 3)
 
-        center.choice = .none
+        center.choose(.none)
         XCTAssertEqual(center.state(for: key), .needsProvider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         XCTAssertEqual(center.state(for: key), .explained(explanation, sent))
     }
 
@@ -538,7 +538,7 @@ final class ExplainTests: XCTestCase {
         let provider = FakeProvider()
         provider.status = .appleIntelligenceNotEnabled
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("disk:/x")
         await center.explain(key) { _ in self.request() }
         XCTAssertEqual(center.state(for: key), .unavailable(.appleIntelligenceNotEnabled))
@@ -555,7 +555,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.gate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let first = Task { await center.explain(key) { _ in self.request() } }
         await gate.reached()
@@ -572,16 +572,16 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request() } }
         await gate.reached()
-        center.choice = .none
+        center.choose(.none)
         gate.open()
         await asked.value
         XCTAssertEqual(provider.explained, 0, "the request is not sent to a provider no longer chosen")
         XCTAssertNil(center.availability)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         XCTAssertEqual(center.state(for: key), .idle)
     }
 
@@ -590,15 +590,15 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.gate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request() } }
         await gate.reached()
-        center.choice = .none
+        center.choose(.none)
         gate.open()
         await asked.value
         XCTAssertEqual(provider.explained, 1)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         XCTAssertEqual(center.state(for: key), .idle, "no answer is kept, and the item can be explained again")
     }
 
@@ -616,12 +616,12 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
         await gate.reached()
-        center.choice = .none
-        center.choice = .appleIntelligence
+        center.choose(.none)
+        center.choose(.appleIntelligence)
         XCTAssertEqual(center.state(for: key), .idle, "the old request no longer holds the item")
         let ended = try await finishes(asked)
         XCTAssertTrue(ended, "the old work is cancelled while the provider is still reading its availability")
@@ -643,7 +643,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
         await gate.reached()
@@ -666,12 +666,12 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.gate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request(named: "old") } }
         await gate.reached()
-        center.choice = .none
-        center.choice = .appleIntelligence
+        center.choose(.none)
+        center.choose(.appleIntelligence)
         XCTAssertEqual(center.state(for: key), .idle, "the old request no longer holds the item")
         let ended = try await finishes(asked)
         XCTAssertTrue(ended, "the old answer is cancelled")
@@ -695,7 +695,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         center.sendFolderNames = true
         let key = ExplainKey("disk:/Users/jdoe/dev/secret-client")
         let build = { (redactor: ExplainRedactor) -> ExplainRequest? in
@@ -723,7 +723,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.gate = gate
         let center = center(defaults(), provider: provider, timeout: .milliseconds(200))
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         await center.explain(key) { _ in self.request() }
         guard case let .failed(message, _) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
@@ -740,7 +740,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider, timeout: .milliseconds(200))
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         await center.explain(key) { _ in self.request() }
         guard case let .failed(message, _) = center.state(for: key) else { return XCTFail("\(center.state(for: key))") }
@@ -758,7 +758,7 @@ final class ExplainTests: XCTestCase {
         let provider = FakeProvider()
         provider.status = .modelNotReady
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         await center.refreshAvailability()
         XCTAssertEqual(center.availability, .modelNotReady)
         provider.status = .available
@@ -772,7 +772,7 @@ final class ExplainTests: XCTestCase {
         let gate = AnswerGate()
         provider.availabilityGate = gate
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("process:1")
         let asked = Task { await center.explain(key) { _ in self.request() } }
         await gate.reached()
@@ -792,14 +792,14 @@ final class ExplainTests: XCTestCase {
     func testSettingsSaysWhenTheLatestAvailabilityReadDidNotAnswerUntilALaterOneDoes() async {
         let provider = FakeProvider()
         let center = center(defaults(), provider: provider, timeout: .seconds(1))
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         await center.refreshAvailability()
         XCTAssertEqual(center.availabilityStatus, .read(.available))
-        center.choice = .none
+        center.choose(.none)
         XCTAssertNil(center.availabilityStatus)
         let never = AnswerGate()
         provider.availabilityGate = never
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let reading = Task { await center.refreshAvailability() }
         await never.reached()
         XCTAssertEqual(center.availabilityStatus, .checking)
@@ -836,7 +836,7 @@ final class ExplainTests: XCTestCase {
     func testAnItemGoneBeforeItsRequestIsBuiltSaysSoAndSendsNothing() async {
         let provider = FakeProvider()
         let center = center(defaults(), provider: provider)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         let key = ExplainKey("disk:/gone")
         await center.explain(key) { _ in nil }
         XCTAssertEqual(center.state(for: key), .gone)
@@ -850,7 +850,7 @@ final class ExplainTests: XCTestCase {
         let defaults = defaults()
         let center = center(defaults, provider: nil)
         XCTAssertFalse(center.redactor.sendFolderNames)
-        center.choice = .appleIntelligence
+        center.choose(.appleIntelligence)
         center.sendFolderNames = true
         XCTAssertTrue(center.redactor.sendFolderNames)
         let reopened = self.center(defaults, provider: nil)

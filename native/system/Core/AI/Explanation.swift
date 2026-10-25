@@ -134,12 +134,14 @@ public enum ExplainError: Error, Equatable, Sendable {
     case unavailable(AIAvailability)
     /// The provider failed to answer.
     case failed(String)
+    /// The provider received the request and answered it with an error or a refusal, not an explanation.
+    case rejected(String)
 
     public var message: String {
         switch self {
         case let .invalidResponse(reason): "The answer was rejected: \(reason)"
         case let .unavailable(availability): "\(availability.title). \(availability.meaning)"
-        case let .failed(reason): reason
+        case let .failed(reason), let .rejected(reason): reason
         }
     }
 }

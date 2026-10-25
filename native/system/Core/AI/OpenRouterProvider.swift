@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -22,17 +23,25 @@ public struct SystemExplainLog: ExplainLog {
 /// Apple Intelligence gets, as its prompt text, in a JSON body with a JSON schema `response_format` matching
 /// `Explanation`; the body (`body(for:)`) has the same bytes each time it is built, and the client sends exactly it, so
 /// SET-160's send preview can show it. The key is read from the Keychain for each request and goes only into its
-/// `Authorization` header.
+/// `Authorization` header; a provider bound to the key read before a preview was built (`checkBeforeSending()`) sends
+/// with that key or not at all.
 public struct OpenRouterProvider: AIProvider {
     public static let defaultModel = "openrouter/auto"
-    static let keyAsModelFailure = "The model ID in Settings contains your API key, so nothing was sent. Clear the "
-        + "Model field in Settings, then ask again."
+    /// How `OpenRouterClient.failure(status:data:key:)` begins each answer outside 2xx, which OpenRouter received.
+    static let answeredPrefix = "OpenRouter answered "
     /// The longest model ID accepted.
     static let modelLimit = 200
 
     private let keys: OpenRouterKeyStore
     public let model: String
     private let client: OpenRouterClient
+    /// The key `checkBeforeSending()` read when it bound this provider to it, so a request is sent only with that key;
+    /// `nil` when not bound, and a request is sent with the key stored then.
+    public private(set) var checkedKey: OpenRouterKeyIdentity?
+
+    /// "The OpenRouter key changed after this request was previewed, …": a bound provider's key replaced since.
+    static let keyChanged = "The OpenRouter key changed after this request was previewed, so nothing was sent. Try "
+        + "again to review it with the key stored now."
 
     public init(keys: OpenRouterKeyStore, model: String, client: OpenRouterClient) {
         self.keys = keys
@@ -75,7 +84,32 @@ public struct OpenRouterProvider: AIProvider {
         }
     }
 
-    /// Sends nothing when the key cannot be read or the model ID contains it.
+    /// Before a request is built: available while a key is stored and the model ID does not hold it, so a body whose
+    /// model would be the key is never previewed or sent. The key is read only to check that; nothing is sent.
+    public func availabilityBeforeSending() async -> AIAvailability {
+        await checkBeforeSending().availability
+    }
+
+    /// `availabilityBeforeSending()`, and, when available, this provider bound to the key it read (`checkedKey`), so a
+    /// preview built after it is sent with that key or not at all.
+    public func checkBeforeSending() async -> (availability: AIAvailability, bound: OpenRouterProvider?) {
+        let key: String?
+        do {
+            key = try keys.readKey()
+        } catch {
+            return (.openRouterKeyUnreadable, nil)
+        }
+        guard let key else { return (.noOpenRouterKey, nil) }
+        guard !Self.contains(key: key, in: model) else { return (.openRouterModelHeldKey, nil) }
+        var bound = self
+        bound.checkedKey = OpenRouterKeyIdentity(key)
+        return (.availableOnOpenRouter, bound)
+    }
+
+    /// Sends nothing when the key cannot be read or the model ID contains it (`ExplainError.unavailable`), or, when this
+    /// provider is bound to a key (`checkedKey`), when the key read is another one (`ExplainError.failed`, `keyChanged`).
+    /// An answer OpenRouter gave that is not an explanation, its status outside 2xx included, is `ExplainError.rejected`, so
+    /// `ExplainCenter` knows the request reached it; a connection failure or timeout is `ExplainError.failed`.
     public func explain(_ request: ExplainRequest) async throws -> ExplanationDraft {
         let key: String?
         do {
@@ -84,9 +118,17 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.unavailable(.openRouterKeyUnreadable)
         }
         guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
-        // The key inside the model ID, however Settings came to keep it: not sent in the body.
-        guard !Self.contains(key: key, in: model) else { throw ExplainError.failed(Self.keyAsModelFailure) }
-        let data = try await client.send(.chat(try body(for: request)), key: key)
+        // The key inside the model ID, however Settings came to keep it, the key replaced since availability was read
+        // included: not sent in the body.
+        guard !Self.contains(key: key, in: model) else { throw ExplainError.unavailable(.openRouterModelHeldKey) }
+        // A preview is sent only with the key checked as it was built, never one replaced since outside System.
+        if let checkedKey, checkedKey != OpenRouterKeyIdentity(key) { throw ExplainError.failed(Self.keyChanged) }
+        let data: Data
+        do {
+            data = try await client.send(.chat(try body(for: request)), key: key)
+        } catch let ExplainError.failed(message) where message.hasPrefix(Self.answeredPrefix) {
+            throw ExplainError.rejected(message)
+        }
         return try Self.draft(from: data, key: key)
     }
 
@@ -149,7 +191,7 @@ public struct OpenRouterProvider: AIProvider {
             throw ExplainError.invalidResponse("OpenRouter's answer has no message.")
         }
         if let refusal = message["refusal"] as? String, !refusal.isEmpty {
-            throw ExplainError.failed("The model declined to explain this item.")
+            throw ExplainError.rejected("The model declined to explain this item.")
         }
         guard let content = message["content"] as? String else {
             throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
@@ -160,8 +202,20 @@ public struct OpenRouterProvider: AIProvider {
     /// "OpenRouter could not answer: …", with OpenRouter's message as `OpenRouterClient.message(in:key:)` gives it.
     private static func failure(_ error: Any?, key: String) -> ExplainError {
         let message = error.flatMap { OpenRouterClient.message(in: $0, key: key) }
-        return .failed(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
+        return .rejected(OpenRouterClient.sentence("OpenRouter could not answer: \(message ?? "no reason given")"))
     }
+}
+
+/// Which OpenRouter key a send preview was checked with: its SHA-256 digest, so the key itself is not kept. It is held
+/// in memory only, never stored, logged or shown, and describes itself without the digest.
+public struct OpenRouterKeyIdentity: Equatable, Sendable, CustomStringConvertible {
+    private let digest: Data
+
+    init(_ key: String) {
+        digest = Data(SHA256.hash(data: Data(key.utf8)))
+    }
+
+    public var description: String { "OpenRouterKeyIdentity" }
 }
 
 /// Sends System's two OpenRouter requests: a chat completion and the key test. Each has a 30-second timeout, sends
