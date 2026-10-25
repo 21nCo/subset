@@ -626,37 +626,11 @@ final class OpenRouterExplainTests: XCTestCase {
             let item = ExplainKey("process:1")
 
             keychain.failure = errSecInteractionNotAllowed
-            keychain.holdsDataReads = true
-            account.model = "openai/gpt-4o"
-            try await until { keychain.heldDataReads == 1 }
-            keychain.holdsDataReads = false
-            keychain.failure = nil
-            if byExplain {
-                await center.explain(item) { _ in self.request() }
-                XCTAssertNotNil(confirming(center, item))
-            } else {
-                await center.refreshAvailability()
-                XCTAssertEqual(center.availability, .availableOnOpenRouter)
-            }
-            let preview = confirming(center, item)
-            keychain.releaseDataRead()
-            await account.modelChecked()
-            XCTAssertEqual(center.choice, .openRouter, "by Explain: \(byExplain)")
-            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
-            XCTAssertNil(center.notice)
+            let preview = try await overtakingModelCheck(of: "openai/gpt-4o", byExplain: byExplain,
+                                                         center, account, keychain, item, defaults)
             XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage, "Settings still says so")
             XCTAssertEqual(account.checkedModel, "", "the entry is not used")
-            if byExplain {
-                let shown = try XCTUnwrap(preview)
-                XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
-                StubProtocol.enqueue(status: 200, json: completion(Self.answer))
-                await center.confirmSend(item)
-                XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
-                guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
-            } else {
-                XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter), "the newer read is shown")
-                XCTAssertTrue(StubProtocol.requests.isEmpty)
-            }
+            try await assertOvertakerStands(preview, byExplain: byExplain, center, item)
 
             // The latest check of a model ID entry, failing, sets the choice back.
             keychain.failure = errSecInteractionNotAllowed
@@ -732,40 +706,16 @@ final class OpenRouterExplainTests: XCTestCase {
             XCTAssertTrue(center.choose(.openRouter))
             let item = ExplainKey("process:1")
 
-            keychain.holdsDataReads = true
-            account.model = "acme/\(other)"
-            try await until { keychain.heldDataReads == 1 }
-            keychain.holdsDataReads = false
-            if byExplain {
-                await center.explain(item) { _ in self.request() }
-                XCTAssertNotNil(confirming(center, item))
-            } else {
-                await center.refreshAvailability()
-                XCTAssertEqual(center.availability, .availableOnOpenRouter)
-            }
-            let preview = confirming(center, item)
-            keychain.releaseDataRead()
-            await account.modelChecked()
-            XCTAssertEqual(center.choice, .openRouter, "by Explain: \(byExplain)")
-            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
-            XCTAssertNil(center.notice)
+            let preview = try await overtakingModelCheck(of: "acme/\(other)", byExplain: byExplain,
+                                                         center, account, keychain, item, defaults)
             XCTAssertEqual(account.model, "", "the entry is cleared")
             XCTAssertEqual(account.modelEntry, "")
             XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
             XCTAssertEqual(account.checkedModel, "", "openrouter/auto, as before")
             XCTAssertEqual(defaults.string(forKey: OpenRouterAccount.modelKey), "")
-            if byExplain {
-                let shown = try XCTUnwrap(preview)
-                XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
-                StubProtocol.enqueue(status: 200, json: completion(Self.answer))
-                await center.confirmSend(item)
-                XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
-                XCTAssertFalse(String(decoding: shown.body, as: UTF8.self).contains(other), "never sent the key")
-                guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
-            } else {
-                XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter), "the newer read is shown")
-                XCTAssertTrue(StubProtocol.requests.isEmpty)
-            }
+            try await assertOvertakerStands(preview, byExplain: byExplain, center, item)
+            let sent = StubProtocol.requests.map { String(decoding: $0.body ?? Data(), as: UTF8.self) }
+            XCTAssertFalse(sent.contains { $0.contains(other) }, "never sent the key")
 
             // The latest check finding the key in the entry sets the choice back.
             account.model = "acme/\(other)"
@@ -828,7 +778,9 @@ final class OpenRouterExplainTests: XCTestCase {
             guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
 
             // The latest key test read, failing or finding none, sets the choice back.
-            try await testing {}
+            try await testing {
+                // Nothing overtakes the latest read.
+            }
             XCTAssertEqual(center.choice, .appleIntelligence)
             XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
             XCTAssertEqual(StubProtocol.requests.count, 1)
@@ -903,7 +855,9 @@ final class OpenRouterExplainTests: XCTestCase {
             guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
 
             // The latest read after a failed removal, failing or finding none, sets the choice back.
-            try await removing {}
+            try await removing {
+                // Nothing overtakes the latest read.
+            }
             XCTAssertEqual(center.choice, .appleIntelligence)
             XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
             XCTAssertEqual(StubProtocol.requests.count, 1)
@@ -1557,6 +1511,50 @@ final class OpenRouterExplainTests: XCTestCase {
 
     private func confirming(_ center: ExplainCenter, _ item: ExplainKey) -> SendPreview? {
         if case let .confirming(preview) = center.state(for: item) { preview } else { nil }
+    }
+
+    /// Holds the account's check of the model ID `model` at its Keychain read until another item's Explain shows its
+    /// preview, or Settings' read finds OpenRouter available, then releases it, and asserts that the overtaken check set
+    /// nothing back. Returns the preview shown, if any.
+    private func overtakingModelCheck(of model: String, byExplain: Bool, _ center: ExplainCenter,
+                                      _ account: OpenRouterAccount, _ keychain: FakeKeychain, _ item: ExplainKey,
+                                      _ defaults: UserDefaults) async throws -> SendPreview? {
+        keychain.holdsDataReads = true
+        account.model = model
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        keychain.failure = nil
+        if byExplain {
+            await center.explain(item) { _ in self.request() }
+            XCTAssertNotNil(confirming(center, item))
+        } else {
+            await center.refreshAvailability()
+            XCTAssertEqual(center.availability, .availableOnOpenRouter)
+        }
+        let preview = confirming(center, item)
+        keychain.releaseDataRead()
+        await account.modelChecked()
+        XCTAssertEqual(center.choice, .openRouter, "by Explain: \(byExplain)")
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+        XCTAssertNil(center.notice)
+        return preview
+    }
+
+    /// Asserts that the check which overtook one stands: its preview is kept and confirming it sends exactly its body,
+    /// or Settings shows its read and nothing is sent.
+    private func assertOvertakerStands(_ preview: SendPreview?, byExplain: Bool, _ center: ExplainCenter,
+                                       _ item: ExplainKey) async throws {
+        if byExplain {
+            let shown = try XCTUnwrap(preview)
+            XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        } else {
+            XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter), "the newer read is shown")
+            XCTAssertTrue(StubProtocol.requests.isEmpty)
+        }
     }
 
     /// The reads of whether a key is stored made since `calls` other than one made here: the main actor starts the
