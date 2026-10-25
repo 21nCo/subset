@@ -36,6 +36,7 @@ private final class FakeDaemon: AlertHandlerDaemon, @unchecked Sendable {
         return lock.withLock { expired.contains(alertId) } ? .expired : .acknowledged
     }
     func confirmAlert(_ alertId: String, subscriberId: String) async throws {}
+    func releaseAlert(_ alertId: String, subscriberId: String) async throws { log.add("release \(alertId)") }
 }
 
 @MainActor

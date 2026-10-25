@@ -19,6 +19,8 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var holder: String?
     private var confirmations: [String] = []
     private var lostConfirmations = 0
+    private var released: Set<String> = []
+    private var duringAck: (@Sendable () async -> Void)?
 
     var log: [String] { lock.withLock { entries } }
     /// The subscriber the daemon holds as its handler.
@@ -33,6 +35,11 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// The answers to the next acknowledgements, in order; once used up, each is `.acknowledged`.
     func answerAcks(_ answers: [Result<AlertAcknowledgement, DaemonError>]) {
         lock.withLock { acks = answers }
+    }
+
+    /// Runs `action` while the next acknowledgement is on its way, before its answer.
+    func whileNextAckIsAnswered(_ action: @escaping @Sendable () async -> Void) {
+        lock.withLock { duringAck = action }
     }
 
     func refuseRegistration(_ error: DaemonError?) {
@@ -68,6 +75,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
 
     func acknowledgeAlert(_ alertId: String, subscriberId: String) async throws -> AlertAcknowledgement {
         record("ack \(alertId) \(subscriberId)")
+        if let action = lock.withLock({ duringAck.take() }) { await action() }
         let answer: Result<AlertAcknowledgement, DaemonError> = lock.withLock {
             switch lostAcks.isEmpty ? nil : lostAcks.removeFirst() {
             case .beforeApplying?:
@@ -93,6 +101,12 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
             return true
         }
         if lost { throw DaemonError.timedOut }
+    }
+
+    /// Hands the alert back: the daemon's sink plays it ("sink <alertId>"), once, whether it was taken or still pending.
+    func releaseAlert(_ alertId: String, subscriberId: String) async throws {
+        record("release \(alertId) \(subscriberId)")
+        if lock.withLock({ released.insert(alertId).inserted }) { record("sink \(alertId)") }
     }
 }
 
@@ -213,6 +227,25 @@ struct AlertHandlerTests {
         await handler.settled()
         #expect(handler.registration == .inactive)
         #expect(daemon.log == ["register s1", "ack a1 s1", "play a1", "unregister s1"])
+    }
+
+    /// Revoked while an acknowledgement is on its way: answered after all (held), its answer lost after the daemon took
+    /// it, or lost before the daemon saw it. The app plays nothing and hands the alert back, so the daemon's sink plays it.
+    @Test(arguments: [nil, FakeAlertDaemon.Lost.afterApplying, .beforeApplying])
+    func permissionRevokedWhileAnAckIsAnsweredHandsTheAlertBackSoItPlaysOnce(_ lost: FakeAlertDaemon.Lost?) async {
+        let permission = Permission()
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        if let lost { daemon.lose(acks: [lost]) }
+        daemon.whileNextAckIsAnswered { await MainActor.run { permission.granted = false } }
+        await handler.receive(alert("a1", kind: .finish))
+        await handler.settled()
+        #expect(handler.registration == .inactive)
+        #expect(daemon.log == ["register s1", "ack a1 s1", "release a1 s1", "sink a1", "unregister s1"])
+        #expect(daemon.confirmed.isEmpty)
     }
 
     @Test func itRegistersOnlyWhilePermittedAndUnregistersWhenPermissionIsRevoked() async {

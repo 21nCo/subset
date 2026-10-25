@@ -469,6 +469,13 @@ export async function startDaemon({
     settleRequest(response, result, { alertId, forgotten: result.forgotten });
   }
 
+  /** The handler hands that alert back unplayed, so the sink plays it. */
+  async function release(request, response, alertId) {
+    const id = await subscriberIdOf(request, response);
+    if (id === null) return;
+    settleRequest(response, alertHandlers.release(alertId, id), { alertId, released: true });
+  }
+
   /** The id in `pathname` after `prefix` and before `suffix`, or null when it does not match. */
   function idIn(pathname, prefix, suffix = '') {
     if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return null;
@@ -532,6 +539,11 @@ export async function startDaemon({
     if (receivedId !== null) {
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
       return received(request, response, receivedId);
+    }
+    const releasedId = idIn(pathname, '/v1/alerts/', '/release');
+    if (releasedId !== null) {
+      if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
+      return release(request, response, releasedId);
     }
     const route = Object.hasOwn(routes, pathname) ? routes[pathname] : null;
     if (!route) return fail(response, 404, 'not_found', `No route ${pathname}.`);

@@ -57,6 +57,7 @@ public protocol AlertHandlerDaemon: Sendable {
     func unregisterAlertHandler(subscriberId: String) async throws
     func acknowledgeAlert(_ alertId: String, subscriberId: String) async throws -> AlertAcknowledgement
     func confirmAlert(_ alertId: String, subscriberId: String) async throws
+    func releaseAlert(_ alertId: String, subscriberId: String) async throws
 }
 
 extension DaemonClient: AlertHandlerDaemon {
@@ -88,6 +89,15 @@ extension DaemonClient: AlertHandlerDaemon {
     public func confirmAlert(_ alertId: String, subscriberId: String) async throws {
         let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/received",
                                    body: try JSONEncoder().encode(SubscriberBody(subscriberId: subscriberId)))
+        _ = try Self.decode(Ignored.self, status: reply.status, body: reply.body)
+    }
+
+    /// `POST /v1/alerts/<alertId>/release`: the app hands back an alert it may no longer present, and the daemon's sink
+    /// plays it. A 410 means the sink already played it, which is the same outcome.
+    public func releaseAlert(_ alertId: String, subscriberId: String) async throws {
+        let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/release",
+                                   body: try JSONEncoder().encode(SubscriberBody(subscriberId: subscriberId)))
+        if reply.status == 410 { return }
         _ = try Self.decode(Ignored.self, status: reply.status, body: reply.body)
     }
 
@@ -131,7 +141,7 @@ public final class AlertHandler {
 
     /// `play` presents an alert the app has taken over. A registration request the daemon did not answer is tried again
     /// after `retryDelay`, and at the next permission check; an acknowledgement, after `ackRetryDelay`. `isPermitted`
-    /// reads whether the app may still post notifications, before each acknowledgement.
+    /// reads whether the app may still post notifications, before each acknowledgement and before playing.
     public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), ackRetryDelay: Duration = .milliseconds(250),
                 isPermitted: @escaping @MainActor () async -> Bool = { true }, play: @escaping (TimerAlert) -> Void) {
         self.daemon = daemon
@@ -252,36 +262,64 @@ public final class AlertHandler {
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
-        // Permission revoked in System Settings since the last check: the app takes no alert it may not show, and gives
-        // up the handler role, so the daemon plays this alert and the next ones.
-        guard await isPermitted() else {
-            setPermitted(false)
-            return
-        }
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
         // no daemon answered is sent again until one does, always for the stream the alert came on, even after the stream
         // reconnects: one it took gets `.acknowledged` again, from the next daemon too, which the event stream starts, until
         // the app says it received that answer; one it never saw gets `.expired` once its sink has played the alert, or a
         // 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
         let daemon = daemon
-        guard await untilAnswered({ try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId) }) == .acknowledged
-        else { return }
-        play(alert)
-        _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+        var asked = false
+        switch await untilAnswered(while: isPermitted, {
+            asked = true
+            return try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId)
+        }) {
+        case .answer(.acknowledged):
+            // Revoked while the answer was on its way: the app hands the alert back rather than show what it may not.
+            guard await isPermitted() else { return await handBack(alertId, subscriberId: subscriberId) }
+            play(alert)
+            _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+        case .revoked:
+            // Permission revoked in System Settings since the last check: the app takes no alert it may not show, and
+            // gives up the handler role, so the daemon plays this alert and the next ones. An acknowledgement already
+            // sent may have been taken, so that alert is handed back.
+            if asked { return await handBack(alertId, subscriberId: subscriberId) }
+            setPermitted(false)
+        case .answer(.expired), .refused:
+            break
+        }
     }
 
-    /// Sends `request` every `ackRetryDelay` until a daemon answers it. Nil when the daemon refused it (404 or 409: not
-    /// this app's alert, so whoever holds it plays it) or the task was cancelled.
-    private func untilAnswered<Answer>(_ request: () async throws -> Answer) async -> Answer? {
+    /// Hands back an alert the daemon may have handed over, until a daemon answers, so its sink plays it; then gives up
+    /// the handler role.
+    private func handBack(_ alertId: String, subscriberId: String) async {
+        let daemon = daemon
+        _ = await untilAnswered { try await daemon.releaseAlert(alertId, subscriberId: subscriberId) }
+        setPermitted(false)
+    }
+
+    /// How a request sent until a daemon answers it ended.
+    private enum Outcome<Answer> {
+        case answer(Answer)
+        /// The daemon refused it (404 or 409: not this app's alert, so whoever holds it plays it), or the task was
+        /// cancelled.
+        case refused
+        /// The app may no longer post notifications, so the request was not sent again.
+        case revoked
+    }
+
+    /// Sends `request` every `ackRetryDelay` until a daemon answers it, while `permitted` holds before each attempt.
+    private func untilAnswered<Answer>(while permitted: @MainActor () async -> Bool = { true },
+                                       _ request: () async throws -> Answer) async -> Outcome<Answer> {
         while !Task.isCancelled {
+            guard await permitted() else { return .revoked }
             do {
-                return try await request()
+                return .answer(try await request())
             } catch where Self.refused(error) {
-                return nil
+                return .refused
             } catch {
                 try? await Task.sleep(for: ackRetryDelay)
             }
         }
-        return nil
+        return .refused
     }
 }

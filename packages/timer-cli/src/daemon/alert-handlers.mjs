@@ -10,9 +10,10 @@ export const ACK_TIMEOUT_MS = 2_000;
  */
 export const SETTLED_RETENTION_MS = 60_000;
 /**
- * How many acknowledged alerts the daemon keeps that no handler has said it received; the oldest
- * is dropped beyond this. A running handler says so right after each 200, so only a handler that
- * ended between a 200 and saying so leaves one behind.
+ * How many acknowledged alerts the daemon keeps that no handler has said it received. None is ever
+ * dropped: at this many, the daemon takes no more, and the sink plays the next alert acknowledged
+ * (410). A running handler says so right after each 200, so only a handler that ended between a
+ * 200 and saying so leaves one behind.
  */
 export const MAX_UNRECEIVED = 1_000;
 
@@ -37,7 +38,8 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * stays in `acknowledged`, and so in every later save, until its handler says it received the 200
  * (`received`), however long that takes: a written reply does not mean the handler read it. The
  * next daemon takes the saved ones as `acknowledged`, so a handler whose 200 was lost gets it from
- * that daemon too.
+ * that daemon too. A handler that may no longer present an alert it took hands it back
+ * (`release`), and the sink plays it.
  *
  * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting and
  * stopping) first asks `owns()` whether this daemon still holds `daemon.lock`. One that lost it
@@ -64,7 +66,7 @@ export function createAlertHandlers({
   const pending = new Map();
   /** alertId → { subscriberId, at }, for alerts the sink played, least recently asked first. */
   const settled = new Map();
-  /** alertId → subscriberId, for acknowledged alerts whose handler has not said it received the 200, oldest first. */
+  /** alertId → { subscriberId, alert, timer }, for acknowledged alerts whose handler has not said it received the 200. */
   const taken = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
   /** The sink's plays of fallen-back alerts that have not finished, so shutdown can wait for them. */
@@ -85,20 +87,13 @@ export function createAlertHandlers({
     settled.delete(alertId);
     settled.set(alertId, { subscriberId, at: monotonic() });
   }
-  function take(alertId, subscriberId) {
-    taken.set(alertId, subscriberId);
-    if (taken.size <= MAX_UNRECEIVED) return;
-    const [oldest] = taken.keys();
-    taken.delete(oldest);
-    log(`alert ${oldest} was acknowledged but its handler never said it received the reply; it is forgotten.`);
-  }
   // A daemon that ended before these handlers said they received their 200 left them for this one.
-  for (const { alertId, subscriberId } of acknowledged) take(alertId, subscriberId);
+  for (const { alertId, subscriberId, alert, timer } of acknowledged) taken.set(alertId, { subscriberId, alert, timer });
 
   const handoffs = (except = null) => [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer }]) => ({ alertId, alert, timer }));
   /** What `save` records: the pending alerts and the acknowledged ones not yet received, plus `next`. */
   function checkpoint(next = null) {
-    const acknowledgements = [...taken].map(([alertId, subscriberId]) => ({ alertId, subscriberId }));
+    const acknowledgements = [...taken].map(([alertId, { subscriberId, alert, timer }]) => ({ alertId, subscriberId, alert, timer }));
     if (next) acknowledgements.push(next);
     return { handoffs: handoffs(next?.alertId), acknowledged: acknowledgements };
   }
@@ -153,6 +148,23 @@ export function createAlertHandlers({
   }
 
   const refused = (status, code, message) => ({ ok: false, status, code, message });
+  const expired = () => refused(410, 'alert_expired', 'The daemon already played that alert.');
+
+  /** A refusal unless `subscriberId` holds `alertId`: pending, taken, or played by the sink. */
+  function notOwnedBy(alertId, subscriberId) {
+    forgetExpired();
+    const owner = pending.get(alertId)?.subscriberId ?? taken.get(alertId)?.subscriberId ?? settled.get(alertId)?.subscriberId;
+    if (owner === undefined) return refused(404, 'not_found', 'No alert has that id.');
+    if (owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
+    return null;
+  }
+
+  /** The sink plays pending `alertId` now; 503 when the daemon that holds `daemon.lock` will instead. */
+  function fallBackNow(alertId, reason) {
+    if (!fallBack(alertId, reason)) return refused(503, 'daemon_unavailable', 'The daemon is shutting down.');
+    saveAfterFallback();
+    return { ok: true };
+  }
 
   return {
     /** The registered handler's subscriber id, or null. */
@@ -214,27 +226,31 @@ export function createAlertHandlers({
     /**
      * The handler `subscriberId` takes `alertId`, once that is saved; a failed save throws and
      * leaves the alert pending. Acknowledging an alert it already took is a no-op, so a retried
-     * acknowledgement gets the same answer until the handler says it received it. A retry for a
-     * fallback keeps its 410 for another `SETTLED_RETENTION_MS`.
+     * acknowledgement gets the same answer until the handler says it received it. While
+     * `MAX_UNRECEIVED` taken alerts are not yet received, a pending one is not taken: the sink plays
+     * it and the answer is 410. A retry for a fallback keeps its 410 for another
+     * `SETTLED_RETENTION_MS`.
      */
     acknowledge(alertId, subscriberId) {
-      forgetExpired();
+      const refusal = notOwnedBy(alertId, subscriberId);
+      if (refusal) return refusal;
       const entry = pending.get(alertId);
-      const outcome = settled.get(alertId);
-      const owner = entry?.subscriberId ?? taken.get(alertId) ?? outcome?.subscriberId;
-      if (owner === undefined) return refused(404, 'not_found', 'No alert has that id.');
-      if (owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
+      if (entry && taken.size >= MAX_UNRECEIVED) {
+        const played = fallBackNow(alertId, `was not taken, as ${MAX_UNRECEIVED} acknowledged alerts are not yet received`);
+        return played.ok ? expired() : played;
+      }
       if (entry) {
-        save(checkpoint({ alertId, subscriberId }));
+        const { alert, timer } = entry;
+        save(checkpoint({ alertId, subscriberId, alert, timer }));
         pending.delete(alertId);
         clock.clearTimeout(entry.handle);
-        take(alertId, subscriberId);
+        taken.set(alertId, { subscriberId, alert, timer });
         counts.acknowledged += 1;
         return { ok: true };
       }
       if (taken.has(alertId)) return { ok: true };
       remember(alertId, subscriberId);
-      return refused(410, 'alert_expired', 'The daemon already played that alert.');
+      return expired();
     },
 
     /**
@@ -242,9 +258,29 @@ export function createAlertHandlers({
      * save leaves it out. Saying so again, or for an alert the daemon does not hold, changes nothing.
      */
     received(alertId, subscriberId) {
-      const owner = taken.get(alertId);
+      const owner = taken.get(alertId)?.subscriberId;
       if (owner !== undefined && owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
       return { ok: true, forgotten: taken.delete(alertId) };
+    },
+
+    /**
+     * The handler `subscriberId` hands `alertId` back unplayed, whether pending or taken, for
+     * example because it may no longer post notifications: the sink plays it once, and a later
+     * acknowledgement or release gets 410, as for any alert the sink played. A daemon that lost
+     * `daemon.lock` answers 503, so the handler asks the daemon that holds it, which has the alert
+     * saved.
+     */
+    release(alertId, subscriberId) {
+      const refusal = notOwnedBy(alertId, subscriberId);
+      if (refusal) return refusal;
+      const held = taken.get(alertId);
+      if (held) {
+        taken.delete(alertId);
+        pending.set(alertId, { ...held, handle: null });
+      }
+      if (pending.has(alertId)) return fallBackNow(alertId, 'was handed back by its handler');
+      remember(alertId, subscriberId);
+      return expired();
     },
 
     /**

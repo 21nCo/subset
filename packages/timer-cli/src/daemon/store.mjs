@@ -11,7 +11,7 @@ const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.starte
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isHandoff = (handoff) =>
   typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
-const isAcknowledged = (entry) => typeof entry?.alertId === 'string' && typeof entry.subscriberId === 'string';
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);

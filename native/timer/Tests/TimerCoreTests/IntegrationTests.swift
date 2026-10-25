@@ -165,6 +165,14 @@ func realDaemonHandsAlertsToOneHandlerAndRefusesALateAcknowledgement() async thr
     try await Task.sleep(nanoseconds: 2_500_000_000)
     #expect(try await client.acknowledgeAlert(try #require(second.alertId), subscriberId: handlerId) == .expired)
 
+    // Handed back after it was taken: the daemon's sink plays it, so a later acknowledgement is refused.
+    try await client.perform("start", countdown)
+    let third = try #require(try await waitFor("the third finish") { await handler.alerts.count == 3 ? await handler.alerts.last : nil }.alertId)
+    #expect(try await client.acknowledgeAlert(third, subscriberId: handlerId) == .acknowledged)
+    try await client.releaseAlert(third, subscriberId: handlerId)
+    try await client.releaseAlert(third, subscriberId: handlerId)
+    #expect(try await client.acknowledgeAlert(third, subscriberId: handlerId) == .expired)
+
     try await client.unregisterAlertHandler(subscriberId: handlerId)
     try await client.registerAlertHandler(subscriberId: otherId)
     #expect(try await client.send("POST", "/v1/shutdown").status == 200)

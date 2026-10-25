@@ -4,10 +4,13 @@ import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
-import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, socketRequest } from '../../src/daemon/index.mjs';
+import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, createStateStore, daemonPaths, socketRequest } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
+
+/** Saved acknowledgements by alert and handler, without the alert and timer they also keep. */
+const ids = (acknowledged) => acknowledged.map(({ alertId, subscriberId }) => ({ alertId, subscriberId }));
 
 /** Opens an event stream and waits for its subscriber id and first state. */
 async function openStream(t, context) {
@@ -391,7 +394,7 @@ test('an acknowledgement is answered only once it is saved; one that fails to sa
         failNext = false;
         throw new Error('disk full');
       }
-      saved.push([handoffs.map(({ alertId }) => alertId), acknowledged]);
+      saved.push([handoffs.map(({ alertId }) => alertId), ids(acknowledged)]);
     }
   });
   handlers.register('s1');
@@ -473,19 +476,97 @@ test(`an acknowledged alert is answered 200 until its handler says it received i
   assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.checkpoint.acknowledged], [404, []]);
 });
 
-test(`at most ${MAX_UNRECEIVED} acknowledged alerts nobody said they received are kept, the oldest dropped first`, () => {
-  const { clock, handlers } = sequentialHandlers();
-  const timer = { id: 't_1', name: 'Egg', sound: true };
-  for (let index = 1; index <= MAX_UNRECEIVED + 1; index++) {
-    handlers.deliver({ timerId: 't_1', kind: 'tick', at: clock.now() }, timer);
-    assert.equal(handlers.acknowledge(`a${index}`, 's1').ok, true);
+test(`however many acknowledged alerts are not yet received, none is forgotten: at ${MAX_UNRECEIVED} the sink plays the next one instead (410)`, (t) => {
+  const dataDir = tempDataDir(t);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const stateStore = createStateStore(daemonPaths(dataDir), { log: () => {}, now: () => 0 });
+  const save = (checkpoint) => stateStore.saveMarks([], checkpoint);
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  let next = 0;
+  const handlers = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, save, newId: () => `a${++next}` });
+  handlers.register('s1');
+  const egg = { id: 't_egg', name: 'Egg', sound: false };
+  const interval = { id: 't_2', name: 'Interval', sound: true };
+  /** alertId → plays by the handler, which plays only on a 200 it reads. */
+  const playedByHandler = new Map();
+  handlers.deliver({ timerId: 't_egg', kind: 'finish', at: clock.now() }, egg);
+  // The daemon takes Egg's finish, but its 200 is lost: the handler keeps asking every second.
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  // 50 supported timers alert about 99 times a second; for 11 s their acknowledgements are taken
+  // and none is received yet, so more are taken than the daemon keeps.
+  for (let second = 0; second < 11; second++) {
+    for (let index = 0; index < 99; index++) {
+      handlers.deliver({ timerId: 't_2', kind: 'tick', at: clock.now() }, interval);
+      const alertId = `a${next}`;
+      const answer = handlers.acknowledge(alertId, 's1');
+      assert.ok(answer.ok || answer.status === 410, JSON.stringify(answer));
+      if (answer.ok) playedByHandler.set(alertId, 1);
+    }
+    clock.advance(1_000);
+    assert.equal(handlers.acknowledge('a1', 's1').ok, true);
   }
-  const kept = handlers.checkpoint.acknowledged;
-  assert.deepEqual([kept.length, kept[0].alertId, kept.at(-1).alertId], [MAX_UNRECEIVED, 'a2', `a${MAX_UNRECEIVED + 1}`]);
-  assert.deepEqual([handlers.acknowledge('a1', 's1').status, handlers.acknowledge('a2', 's1').ok], [404, true]);
+  // Each tick played exactly once, by the handler or, beyond the limit, by the sink.
+  assert.equal(playedByHandler.size + sink.received.length, 11 * 99);
+  assert.deepEqual([playedByHandler.size, handlers.checkpoint.acknowledged.length], [MAX_UNRECEIVED - 1, MAX_UNRECEIVED]);
+  assert.equal(sink.received.filter(({ timer }) => timer.name === 'Egg').length, 0);
+  // Another alert falls back, which saves the checkpoint again; then a daemon that reads it replaces this one.
+  handlers.deliver({ timerId: 't_2', kind: 'tick', at: clock.now() }, interval);
+  clock.advance(ACK_TIMEOUT_MS);
+  const successor = createAlertHandlers({ clock: createFakeClock(), sink: createRecordingSink(), log: () => {}, publish: () => {}, isOpen: () => true, save, ...stateStore.loadAlerts() });
+  assert.equal(successor.checkpoint.acknowledged.length, MAX_UNRECEIVED);
+  // Egg's retry still gets its 200, so the handler plays it once and no sink does.
+  if (successor.acknowledge('a1', 's1').ok) playedByHandler.set('a1', 1);
+  assert.deepEqual([playedByHandler.get('a1'), sink.received.filter(({ timer }) => timer.name === 'Egg').length, successor.status.fallbacks], [1, 0, 0]);
+  // Once the handler says it received it, there is room for one more.
+  assert.equal(successor.received('a1', 's1').forgotten, true);
+  successor.register('s1');
+  successor.deliver({ timerId: 't_egg', kind: 'finish', at: 0 }, egg);
+  assert.equal(successor.checkpoint.handoffs.length, 1);
+  assert.equal(successor.acknowledge(successor.checkpoint.handoffs[0].alertId, 's1').ok, true);
+});
+
+test('a handler hands back an alert it may no longer present, pending or taken, and the sink plays it once', () => {
+  const clock = createFakeClock();
+  const sink = createRecordingSink();
+  const saved = [];
+  let next = 0;
+  let held = true;
+  const handlers = createAlertHandlers({
+    clock,
+    sink,
+    log: () => {},
+    publish: () => {},
+    isOpen: () => true,
+    owns: () => held,
+    save: ({ handoffs, acknowledged }) => saved.push([handoffs.map(({ alertId }) => alertId), ids(acknowledged)]),
+    newId: () => `a${++next}`
+  });
+  handlers.register('s1');
+  const timer = { id: 't_1', name: 'Egg', sound: false };
+  for (const kind of ['finish', 'tick', 'segment']) handlers.deliver({ timerId: 't_1', kind, at: clock.now() }, timer);
+  assert.equal(handlers.acknowledge('a2', 's1').ok, true);
+  assert.equal(handlers.acknowledge('a3', 's1').ok, true);
+  // Pending a1 and taken a2 are handed back: the sink plays each at once, and the next save drops a2.
+  assert.deepEqual([handlers.release('a1', 's2').status, handlers.release('a9', 's1').status], [409, 404]);
+  assert.deepEqual([handlers.release('a1', 's1'), handlers.release('a2', 's1')], [{ ok: true }, { ok: true }]);
+  assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['finish', 'tick']);
+  assert.deepEqual(saved.at(-1), [[], [{ alertId: 'a3', subscriberId: 's1' }]]);
+  // Asking again, or acknowledging it, gets 410: the sink played it, so the handler does not.
+  assert.deepEqual(['a1', 'a2'].flatMap((alertId) => [handlers.release(alertId, 's1').status, handlers.acknowledge(alertId, 's1').status]), [410, 410, 410, 410]);
+  clock.advance(ACK_TIMEOUT_MS);
+  assert.equal(sink.received.length, 2);
+  // A daemon that lost daemon.lock plays nothing and answers 503, so the handler asks the one that holds it.
+  held = false;
+  assert.equal(handlers.release('a3', 's1').status, 503);
+  assert.equal(sink.received.length, 2);
+  const successor = createAlertHandlers({ clock, sink, log: () => {}, publish: () => {}, isOpen: () => true, acknowledged: [{ alertId: 'a3', subscriberId: 's1', alert: { timerId: 't_1', kind: 'segment', at: 0 }, timer }] });
+  assert.equal(successor.release('a3', 's1').ok, true);
+  assert.deepEqual([sink.received.map(({ alert }) => alert.kind), successor.checkpoint.acknowledged], [['finish', 'tick', 'segment'], []]);
 });
 
 test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and only for their handler', () => {
+  const earlier = { alertId: 'a1', subscriberId: 's1', alert: { timerId: 't_1', kind: 'finish', at: 0 }, timer: { id: 't_1', name: 'Egg', sound: false } };
   const clock = createFakeClock();
   const sink = createRecordingSink();
   const saved = [];
@@ -496,14 +577,14 @@ test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and
     publish: () => {},
     isOpen: () => true,
     save: (checkpoint) => saved.push(checkpoint),
-    acknowledged: [{ alertId: 'a1', subscriberId: 's1' }]
+    acknowledged: [earlier]
   });
-  assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [{ alertId: 'a1', subscriberId: 's1' }] });
+  assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [earlier] });
   assert.equal(handlers.acknowledge('a1', 's2').status, 409);
   assert.equal(handlers.acknowledge('a1', 's1').ok, true);
   // Answering it does not drop it, however long the handler takes: it may never have read that 200.
   clock.advance(10 * SETTLED_RETENTION_MS);
-  assert.deepEqual(handlers.checkpoint.acknowledged, [{ alertId: 'a1', subscriberId: 's1' }]);
+  assert.deepEqual(handlers.checkpoint.acknowledged, [earlier]);
   assert.equal(handlers.received('a1', 's1').ok, true);
   assert.deepEqual(handlers.checkpoint.acknowledged, []);
   assert.equal(handlers.acknowledge('a1', 's1').status, 404);
@@ -533,7 +614,7 @@ async function killDaemonDuringHandoff(t, { acknowledgeFirst }) {
   await crashed.exited;
   const saved = JSON.parse(readFileSync(join(dataDir, 'scheduler.json'), 'utf8'));
   assert.deepEqual((saved.handoffs ?? []).map(({ alertId }) => alertId), acknowledgeFirst ? [] : [alert.alertId]);
-  assert.deepEqual(saved.acknowledged ?? [], acknowledgeFirst ? [{ alertId: alert.alertId, subscriberId: stream.subscriberId }] : []);
+  assert.deepEqual(ids(saved.acknowledged ?? []), acknowledgeFirst ? [{ alertId: alert.alertId, subscriberId: stream.subscriberId }] : []);
   return { dataDir, id: started.body.timer.definition.id, alertId: alert.alertId, subscriberId: stream.subscriberId };
 }
 
@@ -571,7 +652,7 @@ function filesLeftByKill(t, context) {
   return next;
 }
 
-const savedAcknowledged = (context) => JSON.parse(readFileSync(join(context.dataDir, 'scheduler.json'), 'utf8')).acknowledged ?? [];
+const savedAcknowledged = (context) => ids(JSON.parse(readFileSync(join(context.dataDir, 'scheduler.json'), 'utf8')).acknowledged ?? []);
 
 test('an acknowledgement stays saved after its 200 is written, so a handler that never read it gets 200 from the next daemon', async (t) => {
   const context = await startTestDaemon(t);
@@ -592,6 +673,39 @@ test('an acknowledgement stays saved after its 200 is written, so a handler that
   if ((await acknowledge(next, alert.alertId, handler.subscriberId)).status === 200) playedByHandler += 1;
   next.clock.advance(60_000);
   assert.deepEqual([playedByHandler, next.sink.received.filter(({ timer }) => timer.name === 'Egg').length], [1, 0]);
+});
+
+test(`a daemon whose saved acknowledgements reach ${MAX_UNRECEIVED} has its sink play the next alert, and keeps answering them, also after a restart`, async (t) => {
+  const dataDir = tempDataDir(t);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // An earlier daemon left that many acknowledgements whose handler never said it received the 200.
+  const timer = { id: 't_old', name: 'Old', sound: false };
+  const acknowledged = Array.from({ length: MAX_UNRECEIVED }, (_, index) => ({ alertId: `old${index}`, subscriberId: 'gone', alert: { timerId: 't_old', kind: 'tick', at: 0 }, timer }));
+  writeFileSync(join(dataDir, 'scheduler.json'), JSON.stringify({ version: 1, marks: [], acknowledged }));
+  const context = await startTestDaemon(t, { dataDir });
+  const handler = await registeredHandler(t, context);
+  await startCountdown(context, 'Egg');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 1);
+  const [alert] = alertsOf(handler);
+  // Not taken: the sink plays it at once and the handler, told 410, does not.
+  assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 410);
+  assert.equal(context.sink.received.filter(({ timer: { name } }) => name === 'Egg').length, 1);
+  assert.equal((await acknowledge(context, 'old0', 'gone')).status, 200);
+  // Once one is received there is room again.
+  assert.equal((await received(context, 'old0', 'gone')).status, 200);
+  await startCountdown(context, 'Tea');
+  context.clock.advance(1_000);
+  await handler.waitFor(() => alertsOf(handler).length === 2);
+  const tea = alertsOf(handler)[1].alertId;
+  assert.equal((await acknowledge(context, tea, handler.subscriberId)).status, 200);
+  // The daemon is killed; the next one still answers the old acknowledgements and the one taken before.
+  const next = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
+  assert.deepEqual([(await acknowledge(next, 'old1', 'gone')).status, (await acknowledge(next, tea, handler.subscriberId)).status], [200, 200]);
+  assert.deepEqual((await next.call('POST', `/v1/alerts/${tea}/release`, { subscriberId: handler.subscriberId })).body, { alertId: tea, released: true });
+  assert.equal((await acknowledge(next, tea, handler.subscriberId)).status, 410);
+  const plays = (name) => [context, next].flatMap(({ sink }) => sink.received).filter(({ timer: played }) => played.name === name).length;
+  assert.deepEqual([plays('Egg'), plays('Tea'), plays('Old')], [1, 1, 0]);
 });
 
 /** Starts another countdown, so the daemon saves scheduler.json again, and waits for that save. */

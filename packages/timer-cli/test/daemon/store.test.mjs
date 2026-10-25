@@ -111,7 +111,7 @@ test('alert handoffs and acknowledgements are saved with the marks and read back
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
   const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false } };
-  const acknowledged = { alertId: 'a0', subscriberId: 's1' };
+  const acknowledged = { ...handoff, alertId: 'a0', subscriberId: 's1' };
   stateStore.saveMarks(marks, { handoffs: [handoff], acknowledged: [acknowledged] });
   assert.deepEqual([stateStore.loadMarks(), stateStore.loadAlerts()], [marks, { handoffs: [handoff], acknowledged: [acknowledged] }]);
   writeFileSync(
@@ -120,7 +120,7 @@ test('alert handoffs and acknowledgements are saved with the marks and read back
       version: 1,
       marks,
       handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, null],
-      acknowledged: [acknowledged, { alertId: 'a3' }, { alertId: 4, subscriberId: 's1' }, null]
+      acknowledged: [acknowledged, { alertId: 'a3' }, { ...acknowledged, alertId: 4 }, { alertId: 'a5', subscriberId: 's1' }, null]
     })
   );
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [handoff], acknowledged: [acknowledged] });
