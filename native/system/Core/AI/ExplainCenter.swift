@@ -469,7 +469,10 @@ public final class ExplainCenter {
 
     /// Asks `provider` to explain `request`, whose body sent off this Mac, if any, is `body`, and keeps the outcome
     /// unless the provider changed since `selection`. `confirmed` is whether the user confirmed `body` in the preview.
-    /// Sends nothing while the OpenRouter key is being changed.
+    /// Sends nothing while the OpenRouter key is being changed. A refusal as it is sent (`ExplainError.unavailable`,
+    /// from the key read or `OpenRouterAccount.refuseModel(sent:)`) sends nothing and sets the choice back, failing
+    /// closed, even when a newer Explain overtook it, which can withdraw that newer preview; by owner decision
+    /// (2026-10-25) that is accepted here, and reconciling it with newer checks is SET-165.
     private func send(_ request: ExplainRequest, body: Data?, with provider: any AIProvider, for key: StateKey,
                       in selection: Int, confirmed: Bool) async {
         guard !keyChanging(key.choice) else {
