@@ -66,9 +66,10 @@ public struct SendPreview: Equatable, Sendable {
 /// OpenRouter (SET-160) can be chosen only while its key is stored. A check that finds it cannot be used (the key
 /// removed or not found, the Keychain not answering, in time or at all, or a model ID entry that held the key or could not be compared
 /// with it) sets the choice back to the on-device provider and says why (`notice`), so the choice never stays on a
-/// provider that cannot run, and what is stored is always what is shown. Until OpenRouter has answered a request whose
-/// body the user confirmed in the send preview this session, every request to it waits in `.confirming` for its own
-/// preview, and cancelling it sends nothing; the body sent is the one shown, with the key checked as it was built, and
+/// provider that cannot run, and what is stored is always what is shown. Of Explain's own checks, its availability
+/// reads and the key read as a request is sent, only the latest does (SET-165): one a later check overtook ends only
+/// its own request, unsent. Until OpenRouter has answered a request whose body the user confirmed in the send preview
+/// this session, every request to it waits in `.confirming` for its own preview, and cancelling it sends nothing; the body sent is the one shown, with the key checked as it was built, and
 /// only from the preview the user confirmed while it is still the item's. Add Key and Remove Key end the OpenRouter
 /// work in flight as they start, and until they finish no request to OpenRouter is begun or sent
 /// (`keyChanging`), so nothing is sent with the key being replaced or removed. Changing **Send folder names** ends the
@@ -116,6 +117,10 @@ public final class ExplainCenter {
     private var sentBodies: [StateKey: Data] = [:]
     /// Counts availability reads, so only the latest one is shown.
     @ObservationIgnored private var availabilityReads = 0
+    /// Counts every check of whether OpenRouter can be used: each availability read and each key read as a request is
+    /// sent, taken before it reads the key, so only the latest one sets the choice back, says why, or clears the model
+    /// ID, and one overtaken by a later check, of either kind, ends only its own request, unsent.
+    @ObservationIgnored private var checks = 0
     /// Counts provider changes, and Add Key and Remove Key while OpenRouter is chosen, so work begun before the latest
     /// one changes nothing.
     @ObservationIgnored private var selection = 0
@@ -281,9 +286,9 @@ public final class ExplainCenter {
         }
     }
 
-    /// Sets the choice back from OpenRouter when what `provider` answered means it cannot be used. When no key is
-    /// found, or it cannot be read, whether one is stored is read again, so Settings shows it as it is; a model ID that
-    /// held the key is cleared (`OpenRouterAccount.refuseModel(sent:)`).
+    /// Sets the choice back from OpenRouter when what `provider` answered, in the latest check (`checks`), means it
+    /// cannot be used. When no key is found, or it cannot be read, whether one is stored is read again, so Settings
+    /// shows it as it is; a model ID that held the key is cleared (`OpenRouterAccount.refuseModel(sent:)`).
     private func noteOpenRouter(_ availability: AIAvailability, from provider: any AIProvider) {
         switch availability {
         case .noOpenRouterKey, .openRouterKeyUnreadable:
@@ -314,8 +319,8 @@ public final class ExplainCenter {
         let availability: AIAvailability?
         /// OpenRouter bound to the key read before sending, when it found it available (`checkBeforeSending()`).
         let bound: OpenRouterProvider?
-        /// Whether no later read had started, and the provider had not changed, when it answered: only then did what
-        /// it answered set the choice back.
+        /// Whether no later check had started (`checks`: another read, or a key read as a request is sent), and the
+        /// provider had not changed, when it answered: only then did what it answered set the choice back.
         let latest: Bool
     }
 
@@ -324,14 +329,17 @@ public final class ExplainCenter {
     /// it as checking while it is read, then what it answered or that it did not answer in time, only while no later
     /// read has started and the provider has not changed since `selection`, so a slow read never replaces a newer one. OpenRouter's answer that no key is
     /// stored, that it cannot be read, or that the model ID holds it sets the choice back, as does it not answering in
-    /// time, only from its latest read: a read cancelled, or overtaken by a later one, sets nothing back and ends no
-    /// newer work, and only its own caller acts on what it answered (`overtaken(_:)`). `beforeSending` reads it as
-    /// a request is about to be built (`OpenRouterProvider.checkBeforeSending()`), so a model ID holding the key
-    /// sets the choice back before anything is previewed, and a preview is bound to the key it read.
+    /// time, only from the latest check (`checks`): a read cancelled, or overtaken by a later read or by a key read as
+    /// a request is sent, sets nothing back and ends no newer work, and only its own caller acts on what it answered
+    /// (`overtaken(_:)`). `beforeSending` reads it as a request is about to be built
+    /// (`OpenRouterProvider.checkBeforeSending()`), so a model ID holding the key sets the choice back before anything
+    /// is previewed, and a preview is bound to the key it read.
     private func readAvailability(of provider: any AIProvider, in selection: Int,
                                   beforeSending: Bool = false) async throws -> Read {
         availabilityReads += 1
         let read = availabilityReads
+        checks += 1
+        let check = checks
         availabilityStatus = .checking
         let checked: (availability: AIAvailability, bound: OpenRouterProvider?)?
         do {
@@ -351,9 +359,11 @@ public final class ExplainCenter {
             throw CancellationError()
         }
         let availability = checked?.availability
-        let latest = selection == self.selection && read == availabilityReads
-        if latest {
+        if selection == self.selection, read == availabilityReads {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
+        }
+        let latest = selection == self.selection && check == checks
+        if latest {
             if let availability {
                 noteOpenRouter(availability, from: provider)
             } else {
@@ -364,9 +374,10 @@ public final class ExplainCenter {
         return Read(availability: availability, bound: checked?.bound, latest: latest)
     }
 
-    /// What an item shows when a read overtaken by a later one found OpenRouter cannot be used: that read set nothing
-    /// back and cleared nothing (the latest read does), so it says only what it found and that nothing was sent; `nil`
-    /// for any other answer, which is shown as it is.
+    /// What an item shows when a check overtaken by a later one (`checks`), an availability read or the key read as its
+    /// request was sent, found OpenRouter cannot be used: that check set nothing back and cleared nothing (the latest
+    /// check does), so it says only what it found and that nothing was sent; `nil` for any other answer, which is shown
+    /// as it is.
     static func overtaken(_ availability: AIAvailability) -> String? {
         switch availability {
         case .noOpenRouterKey: "No OpenRouter key was found, so nothing was sent. Try again."
@@ -383,10 +394,10 @@ public final class ExplainCenter {
     /// has not been yet, no answer is kept, and the item can be explained again at once; when
     /// the user changes **Send folder names** before it is sent, it is built again with the setting as it is then. When
     /// the provider does not say in time whether it is available, or does not answer in time, the item fails and can be
-    /// asked again; OpenRouter not saying in time whether it is available, from its latest read, sets the choice back
-    /// instead. A read overtaken by a later one that finds OpenRouter cannot be used fails only its item, saying what
-    /// it found and that nothing was sent (`overtaken(_:)`). When the caller is cancelled, nothing more is sent, no
-    /// failure is kept, and the item can be asked again. While the OpenRouter key is being changed, an OpenRouter
+    /// asked again; OpenRouter not saying in time whether it is available, from the latest check, sets the choice back
+    /// instead. A read overtaken by a later check (`checks`) that finds OpenRouter cannot be used fails only its item,
+    /// saying what it found and that nothing was sent (`overtaken(_:)`). When the caller is cancelled, nothing more is
+    /// sent, no failure is kept, and the item can be asked again. While the OpenRouter key is being changed, an OpenRouter
     /// request fails at once and nothing is sent.
     public func explain(_ item: ExplainKey, request build: (ExplainRedactor) -> ExplainRequest?) async {
         let choice = self.choice
@@ -428,7 +439,7 @@ public final class ExplainCenter {
             return
         }
         guard availability.isAvailable else {
-            // An overtaken read's answer is not the latest, so it claims no set-back or cleared model ID.
+            // An overtaken read's answer is not the latest check, so it claims no set-back or cleared model ID.
             if !read.latest, let message = Self.overtaken(availability) {
                 states[key] = .failed(message, request)
             } else {
@@ -486,16 +497,20 @@ public final class ExplainCenter {
 
     /// Asks `provider` to explain `request`, whose body sent off this Mac, if any, is `body`, and keeps the outcome
     /// unless the provider changed since `selection`. `confirmed` is whether the user confirmed `body` in the preview.
-    /// Sends nothing while the OpenRouter key is being changed. A refusal as it is sent (`ExplainError.unavailable`,
-    /// from the key read or `OpenRouterAccount.refuseModel(sent:)`) sends nothing and sets the choice back, failing
-    /// closed, even when a newer Explain overtook it, which can withdraw that newer preview; by owner decision
-    /// (2026-10-25) that is accepted here, and reconciling it with newer checks is SET-165.
+    /// Sends nothing while the OpenRouter key is being changed. The key read as it is sent is a check (`checks`), taken
+    /// before the key is read. A refusal as it is sent (`ExplainError.unavailable`: the key unreadable or not found, or
+    /// the model ID holding it) sends nothing; from the latest check it sets the choice back and, for that model ID,
+    /// clears it (`OpenRouterAccount.refuseModel(sent:)`). One overtaken by a later check for the same selection, such
+    /// as another item's Explain or Settings' read, fails only its own item (`overtaken(_:)`), so the newer check, and
+    /// a preview it built, stands; it sets nothing back, says nothing in `notice`, and clears or reads again nothing.
     private func send(_ request: ExplainRequest, body: Data?, with provider: any AIProvider, for key: StateKey,
                       in selection: Int, confirmed: Bool) async {
         guard !keyChanging(key.choice) else {
             if selection == self.selection { states[key] = .failed(Self.keyChanging, request) }
             return
         }
+        checks += 1
+        let check = checks
         let folderNamesChanges = self.folderNamesChanges
         var answered = false
         let outcome: ExplainState?
@@ -527,8 +542,14 @@ public final class ExplainCenter {
         if confirmed, answered { sendConfirmed = true }
         guard selection == self.selection else { return }
         if case let .unavailable(availability)? = outcome {
-            // Refused before it was sent. A refusal that sets the choice back ends this work, so it is not kept as
-            // the item's state when OpenRouter is chosen again.
+            // Refused before it was sent. Overtaken by a later check, it ends only this item; the newer check decides.
+            if check != checks, let message = Self.overtaken(availability) {
+                states[key] = .failed(message, request)
+                sentBodies[key] = nil
+                return
+            }
+            // A refusal that sets the choice back ends this work, so it is not kept as the item's state when
+            // OpenRouter is chosen again.
             noteOpenRouter(availability, from: provider)
             guard selection == self.selection else { return }
         }
