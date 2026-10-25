@@ -17,8 +17,11 @@ public struct AskSendPreview: Equatable, Sendable {
 /// folder names** changes, since a follow-up gives the provider the thread's earlier questions and answers. Nothing is
 /// asked while no provider is chosen. As with Explain, until OpenRouter has answered a request whose body the user
 /// confirmed this session (`ExplainCenter.sendConfirmed`, shared), each request to it waits for its own send preview,
-/// and while Add Key or Remove Key runs none is sent. A question not answered within `timeout`, not counting the time a
-/// preview waits, fails and can be asked again; Stop, or Cancel in the preview, ends it and keeps nothing of it.
+/// and while Add Key or Remove Key runs none is sent. Each read of the OpenRouter key is one of the checks Explain's are
+/// (SET-165): one that finds the key cannot be used, from the latest check, sets the choice back and says why, as
+/// Explain's does, which begins a new thread; one a later check overtook fails only its own question, and changes no
+/// provider and no thread. A question not answered within `timeout`, not counting the time a preview waits, fails and
+/// can be asked again; Stop, or Cancel in the preview, ends it and keeps nothing of it.
 @MainActor
 @Observable
 public final class AskCenter {
@@ -119,7 +122,10 @@ public final class AskCenter {
         }
         toolbox.begin(question, redactor: explain.redactor)
         let tools = toolbox.tools(for: question)
-        let gate = AskSendGate(confirm: { [weak self] body in
+        let gate = AskSendGate(check: { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.startCheck(question: question)
+        }, confirm: { [weak self] body in
             guard let self else { throw CancellationError() }
             return try await self.confirm(body, question: question)
         }, answered: { [weak self] body, confirmed in
@@ -131,7 +137,7 @@ public final class AskCenter {
             do { outcome = .success(try await provider.ask(prompt, tools: tools, gate: gate)) } catch {
                 outcome = .failure(error)
             }
-            self?.complete(question, outcome)
+            self?.complete(question, outcome, from: provider)
         }
         watchdog = Task { [weak self] in await self?.watch(question) }
         return true
@@ -179,7 +185,7 @@ public final class AskCenter {
 
     // MARK: Running a question
 
-    private func complete(_ question: Int, _ outcome: Result<String, any Error>) {
+    private func complete(_ question: Int, _ outcome: Result<String, any Error>, from provider: any AIProvider) {
         guard question == self.question, isBusy else { return }
         let state: State
         switch outcome {
@@ -190,6 +196,17 @@ public final class AskCenter {
                 state = .failed(error.message)
             } catch {
                 state = .failed(error.localizedDescription)
+            }
+        case let .failure(refusal as AskKeyRefusal):
+            if let message = explain.refused(refusal.availability, check: refusal.check, from: provider) {
+                state = .failed(message)
+            } else {
+                // From the latest check: the choice was set back, which began a new thread; it says why.
+                guard question == self.question, isBusy else {
+                    if explain.choice != .openRouter, let reason = explain.notice { notice = reason }
+                    return
+                }
+                state = .failed(ExplainError.unavailable(refusal.availability).message)
             }
         case let .failure(error as ExplainError):
             state = .failed(error.message)
@@ -244,6 +261,14 @@ public final class AskCenter {
             }
             try? await Task.sleep(until: deadline, clock: .continuous)
         }
+    }
+
+    /// Before the provider reads its key: a check shared with Explain's, not taken while the OpenRouter key is being
+    /// changed.
+    private func startCheck(question: Int) throws -> Int {
+        guard question == self.question else { throw CancellationError() }
+        guard !explain.keyChanging(explain.choice) else { throw ExplainError.failed(ExplainCenter.keyChanging) }
+        return explain.startCheck()
     }
 
     /// Before a body is sent off this Mac: while no request the user confirmed has been answered this session, the

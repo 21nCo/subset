@@ -3,11 +3,12 @@ import Foundation
 /// Ask (SET-51) through OpenRouter: chat completions with Ask's tools as functions. Each request's body goes through
 /// the send gate first, so it is previewed as Explain's are; tool results, redacted by the toolbox, go back in the next
 /// request. After `AskToolbox.callLimit` calls the request asks for an answer with `tool_choice` `none`, so a question
-/// takes at most `callLimit + 1` requests. The key is read for each request and must be the one read as the question
-/// began, so a key replaced meanwhile is never used.
+/// takes at most `callLimit + 1` requests. The key is read for each request, each read one of the checks shared with
+/// Explain (`AskSendGate.check()`), and must be the one read as the question began, so a key replaced meanwhile is
+/// never used; a read that finds it cannot be used throws `AskKeyRefusal`, and nothing is sent.
 extension OpenRouterProvider {
     public func ask(_ prompt: AskPrompt, tools: AskTools, gate: AskSendGate) async throws -> String {
-        let checked = OpenRouterKeyIdentity(try sendingKey())
+        let checked = OpenRouterKeyIdentity(try await sendingKey(gate))
         if let checkedKey, checkedKey != checked { throw ExplainError.failed(Self.keyChanged) }
         var messages: [[String: Any]] = [["role": "system", "content": AskPrompt.instructions]]
         for turn in prompt.history {
@@ -20,7 +21,7 @@ extension OpenRouterProvider {
             let toolsAllowed = calls < AskToolbox.callLimit
             let body = try askBody(messages, toolsAllowed: toolsAllowed)
             let confirmed = try await gate.confirm(body)
-            let key = try sendingKey()
+            let key = try await sendingKey(gate)
             guard OpenRouterKeyIdentity(key) == checked else { throw ExplainError.failed(Self.keyChanged) }
             let data: Data
             do {
@@ -73,17 +74,20 @@ extension OpenRouterProvider {
         return try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
-    /// The key a request is sent with: not when it cannot be read, none is stored, or the model ID holds it, so nothing
-    /// is sent then.
-    private func sendingKey() throws -> String {
+    /// The key a request is sent with, read as a check taken just before (`AskSendGate.check()`): not when it cannot be
+    /// read, none is stored, or the model ID holds it, so nothing is sent then.
+    private func sendingKey(_ gate: AskSendGate) async throws -> String {
+        let check = try await gate.check()
         let key: String?
         do {
             key = try keys.readKey()
         } catch {
-            throw ExplainError.unavailable(.openRouterKeyUnreadable)
+            throw AskKeyRefusal(availability: .openRouterKeyUnreadable, check: check)
         }
-        guard let key else { throw ExplainError.unavailable(.noOpenRouterKey) }
-        guard !Self.contains(key: key, in: model) else { throw ExplainError.unavailable(.openRouterModelHeldKey) }
+        guard let key else { throw AskKeyRefusal(availability: .noOpenRouterKey, check: check) }
+        guard !Self.contains(key: key, in: model) else {
+            throw AskKeyRefusal(availability: .openRouterModelHeldKey, check: check)
+        }
         return key
     }
 
@@ -115,4 +119,11 @@ extension OpenRouterProvider {
             return ToolCall(id: id, name: name, arguments: arguments as? String ?? "")
         }
     }
+}
+
+/// An Ask key read that found OpenRouter cannot be used, with the check it took (`OpenRouterChecks`), so only the latest
+/// check sets the choice back (`ExplainCenter.refused(_:check:from:)`).
+struct AskKeyRefusal: Error {
+    let availability: AIAvailability
+    let check: Int
 }

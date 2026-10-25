@@ -35,7 +35,8 @@ final class ProcessAskTests: XCTestCase {
         XCTAssertEqual(chrome.fields["memory"], .words("about 1.27 GB"))
 
         XCTAssertEqual(ProcessesWindowModel().askTopGroups(by: .cpu, layer: .app, limit: 5, redactor: redactor),
-                       AskOutput(["status": .words("No process sample yet.")]))
+                       AskOutput(["status": .words("No process sample yet."), "sample": .words("Not observed yet"),
+                                  "sampling": .words("Waiting for the first sample")]))
     }
 
     func testAProjectGroupIsNamedAndPlacedAsExplainSendsIt() throws {
@@ -56,12 +57,45 @@ final class ProcessAskTests: XCTestCase {
         XCTAssertNil(model.askGroupDetail(OriginGroupID(.app(bundlePath: "/Applications/Gone.app")), redactor: redactor))
     }
 
+    func testGroupToolsSayWhenTheirFiguresAreNotCurrent() throws {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        let model = try model()
+        let chrome = OriginGroupID(.app(bundlePath: ProcessFixtures.chrome))
+        func sampling(now: Date) throws -> [AskValue?] {
+            let top = model.askTopGroups(by: .memory, layer: .app, limit: 3, redactor: redactor, now: now)
+            let detail = try XCTUnwrap(model.askGroupDetail(chrome, redactor: redactor, now: now))
+            return [top.fields["sampling"], detail.fields["sampling"], model.askMemoryState(now: now).fields["sampling"]]
+        }
+        XCTAssertEqual(try sampling(now: t0 + 1), Array(repeating: .words("Current"), count: 3))
+        XCTAssertEqual(model.askGroupDetail(chrome, redactor: redactor, now: t0 + 1)?.fields["sample"],
+                       .words("Observed at \(ProcessFixtures.format.time(t0))"))
+
+        // The window keeps the last good groups after a failed sample, so their figures are the same; only the
+        // sampling state tells them apart, without the failure's message.
+        let before = model.askTopGroups(by: .memory, layer: .app, limit: 3, redactor: redactor, now: t0 + 1)
+        model.applyFailure("Could not list processes: listFailed(1)", memory: nil, at: t0 + 2, cadence: .mainWindowVisible)
+        let failed = model.askTopGroups(by: .memory, layer: .app, limit: 3, redactor: redactor, now: t0 + 3)
+        XCTAssertEqual(failed.entries, before.entries)
+        let failedText = "The latest sample failed; process figures are from the one before"
+        XCTAssertEqual(try sampling(now: t0 + 3), Array(repeating: .words(failedText), count: 3))
+        XCTAssertFalse(String(describing: failed).contains("listFailed"))
+
+        // No sample for more than three intervals: stale.
+        XCTAssertEqual(try sampling(now: t0 + 20), Array(repeating: .words("Stale: no recent sample"), count: 3))
+
+        model.apply(try ProcessFixtures.sample(ProcessFixtures.workload(), observedAt: t0 + 30),
+                    memory: ProcessFixtures.memory(level: 2, physical: 16 << 30), cadence: .mainWindowVisible)
+        XCTAssertEqual(try sampling(now: t0 + 31), Array(repeating: .words("Current"), count: 3))
+    }
+
     func testMemoryStateIsTheMemoryReadWithTheSample() throws {
         let memory = try model().askMemoryState()
         XCTAssertEqual(memory.fields["pressure"], .words("Warning"))
         XCTAssertEqual(memory.fields["physicalMemory"], .words("16 GB"))
         XCTAssertEqual(memory.fields["used"], .words("–"))
-        XCTAssertEqual(ProcessesWindowModel().askMemoryState(), AskOutput(["status": .words("Memory has not been read yet.")]))
+        XCTAssertEqual(ProcessesWindowModel().askMemoryState(),
+                       AskOutput(["status": .words("Memory has not been read yet."), "sample": .words("Not observed yet"),
+                                  "sampling": .words("Waiting for the first sample")]))
     }
 }
 

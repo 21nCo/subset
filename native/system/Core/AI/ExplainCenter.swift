@@ -571,20 +571,36 @@ public final class ExplainCenter {
         guard selection == self.selection else { return }
         if case let .unavailable(availability)? = outcome {
             // Refused before it was sent. Overtaken by a later check, it ends only this item; the newer check decides.
-            if !checks.isLatest(check), let message = Self.overtaken(availability) {
+            if let message = refused(availability, check: check, from: provider) {
                 states[key] = .failed(message, request)
                 sentBodies[key] = nil
                 return
             }
             // A refusal that sets the choice back ends this work, so it is not kept as the item's state when
             // OpenRouter is chosen again.
-            noteOpenRouter(availability, from: provider)
             guard selection == self.selection else { return }
         }
         states[key] = outcome
         // Only an answer shows the body reached the provider; one refused, cancelled, failed or not answered in time
         // may never have left this Mac.
         sentBodies[key] = answered ? body : nil
+    }
+
+    /// Takes a check (`checks`) before Ask (SET-51) reads the OpenRouter key, as the key read as an Explain request is
+    /// sent does.
+    func startCheck() -> Int {
+        checks.start()
+    }
+
+    /// Acts on a refusal as a request is sent, Explain's or Ask's (`ExplainError.unavailable`, or `AskKeyRefusal`),
+    /// found by the check `check`: from the latest check, it sets the choice back and, for a model ID holding the key,
+    /// clears it (`noteOpenRouter(_:from:)`), and returns `nil`. Overtaken by a later check, it sets nothing back, says
+    /// nothing in `notice`, and clears or reads again nothing, and returns what only its own request shows
+    /// (`overtaken(_:)`).
+    func refused(_ availability: AIAvailability, check: Int, from provider: any AIProvider) -> String? {
+        if !checks.isLatest(check), let message = Self.overtaken(availability) { return message }
+        noteOpenRouter(availability, from: provider)
+        return nil
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does, and so does

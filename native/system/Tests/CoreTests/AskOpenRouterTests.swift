@@ -1,11 +1,12 @@
 import Foundation
+import Security
 @testable import SystemCore
 import XCTest
 
 /// Ask (SET-51) through OpenRouter, with the Keychain double and the `URLProtocol` stub of `OpenRouterTests`, never the
 /// network: tool calls answered with redacted results in the next request, the send preview before the session's first
-/// confirmed request, `tool_choice` `none` after four calls, and nothing sent with a key replaced since the question
-/// began.
+/// confirmed request, `tool_choice` `none` after four calls, nothing sent with a key replaced since the question
+/// began, and each key read one of the checks Explain's are (SET-165).
 @MainActor
 final class AskOpenRouterTests: XCTestCase {
     private static let key = "sk-or-v1-" + String(repeating: "0123456789abcdef", count: 4)
@@ -122,9 +123,171 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.count, 1)
     }
 
+    // MARK: Checks shared with Explain (SET-165)
+
+    /// The key removed outside System, found as the question begins or as its previewed body is sent: the latest check
+    /// sets the choice back as Explain's does, saying why, and nothing is sent.
+    func testAKeyRemovedOutsideSystemSetsTheChoiceBackAndSendsNothing() async throws {
+        for afterPreview in [false, true] {
+            StubProtocol.reset()
+            let setup = try await openRouterChosen()
+            let ask = setup.ask, explain = setup.explain
+            if afterPreview {
+                XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+                let preview = try await previewShown(ask)
+                try OpenRouterKeyStore(items: setup.keychain).remove()
+                ask.confirmSend(preview)
+            } else {
+                try OpenRouterKeyStore(items: setup.keychain).remove()
+                XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+            }
+            await ask.settled()
+            XCTAssertTrue(StubProtocol.requests.isEmpty, "after preview: \(afterPreview)")
+            XCTAssertEqual(explain.choice, .appleIntelligence, "after preview: \(afterPreview)")
+            XCTAssertEqual(setup.defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+            XCTAssertEqual(explain.notice, ExplainCenter.notice(.noKey))
+            XCTAssertEqual(ask.notice, ExplainCenter.notice(.noKey), "Ask says why its thread ended")
+            XCTAssertTrue(ask.exchanges.isEmpty)
+            XCTAssertFalse(explain.sendConfirmed)
+            XCTAssertEqual(setup.keychain.mainThreadDataReads, 0, "off the main thread")
+        }
+    }
+
+    /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
+    /// question's first key read refuses it before anything is previewed, sets the choice back and clears the model ID,
+    /// as Explain's refusal does, so the key is never sent or left stored as the model ID.
+    func testAModelIDHoldingAKeyReplacedOutsideSystemIsClearedAndNothingIsSent() async throws {
+        let other = "tok-0123456789abcdef"
+        let setup = try await openRouterChosen(model: "acme/\(other)")
+        XCTAssertEqual(setup.account.checkedModel, "acme/\(other)", "it does not hold the key stored now")
+        try OpenRouterKeyStore(items: setup.keychain).save(other)
+
+        XCTAssertTrue(setup.ask.ask("Why is my Mac slow?"))
+        await setup.ask.settled()
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
+        XCTAssertEqual(setup.explain.choice, .appleIntelligence)
+        XCTAssertEqual(setup.explain.notice, ExplainCenter.notice(.modelHeldKey))
+        XCTAssertEqual(setup.ask.notice, ExplainCenter.notice(.modelHeldKey))
+        XCTAssertEqual(setup.account.checkedModel, "")
+        XCTAssertEqual(setup.account.model, "")
+        XCTAssertEqual(setup.defaults.string(forKey: "openRouterModel"), "")
+        XCTAssertTrue(setup.ask.exchanges.isEmpty)
+    }
+
+    /// An older check, the account's read of whether a key is stored, held with a failure until a question reached its
+    /// preview: the question's key read overtook it, so it sets nothing back and the preview and thread stand, and
+    /// exactly the body shown is sent.
+    func testAnOlderFailingCheckOvertakenByAQuestionSetsNothingBack() async throws {
+        let setup = try await openRouterChosen()
+        let ask = setup.ask, keychain = setup.keychain
+        StubProtocol.enqueue(status: 200, json: completion("Earlier."))
+        setup.explain.sendConfirmed = true
+        try await answer(ask, "What is using the most memory?")
+        setup.explain.sendConfirmed = false
+
+        keychain.failure = errSecInteractionNotAllowed
+        keychain.holdsSearches = true
+        let read = Task { await setup.account.refreshKey() }
+        try await until { keychain.heldSearches == 1 }
+        keychain.holdsSearches = false
+        keychain.failure = nil
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        let preview = try await previewShown(ask)
+        keychain.releaseSearch()
+        await read.value
+        XCTAssertEqual(setup.explain.choice, .openRouter)
+        XCTAssertNil(setup.explain.notice)
+        XCTAssertNil(ask.notice)
+        XCTAssertEqual(ask.exchanges.count, 2, "the thread is kept")
+        XCTAssertEqual(ask.exchanges.last?.state, .confirming(preview), "the newer preview is kept")
+
+        StubProtocol.enqueue(status: 200, json: completion("Memory is under pressure."))
+        ask.confirmSend(preview)
+        await ask.settled()
+        XCTAssertEqual(StubProtocol.requests.last?.body, preview.body)
+        guard case .answered? = ask.exchanges.last?.state else { return XCTFail("\(String(describing: ask.exchanges.last))") }
+    }
+
+    /// The question's key read, as its previewed body is sent, held after finding no key until a later check found it
+    /// stored again: it fails only its own question, saying what it found, and changes no provider and no thread.
+    func testAQuestionsRefusalOvertakenByALaterCheckEndsOnlyThatQuestion() async throws {
+        let setup = try await openRouterChosen()
+        let ask = setup.ask, keychain = setup.keychain
+        StubProtocol.enqueue(status: 200, json: completion("Earlier."))
+        setup.explain.sendConfirmed = true
+        try await answer(ask, "What is using the most memory?")
+        setup.explain.sendConfirmed = false
+
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        let preview = try await previewShown(ask)
+        try OpenRouterKeyStore(items: keychain).remove()
+        keychain.holdsDataReads = true
+        let reads = keychain.heldDataReads
+        ask.confirmSend(preview)
+        try await until { keychain.heldDataReads == reads + 1 }
+        keychain.holdsDataReads = false
+        try OpenRouterKeyStore(items: keychain).save(Self.key)
+        // Settings' read, a later check, finds the key stored again.
+        await setup.explain.refreshAvailability()
+        XCTAssertEqual(setup.explain.availability, .availableOnOpenRouter)
+        keychain.releaseDataRead()
+        await ask.settled()
+
+        XCTAssertEqual(StubProtocol.requests.count, 1, "only the earlier question was sent")
+        XCTAssertEqual(setup.explain.choice, .openRouter)
+        XCTAssertNil(setup.explain.notice)
+        XCTAssertNil(ask.notice)
+        XCTAssertEqual(ask.exchanges.count, 2, "the thread is kept")
+        XCTAssertEqual(ask.exchanges.last?.state, .failed(try XCTUnwrap(ExplainCenter.overtaken(.noOpenRouterKey))))
+    }
+
+    /// Add Key or Remove Key starting while the question reads the key ends the question: nothing is sent with the key
+    /// being replaced or removed.
+    func testChangingTheKeyMidQuestionSendsNothing() async throws {
+        for replacing in [false, true] {
+            StubProtocol.reset()
+            let setup = try await openRouterChosen()
+            let ask = setup.ask, keychain = setup.keychain
+            setup.explain.sendConfirmed = true
+            StubProtocol.enqueue(status: 200, json: completion("Answered."))
+            keychain.holdsDataReads = true
+            XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+            try await until { keychain.heldDataReads == 1 }
+            // The change is held, so only its start can end the question.
+            keychain.holdsOtherCalls = true
+            let changing = Task {
+                if replacing { await setup.account.addKey("sk-or-v1-" + String(repeating: "f", count: 64)) } else {
+                    await setup.account.removeKey()
+                }
+            }
+            try await until { keychain.heldOtherCalls == 1 }
+            XCTAssertEqual(ask.exchanges.last?.state, .failed(AskCenter.keyChanged), "replacing: \(replacing)")
+            keychain.holdsDataReads = false
+            keychain.releaseDataRead()
+            await ask.settled()
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertTrue(StubProtocol.requests.isEmpty, "replacing: \(replacing)")
+            keychain.holdsOtherCalls = false
+            keychain.releaseOtherCall()
+            await changing.value
+            XCTAssertEqual(setup.explain.choice, replacing ? .openRouter : .appleIntelligence)
+            XCTAssertTrue(StubProtocol.requests.isEmpty)
+        }
+    }
+
     // MARK: Helpers
 
-    private func chosen() async throws -> (AskCenter, ExplainCenter, FakeAskSource, FakeKeychain) {
+    private struct Setup {
+        let ask: AskCenter
+        let explain: ExplainCenter
+        let source: FakeAskSource
+        let keychain: FakeKeychain
+        let account: OpenRouterAccount
+        let defaults: UserDefaults
+    }
+
+    /// OpenRouter chosen, with a key stored and, with `model`, that model ID checked.
+    private func openRouterChosen(model: String? = nil) async throws -> Setup {
         let name = "AskOpenRouterTests-\(UUID().uuidString)"
         addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -134,10 +297,29 @@ final class AskOpenRouterTests: XCTestCase {
         let account = OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults,
                                         log: RecordingLog())
         await account.refreshKey()
+        if let model {
+            account.model = model
+            await account.modelChecked()
+        }
         let explain = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account)
         XCTAssertTrue(explain.choose(.openRouter))
         let source = FakeAskSource()
-        return (AskCenter(explain: explain, source: source), explain, source, keychain)
+        return Setup(ask: AskCenter(explain: explain, source: source), explain: explain, source: source,
+                     keychain: keychain, account: account, defaults: defaults)
+    }
+
+    private func chosen() async throws -> (AskCenter, ExplainCenter, FakeAskSource, FakeKeychain) {
+        let setup = try await openRouterChosen()
+        return (setup.ask, setup.explain, setup.source, setup.keychain)
+    }
+
+    private func until(_ condition: () -> Bool) async throws {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("never")
+        throw CancellationError()
     }
 
     private func answer(_ ask: AskCenter, _ question: String) async throws {

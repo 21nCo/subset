@@ -51,20 +51,29 @@ public struct AskTools: Sendable {
 }
 
 /// What a provider that sends off this Mac does around each body it sends, so Ask keeps Explain's send preview
-/// (SET-160): `confirm` before sending, which returns whether the user confirmed the body in the preview (`false` when
-/// none was needed) and throws when it must not be sent; `answered` once the provider answered it.
+/// (SET-160) and its checks (SET-165): `check` before each read of its key, which takes one of the checks shared with
+/// Explain and returns its number, and throws when nothing more must be sent; `confirm` before sending, which returns
+/// whether the user confirmed the body in the preview (`false` when none was needed) and throws when it must not be
+/// sent; `answered` once the provider answered it.
 public struct AskSendGate: Sendable {
+    private let startCheck: @Sendable () async throws -> Int
     private let confirmBody: @Sendable (Data) async throws -> Bool
     private let answeredBody: @Sendable (Data, Bool) async -> Void
 
-    public init(confirm: @escaping @Sendable (Data) async throws -> Bool,
+    public init(check: @escaping @Sendable () async throws -> Int = { 0 },
+                confirm: @escaping @Sendable (Data) async throws -> Bool,
                 answered: @escaping @Sendable (Data, Bool) async -> Void) {
+        startCheck = check
         confirmBody = confirm
         answeredBody = answered
     }
 
     /// Sends nothing that needs confirming: for tests and providers on this Mac.
     public static let none = AskSendGate(confirm: { _ in false }, answered: { _, _ in })
+
+    public func check() async throws -> Int {
+        try await startCheck()
+    }
 
     public func confirm(_ body: Data) async throws -> Bool {
         try await confirmBody(body)
