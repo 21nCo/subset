@@ -8,7 +8,8 @@ import Observation
 /// app asks (`refreshKey()`, at launch and each time Settings is shown), and Add key and Remove key wait for theirs.
 /// The model ID is kept in user defaults; the key never is. Explain uses OpenRouter through `provider()` once the user
 /// chooses it (SET-160); each check here that leaves it unusable is reported (`onSetback`), so the choice goes back to
-/// the on-device provider.
+/// the on-device provider: a change the user makes at once, and a Keychain read only while it is the latest check of
+/// whether OpenRouter can be used (`checks`, SET-165).
 @MainActor
 @Observable
 public final class OpenRouterAccount {
@@ -39,21 +40,21 @@ public final class OpenRouterAccount {
     /// Set by every read of whether a key is stored, and by Add key, Remove key and the key test. A model ID entry is
     /// kept without comparing it with the key only while this is `absent`. Once it is known again, an entry that could
     /// not be checked is checked again, so what is used, and what Settings says about it, follow it. Each time it is
-    /// set to anything but `stored`, that is reported (`onSetback`).
+    /// set to anything but `stored`, that is reported (`found(_:check:)`).
     public private(set) var presence: KeyPresence {
         didSet {
             if modelUnchecked, modelCheck == nil, presence == .stored || presence == .absent { keep(model) }
-            switch presence {
-            case .stored: break
-            case .absent: onSetback?(.noKey)
-            case .unknown: onSetback?(.keyUnreadable)
-            }
         }
     }
     /// Told each time a check finds OpenRouter cannot be used as it is: whether a key is stored is set to anything but
     /// stored, or a model ID entered is cleared because it held the key or is not used because it could not be compared
-    /// with it. `ExplainCenter` sets it.
+    /// with it. A Keychain read that a later check overtook (`checks`) is not told, though what it found is still shown
+    /// here. `ExplainCenter` sets it.
     @ObservationIgnored public var onSetback: (@MainActor (Setback) -> Void)?
+    /// Every check of whether OpenRouter can be used, shared with `ExplainCenter`: each Keychain read here whose answer
+    /// can be reported (`onSetback`), whether a key is stored, the key test's read of it and the model ID's check, takes
+    /// one before it reads, so only the latest check of either sets the Explain choice back.
+    @ObservationIgnored let checks = OpenRouterChecks()
     /// Told when Add key or Remove key starts, before the Keychain is changed, so `ExplainCenter` ends the OpenRouter
     /// work in flight and nothing more is sent with the key being replaced or removed.
     @ObservationIgnored public var onKeyChange: (@MainActor () -> Void)?
@@ -190,7 +191,7 @@ public final class OpenRouterAccount {
         case .success:
             log.record("OpenRouter key stored in the Keychain")
             guard change == keyChanges else { return true }
-            presence = .stored
+            found(.stored, check: nil)
             keyError = nil
             return true
         case let .failure(error):
@@ -214,7 +215,7 @@ public final class OpenRouterAccount {
         case .success:
             log.record("OpenRouter key removed from the Keychain")
             guard change == keyChanges else { return }
-            presence = .absent
+            found(.absent, check: nil)
             keyError = nil
         case let .failure(error):
             log.record("OpenRouter key could not be removed")
@@ -242,32 +243,55 @@ public final class OpenRouterAccount {
 
     /// Reads again whether a key is stored, without reading the key, off the main actor: at launch and each time
     /// Settings is shown, so a Keychain read that failed once is not kept for the session. A read that Add key or
-    /// Remove key overtakes changes nothing.
+    /// Remove key overtakes changes nothing; one that a later check overtakes (`checks`) is shown, and sets nothing back.
     public func refreshKey() async {
         let changes = keyChanges
+        let check = checks.start()
         let read = await onKeychainQueue { try $0.containsKey() }
         guard changes == keyChanges else { return }
         switch read {
         case let .success(stored):
             if case .unknown = presence { keyError = nil }
             // A model ID that could not be checked against the key is checked again (`presence`).
-            presence = stored ? .stored : .absent
+            found(stored ? .stored : .absent, check: check)
         case let .failure(error):
             // Whether a key is stored is not known: what is shown stays.
             keyError = (error as? KeychainError)?.message ?? "The Keychain could not be read."
-            presence = .unknown(shown: hasKey)
+            found(.unknown(shown: hasKey), check: check)
         }
     }
 
     /// Reads whether a key is stored after Add key or Remove key failed; a read that fails too leaves it not known. A
-    /// read that a later Add key or Remove key overtakes changes nothing.
+    /// read that a later Add key or Remove key overtakes changes nothing; one that a later check overtakes sets nothing
+    /// back.
     private func reread(after change: Int, shown: Bool) async {
+        let check = checks.start()
         let read = await onKeychainQueue { try $0.containsKey() }
         guard change == keyChanges else { return }
         switch read {
-        case let .success(stored): presence = stored ? .stored : .absent
-        case .failure: presence = .unknown(shown: shown)
+        case let .success(stored): found(stored ? .stored : .absent, check: check)
+        case .failure: found(.unknown(shown: shown), check: check)
         }
+    }
+
+    /// Sets whether a key is stored, and reports anything but stored (`onSetback`): at once for Remove key (`check` is
+    /// `nil`), and for a Keychain read only while it is the latest check (`checks`), so a read that Explain's check, or
+    /// another here, overtook sets nothing back while still showing what it found.
+    private func found(_ presence: KeyPresence, check: Int?) {
+        // Before setting it, which may begin a check of the model ID (`presence`).
+        let latest = check.map(checks.isLatest) ?? true
+        self.presence = presence
+        switch presence {
+        case .stored: break
+        case .absent: report(.noKey, latest: latest)
+        case .unknown: report(.keyUnreadable, latest: latest)
+        }
+    }
+
+    /// Tells `onSetback`, only from a change the user made or the latest check (`latest`).
+    private func report(_ setback: Setback, latest: Bool) {
+        guard latest else { return }
+        onSetback?(setback)
     }
 
     /// Makes `call` on the Keychain queue (`keychainQueue`), after every call asked for before it.
@@ -294,7 +318,9 @@ public final class OpenRouterAccount {
     /// non-empty entry is then compared with the key, read off the main actor after those calls: one that contains it
     /// is cleared (`keyAsModelMessage`), and a model ID that cannot be compared, because the key cannot be read, is not
     /// used or kept (`modelUncheckedMessage`), so what was checked before stays. A later entry ends the check. Each
-    /// outcome sets the model ID used and its message together (`settle(using:error:unchecked:)`).
+    /// outcome sets the model ID used and its message together (`settle(using:error:unchecked:)`). The comparison is a
+    /// check (`checks`), taken as it is asked for: overtaken by a later one, its outcome is still shown and applied, and
+    /// sets nothing back.
     private func keep(_ entered: String) {
         let candidate = entered.trimmingCharacters(in: .whitespacesAndNewlines)
         let isModelID = OpenRouterProvider.isModelID(candidate)
@@ -309,13 +335,14 @@ public final class OpenRouterAccount {
             settle(using: nil, error: nil)
         }
         guard !candidate.isEmpty, presence != .absent || pendingKeyChanges > 0 else { return }
+        let check = checks.start()
         let task = Task {
             let read = await onKeychainQueue { try $0.readKey() }
             guard !Task.isCancelled, model == entered else { return }
             modelCheck = nil
             switch read {
             case let .success(key?) where OpenRouterProvider.contains(key: key, in: candidate):
-                refuseModel()
+                refuseModel(check: check)
             case .success:
                 if isModelID { settle(using: candidate, error: nil) }
             case .failure where presence == .absent && pendingKeyChanges == 0:
@@ -324,19 +351,22 @@ public final class OpenRouterAccount {
             case .failure:
                 settle(using: isModelID ? nil : "", error: isModelID ? Self.modelUncheckedMessage : Self.notAModelMessage,
                        unchecked: true)
-                if isModelID { onSetback?(.modelUnchecked) }
+                if isModelID { report(.modelUnchecked, latest: checks.isLatest(check)) }
             }
         }
         modelCheck = task
     }
 
     /// Clears an entry that holds an API key: `openrouter/auto` is used and kept, and `keyAsModelMessage` says why.
-    private func refuseModel() {
+    /// That is reported at once for an entry the user made or Explain's latest check refused (`check` is `nil`), and,
+    /// for the comparison with the key read (`keep(_:)`), only while it is the latest check (`checks`).
+    private func refuseModel(check: Int? = nil) {
+        let latest = check.map(checks.isLatest) ?? true
         modelCheck?.cancel()
         modelCheck = nil
         if !model.isEmpty { model = "" }
         settle(using: "", error: Self.keyAsModelMessage)
-        onSetback?(.modelHeldKey)
+        report(.modelHeldKey, latest: latest)
     }
 
     /// Clears the model ID that a request was refused with because it holds the key stored now, as Explain reports it
@@ -388,6 +418,7 @@ public final class OpenRouterAccount {
 
     private func runKeyTest(_ test: Int) async {
         let outcome: KeyTest?
+        let check = checks.start()
         do {
             // Read off the main actor, so a slow or prompting Keychain cannot hold the app, and on the Keychain queue,
             // after the Add key and Remove key in flight, so a key being replaced or removed is never sent.
@@ -395,17 +426,17 @@ public final class OpenRouterAccount {
             // Add key or Remove key pressed after the test: what was read is not the key stored now, so it is not used.
             guard test == tests, !Task.isCancelled else { return }
             guard let key else {
-                presence = .absent
+                found(.absent, check: check)
                 throw ExplainError.unavailable(.noOpenRouterKey)
             }
-            presence = .stored
+            found(.stored, check: check)
             _ = try await client.send(.keyTest, key: key)
             outcome = .passed
         } catch let error as ExplainError {
             outcome = .failed(error.message)
         } catch let error as KeychainError {
             // The key could not be read, so whether one is stored is not known.
-            if test == tests { presence = .unknown(shown: hasKey) }
+            if test == tests { found(.unknown(shown: hasKey), check: check) }
             outcome = .failed(error.message)
         } catch is CancellationError {
             outcome = nil
@@ -414,5 +445,25 @@ public final class OpenRouterAccount {
         }
         guard test == tests else { return }
         keyTest = outcome
+    }
+}
+
+/// Counts every check of whether OpenRouter can be used, `ExplainCenter`'s (its availability reads and the key read as
+/// a request is sent) and `OpenRouterAccount`'s (its Keychain reads whose answer can set the Explain choice back), each
+/// taken before it reads the Keychain, so only the latest one sets the choice back, says why, or clears the model ID
+/// (SET-165); one that a later check overtook, of any kind, ends only its own effect.
+@MainActor
+final class OpenRouterChecks {
+    private var started = 0
+
+    /// Starts a check, before it reads the Keychain, and returns its number.
+    func start() -> Int {
+        started += 1
+        return started
+    }
+
+    /// Whether no check has started since `check`.
+    func isLatest(_ check: Int) -> Bool {
+        check == started
     }
 }

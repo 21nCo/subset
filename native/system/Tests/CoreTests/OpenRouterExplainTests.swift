@@ -5,7 +5,7 @@ import XCTest
 
 /// Choosing OpenRouter for Explain and the send preview (SET-160), with the Keychain double and the `URLProtocol` stub
 /// of `OpenRouterTests`, never the network or the real Keychain: OpenRouter chosen only while its key is stored; the
-/// choice set back, with a notice, by every check that finds it cannot be used; the first request of the session sent
+/// choice set back, with a notice, by every latest check that finds it cannot be used (SET-165); the first request of the session sent
 /// only once its preview is confirmed, with exactly the body shown; and the work in flight ended by a provider change,
 /// Add Key or Remove Key, and Send folder names.
 @MainActor
@@ -380,6 +380,522 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
         XCTAssertEqual(account.checkedModel, "")
         XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
+    }
+
+    /// A confirmed request whose key read, as it is sent, fails after a later check began (SET-165) sets nothing back:
+    /// the newer check, Settings' read or another item's Explain whose preview is shown, stands, and only the overtaken
+    /// request ends, unsent, saying so without claiming a set-back; the key is not read again for Settings. An
+    /// availability read overtaken by a send's key read sets nothing back either, and the latest send-time refusal still
+    /// sets the choice back.
+    func testAnOvertakenKeyReadAsARequestIsSentSetsNothingBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        let first = ExplainKey("process:1"), second = ExplainKey("process:2"), third = ExplainKey("process:3")
+        let fourth = ExplainKey("process:4"), fifth = ExplainKey("process:5")
+
+        /// Confirms `item`'s preview with the key read as it is sent failing, held until `overtake` has run.
+        func overtaken(_ item: ExplainKey, by overtake: () async throws -> Void) async throws {
+            await center.explain(item) { _ in self.request() }
+            let preview = try XCTUnwrap(confirming(center, item))
+            let sent = StubProtocol.requests.count
+            keychain.failure = errSecInteractionNotAllowed
+            keychain.holdsDataReads = true
+            let held = Task { await center.confirmSend(item) }
+            try await until { keychain.heldDataReads == 1 }
+            keychain.holdsDataReads = false
+            keychain.failure = nil
+            try await overtake()
+            let calls = keychain.otherCalls
+            keychain.releaseDataRead()
+            await held.value
+            let rereads = await rereads(since: calls, keychain, account)
+            XCTAssertEqual(rereads, 0, "whether a key is stored is not read again")
+            XCTAssertEqual(center.choice, .openRouter)
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(center.state(for: item), .failed(try XCTUnwrap(ExplainCenter.overtaken(.openRouterKeyUnreadable)),
+                                                            preview.request), "only its own item ends")
+            XCTAssertNil(center.sentText(for: item))
+            XCTAssertFalse(center.sendConfirmed)
+            XCTAssertEqual(StubProtocol.requests.count, sent, "nothing sent")
+        }
+
+        // Overtaken by Settings' read, which found the key stored.
+        try await overtaken(first) { await center.refreshAvailability() }
+        XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is shown")
+
+        // Overtaken by another item's Explain, which read the key and shows its preview.
+        var preview: SendPreview?
+        try await overtaken(second) {
+            await center.explain(third) { _ in self.request("backupd") }
+            preview = try XCTUnwrap(confirming(center, third))
+        }
+        XCTAssertEqual(confirming(center, third), preview, "the newer preview is kept")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+
+        // An Explain whose availability read fails after that preview's key read began, as it is sent, sets nothing
+        // back, and the preview's exact body is sent.
+        keychain.failure = errSecInteractionNotAllowed
+        keychain.holdsDataReads = true
+        let read = Task { await center.explain(fourth) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        keychain.failure = nil
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.confirmSend(third)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [try XCTUnwrap(preview).body])
+        keychain.releaseDataRead()
+        await read.value
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertNil(center.notice)
+        XCTAssertEqual(center.state(for: fourth), .failed(try XCTUnwrap(ExplainCenter.overtaken(.openRouterKeyUnreadable)),
+                                                          request()))
+        XCTAssertNil(center.availabilityStatus, "not shown as unusable while OpenRouter stays chosen")
+        guard case .explained = center.state(for: third) else { return XCTFail("\(center.state(for: third))") }
+
+        // The latest check, a key read as a request is sent that fails, sets the choice back.
+        keychain.holdsDataReads = true
+        let latest = Task { await center.explain(fifth) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        keychain.failure = errSecInteractionNotAllowed
+        keychain.releaseDataRead()
+        await latest.value
+        XCTAssertEqual(center.choice, .appleIntelligence)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.keyUnreadable))
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+    }
+
+    /// A confirmed request whose key read, as it is sent, finds no key after a later check began sets nothing back
+    /// either, whether that check is Settings' read or another item's confirmed request, which is sent: only the
+    /// overtaken request ends, unsent, and whether a key is stored is not read again.
+    func testAnOvertakenRefusalAsARequestIsSentThatFindsNoKeySetsNothingBack() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        XCTAssertTrue(center.choose(.openRouter))
+        let first = ExplainKey("process:1"), second = ExplainKey("process:2"), third = ExplainKey("process:3")
+        await center.explain(first) { _ in self.request() }
+        await center.explain(second) { _ in self.request() }
+        await center.explain(third) { _ in self.request("backupd") }
+        let preview = try XCTUnwrap(confirming(center, third))
+
+        /// Confirms `item`'s preview with the key, removed outside System, read as it is sent, held until it is stored
+        /// again and `overtake` has run.
+        func overtaken(_ item: ExplainKey, by overtake: () async throws -> Void) async throws {
+            let shown = try XCTUnwrap(confirming(center, item))
+            try OpenRouterKeyStore(items: keychain).remove()
+            keychain.holdsDataReads = true
+            let held = Task { await center.confirmSend(item) }
+            try await until { keychain.heldDataReads == 1 }
+            keychain.holdsDataReads = false
+            try OpenRouterKeyStore(items: keychain).save(Self.key)
+            try await overtake()
+            let calls = keychain.otherCalls
+            keychain.releaseDataRead()
+            await held.value
+            let rereads = await rereads(since: calls, keychain, account)
+            XCTAssertEqual(rereads, 0, "whether a key is stored is not read again")
+            XCTAssertEqual(center.choice, .openRouter)
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(center.state(for: item), .failed(try XCTUnwrap(ExplainCenter.overtaken(.noOpenRouterKey)),
+                                                            shown.request), "only its own item ends")
+            XCTAssertNil(center.sentText(for: item))
+        }
+
+        // Overtaken by Settings' read, which found the key stored again.
+        try await overtaken(first) { await center.refreshAvailability() }
+        XCTAssertEqual(center.availability, .availableOnOpenRouter, "the newer read is shown")
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+
+        // Overtaken by another item's confirmed request, which is sent with exactly its preview's body.
+        try await overtaken(second) {
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(third)
+        }
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [preview.body], "only the newer request is sent")
+        guard case .explained = center.state(for: third) else { return XCTFail("\(center.state(for: third))") }
+        XCTAssertEqual(center.sentText(for: third), String(decoding: preview.body, as: UTF8.self))
+        XCTAssertTrue(center.sendConfirmed, "by the newer request alone")
+    }
+
+    /// A read for Settings that a key read as a request is sent overtook, and that then finds OpenRouter cannot be
+    /// used, or does not answer in time, sets nothing back, so Settings does not show OpenRouter as unusable, or as not
+    /// answering, while it stays chosen: it offers Check instead.
+    func testASettingsReadOvertakenByAKeyReadAsARequestIsSentShowsNoUnusableStatus() async throws {
+        for timesOut in [false, true] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account,
+                                       availabilityTimeout: timesOut ? .seconds(1) : .seconds(15))
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+            await center.explain(item) { _ in self.request() }
+            let preview = try XCTUnwrap(confirming(center, item))
+
+            keychain.holdsOtherCalls = true
+            let read = Task { await center.refreshAvailability() }
+            try await until { keychain.heldOtherCalls == 1 }
+            XCTAssertEqual(center.availabilityStatus, .checking)
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [preview.body])
+            if timesOut {
+                await read.value
+                keychain.holdsOtherCalls = false
+                keychain.releaseOtherCall()
+            } else {
+                keychain.failure = errSecInteractionNotAllowed
+                keychain.holdsOtherCalls = false
+                keychain.releaseOtherCall()
+                await read.value
+                keychain.failure = nil
+            }
+            XCTAssertNil(center.availabilityStatus, "Settings offers Check (timed out: \(timesOut))")
+            XCTAssertEqual(center.choice, .openRouter)
+            XCTAssertNil(center.notice)
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+
+            // The next read, the latest check, is shown.
+            await center.refreshAvailability()
+            XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter))
+        }
+    }
+
+    /// A confirmed request refused as it is sent because the model ID holds the key replaced since, after a later check
+    /// began, clears nothing and sets nothing back, so its item says only that nothing was sent, never that the model ID
+    /// was cleared or to choose OpenRouter again.
+    func testAnOvertakenRefusalAsARequestIsSentThatFindsTheModelIDHoldsTheKeyClaimsNoClear() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        let other = "tok-0123456789abcdef"
+        account.model = "acme/\(other)"
+        await account.modelChecked()
+        XCTAssertTrue(center.choose(.openRouter))
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        let preview = try XCTUnwrap(confirming(center, item))
+
+        try OpenRouterKeyStore(items: keychain).save(other)
+        keychain.holdsDataReads = true
+        let held = Task { await center.confirmSend(item) }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        await center.refreshAvailability()
+        XCTAssertEqual(center.availability, .availableOnOpenRouter)
+        keychain.releaseDataRead()
+        await held.value
+        XCTAssertEqual(center.choice, .openRouter)
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+        XCTAssertNil(center.notice)
+        XCTAssertEqual(account.checkedModel, "acme/\(other)", "not cleared by an overtaken refusal")
+        XCTAssertEqual(account.model, "acme/\(other)")
+        XCTAssertNil(account.modelError)
+        let message = try XCTUnwrap(ExplainCenter.overtaken(.openRouterModelHeldKey))
+        XCTAssertEqual(center.state(for: item), .failed(message, preview.request))
+        XCTAssertFalse(message.contains("cleared"), message)
+        XCTAssertFalse(message.contains("Choose OpenRouter again"), message)
+        XCTAssertNil(center.sentText(for: item))
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
+    }
+
+    /// The account's check of a model ID entry against the key, whose Keychain read failed, held until a later check
+    /// began (SET-165), sets nothing back: the newer check, another item's Explain whose preview is shown or Settings'
+    /// read that finds OpenRouter available, stands, and the preview's exact body is sent; Settings still says the model
+    /// ID is not used. The latest such check, failing, still sets the choice back.
+    func testAnOvertakenModelIDCheckSetsNothingBack() async throws {
+        for byExplain in [true, false] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            keychain.failure = errSecInteractionNotAllowed
+            let preview = try await overtakingModelCheck(of: "openai/gpt-4o", byExplain: byExplain,
+                                                         center, account, keychain, item, defaults)
+            XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage, "Settings still says so")
+            XCTAssertEqual(account.checkedModel, "", "the entry is not used")
+            try await assertOvertakerStands(preview, byExplain: byExplain, center, item)
+
+            // The latest check of a model ID entry, failing, sets the choice back.
+            keychain.failure = errSecInteractionNotAllowed
+            account.model = "anthropic/claude-sonnet-4"
+            await account.modelChecked()
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(.modelUnchecked))
+        }
+    }
+
+    /// The account's read of whether a key is stored, failing or finding none, held until a later check, another
+    /// item's Explain whose preview is shown, began (SET-165), sets nothing back: the preview is kept and its exact body
+    /// sent, while Settings shows what the read found. The latest such read still sets the choice back.
+    func testAnOvertakenReadOfWhetherAKeyIsStoredSetsNothingBack() async throws {
+        for findsNone in [false, true] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            if findsNone {
+                try OpenRouterKeyStore(items: keychain).remove()
+            } else {
+                keychain.failure = errSecInteractionNotAllowed
+            }
+            keychain.holdsSearches = true
+            let read = Task { await account.refreshKey() }
+            try await until { keychain.heldSearches == 1 }
+            keychain.holdsSearches = false
+            keychain.failure = nil
+            if findsNone { try OpenRouterKeyStore(items: keychain).save(Self.key) }
+            await center.explain(item) { _ in self.request() }
+            let preview = try XCTUnwrap(confirming(center, item))
+            keychain.releaseSearch()
+            await read.value
+            XCTAssertEqual(center.choice, .openRouter, "finds none: \(findsNone)")
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(account.presence, findsNone ? .absent : .unknown(shown: true), "Settings shows what it found")
+            XCTAssertEqual(confirming(center, item), preview, "the newer preview is kept")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [preview.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+
+            // The latest read, failing or finding none, sets the choice back.
+            if findsNone {
+                try OpenRouterKeyStore(items: keychain).remove()
+            } else {
+                keychain.failure = errSecInteractionNotAllowed
+            }
+            await account.refreshKey()
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
+        }
+    }
+
+    /// The account's check of a model ID entry that holds the key stored, which has no `sk-or-` in it, held until a
+    /// later check began (SET-165): another item's Explain whose preview is shown, or Settings' read that finds
+    /// OpenRouter available. The entry is still cleared, and Settings says why, but nothing is set back: the preview is
+    /// kept and its exact body sent. The latest such check still sets the choice back.
+    func testAnOvertakenModelIDCheckThatFindsTheKeyInTheEntryClearsItAndSetsNothingBack() async throws {
+        let other = "tok-0123456789abcdef"
+        for byExplain in [true, false] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain, key: other)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            let preview = try await overtakingModelCheck(of: "acme/\(other)", byExplain: byExplain,
+                                                         center, account, keychain, item, defaults)
+            XCTAssertEqual(account.model, "", "the entry is cleared")
+            XCTAssertEqual(account.modelEntry, "")
+            XCTAssertEqual(account.modelError, OpenRouterAccount.keyAsModelMessage)
+            XCTAssertEqual(account.checkedModel, "", "openrouter/auto, as before")
+            XCTAssertEqual(defaults.string(forKey: OpenRouterAccount.modelKey), "")
+            try await assertOvertakerStands(preview, byExplain: byExplain, center, item)
+            let sent = StubProtocol.requests.map { String(decoding: $0.body ?? Data(), as: UTF8.self) }
+            XCTAssertFalse(sent.contains { $0.contains(other) }, "never sent the key")
+
+            // The latest check finding the key in the entry sets the choice back.
+            account.model = "acme/\(other)"
+            await account.modelChecked()
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+            XCTAssertEqual(account.model, "")
+        }
+    }
+
+    /// The key test's read of the key, failing or finding none, held until a later check, another item's Explain whose
+    /// preview is shown, began (SET-165), sets nothing back: the preview is kept and its exact body sent, while Settings
+    /// shows what the read found and the test's failure. The latest such read still sets the choice back.
+    func testAnOvertakenKeyTestReadSetsNothingBack() async throws {
+        let unreadable = KeychainError(status: errSecInteractionNotAllowed).message
+        let noKey = ExplainError.unavailable(.noOpenRouterKey).message
+        for findsNone in [false, true] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            /// Tests the key with its read failing or finding none, held until `overtake` has run.
+            func testing(overtake: () async throws -> Void) async throws {
+                if findsNone {
+                    try OpenRouterKeyStore(items: keychain).remove()
+                } else {
+                    keychain.failure = errSecInteractionNotAllowed
+                }
+                keychain.holdsDataReads = true
+                let test = Task { await account.testKey() }
+                try await until { keychain.heldDataReads == 1 }
+                keychain.holdsDataReads = false
+                keychain.failure = nil
+                if findsNone { try OpenRouterKeyStore(items: keychain).save(Self.key) }
+                try await overtake()
+                keychain.releaseDataRead()
+                await test.value
+                XCTAssertEqual(account.keyTest, .failed(findsNone ? noKey : unreadable))
+                XCTAssertEqual(account.presence, findsNone ? .absent : .unknown(shown: true), "Settings shows it")
+            }
+
+            var preview: SendPreview?
+            try await testing {
+                await center.explain(item) { _ in self.request() }
+                preview = try XCTUnwrap(confirming(center, item))
+            }
+            XCTAssertEqual(center.choice, .openRouter, "finds none: \(findsNone)")
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            let shown = try XCTUnwrap(preview)
+            XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
+            XCTAssertTrue(StubProtocol.requests.isEmpty, "the key test sent nothing")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+
+            // The latest key test read, failing or finding none, sets the choice back.
+            try await testing {
+                // Nothing overtakes the latest read.
+            }
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
+            XCTAssertEqual(StubProtocol.requests.count, 1)
+        }
+    }
+
+    /// Remove Key that fails, then reads again whether a key is stored, failing or finding none, held until a later
+    /// check, another item's Explain whose preview is shown, began (SET-165): it is reachable, since Explain sends
+    /// again once the removal itself has failed. That read sets nothing back: the preview is kept and its exact body
+    /// sent, while Settings shows what it found. The latest such read still sets the choice back.
+    func testAnOvertakenReadAfterAFailedRemoveKeySetsNothingBack() async throws {
+        for findsNone in [false, true] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            /// Removes the key, which fails, with the read after it failing or finding none, held until `overtake` has
+            /// run.
+            func removing(overtake: () async throws -> Void) async throws {
+                let calls = keychain.otherCalls
+                keychain.failure = errSecInteractionNotAllowed
+                keychain.holdsOtherCalls = true
+                let removal = Task { await account.removeKey() }
+                try await until { keychain.heldOtherCalls == 1 }
+                // The removal fails; the read after it waits before it is made.
+                keychain.releaseOtherCall()
+                try await until { keychain.otherCalls == calls + 2 && keychain.heldOtherCalls == 1 }
+                XCTAssertFalse(account.isChangingKey, "Explain can send again")
+                keychain.holdsOtherCalls = false
+                if findsNone {
+                    keychain.failure = nil
+                    try OpenRouterKeyStore(items: keychain).remove()
+                }
+                keychain.holdsSearches = true
+                keychain.releaseOtherCall()
+                try await until { keychain.heldSearches == 1 }
+                keychain.holdsSearches = false
+                keychain.failure = nil
+                if findsNone { try OpenRouterKeyStore(items: keychain).save(Self.key) }
+                try await overtake()
+                let overtaken = keychain.otherCalls
+                keychain.releaseSearch()
+                await removal.value
+                if center.choice == .openRouter {
+                    // Settings' read once the removal has ended, which finds the key stored, is done before any next
+                    // check.
+                    try await until {
+                        keychain.otherCalls > overtaken && center.availabilityStatus == .read(.availableOnOpenRouter)
+                    }
+                }
+                XCTAssertEqual(account.keyError, KeychainError(status: errSecInteractionNotAllowed).message)
+                XCTAssertEqual(account.presence, findsNone ? .absent : .unknown(shown: true), "Settings shows it")
+            }
+
+            var preview: SendPreview?
+            try await removing {
+                await center.explain(item) { _ in self.request() }
+                preview = try XCTUnwrap(confirming(center, item))
+            }
+            XCTAssertEqual(center.choice, .openRouter, "finds none: \(findsNone)")
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            let shown = try XCTUnwrap(preview)
+            XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+
+            // The latest read after a failed removal, failing or finding none, sets the choice back.
+            try await removing {
+                // Nothing overtakes the latest read.
+            }
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
+            XCTAssertEqual(StubProtocol.requests.count, 1)
+        }
+    }
+
+    /// A model ID entry that holds a key, and Remove Key, are changes the user made, not checks: they set the choice
+    /// back at once, even while a later check, an Explain whose key read is held, is in flight (SET-165).
+    func testChangesTheUserMakesSetTheChoiceBackWhileACheckIsInFlight() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        let item = ExplainKey("process:1")
+
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsDataReads = true
+        let entering = Task { await center.explain(item) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        account.modelEntry = "x/\(Self.key)"
+        XCTAssertEqual(center.choice, .appleIntelligence, "at once")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await entering.value
+
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsDataReads = true
+        let removing = Task { await center.explain(item) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        await account.removeKey()
+        XCTAssertEqual(center.choice, .appleIntelligence, "at once")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.noKey))
+        keychain.releaseDataRead()
+        await removing.value
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
     }
 
     /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
@@ -995,6 +1511,58 @@ final class OpenRouterExplainTests: XCTestCase {
 
     private func confirming(_ center: ExplainCenter, _ item: ExplainKey) -> SendPreview? {
         if case let .confirming(preview) = center.state(for: item) { preview } else { nil }
+    }
+
+    /// Holds the account's check of the model ID `model` at its Keychain read until another item's Explain shows its
+    /// preview, or Settings' read finds OpenRouter available, then releases it, and asserts that the overtaken check set
+    /// nothing back. Returns the preview shown, if any.
+    private func overtakingModelCheck(of model: String, byExplain: Bool, _ center: ExplainCenter,
+                                      _ account: OpenRouterAccount, _ keychain: FakeKeychain, _ item: ExplainKey,
+                                      _ defaults: UserDefaults) async throws -> SendPreview? {
+        keychain.holdsDataReads = true
+        account.model = model
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        keychain.failure = nil
+        if byExplain {
+            await center.explain(item) { _ in self.request() }
+            XCTAssertNotNil(confirming(center, item))
+        } else {
+            await center.refreshAvailability()
+            XCTAssertEqual(center.availability, .availableOnOpenRouter)
+        }
+        let preview = confirming(center, item)
+        keychain.releaseDataRead()
+        await account.modelChecked()
+        XCTAssertEqual(center.choice, .openRouter, "by Explain: \(byExplain)")
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+        XCTAssertNil(center.notice)
+        return preview
+    }
+
+    /// Asserts that the check which overtook one stands: its preview is kept and confirming it sends exactly its body,
+    /// or Settings shows its read and nothing is sent.
+    private func assertOvertakerStands(_ preview: SendPreview?, byExplain: Bool, _ center: ExplainCenter,
+                                       _ item: ExplainKey) async throws {
+        if byExplain {
+            let shown = try XCTUnwrap(preview)
+            XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        } else {
+            XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter), "the newer read is shown")
+            XCTAssertTrue(StubProtocol.requests.isEmpty)
+        }
+    }
+
+    /// The reads of whether a key is stored made since `calls` other than one made here: the main actor starts the
+    /// task a set-back reads it again in before resuming its caller, and the Keychain queue makes its calls in order,
+    /// so one asked for is counted by the time this read returns.
+    private func rereads(since calls: Int, _ keychain: FakeKeychain, _ account: OpenRouterAccount) async -> Int {
+        await account.refreshKey()
+        return keychain.otherCalls - calls - 1
     }
 
     /// Waits until `condition` holds.
