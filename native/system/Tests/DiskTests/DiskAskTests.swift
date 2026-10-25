@@ -1,4 +1,5 @@
 import Foundation
+import os
 @testable import SystemCore
 @testable import SystemDisk
 import SystemProcesses
@@ -61,6 +62,84 @@ final class DiskAskTests: XCTestCase {
         try await DiskFixture.wait { model.phase == .completed }
         XCTAssertEqual(model.askLargestItems(limit: 2, redactor: redactor).entries.map(\.target),
                        [.diskItem(path: fixture.path("Movies/huge.mov")), .diskItem(path: fixture.path("Documents/big.bin"))])
+    }
+
+    func testDiskToolsSayWhenTheScanEndedAndTheVolumeWasRead() async throws {
+        let clock = TestClock()
+        let start = clock.now
+        // Each scan stops at its own gate once it has read everything.
+        let gates = [AsyncGate(), AsyncGate()]
+        let scans = OSAllocatedUnfairLock(initialState: 0)
+        let model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            let scan = scans.withLock { count in
+                defer { count += 1 }
+                return count
+            }
+            await gates[scan].pass()
+            return scanned
+        }), clock: { clock.now })
+
+        model.scan()
+        await fulfillment(of: [gates[0].reached], timeout: 30)
+        try await DiskFixture.wait { model.volumeHeader != nil }
+        XCTAssertNil(model.askDiskSummary(redactor: redactor).fields["scanEnded"], "a scan still reading has not ended")
+        clock.now = start.addingTimeInterval(60)
+        gates[0].open()
+        try await DiskFixture.wait { !model.isScanning }
+        let finished: [String: AskValue] = ["scan": .words("Finished"), "scanEnded": at(clock.now, "5 minutes"),
+                                            "volumeRead": at(start, "6 minutes")]
+        XCTAssertEqual(times(model, at: start.addingTimeInterval(360)), [finished, finished, finished])
+        // A reading kept for hours says so; nothing reads it again.
+        let later = times(model, at: start.addingTimeInterval(3 * 3_600))
+        XCTAssertEqual(later[0]["scanEnded"], at(start.addingTimeInterval(60), "2 hours"))
+        XCTAssertEqual(later[2]["volumeRead"], at(start, "3 hours"))
+
+        // A new scan drops both until it reads them again; a cancelled one ends when it stops.
+        clock.now = start.addingTimeInterval(7_200)
+        model.scan()
+        XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields, ["scan": .words("Scanning")])
+        await fulfillment(of: [gates[1].reached], timeout: 30)
+        try await DiskFixture.wait { model.volumeHeader != nil }
+        clock.now = start.addingTimeInterval(7_260)
+        model.cancel()
+        gates[1].open()
+        try await DiskFixture.wait { !model.isScanning }
+        let summary = model.askDiskSummary(redactor: redactor, now: start.addingTimeInterval(7_380)).fields
+        XCTAssertEqual(summary["scan"], .words("Cancelled; folders not read in full count only what was read"))
+        XCTAssertEqual(summary["scanEnded"], at(clock.now, "2 minutes"))
+        XCTAssertEqual(summary["volumeRead"], at(start.addingTimeInterval(7_200), "3 minutes"))
+        XCTAssertEqual(model.askLargestItems(limit: 1, redactor: redactor, now: clock.now).fields["scanEnded"],
+                       at(clock.now, "0 minutes"))
+    }
+
+    /// What each disk tool says of the scan's state and when it and the volume were read.
+    private func times(_ model: DiskWindowModel, at now: Date) -> [[String: AskValue]] {
+        [model.askDiskSummary(redactor: redactor, now: now).fields,
+         model.askLargestItems(limit: 1, redactor: redactor, now: now).fields,
+         model.askReclaimSuggestions(redactor: redactor, now: now).fields].map {
+            $0.filter { ["scan", "scanEnded", "volumeRead"].contains($0.key) }
+        }
+    }
+
+    private func at(_ date: Date, _ ago: String) -> AskValue {
+        .words("At \(fixture.format.time(date)), \(ago) ago")
+    }
+
+    func testAHardLinkedFileIsOneLargestItem() async throws {
+        try fixture.write("Movies/take.mov", bytes: 3_000_000)
+        XCTAssertEqual(link(fixture.path("Movies/take.mov"), fixture.path("Documents/take-link.mov")), 0)
+        let model = try await fixture.scanned()
+        let paths = model.askLargestItems(limit: 3, redactor: redactor).entries.compactMap { entry -> String? in
+            guard case let .diskItem(path)? = entry.target else { return nil }
+            return path
+        }
+        XCTAssertEqual(paths.filter { $0.hasSuffix("take.mov") || $0.hasSuffix("take-link.mov") }.count, 1, "\(paths)")
+        XCTAssertEqual(paths.count, 3)
+        let counted = try XCTUnwrap(paths.first)
+        let tree = try XCTUnwrap(model.result?.tree)
+        XCTAssertFalse(try XCTUnwrap(tree.item(at: String(counted.dropFirst(fixture.home.count + 1)))).flags
+            .contains(.countedElsewhere), "the link listed is the one that counts the file")
     }
 
     func testAPackageChosenAsTheScansRootIsItsLargestItem() async throws {
@@ -133,4 +212,10 @@ final class DiskAskTests: XCTestCase {
         XCTAssertEqual(model.selection.flatMap(model.path(for:)), notes)
         XCTAssertEqual(shown, ["disk", "disk"])
     }
+}
+
+/// A clock tests set by hand.
+@MainActor
+private final class TestClock {
+    var now = Date(timeIntervalSince1970: 1_800_000_000)
 }

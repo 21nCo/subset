@@ -48,7 +48,11 @@ public final class DiskWindowModel {
     public private(set) var isCancelling = false
     public private(set) var progress: DiskScanProgress?
     public private(set) var volumeHeader: DiskVolumeHeader?
+    /// When the header's figures were read: it is read once per scan, so they can be older than the window.
+    public private(set) var volumeReadAt: Date?
     public private(set) var result: DiskScanResult?
+    /// When the scan shown stopped reading, finished or cancelled.
+    public private(set) var scanEndedAt: Date?
     public private(set) var analysis: DiskAnalysis?
     /// The scope of the scan shown.
     public private(set) var scannedScope: DiskScope?
@@ -73,6 +77,7 @@ public final class DiskWindowModel {
     public let rowLimit: Int
 
     @ObservationIgnored private let service: DiskScanService
+    @ObservationIgnored private let clock: @MainActor () -> Date
     @ObservationIgnored let cleanup: DiskCleanupService
     /// The cleanup running, observed so the window knows when one is. Cleared only once it has finished: every item
     /// checked, or the command and the programs it started exited.
@@ -90,8 +95,10 @@ public final class DiskWindowModel {
     @ObservationIgnored private(set) var itemPathsBuilt = 0
 
     public init(service: DiskScanService = .live, cleanup: DiskCleanupService? = nil, format: UsageFormat? = nil,
-                home: String = DiskWindowModel.realHome, rowLimit: Int = 500) {
+                home: String = DiskWindowModel.realHome, rowLimit: Int = 500,
+                clock: @escaping @MainActor () -> Date = { .now }) {
         self.service = service
+        self.clock = clock
         self.cleanup = cleanup ?? .live(home: home)
         self.home = home
         self.format = format ?? UsageFormat(home: home)
@@ -165,7 +172,9 @@ public final class DiskWindowModel {
         isCancelling = false
         progress = nil
         volumeHeader = nil
+        volumeReadAt = nil
         result = nil
+        scanEndedAt = nil
         analysis = nil
         scannedScope = scope
         folder = 0
@@ -180,6 +189,7 @@ public final class DiskWindowModel {
             let summary = await service.volume(root)
             guard let self, self.generation == generation, !self.isFailed else { return }
             volumeHeader = DiskVolumeHeader(summary, format: format)
+            volumeReadAt = clock()
         }
         task = Task { [weak self] in
             let scanned = await service.scan(root) { progress in
@@ -231,12 +241,14 @@ public final class DiskWindowModel {
             phase = .failed(Self.message(error, format: format))
             // There is no volume to describe for a scan that did not run.
             volumeHeader = nil
+            volumeReadAt = nil
             rebuild()
             return
         case let .success(value):
             result = value
         }
         self.result = result
+        scanEndedAt = clock()
         guard result.outcome == .completed, !cancelled else {
             phase = .cancelled
             rebuild()

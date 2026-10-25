@@ -5,9 +5,9 @@ import SystemProcesses
 /// What Ask's disk tools (SET-51) read: the volume header and the scan shown, with its suggestions, redacted as Explain
 /// redacts (SET-49). Nothing here scans, changes the window, or starts a cleanup.
 extension DiskWindowModel {
-    /// The volume's space and the scan's folder, state, and total.
-    public func askDiskSummary(redactor: ExplainRedactor) -> AskOutput {
-        var fields: [String: AskValue] = ["scan": .words(askScanState)]
+    /// The volume's space and the scan's folder, state, and total, with when each was read.
+    public func askDiskSummary(redactor: ExplainRedactor, now: Date = .now) -> AskOutput {
+        var fields = askObserved(now: now)
         if let header = volumeHeader {
             // Never the header's title, which is the mount point when the volume has no name: that is a path.
             if let name = header.name { fields["volume"] = .name(name) }
@@ -46,14 +46,14 @@ extension DiskWindowModel {
             }
             return AskEntry(.diskItem(path: path), fields)
         }
-        return AskOutput(["scan": .words(askScanState), "scannedFolder": .path(redactor.path(tree.rootPath))],
+        return AskOutput(askObserved(now: now).merging(["scannedFolder": .path(redactor.path(tree.rootPath))]) { $1 },
                          entries: entries)
     }
 
     static let askSuggestionLimit = 20
 
     /// The suggestions of the scan shown, in the Suggestions tab's order of rules.
-    public func askReclaimSuggestions(redactor: ExplainRedactor) -> AskOutput {
+    public func askReclaimSuggestions(redactor: ExplainRedactor, now: Date = .now) -> AskOutput {
         guard let analysis, result != nil else {
             return AskOutput(["status": .words("No suggestions: they are worked out once a disk scan finishes without "
                 + "being cancelled.")])
@@ -80,9 +80,23 @@ extension DiskWindowModel {
             if cleanedMatches.contains(position) { fields["cleanedUpThisSession"] = .flag(true) }
             return AskEntry(explainKey(for: .match(position)).map { .suggestion($0.id) }, fields)
         }
-        var fields: [String: AskValue] = ["scannedFolder": .path(redactor.path(result?.tree.rootPath ?? home))]
+        var fields = askObserved(now: now)
+        fields["scannedFolder"] = .path(redactor.path(result?.tree.rootPath ?? home))
         if analysis.matches.count > entries.count { fields["notListed"] = .count(analysis.matches.count - entries.count) }
         return AskOutput(fields, entries: entries)
+    }
+
+    /// The scan's state, and when the scan shown stopped reading and the volume's figures were read, with how long
+    /// ago: each is read once per scan, so every disk tool says how old its figures are.
+    private func askObserved(now: Date) -> [String: AskValue] {
+        var fields: [String: AskValue] = ["scan": .words(askScanState)]
+        if let scanEndedAt { fields["scanEnded"] = .words(Self.askTime(scanEndedAt, now: now, format: format)) }
+        if let volumeReadAt { fields["volumeRead"] = .words(Self.askTime(volumeReadAt, now: now, format: format)) }
+        return fields
+    }
+
+    private static func askTime(_ date: Date, now: Date, format: UsageFormat) -> String {
+        "At \(format.time(date)), \(ExplainFacts.duration(from: date, to: now)) ago"
     }
 
     /// The scan's state in System's words, without a failure's message.

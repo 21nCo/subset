@@ -190,8 +190,8 @@ final class AskTests: XCTestCase {
         for _ in 1...2 {
             let result = toolbox.call("largestItems", arguments: Data(), question: 1)
             let count = try listed(result, prefix: "d", total: 20)
-            if count > 0 { XCTAssertLessThanOrEqual(used + result.count, AskToolbox.questionLimit) }
             used += result.count
+            XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit)
             later.append(count)
         }
         XCTAssertEqual(later.last, 0, "the question's budget is used up: \(later)")
@@ -201,6 +201,64 @@ final class AskTests: XCTestCase {
         let again = toolbox.call("reclaimSuggestions", arguments: Data(), question: 2)
         XCTAssertEqual(try listed(again, prefix: "s", total: 25), suggestionsListed)
         XCTAssertEqual(again, suggestions)
+    }
+
+    func testEveryStringAQuestionsCallsReturnCountsTowardsItsBudget() throws {
+        let source = FakeAskSource()
+        source.bulky = true
+        let toolbox = AskToolbox(source: source, redactor: redactor)
+        var question = 1
+        toolbox.begin(question, redactor: redactor)
+        var used = 0
+        func call(_ name: String, _ arguments: String = "{}") throws -> [String: Any] {
+            let result = toolbox.call(name, arguments: Data(arguments.utf8), question: question)
+            used += result.count
+            XCTAssertLessThanOrEqual(result.count, AskToolbox.resultLimit, name)
+            XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit, "after \(name): \(used)")
+            return try json(result)
+        }
+        func refused(_ object: [String: Any]) -> Bool {
+            object["results"] == nil && object["error"] as? String == AskToolbox.tooLarge
+        }
+
+        // Ten groups, then one group's facts, as Explain sends them, three times: the facts alone fill the rest.
+        let groups = try call("topGroups", #"{"metric":"memory","limit":10}"#)
+        XCTAssertEqual((groups["results"] as? [Any])?.count, 10)
+        let detail = try call("groupDetail", #"{"id":"g1"}"#)
+        let factsSent = try JSONSerialization.data(withJSONObject: try XCTUnwrap(detail["group"])).count
+        XCTAssertTrue((2_000...AskToolbox.resultLimit).contains(factsSent), "facts sized as a real group's: \(factsSent)")
+        for _ in 1...2 {
+            let again = try call("groupDetail", #"{"id":"g1"}"#)
+            XCTAssertTrue(refused(again), "facts that do not fit are not sent at all: \(again)")
+            XCTAssertNil(again["group"])
+        }
+        XCTAssertNil(toolbox.target(for: "g\(FakeAskSource.subgroups + 11)"), "a refused result gives no id")
+
+        // Refusals count too, and room is kept for them: invalid arguments, then results that fill the rest, then
+        // calls past the limit, one of them for a tool that does not exist.
+        question = 2
+        toolbox.begin(question, redactor: redactor)
+        used = 0
+        XCTAssertNotNil(try call("groupDetail", #"{"id":"g999"}"#)["error"])
+        XCTAssertNotNil(try call("largestItems", #"{"limit":20}"#)["results"])
+        XCTAssertNotNil(try call("topGroups", #"{"metric":"cpu","limit":10}"#)["results"])
+        XCTAssertNotNil(try call("topGroups", #"{"metric":"cpu","limit":10}"#)["notListed"])
+        XCTAssertNotNil(try call("deleteEverything")["error"])
+        for _ in 2...AskToolbox.callLimit {
+            XCTAssertNotNil(try call("reclaimSuggestions")["error"])
+        }
+        XCTAssertEqual(toolbox.records.map(\.ran), [false, true, true, true, false, false, false, false])
+        XCTAssertFalse(source.ran.contains("reclaimSuggestions"))
+
+        // Every refusal fits the room kept for it, even naming a tool whose name grows when escaped.
+        question = 3
+        toolbox.begin(question, redactor: redactor)
+        used = 0
+        let unknown = toolbox.call(String(repeating: #"""#, count: 60), arguments: Data(), question: question)
+        XCTAssertLessThanOrEqual(unknown.count, AskToolbox.refusalLimit)
+        XCTAssertTrue(try XCTUnwrap(json(unknown)["error"] as? String).hasPrefix("There is no tool named"), unknown)
+        XCTAssertLessThanOrEqual(AskToolbox.error(AskToolbox.tooLarge).count, AskToolbox.refusalLimit)
+        XCTAssertEqual(try json(AskToolbox.error(AskToolbox.tooLarge))["error"] as? String, AskToolbox.tooLarge)
     }
 
     // MARK: Answers
@@ -451,12 +509,21 @@ final class FakeAskSource: AskSource {
     static let project = OriginGroupID(.project(path: "/Users/jdoe/dev/secret-project"))
     private(set) var ran: [String] = []
     private(set) var selected: [AskTarget] = []
-    /// Lists twenty disk items and twenty suggestions, every text at its cap, as the largest results could be.
+    /// Lists twenty disk items and twenty suggestions, every text at its cap, groups with long names, and a group's
+    /// full facts, as the largest results could be.
     var bulky = false
+    static let subgroups = 3
     private static let long = String(repeating: "long text ", count: 40)
 
     func topGroups(by metric: AskMetric, layer: AttributionLayer, limit: Int, redactor: ExplainRedactor) -> AskOutput {
         ran.append("topGroups \(metric.rawValue) \(layer.rawValue) \(limit)")
+        if bulky {
+            return AskOutput(["layer": .words(layer.rawValue)], entries: (1...limit).map { number in
+                AskEntry(.group(number == 1 ? Self.chrome : OriginGroupID(.app(bundlePath: "/Applications/App\(number).app"))),
+                         ["name": .name(String(Self.long.prefix(200))), "memory": .words("1.2 GB"),
+                          "launchSource": .words(String(Self.long.prefix(100)))])
+            })
+        }
         return AskOutput(["layer": .words(layer.rawValue)], entries: [
             AskEntry(.group(Self.chrome), ["name": .name("Google Chrome"), "memory": .words("1.2 GB")]),
             AskEntry(.group(Self.project), ["name": .name("jdoe's project"),
@@ -464,9 +531,22 @@ final class FakeAskSource: AskSource {
         ].prefix(limit).map { $0 })
     }
 
-    func groupDetail(_ group: OriginGroupID, redactor _: ExplainRedactor) -> AskOutput? {
+    func groupDetail(_ group: OriginGroupID, redactor: ExplainRedactor) -> AskOutput? {
         ran.append("groupDetail \(group)")
-        return AskOutput(["name": .name("Google Chrome")])
+        guard bulky else { return AskOutput(["name": .name("Google Chrome")]) }
+        // A group's facts, about as large as a real group's with long names, members, and evidence, and subgroups.
+        var facts = ExplainFacts(kind: .processGroup, name: String(Self.long.prefix(200)))
+        facts.type = "App"
+        facts.app = facts.name
+        facts.bundleID = String(Self.long.prefix(120))
+        facts.signingID = String(Self.long.prefix(120))
+        facts.vendor = String(Self.long.prefix(120))
+        facts.members = (1...10).map { "Helper \($0) " + String(Self.long.prefix(90)) }
+        facts.evidence = (1...6).map { _ in ExplainFacts.Evidence(.appBundle, path: "/Applications/Google Chrome.app") }
+        let subgroups = (1...Self.subgroups).map { number in
+            AskEntry(.group(OriginGroupID(.app(bundlePath: "/Applications/Sub\(number).app"))), ["name": .name("Sub")])
+        }
+        return AskOutput(["group": .facts(ExplainRequest(facts, redactor: redactor))], entries: subgroups)
     }
 
     func memoryState() -> AskOutput {

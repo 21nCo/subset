@@ -15,7 +15,7 @@ public enum AskTool: String, CaseIterable, Sendable {
         case .memoryState: "The Mac's latest memory read: pressure, used, app, wired, and compressed memory, and swap, "
             + "with when it was read; CPU and process counts are the latest process sample's."
         case .diskSummary: "The scanned volume's capacity, available and purgeable space, and the latest disk scan's "
-            + "folder, state, and total."
+            + "folder, state, and total, with when each was read."
         case .largestItems: "The largest files and packages in the latest disk scan, anywhere in it, each with its id."
         case .reclaimSuggestions: "The latest disk scan's reclaim suggestions: what each rule found, its risk, and how "
             + "much space it uses, each with its id."
@@ -165,17 +165,29 @@ public struct AskToolRecord: Equatable, Sendable {
 /// question, gives every listed thing an id that stays the same for the thread, and encodes results as JSON with
 /// every text value on one line and capped, within a size budget. A call it refuses runs nothing and returns
 /// `{"error": …}`.
+///
+/// The budget covers every string a call returns, results and refusals alike, as sent: its whole JSON, nested facts
+/// included. Each is at most `resultLimit` characters, and those of a question's first `budgetedCalls` calls total at
+/// most `questionLimit`, because each call leaves `refusalLimit` for each call after it. Past those calls, which a
+/// model can make only by ignoring the refusals, each call gets only the call-limit refusal.
 @MainActor
 public final class AskToolbox {
     public nonisolated static let callLimit = 4
     nonisolated static let textLimit = 300
     /// The most characters one result may take. Listed things that do not fit are left out from the end, counted in
-    /// `notListed`, and given no id; a result's own facts are always sent, each already capped.
+    /// `notListed`, and given no id; when the result's own facts do not fit either, the call returns only a refusal
+    /// saying so, and gives no id.
     nonisolated static let resultLimit = 4_000
     /// The most characters a question's results may take together, about 2,000 tokens at Explain's estimate of four
     /// characters a token, so the results of all `callLimit` calls fit the on-device model's context with the
-    /// instructions and the thread. Once it is used up, results list nothing more.
+    /// instructions and the thread.
     nonisolated static let questionLimit = 8_000
+    /// The most characters any refusal takes, the room each call leaves for each budgeted call after it.
+    nonisolated static let refusalLimit = 200
+    /// The calls a question's budget holds: the `callLimit` that run, and as many refused for being past the limit.
+    nonisolated static let budgetedCalls = 2 * callLimit
+    nonisolated static let tooLarge = "This result is too large for what is left of this question's results. Answer "
+        + "with the results you have."
     /// At least as long as any id a thread gives, to measure a listed thing before it is given its id.
     private nonisolated static let widestID = "x999999"
 
@@ -186,7 +198,7 @@ public final class AskToolbox {
     /// The question whose calls run now; calls made for an earlier one are refused.
     private var question = 0
     private var calls = 0
-    /// The characters of the question's results so far.
+    /// The characters of every string the question's calls returned so far.
     private var used = 0
     public private(set) var records: [AskToolRecord] = []
 
@@ -222,6 +234,12 @@ public final class AskToolbox {
     func call(_ name: String, arguments: Data, question: Int) -> String {
         guard question == self.question else { return Self.error("This question has ended.") }
         calls += 1
+        let result = respond(to: name, arguments: arguments)
+        used += result.count
+        return result
+    }
+
+    private func respond(to name: String, arguments: Data) -> String {
         let shown = ExplainRequest.oneLine(String(name.prefix(40)))
         guard calls <= Self.callLimit else {
             records.append(AskToolRecord(call: shown, ran: false))
@@ -242,9 +260,8 @@ public final class AskToolbox {
         }
         let argumentsShown = values.keys.sorted().map { "\($0): \(values[$0]!)" }.joined(separator: ", ")
         records.append(AskToolRecord(call: "\(name)(\(argumentsShown))", ran: true))
-        let result = encode(run(tool, values), limit: min(Self.resultLimit, max(0, Self.questionLimit - used)))
-        used += result.count
-        return result
+        let reserved = Self.refusalLimit * max(0, Self.budgetedCalls - calls)
+        return encode(run(tool, values), limit: min(Self.resultLimit, Self.questionLimit - used - reserved))
     }
 
     private func run(_ tool: AskTool, _ values: [String: Any]) -> AskOutput {
@@ -319,7 +336,8 @@ public final class AskToolbox {
     }
 
     /// The result as JSON, sorted, with as many of its listed things, from the first, as fit in `limit` characters,
-    /// each with its id first given now or earlier in the thread; those left out are added to `notListed`.
+    /// each with its id first given now or earlier in the thread; those left out are added to `notListed`. When its
+    /// facts alone do not fit, the refusal `tooLarge`, which `limit` always holds.
     private func encode(_ output: AskOutput, limit: Int) -> String {
         let entries = output.entries.map { (target: $0.target, fields: $0.fields.mapValues(json)) }
         func object(listing count: Int, id: (AskTarget) -> String) -> [String: Any] {
@@ -340,6 +358,9 @@ public final class AskToolbox {
         var count = entries.count
         while count > 0, Self.text(object(listing: count) { _ in Self.widestID }).count > limit {
             count -= 1
+        }
+        guard count > 0 || Self.text(object(listing: 0) { _ in Self.widestID }).count <= limit else {
+            return Self.error(Self.tooLarge)
         }
         return Self.text(object(listing: count, id: id(for:)))
     }
@@ -370,8 +391,15 @@ public final class AskToolbox {
         }
     }
 
+    /// `{"error": message}`, the message shortened to fit `refusalLimit`.
     static func error(_ message: String) -> String {
-        text(["error": message])
+        var message = message
+        var result = text(["error": message])
+        while result.count > refusalLimit {
+            message = String(message.dropLast(result.count - refusalLimit + 1)) + "…"
+            result = text(["error": message])
+        }
+        return result
     }
 
     private static func text(_ object: [String: Any]) -> String {

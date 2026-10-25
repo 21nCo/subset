@@ -217,14 +217,16 @@ public struct DiskTree: Sendable {
     }
 
     /// The `limit` largest files and packages anywhere in the tree by allocated size, largest first, then in tree
-    /// order; folders, links, and items that could not be read are left out. A package chosen as the scan's root is
-    /// one item, so it is listed too. One pass keeps only the `limit` largest.
+    /// order; folders, links, items that could not be read, and a hard link's occurrences counted at another of its
+    /// links are left out, so a file is listed once, at the link that counts it. A package chosen as the scan's root
+    /// is one item, so it is listed too. One pass keeps only the `limit` largest.
     public func largestFiles(limit: Int) -> [Int] {
         guard limit > 0 else { return [] }
         var largest: [(allocated: UInt64, index: Int)] = []
         for index in nodes.indices {
             let node = nodes[index]
-            guard node.kind == .file || node.kind == .package, !node.flags.contains(.unreadable) else { continue }
+            guard node.kind == .file || node.kind == .package,
+                  node.flags.isDisjoint(with: [.unreadable, .countedElsewhere]) else { continue }
             guard largest.count < limit || node.sizes.allocated > largest[largest.count - 1].allocated else { continue }
             let position = largest.firstIndex { node.sizes.allocated > $0.allocated } ?? largest.count
             largest.insert((node.sizes.allocated, index), at: position)

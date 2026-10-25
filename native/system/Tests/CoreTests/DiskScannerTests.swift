@@ -68,6 +68,11 @@ final class DiskScannerTests: XCTestCase {
         XCTAssertTrue(a.flags.contains(.hardLinked))
         XCTAssertFalse(a.flags.contains(.countedElsewhere))
         XCTAssertTrue(b.flags.contains(.countedElsewhere))
+        // Each file is one of the largest, at the link that counts it.
+        let largest = tree.largestFiles(limit: 5)
+        XCTAssertEqual(largest.map { tree.path(of: $0) }.first, root.appendingPathComponent("pair/a").path)
+        XCTAssertEqual(largest.count, 2, "\(largest.map { tree.path(of: $0) })")
+        XCTAssertFalse(largest.contains { tree[$0].flags.contains(.countedElsewhere) })
 
         // The link outside "split" keeps its file alive: the folder counts it but would free nothing.
         let split = try XCTUnwrap(tree.item(at: "split")?.sizes)
