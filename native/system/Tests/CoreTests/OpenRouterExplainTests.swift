@@ -874,6 +874,42 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.map(\.body), [current.body])
     }
 
+    /// A withdrawn preview's Send authorizes nothing, even when the one built since has the same body and key.
+    func testASendFromAWithdrawnPreviewSendsNothingWhenTheOneBuiltSinceIsTheSame() async throws {
+        let (center, _, _) = await chosen()
+        let item = ExplainKey("process:1")
+        let withdrawals: [(String, () -> Void)] = [
+            ("cancelled", { center.cancelSend(item) }),
+            ("provider changed", {
+                center.choose(.appleIntelligence)
+                XCTAssertTrue(center.choose(.openRouter))
+            })
+        ]
+        for (withdrawal, withdraw) in withdrawals {
+            await center.explain(item) { _ in self.request() }
+            let shown = try XCTUnwrap(confirming(center, item), withdrawal)
+            withdraw()
+            await center.explain(item) { _ in self.request() }
+            let current = try XCTUnwrap(confirming(center, item), withdrawal)
+            XCTAssertEqual(current.body, shown.body, withdrawal)
+            XCTAssertEqual(current.checkedKey, shown.checkedKey, withdrawal)
+
+            await center.confirmSend(item, preview: shown)
+            XCTAssertTrue(StubProtocol.requests.isEmpty, "\(withdrawal): the withdrawn preview's Send sends nothing")
+            XCTAssertEqual(center.state(for: item), .confirming(current), withdrawal)
+            XCTAssertFalse(center.sendConfirmed, withdrawal)
+            center.cancelSend(item)
+        }
+
+        await center.explain(item) { _ in self.request() }
+        let current = try XCTUnwrap(confirming(center, item))
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.confirmSend(item, preview: current)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [current.body])
+        XCTAssertEqual(StubProtocol.requests.first?.headers["Authorization"], "Bearer \(Self.key)")
+        guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+    }
+
     func testTurningFolderNamesOffDuringTheBackoffSendsNoRetry() async throws {
         let backoff = WaitRecorder()
         let (center, _, _) = await chosen(sleep: { duration in

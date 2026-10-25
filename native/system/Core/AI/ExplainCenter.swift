@@ -42,13 +42,16 @@ public enum ExplainState: Equatable, Sendable {
 }
 
 /// What the send preview shows: exactly the body the provider sends for the request, byte for byte, and, for
-/// OpenRouter, which key was checked as it was built, the only key it is sent with.
+/// OpenRouter, which key was checked as it was built, the only key it is sent with. Each preview built is its own,
+/// even with the same body and key, so a Send from one withdrawn never sends another.
 public struct SendPreview: Equatable, Sendable {
     public let provider: AIProviderChoice
     public let request: ExplainRequest
     public let body: Data
     /// Never shown; it tells two previews of the same body checked with different keys apart.
     let checkedKey: OpenRouterKeyIdentity?
+    /// Never shown, stored or sent; minted as the preview is built, so it equals only itself.
+    let id = UUID()
 
     public var text: String { String(decoding: body, as: UTF8.self) }
 }
@@ -462,7 +465,7 @@ public final class ExplainCenter {
 
     /// Sends exactly the body of `preview`, the send preview the user confirmed for the item, with the provider it was
     /// built for, and returns when the answer is in; nothing when `preview` is no longer the item's, as when it was
-    /// withdrawn and another built since. OpenRouter sends it only with the key checked as it was built: when the key
+    /// withdrawn and another built since, even one with the same body and key. OpenRouter sends it only with the key checked as it was built: when the key
     /// was replaced since, outside System, nothing is sent, the item says so and can be asked again, and the choice
     /// is kept. Once OpenRouter has answered it, no preview is shown again this session.
     public func confirmSend(_ item: ExplainKey, preview shown: SendPreview) async {
