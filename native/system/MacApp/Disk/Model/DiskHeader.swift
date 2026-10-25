@@ -6,6 +6,9 @@ import SystemProcesses
 /// local snapshots, whose sizes macOS does not report. A figure the volume did not give is "–".
 public struct DiskVolumeHeader: Equatable, Sendable {
     public let title: String
+    /// The volume's own name and its mount point, kept apart because a mount point is a path (SET-51 redacts it as one).
+    public let name: String?
+    public let mountPoint: String?
     public let capacity: String
     public let availableForImportantUse: String
     public let purgeable: String
@@ -15,7 +18,9 @@ public struct DiskVolumeHeader: Equatable, Sendable {
     public let accessibilityLabel: String
 
     public init(_ summary: VolumeSummary, format: UsageFormat) {
-        title = summary.values.name ?? summary.values.mountPoint ?? "Volume"
+        name = summary.values.name
+        mountPoint = summary.values.mountPoint
+        title = name ?? mountPoint ?? "Volume"
         capacity = format.diskBytes(summary.capacity)
         availableForImportantUse = format.diskBytes(summary.availableForImportantUsage)
         purgeable = format.diskBytes(summary.purgeable)

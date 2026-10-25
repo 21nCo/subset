@@ -174,6 +174,21 @@ final class AskTests: XCTestCase {
         XCTAssertTrue(long.text.hasSuffix("…"))
     }
 
+    func testABracketCitingSeveralIDsKeepsOnlyTheKnownOnes() throws {
+        let chrome = AskTarget.group(FakeAskSource.chrome)
+        let known: (String) -> AskTarget? = { ["g1": chrome, "s3": .suggestion("key")][$0] }
+        let answer = try AskAnswer(validating: "Chrome [g1, g99] and caches [g99, x5]. Also [G1] and [s3 g1,g01].",
+                                   target: known)
+        XCTAssertEqual(answer.parts, [
+            .text("Chrome "), .citation(id: "g1", target: chrome), .text(" and caches. Also "),
+            .citation(id: "g1", target: chrome), .text(" and "), .citation(id: "s3", target: .suggestion("key")),
+            .text(" "), .citation(id: "g1", target: chrome), .text(".")
+        ])
+        // A follow-up gives the answer back with each kept id in its own brackets, which reads the same again.
+        XCTAssertEqual(answer.text, "Chrome [g1] and caches. Also [g1] and [s3] [g1].")
+        XCTAssertEqual(try AskAnswer(validating: answer.text, target: known), answer)
+    }
+
     func testAFollowUpGetsTheThreadAndTheThreadTakesFiveFollowUps() async throws {
         let provider = ScriptedProvider()
         provider.calls = [("topGroups", #"{"metric":"memory"}"#)]

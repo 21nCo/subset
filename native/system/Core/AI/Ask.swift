@@ -85,7 +85,8 @@ public struct AskSendGate: Sendable {
 }
 
 /// An answer as shown: plain text, with each cited id a tool returned in this thread kept as a link, and every other
-/// `[id]` removed.
+/// id removed. A bracket may cite several ids, as `[g1, G3]`; each one kept becomes its own `[id]`, and a bracket that
+/// keeps none is removed.
 public struct AskAnswer: Equatable, Sendable {
     public enum Part: Equatable, Sendable {
         case text(String)
@@ -112,16 +113,20 @@ public struct AskAnswer: Equatable, Sendable {
                 parts.append(.text(String(piece)))
             }
         }
-        while let match = rest.firstMatch(of: /\[([a-z])([0-9]{1,6})\]/) {
+        while let match = rest.firstMatch(of: /\[[ ,]*[A-Za-z][0-9]{1,6}(?:[ ,]+[A-Za-z][0-9]{1,6})*[ ,]*\]/) {
             var before = rest[..<match.range.lowerBound]
-            let id = String(match.output.1 + match.output.2)
-            if let found = target(id) {
-                add(before)
-                parts.append(.citation(id: id, target: found))
-            } else {
-                // A dropped id takes the space before it, so "Chrome [x9]." reads "Chrome.".
-                if before.last == " " { before = before.dropLast() }
-                add(before)
+            var seen: Set<String> = []
+            let cited = match.output.matches(of: /([A-Za-z])([0-9]{1,6})/).compactMap { id -> Part? in
+                let id = id.output.1.lowercased() + String(Int(id.output.2) ?? 0)
+                guard seen.insert(id).inserted else { return nil }
+                return target(id).map { .citation(id: id, target: $0) }
+            }
+            // A bracket with no id a tool returned takes the space before it, so "Chrome [x9]." reads "Chrome.".
+            if cited.isEmpty, before.last == " " { before = before.dropLast() }
+            add(before)
+            for (position, citation) in cited.enumerated() {
+                if position > 0 { add(" ") }
+                parts.append(citation)
             }
             rest = rest[match.range.upperBound...]
         }

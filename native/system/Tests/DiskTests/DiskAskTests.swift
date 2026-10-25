@@ -52,6 +52,31 @@ final class DiskAskTests: XCTestCase {
         XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["localSnapshots"], .words("2, sizes unavailable"))
     }
 
+    func testAVolumeWithoutANameSendsItsMountPointOnlyAsARedactedPath() async throws {
+        let mountPoint = fixture.path("Private/Work")
+        let unnamed = VolumeSummary(values: VolumeCapacityValues(mountPoint: mountPoint, capacity: 500_000_000_000),
+                                    snapshots: .count(0))
+        let model = fixture.model(service: fixture.service(volume: { _ in unnamed }))
+        model.scan()
+        try await DiskFixture.wait { !model.isScanning && model.volumeHeader != nil }
+        XCTAssertEqual(model.volumeHeader?.title, mountPoint, "the header on screen still shows the mount point")
+
+        let toolbox = AskToolbox(source: AskWindowSource(processes: ProcessesWindowModel(), disk: model,
+                                                         showProcesses: {}, showDisk: {}), redactor: redactor)
+        toolbox.begin(1, redactor: redactor)
+        let sent = toolbox.call("diskSummary", arguments: Data("{}".utf8), question: 1)
+        XCTAssertFalse(sent.contains(fixture.home), sent)
+        XCTAssertFalse(sent.contains("/Work"), sent)
+        XCTAssertFalse(sent.contains(#""volume""#), "a volume without a name sends no name: \(sent)")
+        XCTAssertTrue(sent.contains(#""mountedAt":"\#(redactor.path(mountPoint).value)""#), sent)
+        XCTAssertTrue(redactor.path(mountPoint).value.hasPrefix("~/Private/folder-"))
+
+        let named = try await fixture.scanned()
+        try await DiskFixture.wait { named.volumeHeader != nil }
+        XCTAssertEqual(named.askDiskSummary(redactor: redactor).fields["volume"], .name("Macintosh HD"))
+        XCTAssertEqual(named.askDiskSummary(redactor: redactor).fields["mountedAt"], .path(ExplainPath("/")))
+    }
+
     func testSuggestionsAndCitationsSelectOnlyTheirRows() async throws {
         let model = try await fixture.scanned()
         let output = model.askReclaimSuggestions(redactor: redactor)

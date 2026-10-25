@@ -9,7 +9,9 @@ extension DiskWindowModel {
     public func askDiskSummary(redactor: ExplainRedactor) -> AskOutput {
         var fields: [String: AskValue] = ["scan": .words(askScanState)]
         if let header = volumeHeader {
-            fields["volume"] = .name(header.title)
+            // Never the header's title, which is the mount point when the volume has no name: that is a path.
+            if let name = header.name { fields["volume"] = .name(name) }
+            if let mountPoint = header.mountPoint { fields["mountedAt"] = .path(redactor.path(mountPoint)) }
             fields["capacity"] = .words(header.capacity)
             fields["availableForImportantUse"] = .words(header.availableForImportantUse)
             fields["purgeable"] = .words(header.purgeable)
