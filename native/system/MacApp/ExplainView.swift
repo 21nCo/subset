@@ -64,7 +64,7 @@ struct ExplainPanel: View {
             if let preview {
                 SendPreviewSheet(preview: preview) {
                     showingPreview = false
-                    Task { await center.confirmSend(key) }
+                    Task { await center.confirmSend(key, preview: preview) }
                 } cancel: {
                     showingPreview = false
                     center.cancelSend(key)

@@ -466,6 +466,41 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertNil(center.sentText(for: item))
     }
 
+    /// A preview is sent only with the key checked as it was built: the key replaced outside System since (so Add Key
+    /// never withdrew the preview) sends nothing, keeps the choice, and the item can be asked again, when its new
+    /// preview is sent with the new key. A Send from the earlier sheet sends nothing then.
+    func testAPreviewIsSentOnlyWithTheKeyCheckedAsItWasBuilt() async throws {
+        let (center, keychain, _) = await chosen()
+        let item = ExplainKey("process:1")
+        await center.explain(item) { _ in self.request() }
+        let preview = try XCTUnwrap(confirming(center, item))
+
+        let other = "sk-or-v1-" + String(repeating: "fedcba9876543210", count: 4)
+        try OpenRouterKeyStore(items: keychain).save(other)
+        await center.confirmSend(item, preview: preview)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "not sent with a key the preview was not checked with")
+        XCTAssertEqual(center.state(for: item), .failed(OpenRouterProvider.keyChanged, preview.request))
+        XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
+        XCTAssertFalse(center.sendConfirmed)
+        XCTAssertEqual(center.choice, .openRouter, "a key is stored, so the choice is kept")
+        XCTAssertNil(center.notice)
+
+        await center.explain(item) { _ in self.request() }
+        let checked = try XCTUnwrap(confirming(center, item))
+        XCTAssertEqual(checked.body, preview.body)
+        XCTAssertNotEqual(checked, preview, "checked with another key")
+        await center.confirmSend(item, preview: preview)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "the earlier sheet's Send is not this preview's")
+        XCTAssertEqual(center.state(for: item), .confirming(checked))
+
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.confirmSend(item, preview: checked)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [checked.body])
+        XCTAssertEqual(StubProtocol.requests.first?.headers["Authorization"], "Bearer \(other)")
+        guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+        XCTAssertEqual(center.sentText(for: item), checked.text)
+    }
+
     func testARequestRefusedBeforeItIsSentKeepsNeitherItsStateNorItsBody() async throws {
         let defaults = defaults()
         let account = await account(defaults, keychain: FakeKeychain())
@@ -514,6 +549,7 @@ final class OpenRouterExplainTests: XCTestCase {
         await center.confirmSend(first)
         XCTAssertEqual(StubProtocol.requests.count, 1)
         XCTAssertEqual(StubProtocol.requests.first?.body, preview.body, "sent byte for byte as shown")
+        XCTAssertEqual(StubProtocol.requests.first?.headers["Authorization"], "Bearer \(Self.key)", "with the key checked")
         guard case .explained = center.state(for: first) else { return XCTFail("\(center.state(for: first))") }
         XCTAssertTrue(center.sendConfirmed)
         XCTAssertEqual(center.sentText(for: first), preview.text, "What was sent shows the body")
@@ -811,6 +847,33 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertNil(center.sentText(for: item), "nothing left this Mac")
     }
 
+    /// Send sends only the preview its sheet showed while it is still the item's: once that one was withdrawn and
+    /// another built, the earlier Send sends nothing and the new preview still waits.
+    func testASendFromAWithdrawnPreviewSendsNothing() async throws {
+        let (center, _, _) = await chosen()
+        center.sendFolderNames = true
+        let item = ExplainKey("disk:/Users/jdoe/dev/secret-client")
+        let build = { (redactor: ExplainRedactor) -> ExplainRequest? in
+            var facts = ExplainFacts(kind: .folder, name: redactor.name(ofPath: "/Users/jdoe/dev/secret-client"))
+            facts.path = "/Users/jdoe/dev/secret-client"
+            return ExplainRequest(facts, redactor: redactor)
+        }
+        await center.explain(item, request: build)
+        let shown = try XCTUnwrap(confirming(center, item))
+        center.sendFolderNames = false
+        await center.explain(item, request: build)
+        let current = try XCTUnwrap(confirming(center, item))
+        XCTAssertFalse(current.text.contains("secret-client"))
+
+        await center.confirmSend(item, preview: shown)
+        XCTAssertTrue(StubProtocol.requests.isEmpty, "the withdrawn preview is not sent, nor the one not confirmed")
+        XCTAssertEqual(center.state(for: item), .confirming(current))
+
+        StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+        await center.confirmSend(item, preview: current)
+        XCTAssertEqual(StubProtocol.requests.map(\.body), [current.body])
+    }
+
     func testTurningFolderNamesOffDuringTheBackoffSendsNoRetry() async throws {
         let backoff = WaitRecorder()
         let (center, _, _) = await chosen(sleep: { duration in
@@ -906,6 +969,14 @@ final class OpenRouterExplainTests: XCTestCase {
         }
         XCTFail("never")
         throw CancellationError()
+    }
+}
+
+private extension ExplainCenter {
+    /// Send, from the sheet showing the item's preview as it is now; nothing when none is shown.
+    func confirmSend(_ item: ExplainKey) async {
+        guard case let .confirming(preview) = state(for: item) else { return }
+        await confirmSend(item, preview: preview)
     }
 }
 

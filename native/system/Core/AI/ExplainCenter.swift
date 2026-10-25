@@ -41,11 +41,14 @@ public enum ExplainState: Equatable, Sendable {
     case gone
 }
 
-/// What the send preview shows: exactly the body the provider sends for the request, byte for byte.
+/// What the send preview shows: exactly the body the provider sends for the request, byte for byte, and, for
+/// OpenRouter, which key was checked as it was built, the only key it is sent with.
 public struct SendPreview: Equatable, Sendable {
     public let provider: AIProviderChoice
     public let request: ExplainRequest
     public let body: Data
+    /// Never shown; it tells two previews of the same body checked with different keys apart.
+    let checkedKey: OpenRouterKeyIdentity?
 
     public var text: String { String(decoding: body, as: UTF8.self) }
 }
@@ -62,7 +65,8 @@ public struct SendPreview: Equatable, Sendable {
 /// with it) sets the choice back to the on-device provider and says why (`notice`), so the choice never stays on a
 /// provider that cannot run, and what is stored is always what is shown. Until OpenRouter has answered a request whose
 /// body the user confirmed in the send preview this session, every request to it waits in `.confirming` for its own
-/// preview, and cancelling it sends nothing; the body sent is the one shown. Add Key and Remove Key end the OpenRouter
+/// preview, and cancelling it sends nothing; the body sent is the one shown, with the key checked as it was built, and
+/// only from the preview the user confirmed while it is still the item's. Add Key and Remove Key end the OpenRouter
 /// work in flight as they start, and until they finish no request to OpenRouter is begun or sent
 /// (`keyChanging`), so nothing is sent with the key being replaced or removed. Changing **Send folder names** ends the
 /// previews and sends off this Mac built with the setting before, so nothing built with it goes out, a retry included.
@@ -117,7 +121,8 @@ public final class ExplainCenter {
     /// Each availability read and answer in flight, by when it began.
     @ObservationIgnored private var pending: [Int: Pending] = [:]
     @ObservationIgnored private var pendingCount = 0
-    /// The provider each item in `.confirming` is sent with once confirmed, so the body sent is the one shown.
+    /// The provider each item in `.confirming` is sent with once confirmed, so the body sent is the one shown; for
+    /// OpenRouter, bound to the key checked as the preview was built.
     @ObservationIgnored private var previews: [StateKey: any AIProvider] = [:]
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -304,6 +309,8 @@ public final class ExplainCenter {
     /// What a read of the chosen provider's availability answered, and whether it was the latest read.
     private struct Read {
         let availability: AIAvailability?
+        /// OpenRouter bound to the key read before sending, when it found it available (`checkBeforeSending()`).
+        let bound: OpenRouterProvider?
         /// Whether no later read had started, and the provider had not changed, when it answered: only then did what
         /// it answered set the choice back.
         let latest: Bool
@@ -316,22 +323,22 @@ public final class ExplainCenter {
     /// stored, that it cannot be read, or that the model ID holds it sets the choice back, as does it not answering in
     /// time, only from its latest read: a read cancelled, or overtaken by a later one, sets nothing back and ends no
     /// newer work, and only its own caller acts on what it answered (`overtaken(_:)`). `beforeSending` reads it as
-    /// a request is about to be built (`OpenRouterProvider.availabilityBeforeSending()`), so a model ID holding the key
-    /// sets the choice back before anything is previewed.
+    /// a request is about to be built (`OpenRouterProvider.checkBeforeSending()`), so a model ID holding the key
+    /// sets the choice back before anything is previewed, and a preview is bound to the key it read.
     private func readAvailability(of provider: any AIProvider, in selection: Int,
                                   beforeSending: Bool = false) async throws -> Read {
         availabilityReads += 1
         let read = availabilityReads
         availabilityStatus = .checking
-        let availability: AIAvailability?
+        let checked: (availability: AIAvailability, bound: OpenRouterProvider?)?
         do {
             let timeout = availabilityTimeout
-            availability = try await untilProviderChanges {
+            checked = try await untilProviderChanges {
                 try await answer(within: timeout, {
                     if beforeSending, let openRouter = provider as? OpenRouterProvider {
-                        await openRouter.availabilityBeforeSending()
+                        await openRouter.checkBeforeSending()
                     } else {
-                        await provider.availability()
+                        (await provider.availability(), nil)
                     }
                 })
             }
@@ -340,6 +347,7 @@ public final class ExplainCenter {
             if selection == self.selection, read == availabilityReads { availabilityStatus = nil }
             throw CancellationError()
         }
+        let availability = checked?.availability
         let latest = selection == self.selection && read == availabilityReads
         if latest {
             availabilityStatus = availability.map(AvailabilityStatus.read) ?? .noAnswer(seconds: availabilityTimeout.components.seconds)
@@ -350,7 +358,7 @@ public final class ExplainCenter {
                 setBack(.keyUnreadable)
             }
         }
-        return Read(availability: availability, latest: latest)
+        return Read(availability: availability, bound: checked?.bound, latest: latest)
     }
 
     /// What an item shows when a read overtaken by a later one found OpenRouter cannot be used: that read set nothing
@@ -441,20 +449,26 @@ public final class ExplainCenter {
             states[key] = .failed("The request could not be prepared. Nothing was sent.", request)
             return
         }
-        // Off this Mac, until a body the user confirmed has been answered this session: shown first.
+        // Off this Mac, until a body the user confirmed has been answered this session: shown first, and sent only with
+        // the key just checked.
         if let body, !sendConfirmed {
-            previews[key] = provider
-            states[key] = .confirming(SendPreview(provider: choice, request: request, body: body))
+            previews[key] = read.bound ?? provider
+            states[key] = .confirming(SendPreview(provider: choice, request: request, body: body,
+                                                  checkedKey: read.bound?.checkedKey))
             return
         }
         await send(request, body: body, with: provider, for: key, in: selection, confirmed: false)
     }
 
-    /// Sends exactly the body the send preview showed for the item, with the provider it was built for, and returns
-    /// when the answer is in. Once OpenRouter has answered it, no preview is shown again this session.
-    public func confirmSend(_ item: ExplainKey) async {
+    /// Sends exactly the body of `preview`, the send preview the user confirmed for the item, with the provider it was
+    /// built for, and returns when the answer is in; nothing when `preview` is no longer the item's, as when it was
+    /// withdrawn and another built since. OpenRouter sends it only with the key checked as it was built: when the key
+    /// was replaced since, outside System, nothing is sent, the item says so and can be asked again, and the choice
+    /// is kept. Once OpenRouter has answered it, no preview is shown again this session.
+    public func confirmSend(_ item: ExplainKey, preview shown: SendPreview) async {
         let key = StateKey(choice: choice, item: item)
-        guard case let .confirming(preview) = states[key], let provider = previews.removeValue(forKey: key) else { return }
+        guard case let .confirming(preview) = states[key], preview == shown,
+              let provider = previews.removeValue(forKey: key) else { return }
         states[key] = .working(preview.request)
         await send(preview.request, body: preview.body, with: provider, for: key, in: selection, confirmed: true)
     }
