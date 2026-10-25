@@ -611,6 +611,146 @@ final class OpenRouterExplainTests: XCTestCase {
         XCTAssertTrue(StubProtocol.requests.isEmpty, "nothing sent with the key in the body")
     }
 
+    /// The account's check of a model ID entry against the key, whose Keychain read failed, held until a later check
+    /// began (SET-165), sets nothing back: the newer check, another item's Explain whose preview is shown or Settings'
+    /// read that finds OpenRouter available, stands, and the preview's exact body is sent; Settings still says the model
+    /// ID is not used. The latest such check, failing, still sets the choice back.
+    func testAnOvertakenModelIDCheckSetsNothingBack() async throws {
+        for byExplain in [true, false] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            keychain.failure = errSecInteractionNotAllowed
+            keychain.holdsDataReads = true
+            account.model = "openai/gpt-4o"
+            try await until { keychain.heldDataReads == 1 }
+            keychain.holdsDataReads = false
+            keychain.failure = nil
+            if byExplain {
+                await center.explain(item) { _ in self.request() }
+                XCTAssertNotNil(confirming(center, item))
+            } else {
+                await center.refreshAvailability()
+                XCTAssertEqual(center.availability, .availableOnOpenRouter)
+            }
+            let preview = confirming(center, item)
+            keychain.releaseDataRead()
+            await account.modelChecked()
+            XCTAssertEqual(center.choice, .openRouter, "by Explain: \(byExplain)")
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(account.modelError, OpenRouterAccount.modelUncheckedMessage, "Settings still says so")
+            XCTAssertEqual(account.checkedModel, "", "the entry is not used")
+            if byExplain {
+                let shown = try XCTUnwrap(preview)
+                XCTAssertEqual(confirming(center, item), shown, "the newer preview is kept")
+                StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+                await center.confirmSend(item)
+                XCTAssertEqual(StubProtocol.requests.map(\.body), [shown.body])
+                guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+            } else {
+                XCTAssertEqual(center.availabilityStatus, .read(.availableOnOpenRouter), "the newer read is shown")
+                XCTAssertTrue(StubProtocol.requests.isEmpty)
+            }
+
+            // The latest check of a model ID entry, failing, sets the choice back.
+            keychain.failure = errSecInteractionNotAllowed
+            account.model = "anthropic/claude-sonnet-4"
+            await account.modelChecked()
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(.modelUnchecked))
+        }
+    }
+
+    /// The account's read of whether a key is stored, failing or finding none, held until a later check, another
+    /// item's Explain whose preview is shown, began (SET-165), sets nothing back: the preview is kept and its exact body
+    /// sent, while Settings shows what the read found. The latest such read still sets the choice back.
+    func testAnOvertakenReadOfWhetherAKeyIsStoredSetsNothingBack() async throws {
+        for findsNone in [false, true] {
+            StubProtocol.reset()
+            let defaults = defaults()
+            let keychain = FakeKeychain()
+            let account = await account(defaults, keychain: keychain)
+            let center = center(defaults, account)
+            XCTAssertTrue(center.choose(.openRouter))
+            let item = ExplainKey("process:1")
+
+            if findsNone {
+                try OpenRouterKeyStore(items: keychain).remove()
+            } else {
+                keychain.failure = errSecInteractionNotAllowed
+            }
+            keychain.holdsSearches = true
+            let read = Task { await account.refreshKey() }
+            try await until { keychain.heldSearches == 1 }
+            keychain.holdsSearches = false
+            keychain.failure = nil
+            if findsNone { try OpenRouterKeyStore(items: keychain).save(Self.key) }
+            await center.explain(item) { _ in self.request() }
+            let preview = try XCTUnwrap(confirming(center, item))
+            keychain.releaseSearch()
+            await read.value
+            XCTAssertEqual(center.choice, .openRouter, "finds none: \(findsNone)")
+            XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "openRouter", "stored as shown")
+            XCTAssertNil(center.notice)
+            XCTAssertEqual(account.presence, findsNone ? .absent : .unknown(shown: true), "Settings shows what it found")
+            XCTAssertEqual(confirming(center, item), preview, "the newer preview is kept")
+            StubProtocol.enqueue(status: 200, json: completion(Self.answer))
+            await center.confirmSend(item)
+            XCTAssertEqual(StubProtocol.requests.map(\.body), [preview.body])
+            guard case .explained = center.state(for: item) else { return XCTFail("\(center.state(for: item))") }
+
+            // The latest read, failing or finding none, sets the choice back.
+            if findsNone {
+                try OpenRouterKeyStore(items: keychain).remove()
+            } else {
+                keychain.failure = errSecInteractionNotAllowed
+            }
+            await account.refreshKey()
+            XCTAssertEqual(center.choice, .appleIntelligence)
+            XCTAssertEqual(center.notice, ExplainCenter.notice(findsNone ? .noKey : .keyUnreadable))
+        }
+    }
+
+    /// A model ID entry that holds a key, and Remove Key, are changes the user made, not checks: they set the choice
+    /// back at once, even while a later check, an Explain whose key read is held, is in flight (SET-165).
+    func testChangesTheUserMakesSetTheChoiceBackWhileACheckIsInFlight() async throws {
+        let defaults = defaults()
+        let keychain = FakeKeychain()
+        let account = await account(defaults, keychain: keychain)
+        let center = center(defaults, account)
+        let item = ExplainKey("process:1")
+
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsDataReads = true
+        let entering = Task { await center.explain(item) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        account.modelEntry = "x/\(Self.key)"
+        XCTAssertEqual(center.choice, .appleIntelligence, "at once")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.modelHeldKey))
+        keychain.holdsDataReads = false
+        keychain.releaseDataRead()
+        await entering.value
+
+        XCTAssertTrue(center.choose(.openRouter))
+        keychain.holdsDataReads = true
+        let removing = Task { await center.explain(item) { _ in self.request() } }
+        try await until { keychain.heldDataReads == 1 }
+        keychain.holdsDataReads = false
+        await account.removeKey()
+        XCTAssertEqual(center.choice, .appleIntelligence, "at once")
+        XCTAssertEqual(center.notice, ExplainCenter.notice(.noKey))
+        keychain.releaseDataRead()
+        await removing.value
+        XCTAssertEqual(defaults.string(forKey: ExplainCenter.choiceKey), "appleIntelligence", "stored as shown")
+        XCTAssertTrue(StubProtocol.requests.isEmpty)
+    }
+
     /// A model ID checked against the key stored then, which holds the key that replaced it outside System: the
     /// request is refused before it is previewed, so the key is never shown as the model or sent, and that sets the
     /// choice back, says why, and clears the model ID.

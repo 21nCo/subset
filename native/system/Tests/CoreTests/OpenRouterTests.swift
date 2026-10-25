@@ -1147,6 +1147,9 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     private var _holdsDataReads = false
     private var _heldDataReads = 0
     private let readGate = DispatchSemaphore(value: 0)
+    private var _holdsSearches = false
+    private var _heldSearches = 0
+    private let searchGate = DispatchSemaphore(value: 0)
     private var _holdsOtherCalls = false
     private var _heldOtherCalls = 0
     private var _otherCalls = 0
@@ -1179,6 +1182,17 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
         readGate.signal()
     }
     var mainThreadDataReads: Int { lock.withLock { _mainThreadDataReads } }
+    /// Each search for whether a key is stored, once it has answered, waits for `releaseSearch()` while this is set, so
+    /// what it answers is fixed before what the Keychain holds changes.
+    var holdsSearches: Bool {
+        get { lock.withLock { _holdsSearches } }
+        set { lock.withLock { _holdsSearches = newValue } }
+    }
+    var heldSearches: Int { lock.withLock { _heldSearches } }
+
+    func releaseSearch() {
+        searchGate.signal()
+    }
     /// Each call that does not read the key (a search for whether one is stored, an add, an update, a delete) waits
     /// for `releaseOtherCall()` before it is made while this is set.
     var holdsOtherCalls: Bool {
@@ -1251,16 +1265,21 @@ final class FakeKeychain: KeychainItems, @unchecked Sendable {
     }
 
     func copyMatching(_ query: [String: Any]) -> (OSStatus, Data?) {
-        begin(readsData: query[kSecReturnData as String] as? Bool == true)
+        let readsData = query[kSecReturnData as String] as? Bool == true
+        begin(readsData: readsData)
         let (result, hold) = lock.withLock {
             let result = search(query)
-            let hold = _holdsDataReads && query[kSecReturnData as String] as? Bool == true
-            if hold { _heldDataReads += 1 }
+            let hold = readsData ? _holdsDataReads : _holdsSearches
+            if hold, readsData { _heldDataReads += 1 }
+            if hold, !readsData { _heldSearches += 1 }
             return (result, hold)
         }
-        if hold {
+        if hold, readsData {
             readGate.wait()
             lock.withLock { _heldDataReads -= 1 }
+        } else if hold {
+            searchGate.wait()
+            lock.withLock { _heldSearches -= 1 }
         }
         return result
     }
