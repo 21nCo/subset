@@ -192,6 +192,30 @@ struct AlertTests {
         #expect(log.all == ["register s1", "ack a1", "notify Quiet: Finished."])
     }
 
+    /// Quit while a finish's acknowledgement is answered: the app presents nothing and hands the finish back, so the
+    /// daemon plays it, before quitting completes.
+    @Test func quittingWhileAFinishIsAcknowledgedHandsItBackInsteadOfPresentingIt() async {
+        let daemon = FakeDaemon(log: log)
+        let notifications = FakeNotifications(log: log, authorized: true)
+        let controller = TimerController(paths: DaemonPaths(dataDir: "/tmp/unused"), alertDaemon: daemon, notifications: notifications, sounds: FakeSounds(log: log))
+        controller.checkNotifications()
+        controller.handle(event("subscriber", #"{"subscriberId":"s1"}"#))
+        controller.handle(state(timerName: "Egg", sound: true))
+        await until { controller.alerts.registration == .registered }
+        daemon.holdNextAck()
+        controller.handle(event("alert", #"{"timerId":"t_1","kind":"finish","at":1000,"alertId":"a1","ackRequired":true}"#))
+        await until { daemon.holding }
+        let quitting = Task { [log] in
+            await controller.alerts.quit()
+            log.add("quit")
+        }
+        await until { log.all.contains("unregister s1") }
+        daemon.release()
+        await quitting.value
+        #expect(log.all == ["register s1", "ack a1", "unregister s1", "release a1", "quit"])
+        #expect(notifications.posted.isEmpty)
+    }
+
     /// A Restart that launches the app arrives while Node.js is still being located; it runs once it is found.
     @Test func aRestartBeforeTheRuntimeIsLocatedRunsResetThenStartOnceItIs() async {
         let (located, locate) = AsyncStream.makeStream(of: Result<Runtime, RuntimeProblem>.self)

@@ -16,6 +16,9 @@ import { intervalStep } from '@subset/timer';
  *   5 s, for every play it started), and a sink that throws or rejects is logged and ignored. A sink
  *   honours `timer.sound` itself. Delivery through a sink is at least once: a daemon that ends after
  *   the sink played an alert, but before it could save that, leaves the alert to the next daemon.
+ *   Each alert is delivered exactly once while the daemon keeps running; a play that has started
+ *   counts as delivered, so a daemon that ends mid-play does not play it again (SET-169: an
+ *   idempotent sink).
  * @property {string} name Shown by `daemon status`.
  * @property {(alert: TimerAlert, timer: import('@subset/timer').TimerDefinition) => void | Promise<void>} alert
  */

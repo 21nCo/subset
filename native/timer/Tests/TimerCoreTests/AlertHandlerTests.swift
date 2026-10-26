@@ -19,6 +19,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var holder: String?
     private var confirmations: [String] = []
     private var lostConfirmations = 0
+    private var lostReleases = 0
     private var released: Set<String> = []
     private var duringAck: (@Sendable () async -> Void)?
     private var duringRelease: (@Sendable () async -> Void)?
@@ -52,13 +53,15 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
         lock.withLock { registerError = error }
     }
 
-    /// The next registrations, unregistrations and acknowledgements that get no answer, in order.
-    func lose(registrations: [Lost] = [], unregistrations: [Lost] = [], acks: [Lost] = [], confirmations: Int = 0) {
+    /// The next registrations, unregistrations and acknowledgements that get no answer, in order, and how many of the
+    /// next confirmations and handbacks get none.
+    func lose(registrations: [Lost] = [], unregistrations: [Lost] = [], acks: [Lost] = [], confirmations: Int = 0, releases: Int = 0) {
         lock.withLock {
             lostRegistrations = registrations
             lostUnregistrations = unregistrations
             lostAcks = acks
             lostConfirmations = confirmations
+            lostReleases = releases
         }
     }
 
@@ -113,6 +116,12 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     func releaseAlert(_ alertId: String, subscriberId: String) async throws {
         record("release \(alertId) \(subscriberId)")
         if let action = lock.withLock({ duringRelease.take() }) { await action() }
+        let lost = lock.withLock {
+            guard lostReleases > 0 else { return false }
+            lostReleases -= 1
+            return true
+        }
+        if lost { throw DaemonError.timedOut }
         if lock.withLock({ released.insert(alertId).inserted }) { record("sink \(alertId)") }
     }
 }
@@ -126,6 +135,12 @@ private let conflict = DaemonError.rejected(status: 409, TimerError(code: "handl
 @MainActor
 private final class Permission {
     var granted = true
+}
+
+/// The app's quit, started while a request is on its way.
+@MainActor
+private final class Quitting {
+    var task: Task<Void, Never>?
 }
 
 @MainActor
@@ -279,6 +294,65 @@ struct AlertHandlerTests {
         #expect(daemon.handler == "s1")
         #expect(daemon.log.filter { $0.hasPrefix("sink") || $0.hasPrefix("play") } == ["sink a1"])
         #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Quit while an acknowledgement is on its way: answered after all (held), its answer lost after the daemon took it,
+    /// or lost before the daemon saw it. The app plays nothing and hands the alert back, sent again until a daemon answers,
+    /// so the daemon's sink plays it once, and quitting returns only after that.
+    @Test(arguments: [nil, FakeAlertDaemon.Lost.afterApplying, .beforeApplying])
+    func quittingWhileAnAckIsAnsweredHandsTheAlertBackBeforeTheAppEnds(_ lost: FakeAlertDaemon.Lost?) async {
+        let handler = await handler()
+        let quitting = Quitting()
+        if let lost { daemon.lose(acks: [lost], releases: 2) } else { daemon.lose(releases: 2) }
+        daemon.whileNextAckIsAnswered { [daemon] in
+            await MainActor.run {
+                quitting.task = Task {
+                    await handler.quit()
+                    daemon.record("quit")
+                }
+            }
+            // Quitting has begun once the app unregisters.
+            for _ in 0..<2_000 where !daemon.log.contains("unregister s1") { try? await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        await handler.receive(alert("a1"))
+        await quitting.task?.value
+        await handler.settled()
+        #expect(handler.registration == .inactive)
+        #expect(daemon.log.prefix(2) == ["register s1", "ack a1 s1"])
+        #expect(daemon.log.dropFirst(2).filter { $0 != "unregister s1" }
+            == ["release a1 s1", "release a1 s1", "release a1 s1", "sink a1", "quit"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Once quitting, an alert is not acknowledged, so the daemon plays it, and a permission check that grants it does not
+    /// make the app the handler again. With nothing to hand back, quitting returns at once.
+    @Test func anAlertArrivingWhileQuittingIsLeftToTheDaemon() async {
+        let handler = await handler()
+        await handler.quit()
+        await handler.receive(alert("a1"))
+        handler.setPermitted(true)
+        await handler.settled()
+        #expect(handler.registration == .inactive)
+        #expect(daemon.log == ["register s1", "unregister s1"])
+    }
+
+    /// A handback no daemon answers does not hold up quitting past its bound; the alert stays with the daemon, taken.
+    @Test func quittingReturnsAtItsBoundWhenNoDaemonAnswersTheHandback() async {
+        let handler = await handler()
+        let quitting = Quitting()
+        daemon.lose(releases: .max)
+        daemon.whileNextAckIsAnswered { [daemon] in
+            await MainActor.run { quitting.task = Task { await handler.quit(within: .milliseconds(50)) } }
+            for _ in 0..<2_000 where !daemon.log.contains("unregister s1") { try? await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        let receiving = Task { await handler.receive(alert("a1")) }
+        for _ in 0..<2_000 where quitting.task == nil { try? await Task.sleep(nanoseconds: 1_000_000) }
+        await quitting.task?.value
+        #expect(!daemon.log.contains("sink a1") && !daemon.log.contains("play a1"))
+        // The app would end here; in this test the handback is answered later.
+        daemon.lose()
+        await receiving.value
+        #expect(daemon.log.filter { $0 == "sink a1" || $0 == "play a1" } == ["sink a1"])
     }
 
     @Test func itRegistersOnlyWhilePermittedAndUnregistersWhenPermissionIsRevoked() async {

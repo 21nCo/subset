@@ -111,7 +111,8 @@ extension DaemonClient: AlertHandlerDaemon {
 /// daemon has handed it over. The app registers its current event stream only while permission is granted; the daemon
 /// unregisters it when that stream closes. For each alert that asks for acknowledgement, the app acknowledges first and
 /// plays only on `.acknowledged`: an alert the daemon's sink already played (410), or that the daemon handed to someone
-/// else, is never played here, so every alert plays exactly once.
+/// else, is never played here, so every alert plays exactly once. Quitting (`quit(within:)`) hands back every alert the
+/// app may have taken and not played, so an alert is not lost when the app ends.
 @MainActor
 public final class AlertHandler {
     public enum Registration: Equatable, Sendable {
@@ -138,6 +139,11 @@ public final class AlertHandler {
     private var claim: (id: String, confirmed: Bool)?
     private var reconciling: Task<Void, Never>?
     private var retrying: Task<Void, Never>?
+    /// Set once the app is quitting: it takes no alert and registers no more.
+    private var quitting = false
+    /// Alerts the daemon may have handed over that the app has neither played nor handed back, which quitting waits for.
+    private var unsettled = 0
+    private var waitingToQuit: [CheckedContinuation<Void, Never>] = []
 
     /// `play` presents an alert the app has taken over. A registration request the daemon did not answer is tried again
     /// after `retryDelay`, and at the next permission check; an acknowledgement, after `ackRetryDelay`. `isPermitted`
@@ -163,8 +169,38 @@ public final class AlertHandler {
     /// Whether the app may post notifications. It registers only while it may. Each check also retries what is
     /// unsettled: a refused registration, or a request the daemon did not answer.
     public func setPermitted(_ granted: Bool) {
-        permitted = granted
+        permitted = granted && !quitting
         reconcile()
+    }
+
+    /// Before the app quits: it takes no more alerts and unregisters, so the daemon plays the next ones, and hands back
+    /// each alert it may have taken but not played (sent again until a daemon answers), so the daemon's sink plays it.
+    /// Returns once all are handed back or played, or after `bound`; an alert whose ack or handback no daemon answered by
+    /// then may stay with the daemon as taken, unplayed.
+    public func quit(within bound: Duration = .seconds(5)) async {
+        quitting = true
+        setPermitted(false)
+        guard unsettled > 0 else { return }
+        let deadline = Task { [weak self] in
+            try? await Task.sleep(for: bound)
+            guard !Task.isCancelled else { return }
+            self?.resumeQuitting()
+        }
+        await withCheckedContinuation { waitingToQuit.append($0) }
+        deadline.cancel()
+    }
+
+    private func resumeQuitting() {
+        let waiting = waitingToQuit
+        waitingToQuit = []
+        for continuation in waiting { continuation.resume() }
+    }
+
+    /// Whether the app may present an alert: it is not quitting and may still post notifications.
+    private func mayPresent() async -> Bool {
+        guard !quitting else { return false }
+        let granted = await isPermitted()
+        return granted && !quitting
     }
 
     /// Waits for the registration work in flight, including retries; for tests.
@@ -262,6 +298,19 @@ public final class AlertHandler {
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
+        guard await takeOver(alert, alertId: alertId, subscriberId: subscriberId) else { return }
+        let daemon = daemon
+        _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+    }
+
+    /// Acknowledges the alert, then plays it or hands it back; true once it played. Until then it counts as unsettled,
+    /// so quitting waits for it.
+    private func takeOver(_ alert: TimerAlert, alertId: String, subscriberId: String) async -> Bool {
+        unsettled += 1
+        defer {
+            unsettled -= 1
+            if unsettled == 0 { resumeQuitting() }
+        }
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
         // no daemon answered is sent again until one does, always for the stream the alert came on, even after the stream
         // reconnects: one it took gets `.acknowledged` again, from the next daemon too, which the event stream starts, until
@@ -269,24 +318,28 @@ public final class AlertHandler {
         // 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
         let daemon = daemon
         var asked = false
-        switch await untilAnswered(while: isPermitted, {
+        switch await untilAnswered(while: mayPresent, {
             asked = true
             return try await daemon.acknowledgeAlert(alertId, subscriberId: subscriberId)
         }) {
         case .answer(.acknowledged):
-            // Revoked while the answer was on its way: the app hands the alert back rather than show what it may not.
-            guard await isPermitted() else { return await handBack(alertId, subscriberId: subscriberId) }
+            // Revoked, or quitting, while the answer was on its way: the app hands the alert back rather than show what
+            // it may not.
+            guard await mayPresent() else {
+                await handBack(alertId, subscriberId: subscriberId)
+                return false
+            }
             play(alert)
-            _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+            return true
         case .revoked:
-            // Permission revoked in System Settings since the last check: the app takes no alert it may not show, and
-            // gives up the handler role, so the daemon plays this alert and the next ones. An acknowledgement already
-            // sent may have been taken, so that alert is handed back.
-            if asked { return await handBack(alertId, subscriberId: subscriberId) }
-            setPermitted(false)
+            // Permission revoked in System Settings since the last check, or the app is quitting: it takes no alert it
+            // may not show, and gives up the handler role, so the daemon plays this alert and the next ones. An
+            // acknowledgement already sent may have been taken, so that alert is handed back.
+            if asked { await handBack(alertId, subscriberId: subscriberId) } else { setPermitted(false) }
         case .answer(.expired), .refused:
             break
         }
+        return false
     }
 
     /// Gives up the handler role as soon as the revocation is seen, then hands back an alert the daemon may have handed
@@ -304,7 +357,7 @@ public final class AlertHandler {
         /// The daemon refused it (404 or 409: not this app's alert, so whoever holds it plays it), or the task was
         /// cancelled.
         case refused
-        /// The app may no longer post notifications, so the request was not sent again.
+        /// The app may no longer post notifications, or is quitting, so the request was not sent again.
         case revoked
     }
 

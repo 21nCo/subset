@@ -50,6 +50,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.checkNotifications()
     }
 
+    /// Quitting first hands back to the daemon every alert the app may have taken but not played, waiting at most 5 s
+    /// for a daemon to answer, so the daemon's sink plays them.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { [controller] in
+            await controller.alerts.quit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     /// Quitting stops only the board server this app started; the daemon and its timers keep running.
     func applicationWillTerminate(_ notification: Notification) {
         controller.stopBoard()
