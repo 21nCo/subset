@@ -101,6 +101,50 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.count, 2)
     }
 
+    func testABatchOfToolCallsPastTheQuestionsBudgetEndsItAndNothingMoreIsSent() async throws {
+        let (ask, explain, source, _) = try await chosen()
+        explain.sendConfirmed = true
+        // A hundred calls in one answer: none runs, and no second request is sent.
+        StubProtocol.enqueue(status: 200, json: try toolCalls((1...100).map { ("a\($0)", "memoryState", "{}") }))
+        StubProtocol.enqueue(status: 200, json: try completion("Not asked for."))
+        try await answer(ask, "Why is my Mac slow?")
+        var exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed(AskToolbox.exhausted.message))
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+        XCTAssertEqual(exchange.sent, StubProtocol.requests.compactMap(\.body), "what was sent is kept")
+        XCTAssertTrue(source.ran.isEmpty)
+        XCTAssertTrue(exchange.tools.isEmpty)
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1, "a failed question is not counted")
+
+        // A later batch larger than what is left: the calls before it are kept, and nothing more is sent.
+        StubProtocol.reset()
+        StubProtocol.enqueue(status: 200, json: try toolCalls((1...3).map { ("b\($0)", "memoryState", "{}") }))
+        StubProtocol.enqueue(status: 200, json: try toolCalls((1...(AskToolbox.budgetedCalls - 2)).map {
+            ("c\($0)", "diskSummary", "{}")
+        }))
+        StubProtocol.enqueue(status: 200, json: try completion("Not asked for."))
+        try await answer(ask, "Why is my Mac slow?")
+        exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(ask.exchanges.count, 1, "asked again in the failed question's place")
+        XCTAssertEqual(exchange.state, .failed(AskToolbox.exhausted.message))
+        let sent = StubProtocol.requests.compactMap(\.body)
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(exchange.sent, sent)
+        XCTAssertEqual(source.ran, ["memoryState", "memoryState", "memoryState"])
+        XCTAssertEqual(exchange.tools.map(\.ran), [true, true, true])
+        let results = try XCTUnwrap(try json(sent[1])["messages"] as? [[String: Any]]).compactMap { message in
+            message["role"] as? String == "tool" ? message["content"] as? String : nil
+        }
+        XCTAssertEqual(results.count, 3)
+        XCTAssertLessThanOrEqual(results.joined().count, AskToolbox.questionLimit)
+
+        // Asked again, it is answered and counted.
+        StubProtocol.reset()
+        StubProtocol.enqueue(status: 200, json: try completion("Memory is under pressure."))
+        try await answer(ask, "Why is my Mac slow?")
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit)
+    }
+
     func testAKeyReplacedSinceTheQuestionBeganIsNeverUsed() async throws {
         let (ask, _, _, keychain) = try await chosen()
         XCTAssertTrue(ask.ask("Why is my Mac slow?"))

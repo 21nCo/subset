@@ -48,8 +48,8 @@ public struct AppleIntelligenceProvider: AIProvider {
                 return try await session.respond(to: prompt.text).content
             } catch let error as LanguageModelSession.GenerationError {
                 throw ExplainError(error, declined: "Apple Intelligence declined to answer this question.")
-            } catch is LanguageModelSession.ToolCallError {
-                throw ExplainError.failed("Apple Intelligence could not use System's tools to answer.")
+            } catch let error as LanguageModelSession.ToolCallError {
+                throw Self.askFailure(error)
             }
         }
         throw ExplainError.unavailable(.requiresNewerMacOS)
@@ -60,6 +60,19 @@ public struct AppleIntelligenceProvider: AIProvider {
 }
 
 #if canImport(FoundationModels)
+@available(macOS 26, *)
+extension AppleIntelligenceProvider {
+    /// What a tool call that threw ends the question with: the toolbox's own reason, such as calls past the question's
+    /// budget, or its end; anything else as a failure to use the tools.
+    static func askFailure(_ error: LanguageModelSession.ToolCallError) -> any Error {
+        switch error.underlyingError {
+        case let reason as ExplainError: reason
+        case let ended as CancellationError: ended
+        default: ExplainError.failed("Apple Intelligence could not use System's tools to answer.")
+        }
+    }
+}
+
 @available(macOS 26, *)
 extension AIAvailability {
     /// What FoundationModels reports, as System shows it.
@@ -169,9 +182,10 @@ struct AskModelTool<Arguments: AskModelArguments>: Tool {
     var name: String { tool.rawValue }
     var description: String { tool.summary }
 
+    /// Throws once the question's calls are used up, which ends the session's answer (`askFailure(_:)`).
     func call(arguments: Arguments) async throws -> String {
         let data = (try? JSONSerialization.data(withJSONObject: arguments.json)) ?? Data("{}".utf8)
-        return await tools.call(tool.rawValue, arguments: data)
+        return try await tools.call(tool.rawValue, arguments: data)
     }
 }
 

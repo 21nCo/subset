@@ -37,16 +37,18 @@ public struct AskPrompt: Equatable, Sendable {
 }
 
 /// The question's tools, as a provider calls them from any actor: a tool's name and its JSON arguments in, its JSON
-/// result out. Refusals are results too (`{"error": …}`), so the model can answer with what it has.
+/// result out. Refusals are results too (`{"error": …}`), so the model can answer with what it has. A call that throws
+/// returns nothing, and ends the question: its model called tools past what one question takes
+/// (`AskToolbox.exhausted`), or the question has already ended. The provider sends nothing more and fails with it.
 public struct AskTools: Sendable {
-    private let run: @Sendable (_ name: String, _ arguments: Data) async -> String
+    private let run: @Sendable (_ name: String, _ arguments: Data) async throws -> String
 
-    public init(_ run: @escaping @Sendable (_ name: String, _ arguments: Data) async -> String) {
+    public init(_ run: @escaping @Sendable (_ name: String, _ arguments: Data) async throws -> String) {
         self.run = run
     }
 
-    public func call(_ name: String, arguments: Data) async -> String {
-        await run(name, arguments)
+    public func call(_ name: String, arguments: Data) async throws -> String {
+        try await run(name, arguments)
     }
 }
 

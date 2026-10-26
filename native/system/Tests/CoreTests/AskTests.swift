@@ -1,6 +1,9 @@
 import Foundation
 @testable import SystemCore
 import XCTest
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 /// Ask (SET-51) with a scripted provider and a fake window: tool dispatch and argument validation, unknown tools, the
 /// four-call limit, redacted tool results, cited ids kept only when a tool returned them, the follow-up limit, and Ask
@@ -174,11 +177,11 @@ final class AskTests: XCTestCase {
             return ids.count
         }
         // Twenty suggestions with every text at its cap, five more not listed by the source, and twenty long items.
-        let suggestions = toolbox.call("reclaimSuggestions", arguments: Data(), question: 1)
+        let suggestions = try toolbox.call("reclaimSuggestions", arguments: Data(), question: 1)
         let suggestionsListed = try listed(suggestions, prefix: "s", total: 25)
         XCTAssertTrue((1..<20).contains(suggestionsListed), suggestions)
         XCTAssertNil(toolbox.target(for: "s\(suggestionsListed + 1)"), "what is left out has no id")
-        let items = toolbox.call("largestItems", arguments: Data(#"{"limit":20}"#.utf8), question: 1)
+        let items = try toolbox.call("largestItems", arguments: Data(#"{"limit":20}"#.utf8), question: 1)
         let itemsListed = try listed(items, prefix: "d", total: 20)
         XCTAssertTrue((1..<20).contains(itemsListed), items)
         XCTAssertNil(toolbox.target(for: "d\(itemsListed + 1)"), "what is left out has no id")
@@ -188,7 +191,7 @@ final class AskTests: XCTestCase {
         XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit)
         var later: [Int] = []
         for _ in 1...2 {
-            let result = toolbox.call("largestItems", arguments: Data(), question: 1)
+            let result = try toolbox.call("largestItems", arguments: Data(), question: 1)
             let count = try listed(result, prefix: "d", total: 20)
             used += result.count
             XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit)
@@ -198,7 +201,7 @@ final class AskTests: XCTestCase {
 
         // The next question has its own budget, and the same things keep their ids.
         toolbox.begin(2, redactor: redactor)
-        let again = toolbox.call("reclaimSuggestions", arguments: Data(), question: 2)
+        let again = try toolbox.call("reclaimSuggestions", arguments: Data(), question: 2)
         XCTAssertEqual(try listed(again, prefix: "s", total: 25), suggestionsListed)
         XCTAssertEqual(again, suggestions)
     }
@@ -211,7 +214,7 @@ final class AskTests: XCTestCase {
         toolbox.begin(question, redactor: redactor)
         var used = 0
         func call(_ name: String, _ arguments: String = "{}") throws -> [String: Any] {
-            let result = toolbox.call(name, arguments: Data(arguments.utf8), question: question)
+            let result = try toolbox.call(name, arguments: Data(arguments.utf8), question: question)
             used += result.count
             XCTAssertLessThanOrEqual(result.count, AskToolbox.resultLimit, name)
             XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit, "after \(name): \(used)")
@@ -254,11 +257,98 @@ final class AskTests: XCTestCase {
         question = 3
         toolbox.begin(question, redactor: redactor)
         used = 0
-        let unknown = toolbox.call(String(repeating: #"""#, count: 60), arguments: Data(), question: question)
+        let unknown = try toolbox.call(String(repeating: #"""#, count: 60), arguments: Data(), question: question)
         XCTAssertLessThanOrEqual(unknown.count, AskToolbox.refusalLimit)
         XCTAssertTrue(try XCTUnwrap(json(unknown)["error"] as? String).hasPrefix("There is no tool named"), unknown)
         XCTAssertLessThanOrEqual(AskToolbox.error(AskToolbox.tooLarge).count, AskToolbox.refusalLimit)
         XCTAssertEqual(try json(AskToolbox.error(AskToolbox.tooLarge))["error"] as? String, AskToolbox.tooLarge)
+    }
+
+    func testCallsPastAQuestionsBudgetReturnNothingAndEndIt() throws {
+        let source = FakeAskSource()
+        source.bulky = true
+        let toolbox = AskToolbox(source: source, redactor: redactor)
+        toolbox.begin(1, redactor: redactor)
+        // Valid, invalid, unknown, and refused calls in turn, three times as many as a question takes.
+        let mixed = [("topGroups", #"{"metric":"memory","limit":10}"#), ("groupDetail", #"{"id":"g1"}"#),
+                     ("deleteEverything", "{}"), ("largestItems", #"{"limit":"all"}"#), ("reclaimSuggestions", ""),
+                     ("groupDetail", #"{"id":"g999"}"#)]
+        var used = 0
+        var returned = 0
+        for number in 0..<(3 * AskToolbox.budgetedCalls) {
+            let (name, arguments) = mixed[number % mixed.count]
+            do {
+                let result = try toolbox.call(name, arguments: Data(arguments.utf8), question: 1)
+                returned += 1
+                used += result.count
+                XCTAssertLessThanOrEqual(result.count, AskToolbox.resultLimit, "call \(number + 1), \(name)")
+                XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+            } catch {
+                XCTAssertEqual(error as? ExplainError, AskToolbox.exhausted, "call \(number + 1)")
+            }
+            XCTAssertLessThanOrEqual(used, AskToolbox.questionLimit, "after call \(number + 1), \(name)")
+        }
+        XCTAssertEqual(returned, AskToolbox.budgetedCalls, "nothing is returned past the question's calls")
+        XCTAssertEqual(toolbox.records.count, AskToolbox.budgetedCalls)
+        XCTAssertEqual(source.ran, ["topGroups memory app 10", "groupDetail \(FakeAskSource.chrome)"],
+                       "only the first four calls could run, and only two of them were valid")
+
+        // A question that has ended returns nothing either; the next has its own budget.
+        toolbox.end()
+        XCTAssertThrowsError(try toolbox.call("memoryState", arguments: Data(), question: 1)) { error in
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        toolbox.begin(2, redactor: redactor)
+        XCTAssertNotNil(try json(try toolbox.call("memoryState", arguments: Data(), question: 2))["pressure"])
+    }
+
+    func testAModelCallingToolsPastTheBudgetEndsTheQuestionWhichIsNotCounted() async throws {
+        let provider = ScriptedProvider()
+        provider.calls = Array(repeating: ("memoryState", "{}"), count: 3 * AskToolbox.budgetedCalls)
+        let (ask, _, source) = center(provider)
+        try await answer(ask, "Why is my Mac slow?")
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed(AskToolbox.exhausted.message))
+        XCTAssertEqual(provider.results.count, AskToolbox.budgetedCalls, "the call past the budget ended the answer")
+        XCTAssertLessThanOrEqual(provider.results.joined().count, AskToolbox.questionLimit)
+        XCTAssertEqual(exchange.tools.count, AskToolbox.budgetedCalls, "the tools it called are kept")
+        XCTAssertEqual(source.ran.count, AskToolbox.callLimit)
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1, "a failed question is not counted")
+
+        provider.calls = []
+        try await answer(ask, "Why is my Mac slow?")
+        XCTAssertEqual(ask.exchanges.count, 1, "asked again in its place")
+        guard case .answered = ask.exchanges[0].state else { return XCTFail("\(ask.exchanges[0].state)") }
+    }
+
+    func testFoundationModelsToolsEndTheAnswerOnceTheQuestionsCallsAreUsedUp() async throws {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26, *) else { throw XCTSkip("FoundationModels needs macOS 26") }
+        let toolbox = AskToolbox(source: FakeAskSource(), redactor: redactor)
+        toolbox.begin(1, redactor: redactor)
+        let tool = AskModelTool<NoArguments>(tool: .memoryState, tools: toolbox.tools(for: 1))
+        for _ in 0..<AskToolbox.budgetedCalls {
+            _ = try await tool.call(arguments: NoArguments())
+        }
+        do {
+            let late = try await tool.call(arguments: NoArguments())
+            XCTFail("returned \(late)")
+        } catch {
+            XCTAssertEqual(error as? ExplainError, AskToolbox.exhausted)
+            // The session throws it wrapped, and the question fails with the toolbox's reason.
+            let failure = AppleIntelligenceProvider.askFailure(LanguageModelSession.ToolCallError(tool: tool, underlyingError: error))
+            XCTAssertEqual(failure as? ExplainError, AskToolbox.exhausted)
+        }
+        toolbox.end()
+        let ended = AppleIntelligenceProvider.askFailure(LanguageModelSession.ToolCallError(tool: tool,
+                                                                                            underlyingError: CancellationError()))
+        XCTAssertTrue(ended is CancellationError, "a question that has ended stays ended: \(ended)")
+        let other = AppleIntelligenceProvider.askFailure(LanguageModelSession.ToolCallError(tool: tool,
+                                                                                            underlyingError: URLError(.unknown)))
+        XCTAssertEqual(other as? ExplainError, .failed("Apple Intelligence could not use System's tools to answer."))
+        #else
+        throw XCTSkip("Built without FoundationModels")
+        #endif
     }
 
     // MARK: Answers
@@ -493,7 +583,7 @@ final class ScriptedProvider: AIProvider, @unchecked Sendable {
     func ask(_ prompt: AskPrompt, tools: AskTools, gate _: AskSendGate) async throws -> String {
         lock.withLock { storedPrompts.append(prompt) }
         for (name, arguments) in calls {
-            let result = await tools.call(name, arguments: Data(arguments.utf8))
+            let result = try await tools.call(name, arguments: Data(arguments.utf8))
             lock.withLock { storedResults.append(result) }
         }
         await hold?.pass()

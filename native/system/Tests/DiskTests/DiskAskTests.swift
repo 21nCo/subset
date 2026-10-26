@@ -106,11 +106,67 @@ final class DiskAskTests: XCTestCase {
         gates[1].open()
         try await DiskFixture.wait { !model.isScanning }
         let summary = model.askDiskSummary(redactor: redactor, now: start.addingTimeInterval(7_380)).fields
-        XCTAssertEqual(summary["scan"], .words("Cancelled; folders not read in full count only what was read"))
+        // Cancelled once it had read everything: its sizes are whole.
+        XCTAssertEqual(model.result?.outcome, .completed)
+        XCTAssertEqual(summary["scan"], .words(Self.cancelledWhole))
         XCTAssertEqual(summary["scanEnded"], at(clock.now, "2 minutes"))
         XCTAssertEqual(summary["volumeRead"], at(start.addingTimeInterval(7_200), "3 minutes"))
         XCTAssertEqual(model.askLargestItems(limit: 1, redactor: redactor, now: clock.now).fields["scanEnded"],
                        at(clock.now, "0 minutes"))
+    }
+
+    private static let cancelledWhole = "Cancelled after the whole folder tree was read, before origins and suggestions "
+        + "were worked out"
+
+    /// A cancelled scan says how much it read, as the window's status does: nothing, part of the tree, or all of it.
+    func testACancelledScanSaysHowMuchItRead() async throws {
+        // Cancelled before anything was read.
+        let start = AsyncGate()
+        var model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            await start.pass()
+            return await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+        }))
+        model.scan()
+        await fulfillment(of: [start.reached], timeout: 30)
+        model.cancel()
+        start.open()
+        XCTAssertNil(model.result)
+        XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["scan"], .words("Cancelled before anything was read"))
+
+        // Cancelled partway: one worker stops after the home folder's own listing.
+        let partway = Gate()
+        model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            await DiskScanService.scan(DiskScanner(workers: 1, progressInterval: .zero), root: root) { progress in
+                onProgress(progress)
+                partway.pass()
+            }
+        }))
+        model.scan()
+        await fulfillment(of: [partway.reached], timeout: 30)
+        try await DiskFixture.wait { model.progress != nil }
+        model.cancel()
+        partway.open()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.result?.outcome, .cancelled)
+        let partial = AskValue.words("Cancelled before it finished reading; folders not read in full count only what was read")
+        XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["scan"], partial)
+        XCTAssertEqual(model.askLargestItems(limit: 1, redactor: redactor).fields["scan"], partial)
+
+        // Cancelled once it had read everything, before its suggestions.
+        let read = AsyncGate()
+        model = fixture.model(service: fixture.service(scan: { root, onProgress in
+            let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            await read.pass()
+            return scanned
+        }))
+        model.scan()
+        await fulfillment(of: [read.reached], timeout: 30)
+        model.cancel()
+        read.open()
+        try await DiskFixture.wait { !model.isScanning }
+        XCTAssertEqual(model.result?.outcome, .completed)
+        XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["scan"], .words(Self.cancelledWhole))
+        XCTAssertEqual(model.askLargestItems(limit: 1, redactor: redactor).fields["scan"], .words(Self.cancelledWhole))
     }
 
     /// What each disk tool says of the scan's state and when it and the volume were read.
@@ -168,7 +224,7 @@ final class DiskAskTests: XCTestCase {
                                                          showProcesses: { /* Not cited here. */ },
                                                          showDisk: { /* Not cited here. */ }), redactor: redactor)
         toolbox.begin(1, redactor: redactor)
-        let sent = toolbox.call("diskSummary", arguments: Data("{}".utf8), question: 1)
+        let sent = try toolbox.call("diskSummary", arguments: Data("{}".utf8), question: 1)
         XCTAssertFalse(sent.contains(fixture.home), sent)
         XCTAssertFalse(sent.contains("/Work"), sent)
         XCTAssertFalse(sent.contains(#""volume""#), "a volume without a name sends no name: \(sent)")

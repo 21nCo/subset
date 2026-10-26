@@ -306,7 +306,7 @@ public final class DiskWindowModel {
     }
 
     /// The scan shown read everything it was asked to, even if Cancel then stopped the analysis.
-    private var isTreeWhole: Bool { result?.outcome == .completed }
+    var isTreeWhole: Bool { result?.outcome == .completed }
 
     /// Shown only when the scan met folders or items it could not read.
     public var unreadableBanner: DiskUnreadableBanner? {

@@ -99,14 +99,18 @@ extension DiskWindowModel {
         "At \(format.time(date)), \(ExplainFacts.duration(from: date, to: now)) ago"
     }
 
-    /// The scan's state in System's words, without a failure's message.
+    /// The scan's state in System's words, without a failure's message; a cancelled scan says how much it read, as
+    /// `statusText` does.
     private var askScanState: String {
         switch phase {
         case .idle: "No scan yet"
         case .scanning: "Scanning"
         case .analyzing: "Working out origins and suggestions"
         case .completed: "Finished"
-        case .cancelled: "Cancelled; folders not read in full count only what was read"
+        case .cancelled where result == nil: "Cancelled before anything was read"
+        case .cancelled where isTreeWhole: "Cancelled after the whole folder tree was read, before origins and "
+            + "suggestions were worked out"
+        case .cancelled: "Cancelled before it finished reading; folders not read in full count only what was read"
         case .failed: "Failed"
         }
     }

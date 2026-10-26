@@ -3,9 +3,12 @@ import Foundation
 /// Ask (SET-51) through OpenRouter: chat completions with Ask's tools as functions. Each request's body goes through
 /// the send gate first, so it is previewed as Explain's are; tool results, redacted by the toolbox, go back in the next
 /// request. After `AskToolbox.callLimit` calls the request asks for an answer with `tool_choice` `none`, so a question
-/// takes at most `callLimit + 1` requests. The key is read for each request, each read one of the checks shared with
-/// Explain (`AskSendGate.check()`), and must be the one read as the question began, so a key replaced meanwhile is
-/// never used; a read that finds it cannot be used throws `AskKeyRefusal`, and nothing is sent.
+/// takes at most `callLimit + 1` requests. A batch of tool calls larger than what is left of the question's
+/// `AskToolbox.budgetedCalls` runs none of them, and a call the toolbox refuses to return from ends the batch: either
+/// way the question fails with `AskToolbox.exhausted`, and nothing more is sent. The key is read for each request, each
+/// read one of the checks shared with Explain (`AskSendGate.check()`), and must be the one read as the question began,
+/// so a key replaced meanwhile is never used; a read that finds it cannot be used throws `AskKeyRefusal`, and nothing
+/// is sent.
 extension OpenRouterProvider {
     public func ask(_ prompt: AskPrompt, tools: AskTools, gate: AskSendGate) async throws -> String {
         let checked = OpenRouterKeyIdentity(try await sendingKey(gate))
@@ -39,11 +42,12 @@ extension OpenRouterProvider {
                 guard toolsAllowed else {
                     throw ExplainError.invalidResponse("The model asked for more tools after its \(AskToolbox.callLimit).")
                 }
+                guard requested.count <= AskToolbox.budgetedCalls - calls else { throw AskToolbox.exhausted }
                 messages.append(["role": "assistant", "content": message["content"] as? String ?? NSNull(),
                                  "tool_calls": requested.map(\.json)])
                 for call in requested {
                     calls += 1
-                    let result = await tools.call(call.name, arguments: Data(call.arguments.utf8))
+                    let result = try await tools.call(call.name, arguments: Data(call.arguments.utf8))
                     messages.append(["role": "tool", "tool_call_id": call.id, "content": result])
                 }
                 continue

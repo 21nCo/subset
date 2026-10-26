@@ -167,9 +167,10 @@ public struct AskToolRecord: Equatable, Sendable {
 /// `{"error": …}`.
 ///
 /// The budget covers every string a call returns, results and refusals alike, as sent: its whole JSON, nested facts
-/// included. Each is at most `resultLimit` characters, and those of a question's first `budgetedCalls` calls total at
-/// most `questionLimit`, because each call leaves `refusalLimit` for each call after it. Past those calls, which a
-/// model can make only by ignoring the refusals, each call gets only the call-limit refusal.
+/// included. Each is at most `resultLimit` characters, and a question's calls return at most `questionLimit` in all,
+/// because a question takes at most `budgetedCalls` calls and each leaves `refusalLimit` for each call after it. A call
+/// past those, which a model makes only by ignoring the refusals, returns nothing: it throws `exhausted`, and the
+/// provider ends the question with that failure, sending nothing more.
 @MainActor
 public final class AskToolbox {
     public nonisolated static let callLimit = 4
@@ -186,6 +187,9 @@ public final class AskToolbox {
     nonisolated static let refusalLimit = 200
     /// The calls a question's budget holds: the `callLimit` that run, and as many refused for being past the limit.
     nonisolated static let budgetedCalls = 2 * callLimit
+    /// Why a question ends when its model calls tools past `budgetedCalls`.
+    nonisolated static let exhausted = ExplainError.invalidResponse("The model asked for more tool calls than one "
+        + "question takes, so nothing more was sent. Ask again.")
     nonisolated static let tooLarge = "This result is too large for what is left of this question's results. Answer "
         + "with the results you have."
     /// At least as long as any id a thread gives, to measure a listed thing before it is given its id.
@@ -223,7 +227,7 @@ public final class AskToolbox {
 
     /// The question's tools as a provider calls them, from any actor.
     func tools(for question: Int) -> AskTools {
-        AskTools { name, arguments in await self.call(name, arguments: arguments, question: question) }
+        AskTools { name, arguments in try await self.call(name, arguments: arguments, question: question) }
     }
 
     /// What a cited id selects, when a tool returned it in this thread.
@@ -231,8 +235,11 @@ public final class AskToolbox {
         targets[id]
     }
 
-    func call(_ name: String, arguments: Data, question: Int) -> String {
-        guard question == self.question else { return Self.error("This question has ended.") }
+    /// Throws `CancellationError` for a question that has ended, and `exhausted` past the question's `budgetedCalls`;
+    /// neither returns or counts anything, and neither runs a tool.
+    func call(_ name: String, arguments: Data, question: Int) throws -> String {
+        guard question == self.question else { throw CancellationError() }
+        guard calls < Self.budgetedCalls else { throw Self.exhausted }
         calls += 1
         let result = respond(to: name, arguments: arguments)
         used += result.count
