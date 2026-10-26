@@ -122,14 +122,20 @@ final class DiskAskTests: XCTestCase {
     func testACancelledScanSaysHowMuchItRead() async throws {
         // Cancelled before anything was read.
         let start = AsyncGate()
+        let returned = expectation(description: "the abandoned scan returned")
         var model = fixture.model(service: fixture.service(scan: { root, onProgress in
             await start.pass()
-            return await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            let scanned = await DiskScanService.scan(DiskScanner(workers: 2), root: root, onProgress: onProgress)
+            returned.fulfill()
+            return scanned
         }))
         model.scan()
         await fulfillment(of: [start.reached], timeout: 30)
         model.cancel()
         start.open()
+        // What it returns later is dropped: once it has, nothing was kept.
+        await fulfillment(of: [returned], timeout: 30)
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertNil(model.result)
         XCTAssertEqual(model.askDiskSummary(redactor: redactor).fields["scan"], .words("Cancelled before anything was read"))
 

@@ -56,17 +56,21 @@ public struct AskTools: Sendable {
 /// (SET-160) and its checks (SET-165): `check` before each read of its key, which takes one of the checks shared with
 /// Explain and returns its number, and throws when nothing more must be sent; `confirm` before sending, which returns
 /// whether the user confirmed the body in the preview (`false` when none was needed) and throws when it must not be
-/// sent; `answered` once the provider answered it.
+/// sent; `sending` as the body is handed over to be sent, before it is known whether it arrived, since a timeout or a
+/// lost connection can come after it left this Mac; `answered` once the provider answered it.
 public struct AskSendGate: Sendable {
     private let startCheck: @Sendable () async throws -> Int
     private let confirmBody: @Sendable (Data) async throws -> Bool
+    private let sendingBody: @Sendable (Data) async -> Void
     private let answeredBody: @Sendable (Data, Bool) async -> Void
 
     public init(check: @escaping @Sendable () async throws -> Int = { 0 },
                 confirm: @escaping @Sendable (Data) async throws -> Bool,
+                sending: @escaping @Sendable (Data) async -> Void = { _ in /* Nothing is kept. */ },
                 answered: @escaping @Sendable (Data, Bool) async -> Void) {
         startCheck = check
         confirmBody = confirm
+        sendingBody = sending
         answeredBody = answered
     }
 
@@ -79,6 +83,10 @@ public struct AskSendGate: Sendable {
 
     public func confirm(_ body: Data) async throws -> Bool {
         try await confirmBody(body)
+    }
+
+    public func sending(_ body: Data) async {
+        await sendingBody(body)
     }
 
     public func answered(_ body: Data, confirmed: Bool) async {

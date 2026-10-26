@@ -152,9 +152,15 @@ private struct ExchangeView: View {
                     ForEach(Array(exchange.tools.enumerated()), id: \.offset) { _, record in
                         Text(verbatim: record.call + (record.ran ? "" : " (refused)"))
                     }
-                    // Only what left this Mac: OpenRouter's bodies, each exactly as sent.
-                    ForEach(Array(exchange.sent.enumerated()), id: \.offset) { _, body in
-                        Text(verbatim: String(decoding: body, as: UTF8.self)).font(.caption.monospaced())
+                    // What was handed to OpenRouter, each body exactly as sent; one it did not answer may or may
+                    // not have left this Mac.
+                    ForEach(Array(exchange.sent.enumerated()), id: \.offset) { _, sent in
+                        if !sent.answered {
+                            Text("Possibly sent: \(provider.title) did not answer, so whether this left the Mac "
+                                + "is not known.")
+                                .foregroundStyle(.orange)
+                        }
+                        Text(verbatim: String(decoding: sent.body, as: UTF8.self)).font(.caption.monospaced())
                     }
                 }
                 .font(.caption)

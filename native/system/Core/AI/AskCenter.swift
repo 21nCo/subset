@@ -17,10 +17,11 @@ public struct AskSendPreview: Equatable, Sendable {
 /// folder names** changes, since a follow-up gives the provider the thread's earlier questions and answers. Nothing is
 /// asked while no provider is chosen. As with Explain, until OpenRouter has answered a request whose body the user
 /// confirmed this session (`ExplainCenter.sendConfirmed`, shared), each request to it waits for its own send preview,
-/// and while Add Key or Remove Key runs none is sent. Each read of the OpenRouter key is one of the checks Explain's are
-/// (SET-165): one that finds the key cannot be used, from the latest check, sets the choice back and says why, as
-/// Explain's does, which begins a new thread; one a later check overtook fails only its own question, and changes no
-/// provider and no thread. A question not answered within `timeout`, not counting the time a preview waits, fails and
+/// and while Add Key or Remove Key runs none is sent. Each body is kept with its exchange as it is handed over to be
+/// sent, so a question that fails keeps the bodies that may have left this Mac, those not answered marked so. Each read
+/// of the OpenRouter key is one of the checks Explain's are (SET-165): one that finds the key cannot be used, from the
+/// latest check, sets the choice back and says why, as Explain's does, which begins a new thread; one a later check
+/// overtook fails only its own question, and changes no provider and no thread. A question not answered within `timeout`, not counting the time a preview waits, fails and
 /// can be asked again; Stop, or Cancel in the preview, ends it and keeps nothing of it.
 @MainActor
 @Observable
@@ -39,8 +40,15 @@ public final class AskCenter {
         public fileprivate(set) var state: State
         /// The tools the answer called, in order.
         public fileprivate(set) var tools: [AskToolRecord] = []
-        /// Exactly the bodies sent off this Mac that the provider answered.
-        public fileprivate(set) var sent: [Data] = []
+        /// Exactly the bodies handed over to be sent off this Mac, in order, each marked when the provider answered it.
+        public fileprivate(set) var sent: [Sent] = []
+    }
+
+    /// A body handed over to be sent, exactly as sent. One the provider did not answer, because the send timed out,
+    /// lost its connection, or the question failed meanwhile, may or may not have left this Mac.
+    public struct Sent: Equatable, Sendable {
+        public let body: Data
+        public fileprivate(set) var answered: Bool
     }
 
     public static let followUpLimit = 5
@@ -128,6 +136,8 @@ public final class AskCenter {
         }, confirm: { [weak self] body in
             guard let self else { throw CancellationError() }
             return try await self.confirm(body, question: question)
+        }, sending: { [weak self] body in
+            await self?.sending(body, question: question)
         }, answered: { [weak self] body, confirmed in
             await self?.answered(body, confirmed: confirmed, question: question)
         })
@@ -298,10 +308,21 @@ public final class AskCenter {
         return true
     }
 
+    private func sending(_ body: Data, question: Int) {
+        guard question == self.question else { return }
+        exchanges[exchanges.count - 1].sent.append(Sent(body: body, answered: false))
+    }
+
+    /// Only an answer confirms a body arrived, and only an answer to a body the user confirmed ends the previews.
     private func answered(_ body: Data, confirmed: Bool, question: Int) {
         if confirmed { explain.sendConfirmed = true }
         guard question == self.question else { return }
-        exchanges[exchanges.count - 1].sent.append(body)
+        let sent = exchanges[exchanges.count - 1].sent
+        guard let index = sent.lastIndex(where: { $0.body == body && !$0.answered }) else {
+            exchanges[exchanges.count - 1].sent.append(Sent(body: body, answered: true))
+            return
+        }
+        exchanges[exchanges.count - 1].sent[index].answered = true
     }
 
     private func workEnded(_ end: ExplainCenter.WorkEnd) {

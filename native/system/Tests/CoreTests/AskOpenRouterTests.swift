@@ -53,7 +53,8 @@ final class AskOpenRouterTests: XCTestCase {
         guard case let .answered(answer) = exchange.state else { return XCTFail("\(exchange.state)") }
         XCTAssertEqual(answer.parts, [.text("Your project "), .citation(id: "g2", target: .group(FakeAskSource.project)),
                                       .text(" uses the most.")])
-        XCTAssertEqual(exchange.sent, sent, "What was sent shows both bodies")
+        XCTAssertEqual(exchange.sent.map(\.body), sent, "What was sent shows both bodies")
+        XCTAssertEqual(exchange.sent.map(\.answered), [true, true])
 
         // A follow-up is sent without a preview, with the thread's question and answer.
         StubProtocol.enqueue(status: 200, json: try completion("Yes."))
@@ -111,7 +112,8 @@ final class AskOpenRouterTests: XCTestCase {
         var exchange = try XCTUnwrap(ask.exchanges.last)
         XCTAssertEqual(exchange.state, .failed(AskToolbox.exhausted.message))
         XCTAssertEqual(StubProtocol.requests.count, 1)
-        XCTAssertEqual(exchange.sent, StubProtocol.requests.compactMap(\.body), "what was sent is kept")
+        XCTAssertEqual(exchange.sent.map(\.body), StubProtocol.requests.compactMap(\.body), "what was sent is kept")
+        XCTAssertEqual(exchange.sent.map(\.answered), [true])
         XCTAssertTrue(source.ran.isEmpty)
         XCTAssertTrue(exchange.tools.isEmpty)
         XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1, "a failed question is not counted")
@@ -129,7 +131,8 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(exchange.state, .failed(AskToolbox.exhausted.message))
         let sent = StubProtocol.requests.compactMap(\.body)
         XCTAssertEqual(sent.count, 2)
-        XCTAssertEqual(exchange.sent, sent)
+        XCTAssertEqual(exchange.sent.map(\.body), sent)
+        XCTAssertEqual(exchange.sent.map(\.answered), [true, true])
         XCTAssertEqual(source.ran, ["memoryState", "memoryState", "memoryState"])
         XCTAssertEqual(exchange.tools.map(\.ran), [true, true, true])
         let results = try XCTUnwrap(try json(sent[1])["messages"] as? [[String: Any]]).compactMap { message in
@@ -167,8 +170,70 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(exchange.state, .failed("OpenRouter answered 400 (bad request): No endpoints support tools."))
         let sent = StubProtocol.requests.compactMap(\.body)
         XCTAssertEqual(sent.count, 2)
-        XCTAssertEqual(exchange.sent, sent, "both bodies left this Mac, the second with the tool's result")
+        XCTAssertEqual(exchange.sent.map(\.body), sent, "both bodies left this Mac, the second with the tool's result")
+        XCTAssertEqual(exchange.sent.map(\.answered), [true, true], "OpenRouter answered both")
         XCTAssertEqual(exchange.tools, [AskToolRecord(call: "memoryState()", ran: true)])
+    }
+
+    // MARK: Bodies whose delivery is not known
+
+    /// A first request that times out may have left this Mac: its body is kept, not answered, and since OpenRouter
+    /// answered nothing the user confirmed, the next request is previewed again.
+    func testATimedOutRequestIsKeptAsPossiblySentAndPreviewsStayOn() async throws {
+        let (ask, explain, _, _) = try await chosen()
+        StubProtocol.enqueue(error: URLError(.timedOut))
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        let preview = try await previewShown(ask)
+        ask.confirmSend(preview)
+        await ask.settled()
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed("OpenRouter did not answer within \(Int(OpenRouterClient.timeout)) seconds. "
+            + "Try again."))
+        XCTAssertEqual(StubProtocol.requests.compactMap(\.body), [preview.body])
+        XCTAssertEqual(exchange.sent.map(\.body), [preview.body], "the body that may have left is kept")
+        XCTAssertEqual(exchange.sent.map(\.answered), [false])
+        XCTAssertFalse(explain.sendConfirmed)
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1, "a failed question is not counted")
+
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        _ = try await previewShown(ask)
+        ask.cancelSend()
+        await ask.settled()
+        XCTAssertTrue(ask.exchanges.isEmpty, "Cancel keeps nothing, the failed question included")
+    }
+
+    /// A lost connection on the request carrying a tool's result: the first body, which OpenRouter answered, and the
+    /// second, which it did not, are both kept, with the tool that ran.
+    func testALostConnectionAfterAToolRoundTripKeepsBothBodies() async throws {
+        let (ask, explain, _, _) = try await chosen()
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("call-1", "memoryState", "{}")]))
+        StubProtocol.enqueue(error: URLError(.networkConnectionLost))
+        XCTAssertTrue(ask.ask("Why?"))
+        ask.confirmSend(try await previewShown(ask))
+        await ask.settled()
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        guard case let .failed(message) = exchange.state, message.hasPrefix("Could not reach OpenRouter") else {
+            return XCTFail("\(exchange.state)")
+        }
+        let sent = StubProtocol.requests.compactMap(\.body)
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(exchange.sent.map(\.body), sent)
+        XCTAssertEqual(exchange.sent.map(\.answered), [true, false])
+        XCTAssertTrue(explain.sendConfirmed, "OpenRouter answered the confirmed first request")
+        XCTAssertEqual(exchange.tools, [AskToolRecord(call: "memoryState()", ran: true)])
+    }
+
+    /// A question failed for lateness while its request is on its way keeps that body, not answered.
+    func testALateQuestionKeepsTheBodyOnItsWayAsPossiblySent() async throws {
+        let setup = try await openRouterChosen(timeout: .milliseconds(300))
+        let ask = setup.ask
+        setup.explain.sendConfirmed = true
+        StubProtocol.enqueueNoAnswer()
+        try await answer(ask, "Why is my Mac slow?")
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed("OpenRouter did not answer within 0 seconds. Ask again."))
+        XCTAssertEqual(exchange.sent.map(\.body), StubProtocol.requests.compactMap(\.body))
+        XCTAssertEqual(exchange.sent.map(\.answered), [false])
     }
 
     func testAnOpenRouterErrorIsShownAndNothingMoreIsSent() async throws {
@@ -349,7 +414,7 @@ final class AskOpenRouterTests: XCTestCase {
     }
 
     /// OpenRouter chosen, with a key stored and, with `model`, that model ID checked.
-    private func openRouterChosen(model: String? = nil) async throws -> Setup {
+    private func openRouterChosen(model: String? = nil, timeout: Duration = .seconds(120)) async throws -> Setup {
         let name = "AskOpenRouterTests-\(UUID().uuidString)"
         addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -367,7 +432,7 @@ final class AskOpenRouterTests: XCTestCase {
         let explain = ExplainCenter(defaults: defaults, redactor: redactor, openRouter: account)
         XCTAssertTrue(explain.choose(.openRouter))
         let source = FakeAskSource()
-        return Setup(ask: AskCenter(explain: explain, source: source), explain: explain, source: source,
+        return Setup(ask: AskCenter(explain: explain, source: source, timeout: timeout), explain: explain, source: source,
                      keychain: keychain, account: account, defaults: defaults)
     }
 

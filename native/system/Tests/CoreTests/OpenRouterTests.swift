@@ -1368,6 +1368,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         case response(Int, Data, [String: String])
         case error(URLError)
         case redirect(URL)
+        /// Never answers, as a request still on its way.
+        case silent
     }
 
     private static let lock = NSLock()
@@ -1402,6 +1404,10 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         lock.withLock { answers.append(.error(error)) }
     }
 
+    static func enqueueNoAnswer() {
+        lock.withLock { answers.append(.silent) }
+    }
+
     static func session() -> URLSession {
         let configuration = OpenRouterClient.configuration(.ephemeral)
         configuration.protocolClasses = [StubProtocol.self]
@@ -1432,6 +1438,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             // A refused redirect delivers the 3xx response itself.
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocolDidFinishLoading(self)
+        case .silent?:
+            break
         case nil:
             client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
         }
