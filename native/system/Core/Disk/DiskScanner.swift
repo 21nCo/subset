@@ -31,6 +31,19 @@ public struct DiskScanResult: Sendable {
     public let unreadablePaths: [String]
     /// Every entry read, including those inside packages, which are not items of the tree.
     public let entriesRead: Int
+    /// The `largestFileLimit` largest files and packages, as `DiskTree.largestFiles(limit:)` lists them: worked out
+    /// once where the result is made, off the main actor, so Ask (SET-51) reads a list instead of walking the tree.
+    public let largestFiles: [Int]
+
+    public static let largestFileLimit = 20
+
+    public init(tree: DiskTree, outcome: Outcome, unreadablePaths: [String], entriesRead: Int) {
+        self.tree = tree
+        self.outcome = outcome
+        self.unreadablePaths = unreadablePaths
+        self.entriesRead = entriesRead
+        largestFiles = tree.largestFiles(limit: Self.largestFileLimit)
+    }
 
     /// The root's totals, or `nil` when the root itself could not be read.
     public var totals: DiskSizes? { tree.root.sizes }
@@ -209,7 +222,8 @@ final class DiskScan: @unchecked Sendable {
         while let job = nextJob() {
             read(job, buffer: buffer)
         }
-        let result: DiskScanResult? = condition.withLock {
+        typealias Finished = (tree: DiskTree, outcome: DiskScanResult.Outcome, unreadable: [String], entries: Int)
+        let finished: Finished? = condition.withLock {
             running -= 1
             guard running == 0 else { return nil }
             for job in queue {
@@ -218,10 +232,12 @@ final class DiskScan: @unchecked Sendable {
             queue.removeAll()
             let outcome: DiskScanResult.Outcome = cancelled ? .cancelled : .completed
             let unreadable = builder.unreadablePaths.sorted()
-            return DiskScanResult(tree: builder.finish(), outcome: outcome, unreadablePaths: unreadable,
-                                  entriesRead: progress.items)
+            return (builder.finish(), outcome, unreadable, progress.items)
         }
-        if let result {
+        if let finished {
+            // Made outside the lock: the result works out its largest files, and a cancel waits on the lock.
+            let result = DiskScanResult(tree: finished.tree, outcome: finished.outcome,
+                                        unreadablePaths: finished.unreadable, entriesRead: finished.entries)
             let finish = condition.withLock { self.finish }
             finish?(result)
         }

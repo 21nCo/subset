@@ -32,9 +32,9 @@ public struct OpenRouterProvider: AIProvider {
     /// The longest model ID accepted.
     static let modelLimit = 200
 
-    private let keys: OpenRouterKeyStore
+    let keys: OpenRouterKeyStore
     public let model: String
-    private let client: OpenRouterClient
+    let client: OpenRouterClient
     /// The key `checkBeforeSending()` read when it bound this provider to it, so a request is sent only with that key;
     /// `nil` when not bound, and a request is sent with the key stored then.
     public private(set) var checkedKey: OpenRouterKeyIdentity?
@@ -178,6 +178,19 @@ public struct OpenRouterProvider: AIProvider {
     /// error, whether the answer's or the first choice's (which comes with `finish_reason` `error` and whatever content
     /// was generated before it), fails with OpenRouter's reason, and no content is read.
     static func draft(from data: Data, key: String) throws -> ExplanationDraft {
+        let message = try message(from: data, key: key)
+        if let refusal = message["refusal"] as? String, !refusal.isEmpty {
+            throw ExplainError.rejected("The model declined to explain this item.")
+        }
+        guard let content = message["content"] as? String else {
+            throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
+        }
+        return try ExplanationDraft(json: Data(content.utf8))
+    }
+
+    /// The first choice's message in a chat completion. An error, whether the answer's or the first choice's, fails
+    /// with OpenRouter's reason.
+    static func message(from data: Data, key: String) throws -> [String: Any] {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ExplainError.invalidResponse("OpenRouter's answer is not a JSON object.")
         }
@@ -190,13 +203,7 @@ public struct OpenRouterProvider: AIProvider {
         guard let message = choice["message"] as? [String: Any] else {
             throw ExplainError.invalidResponse("OpenRouter's answer has no message.")
         }
-        if let refusal = message["refusal"] as? String, !refusal.isEmpty {
-            throw ExplainError.rejected("The model declined to explain this item.")
-        }
-        guard let content = message["content"] as? String else {
-            throw ExplainError.invalidResponse("OpenRouter's answer has no content.")
-        }
-        return try ExplanationDraft(json: Data(content.utf8))
+        return message
     }
 
     /// "OpenRouter could not answer: …", with OpenRouter's message as `OpenRouterClient.message(in:key:)` gives it.
@@ -300,8 +307,10 @@ public struct OpenRouterClient: Sendable {
     /// The body of OpenRouter's 2xx answer. A chat completion sends exactly the body it is given, the retry included.
     /// Throws `ExplainError.failed` with the status and OpenRouter's message, or with the timeout or connection
     /// failure; `CancellationError` when cancelled, before the request or its retry is sent, during the backoff, or
-    /// while it is on its way.
-    public func send(_ request: Request, key: String) async throws -> Data {
+    /// while it is on its way. `received` runs once, as the first HTTP answer comes, whatever its status: before a retry
+    /// it leads to, so OpenRouter is known to have the request even when the retry then fails.
+    public func send(_ request: Request, key: String,
+                     received: @Sendable () async -> Void = { /* Receipt is not recorded. */ }) async throws -> Data {
         let urlRequest = Self.urlRequest(request, key: key)
         for attempt in 1...2 {
             try Task.checkCancellation()
@@ -325,6 +334,7 @@ public struct OpenRouterClient: Sendable {
             }
             let status = http.statusCode
             log.record("OpenRouter \(request.name) answered \(status)")
+            if attempt == 1 { await received() }
             if (200..<300).contains(status) { return data }
             if attempt == 1, status == 429 || (500..<600).contains(status) {
                 let delay = Self.delay(retryAfter: http.value(forHTTPHeaderField: "Retry-After"))

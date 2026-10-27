@@ -6,22 +6,31 @@ import SystemProcesses
 /// local snapshots, whose sizes macOS does not report. A figure the volume did not give is "–".
 public struct DiskVolumeHeader: Equatable, Sendable {
     public let title: String
+    /// The volume's own name and its mount point, kept apart because a mount point is a path (SET-51 redacts it as one).
+    public let name: String?
+    public let mountPoint: String?
     public let capacity: String
     public let availableForImportantUse: String
     public let purgeable: String
     public let snapshots: String
+    /// How many local snapshots there are; `nil` when they could not be listed.
+    public let snapshotCount: Int?
     public let accessibilityLabel: String
 
     public init(_ summary: VolumeSummary, format: UsageFormat) {
-        title = summary.values.name ?? summary.values.mountPoint ?? "Volume"
+        name = summary.values.name
+        mountPoint = summary.values.mountPoint
+        title = name ?? mountPoint ?? "Volume"
         capacity = format.diskBytes(summary.capacity)
         availableForImportantUse = format.diskBytes(summary.availableForImportantUsage)
         purgeable = format.diskBytes(summary.purgeable)
         switch summary.snapshots {
         case let .count(count):
+            snapshotCount = count
             snapshots = count == 0 ? "No local snapshots"
                 : "\(format.count(count)) local snapshot\(count == 1 ? "" : "s"), sizes unavailable"
         case let .unavailable(reason):
+            snapshotCount = nil
             snapshots = "Local snapshots unavailable: \(reason)"
         }
         accessibilityLabel = "\(title): capacity \(capacity), \(availableForImportantUse) available for important use, "

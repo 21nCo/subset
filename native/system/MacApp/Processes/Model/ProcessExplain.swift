@@ -122,7 +122,7 @@ extension ProcessesWindowModel {
     /// A group's name as sent. An Unattributed executable's group, named by its path wherever it is, is named by that
     /// path's last name as sent, so a path is sent only as the path field. Another group standing for a path in the
     /// home folder (an app, a login item, a project) is named as the redactor names that path's last folder or file.
-    private static func explainName(_ id: OriginGroupID, _ name: String, redactor: ExplainRedactor) -> String {
+    static func explainName(_ id: OriginGroupID, _ name: String, redactor: ExplainRedactor) -> String {
         guard let path = path(of: id) else { return name }
         if name == path { return redactor.name(ofPath: path) }
         return redactor.isInHome(path) ? redactor.name(name, ofPath: path) : name

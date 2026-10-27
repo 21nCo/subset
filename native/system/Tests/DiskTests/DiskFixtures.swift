@@ -87,8 +87,9 @@ final class DiskFixture {
             volume: volume ?? { _ in Self.volume })
     }
 
-    func model(rowLimit: Int = 500, service: DiskScanService? = nil) -> DiskWindowModel {
-        DiskWindowModel(service: service ?? self.service(), format: format, home: home, rowLimit: rowLimit)
+    func model(rowLimit: Int = 500, service: DiskScanService? = nil,
+               clock: @escaping @MainActor () -> Date = { .now }) -> DiskWindowModel {
+        DiskWindowModel(service: service ?? self.service(), format: format, home: home, rowLimit: rowLimit, clock: clock)
     }
 
     /// Scans the home scope and waits for origins and suggestions.

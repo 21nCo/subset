@@ -24,13 +24,14 @@ final class MainWindowState {
     var section: MainWindowSection = .processes
 }
 
-/// The main window: the section picker above Processes or Disk.
+/// The main window: the section picker above Processes or Disk, and Ask below them.
 struct MainWindowView: View {
     @Bindable var state: MainWindowState
     let processes: ProcessesWindowModel
     let disk: DiskWindowModel
     let monitor: SystemMonitor
     let explain: ExplainCenter
+    let ask: AskCenter
     let openSettings: () -> Void
 
     var body: some View {
@@ -49,6 +50,8 @@ struct MainWindowView: View {
             case .processes: ProcessesView(model: processes, monitor: monitor, explain: explain, openSettings: openSettings)
             case .disk: DiskView(model: disk, explain: explain, openSettings: openSettings)
             }
+            Divider()
+            AskView(center: ask, openSettings: openSettings)
         }
     }
 }

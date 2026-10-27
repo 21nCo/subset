@@ -62,7 +62,7 @@ struct ExplainPanel: View {
         .onChange(of: preview, initial: true) { _, preview in showingPreview = preview != nil }
         .sheet(isPresented: $showingPreview) {
             if let preview {
-                SendPreviewSheet(preview: preview) {
+                SendPreviewSheet(provider: preview.provider, text: preview.text) {
                     showingPreview = false
                     Task { await center.confirmSend(key, preview: preview) }
                 } cancel: {
@@ -213,7 +213,8 @@ struct SettingsView: View {
                     + "arguments and file contents are never sent: System never reads them. Nothing is sent until you "
                     + "choose a provider and press Explain; with OpenRouter, until it has answered a request you confirmed since "
                     + "System opened, each request is shown to you, exactly as it will be sent, and sent only once you "
-                    + "confirm it.")
+                    + "confirm it. Ask sends your question, the thread's earlier questions and answers, and the results "
+                    + "of the read-only tools it calls, redacted the same way.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             OpenRouterSection(account: openRouter)
@@ -224,22 +225,24 @@ struct SettingsView: View {
     }
 }
 
-/// The send preview: exactly the body that will be sent, and Send or Cancel. Cancel, or Escape, sends nothing.
-private struct SendPreviewSheet: View {
-    let preview: SendPreview
+/// The send preview, for Explain and Ask: exactly the body that will be sent, and Send or Cancel. Cancel, or Escape,
+/// sends nothing.
+struct SendPreviewSheet: View {
+    let provider: AIProviderChoice
+    let text: String
     let send: () -> Void
     let cancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Send to \(preview.provider.title)?").font(.title3.bold())
+            Text("Send to \(provider.title)?").font(.title3.bold())
             Text("This is exactly what will be sent to openrouter.ai, with your API key in the request's Authorization "
                 + "header. You are asked for each request until OpenRouter has answered one you sent since System opened; "
                 + "nothing is sent unless you choose Send.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {
-                Text(verbatim: preview.text)
+                Text(verbatim: text)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

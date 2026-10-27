@@ -86,6 +86,7 @@ public final class ExplainCenter {
             guard choice != oldValue else { return }
             defaults.set(choice.rawValue, forKey: Self.choiceKey)
             endWork()
+            onWorkEnded?(.providerChanged)
         }
     }
     /// Why the choice was set back from OpenRouter; cleared when the user next chooses a provider.
@@ -95,7 +96,8 @@ public final class ExplainCenter {
     /// shows the request reached it. A confirmed request that is cancelled, refused before it is sent, or not answered
     /// (no connection, or no answer in time, when whether it reached OpenRouter is not known) leaves the preview
     /// required.
-    public private(set) var sendConfirmed = false
+    /// Ask (SET-51) shares it: its requests to OpenRouter wait for the same preview, and set it the same way.
+    public internal(set) var sendConfirmed = false
     /// Sends folder names deeper than the first level under `~` instead of placeholders. Off by default.
     public var sendFolderNames: Bool {
         didSet {
@@ -108,6 +110,7 @@ public final class ExplainCenter {
             }
             previews = [:]
             for work in pending.values where work.sendsOffThisMac { work.cancel() }
+            onWorkEnded?(.folderNamesChanged)
         }
     }
     /// The chosen provider's availability from its latest read, which may still be checking or may not have answered
@@ -141,7 +144,17 @@ public final class ExplainCenter {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let openRouter: OpenRouterAccount?
-    @ObservationIgnored private let makeProvider: @MainActor (AIProviderChoice) -> (any AIProvider)?
+    @ObservationIgnored let makeProvider: @MainActor (AIProviderChoice) -> (any AIProvider)?
+    /// Tells Ask (SET-51) when the work begun before must end, so it ends its own.
+    @ObservationIgnored var onWorkEnded: (@MainActor (WorkEnd) -> Void)?
+
+    /// Why the work in flight ended.
+    enum WorkEnd {
+        case providerChanged
+        /// Add Key or Remove Key began while OpenRouter is chosen.
+        case keyChanging
+        case folderNamesChanged
+    }
     @ObservationIgnored private let baseRedactor: ExplainRedactor
     @ObservationIgnored private let availabilityTimeout: Duration
     @ObservationIgnored private let answerTimeout: Duration
@@ -191,7 +204,9 @@ public final class ExplainCenter {
         sendFolderNames = defaults.bool(forKey: Self.sendFolderNamesKey)
         openRouter?.onSetback = { [weak self] setback in self?.setBack(setback) }
         openRouter?.onKeyChange = { [weak self] in
-            if self?.choice == .openRouter { self?.endWork() }
+            guard let self, choice == .openRouter else { return }
+            endWork()
+            onWorkEnded?(.keyChanging)
         }
         // The change ended the status Settings showed; it is read again while OpenRouter is still chosen.
         openRouter?.onKeyChangeEnd = { [weak self] in
@@ -310,7 +325,7 @@ public final class ExplainCenter {
 
     /// Whether `choice` is OpenRouter while Add Key or Remove Key waits for the Keychain: no request to it is begun or
     /// sent then, since what it would read is the key being replaced or removed.
-    private func keyChanging(_ choice: AIProviderChoice) -> Bool {
+    func keyChanging(_ choice: AIProviderChoice) -> Bool {
         choice == .openRouter && openRouter?.isChangingKey == true
     }
 
@@ -556,20 +571,36 @@ public final class ExplainCenter {
         guard selection == self.selection else { return }
         if case let .unavailable(availability)? = outcome {
             // Refused before it was sent. Overtaken by a later check, it ends only this item; the newer check decides.
-            if !checks.isLatest(check), let message = Self.overtaken(availability) {
+            if let message = refused(availability, check: check, from: provider) {
                 states[key] = .failed(message, request)
                 sentBodies[key] = nil
                 return
             }
             // A refusal that sets the choice back ends this work, so it is not kept as the item's state when
             // OpenRouter is chosen again.
-            noteOpenRouter(availability, from: provider)
             guard selection == self.selection else { return }
         }
         states[key] = outcome
         // Only an answer shows the body reached the provider; one refused, cancelled, failed or not answered in time
         // may never have left this Mac.
         sentBodies[key] = answered ? body : nil
+    }
+
+    /// Takes a check (`checks`) before Ask (SET-51) reads the OpenRouter key, as the key read as an Explain request is
+    /// sent does.
+    func startCheck() -> Int {
+        checks.start()
+    }
+
+    /// Acts on a refusal as a request is sent, Explain's or Ask's (`ExplainError.unavailable`, or `AskKeyRefusal`),
+    /// found by the check `check`: from the latest check, it sets the choice back and, for a model ID holding the key,
+    /// clears it (`noteOpenRouter(_:from:)`), and returns `nil`. Overtaken by a later check, it sets nothing back, says
+    /// nothing in `notice`, and clears or reads again nothing, and returns what only its own request shows
+    /// (`overtaken(_:)`).
+    func refused(_ availability: AIAvailability, check: Int, from provider: any AIProvider) -> String? {
+        if !checks.isLatest(check), let message = Self.overtaken(availability) { return message }
+        noteOpenRouter(availability, from: provider)
+        return nil
     }
 
     /// `operation`'s result, run so that changing the provider cancels it, as cancelling the caller does, and so does
