@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import os
-import SystemCore
+@testable import SystemCore
 import SystemHelper
 import XCTest
 
@@ -91,6 +91,15 @@ final class DiskReportTests: XCTestCase {
         let suggestions = await run(["disk", "--suggestions", "--path", folder.path, "--timeout", "0.2", "--json"], environment)
         try assertValid(suggestions, "disk-suggestions.schema.json")
         XCTAssertEqual(suggestions.exit, .timeout)
+
+        // A cancelled scan leaves the home folder not read in full, which the suggestions say without its path.
+        let cancelled = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, home: folder.path, edit: { tree, _ in
+            tree.nodes[0].flags.insert(.partial)
+        }), home: folder.path)
+        let home = await run(["disk", "--suggestions", "--path", folder.path, "--timeout", "0.2", "--json"], cancelled)
+        try assertValid(home, "disk-suggestions.schema.json")
+        XCTAssertTrue(home.stdout.contains("\"unavailableReason\": \"~ was not read in full.\""), home.stdout)
+        XCTAssertFalse(home.stdout.contains(folder.url.lastPathComponent), home.stdout)
     }
 
     /// The smallest timeout accepted is reported as applied, positive, and both disk results still validate.
@@ -169,7 +178,7 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual(json["restricted"] as? [String: Int], ["unreadablePaths": 0])
         let errors = try XCTUnwrap(json["errors"] as? [[String: String]])
         XCTAssertEqual(errors.map { $0["code"] }, ["scanIncomplete"], output.stdout)
-        XCTAssertTrue(errors.first?["message"]?.hasSuffix("/b changed while the scan read them and were not read; sizes are lower bounds.") ?? false,
+        XCTAssertTrue(errors.first?["message"]?.hasSuffix("/b were not read in full: replaced while the scan read them, or past its item limit; sizes are lower bounds.") ?? false,
                       "\(errors)")
     }
 
@@ -206,10 +215,96 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual(notAsked.exit, .ok)
         XCTAssertEqual(notAskedCodes, [])
 
-        let (unreadApps, unreadAppsCodes) = try await suggestions(.unavailable(.cliNotFound),
-                                                                  apps: InstalledApps([], unread: ["/Applications/Locked.app"]))
-        XCTAssertEqual(unreadApps.exit, .partial)
-        XCTAssertEqual(unreadAppsCodes, ["installedAppsUnread"])
+    }
+
+    /// Every suggestion left incomplete or unavailable by something the scan's flags do not explain makes the result
+    /// partial, with that cause's code, and keeps what was measured. What the flags explain as no failure (an iCloud
+    /// placeholder) or what nothing reported depends on (an unread app no entry may belong to) leaves it complete.
+    func testEveryValueARuleCouldNotJudgeMakesSuggestionsPartial() async throws {
+        let devices = "Library/Developer/CoreSimulator/Devices"
+        let runtime = try PropertyListSerialization.data(fromPropertyList: ["runtime": "com.apple.CoreSimulator.SimRuntime.iOS-1-0"],
+                                                         format: .xml, options: 0)
+        func suggestions(apps: InstalledApps = InstalledApps([]), edit: (@Sendable (inout DiskTree, String) -> Void)? = nil,
+                         _ setUp: (TemporaryFolder) throws -> Void) async throws -> (exit: HelperExit, codes: [String], rules: [String: [String: Any]]) {
+            let home = try TemporaryFolder()
+            try home.file("Documents/notes.txt", bytes: 10)
+            try setUp(home)
+            let environment = HelperFixtures.environment(
+                disk: HelperFixtures.diskProbe(home: home.path, apps: apps, edit: edit), home: home.path)
+            let output = await run(["disk", "--suggestions", "--path", home.path, "--json"], environment)
+            try assertValid(output, "disk-suggestions.schema.json")
+            let json = try object(output)
+            XCTAssertEqual(json["complete"] as? Bool, output.exit == .ok)
+            let codes = (json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String } ?? []
+            let suggestions = json["suggestions"] as? [[String: Any]] ?? []
+            let bytes = suggestions.reduce(into: [String: [String: Any]]()) { $0[$1["ruleId"] as? String ?? ""] = $1["bytes"] as? [String: Any] }
+            return (output.exit, codes, bytes)
+        }
+        // The scanner reports the real path, which `edit` gets as the root.
+        func touchUnknown(_ relative: String) -> @Sendable (inout DiskTree, String) -> Void {
+            { tree, root in
+                if let index = tree.index(atPath: root + "/" + relative) { tree.nodes[index].touched = DiskTree.Node.unknownTime }
+            }
+        }
+
+        let malformed = try await suggestions { home in try home.file("\(devices)/A/device.plist", bytes: 3) }
+        XCTAssertEqual(malformed.exit, .partial)
+        XCTAssertEqual(malformed.codes, ["devicePlistUnread"])
+        XCTAssertEqual(malformed.rules["unavailableSimulators"]?["kind"] as? String, "unavailable")
+
+        let mixed = try await suggestions { home in
+            try home.file("\(devices)/A/device.plist", bytes: 3)
+            try home.file("\(devices)/B/data.img", bytes: 4096)
+            try runtime.write(to: home.url.appendingPathComponent("\(devices)/B/device.plist"))
+        }
+        XCTAssertEqual(mixed.exit, .partial)
+        XCTAssertEqual(mixed.codes, ["devicePlistUnread"])
+        XCTAssertEqual(mixed.rules["unavailableSimulators"]?["kind"] as? String, "scanned")
+        XCTAssertEqual(mixed.rules["unavailableSimulators"]?["complete"] as? Bool, false)
+
+        let missing = try await suggestions { home in try home.file("\(devices)/C/data.img", bytes: 10) }
+        XCTAssertEqual(missing.exit, .partial)
+        XCTAssertEqual(missing.codes, ["devicePlistUnread"])
+
+        let unsigned = InstalledApps([InstalledApp(path: "/Applications/Signed.app", bundleID: "com.example.signed",
+                                                   name: "Signed", signature: nil, appGroups: nil)])
+        let signing = try await suggestions(apps: unsigned) { home in
+            try home.file("Library/Group Containers/group.com.example.gone/data", bytes: 10)
+        }
+        XCTAssertEqual(signing.exit, .partial)
+        XCTAssertEqual(signing.codes, ["installedAppsUnread"])
+
+        let locked = InstalledApps([], unread: ["/Applications/Locked.app"])
+        let unreadApp = try await suggestions(apps: locked) { home in try home.file("Library/Caches/com.example.gone/x", bytes: 10) }
+        XCTAssertEqual(unreadApp.exit, .partial)
+        XCTAssertEqual(unreadApp.codes, ["installedAppsUnread"])
+        let nothingDepends = try await suggestions(apps: locked) { _ in }
+        XCTAssertEqual(nothingDepends.exit, .ok)
+        XCTAssertEqual(nothingDepends.codes, [])
+
+        let installer = try await suggestions(edit: touchUnknown("Downloads/old.dmg")) { home in
+            try home.file("Downloads/old.dmg", bytes: 10)
+        }
+        XCTAssertEqual(installer.exit, .partial)
+        XCTAssertEqual(installer.codes, ["modificationTimeUnknown"])
+        XCTAssertEqual(installer.rules["oldInstallers"]?["kind"] as? String, "unavailable")
+
+        let project = try await suggestions(edit: touchUnknown("dev/app/package.json")) { home in
+            try home.file("dev/app/package.json", bytes: 10)
+            try home.file("dev/app/node_modules/x/index.js", bytes: 10)
+        }
+        XCTAssertEqual(project.exit, .partial)
+        XCTAssertEqual(project.codes, ["modificationTimeUnknown"])
+
+        // A placeholder folder is never downloaded, so the match is incomplete, and that is not a failure.
+        let placeholder = try await suggestions(edit: { tree, root in
+            guard let index = tree.index(atPath: root + "/Library/Caches/Homebrew") else { return }
+            tree.nodes[index].flags = .dataless
+            tree.nodes[index].childCount = 0
+        }) { home in try home.file("Library/Caches/Homebrew/bottle.tar.gz", bytes: 10) }
+        XCTAssertEqual(placeholder.exit, .ok)
+        XCTAssertEqual(placeholder.codes, [])
+        XCTAssertEqual(placeholder.rules["homebrewCache"]?["complete"] as? Bool, false)
     }
 
     func testAPathThatIsNotAFolderIsAnErroredResultThatValidates() async throws {

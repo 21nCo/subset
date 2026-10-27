@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import SystemCore
+@testable import SystemCore
 import SystemHelper
 import XCTest
 
@@ -115,16 +115,25 @@ enum HelperFixtures {
     /// Scans with the real scanner, `volume`, and no installed apps, with `home` as the home folder. `slow` keeps the
     /// scan waiting until it is cancelled, then returns the real scan as cancelled. `onProgress` sees the scan's
     /// progress. `includedDocker` records each analysis's Docker flag; `docker` is what Docker answers when asked.
+    /// `edit` changes the scanned tree, given its root, to place states a test folder cannot have.
     static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil, home: String = home,
                           volume: VolumeSummary = HelperFixtures.volume,
                           docker: DockerImageUsage = .unavailable(.cliNotFound), apps: InstalledApps = InstalledApps([]),
-                          onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil) -> DiskProbe {
+                          onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil,
+                          edit: (@Sendable (inout DiskTree, String) -> Void)? = nil) -> DiskProbe {
         DiskProbe(
             scan: { root in
                 let scanned: Result<DiskScanResult, DiskScanError>
                 do throws(DiskScanError) {
                     let scanner = DiskScanner(workers: 1, progressInterval: onProgress == nil ? .milliseconds(100) : .zero)
-                    scanned = .success(try await scanner.scan(URL(fileURLWithPath: root), onProgress: onProgress))
+                    var result = try await scanner.scan(URL(fileURLWithPath: root), onProgress: onProgress)
+                    if let edit {
+                        var tree = result.tree
+                        edit(&tree, tree.rootPath)
+                        result = DiskScanResult(tree: tree, outcome: result.outcome, unreadablePaths: result.unreadablePaths,
+                                                entriesRead: result.entriesRead)
+                    }
+                    scanned = .success(result)
                 } catch {
                     scanned = .failure(error)
                 }

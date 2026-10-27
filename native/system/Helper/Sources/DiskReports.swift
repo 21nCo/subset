@@ -46,7 +46,8 @@ enum DiskReports {
         let timedOut: Bool
     }
 
-    /// Scans `root`, cancelling the scan after `timeout`; a cancelled scan returns what it read.
+    /// Scans `root`, cancelling the scan after `timeout`; a cancelled scan returns what it read. A scan that finished
+    /// or failed before the cancellation reached it has not timed out.
     static func scan(_ root: String, probe: DiskProbe, timeout: Duration) async -> Scan {
         enum Event: Sendable {
             case finished(Result<DiskScanResult, DiskScanError>)
@@ -63,14 +64,13 @@ enum DiskReports {
                     return .timerStopped
                 }
             }
-            var timedOut = false
             while let event = await group.next() {
                 switch event {
                 case let .finished(result):
                     group.cancelAll()
-                    return Scan(result: result, timedOut: timedOut)
+                    guard case let .success(scanned) = result else { return Scan(result: result, timedOut: false) }
+                    return Scan(result: result, timedOut: scanned.outcome == .cancelled)
                 case .timedOut:
-                    timedOut = true
                     group.cancelAll()
                 case .timerStopped:
                     continue
@@ -129,7 +129,7 @@ enum DiskReports {
             return "  \(match.rule.name)\(subject.map { " (\($0))" } ?? ""): \(size), \(match.risk.rawValue)"
         }
         return finished(scan, result: result, command: "disk-suggestions", path: path, timeout: timeout, paths: paths,
-                        now: now, errors: contextErrors(context, includeDocker: includeDocker, matches: matches, paths: paths),
+                        now: now, errors: failureErrors(matches, paths: paths),
                         sources: [
                             ("suggestions", "Subset System's reclaim rule catalog, version \(ReclaimRules.catalogVersion), over the scan"),
                             ("installedApps", "Info.plist and code signature of each app in /Applications, /System/Applications, and ~/Applications"),
@@ -173,7 +173,7 @@ enum DiskReports {
         if scan.timedOut {
             errors.append(HelperError(code: "timedOut",
                                       message: "The scan did not finish within \(timeoutSeconds(timeout).pretty) seconds; sizes count only what was read."))
-        } else if let error = incompleteScanError(result.tree, unreadable: unreadable, paths: paths) {
+        } else if let error = incompleteScanError(result.tree, unreadable: result.unreadablePaths, paths: paths) {
             errors.append(error)
         }
         errors += readErrors
@@ -199,21 +199,33 @@ enum DiskReports {
     }
 
     /// Why a scan that was not stopped still left sizes as lower bounds when no unreadable item explains it: a folder
-    /// replaced between being listed and being opened is not read, nor are the scanned folder's own attributes when
-    /// they cannot be read. `nil` when the tree is complete or only unreadable items, counted already, made it not.
-    static func incompleteScanError(_ tree: DiskTree, unreadable: Int, paths: PathDisplay) -> HelperError? {
-        let explained: DiskItemFlags = [.unreadable, .partial]
+    /// replaced between being listed and being opened is not read, nor is a package's folder replaced that way, nor a
+    /// folder once the tree is full, nor the scanned folder's own attributes when they cannot be read. `nil` when the
+    /// tree is complete or only unreadable items, counted already, made it not.
+    static func incompleteScanError(_ tree: DiskTree, unreadable: [String], paths: PathDisplay) -> HelperError? {
         let notRead = (0..<tree.count).filter { index in
             let item = tree[index]
-            return item.kind == .directory && item.flags.contains(.incomplete) && item.flags.isDisjoint(with: explained)
-                && item.children.isEmpty
+            guard !item.flags.contains(.unreadable) else { return false }
+            if item.flags.contains(.partial) { return true }
+            guard item.flags.contains(.incomplete) else { return false }
+            switch item.kind {
+            case .directory:
+                // Above an unread item a folder is incomplete too, but lists what it read.
+                return item.children.isEmpty
+            case .package:
+                // A package's contents are not listed: only an unreadable item inside it explains its flag.
+                let prefix = tree.path(of: index) + "/"
+                return !unreadable.contains { $0.hasPrefix(prefix) }
+            case .file, .symlink, .other, .mountPoint:
+                return false
+            }
         }
         if let first = notRead.first {
             let others = notRead.count > 1 ? " and \(notRead.count - 1) more folders" : ""
             return HelperError(code: "scanIncomplete",
-                               message: "\(paths(tree.path(of: first)))\(others) changed while the scan read them and were not read; sizes are lower bounds.")
+                               message: "\(paths(tree.path(of: first)))\(others) were not read in full: replaced while the scan read them, or past its item limit; sizes are lower bounds.")
         }
-        guard tree.root.flags.contains(.incomplete), unreadable == 0 else { return nil }
+        guard tree.root.flags.contains(.incomplete), unreadable.isEmpty else { return nil }
         return HelperError(code: "scanIncomplete",
                            message: "Part of \(paths(tree.rootPath)) could not be read; sizes are lower bounds.")
     }
@@ -237,41 +249,24 @@ enum DiskReports {
         return errors
     }
 
-    /// What the reclaim rules read besides the scan and could not. Docker's image space is a failed read only when it
-    /// was asked for and a Docker CLI is installed: not asking (a scan of another folder) or no `docker` command is not
-    /// a failure. The simulator runtimes count only when a simulator device needed them.
-    static func contextErrors(_ context: ReclaimContext, includeDocker: Bool, matches: [ReclaimMatch],
-                              paths: PathDisplay) -> [HelperError] {
-        var errors: [HelperError] = []
-        if !context.installedApps.unread.isEmpty {
-            let unread = context.installedApps.unread
-            let others = unread.count > 1 ? " and \(unread.count - 1) more" : ""
-            errors.append(HelperError(code: "installedAppsUnread",
-                                      message: "Could not read \(paths(unread[0]))\(others) among the installed apps, so items they may own are not attributed to an app."))
+    /// What the reclaim rules could not judge apart from what the scan's flags say (`ReclaimMatch.failures`), one
+    /// error per kind. The rest of a match's incompleteness is unreadable items, counted in `restricted`, a timeout or
+    /// an incomplete scan, which have their own errors, or what is not a failure: iCloud placeholders, other volumes,
+    /// links, items counted at another path, Docker's images when no Docker CLI is installed or they were not asked for.
+    static func failureErrors(_ matches: [ReclaimMatch], paths: PathDisplay) -> [HelperError] {
+        let codes: [(ReclaimFailure.Kind, String)] = [
+            (.devicePlist, "devicePlistUnread"), (.simulatorRuntimes, "simulatorRuntimesUnknown"),
+            (.modificationTime, "modificationTimeUnknown"), (.installedApps, "installedAppsUnread"),
+            (.dockerImages, "dockerUnavailable")
+        ]
+        var seen = Set<String>()
+        let failures = matches.flatMap(\.failures).filter { seen.insert("\($0.kind.rawValue) \($0.reason)").inserted }
+        return codes.compactMap { kind, code in
+            let reasons = failures.filter { $0.kind == kind }.map(\.reason)
+            guard let first = reasons.first else { return nil }
+            let others = reasons.count > 1 ? " \(reasons.count - 1) more like it." : ""
+            return HelperError(code: code, message: paths.message(first) + others)
         }
-        if case let .unknown(reason) = context.simulatorRuntimes,
-           matches.contains(where: { match in
-               guard match.rule.id == .unavailableSimulators, case .unavailable = match.bytes else { return false }
-               return true
-           }) {
-            errors.append(HelperError(code: "simulatorRuntimesUnknown",
-                                      message: "Could not read the installed simulator runtimes: \(paths.message(reason))"))
-        }
-        if includeDocker {
-            switch context.dockerImages {
-            case .unavailable(.cliNotFound), nil:
-                break
-            case let .unavailable(reason):
-                errors.append(HelperError(code: "dockerUnavailable",
-                                          message: "Could not read Docker's image space: \(paths.message(reason.reason))"))
-            case let .reported(space, _) where space.reclaimable == nil:
-                errors.append(HelperError(code: "dockerUnavailable",
-                                          message: "docker system df did not report reclaimable image space."))
-            case .reported:
-                break
-            }
-        }
-        return errors
     }
 
     private static let sizeSource = "getattrlistbulk over the folder, without crossing volumes or following links; allocated, logical, and private bytes per item"

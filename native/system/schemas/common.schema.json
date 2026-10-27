@@ -23,7 +23,8 @@
           "code": {
             "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "usageUnavailable", "originSignalsNotRead",
                      "cannotResolve", "notADirectory", "notLocal", "timedOut", "scanIncomplete", "volumeUnavailable",
-                     "snapshotsUnavailable", "installedAppsUnread", "simulatorRuntimesUnknown", "dockerUnavailable"]
+                     "snapshotsUnavailable", "installedAppsUnread", "simulatorRuntimesUnknown", "dockerUnavailable",
+                     "devicePlistUnread", "modificationTimeUnknown"]
           },
           "message": { "type": "string" }
         }

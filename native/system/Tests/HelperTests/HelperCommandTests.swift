@@ -102,6 +102,26 @@ final class HelperCommandTests: XCTestCase {
         XCTAssertEqual(PathDisplay(home: "/Users/me", absolute: true)("/Users/me/dev"), "/Users/me/dev")
     }
 
+    /// A message names the home folder bare as often as a path inside it, followed by prose or punctuation.
+    func testMessagesRedactTheHomeFolderWhereverItIsAWholePath() {
+        let paths = PathDisplay(home: "/Users/me", absolute: false)
+        let redacted: [(String, String)] = [
+            ("/Users/me was not read in full.", "~ was not read in full."),
+            ("/Users/me 22 more places could not be searched in full.", "~ 22 more places could not be searched in full."),
+            ("Could not read /Users/me.", "Could not read ~."),
+            ("Could not read /Users/me: denied, or (/Users/me), \"/Users/me\"; /Users/me/a and /Users/me",
+             "Could not read ~: denied, or (~), \"~\"; ~/a and ~"),
+            ("/Users/me/", "~/"),
+            ("Cannot connect at unix:///Users/me/.docker/run/docker.sock.", "Cannot connect at unix://~/.docker/run/docker.sock.")
+        ]
+        for (text, expected) in redacted { XCTAssertEqual(paths.message(text), expected, text) }
+        for kept in ["/Users/me2 was not read.", "/Users/me.old was not read.", "/Users/me-x/a", "/Volumes/b/Users/me was not read."] {
+            XCTAssertEqual(paths.message(kept), kept)
+        }
+        let absolute = PathDisplay(home: "/Users/me", absolute: true)
+        XCTAssertEqual(absolute.message("/Users/me was not read in full."), "/Users/me was not read in full.")
+    }
+
     /// The validator itself must reject what the schemas forbid, or every passing schema test would prove nothing.
     func testTheValidatorRejectsDocumentsTheSchemasForbid() throws {
         var validator = SchemaValidator()

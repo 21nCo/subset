@@ -93,6 +93,20 @@ final class ProcessReportTests: XCTestCase {
         }
     }
 
+    func testEveryLayerWithoutRestrictedProcessesIsACompleteResult() async throws {
+        for layer in HelperLayer.allCases {
+            let output = await run(["processes", "--layer", layer.rawValue, "--json"], HelperFixtures.environment(
+                processes: HelperFixtures.probe(HelperFixtures.workload(restricted: false))))
+            try assertValid(output, "processes.schema.json")
+            XCTAssertEqual(output.exit, .ok, layer.rawValue)
+            let json = try object(output)
+            XCTAssertEqual(json["complete"] as? Bool, true, layer.rawValue)
+            XCTAssertEqual(json["restricted"] as? [String: Int], ["processes": 0], layer.rawValue)
+            XCTAssertEqual((json["errors"] as? [Any])?.count, 0, layer.rawValue)
+            XCTAssertFalse((json["groups"] as? [Any])?.isEmpty ?? true, layer.rawValue)
+        }
+    }
+
     func testEveryLayerValidatesWithMembersAndTheirRule() async throws {
         for layer in HelperLayer.allCases {
             let output = await run(["processes", "--layer", layer.rawValue, "--json"], HelperFixtures.environment())

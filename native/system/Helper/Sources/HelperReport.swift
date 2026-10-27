@@ -27,15 +27,36 @@ public struct PathDisplay: Sendable {
         return path
     }
 
-    /// Replaces every occurrence of the home folder inside a message, where a path may follow other text.
-    func message(_ text: String) -> String {
+    /// Replaces the home folder wherever a message names it as a whole path: after the start, a space, an opening
+    /// quote or bracket, `:`, `=`, or a URL's `://` (`unix:///Users/ann/.docker/run/docker.sock`), and before the end, a `/`, a space, a closing quote or bracket, or punctuation that
+    /// ends the text or a clause. So `/Users/ann was not read.` and `(/Users/ann).` are redacted, while `/Users/ann2`,
+    /// `/Users/ann.old`, and `/Volumes/x/Users/ann` are not.
+    public func message(_ text: String) -> String {
         guard !absolute else { return text }
-        var result = text
-        for home in homes {
-            result = result.replacingOccurrences(of: home + "/", with: "~/")
-            if result.hasSuffix(home) { result = String(result.dropLast(home.count)) + "~" }
+        return homes.reduce(text) { text, home in Self.replace(home, in: text) }
+    }
+
+    private static func replace(_ home: String, in text: String) -> String {
+        let opening: Set<Character> = ["\"", "'", "\u{201C}", "\u{2018}", "(", "[", "{", "<", ":", "="]
+        let closing: Set<Character> = ["\"", "'", "\u{201D}", "\u{2019}", ")", "]", "}", ">"]
+        let punctuation: Set<Character> = [".", ",", ";", ":", "!", "?"]
+        func ends(_ rest: Substring) -> Bool {
+            guard let next = rest.first else { return true }
+            if next == "/" || next.isWhitespace || closing.contains(next) { return true }
+            guard punctuation.contains(next) else { return false }
+            let after = rest.dropFirst().first
+            return after == nil || after!.isWhitespace || closing.contains(after!)
         }
-        return result
+        var result = ""
+        var rest = text[...]
+        while let range = rest.range(of: home) {
+            let before = range.lowerBound == text.startIndex ? nil : text[text.index(before: range.lowerBound)]
+            let starts = before == nil || before!.isWhitespace || opening.contains(before!)
+                || text[..<range.lowerBound].hasSuffix("://")
+            result += rest[..<range.lowerBound] + (starts && ends(text[range.upperBound...]) ? "~" : home)
+            rest = text[range.upperBound...]
+        }
+        return result + rest
     }
 }
 
