@@ -336,7 +336,24 @@ struct AlertHandlerTests {
         #expect(daemon.log == ["register s1", "unregister s1"])
     }
 
-    /// A handback no daemon answers does not hold up quitting past its bound; the alert stays with the daemon, taken.
+    /// Quitting after playing an alert waits until a daemon hears that the app received it, so the daemon never plays it
+    /// too once the app's stream is gone.
+    @Test func quittingWaitsUntilTheDaemonHearsTheAppReceivedAnAlertItPlayed() async {
+        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.lose(confirmations: 3)
+        let receiving = Task { await handler.receive(alert("a1")) }
+        for _ in 0..<2_000 where !daemon.log.contains("play a1") { try? await Task.sleep(nanoseconds: 1_000_000) }
+        await handler.quit()
+        daemon.record("quit after \(daemon.confirmed.count) receipts")
+        await receiving.value
+        #expect(daemon.log.filter { $0.hasPrefix("play") || $0.hasPrefix("quit") } == ["play a1", "quit after 4 receipts"])
+    }
+
+    /// A handback no daemon answers does not hold up quitting past its bound; the daemon's sink plays the alert once the
+    /// app's stream has been gone 30 s (alert-handlers.test.mjs).
     @Test func quittingReturnsAtItsBoundWhenNoDaemonAnswersTheHandback() async {
         let handler = await handler()
         let quitting = Quitting()

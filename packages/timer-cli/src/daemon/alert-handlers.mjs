@@ -13,9 +13,18 @@ export const SETTLED_RETENTION_MS = 60_000;
  * How many acknowledged alerts the daemon keeps that no handler has said it received. None is ever
  * dropped: at this many, the daemon takes no more, and the sink plays the next alert acknowledged
  * (410). A running handler says so right after each 200, so only a handler that ended between a
- * 200 and saying so leaves one behind.
+ * 200 and saying so leaves one behind, until `ORPHANED_ALERT_MS` after it left.
  */
 export const MAX_UNRECEIVED = 1_000;
+/**
+ * How long, on the monotonic clock, an alert a handler took stays its own once that handler is no
+ * longer registered (it unregistered, its event stream closed, or it registered with an earlier
+ * daemon) without its saying it received the 200. Then the sink plays it, and a later
+ * acknowledgement or handback gets 410. A running handler says so right after it plays, so the
+ * one that has not said so by then ended without playing it, unless it ended (or stalled this long)
+ * after playing and before saying so: then the alert plays twice.
+ */
+export const ORPHANED_ALERT_MS = 30_000;
 
 export const newAlertId = () => randomBytes(16).toString('hex');
 
@@ -36,16 +45,20 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * answered only once `save(checkpoint)` has recorded the alert as taken, in `acknowledged`; when
  * that throws, the alert stays pending and the error is thrown to the caller. An acknowledged alert
  * stays in `acknowledged`, and so in every later save, until its handler says it received the 200
- * (`received`), however long that takes: a written reply does not mean the handler read it. The
- * next daemon takes the saved ones as `acknowledged`, so a handler whose 200 was lost gets it from
- * that daemon too. A handler that may no longer present an alert it took hands it back
+ * (`received`), however long that takes while it is the handler: a written reply does not mean the
+ * handler read it. The next daemon takes the saved ones as `acknowledged`, so a handler whose 200
+ * was lost gets it from that daemon too. One a handler took and never said it received is played
+ * by the sink `ORPHANED_ALERT_MS` after that handler stopped being the handler (or after the next
+ * daemon started), unless it is the handler again by then, so an app that ended before playing it
+ * does not lose it. A handler that may no longer present an alert it took hands it back
  * (`release`), and the sink plays it once that is saved: the alert is saved as a handoff again, so
  * a daemon that ends before the sink has played it leaves it for the next one to play. When that
  * save throws, the alert stays taken and the error is thrown to the caller.
  *
- * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting and
- * stopping) first asks `owns()` whether this daemon still holds `daemon.lock`. One that lost it
- * plays none of its pending alerts: the daemon that holds it plays those this one saved. Every
+ * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting,
+ * stopping and an orphaned taken alert) first asks `owns()` whether this daemon still holds
+ * `daemon.lock`. One that lost it plays none of its pending alerts: the daemon that holds it plays
+ * those this one saved. Every
  * sink play (a fallback, an alert with no handler, a replayed handoff) is tracked, and once stopped
  * nothing more is handed to the sink, so what `stop()` waits for is all it plays.
  *
@@ -73,6 +86,8 @@ export function createAlertHandlers({
   /** alertId → { subscriberId, alert, timer }, for acknowledged alerts whose handler has not said it received the 200. */
   const taken = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
+  /** subscriberId → timeout, for each former handler that still holds taken alerts, until `ORPHANED_ALERT_MS` ends. */
+  const orphaned = new Map();
   /** The sink's plays that have not finished, so shutdown can wait for them. */
   const playing = new Set();
   let stopped = false;
@@ -92,8 +107,29 @@ export function createAlertHandlers({
     settled.delete(alertId);
     settled.set(alertId, { subscriberId, at: monotonic() });
   }
-  // A daemon that ended before these handlers said they received their 200 left them for this one.
+  /**
+   * In `ORPHANED_ALERT_MS`, the sink plays the alerts `subscriberId` took and has not said it
+   * received, unless it is the handler again by then: they fall back as pending alerts do.
+   */
+  function orphan(subscriberId) {
+    if (orphaned.has(subscriberId) || ![...taken.values()].some((held) => held.subscriberId === subscriberId)) return;
+    const handle = clock.setTimeout(() => {
+      orphaned.delete(subscriberId);
+      if (handler === subscriberId) return;
+      for (const [alertId, held] of [...taken]) {
+        if (held.subscriberId !== subscriberId) continue;
+        taken.delete(alertId);
+        pending.set(alertId, { ...held, handle: null });
+      }
+      fallBackAll(subscriberId, `was taken by a handler that left ${ORPHANED_ALERT_MS / 1000} s ago without saying it received it`);
+    }, ORPHANED_ALERT_MS);
+    orphaned.set(subscriberId, handle);
+  }
+
+  // A daemon that ended before these handlers said they received their 200 left them for this one,
+  // and no stream of this daemon is their handler yet.
   for (const { alertId, subscriberId, alert, timer } of acknowledged) taken.set(alertId, { subscriberId, alert, timer });
+  for (const { subscriberId } of acknowledged) orphan(subscriberId);
 
   const handoffs = (except = null) => [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer }]) => ({ alertId, alert, timer }));
   /** What `save` records: the pending alerts and the acknowledged ones not yet received, plus `next`. */
@@ -208,12 +244,16 @@ export function createAlertHandlers({
       return { ok: true };
     },
 
-    /** Unregisters `subscriberId` if it is the handler; its pending alerts fall back at once. */
+    /**
+     * Unregisters `subscriberId` if it is the handler; its pending alerts fall back at once, and
+     * those it took and has not said it received, after `ORPHANED_ALERT_MS`.
+     */
     unregister(subscriberId, reason = 'was left unacknowledged when its handler unregistered') {
       if (handler !== subscriberId) return false;
       handler = null;
       log('the alert handler unregistered; the sink plays alerts.');
       fallBackAll(subscriberId, reason);
+      orphan(subscriberId);
       return true;
     },
 
@@ -321,7 +361,8 @@ export function createAlertHandlers({
     },
 
     /**
-     * At shutdown: the handler is dropped and every pending alert falls back. A daemon that lost
+     * At shutdown: the handler is dropped and every pending alert falls back; taken alerts stay
+     * saved for the next daemon, which plays any no handler claims. A daemon that lost
      * `daemon.lock` plays none: the daemon that holds it plays those this one saved, and delivers
      * again those whose marks this one could not save. Returns a promise that settles once the sink
      * has finished every play it started (fallbacks, alerts with no handler and replayed
@@ -329,6 +370,8 @@ export function createAlertHandlers({
      */
     stop({ lockLost = false } = {}) {
       handler = null;
+      for (const handle of orphaned.values()) clock.clearTimeout(handle);
+      orphaned.clear();
       if (lockLost) leaveToLockHolder();
       else fallBackAll(null, 'was pending when the daemon stopped');
       stopped = true;

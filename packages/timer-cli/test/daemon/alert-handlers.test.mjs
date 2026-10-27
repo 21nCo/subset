@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
-import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, createStateStore, daemonPaths, socketRequest } from '../../src/daemon/index.mjs';
+import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, ORPHANED_ALERT_MS, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, createStateStore, daemonPaths, socketRequest } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 
 const TABATA_MS = 250_000;
@@ -781,8 +782,9 @@ test('a handback whose save after the play fails still gets 200, and the next ru
   assert.deepEqual([context.sink.received.length, successor.sink.received.length], [1, 0]);
 });
 
-test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and only for their handler', () => {
+test(`a daemon answers 200 for the acknowledgements an earlier daemon saved, only for their handler, and plays those not received within ${ORPHANED_ALERT_MS / 1000} s`, () => {
   const earlier = { alertId: 'a1', subscriberId: 's1', alert: { timerId: 't_1', kind: 'finish', at: 0 }, timer: { id: 't_1', name: 'Egg', sound: false } };
+  const unclaimed = { ...earlier, alertId: 'a2', alert: { timerId: 't_1', kind: 'tick', at: 0 } };
   const clock = createFakeClock();
   const sink = createRecordingSink();
   const saved = [];
@@ -793,18 +795,25 @@ test('a daemon answers 200 for the acknowledgements an earlier daemon saved, and
     publish: () => {},
     isOpen: () => true,
     save: (checkpoint) => saved.push(checkpoint),
-    acknowledged: [earlier]
+    acknowledged: [earlier, unclaimed]
   });
-  assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [earlier] });
+  assert.deepEqual(handlers.checkpoint, { handoffs: [], acknowledged: [earlier, unclaimed] });
   assert.equal(handlers.acknowledge('a1', 's2').status, 409);
   assert.equal(handlers.acknowledge('a1', 's1').ok, true);
-  // Answering it does not drop it, however long the handler takes: it may never have read that 200.
-  clock.advance(10 * SETTLED_RETENTION_MS);
-  assert.deepEqual(handlers.checkpoint.acknowledged, [earlier]);
+  // Answering it does not drop it: the handler may never have read that 200.
+  clock.advance(ORPHANED_ALERT_MS - 1);
+  assert.deepEqual(handlers.checkpoint.acknowledged, [earlier, unclaimed]);
   assert.equal(handlers.received('a1', 's1').ok, true);
-  assert.deepEqual(handlers.checkpoint.acknowledged, []);
+  assert.deepEqual(handlers.checkpoint.acknowledged, [unclaimed]);
   assert.equal(handlers.acknowledge('a1', 's1').status, 404);
   assert.deepEqual([saved, sink.received.length], [[], 0]);
+  // No handler said it received the other, so its app ended before playing it: the sink plays it, once.
+  clock.advance(1);
+  assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['tick']);
+  assert.deepEqual(saved, [{ handoffs: [], acknowledged: [] }]);
+  assert.equal(handlers.acknowledge('a2', 's1').status, 410);
+  clock.advance(ORPHANED_ALERT_MS);
+  assert.equal(sink.received.length, 1);
 });
 
 /**
@@ -853,11 +862,28 @@ test('an alert the handler acknowledged before the daemon was killed is not play
   // The handler whose 200 was lost when the daemon ended asks the next one, and plays on its 200.
   assert.equal((await acknowledge(next, alertId, 'another stream')).status, 409);
   assert.deepEqual((await acknowledge(next, alertId, subscriberId)).body, { alertId, acknowledged: true });
+  next.clock.advance(ORPHANED_ALERT_MS - 1_000);
+  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 200);
+  // It played the alert and says so, so the sink never plays it.
+  assert.deepEqual((await received(next, alertId, subscriberId)).body, { alertId, forgotten: true });
   next.clock.advance(SETTLED_RETENTION_MS + 1_000);
   assert.equal(next.sink.received.length, 0);
-  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 200);
-  assert.deepEqual((await received(next, alertId, subscriberId)).body, { alertId, forgotten: true });
   assert.equal((await acknowledge(next, alertId, subscriberId)).status, 404);
+});
+
+test(`an alert acknowledged before the daemon was killed, whose handler never asks the next daemon, is played by it once after ${ORPHANED_ALERT_MS / 1000} s`, async (t) => {
+  const { dataDir, alertId, subscriberId } = await killDaemonDuringHandoff(t, { acknowledgeFirst: true });
+  const next = await startTestDaemon(t, { dataDir });
+  next.clock.advance(ORPHANED_ALERT_MS - 1);
+  assert.equal(next.sink.received.length, 0);
+  next.clock.advance(1);
+  assert.deepEqual(next.sink.received.map(({ alert, timer }) => [alert.kind, timer.name]), [['finish', 'Egg']]);
+  // An app that asks after all is told not to play it, and the alert is saved as played.
+  assert.equal((await acknowledge(next, alertId, subscriberId)).status, 410);
+  await next.daemon.shutdown();
+  const after = await startTestDaemon(t, { dataDir });
+  after.clock.advance(2 * ORPHANED_ALERT_MS);
+  assert.equal(after.sink.received.length, 0);
 });
 
 /** Copies the daemon's files as they are now into a new data directory, as a daemon killed now leaves them. */
@@ -887,6 +913,7 @@ test('an acknowledgement stays saved after its 200 is written, so a handler that
   const next = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
   let playedByHandler = 0;
   if ((await acknowledge(next, alert.alertId, handler.subscriberId)).status === 200) playedByHandler += 1;
+  assert.equal((await received(next, alert.alertId, handler.subscriberId)).status, 200);
   next.clock.advance(60_000);
   assert.deepEqual([playedByHandler, next.sink.received.filter(({ timer }) => timer.name === 'Egg').length], [1, 0]);
 });
@@ -930,7 +957,7 @@ async function saveAgain(context, name) {
   await eventually(() => JSON.parse(readFileSync(join(context.dataDir, 'scheduler.json'), 'utf8')).marks.some(({ timerId }) => timerId === id));
 }
 
-test('an acknowledgement whose 200 was lost stays saved until its handler says it received it, however long that takes', async (t) => {
+test(`an acknowledgement whose 200 was lost stays saved until its handler says it received it, however long that takes while it is the handler, and ${ORPHANED_ALERT_MS / 1000} s after`, async (t) => {
   const context = await startTestDaemon(t);
   const handler = await registeredHandler(t, context);
   await startCountdown(context, 'Egg');
@@ -944,7 +971,7 @@ test('an acknowledgement whose 200 was lost stays saved until its handler says i
   const owned = [{ alertId: alert.alertId, subscriberId: handler.subscriberId }];
   assert.deepEqual(savedAcknowledged(context), owned);
   const next = await startTestDaemon(t, { dataDir: filesLeftByKill(t, context) });
-  next.clock.advance(SETTLED_RETENTION_MS + 1_000);
+  next.clock.advance(ORPHANED_ALERT_MS - 1_000);
   let playedByHandler = 0;
   if ((await acknowledge(next, alert.alertId, handler.subscriberId)).status === 200) playedByHandler += 1;
   const sinkPlays = [context, next].flatMap(({ sink }) => sink.received).filter(({ timer }) => timer.name === 'Egg').length;
@@ -968,13 +995,97 @@ test('a handler whose stream reconnects gets the 200 it lost when it asks with t
   handler.close();
   await eventually(() => context.daemon.alertHandler.registered === false);
   const again = await registeredHandler(t, context);
-  context.clock.advance(SETTLED_RETENTION_MS + 1_000);
+  context.clock.advance(ORPHANED_ALERT_MS - 1_000);
   await saveAgain(context, 'Tea');
   assert.equal((await acknowledge(context, alert.alertId, again.subscriberId)).status, 409);
   assert.equal((await acknowledge(context, alert.alertId, handler.subscriberId)).status, 200);
   assert.equal((await received(context, alert.alertId, again.subscriberId)).status, 409);
   assert.equal((await received(context, alert.alertId, handler.subscriberId)).status, 200);
+  // It played the alert and said so, so the sink does not play it once the old stream has been gone a while.
+  context.clock.advance(ORPHANED_ALERT_MS);
   assert.equal(context.sink.received.filter(({ timer }) => timer.name === 'Egg').length, 0);
+});
+
+/**
+ * An alert handler app in its own process: it registers its event stream and acknowledges the
+ * first alert, reading the answer when `mode` is `taken`, then prints what it did and waits.
+ */
+const HANDLER_APP = `
+import { request } from 'node:http';
+const [socketPath, mode] = process.argv.slice(1);
+const post = (path, body, read) => new Promise((resolve) => {
+  const outgoing = request({ socketPath, method: 'POST', path, agent: false }, (response) => {
+    response.resume();
+    response.on('end', () => resolve(response.statusCode));
+  });
+  outgoing.on('error', () => resolve(0));
+  outgoing.end(JSON.stringify(body), () => read || resolve('sent'));
+});
+let buffer = '';
+let subscriberId;
+let acknowledged = false;
+request({ socketPath, method: 'GET', path: '/v1/events', agent: false }, (response) => {
+  response.setEncoding('utf8');
+  response.on('data', async (chunk) => {
+    buffer += chunk;
+    for (let end; (end = buffer.indexOf('\\n\\n')) >= 0; buffer = buffer.slice(end + 2)) {
+      const block = buffer.slice(0, end);
+      const event = /^event: (.*)$/m.exec(block)[1];
+      const data = JSON.parse(/^data: (.*)$/m.exec(block)[1]);
+      if (event === 'subscriber') {
+        subscriberId = data.subscriberId;
+        console.log('registered', subscriberId, await post('/v1/alert-handlers', { subscriberId }, true));
+      } else if (event === 'alert' && data.alertId && !acknowledged) {
+        acknowledged = true;
+        console.log('ack', data.alertId, await post(\`/v1/alerts/\${data.alertId}/ack\`, { subscriberId }, mode === 'taken'));
+      }
+    }
+  });
+}).end();
+setInterval(() => {}, 1_000);
+`;
+
+for (const mode of ['taken', 'sent']) {
+  test(`an app killed after its acknowledgement is ${mode}, before playing, leaves the alert to the running daemon, whose sink plays it once`, async (t) => {
+    const context = await startTestDaemon(t);
+    const app = spawn(process.execPath, ['--input-type=module', '-e', HANDLER_APP, context.daemon.paths.socket, mode], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const exited = new Promise((resolve) => app.once('exit', resolve));
+    t.after(() => app.kill('SIGKILL'));
+    let output = '';
+    app.stdout.setEncoding('utf8').on('data', (chunk) => {
+      output += chunk;
+    });
+    const line = (word) => output.split('\n').find((entry) => entry.startsWith(`${word} `))?.split(' ');
+    await eventually(() => line('registered'), 10_000);
+    const [, subscriberId, registered] = line('registered');
+    assert.equal(registered, '200');
+    await startCountdown(context, 'Egg');
+    context.clock.advance(1_000);
+    await eventually(() => line('ack'), 10_000);
+    const [, alertId, answer] = line('ack');
+    if (mode === 'taken') assert.equal(answer, '200');
+    app.kill('SIGKILL');
+    await exited;
+    await eventually(() => context.daemon.alertHandler.registered === false);
+    const eggPlays = () => context.sink.received.filter(({ timer }) => timer.name === 'Egg').length;
+    context.clock.advance(ORPHANED_ALERT_MS);
+    await eventually(() => eggPlays() === 1);
+    // An app that still asked would be told not to play it.
+    assert.equal((await acknowledge(context, alertId, subscriberId)).status, 410);
+    assert.equal((await received(context, alertId, subscriberId)).status, 200);
+    context.clock.advance(ORPHANED_ALERT_MS);
+    assert.equal(eggPlays(), 1);
+  });
+}
+
+test('a daemon that stops before a former handler\'s alerts are orphaned plays none of them; they stay saved for the next daemon', () => {
+  const { clock, sink, handlers } = sequentialHandlers();
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, { id: 't_1', name: 'Egg', sound: true });
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  handlers.disconnected('s1');
+  handlers.stop();
+  clock.advance(ORPHANED_ALERT_MS);
+  assert.deepEqual([sink.received.length, ids(handlers.checkpoint.acknowledged)], [0, [{ alertId: 'a1', subscriberId: 's1' }]]);
 });
 
 /** A small seeded generator (mulberry32), so a failing sequence can be replayed from its seed. */
@@ -1029,7 +1140,7 @@ function randomTabataRun(seed) {
   scheduler.run();
 
   const playedByHandler = [];
-  const outcomes = { acknowledged: 0, expired: 0, refused: 0 };
+  const outcomes = { acknowledged: 0, expired: 0, refused: 0, ended: 0 };
   const end = TABATA_MS + 5_000;
   for (let elapsed = 0; elapsed < end; elapsed += 100) {
     const roll = random();
@@ -1052,23 +1163,29 @@ function randomTabataRun(seed) {
     for (const ack of planned.filter((entry) => entry.at <= clock.monotonic())) {
       planned.splice(planned.indexOf(ack), 1);
       const result = handlers.acknowledge(ack.alertId, ack.subscriberId);
-      // The handler plays only what the daemon handed it.
-      if (result.ok) {
+      // The handler plays only what the daemon handed it, and then says it received it; some apps
+      // end before playing it, which closes their stream.
+      if (result.ok && random() < 0.05) {
+        open.delete(ack.subscriberId);
+        handlers.disconnected(ack.subscriberId);
+        outcomes.ended += 1;
+      } else if (result.ok) {
         playedByHandler.push(ack.key);
+        handlers.received(ack.alertId, ack.subscriberId);
         outcomes.acknowledged += 1;
       } else if (result.status === 410) outcomes.expired += 1;
       else outcomes.refused += 1;
     }
     clock.advance(100);
   }
-  clock.advance(ACK_TIMEOUT_MS);
+  clock.advance(ORPHANED_ALERT_MS);
   scheduler.stop();
   const expected = transitionsBetween(timer, startedAt, startedAt + TABATA_MS).map((transition) => `${timer.definition.id}:${transition.type}:${transition.at}`);
   return { expected, published, playedBySink: sink.received.map(({ alert }) => keyOf(alert)), playedByHandler, outcomes, status: handlers.status };
 }
 
-test('a seeded random sequence of registrations, disconnects and acknowledgement times across a Tabata run delivers each alert exactly once', () => {
-  const totals = { acknowledged: 0, expired: 0, fallbacks: 0, direct: 0 };
+test('a seeded random sequence of registrations, disconnects, acknowledgement times and apps that end before playing across a Tabata run delivers each alert exactly once', () => {
+  const totals = { acknowledged: 0, expired: 0, ended: 0, fallbacks: 0, direct: 0 };
   for (let seed = 1; seed <= 40; seed++) {
     const run = randomTabataRun(seed);
     assert.equal(run.expected.length, 68, `seed ${seed}`);
@@ -1080,9 +1197,10 @@ test('a seeded random sequence of registrations, disconnects and acknowledgement
     assert.equal(run.status.pending, 0, `seed ${seed}`);
     totals.acknowledged += run.outcomes.acknowledged;
     totals.expired += run.outcomes.expired;
+    totals.ended += run.outcomes.ended;
     totals.fallbacks += run.status.fallbacks;
     totals.direct += run.published.filter(({ handler }) => handler === null).length;
   }
-  // The seeds cover every path: handled, fallen back, refused late, and played with no handler.
+  // The seeds cover every path: handled, fallen back, refused late, taken by an app that ended, and played with no handler.
   for (const [path, count] of Object.entries(totals)) assert.ok(count > 0, `${path} never happened`);
 });

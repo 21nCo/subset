@@ -112,7 +112,9 @@ extension DaemonClient: AlertHandlerDaemon {
 /// unregisters it when that stream closes. For each alert that asks for acknowledgement, the app acknowledges first and
 /// plays only on `.acknowledged`: an alert the daemon's sink already played (410), or that the daemon handed to someone
 /// else, is never played here, so every alert plays exactly once. Quitting (`quit(within:)`) hands back every alert the
-/// app may have taken and not played, so an alert is not lost when the app ends.
+/// app may have taken and not played, and waits until the daemon hears the app received each one it played. The daemon's
+/// sink plays an alert the app took and never said it received 30 s after the app's stream closed
+/// (`ORPHANED_ALERT_MS`), so an alert is not lost when the app ends.
 @MainActor
 public final class AlertHandler {
     public enum Registration: Equatable, Sendable {
@@ -141,7 +143,8 @@ public final class AlertHandler {
     private var retrying: Task<Void, Never>?
     /// Set once the app is quitting: it takes no alert and registers no more.
     private var quitting = false
-    /// Alerts the daemon may have handed over that the app has neither played nor handed back, which quitting waits for.
+    /// Alerts the daemon may have handed over that the app has not handed back, or played and said it received, which
+    /// quitting waits for.
     private var unsettled = 0
     private var waitingToQuit: [CheckedContinuation<Void, Never>] = []
 
@@ -175,8 +178,9 @@ public final class AlertHandler {
 
     /// Before the app quits: it takes no more alerts and unregisters, so the daemon plays the next ones, and hands back
     /// each alert it may have taken but not played (sent again until a daemon answers), so the daemon's sink plays it.
-    /// Returns once all are handed back or played, or after `bound`; an alert whose ack or handback no daemon answered by
-    /// then may stay with the daemon as taken, unplayed.
+    /// Returns once each is handed back, or played and its receipt answered, or after `bound`. The daemon's sink plays an
+    /// alert whose ack or handback no daemon answered by then 30 s after the app's stream closed; one the app played whose
+    /// receipt no daemon answered by then plays twice.
     public func quit(within bound: Duration = .seconds(5)) async {
         quitting = true
         setPermitted(false)
@@ -296,26 +300,28 @@ public final class AlertHandler {
 
     /// Handles an `alert` event from the current stream: acknowledges one that asks for it, then plays it only if the
     /// daemon handed it over. Alerts that ask for no acknowledgement are the daemon's to play.
+    /// An alert counts as unsettled, so quitting waits for it, until it is handed back, or played and the daemon heard
+    /// that the app received it: the daemon's sink plays an alert whose handler left without saying so.
     public func receive(_ alert: TimerAlert) async {
         guard alert.ackRequired == true, let alertId = alert.alertId, permitted, let subscriberId else { return }
-        guard await takeOver(alert, alertId: alertId, subscriberId: subscriberId) else { return }
-        let daemon = daemon
-        _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
-    }
-
-    /// Acknowledges the alert, then plays it or hands it back; true once it played. Until then it counts as unsettled,
-    /// so quitting waits for it.
-    private func takeOver(_ alert: TimerAlert, alertId: String, subscriberId: String) async -> Bool {
         unsettled += 1
         defer {
             unsettled -= 1
             if unsettled == 0 { resumeQuitting() }
         }
+        guard await takeOver(alert, alertId: alertId, subscriberId: subscriberId) else { return }
+        let daemon = daemon
+        _ = await untilAnswered { try await daemon.confirmAlert(alertId, subscriberId: subscriberId) }
+    }
+
+    /// Acknowledges the alert, then plays it or hands it back; true once it played.
+    private func takeOver(_ alert: TimerAlert, alertId: String, subscriberId: String) async -> Bool {
         // The daemon decides who owns the alert, so a registration still in flight does not matter. An acknowledgement
         // no daemon answered is sent again until one does, always for the stream the alert came on, even after the stream
         // reconnects: one it took gets `.acknowledged` again, from the next daemon too, which the event stream starts, until
-        // the app says it received that answer; one it never saw gets `.expired` once its sink has played the alert, or a
-        // 404 from a daemon that played it at startup, so the alert plays once whichever was lost.
+        // the app says it received that answer (once that stream has been gone 30 s, its sink plays it instead and answers
+        // `.expired`); one it never saw gets `.expired` once its sink has played the alert, or a 404 from a daemon that
+        // played it at startup, so the alert plays once whichever was lost.
         let daemon = daemon
         var asked = false
         switch await untilAnswered(while: mayPresent, {
