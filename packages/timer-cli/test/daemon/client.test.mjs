@@ -135,7 +135,11 @@ test('the event stream delivers state from a started daemon', async (t) => {
   t.after(() => stopDaemon(client));
   const received = [];
   const stream = await client.events((event) => received.push(event));
-  await eventually(() => received.length === 1);
+  await eventually(() => received.length === 2);
+  // The stream opens with its subscriber id, which an alert handler registers with.
+  assert.equal(received[0].event, 'subscriber');
+  assert.match(received[0].data.subscriberId, /^[0-9a-f]{32}$/);
+  received.shift();
   assert.equal(received[0].event, 'state');
   await client.op('create', { timer: { kind: 'stopwatch', name: 'Watched' } });
   await eventually(() => received.length === 2);

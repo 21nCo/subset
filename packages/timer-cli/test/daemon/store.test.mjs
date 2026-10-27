@@ -103,6 +103,29 @@ test('scheduler marks read back; an unreadable or older file is ignored', (t) =>
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
   stateStore.saveMarks(marks);
   assert.deepEqual(stateStore.loadMarks(), marks);
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
+});
+
+test('alert handoffs and acknowledgements are saved with the marks and read back; malformed ones are dropped', (t) => {
+  const { paths, stateStore } = storeIn(t);
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
+  const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
+  const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false } };
+  const acknowledged = { ...handoff, alertId: 'a0', subscriberId: 's1' };
+  stateStore.saveMarks(marks, { handoffs: [handoff], acknowledged: [acknowledged] });
+  assert.deepEqual([stateStore.loadMarks(), stateStore.loadAlerts()], [marks, { handoffs: [handoff], acknowledged: [acknowledged] }]);
+  writeFileSync(
+    paths.scheduler,
+    JSON.stringify({
+      version: 1,
+      marks,
+      handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, null],
+      acknowledged: [acknowledged, { alertId: 'a3' }, { ...acknowledged, alertId: 4 }, { alertId: 'a5', subscriberId: 's1' }, null]
+    })
+  );
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [handoff], acknowledged: [acknowledged] });
+  stateStore.saveMarks(marks);
+  assert.deepEqual(JSON.parse(readFileSync(paths.scheduler, 'utf8')), { version: 1, marks });
 });
 
 test('a directory fsync that fails after the rename keeps the new file and is logged, not thrown', (t) => {

@@ -31,12 +31,33 @@ enum TimerApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let controller = TimerController()
+    private let notifications = SystemUserNotifications()
+    private lazy var controller = TimerController(notifications: notifications)
     private var statusMenu: StatusMenuController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusMenu = StatusMenuController(controller: controller)
         controller.start()
+        // After `start()`, so an action that launched the app waits for the runtime rather than failing.
+        notifications.onAction = { [controller] action, timerId in controller.run(action, timerId: timerId) }
+        notifications.activate()
+        // Asks for notification permission the first time; while it is granted, the app plays Timer's alerts.
+        controller.checkNotifications(ask: true)
+    }
+
+    /// Permission may have changed in System Settings meanwhile.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        controller.checkNotifications()
+    }
+
+    /// Quitting first hands back to the daemon every alert the app may have taken but not played, waiting at most 5 s
+    /// for a daemon to answer, so the daemon's sink plays them.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { [controller] in
+            await controller.alerts.quit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     /// Quitting stops only the board server this app started; the daemon and its timers keep running.

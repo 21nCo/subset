@@ -24,17 +24,71 @@ final class TimerController {
     /// Shows an operation's failure.
     var onError: (String) -> Void = { _ in }
 
-    let paths = DaemonPaths.resolve()
+    let paths: DaemonPaths
     private var client: DaemonClient { DaemonClient(paths: paths) }
+    private let services: Services
     private var subscription: Task<Void, Never>?
+    /// Locates the runtime, after `start()`; operations wait for it.
+    private var locating: Task<Void, Never>?
+
+    /// Makes this app the daemon's alert handler while it may post notifications.
+    private(set) lazy var alerts = AlertHandler(daemon: alertDaemon,
+                                                isPermitted: { [notifications] in await notifications.isAuthorized() },
+                                                play: { [presenter] alert in presenter.present(alert) })
+    private let alertDaemon: AlertHandlerDaemon
+    private let notifications: UserNotifying
+    private let presenter: AlertPresenter
+    /// Counts permission checks, so an older answer that arrives late is ignored.
+    private var permissionChecks = 0
+    /// Set while macOS may be asking the user; its answer is the one that counts.
+    private var askingPermission = false
+
+    /// How the controller finds its runtime and reaches the daemon; tests substitute fakes.
+    struct Services {
+        var locate: @Sendable () async -> Result<Runtime, RuntimeProblem>
+        /// Runs an operation, starting the daemon first if none is listening, as the CLI does.
+        var perform: @Sendable (String, OperationInput, Runtime) async throws -> Void
+        /// The event stream, reconnecting as needed.
+        var events: @Sendable (Runtime) -> AsyncStream<EventSubscription.Update>
+
+        static func live(_ paths: DaemonPaths) -> Services {
+            let client = DaemonClient(paths: paths)
+            return Services(
+                locate: { await RuntimeLocator().locate() },
+                perform: { operation, input, runtime in
+                    do {
+                        try await client.perform(operation, input, as: IgnoredResult.self)
+                    } catch DaemonError.notListening, DaemonError.shuttingDown {
+                        try await client.ensureRunning { try TimerController.launchDaemon(runtime, paths) }
+                        try await client.perform(operation, input, as: IgnoredResult.self)
+                    }
+                },
+                events: { runtime in
+                    EventSubscription.updates(connect: {
+                        try await client.ensureRunning { try TimerController.launchDaemon(runtime, paths) }
+                        return try await client.openEvents()
+                    })
+                })
+        }
+    }
+
+    init(paths: DaemonPaths = .resolve(), services: Services? = nil, alertDaemon: AlertHandlerDaemon? = nil,
+         notifications: UserNotifying = SystemUserNotifications(), sounds: SoundPlaying = SystemSoundPlayer()) {
+        self.paths = paths
+        self.services = services ?? .live(paths)
+        self.alertDaemon = alertDaemon ?? DaemonClient(paths: paths)
+        self.notifications = notifications
+        presenter = AlertPresenter(notifications: notifications, sounds: sounds)
+    }
 
     func start() {
         subscription?.cancel()
         setup = .locating
         timers = []
         onChange()
-        Task {
-            switch await RuntimeLocator().locate() {
+        let locate = services.locate
+        locating = Task {
+            switch await locate() {
             case .success(let runtime):
                 setup = .ready(runtime)
                 subscribe(runtime)
@@ -45,13 +99,19 @@ final class TimerController {
         }
     }
 
+    /// The setup once the runtime has been located, waiting while it still is.
+    private func located() async -> Setup {
+        while case .locating = setup, let task = locating {
+            await task.value
+            // A later `start()` replaces the task; this one has set the setup unless it did.
+            if task == locating, case .locating = setup { break }
+        }
+        return setup
+    }
+
     private func subscribe(_ runtime: Runtime) {
-        let (client, paths) = (client, paths)
+        let updates = services.events(runtime)
         subscription = Task { [weak self] in
-            let updates = EventSubscription.updates(connect: {
-                try await client.ensureRunning { try Self.launchDaemon(runtime, paths) }
-                return try await client.openEvents()
-            })
             for await update in updates {
                 self?.handle(update)
             }
@@ -67,7 +127,23 @@ final class TimerController {
         switch update {
         case .connected:
             connectionProblem = nil
+            alerts.subscribed(nil)
             refreshPresets()
+        case .event(let event) where event.event == "subscriber":
+            struct Subscriber: Decodable { var subscriberId: String }
+            alerts.subscribed(try? JSONDecoder().decode(Subscriber.self, from: Data(event.data.utf8)).subscriberId)
+            return
+        case .event(let event) where event.event == "alert":
+            // An alert this app cannot read is not acknowledged, so the daemon plays it.
+            guard var alert = try? JSONDecoder().decode(TimerAlert.self, from: Data(event.data.utf8)) else { return }
+            // The daemon names the alert's timer; from one that does not, the timer is taken now, before the
+            // acknowledgement, since a `state` that removes it may follow at once.
+            if alert.timerName == nil, let timer = timers.first(where: { $0.definition.id == alert.timerId })?.definition {
+                alert.timerName = timer.name
+                alert.sound = timer.sound
+            }
+            Task { await alerts.receive(alert) }
+            return
         case .event(let event) where event.event == "state":
             do {
                 timers = try DaemonClient.board(from: Data(event.data.utf8)).timers.map(\.stored)
@@ -79,8 +155,32 @@ final class TimerController {
             return
         case .disconnected(let error, _):
             connectionProblem = error?.localizedDescription ?? "The Timer daemon closed the connection."
+            alerts.subscribed(nil)
         }
         onChange()
+    }
+
+    /// Reads whether the app may post notifications, asking first when `ask` is set (macOS asks the user only until they
+    /// answer), and registers as the alert handler only while it may.
+    func checkNotifications(ask: Bool = false) {
+        if askingPermission, !ask { return }
+        askingPermission = ask
+        permissionChecks += 1
+        let check = permissionChecks
+        Task {
+            let granted = ask ? await notifications.requestAuthorization() : await notifications.isAuthorized()
+            guard check == permissionChecks else { return }
+            askingPermission = false
+            alerts.setPermitted(granted)
+        }
+    }
+
+    /// Runs a notification action on its timer and shows a failure. An action that launched the app waits until its
+    /// runtime has been located.
+    func run(_ action: NotificationAction, timerId: String) {
+        Task {
+            if let message = await action.run(timerId: timerId, perform: { await self.perform($0, $1) }) { onError(message) }
+        }
     }
 
     func refreshPresets() {
@@ -93,17 +193,17 @@ final class TimerController {
     }
 
     /// Runs an operation, starting the daemon first if none is listening, as the CLI does. Returns the failure's message.
+    /// While the runtime is still being located, it waits for it.
     @discardableResult
     func perform(_ operation: String, _ input: OperationInput) async -> String? {
-        guard case .ready(let runtime) = setup else { return RuntimeProblem.nodeMissing.message }
-        let (client, paths) = (client, paths)
+        let runtime: Runtime
+        switch await located() {
+        case .ready(let located): runtime = located
+        case .problem(let problem): return problem.message
+        case .locating: return "Timer has not located Node.js and its command-line runtime yet."
+        }
         do {
-            do {
-                try await client.perform(operation, input, as: IgnoredResult.self)
-            } catch DaemonError.notListening, DaemonError.shuttingDown {
-                try await client.ensureRunning { try Self.launchDaemon(runtime, paths) }
-                try await client.perform(operation, input, as: IgnoredResult.self)
-            }
+            try await services.perform(operation, input, runtime)
             return nil
         } catch {
             return error.localizedDescription

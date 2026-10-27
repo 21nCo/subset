@@ -85,6 +85,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
         controller.refreshPresets()
+        controller.checkNotifications()
         tick()
     }
 
@@ -205,10 +206,19 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             Timer CLI (\(runtime.cliSource.rawValue)) at \(runtime.cli)
             Daemon socket: \(controller.paths.socket)
             \(controller.connectionProblem.map { "Connection: \($0)" } ?? "Connected to the daemon.")
+            \(Self.alertsLine(controller.alerts.registration))
             """ + (controller.stateProblem.map { "\nTimer state: \($0)" } ?? "")
         }
         NSApp.activate()
         NSApp.orderFrontStandardAboutPanel(options: [.credits: NSAttributedString(string: details, attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)])])
+    }
+
+    private static func alertsLine(_ registration: AlertHandler.Registration) -> String {
+        switch registration {
+        case .registered: "Alerts: played by this app."
+        case .inactive: "Alerts: played by the daemon (notifications are off for Timer, or it is not connected)."
+        case .refused(let reason): "Alerts: played by the daemon or another app (\(reason))."
+        }
     }
 
     // MARK: Items
