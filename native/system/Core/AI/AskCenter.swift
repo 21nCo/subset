@@ -313,16 +313,17 @@ public final class AskCenter {
         exchanges[exchanges.count - 1].sent.append(Sent(body: body, answered: false))
     }
 
-    /// Only an answer confirms a body arrived, and only an answer to a body the user confirmed ends the previews.
+    /// Only an answer confirms a body arrived, and only an answer to a body the user confirmed ends the previews. An
+    /// answer coming after its question ended (Stop, the deadline, a change) changes nothing.
     private func answered(_ body: Data, confirmed: Bool, question: Int) {
-        if confirmed { explain.sendConfirmed = true }
         guard question == self.question else { return }
         let sent = exchanges[exchanges.count - 1].sent
-        guard let index = sent.lastIndex(where: { $0.body == body && !$0.answered }) else {
+        if let index = sent.lastIndex(where: { $0.body == body && !$0.answered }) {
+            exchanges[exchanges.count - 1].sent[index].answered = true
+        } else {
             exchanges[exchanges.count - 1].sent.append(Sent(body: body, answered: true))
-            return
         }
-        exchanges[exchanges.count - 1].sent[index].answered = true
+        if confirmed { explain.sendConfirmed = true }
     }
 
     private func workEnded(_ end: ExplainCenter.WorkEnd) {

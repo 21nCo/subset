@@ -307,8 +307,10 @@ public struct OpenRouterClient: Sendable {
     /// The body of OpenRouter's 2xx answer. A chat completion sends exactly the body it is given, the retry included.
     /// Throws `ExplainError.failed` with the status and OpenRouter's message, or with the timeout or connection
     /// failure; `CancellationError` when cancelled, before the request or its retry is sent, during the backoff, or
-    /// while it is on its way.
-    public func send(_ request: Request, key: String) async throws -> Data {
+    /// while it is on its way. `received` runs once, as the first HTTP answer comes, whatever its status: before a retry
+    /// it leads to, so OpenRouter is known to have the request even when the retry then fails.
+    public func send(_ request: Request, key: String,
+                     received: @Sendable () async -> Void = { /* Receipt is not recorded. */ }) async throws -> Data {
         let urlRequest = Self.urlRequest(request, key: key)
         for attempt in 1...2 {
             try Task.checkCancellation()
@@ -332,6 +334,7 @@ public struct OpenRouterClient: Sendable {
             }
             let status = http.statusCode
             log.record("OpenRouter \(request.name) answered \(status)")
+            if attempt == 1 { await received() }
             if (200..<300).contains(status) { return data }
             if attempt == 1, status == 429 || (500..<600).contains(status) {
                 let delay = Self.delay(retryAfter: http.value(forHTTPHeaderField: "Retry-After"))

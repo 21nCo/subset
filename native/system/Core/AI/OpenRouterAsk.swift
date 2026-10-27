@@ -2,7 +2,8 @@ import Foundation
 
 /// Ask (SET-51) through OpenRouter: chat completions with Ask's tools as functions. Each request's body goes through
 /// the send gate first, so it is previewed as Explain's are, and is kept (`AskSendGate.sending`) as it is handed to the
-/// client, before OpenRouter answers it (`AskSendGate.answered`) or the send fails; tool results, redacted by the
+/// client, before OpenRouter answers it (`AskSendGate.answered`, as its first HTTP answer comes, before any retry) or
+/// the send fails; tool results, redacted by the
 /// toolbox, go back in the next request. After `AskToolbox.callLimit` calls the request asks for an answer with
 /// `tool_choice` `none`, so a question takes at most `callLimit + 1` requests. A batch of tool calls larger than what is
 /// left of the question's `AskToolbox.budgetedCalls` runs none of them, and a call the toolbox refuses to return from
@@ -30,12 +31,11 @@ extension OpenRouterProvider {
             let data: Data
             await gate.sending(body)
             do {
-                data = try await client.send(.chat(body), key: key)
+                // OpenRouter's first HTTP answer shows it has the body, the one a retry follows included.
+                data = try await client.send(.chat(body), key: key) { await gate.answered(body, confirmed: confirmed) }
             } catch let ExplainError.failed(message) where message.hasPrefix(Self.answeredPrefix) {
-                await gate.answered(body, confirmed: confirmed)
                 throw ExplainError.rejected(message)
             }
-            await gate.answered(body, confirmed: confirmed)
             let message = try Self.message(from: data, key: key)
             if let refusal = message["refusal"] as? String, !refusal.isEmpty {
                 throw ExplainError.rejected("The model declined to answer this question.")

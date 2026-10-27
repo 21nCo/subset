@@ -483,6 +483,37 @@ final class AskTests: XCTestCase {
         XCTAssertTrue(ask.exchanges.isEmpty, "the late answer is not kept")
     }
 
+    /// An answer to a confirmed body that comes after its question ended, by Stop or the deadline, changes nothing: the
+    /// next question is previewed again. One that comes while its question runs ends the previews.
+    func testAnAnswerAfterItsQuestionEndedLeavesThePreviewsOn() async throws {
+        for ending in ["Stop", "the deadline"] {
+            let provider = GatedAskProvider()
+            let (ask, explain, _) = center(provider, timeout: .milliseconds(300))
+            XCTAssertTrue(ask.ask("Why?"))
+            ask.confirmSend(try await previewShown(ask))
+            await provider.hold.reached()
+            if ending == "Stop" { ask.stop() } else { try await until { !ask.isBusy } }
+            provider.hold.open()
+            await provider.answered.reached()
+            XCTAssertFalse(explain.sendConfirmed, ending)
+            XCTAssertEqual(ask.exchanges.flatMap(\.sent).map(\.answered), ending == "Stop" ? [] : [false], ending)
+            XCTAssertTrue(ask.ask("Why, again?"))
+            _ = try await previewShown(ask)
+            ask.cancelSend()
+            await ask.settled()
+        }
+
+        let provider = GatedAskProvider()
+        provider.hold.open()
+        let (ask, explain, _) = center(provider)
+        XCTAssertTrue(ask.ask("Why?"))
+        ask.confirmSend(try await previewShown(ask))
+        await ask.settled()
+        XCTAssertEqual(ask.exchanges.last?.state, .answered(try AskAnswer(validating: "An answer.") { _ in nil }))
+        XCTAssertEqual(ask.exchanges.last?.sent.map(\.answered), [true])
+        XCTAssertTrue(explain.sendConfirmed, "an answer while its question runs ends the previews")
+    }
+
     func testChangingTheProviderEndsTheThread() async throws {
         let provider = ScriptedProvider()
         let (ask, explain, _) = center(provider)
@@ -514,7 +545,7 @@ final class AskTests: XCTestCase {
 
     // MARK: Helpers
 
-    private func center(_ provider: ScriptedProvider, made: Counter = Counter(), choice: AIProviderChoice = .appleIntelligence,
+    private func center(_ provider: any AIProvider, made: Counter = Counter(), choice: AIProviderChoice = .appleIntelligence,
                         timeout: Duration = .seconds(30)) -> (AskCenter, ExplainCenter, FakeAskSource) {
         let name = "AskTests-\(UUID().uuidString)"
         addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
@@ -534,6 +565,15 @@ final class AskTests: XCTestCase {
         XCTAssertFalse(ask.isBusy)
     }
 
+    private func previewShown(_ ask: AskCenter) async throws -> AskSendPreview {
+        for _ in 0..<2_000 {
+            if case let .confirming(preview)? = ask.exchanges.last?.state { return preview }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("no preview")
+        throw CancellationError()
+    }
+
     private func json(_ text: String) throws -> [String: Any] {
         try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
     }
@@ -545,6 +585,33 @@ final class AskTests: XCTestCase {
         }
         XCTFail("never")
         throw CancellationError()
+    }
+}
+
+/// A provider that sends one body through Ask's send gate and holds the answer to it at `hold` before saying it was
+/// answered, then passes `answered`, so a test can end the question in between.
+final class GatedAskProvider: AIProvider, @unchecked Sendable {
+    static let body = Data(#"{"question":"Why?"}"#.utf8)
+    let hold = AnswerGate()
+    let answered = AnswerGate()
+
+    init() {
+        answered.open()
+    }
+
+    func availability() async -> AIAvailability { .available }
+
+    func explain(_: ExplainRequest) async throws -> ExplanationDraft {
+        throw ExplainError.failed("Not used.")
+    }
+
+    func ask(_: AskPrompt, tools _: AskTools, gate: AskSendGate) async throws -> String {
+        let confirmed = try await gate.confirm(Self.body)
+        await gate.sending(Self.body)
+        await hold.pass()
+        await gate.answered(Self.body, confirmed: confirmed)
+        await answered.pass()
+        return "An answer."
     }
 }
 

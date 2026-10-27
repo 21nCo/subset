@@ -236,6 +236,71 @@ final class AskOpenRouterTests: XCTestCase {
         XCTAssertEqual(exchange.sent.map(\.answered), [false])
     }
 
+    // MARK: Bodies OpenRouter answered before a retry failed
+
+    /// A 429 shows OpenRouter has the body, so a retry that then times out leaves it answered, and since the user
+    /// confirmed it, the previews end; the question still fails and is not counted.
+    func testA429ThenATimedOutRetryKeepsTheBodyAnswered() async throws {
+        let (ask, explain, _, _) = try await chosen()
+        StubProtocol.enqueue(status: 429, json: #"{"error":{"code":429,"message":"Slow down."}}"#)
+        StubProtocol.enqueue(error: URLError(.timedOut))
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        let preview = try await previewShown(ask)
+        ask.confirmSend(preview)
+        await ask.settled()
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed("OpenRouter did not answer within \(Int(OpenRouterClient.timeout)) seconds. "
+            + "Try again."))
+        XCTAssertEqual(StubProtocol.requests.compactMap(\.body), [preview.body, preview.body], "the body and its retry")
+        XCTAssertEqual(exchange.sent.map(\.body), [preview.body], "kept once")
+        XCTAssertEqual(exchange.sent.map(\.answered), [true])
+        XCTAssertTrue(explain.sendConfirmed, "OpenRouter answered the confirmed body before its retry failed")
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1, "a failed question is not counted")
+    }
+
+    /// A 503 on the request carrying a tool's result, then a lost connection on its retry: both bodies were answered,
+    /// and the tool that ran is kept.
+    func testA503ThenALostRetryAfterAToolRoundTripKeepsBothBodiesAnswered() async throws {
+        let (ask, explain, _, _) = try await chosen()
+        StubProtocol.enqueue(status: 200, json: try toolCalls([("call-1", "memoryState", "{}")]))
+        StubProtocol.enqueue(status: 503, json: #"{"error":{"code":503,"message":"Busy"}}"#)
+        StubProtocol.enqueue(error: URLError(.networkConnectionLost))
+        XCTAssertTrue(ask.ask("Why?"))
+        ask.confirmSend(try await previewShown(ask))
+        await ask.settled()
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        guard case let .failed(message) = exchange.state, message.hasPrefix("Could not reach OpenRouter") else {
+            return XCTFail("\(exchange.state)")
+        }
+        let sent = StubProtocol.requests.compactMap(\.body)
+        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(sent[1], sent[2], "the retry sends the same body")
+        XCTAssertEqual(exchange.sent.map(\.body), [sent[0], sent[1]])
+        XCTAssertEqual(exchange.sent.map(\.answered), [true, true])
+        XCTAssertTrue(explain.sendConfirmed)
+        XCTAssertEqual(exchange.tools, [AskToolRecord(call: "memoryState()", ran: true)])
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1)
+    }
+
+    /// The deadline passing during the backoff after a 429: the body was answered before the question failed for
+    /// lateness, so it stays answered, and no retry goes out.
+    func testTheDeadlineDuringTheBackoffKeepsTheBodyAnswered() async throws {
+        let setup = try await openRouterChosen(timeout: .milliseconds(300), backoff: { _ in try await Task.sleep(for: .seconds(60)) })
+        let ask = setup.ask
+        StubProtocol.enqueue(status: 429, json: #"{"error":{"code":429,"message":"Slow down."}}"#)
+        XCTAssertTrue(ask.ask("Why is my Mac slow?"))
+        let preview = try await previewShown(ask)
+        ask.confirmSend(preview)
+        await ask.settled()
+        let exchange = try XCTUnwrap(ask.exchanges.last)
+        XCTAssertEqual(exchange.state, .failed("OpenRouter did not answer within 0 seconds. Ask again."))
+        XCTAssertEqual(StubProtocol.requests.compactMap(\.body), [preview.body], "no retry after the deadline")
+        XCTAssertEqual(exchange.sent.map(\.body), [preview.body])
+        XCTAssertEqual(exchange.sent.map(\.answered), [true])
+        XCTAssertTrue(setup.explain.sendConfirmed)
+        XCTAssertEqual(ask.questionsLeft, AskCenter.followUpLimit + 1)
+    }
+
     func testAnOpenRouterErrorIsShownAndNothingMoreIsSent() async throws {
         let (ask, explain, _, _) = try await chosen()
         explain.sendConfirmed = true
@@ -414,14 +479,16 @@ final class AskOpenRouterTests: XCTestCase {
     }
 
     /// OpenRouter chosen, with a key stored and, with `model`, that model ID checked.
-    private func openRouterChosen(model: String? = nil, timeout: Duration = .seconds(120)) async throws -> Setup {
+    private func openRouterChosen(model: String? = nil, timeout: Duration = .seconds(120),
+                                  backoff: @escaping @Sendable (Duration) async throws -> Void = { _ in
+                                      /* Retries are not waited for in tests. */
+                                  }) async throws -> Setup {
         let name = "AskOpenRouterTests-\(UUID().uuidString)"
         addTeardownBlock { UserDefaults().removePersistentDomain(forName: name) }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         let keychain = FakeKeychain()
         try OpenRouterKeyStore(items: keychain).save(Self.key)
-        let client = OpenRouterClient(session: StubProtocol.session(), log: RecordingLog(),
-                                      sleep: { _ in /* Retries are not waited for in tests. */ })
+        let client = OpenRouterClient(session: StubProtocol.session(), log: RecordingLog(), sleep: backoff)
         let account = OpenRouterAccount(keys: OpenRouterKeyStore(items: keychain), client: client, defaults: defaults,
                                         log: RecordingLog())
         await account.refreshKey()

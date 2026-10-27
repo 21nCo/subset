@@ -57,7 +57,8 @@ public struct AskTools: Sendable {
 /// Explain and returns its number, and throws when nothing more must be sent; `confirm` before sending, which returns
 /// whether the user confirmed the body in the preview (`false` when none was needed) and throws when it must not be
 /// sent; `sending` as the body is handed over to be sent, before it is known whether it arrived, since a timeout or a
-/// lost connection can come after it left this Mac; `answered` once the provider answered it.
+/// lost connection can come after it left this Mac; `answered` at most once per body, as the provider's first answer to
+/// it comes, even one a failed retry follows.
 public struct AskSendGate: Sendable {
     private let startCheck: @Sendable () async throws -> Int
     private let confirmBody: @Sendable (Data) async throws -> Bool

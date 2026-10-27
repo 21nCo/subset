@@ -213,6 +213,63 @@ final class OpenRouterTests: XCTestCase {
         XCTAssertEqual(try provider.body(for: request()), try provider.body(for: request()))
     }
 
+    /// `received` runs once, at the first HTTP answer: before the retry a 429 or 5xx leads to, whatever the retry then
+    /// does, and never when no HTTP answer came.
+    func testTheClientReportsTheFirstHTTPAnswerOnceTheRetryIncluded() async throws {
+        let body = Data(#"{"model":"a/b"}"#.utf8)
+        for (answers, expected) in [
+            ([Answer.status(429), .error(.timedOut)], "OpenRouter did not answer within"),
+            ([.status(503), .error(.networkConnectionLost)], "Could not reach OpenRouter"),
+            ([.status(503), .status(200)], nil),
+            ([.status(401)], "OpenRouter answered 401"),
+            ([.status(200)], nil)
+        ] {
+            StubProtocol.reset()
+            for answer in answers { answer.enqueue() }
+            let receipts = ReceiptCounter()
+            let failure: String?
+            do {
+                _ = try await client().send(.chat(body), key: Self.key) { await receipts.receive() }
+                failure = nil
+            } catch let error as ExplainError {
+                failure = error.message
+            }
+            if let expected {
+                XCTAssertTrue(failure?.hasPrefix(expected) == true, "\(answers): \(failure ?? "answered")")
+            } else {
+                XCTAssertNil(failure, "\(answers)")
+            }
+            XCTAssertEqual(receipts.count, 1, "\(answers): once, at the first HTTP answer")
+            XCTAssertEqual(StubProtocol.requests.count, answers.count)
+        }
+        for error in [URLError(.timedOut), URLError(.networkConnectionLost)] {
+            StubProtocol.reset()
+            StubProtocol.enqueue(error: error)
+            let receipts = ReceiptCounter()
+            _ = try? await client().send(.chat(body), key: Self.key) { await receipts.receive() }
+            XCTAssertEqual(receipts.count, 0, "no HTTP answer, so receipt is not known")
+        }
+    }
+
+    private enum Answer: CustomStringConvertible {
+        case status(Int)
+        case error(URLError.Code)
+
+        func enqueue() {
+            switch self {
+            case let .status(status): StubProtocol.enqueue(status: status, json: #"{"error":{"code":\#(status),"message":"No."}}"#)
+            case let .error(code): StubProtocol.enqueue(error: URLError(code))
+            }
+        }
+
+        var description: String {
+            switch self {
+            case let .status(status): "\(status)"
+            case let .error(code): "URLError \(code.rawValue)"
+            }
+        }
+    }
+
     func testTheSchemaIsExactlyExplanationsFields() throws {
         let schema = OpenRouterProvider.schema
         let fields = ExplanationDraft.Key.allCases.map(\.rawValue)
@@ -1351,6 +1408,18 @@ final class WaitRecorder: @unchecked Sendable {
 
     func record(_ duration: Duration) async {
         lock.withLock { _durations.append(duration) }
+    }
+}
+
+/// Counts the client's reports of an HTTP answer.
+final class ReceiptCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+
+    var count: Int { lock.withLock { _count } }
+
+    func receive() async {
+        lock.withLock { _count += 1 }
     }
 }
 
