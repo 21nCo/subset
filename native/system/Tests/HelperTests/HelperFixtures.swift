@@ -107,14 +107,24 @@ enum HelperFixtures {
                           now: { observedAt })
     }
 
-    /// Scans with the real scanner, a fixed volume summary, and no installed apps, with `home` as the home folder. `slow` keeps the scan waiting until
-    /// it is cancelled, then returns the real scan as cancelled. `includedDocker` records each analysis's Docker flag.
-    static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil, home: String = home) -> DiskProbe {
+    static let volume = VolumeSummary(
+        values: VolumeCapacityValues(mountPoint: "/", name: "Macintosh HD", capacity: 500_000_000_000,
+                                     availableForImportantUsage: 120_000_000_000, available: 100_000_000_000),
+        snapshots: .count(2))
+
+    /// Scans with the real scanner, `volume`, and no installed apps, with `home` as the home folder. `slow` keeps the
+    /// scan waiting until it is cancelled, then returns the real scan as cancelled. `onProgress` sees the scan's
+    /// progress. `includedDocker` records each analysis's Docker flag; `docker` is what Docker answers when asked.
+    static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil, home: String = home,
+                          volume: VolumeSummary = HelperFixtures.volume,
+                          docker: DockerImageUsage = .unavailable(.cliNotFound), apps: InstalledApps = InstalledApps([]),
+                          onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil) -> DiskProbe {
         DiskProbe(
             scan: { root in
                 let scanned: Result<DiskScanResult, DiskScanError>
                 do throws(DiskScanError) {
-                    scanned = .success(try await DiskScanner(workers: 1).scan(URL(fileURLWithPath: root)))
+                    let scanner = DiskScanner(workers: 1, progressInterval: onProgress == nil ? .milliseconds(100) : .zero)
+                    scanned = .success(try await scanner.scan(URL(fileURLWithPath: root), onProgress: onProgress))
                 } catch {
                     scanned = .failure(error)
                 }
@@ -123,20 +133,15 @@ enum HelperFixtures {
                 return .success(DiskScanResult(tree: result.tree, outcome: .cancelled, unreadablePaths: result.unreadablePaths,
                                                entriesRead: result.entriesRead))
             },
-            volume: { _ in
-                VolumeSummary(values: VolumeCapacityValues(mountPoint: "/", name: "Macintosh HD", capacity: 500_000_000_000,
-                                                           availableForImportantUsage: 120_000_000_000, available: 100_000_000_000),
-                              snapshots: .count(2))
-            },
+            volume: { _ in volume },
             context: { includeDocker in
                 includedDocker?.append(includeDocker)
                 let real = realpath(home, nil).map { pointer in
                     defer { free(pointer) }
                     return String(cString: pointer)
                 }
-                return ReclaimContext(home: real ?? home, now: observedAt, installedApps: InstalledApps([]),
-                                      simulatorRuntimes: .installed([]),
-                                      dockerImages: includeDocker ? .unavailable(.cliNotFound) : nil)
+                return ReclaimContext(home: real ?? home, now: observedAt, installedApps: apps,
+                                      simulatorRuntimes: .installed([]), dockerImages: includeDocker ? docker : nil)
             })
     }
 }

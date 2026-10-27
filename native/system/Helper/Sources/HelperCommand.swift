@@ -84,7 +84,10 @@ public struct HelperInvocation: Equatable, Sendable {
         let valued: Set<String> = ["--layer", "--path", "--depth", "--timeout"]
         let switches: Set<String> = ["--json", "--absolute", "--suggestions", "--version", "--help", "-h"]
         while let argument = remaining.popFirst() {
-            let parts = argument.split(separator: "=", maxSplits: 1).map(String.init)
+            guard !argument.isEmpty, !argument.hasPrefix("=") else {
+                throw HelperUsageError(argument.isEmpty ? "An argument is empty." : "Unexpected argument \(argument).")
+            }
+            let parts = argument.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             if valued.contains(parts[0]) {
                 guard let value = parts.count == 2 ? parts[1] : remaining.popFirst() else {
                     throw HelperUsageError("\(parts[0]) needs a value.")
@@ -138,7 +141,11 @@ public struct HelperInvocation: Equatable, Sendable {
                 guard let seconds = Double(text), seconds.isFinite, seconds > 0, seconds <= 86_400 else {
                     throw HelperUsageError("--timeout must be a number of seconds above 0, not \(text).")
                 }
-                timeout = .milliseconds(Int64((seconds * 1000).rounded(.up)))
+                // Whole milliseconds, rounded up, so the timeout applied is the one reported and never 0; a
+                // decimal such as 0.003 that binary floating point cannot hold exactly stays 3 ms, not 4.
+                let milliseconds = seconds * 1000
+                let nearest = milliseconds.rounded()
+                timeout = .milliseconds(Int64(abs(milliseconds - nearest) < 1e-6 ? max(nearest, 1) : milliseconds.rounded(.up)))
             }
             if flags.contains("--suggestions") {
                 try reject(["--depth"], for: "disk --suggestions")

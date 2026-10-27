@@ -61,6 +61,25 @@ final class ProcessReportTests: XCTestCase {
         XCTAssertEqual(codes, ["cpuUnavailable", "memoryUnavailable"])
     }
 
+    /// A process whose usage read failed without macOS restricting it is not restricted, but its usage is unknown, so
+    /// the result is partial with an error rather than complete.
+    func testAFailedUsageReadOfAnUnrestrictedProcessIsAPartialResult() async throws {
+        var processes = HelperFixtures.workload(restricted: false)
+        let complete = await run(["status", "--json"], HelperFixtures.environment(processes: HelperFixtures.probe(processes)))
+        XCTAssertEqual(complete.exit, .ok)
+
+        processes.append(HelperProcess(pid: 500, path: "/Applications/Gone.app/Contents/MacOS/Gone", memory: nil))
+        for command in [["status", "--json"], ["processes", "--json"]] {
+            let output = await run(command, HelperFixtures.environment(processes: HelperFixtures.probe(processes)))
+            try assertValid(output, command[0] == "status" ? "status.schema.json" : "processes.schema.json")
+            XCTAssertEqual(output.exit, .partial, "\(command)")
+            let json = try object(output)
+            XCTAssertEqual(json["complete"] as? Bool, false)
+            XCTAssertEqual(json["restricted"] as? [String: Int], ["processes": 0])
+            XCTAssertEqual((json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String }, ["usageUnavailable"])
+        }
+    }
+
     func testAFailedProcessListIsAnInternalErrorThatStillValidates() async throws {
         let probe = HelperFixtures.probe([], listFails: true)
         for (arguments, schema) in [(["status", "--json"], "status.schema.json"), (["processes", "--json"], "processes.schema.json")] {

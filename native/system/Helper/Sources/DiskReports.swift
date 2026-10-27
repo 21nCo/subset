@@ -101,6 +101,7 @@ enum DiskReports {
         lines.append(volumeLine(volume))
         lines += topChildren(of: 0, in: tree).shown.map { "  \(bytes($0.sizes?.allocated).padded(9))  \($0.name)" }
         return finished(scan, result: result, command: "disk", path: path, timeout: timeout, paths: paths, now: now,
+                        errors: volumeErrors(volume, paths: paths),
                         sources: [("volume", "URL resource values: volumeTotalCapacity, volumeAvailableCapacity, volumeAvailableCapacityForImportantUsage"),
                                   ("volume.localSnapshots", "/usr/bin/tmutil listlocalsnapshots on the volume's mount point")],
                         fields: [("depth", .count(depth)), ("tree", node(0, in: tree, depth: depth, paths: paths)),
@@ -128,7 +129,8 @@ enum DiskReports {
             return "  \(match.rule.name)\(subject.map { " (\($0))" } ?? ""): \(size), \(match.risk.rawValue)"
         }
         return finished(scan, result: result, command: "disk-suggestions", path: path, timeout: timeout, paths: paths,
-                        now: now, sources: [
+                        now: now, errors: contextErrors(context, includeDocker: includeDocker, matches: matches, paths: paths),
+                        sources: [
                             ("suggestions", "Subset System's reclaim rule catalog, version \(ReclaimRules.catalogVersion), over the scan"),
                             ("installedApps", "Info.plist and code signature of each app in /Applications, /System/Applications, and ~/Applications"),
                             ("dockerImages", includeDocker ? "docker system df --format json on this Mac's Docker-compatible VM"
@@ -159,19 +161,22 @@ enum DiskReports {
         return HelperReport(command: command, observedAt: now(), sources: [("sizes", sizeSource)],
                             restricted: [("unreadablePaths", 0)], errors: [error],
                             fields: [("path", .string(paths(path))), ("outcome", .string(outcome)),
-                                     ("timeoutSeconds", .double(seconds(timeout)))] + fields,
+                                     ("timeoutSeconds", timeoutSeconds(timeout))] + fields,
                             text: "Error: \(error.message)", exit: scan.timedOut ? .timeout : exit)
     }
 
     private static func finished(_ scan: Scan, result: DiskScanResult, command: String, path _: String, timeout: Duration,
-                                 paths: PathDisplay, now: () -> Date, sources: [(String, String)],
-                                 fields: [(String, JSONValue)], lines: [String]) -> HelperReport {
+                                 paths: PathDisplay, now: () -> Date, errors readErrors: [HelperError],
+                                 sources: [(String, String)], fields: [(String, JSONValue)], lines: [String]) -> HelperReport {
         var errors: [HelperError] = []
+        let unreadable = result.unreadablePaths.count
         if scan.timedOut {
             errors.append(HelperError(code: "timedOut",
-                                      message: "The scan did not finish within \(seconds(timeout).formatted()) seconds; sizes count only what was read."))
+                                      message: "The scan did not finish within \(timeoutSeconds(timeout).pretty) seconds; sizes count only what was read."))
+        } else if let error = incompleteScanError(result.tree, unreadable: unreadable, paths: paths) {
+            errors.append(error)
         }
-        let unreadable = result.unreadablePaths.count
+        errors += readErrors
         var text = lines
         if unreadable > 0 { text.append("\(unreadable) items could not be read; their sizes are not in the totals.") }
         text += errors.map { "Note: \($0.message)" }
@@ -182,7 +187,7 @@ enum DiskReports {
         let common: [(String, JSONValue)] = [
             ("path", .string(paths(result.tree.rootPath))),
             ("outcome", .string(scan.timedOut ? "timedOut" : "completed")),
-            ("timeoutSeconds", .double(seconds(timeout))),
+            ("timeoutSeconds", timeoutSeconds(timeout)),
             ("totals", totals),
             ("entriesRead", .count(result.entriesRead)),
             ("unreadablePaths", .array(result.unreadablePaths.prefix(unreadableLimit).map { .string(paths($0)) }))
@@ -193,10 +198,87 @@ enum DiskReports {
                             exit: scan.timedOut ? .timeout : nil)
     }
 
+    /// Why a scan that was not stopped still left sizes as lower bounds when no unreadable item explains it: a folder
+    /// replaced between being listed and being opened is not read, nor are the scanned folder's own attributes when
+    /// they cannot be read. `nil` when the tree is complete or only unreadable items, counted already, made it not.
+    static func incompleteScanError(_ tree: DiskTree, unreadable: Int, paths: PathDisplay) -> HelperError? {
+        let explained: DiskItemFlags = [.unreadable, .partial]
+        let notRead = (0..<tree.count).filter { index in
+            let item = tree[index]
+            return item.kind == .directory && item.flags.contains(.incomplete) && item.flags.isDisjoint(with: explained)
+                && item.children.isEmpty
+        }
+        if let first = notRead.first {
+            let others = notRead.count > 1 ? " and \(notRead.count - 1) more folders" : ""
+            return HelperError(code: "scanIncomplete",
+                               message: "\(paths(tree.path(of: first)))\(others) changed while the scan read them and were not read; sizes are lower bounds.")
+        }
+        guard tree.root.flags.contains(.incomplete), unreadable == 0 else { return nil }
+        return HelperError(code: "scanIncomplete",
+                           message: "Part of \(paths(tree.rootPath)) could not be read; sizes are lower bounds.")
+    }
+
+    /// The volume values that could not be read. The purgeable figure is derived and may be `null` without a failed
+    /// read, when the two available figures cannot explain it.
+    static func volumeErrors(_ volume: VolumeSummary, paths: PathDisplay) -> [HelperError] {
+        var errors: [HelperError] = []
+        let missing = [("mount point", volume.values.mountPoint == nil), ("name", volume.values.name == nil),
+                       ("capacity", volume.capacity == nil), ("available space", volume.available == nil),
+                       ("space available for important use", volume.availableForImportantUsage == nil)]
+            .filter(\.1).map(\.0)
+        if !missing.isEmpty {
+            errors.append(HelperError(code: "volumeUnavailable",
+                                      message: "Could not read the volume's \(missing.joined(separator: ", "))."))
+        }
+        if case let .unavailable(reason) = volume.snapshots {
+            errors.append(HelperError(code: "snapshotsUnavailable",
+                                      message: "Could not count local snapshots: \(paths.message(reason))"))
+        }
+        return errors
+    }
+
+    /// What the reclaim rules read besides the scan and could not. Docker's image space is a failed read only when it
+    /// was asked for and a Docker CLI is installed: not asking (a scan of another folder) or no `docker` command is not
+    /// a failure. The simulator runtimes count only when a simulator device needed them.
+    static func contextErrors(_ context: ReclaimContext, includeDocker: Bool, matches: [ReclaimMatch],
+                              paths: PathDisplay) -> [HelperError] {
+        var errors: [HelperError] = []
+        if !context.installedApps.unread.isEmpty {
+            let unread = context.installedApps.unread
+            let others = unread.count > 1 ? " and \(unread.count - 1) more" : ""
+            errors.append(HelperError(code: "installedAppsUnread",
+                                      message: "Could not read \(paths(unread[0]))\(others) among the installed apps, so items they may own are not attributed to an app."))
+        }
+        if case let .unknown(reason) = context.simulatorRuntimes,
+           matches.contains(where: { match in
+               guard match.rule.id == .unavailableSimulators, case .unavailable = match.bytes else { return false }
+               return true
+           }) {
+            errors.append(HelperError(code: "simulatorRuntimesUnknown",
+                                      message: "Could not read the installed simulator runtimes: \(paths.message(reason))"))
+        }
+        if includeDocker {
+            switch context.dockerImages {
+            case .unavailable(.cliNotFound), nil:
+                break
+            case let .unavailable(reason):
+                errors.append(HelperError(code: "dockerUnavailable",
+                                          message: "Could not read Docker's image space: \(paths.message(reason.reason))"))
+            case let .reported(space, _) where space.reclaimable == nil:
+                errors.append(HelperError(code: "dockerUnavailable",
+                                          message: "docker system df did not report reclaimable image space."))
+            case .reported:
+                break
+            }
+        }
+        return errors
+    }
+
     private static let sizeSource = "getattrlistbulk over the folder, without crossing volumes or following links; allocated, logical, and private bytes per item"
 
-    private static func seconds(_ duration: Duration) -> Double {
-        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+    /// The timeout as applied: the parser makes it whole milliseconds.
+    private static func timeoutSeconds(_ duration: Duration) -> JSONValue {
+        .milliseconds(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
 
     /// A folder's largest children, largest first, then by name; children of unknown size come last.

@@ -20,6 +20,31 @@ final class HelperCommandTests: XCTestCase {
         XCTAssertEqual(try HelperInvocation.parse(["--version"], home: home).command, .version)
     }
 
+    /// The timeout applied is whole milliseconds, never 0, and a decimal binary floating point cannot hold exactly is
+    /// not rounded up past it.
+    func testTimeoutsAreWholeMillisecondsAboveZero() throws {
+        func timeout(_ text: String) throws -> Duration? {
+            guard case let .disk(_, _, timeout) = try HelperInvocation.parse(["disk", "--path", "/tmp", "--timeout", text],
+                                                                              home: home).command else { return nil }
+            return timeout
+        }
+        XCTAssertEqual(try timeout("0.001"), .milliseconds(1))
+        XCTAssertEqual(try timeout("0.003"), .milliseconds(3))
+        XCTAssertEqual(try timeout("0.0001"), .milliseconds(1))
+        XCTAssertEqual(try timeout("0.0015"), .milliseconds(2))
+        XCTAssertEqual(try timeout("1e-9"), .milliseconds(1))
+        XCTAssertEqual(try timeout("2.5"), .milliseconds(2500))
+    }
+
+    func testMillisecondsPrintAsExactSeconds() {
+        XCTAssertEqual(JSONValue.milliseconds(60_000).pretty, "60")
+        XCTAssertEqual(JSONValue.milliseconds(200).pretty, "0.2")
+        XCTAssertEqual(JSONValue.milliseconds(1).pretty, "0.001")
+        XCTAssertEqual(JSONValue.milliseconds(1_050).pretty, "1.05")
+        XCTAssertEqual(JSONValue.milliseconds(86_400_000).pretty, "86400")
+        XCTAssertEqual(JSONValue.milliseconds(-1_500).pretty, "-1.5")
+    }
+
     func testUsageErrorsExitTwoWithAMessageAndNoOutput() async {
         let cases: [([String], String)] = [
             ([], "No command given."),
@@ -34,7 +59,16 @@ final class HelperCommandTests: XCTestCase {
             (["disk", "--path", "/tmp", "--depth", "x"], "--depth must be a whole number from 0 to 64, not x."),
             (["disk", "--path", "/tmp", "--timeout", "0"], "--timeout must be a number of seconds above 0, not 0."),
             (["disk", "--suggestions", "--path", "/tmp", "--depth", "2"], "--depth does not apply to disk --suggestions."),
-            (["status", "extra"], "Unexpected argument extra.")
+            (["status", "extra"], "Unexpected argument extra."),
+            // An empty or `=`-only argument is a usage error, not a crash.
+            (["status", ""], "An argument is empty."),
+            (["status", "="], "Unexpected argument =."),
+            (["disk", "--path", "/tmp", "="], "Unexpected argument =."),
+            (["disk", "--path", "/tmp", "=x"], "Unexpected argument =x."),
+            (["disk", "--path="], "disk needs --path <dir>."),
+            (["disk", "--path", ""], "disk needs --path <dir>."),
+            (["disk", "--path", "/tmp", "--timeout="], "--timeout must be a number of seconds above 0, not ."),
+            (["status", "--json="], "Unknown option --json=.")
         ]
         for (arguments, message) in cases {
             let output = await run(arguments, HelperFixtures.environment())

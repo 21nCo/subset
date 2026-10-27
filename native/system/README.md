@@ -332,9 +332,11 @@ ln -s '/Applications/Subset System.app/Contents/Helpers/subset-system' /usr/loca
 | `disk --suggestions --path <dir> [--timeout S] [--json]` | The reclaim rule catalog's matches over a scan, with `catalogVersion`; each match's cleanup is described, never run. Docker's image space is asked for only when the home folder is scanned, as in the app. |
 | `--version`, `--help` | The helper's version (the app's), or usage |
 
-`--timeout` bounds the scan (60 seconds by default); a scan stopped there reports what it read. `--absolute` prints paths in full; by default the home folder is `~`. `--path` accepts `~`.
+`--timeout` bounds the scan (60 seconds by default, in whole milliseconds, rounded up); a scan stopped there reports what it read, and `timeoutSeconds` is the timeout applied. `--absolute` prints paths in full; by default the home folder is `~`. `--path` accepts `~`.
 
 JSON follows `schemaVersion: 1`, with a schema for each command in [`schemas/`](schemas): `status.schema.json`, `processes.schema.json`, `disk.schema.json`, and `disk-suggestions.schema.json`, sharing `common.schema.json`. Every result has `observedAt`, `sources` (where each value comes from), `restricted` counts (processes macOS refused to reveal, or items that could not be read), `complete`, and `errors[]` with a `code` and `message`. A value that could not be read is `null`, never zero. A path that cannot be scanned still prints a `disk` result with `outcome: "failed"`.
+
+A value that was asked for and could not be read keeps whatever was read, adds an error, and makes the result partial (exit 3, `complete: false`): an unrestricted process whose usage read failed (`usageUnavailable`); CPU or memory figures (`cpuUnavailable`, `memoryUnavailable`); the volume's values or its local snapshot count (`volumeUnavailable`, `snapshotsUnavailable`); a folder replaced while it was scanned, or the scanned folder's own attributes (`scanIncomplete`); and, for `--suggestions`, installed apps that could not be read (`installedAppsUnread`), simulator runtimes a simulator device needed (`simulatorRuntimesUnknown`), and Docker's image space when it was asked for and a `docker` command exists but did not answer, including a stopped daemon (`dockerUnavailable`). These are not failures and leave a result complete: Docker not asked for (a scan other than the home folder) or no `docker` command; a process without a CPU figure because it started between the two samples; a derived `purgeableBytes` of `null`; and iCloud placeholders, which are never downloaded. A timeout (exit 4) and a usage error (exit 2) take precedence over a partial result.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -344,7 +346,7 @@ JSON follows `schemaVersion: 1`, with a schema for each command in [`schemas/`](
 | `4` | Timeout: the scan stopped at `--timeout` |
 | `5` | Internal error: processes could not be listed |
 
-`SystemHelperTests` validate each command's JSON against its schema for normal, partial, and errored fixture data, and check exit codes, `~` and `--absolute`, and the timeout on a slow fixture scan, with a validator for the keywords the schemas use that rejects any other keyword. `HelperBinaryTests` run the built helper for `status --json` and `disk --path <temporary folder> --json` and validate both; CI runs them again against the copy in the built app's `Contents/Helpers`. A real agent invoking the helper is not verified here (SET-57), nor is the signed helper (SET-59).
+`SystemHelperTests` validate each command's JSON against its schema for normal, partial, and errored fixture data, and check exit codes, empty and `=` arguments, `~` and `--absolute`, the timeout on a slow fixture scan at the smallest accepted value, and the failed reads above (unreadable volume values and snapshots, a folder replaced mid-scan, a failed Docker read, an unrestricted process's failed usage read), with a validator for the keywords the schemas use that rejects any other keyword. `HelperBinaryTests` run the built helper for `status --json` and `disk --path <temporary folder> --json` and validate both; CI runs them again against the copy in the built app's `Contents/Helpers`. A real agent invoking the helper is not verified here (SET-57), nor is the signed helper (SET-59).
 
 ## Surfaces
 

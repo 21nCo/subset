@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 import SystemCore
 import SystemHelper
 import XCTest
@@ -90,6 +91,125 @@ final class DiskReportTests: XCTestCase {
         let suggestions = await run(["disk", "--suggestions", "--path", folder.path, "--timeout", "0.2", "--json"], environment)
         try assertValid(suggestions, "disk-suggestions.schema.json")
         XCTAssertEqual(suggestions.exit, .timeout)
+    }
+
+    /// The smallest timeout accepted is reported as applied, positive, and both disk results still validate.
+    func testTheSmallestTimeoutIsReportedExactly() async throws {
+        let folder = try TemporaryFolder()
+        try folder.file("a.txt", bytes: 10)
+        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, home: folder.path),
+                                                     home: folder.path)
+        for timeout in ["0.001", "0.004"] {
+            let disk = await run(["disk", "--path", folder.path, "--timeout", timeout, "--json"], environment)
+            try assertValid(disk, "disk.schema.json")
+            XCTAssertEqual(disk.exit, .timeout)
+            XCTAssertTrue(disk.stdout.contains("\"timeoutSeconds\": \(timeout),"), disk.stdout)
+            let suggestions = await run(["disk", "--suggestions", "--path", folder.path, "--timeout", timeout, "--json"],
+                                        environment)
+            try assertValid(suggestions, "disk-suggestions.schema.json")
+            XCTAssertTrue(suggestions.stdout.contains("\"timeoutSeconds\": \(timeout),"), suggestions.stdout)
+        }
+    }
+
+    /// Volume values and a snapshot count that could not be read keep the scan's data but make the result partial.
+    func testUnreadableVolumeValuesAndSnapshotsMakeAPartialResult() async throws {
+        let folder = try TemporaryFolder()
+        try folder.file("a.txt", bytes: 10)
+        let volume = VolumeSummary(values: VolumeCapacityValues(mountPoint: "/", name: "Macintosh HD"),
+                                   snapshots: .unavailable("tmutil did not answer within 5 seconds."))
+        let output = await run(["disk", "--path", folder.path, "--json"],
+                               HelperFixtures.environment(disk: HelperFixtures.diskProbe(home: folder.path, volume: volume),
+                                                          home: folder.path))
+        try assertValid(output, "disk.schema.json")
+        XCTAssertEqual(output.exit, .partial)
+        let json = try object(output)
+        XCTAssertEqual(json["complete"] as? Bool, false)
+        XCTAssertEqual(json["outcome"] as? String, "completed")
+        XCTAssertNotNil(json["tree"] as? [String: Any])
+        XCTAssertTrue((json["volume"] as? [String: Any])?["capacityBytes"] is NSNull)
+        let errors = try XCTUnwrap(json["errors"] as? [[String: String]])
+        XCTAssertEqual(errors.map { $0["code"] }, ["volumeUnavailable", "snapshotsUnavailable"])
+        XCTAssertEqual(errors[0]["message"],
+                       "Could not read the volume's capacity, available space, space available for important use.")
+        XCTAssertEqual(errors[1]["message"], "Could not count local snapshots: tmutil did not answer within 5 seconds.")
+
+        let text = await run(["disk", "--path", folder.path],
+                             HelperFixtures.environment(disk: HelperFixtures.diskProbe(home: folder.path, volume: volume),
+                                                        home: folder.path))
+        XCTAssertEqual(text.exit, .partial)
+        XCTAssertTrue(text.stdout.contains("Note: Could not count local snapshots"))
+    }
+
+    /// A folder replaced between being listed and being opened is not read, with nothing unreadable to count, so the
+    /// result is partial with a `scanIncomplete` error rather than complete.
+    func testAFolderReplacedDuringTheScanMakesAPartialResult() async throws {
+        let folder = try TemporaryFolder()
+        for name in ["a", "b", "z"] { try folder.file("\(name)/old", bytes: 10_000) }
+        let moved = try TemporaryFolder()
+        // The scanner reports the real path (`/private/var/…` for a temporary folder).
+        let root = try XCTUnwrap(realpath(folder.path, nil).map { pointer in
+            defer { free(pointer) }
+            return String(cString: pointer)
+        })
+        let movedTo = moved.url.appendingPathComponent("b")
+        let swapped = OSAllocatedUnfairLock(initialState: false)
+        // One worker reports the root's only batch before it opens the folders listed in it.
+        let probe = HelperFixtures.diskProbe(home: HelperFixtures.home, onProgress: { progress in
+            guard progress.currentPath == root, !swapped.withLock({ $0 }) else { return }
+            swapped.withLock { $0 = true }
+            let b = URL(fileURLWithPath: root).appendingPathComponent("b")
+            try? FileManager.default.moveItem(at: b, to: movedTo)
+            try? FileManager.default.createDirectory(at: b, withIntermediateDirectories: false)
+        })
+        let output = await run(["disk", "--path", folder.path, "--json", "--absolute"], HelperFixtures.environment(disk: probe))
+        XCTAssertTrue(swapped.withLock { $0 })
+        try assertValid(output, "disk.schema.json")
+        XCTAssertEqual(output.exit, .partial)
+        let json = try object(output)
+        XCTAssertEqual(json["restricted"] as? [String: Int], ["unreadablePaths": 0])
+        let errors = try XCTUnwrap(json["errors"] as? [[String: String]])
+        XCTAssertEqual(errors.map { $0["code"] }, ["scanIncomplete"], output.stdout)
+        XCTAssertTrue(errors.first?["message"]?.hasSuffix("/b changed while the scan read them and were not read; sizes are lower bounds.") ?? false,
+                      "\(errors)")
+    }
+
+    /// Docker asked for and installed but unreadable is a failed read; Docker not installed, or not asked for, is not.
+    func testAFailedDockerReadMakesSuggestionsPartial() async throws {
+        let home = try TemporaryFolder()
+        try home.file("Documents/notes.txt", bytes: 10)
+        func suggestions(_ docker: DockerImageUsage, apps: InstalledApps = InstalledApps([]),
+                         path: String? = nil) async throws -> (HelperOutput, [String]) {
+            let environment = HelperFixtures.environment(
+                disk: HelperFixtures.diskProbe(home: home.path, docker: docker, apps: apps), home: home.path)
+            let output = await run(["disk", "--suggestions", "--path", path ?? home.path, "--json"], environment)
+            try assertValid(output, "disk-suggestions.schema.json")
+            let codes = (try object(output)["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String } ?? []
+            return (output, codes)
+        }
+        let stopped = DockerImageUsage.unavailable(.daemonNotRunning(message: ""))
+        let (failed, failedCodes) = try await suggestions(stopped)
+        XCTAssertEqual(failed.exit, .partial)
+        XCTAssertEqual(failedCodes, ["dockerUnavailable"])
+        XCTAssertEqual((try object(failed)["complete"] as? Bool), false)
+
+        let unreported = DockerImageUsage.reported(DockerImageSpace(count: 1, active: 0, size: 100, reclaimable: nil),
+                                                   observedAt: HelperFixtures.observedAt)
+        let (partly, partlyCodes) = try await suggestions(unreported)
+        XCTAssertEqual(partly.exit, .partial)
+        XCTAssertEqual(partlyCodes, ["dockerUnavailable"])
+
+        let (notInstalled, notInstalledCodes) = try await suggestions(.unavailable(.cliNotFound))
+        XCTAssertEqual(notInstalled.exit, .ok)
+        XCTAssertEqual(notInstalledCodes, [])
+
+        let (notAsked, notAskedCodes) = try await suggestions(stopped, path: home.path + "/Documents")
+        XCTAssertEqual(notAsked.exit, .ok)
+        XCTAssertEqual(notAskedCodes, [])
+
+        let (unreadApps, unreadAppsCodes) = try await suggestions(.unavailable(.cliNotFound),
+                                                                  apps: InstalledApps([], unread: ["/Applications/Locked.app"]))
+        XCTAssertEqual(unreadApps.exit, .partial)
+        XCTAssertEqual(unreadAppsCodes, ["installedAppsUnread"])
     }
 
     func testAPathThatIsNotAFolderIsAnErroredResultThatValidates() async throws {

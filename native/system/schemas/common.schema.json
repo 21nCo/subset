@@ -21,8 +21,9 @@
         "additionalProperties": false,
         "properties": {
           "code": {
-            "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "originSignalsNotRead",
-                     "cannotResolve", "notADirectory", "notLocal", "timedOut"]
+            "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "usageUnavailable", "originSignalsNotRead",
+                     "cannotResolve", "notADirectory", "notLocal", "timedOut", "scanIncomplete", "volumeUnavailable",
+                     "snapshotsUnavailable", "installedAppsUnread", "simulatorRuntimesUnknown", "dockerUnavailable"]
           },
           "message": { "type": "string" }
         }

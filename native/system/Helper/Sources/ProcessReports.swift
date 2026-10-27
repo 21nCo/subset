@@ -198,10 +198,20 @@ enum ProcessReports {
         case let .failure(failure):
             return [HelperError(code: "processListFailed", message: "Could not list processes: \(failure.message)")]
         case .success:
+            var errors: [HelperError] = []
+            // A process macOS restricts is counted in `restricted`; one whose usage read failed otherwise is an error.
+            // A process without CPU alone started between the two samples, which is not a failed read.
+            let unmeasured = measurement.processes.filter { !$0.restricted && $0.physFootprint == nil }.count
+            if unmeasured > 0 {
+                errors.append(HelperError(code: "usageUnavailable",
+                                          message: "\(unmeasured) processes' CPU and memory could not be read; they are in no total."))
+            }
             let unread = measurement.processes.filter { $0.origin == nil }.count
-            guard unread > 0 else { return [] }
-            return [HelperError(code: "originSignalsNotRead",
-                                message: "\(unread) processes' origin signals were not read in time, so fallback rules grouped them.")]
+            if unread > 0 {
+                errors.append(HelperError(code: "originSignalsNotRead",
+                                          message: "\(unread) processes' origin signals were not read in time, so fallback rules grouped them."))
+            }
+            return errors
         }
     }
 
