@@ -109,10 +109,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // counts.
             Task { await openRouter.refreshKey() }
             Task { await explain.refreshAvailability() }
+        case .commandLineHelper: showCommandLineHelper()
         case .about:
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
         case .quit: NSApp.terminate(nil)
+        }
+    }
+
+    /// Explains the bundled read-only helper and how to link it onto PATH. Copy Command writes the command to the
+    /// clipboard; nothing is linked, run, or written anywhere else.
+    private func showCommandLineHelper() {
+        let helper = CommandLineHelper.path(inApp: Bundle.main.bundlePath)
+        let alert = NSAlert()
+        alert.messageText = "Command-Line Helper"
+        guard FileManager.default.isExecutableFile(atPath: helper) else {
+            alert.informativeText = "This build has no \(CommandLineHelper.name) helper. Builds of the Xcode project include it in Contents/Helpers."
+            NSApp.activate()
+            alert.runModal()
+            return
+        }
+        let command = CommandLineHelper.linkCommand(helperPath: helper)
+        alert.informativeText = """
+            \(CommandLineHelper.name) prints this Mac's CPU, memory, and disk usage by origin as text or JSON, for you or \
+            an agent that runs shell commands. It only reads: it never cleans up, changes, or sends anything.
+
+            To run it from Terminal, link it into a folder on your PATH, for example:
+
+            \(command)
+
+            System never edits shell files or /usr/local itself. Run \(CommandLineHelper.name) --help for its commands.
+            """
+        alert.addButton(withTitle: "Copy Command")
+        alert.addButton(withTitle: "Close")
+        NSApp.activate()
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
         }
     }
 }

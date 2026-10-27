@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/system/v1/status.schema.json",
+  "title": "subset-system status --json",
+  "type": "object",
+  "required": ["schemaVersion", "command", "helperVersion", "observedAt", "complete", "sources", "restricted", "errors",
+               "cpu", "memory", "processCount", "topByCPU", "topByMemory"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "command": { "const": "status" },
+    "helperVersion": { "$ref": "common.schema.json#/$defs/helperVersion" },
+    "observedAt": { "$ref": "common.schema.json#/$defs/observedAt" },
+    "complete": { "$ref": "common.schema.json#/$defs/complete" },
+    "sources": {
+      "allOf": [{ "$ref": "common.schema.json#/$defs/sources" }],
+      "required": ["cpu.percent", "memory.pressure", "memory.physicalBytes", "memory.swap", "memory.usage", "groups",
+                   "groups.cpuPercent", "groups.memoryBytes"]
+    },
+    "restricted": { "$ref": "common.schema.json#/$defs/processRestricted" },
+    "errors": { "$ref": "common.schema.json#/$defs/errors" },
+    "cpu": {
+      "type": "object",
+      "required": ["percent", "logicalCores"],
+      "additionalProperties": false,
+      "properties": {
+        "percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "The whole machine's busy share." },
+        "logicalCores": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": ["pressure", "physicalBytes", "usedBytes", "appBytes", "wiredBytes", "compressedBytes", "swapUsedBytes",
+                   "swapTotalBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "pressure": { "enum": ["normal", "warning", "critical", null] },
+        "physicalBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "usedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "appBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "wiredBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "compressedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "swapUsedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "swapTotalBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" }
+      }
+    },
+    "processCount": { "type": ["integer", "null"], "minimum": 0 },
+    "topByCPU": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "App-layer groups with a measured CPU sum, largest first.",
+      "items": { "allOf": [{ "$ref": "common.schema.json#/$defs/groupSummary" }], "additionalProperties": false,
+                 "properties": { "id": true, "layer": { "const": "app" }, "kind": true, "name": true, "path": true,
+                                 "processCount": true, "restrictedCount": true, "cpuPercent": { "type": "number" },
+                                 "cpuUnmeasuredCount": true, "memoryBytes": true, "memoryUnmeasuredCount": true } }
+    },
+    "topByMemory": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "App-layer groups with a measured memory sum, largest first.",
+      "items": { "allOf": [{ "$ref": "common.schema.json#/$defs/groupSummary" }], "additionalProperties": false,
+                 "properties": { "id": true, "layer": { "const": "app" }, "kind": true, "name": true, "path": true,
+                                 "processCount": true, "restrictedCount": true, "cpuPercent": true,
+                                 "cpuUnmeasuredCount": true, "memoryBytes": { "type": "integer" }, "memoryUnmeasuredCount": true } }
+    }
+  }
+}

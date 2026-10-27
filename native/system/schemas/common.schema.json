@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/system/v1/common.schema.json",
+  "title": "subset-system shared definitions",
+  "description": "Definitions every subset-system result shares (schemaVersion 1). A value that could not be read is null, never zero. Paths start with ~ for the home folder unless --absolute was given.",
+  "$defs": {
+    "schemaVersion": { "const": 1 },
+    "helperVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "observedAt": { "type": "string", "format": "date-time", "description": "When the values were read." },
+    "complete": { "type": "boolean", "description": "True when nothing is restricted, no error was recorded, and the exit code is 0." },
+    "sources": {
+      "type": "object",
+      "description": "Where each value comes from, by field.",
+      "additionalProperties": { "type": "string" }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "originSignalsNotRead",
+                     "cannotResolve", "notADirectory", "notLocal", "timedOut"]
+          },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "bytes": { "type": "integer", "minimum": 0 },
+    "optionalBytes": { "type": ["integer", "null"], "minimum": 0 },
+    "optionalPercent": { "type": ["number", "null"], "minimum": 0 },
+    "layer": { "enum": ["app", "vendor", "launch", "project"] },
+    "groupKind": {
+      "enum": ["app", "macOS", "containerVM", "agent", "terminal", "homebrew", "team", "unattributed",
+               "apple", "vendor", "unsigned", "signatureUnavailable",
+               "launchdJob", "loginItem", "codingAgentSession", "terminalSession", "appLaunched", "system",
+               "project", "noProject"]
+    },
+    "groupSummary": {
+      "type": "object",
+      "description": "An origin group and its usage summed from its members. Restricted members are in no sum.",
+      "required": ["id", "layer", "kind", "name", "path", "processCount", "restrictedCount", "cpuPercent",
+                   "cpuUnmeasuredCount", "memoryBytes", "memoryUnmeasuredCount"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable across runs for the same origin." },
+        "layer": { "$ref": "#/$defs/layer" },
+        "kind": { "$ref": "#/$defs/groupKind" },
+        "name": { "type": "string" },
+        "path": { "type": ["string", "null"], "description": "The app bundle, login item, project folder, or executable the group stands for." },
+        "processCount": { "$ref": "#/$defs/count" },
+        "restrictedCount": { "$ref": "#/$defs/count" },
+        "cpuPercent": { "$ref": "#/$defs/optionalPercent", "description": "100 is one fully used logical core." },
+        "cpuUnmeasuredCount": { "$ref": "#/$defs/count" },
+        "memoryBytes": { "$ref": "#/$defs/optionalBytes", "description": "Physical footprint; approximate." },
+        "memoryUnmeasuredCount": { "$ref": "#/$defs/count" }
+      }
+    },
+    "diskTotals": {
+      "type": ["object", "null"],
+      "required": ["allocatedBytes", "logicalBytes", "privateBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "allocatedBytes": { "$ref": "#/$defs/bytes" },
+        "logicalBytes": { "$ref": "#/$defs/bytes" },
+        "privateBytes": { "$ref": "#/$defs/bytes" }
+      }
+    },
+    "scanOutcome": {
+      "enum": ["completed", "timedOut", "failed"],
+      "description": "timedOut: the scan was stopped at --timeout and sizes count only what was read; failed: the path could not be scanned."
+    },
+    "unreadablePaths": {
+      "type": "array",
+      "description": "The first 100 items that could not be read; restricted.unreadablePaths counts them all.",
+      "maxItems": 100,
+      "items": { "type": "string" }
+    },
+    "diskRestricted": {
+      "type": "object",
+      "required": ["unreadablePaths"],
+      "additionalProperties": false,
+      "properties": { "unreadablePaths": { "$ref": "#/$defs/count" } }
+    },
+    "processRestricted": {
+      "type": "object",
+      "required": ["processes"],
+      "additionalProperties": false,
+      "properties": {
+        "processes": { "$ref": "#/$defs/count", "description": "Processes whose usage macOS refused to reveal." }
+      }
+    }
+  }
+}

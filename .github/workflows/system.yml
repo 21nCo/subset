@@ -59,3 +59,12 @@ jobs:
 
       - name: FoundationModels is weak-linked
         run: sh Tests/weak-link.sh "$RUNNER_TEMP/derived/Build/Products/Debug/Subset System.app"
+
+      # The integration tests again, against the helper as the app bundles it: status --json and disk --path <temp
+      # fixture> --json from Contents/Helpers/subset-system must validate against schemas/.
+      - name: Bundled agent helper output matches the schemas
+        run: |
+          helper="$RUNNER_TEMP/derived/Build/Products/Debug/Subset System.app/Contents/Helpers/subset-system"
+          test -x "$helper"
+          "$helper" --version
+          SUBSET_SYSTEM_HELPER="$helper" swift test --filter SystemHelperTests.HelperBinaryTests

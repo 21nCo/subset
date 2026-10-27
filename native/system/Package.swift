@@ -8,7 +8,8 @@ let package = Package(
     name: "SubsetSystem",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "SystemCore", targets: ["SystemCore"])
+        .library(name: "SystemCore", targets: ["SystemCore"]),
+        .executable(name: "subset-system", targets: ["subset-system"])
     ],
     targets: [
         .target(
@@ -33,6 +34,18 @@ let package = Package(
             path: "MacApp",
             exclude: ["Info.plist", "SubsetSystem.entitlements", "Processes/Model", "Disk/Model"]
         ),
+        // The read-only agent helper (SET-52): its commands and reports, linking SystemCore alone, so it cannot reach
+        // the cleanups in SystemDisk.
+        .target(
+            name: "SystemHelper",
+            dependencies: ["SystemCore"],
+            path: "Helper/Sources"
+        ),
+        .executableTarget(
+            name: "subset-system",
+            dependencies: ["SystemHelper"],
+            path: "Helper/Main"
+        ),
         .testTarget(
             name: "SystemCoreTests",
             dependencies: ["SystemCore"],
@@ -47,6 +60,11 @@ let package = Package(
             name: "SystemDiskTests",
             dependencies: ["SystemCore", "SystemProcesses", "SystemDisk"],
             path: "Tests/DiskTests"
+        ),
+        .testTarget(
+            name: "SystemHelperTests",
+            dependencies: ["SystemCore", "SystemHelper"],
+            path: "Tests/HelperTests"
         )
     ]
 )
