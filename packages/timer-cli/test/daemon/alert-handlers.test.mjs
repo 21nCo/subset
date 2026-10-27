@@ -804,16 +804,100 @@ test(`a daemon answers 200 for the acknowledgements an earlier daemon saved, onl
   clock.advance(ORPHANED_ALERT_MS - 1);
   assert.deepEqual(handlers.checkpoint.acknowledged, [earlier, unclaimed]);
   assert.equal(handlers.received('a1', 's1').ok, true);
+  // Its receipt is saved before it is answered, so no later daemon plays it.
   assert.deepEqual(handlers.checkpoint.acknowledged, [unclaimed]);
   assert.equal(handlers.acknowledge('a1', 's1').status, 404);
-  assert.deepEqual([saved, sink.received.length], [[], 0]);
+  assert.deepEqual([saved, sink.received.length], [[{ handoffs: [], acknowledged: [unclaimed] }], 0]);
   // No handler said it received the other, so its app ended before playing it: the sink plays it, once.
   clock.advance(1);
   assert.deepEqual(sink.received.map(({ alert }) => alert.kind), ['tick']);
-  assert.deepEqual(saved, [{ handoffs: [], acknowledged: [] }]);
+  assert.deepEqual(saved.at(-1), { handoffs: [], acknowledged: [] });
   assert.equal(handlers.acknowledge('a2', 's1').status, 410);
   clock.advance(ORPHANED_ALERT_MS);
   assert.equal(sink.received.length, 1);
+});
+
+/** A registered handler that acknowledged a finished one-second countdown named Egg. */
+async function takenFinish(t, context) {
+  const stream = await registeredHandler(t, context);
+  await startCountdown(context);
+  context.clock.advance(1_000);
+  await stream.waitFor(() => alertsOf(stream).length === 1);
+  const [alert] = alertsOf(stream);
+  assert.equal((await acknowledge(context, alert.alertId, stream.subscriberId)).status, 200);
+  return { stream, alert };
+}
+
+test('a receipt is saved before it is answered, so a daemon restarted cleanly never plays an alert its app played', async (t) => {
+  const context = await startTestDaemon(t);
+  const { stream, alert } = await takenFinish(t, context);
+  // The app played it and says so; the 200 for that is lost, so it says so again.
+  assert.equal((await received(context, alert.alertId, stream.subscriberId)).body.forgotten, true);
+  assert.deepEqual((await received(context, alert.alertId, stream.subscriberId)).body, { alertId: alert.alertId, forgotten: false });
+  assert.deepEqual(savedAcknowledged(context), []);
+  // Nothing else is saved before a clean restart.
+  assert.equal(await context.daemon.shutdown(), 0);
+  const next = await startTestDaemon(t, { dataDir: context.dataDir });
+  next.clock.advance(ORPHANED_ALERT_MS + 1_000);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual([context.sink.received.length, next.sink.received.length], [0, 0]);
+});
+
+test('a receipt whose save fails gets 500 and leaves the alert taken, so the app says so again', async (t) => {
+  const context = await startTestDaemon(t);
+  const { stream, alert } = await takenFinish(t, context);
+  const scheduler = join(context.dataDir, 'scheduler.json');
+  renameSync(scheduler, `${scheduler}.saved`);
+  mkdirSync(join(scheduler, 'in-the-way'), { recursive: true });
+  const confirm = () => received(context, alert.alertId, stream.subscriberId);
+  assert.deepEqual([(await confirm()).status, (await acknowledge(context, alert.alertId, stream.subscriberId)).status], [500, 200]);
+  rmSync(scheduler, { recursive: true });
+  renameSync(`${scheduler}.saved`, scheduler);
+  assert.equal(savedAcknowledged(context).length, 1);
+  assert.deepEqual((await confirm()).body, { alertId: alert.alertId, forgotten: true });
+  assert.deepEqual(savedAcknowledged(context), []);
+  stream.close();
+  context.clock.advance(ORPHANED_ALERT_MS);
+  assert.equal(context.sink.received.length, 0);
+});
+
+test(`registering again restarts ${ORPHANED_ALERT_MS / 1000} s from the handler's next departure`, () => {
+  const { clock, sink, handlers } = sequentialHandlers();
+  const timer = { id: 't_1', name: 'Egg', sound: true };
+  const finishes = () => sink.received.filter(({ alert }) => alert.kind === 'finish').length;
+  handlers.deliver({ timerId: 't_1', kind: 'segment', at: clock.now() }, timer);
+  assert.equal(handlers.acknowledge('a1', 's1').ok, true);
+  handlers.unregister('s1');
+  clock.advance(ORPHANED_ALERT_MS - 1_000);
+  assert.equal(handlers.register('s1').ok, true);
+  handlers.deliver({ timerId: 't_1', kind: 'finish', at: clock.now() }, timer);
+  assert.equal(handlers.acknowledge('a2', 's1').ok, true);
+  clock.advance(500);
+  handlers.unregister('s1');
+  // The first departure's 30 s ends; the alert taken since is not played by the sink.
+  clock.advance(ORPHANED_ALERT_MS - 1);
+  assert.deepEqual([finishes(), sink.received.length], [0, 0]);
+  // Without a receipt both are played once, 30 s after the latest departure.
+  clock.advance(1);
+  assert.deepEqual(sink.received.map(({ alert }) => alert.kind).sort(), ['finish', 'segment']);
+  clock.advance(ORPHANED_ALERT_MS);
+  assert.equal(sink.received.length, 2);
+  // An app that leaves, says it played its alert, comes back, takes one, and leaves again while its
+  // 200 is delayed, then plays it and says so 1.5 s later: its play is the only one.
+  const again = sequentialHandlers();
+  again.handlers.deliver({ timerId: 't_1', kind: 'segment', at: again.clock.now() }, timer);
+  assert.equal(again.handlers.acknowledge('a1', 's1').ok, true);
+  again.handlers.unregister('s1');
+  assert.equal(again.handlers.received('a1', 's1').forgotten, true);
+  again.clock.advance(ORPHANED_ALERT_MS - 1_000);
+  assert.equal(again.handlers.register('s1').ok, true);
+  again.handlers.deliver({ timerId: 't_1', kind: 'finish', at: again.clock.now() }, timer);
+  assert.equal(again.handlers.acknowledge('a2', 's1').ok, true);
+  again.handlers.unregister('s1');
+  again.clock.advance(1_500);
+  assert.equal(again.handlers.received('a2', 's1').forgotten, true);
+  again.clock.advance(2 * ORPHANED_ALERT_MS);
+  assert.equal(again.sink.received.length, 0);
 });
 
 /**

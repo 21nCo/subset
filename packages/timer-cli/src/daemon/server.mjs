@@ -461,13 +461,23 @@ export async function startDaemon({
     settleRequest(response, result, { alertId, acknowledged: true });
   }
 
-  /** The handler read the 200 for that alert, so the daemon need no longer answer it. */
+  /**
+   * The handler played that alert, so the daemon forgets it once that is saved. A failed save gets
+   * 500 or 503 and leaves it taken, so the handler says so again.
+   */
   async function received(request, response, alertId) {
     const id = await subscriberIdOf(request, response);
     if (id === null) return;
     // Once shutting down the daemon saves no more, so the handler says so again to the next daemon.
     if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
-    const result = alertHandlers.received(alertId, id);
+    let result;
+    try {
+      result = alertHandlers.received(alertId, id);
+    } catch (error) {
+      if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      log(`could not save scheduler.json: ${error.message}`);
+      return fail(response, 500, 'storage_failed', 'The daemon could not record the receipt.');
+    }
     settleRequest(response, result, { alertId, forgotten: result.forgotten });
   }
 

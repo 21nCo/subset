@@ -12,17 +12,20 @@ export const SETTLED_RETENTION_MS = 60_000;
 /**
  * How many acknowledged alerts the daemon keeps that no handler has said it received. None is ever
  * dropped: at this many, the daemon takes no more, and the sink plays the next alert acknowledged
- * (410). A running handler says so right after each 200, so only a handler that ended between a
- * 200 and saying so leaves one behind, until `ORPHANED_ALERT_MS` after it left.
+ * (410). A running handler says so right after it plays each one, so only a handler that ended or
+ * stalled before saying so leaves one behind, until `ORPHANED_ALERT_MS` after it left.
  */
 export const MAX_UNRECEIVED = 1_000;
 /**
- * How long, on the monotonic clock, an alert a handler took stays its own once that handler is no
- * longer registered (it unregistered, its event stream closed, or it registered with an earlier
- * daemon) without its saying it received the 200. Then the sink plays it, and a later
- * acknowledgement or handback gets 410. A running handler says so right after it plays, so the
- * one that has not said so by then ended without playing it, unless it ended (or stalled this long)
- * after playing and before saying so: then the alert plays twice.
+ * How long, on the monotonic clock, an alert a handler took stays its own once that handler last
+ * stopped being registered (it unregistered, its event stream closed, or it registered with an
+ * earlier daemon) without its saying it received the alert. Then the sink plays it, and a later
+ * acknowledgement or handback gets 410. A handler registering again cancels this, and its next
+ * departure starts it over. So an alert a handler took is never lost while the daemon survives: it
+ * is delivered at least once. A running handler says so right after it plays, so the one that has
+ * not said so by then usually ended without playing it; one that ended, was force-quit, crashed or
+ * stalled this long after playing it and before the daemon recorded its receipt has it played
+ * twice. Exactly-once across that app termination is SET-169.
  */
 export const ORPHANED_ALERT_MS = 30_000;
 
@@ -44,16 +47,18 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * ends abruptly leaves them for the next one to play (`replay`). An acknowledgement is
  * answered only once `save(checkpoint)` has recorded the alert as taken, in `acknowledged`; when
  * that throws, the alert stays pending and the error is thrown to the caller. An acknowledged alert
- * stays in `acknowledged`, and so in every later save, until its handler says it received the 200
- * (`received`), however long that takes while it is the handler: a written reply does not mean the
- * handler read it. The next daemon takes the saved ones as `acknowledged`, so a handler whose 200
- * was lost gets it from that daemon too. One a handler took and never said it received is played
- * by the sink `ORPHANED_ALERT_MS` after that handler stopped being the handler (or after the next
- * daemon started), unless it is the handler again by then, so an app that ended before playing it
- * does not lose it. A handler that may no longer present an alert it took hands it back
- * (`release`), and the sink plays it once that is saved: the alert is saved as a handoff again, so
- * a daemon that ends before the sink has played it leaves it for the next one to play. When that
- * save throws, the alert stays taken and the error is thrown to the caller.
+ * stays in `acknowledged`, and so in every later save, until its handler says it received (played)
+ * it (`received`), however long that takes while it is the handler: a written reply does not mean
+ * the handler read it. A receipt is answered only once a save leaves the alert out; when that
+ * throws, the alert stays taken and the error is thrown to the caller. The next daemon takes the
+ * saved ones as `acknowledged`, so a handler whose 200 was lost gets it from that daemon too. One a
+ * handler took and never said it received is played by the sink `ORPHANED_ALERT_MS` after that
+ * handler last stopped being the handler (or after the next daemon started), unless it is the
+ * handler again by then, so an app that ended before playing it does not lose it. A handler that
+ * may no longer present an alert it took hands it back (`release`), and the sink plays it once that
+ * is saved: the alert is saved as a handoff again, so a daemon that ends before the sink has played
+ * it leaves it for the next one to play. When that save throws, the alert stays taken and the error
+ * is thrown to the caller.
  *
  * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting,
  * stopping and an orphaned taken alert) first asks `owns()` whether this daemon still holds
@@ -240,6 +245,9 @@ export function createAlertHandlers({
       if (handler !== null) return refused(409, 'handler_registered', 'Another alert handler is registered.');
       if (!isOpen(subscriberId)) return refused(404, 'not_found', 'No open event stream has that subscriber id.');
       handler = subscriberId;
+      // Its alerts are its own again, so their `ORPHANED_ALERT_MS` starts over at its next departure.
+      clock.clearTimeout(orphaned.get(subscriberId));
+      orphaned.delete(subscriberId);
       log('an alert handler registered; it plays alerts it acknowledges.');
       return { ok: true };
     },
@@ -309,13 +317,23 @@ export function createAlertHandlers({
     },
 
     /**
-     * The handler `subscriberId` received the 200 for `alertId`, so the daemon forgets it; the next
-     * save leaves it out. Saying so again, or for an alert the daemon does not hold, changes nothing.
+     * The handler `subscriberId` received `alertId` (it played it), so the daemon forgets it once
+     * that is saved, and no later daemon plays it. A failed save throws and leaves it taken, so the
+     * handler says so again. Saying so again, or for an alert the daemon does not hold, changes
+     * nothing.
      */
     received(alertId, subscriberId) {
-      const owner = taken.get(alertId)?.subscriberId;
-      if (owner !== undefined && owner !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
-      return { ok: true, forgotten: taken.delete(alertId) };
+      const held = taken.get(alertId);
+      if (held && held.subscriberId !== subscriberId) return refused(409, 'not_alert_handler', 'That alert was handed to another handler.');
+      if (!held) return { ok: true, forgotten: false };
+      taken.delete(alertId);
+      try {
+        save(checkpoint());
+      } catch (error) {
+        taken.set(alertId, held);
+        throw error;
+      }
+      return { ok: true, forgotten: true };
     },
 
     /**

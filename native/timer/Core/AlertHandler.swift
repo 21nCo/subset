@@ -113,8 +113,10 @@ extension DaemonClient: AlertHandlerDaemon {
 /// plays only on `.acknowledged`: an alert the daemon's sink already played (410), or that the daemon handed to someone
 /// else, is never played here, so every alert plays exactly once. Quitting (`quit(within:)`) hands back every alert the
 /// app may have taken and not played, and waits until the daemon hears the app received each one it played. The daemon's
-/// sink plays an alert the app took and never said it received 30 s after the app's stream closed
-/// (`ORPHANED_ALERT_MS`), so an alert is not lost when the app ends.
+/// sink plays an alert the app took and never said it received 30 s after the app's stream last closed
+/// (`ORPHANED_ALERT_MS`), so an alert is never lost when the app ends: across an app that quits past its bound, is
+/// force-quit, crashes or stalls 30 s between playing an alert and the daemon recording its receipt, that alert plays
+/// at least once, and may play twice (owner decision; exactly-once across that is SET-169).
 @MainActor
 public final class AlertHandler {
     public enum Registration: Equatable, Sendable {
@@ -179,8 +181,8 @@ public final class AlertHandler {
     /// Before the app quits: it takes no more alerts and unregisters, so the daemon plays the next ones, and hands back
     /// each alert it may have taken but not played (sent again until a daemon answers), so the daemon's sink plays it.
     /// Returns once each is handed back, or played and its receipt answered, or after `bound`. The daemon's sink plays an
-    /// alert whose ack or handback no daemon answered by then 30 s after the app's stream closed; one the app played whose
-    /// receipt no daemon answered by then plays twice.
+    /// alert whose ack or handback no daemon answered by then 30 s after the app's stream closed, so it plays once; one
+    /// the app played whose receipt no daemon recorded by then plays again (at least once, SET-169).
     public func quit(within bound: Duration = .seconds(5)) async {
         quitting = true
         setPermitted(false)
