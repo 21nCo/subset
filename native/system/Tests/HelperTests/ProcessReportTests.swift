@@ -80,6 +80,45 @@ final class ProcessReportTests: XCTestCase {
         }
     }
 
+    /// A process the first sample listed but whose CPU could not be measured is a failed read, while a process that
+    /// started between the two samples has no CPU figure yet and leaves the result complete.
+    func testAProcessFromTheFirstSampleWithoutCPUIsAPartialResultButANewOneIsNot() async throws {
+        let app = "/Applications/Late.app/Contents/MacOS/Late"
+        for (first, partial) in [(FirstSample.unreadable, true), (.ahead, true), (.absent, false)] {
+            var processes = HelperFixtures.workload(restricted: false)
+            processes.append(HelperProcess(pid: 500, path: app, memory: 2000 * HelperFixtures.mib, cpu: 50, first: first))
+            for command in [["status", "--json"], ["processes", "--json"]] {
+                let output = await run(command, HelperFixtures.environment(processes: HelperFixtures.probe(processes)))
+                try assertValid(output, command[0] == "status" ? "status.schema.json" : "processes.schema.json")
+                XCTAssertEqual(output.exit, partial ? .partial : .ok, "\(first) \(command)")
+                let json = try object(output)
+                XCTAssertEqual(json["complete"] as? Bool, !partial, "\(first) \(command)")
+                XCTAssertEqual((json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String },
+                               partial ? ["usageUnavailable"] : [], "\(first) \(command)")
+                // Its memory was read, so it stays in the totals; its CPU is unknown, never zero.
+                let groups = try XCTUnwrap((command[0] == "status" ? json["topByMemory"] : json["groups"]) as? [[String: Any]])
+                let late = try XCTUnwrap(groups.first { $0["id"] as? String == "app:/Applications/Late.app" })
+                XCTAssertEqual(late["memoryBytes"] as? Int, 2000 * Int(HelperFixtures.mib))
+                XCTAssertTrue(late["cpuPercent"] is NSNull, "\(first) \(command)")
+                XCTAssertEqual(late["cpuUnmeasuredCount"] as? Int, 1)
+            }
+        }
+    }
+
+    func testOriginSignalsNotReadInTimeAreAPartialResult() async throws {
+        for command in [["status", "--json"], ["processes", "--json"]] {
+            // Reading the oldest process spends the budget, so the others are grouped without their signals.
+            var probe = HelperFixtures.probe(HelperFixtures.workload(restricted: false))
+            probe.originBudget = .zero
+            let output = await run(command, HelperFixtures.environment(processes: probe))
+            try assertValid(output, command[0] == "status" ? "status.schema.json" : "processes.schema.json")
+            XCTAssertEqual(output.exit, .partial, "\(command)")
+            let json = try object(output)
+            XCTAssertEqual(json["complete"] as? Bool, false)
+            XCTAssertEqual((json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String }, ["originSignalsNotRead"])
+        }
+    }
+
     func testAFailedProcessListIsAnInternalErrorThatStillValidates() async throws {
         let probe = HelperFixtures.probe([], listFails: true)
         for (arguments, schema) in [(["status", "--json"], "status.schema.json"), (["processes", "--json"], "processes.schema.json")] {

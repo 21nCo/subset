@@ -8,6 +8,8 @@ public struct ProcessMeasurement: Sendable {
     /// The second sample's processes with their origin signals, attributed. `nil` when sampling failed.
     public let processes: [ProcessFacts]
     public let attribution: AttributionResult?
+    /// The processes the first sample listed: of those without CPU in the second, only these had a failed read.
+    public let firstSample: Set<ProcessIdentity>
     public let memory: SystemMemory
     /// When the second sample was read.
     public let observedAt: Date
@@ -56,22 +58,23 @@ public struct ProcessProbe: Sendable {
     public func measure() async -> ProcessMeasurement {
         // Origin signals are read once, for the second sample, so the first two are `interval` apart.
         var sampler = Sampler(source: source, hostCPU: hostCPU)
+        var firstSample = Set<ProcessIdentity>()
         let snapshot = await Result { () async throws -> ProcessSnapshot in
-            _ = try sampler.sample()
+            firstSample = Set(try sampler.sample().processes.map(\.identity))
             try? await Task.sleep(for: interval)
             return try sampler.sample()
         }.mapError { ProcessSourceFailure(message: "\($0)") }
         let observedAt = now()
         let memory = SystemMemory(raw: memory.read())
         guard case let .success(sample) = snapshot else {
-            return ProcessMeasurement(snapshot: snapshot, processes: [], attribution: nil, memory: memory,
-                                      observedAt: observedAt)
+            return ProcessMeasurement(snapshot: snapshot, processes: [], attribution: nil, firstSample: firstSample,
+                                      memory: memory, observedAt: observedAt)
         }
         var processes = sample.processes
         origin?.annotate(&processes, budget: originBudget)
         return ProcessMeasurement(snapshot: snapshot, processes: processes,
                                   attribution: attribution.attribute(processes, launchdJobs: launchdJobs()),
-                                  memory: memory, observedAt: observedAt)
+                                  firstSample: firstSample, memory: memory, observedAt: observedAt)
     }
 }
 
@@ -200,11 +203,14 @@ enum ProcessReports {
         case .success:
             var errors: [HelperError] = []
             // A process macOS restricts is counted in `restricted`; one whose usage read failed otherwise is an error.
-            // A process without CPU alone started between the two samples, which is not a failed read.
-            let unmeasured = measurement.processes.filter { !$0.restricted && $0.physFootprint == nil }.count
+            // One without CPU failed only if the first sample listed it; otherwise it started between the two samples.
+            let unmeasured = measurement.processes.filter { process in
+                !process.restricted && (process.physFootprint == nil
+                    || process.cpuPercent == nil && measurement.firstSample.contains(process.identity))
+            }.count
             if unmeasured > 0 {
                 errors.append(HelperError(code: "usageUnavailable",
-                                          message: "\(unmeasured) processes' CPU and memory could not be read; they are in no total."))
+                                          message: "\(unmeasured) processes' CPU or memory could not be read; what was read is in the totals."))
             }
             let unread = measurement.processes.filter { $0.origin == nil }.count
             if unread > 0 {

@@ -14,6 +14,18 @@ struct HelperProcess {
     var restricted = false
     var signature: CodeSignature? = HelperFixtures.unsigned
     var cwd: String?
+    var first: FirstSample = .readable
+}
+
+/// How the first of the two samples lists a process.
+enum FirstSample {
+    case readable
+    /// Its usage read failed.
+    case unreadable
+    /// It started after the first sample.
+    case absent
+    /// Its CPU time counter is ahead of the second sample's, as a broken counter would be.
+    case ahead
 }
 
 enum HelperFixtures {
@@ -74,12 +86,13 @@ enum HelperFixtures {
         }
         let timebase = MachTimebase(numer: 1, denom: 1)
         func raw(_ timestamp: UInt64, second: Bool) -> RawProcessSample {
-            RawProcessSample(timestamp: timestamp, timebase: timebase, processes: processes.map { process in
+            RawProcessSample(timestamp: timestamp, timebase: timebase, processes: processes.compactMap { process in
+                if !second, process.first == .absent { return nil }
                 let usage: UsageReading
                 if process.restricted {
                     usage = .restricted
-                } else if let memory = process.memory {
-                    let busy = second ? UInt64(process.cpu / 100 * 1e9) : 0
+                } else if let memory = process.memory, second || process.first != .unreadable {
+                    let busy = second ? UInt64(process.cpu / 100 * 1e9) : process.first == .ahead ? 1_000_000_000_000 : 0
                     usage = .available(RawProcessUsage(physFootprint: memory, userTime: 1_000_000 + busy, systemTime: 0,
                                                        energy: 0, billedEnergy: 0))
                 } else {

@@ -44,11 +44,27 @@ final class HelperBinaryTests: XCTestCase {
         XCTAssertGreaterThan((json["topByMemory"] as? [Any])?.count ?? 0, 0)
     }
 
+    func testProcessesJSONFromTheBuiltHelperValidates() throws {
+        let result = try execute(["processes", "--layer", "vendor", "--json"])
+        XCTAssertTrue([0, 3].contains(result.status), "exit \(result.status): \(result.stderr)")
+        var validator = SchemaValidator()
+        XCTAssertEqual(try validator.errors(json: result.stdout, schemaFile: "processes.schema.json"), [])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(json["layer"] as? String, "vendor")
+        XCTAssertGreaterThan((json["groups"] as? [Any])?.count ?? 0, 0)
+    }
+
     func testTheBuiltHelperReportsUsageErrorsAndItsVersion() throws {
         let usage = try execute(["clean"])
         XCTAssertEqual(usage.status, 2)
         XCTAssertEqual(usage.stdout, "")
         XCTAssertTrue(usage.stderr.contains("Unknown command clean."))
         XCTAssertEqual(try execute(["--version"]).stdout, "subset-system 0.1.0\n")
+        // The copy bundled in the app prints the app's version.
+        let helpers = try helper().deletingLastPathComponent()
+        if helpers.lastPathComponent == "Helpers" {
+            let info = try XCTUnwrap(NSDictionary(contentsOf: helpers.deletingLastPathComponent().appendingPathComponent("Info.plist")))
+            XCTAssertEqual(try execute(["--version"]).stdout, "subset-system \(info["CFBundleShortVersionString"] ?? "")\n")
+        }
     }
 }

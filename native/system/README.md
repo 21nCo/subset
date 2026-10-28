@@ -335,7 +335,7 @@ ln -s '/Applications/Subset System.app/Contents/Helpers/subset-system' /usr/loca
 
 JSON follows `schemaVersion: 1`, with a schema for each command in [`schemas/`](schemas): `status.schema.json` and `processes.schema.json`, sharing `common.schema.json`. Every result has `observedAt`, `sources` (where each value comes from), `restricted` counts (processes macOS refused to reveal), `complete`, and `errors[]` with a `code` and `message`. A value that could not be read is `null`, never zero.
 
-A value that was asked for and could not be read keeps whatever was read, adds an error, and makes the result partial (exit 3, `complete: false`): an unrestricted process whose usage read failed (`usageUnavailable`), CPU or memory figures (`cpuUnavailable`, `memoryUnavailable`), and origin signals not read in time, so fallback rules grouped those processes (`originSignalsNotRead`). A process without a CPU figure because it started between the two samples is not a failure and leaves a result complete. A usage error (exit 2) takes precedence over a partial result.
+A value that was asked for and could not be read keeps whatever was read, adds an error, and makes the result partial (exit 3, `complete: false`): an unrestricted process whose usage read failed, including one listed in both samples without a CPU figure (`usageUnavailable`), CPU or memory figures (`cpuUnavailable`, `memoryUnavailable`), and origin signals not read in time, so fallback rules grouped those processes (`originSignalsNotRead`). A process without a CPU figure because it started between the two samples, so the first sample did not list it, is not a failure and leaves a result complete. A usage error (exit 2) takes precedence over a partial result.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -345,7 +345,7 @@ A value that was asked for and could not be read keeps whatever was read, adds a
 | `4` | Timeout: reserved for the `disk` scan (SET-201) |
 | `5` | Internal error: processes could not be listed |
 
-`SystemHelperTests` validate each command's JSON against its schema for normal, partial, and errored fixture data, and check exit codes, empty and `=` arguments, `~` and `--absolute`, and the failed reads above (unreadable CPU and memory figures, an unrestricted process's failed usage read), with a validator for the keywords the schemas use that rejects any other keyword. `HelperBinaryTests` run the built helper for `status --json` and validate it; CI runs them again against the copy in the built app's `Contents/Helpers`. A real agent invoking the helper is not verified here (SET-57), nor is the signed helper (SET-59).
+`SystemHelperTests` validate each command's JSON against its schema for normal, partial, and errored fixture data, and check exit codes, empty and `=` arguments, `~` and `--absolute`, and the failed reads above (unreadable CPU and memory figures, an unrestricted process's failed usage read, a first-sample CPU read that failed or a counter that went backwards, origin signals not read in time), with a validator for the keywords the schemas use that rejects any other keyword. `HelperBinaryTests` run the built helper for `status --json` and `processes --json` and validate them; CI runs them again against the copy in the built app's `Contents/Helpers`. A real agent invoking the helper is not verified here (SET-57), nor is the signed helper (SET-59).
 
 ## Surfaces
 
