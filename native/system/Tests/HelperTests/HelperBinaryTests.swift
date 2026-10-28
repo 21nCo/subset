@@ -1,0 +1,54 @@
+import Foundation
+import XCTest
+
+/// Runs the built `subset-system` executable, as an agent would, and validates what it prints. The binary is the one
+/// next to this test bundle (`swift test`, `xcodebuild test`), or the one `SUBSET_SYSTEM_HELPER` names, such as the
+/// copy inside the built app's `Contents/Helpers`.
+final class HelperBinaryTests: XCTestCase {
+    private func helper() throws -> URL {
+        if let path = ProcessInfo.processInfo.environment["SUBSET_SYSTEM_HELPER"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        let products = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+        let binary = products.appendingPathComponent("subset-system")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            throw ValidationSetupError("No built subset-system at \(binary.path); build it or set SUBSET_SYSTEM_HELPER.")
+        }
+        return binary
+    }
+
+    private func execute(_ arguments: [String]) throws -> (stdout: String, stderr: String, status: Int32) {
+        let process = Process()
+        process.executableURL = try helper()
+        process.arguments = arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        // Read before waiting, so a full pipe never stalls the helper.
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errors = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (String(decoding: output, as: UTF8.self), String(decoding: errors, as: UTF8.self), process.terminationStatus)
+    }
+
+    func testStatusJSONFromTheBuiltHelperValidates() throws {
+        let result = try execute(["status", "--json"])
+        // Other users' processes are restricted for a normal user, which makes the result partial.
+        XCTAssertTrue([0, 3].contains(result.status), "exit \(result.status): \(result.stderr)")
+        var validator = SchemaValidator()
+        XCTAssertEqual(try validator.errors(json: result.stdout, schemaFile: "status.schema.json"), [])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(json["command"] as? String, "status")
+        XCTAssertGreaterThan((json["topByMemory"] as? [Any])?.count ?? 0, 0)
+    }
+
+    func testTheBuiltHelperReportsUsageErrorsAndItsVersion() throws {
+        let usage = try execute(["clean"])
+        XCTAssertEqual(usage.status, 2)
+        XCTAssertEqual(usage.stdout, "")
+        XCTAssertTrue(usage.stderr.contains("Unknown command clean."))
+        XCTAssertEqual(try execute(["--version"]).stdout, "subset-system 0.1.0\n")
+    }
+}

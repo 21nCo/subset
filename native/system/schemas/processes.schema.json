@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/system/v1/processes.schema.json",
+  "title": "subset-system processes --json",
+  "type": "object",
+  "required": ["schemaVersion", "command", "helperVersion", "observedAt", "complete", "sources", "restricted", "errors",
+               "layer", "processCount", "groups"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "command": { "const": "processes" },
+    "helperVersion": { "$ref": "common.schema.json#/$defs/helperVersion" },
+    "observedAt": { "$ref": "common.schema.json#/$defs/observedAt" },
+    "complete": { "$ref": "common.schema.json#/$defs/complete" },
+    "sources": {
+      "allOf": [{ "$ref": "common.schema.json#/$defs/sources" }],
+      "required": ["groups", "groups.cpuPercent", "groups.memoryBytes", "members"]
+    },
+    "restricted": { "$ref": "common.schema.json#/$defs/processRestricted" },
+    "errors": { "$ref": "common.schema.json#/$defs/errors" },
+    "layer": { "$ref": "common.schema.json#/$defs/layer" },
+    "processCount": { "type": ["integer", "null"], "minimum": 0 },
+    "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } }
+  },
+  "$defs": {
+    "group": {
+      "allOf": [{ "$ref": "common.schema.json#/$defs/groupSummary" }],
+      "required": ["members", "subgroups"],
+      "additionalProperties": false,
+      "properties": {
+        "id": true, "layer": true, "kind": true, "name": true, "path": true, "processCount": true,
+        "restrictedCount": true, "cpuPercent": true, "cpuUnmeasuredCount": true, "memoryBytes": true,
+        "memoryUnmeasuredCount": true,
+        "members": { "type": "array", "items": { "$ref": "#/$defs/member" } },
+        "subgroups": { "type": "array", "items": { "$ref": "#/$defs/group" } }
+      }
+    },
+    "member": {
+      "type": "object",
+      "required": ["pid", "name", "executable", "restricted", "cpuPercent", "memoryBytes", "rule", "confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "pid": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "executable": { "type": ["string", "null"], "description": "The executable's path; command-line arguments are never read." },
+        "restricted": { "type": "boolean" },
+        "cpuPercent": { "$ref": "common.schema.json#/$defs/optionalPercent" },
+        "memoryBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "rule": { "type": ["string", "null"], "description": "The attribution rule that placed the process in this layer." },
+        "confidence": { "enum": ["rule", "signal", "fallback", null] }
+      }
+    }
+  }
+}

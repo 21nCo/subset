@@ -10,6 +10,7 @@ public enum SystemIdentity {
 public enum ShellCommand: CaseIterable, Sendable {
     case openSystem
     case settings
+    case commandLineHelper
     case about
     case quit
 
@@ -17,6 +18,7 @@ public enum ShellCommand: CaseIterable, Sendable {
         switch self {
         case .openSystem: "Open System"
         case .settings: "Settings…"
+        case .commandLineHelper: "Command-Line Helper…"
         case .about: "About \(SystemIdentity.appName)"
         case .quit: "Quit"
         }
@@ -27,6 +29,7 @@ public enum ShellCommand: CaseIterable, Sendable {
         switch self {
         case .openSystem: ""
         case .settings: ","
+        case .commandLineHelper: ""
         case .about: ""
         case .quit: "q"
         }
@@ -37,8 +40,25 @@ public enum ShellCommand: CaseIterable, Sendable {
         switch self {
         case .openSystem: false
         case .settings: false
+        case .commandLineHelper: false
         case .about: true
         case .quit: true
         }
+    }
+}
+
+/// The read-only agent helper (SET-52) inside the app bundle, and the command that links it onto `PATH`. The app only
+/// shows and copies the command: it never runs it, edits shell files, or writes to `/usr/local`.
+public enum CommandLineHelper {
+    public static let name = "subset-system"
+
+    /// Where the app bundles the helper.
+    public static func path(inApp bundlePath: String) -> String {
+        bundlePath + "/Contents/Helpers/" + name
+    }
+
+    /// A shell command that links the helper into `folder`, with the helper's path quoted for the shell.
+    public static func linkCommand(helperPath: String, folder: String = "/usr/local/bin") -> String {
+        "ln -s '\(helperPath.replacingOccurrences(of: "'", with: "'\\''"))' \(folder)/\(name)"
     }
 }
