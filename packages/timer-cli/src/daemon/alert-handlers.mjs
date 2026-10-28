@@ -61,7 +61,8 @@ const withoutParts = (started, parts) => Object.fromEntries(Object.entries(start
  * handler last stopped being the handler (or after the next daemon started), unless it is the
  * handler again by then, so an app that ended before playing it does not lose it. Before the handler
  * plays each part of an alert it took, it asks whether it may (`playing`: while it still holds it),
- * which records its process (`pid`) as playing that part, and once that part finished it says so
+ * answered once `scheduler.json` or else `plays.json` records its process (`pid`) as playing that
+ * part, and once that part finished it says so
  * (`played`), answered once `scheduler.json` or else `plays.json` holds it, so the sink never plays a
  * part the handler finished. A handler that may no longer present an alert it took hands it back
  * (`release`) between parts, and the sink plays the parts it had not finished once that is saved: the
@@ -169,10 +170,13 @@ export function createAlertHandlers({
   let leftUnfinished = journal.unfinished;
   // A daemon that ended before these handlers said they received their 200 left them for this one,
   // and no stream of this daemon is their handler yet.
-  const handled = new Map(journal.handled.map(({ alertId, played }) => [alertId, played]));
+  // Parts only plays.json holds, as scheduler.json could not be saved, are added to theirs.
+  const handled = new Map(journal.handled.map(({ alertId, ...parts }) => [alertId, parts]));
   for (const { alertId, subscriberId, alert, timer, played = [], started = {} } of acknowledged) {
-    const finished = [...new Set([...played, ...(handled.get(alertId) ?? [])])];
-    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played: finished, started: withoutParts(started, finished), unsaved: false });
+    const progress = handled.get(alertId);
+    const finished = [...new Set([...played, ...(progress?.played ?? [])])];
+    const playing = withoutParts({ ...started, ...progress?.started }, finished);
+    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played: finished, started: playing, unsaved: false });
   }
   for (const { subscriberId } of acknowledged) orphan(subscriberId);
 
@@ -446,12 +450,13 @@ export function createAlertHandlers({
 
     /**
      * Whether the handler `subscriberId` may play `part` of `alertId`, which it took: yes while it
-     * still holds it, so the sink has not played it. Its process `pid` is recorded as playing that
-     * part, and saved with the alert when `scheduler.json` can be written (a failed save is logged),
-     * so the sink decides that part by the process if the handler leaves without saying it finished
-     * it (see `ORPHANED_ALERT_MS`). A pending alert gets 409 (`invalid_state`), and one the sink
-     * played 410, so the handler plays nothing more of it. A daemon that lost `daemon.lock` throws
-     * its `LockLostError` and permits nothing.
+     * still holds it, so the sink has not played it, once its process `pid` is recorded as playing
+     * that part in `scheduler.json`, or, when that cannot be saved, in `plays.json`, so the sink, of
+     * this daemon or the next, decides that part by the process if the handler leaves without saying
+     * it finished it (see `ORPHANED_ALERT_MS`). When neither can be written this throws and permits
+     * nothing, forgetting the process, so the handler asks again. A pending alert gets 409
+     * (`invalid_state`), and one the sink played 410, so the handler plays nothing more of it. A
+     * daemon that lost `daemon.lock` throws its `LockLostError` and permits nothing.
      */
     playing(alertId, subscriberId, part, pid) {
       const refusal = heldBy(alertId, subscriberId);
@@ -464,11 +469,14 @@ export function createAlertHandlers({
         save(checkpoint());
       } catch (error) {
         // A daemon that lost daemon.lock permits nothing: the handler asks the one that holds it.
-        if (isLockLost(error)) {
-          held.started = before;
-          throw error;
+        let recorded = false;
+        try {
+          recorded = !isLockLost(error) && journal.handle(alertId, held, { keep: false });
+        } finally {
+          if (!recorded) held.started = before;
         }
-        log(`could not record that the alert handler plays ${part} of alert ${alertId}: ${error.message}`);
+        if (!recorded) throw error;
+        log(`could not save scheduler.json (${error.message}); plays.json holds that the alert handler plays ${part} of alert ${alertId}.`);
       }
       return { ok: true };
     },
@@ -502,7 +510,7 @@ export function createAlertHandlers({
         save(checkpoint());
         held.unsaved = false;
       } catch (error) {
-        if (isLockLost(error) || !journal.handle(alertId, held.played)) throw error;
+        if (isLockLost(error) || !journal.handle(alertId, held)) throw error;
         log(`could not save scheduler.json (${error.message}); plays.json holds the parts of alert ${alertId} its handler finished.`);
       }
       return { ok: true };

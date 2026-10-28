@@ -121,9 +121,10 @@ extension DaemonClient: AlertHandlerDaemon {
     }
 
     /// `POST /v1/alerts/<alertId>/playing`: whether the app may play `part` of an alert it took. It may while the daemon's
-    /// sink has not played the alert; a 410 means it has, so the app plays no more of it. The daemon records this process
-    /// as playing that part, so if the app leaves before it says it finished it, the daemon's sink holds that part while
-    /// this process still runs, however long, and plays it only once the process has ended.
+    /// sink has not played the alert; a 410 means it has, so the app plays no more of it. The daemon answers 200 only once
+    /// it has saved this process as playing that part, so if the app leaves before it says it finished it, the daemon's
+    /// sink, or the next daemon's, holds that part while this process still runs, however long, and plays it only once the
+    /// process has ended. A 500 means it could not save that, and permits nothing: the app asks again before playing it.
     public func startPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
         let body = PartBody(subscriberId: subscriberId, part: part.name, pid: ProcessInfo.processInfo.processIdentifier)
         let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/playing", body: try JSONEncoder().encode(body))

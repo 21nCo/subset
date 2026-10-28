@@ -457,6 +457,77 @@ for (const retry of [false, true]) {
   });
 }
 
+/**
+ * The app finished the notification and asks to play the first Glass while `scheduler.json` cannot be
+ * saved (and, with `plays`, neither can `plays.json`); then its stream closes and the daemon is killed.
+ * Returns the answer, the ids, and the next daemon on the files it left, with the orphan bound passed.
+ */
+async function askWhileSchedulerFails(t, { plays: alsoPlays = false } = {}) {
+  const spawner = partSpawn();
+  const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+  await finishCountdown(context);
+  const { alertId, subscriberId } = await takeAlert(context, stream);
+  for (const state of ['playing', 'played']) assert.equal((await call(context, `/v1/alerts/${alertId}/${state}`, { subscriberId, part: 'notification', pid: APP })).status, 200);
+  breakScheduler(context);
+  if (alsoPlays) breakPlays(context);
+  const asked = await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'sound:0', pid: APP });
+  stream.close();
+  await eventually(() => context.daemon.alertHandler.registered === false);
+  const left = filesLeftByKill(t, context);
+  await context.daemon.shutdown();
+  const { next, spawner: sink } = await successorOf(t, context, partSpawn(), left);
+  next.clock.advance(ORPHANED_ALERT_MS);
+  return { asked, alertId, subscriberId, spawner, next, sink };
+}
+
+for (const resumes of [true, false]) {
+  test(`a part the app is permitted while scheduler.json cannot be saved is held by plays.json across a daemon crash: an app stalled past the orphan bound that then ${resumes ? 'says it finished it' : 'is killed'} has it played ${resumes ? 'by the app only' : 'once, by the sink'}`, async (t) => {
+    const { asked, alertId, subscriberId, spawner, next, sink } = await askWhileSchedulerFails(t);
+    assert.equal(asked.status, 200);
+    // The next daemon knows the app plays the first Glass: it plays the other two at once, and holds that one.
+    await eventually(() => sink.started.length === 2);
+    await pastEveryBound(next.processes);
+    assert.deepEqual([spawner.started, sink.started], [[], ['Glass', 'Glass']]);
+    assert.equal(plays(next.dataDir)[0].running['sound:0'].app, true);
+    if (resumes) {
+      assert.equal((await call(next, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'sound:0' })).status, 410);
+      await eventually(() => plays(next.dataDir).length === 0);
+    }
+    next.processes.live.delete(APP);
+    await eventually(() => plays(next.dataDir).length === 0);
+    await settle();
+    assert.deepEqual(sink.started, resumes ? ['Glass', 'Glass'] : ['Glass', 'Glass', 'Glass']);
+  });
+}
+
+test('a part neither file can record the app as playing gets 500 and is not permitted: the next daemon plays it once, with the app still running', async (t) => {
+  const { asked, sink, next } = await askWhileSchedulerFails(t, { plays: true });
+  assert.deepEqual([asked.status, asked.body.error?.code], [500, 'storage_failed']);
+  // The app never played the first Glass, so nothing holds it: the sink plays every Glass at once, and not the notification.
+  await eventually(() => sink.started.length === 3);
+  await eventually(() => plays(next.dataDir).length === 0);
+  await settle();
+  assert.deepEqual(sink.started, ['Glass', 'Glass', 'Glass']);
+});
+
+test('a part neither file can record the app as playing is forgotten by this daemon too, so its sink does not hold it for the app', async (t) => {
+  const spawner = partSpawn();
+  const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+  await finishCountdown(context, { sound: false });
+  const { alertId, subscriberId } = await takeAlert(context, stream);
+  breakScheduler(context);
+  breakPlays(context);
+  assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 500);
+  fixScheduler(context);
+  assert.equal(scheduler(context.dataDir).acknowledged[0].started, undefined);
+  stream.close();
+  await eventually(() => context.daemon.alertHandler.registered === false);
+  context.clock.advance(ORPHANED_ALERT_MS);
+  await eventually(() => spawner.started.length === 1);
+  await settle();
+  assert.deepEqual(spawner.started, ['notification']);
+});
+
 test('a handback after the app asked to show a part and did not (the notification center refused it) has the sink show it, though the app still runs', async (t) => {
   const spawner = partSpawn();
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
@@ -743,11 +814,40 @@ test('the entries and progress earlier daemons left are written before anything 
   fail = Object.assign(new Error('daemon.lock is no longer held by this daemon.'), { name: 'LockLostError' });
   journal.done('a1', 'sound:0');
   assert.deepEqual([journal.behind, behindCalls], [false, 0]);
-  assert.throws(() => journal.handle('a3', ['notification']), { name: 'LockLostError' });
+  assert.throws(() => journal.handle('a3', { played: ['notification'] }), { name: 'LockLostError' });
   // Nothing to write: a journal with no entries left writes nothing at startup.
   const empty = [];
   createPlayJournal({ persist: () => empty.push(1), processes: fakeProcesses() }).recover();
   assert.deepEqual(empty, []);
+});
+
+test("a handler's started part only plays.json holds is dropped once a save holds it acknowledged as started or finished, and one a failed write could not hold is forgotten", () => {
+  const writes = [];
+  let fail = null;
+  const journal = createPlayJournal({ persist(entries, progress) {
+    if (fail) throw fail;
+    writes.push(progress);
+  }, processes: fakeProcesses() });
+  const app = { pid: APP, birth: 'b', boot: 'b1', app: true };
+  assert.equal(journal.handle('a1', { played: ['notification'], started: { 'sound:0': app } }), true);
+  assert.deepEqual(writes.at(-1), [{ alertId: 'a1', played: ['notification'], started: { 'sound:0': app } }]);
+  // A save that holds the finished part but not the started one keeps it; a handoff need not hold it.
+  journal.saved([], [{ alertId: 'a1', subscriberId: 's1', played: ['notification'] }]);
+  assert.deepEqual(journal.handled.map(({ alertId }) => alertId), ['a1']);
+  journal.saved([], [{ alertId: 'a1', subscriberId: 's1', played: ['notification'], started: { 'sound:0': app } }]);
+  assert.deepEqual([journal.handled, writes.at(-1)], [[], []]);
+  journal.handle('a2', { played: [], started: { notification: app } });
+  journal.saved([], [{ alertId: 'a2', played: [] }]);
+  assert.deepEqual(journal.handled, []);
+  // Not kept: a write that fails forgets it again, and an earlier one is kept as it was.
+  fail = new Error('EACCES');
+  assert.equal(journal.handle('a3', { played: [], started: { notification: app } }, { keep: false }), false);
+  assert.deepEqual(journal.handled, []);
+  fail = null;
+  journal.handle('a3', { played: ['notification'] });
+  fail = new Error('EACCES');
+  journal.handle('a3', { played: ['notification'], started: { 'sound:0': app } }, { keep: false });
+  assert.deepEqual(journal.handled, [{ alertId: 'a3', played: ['notification'] }]);
 });
 
 test("the sink records each part's process as it spawns, its pid before the birth lookup, and a daemon stopped while waiting for a left process hands nothing to its sink", async () => {

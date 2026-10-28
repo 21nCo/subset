@@ -32,7 +32,7 @@ const isRunning = (value) =>
     ));
 const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played)) && isRunning(handoff.started);
 const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
-const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played);
+const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played) && isRunning(entry.started);
 const isPlay = (entry) =>
   isAlert(entry) &&
   (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&

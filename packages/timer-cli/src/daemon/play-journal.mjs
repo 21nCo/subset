@@ -83,9 +83,10 @@ const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running
  * then it plays, as its sound ended with the app. The sink plays the other parts meanwhile. A part
  * from an earlier boot, or whose boot cannot be told, died with that boot, so it plays again.
  *
- * `progress` are the parts an alert handler finished of alerts it holds, which `scheduler.json` has
- * not recorded yet as it could not be saved (`handled`): the next daemon adds them to its
- * acknowledgements, and a save of `scheduler.json` that records them drops them.
+ * `progress` are the parts an alert handler finished (`played`) or was permitted to start, with its
+ * process (`started`), of alerts it holds, which `scheduler.json` has not recorded yet as it could
+ * not be saved (`handled`): the next daemon adds them to its acknowledgements, and a save of
+ * `scheduler.json` that records them drops them.
  *
  * An entry is kept until its play has finished and `scheduler.json` has been saved since without an
  * unfinished copy of it, and a write of the journal then drops it. A write that fails is logged,
@@ -101,8 +102,9 @@ const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running
 export function createPlayJournal({ entries = [], progress = [], persist = () => {}, log = () => {}, onBehind = () => {}, processes = systemProcesses } = {}) {
   /** alertId → { alert, timer, subscriberId, keys, played: Set, running: Map(part → { pid, birth, boot, app? }), finished, saved }. */
   const plays = new Map();
-  /** alertId → the parts its handler finished that `scheduler.json` may not hold. */
-  const handled = new Map(progress.map(({ alertId, played }) => [alertId, [...played]]));
+  /** alertId → { played, started }: the parts its handler finished or started that `scheduler.json` may not hold. */
+  const handled = new Map(progress.map(({ alertId, played, started = {} }) => [alertId, { played: [...played], started: { ...started } }]));
+  const progressOf = ([alertId, { played, started }]) => ({ alertId, played: [...played], ...(Object.keys(started).length ? { started: { ...started } } : {}) });
   let behind = false;
   let closed = false;
   for (const { alertId, alert, timer, subscriberId = null, keys, played, running = {}, finished } of entries) {
@@ -124,7 +126,7 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
     try {
       persist(
         [...plays].filter(([alertId]) => !forget.includes(alertId)).map(serialize),
-        [...handled].map(([alertId, played]) => ({ alertId, played }))
+        [...handled].map(progressOf)
       );
     } catch (error) {
       if (isLockLost(error)) return error;
@@ -267,18 +269,24 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
       if (plays.size || handled.size) flush();
     },
 
-    /** The parts of alerts their handler holds that it finished and `scheduler.json` may not hold (see above). */
+    /** The parts of alerts their handler holds that it finished or started and `scheduler.json` may not hold (see above). */
     get handled() {
-      return [...handled].map(([alertId, played]) => ({ alertId, played: [...played] }));
+      return [...handled].map(progressOf);
     },
 
     /**
-     * Records that the handler finished the parts `played` of `alertId`, which it holds, as
-     * `scheduler.json` could not be saved; true once `plays.json` holds them.
+     * Records that the handler finished the parts `played` of `alertId`, which it holds, and that its
+     * process plays each part in `started`, as `scheduler.json` could not be saved; true once
+     * `plays.json` holds them. Unless `keep`, a failed write forgets them again.
      */
-    handle(alertId, played) {
-      handled.set(alertId, [...played]);
+    handle(alertId, { played = [], started = {} }, { keep = true } = {}) {
+      const before = handled.get(alertId);
+      handled.set(alertId, { played: [...played], started: { ...started } });
       const error = flush();
+      if (error && !keep) {
+        if (before) handled.set(alertId, before);
+        else handled.delete(alertId);
+      }
       if (isLockLost(error)) throw error;
       return !behind;
     },
@@ -314,15 +322,21 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
     /**
      * Called once `scheduler.json` has been saved with `carried` (the journal entries that save
      * carried) and `held` (the handoffs and acknowledgements it saved): plays that finished and that
-     * it no longer holds unfinished are dropped, and so are the handled parts it holds, of alerts
-     * that are not held by an alert with fewer parts.
+     * it no longer holds unfinished are dropped, and so are the handled parts of each alert it does
+     * not hold with fewer parts: every finished part finished, and, while acknowledged (with a
+     * `subscriberId`), every started part finished or started.
      */
     saved(carried = [], held = []) {
       const copies = new Set(carried.filter((entry) => !entry.finished).map(({ alertId }) => alertId));
       for (const [alertId, entry] of plays) entry.saved = !copies.has(alertId);
       let recorded = false;
-      for (const [alertId, played] of handled) {
-        const behindIt = held.find((entry) => entry.alertId === alertId && played.some((part) => !(entry.played ?? []).includes(part)));
+      for (const [alertId, { played, started }] of handled) {
+        const behindIt = held.find((entry) => {
+          if (entry.alertId !== alertId) return false;
+          const finished = entry.played ?? [];
+          if (played.some((part) => !finished.includes(part))) return true;
+          return entry.subscriberId !== undefined && Object.keys(started).some((part) => !finished.includes(part) && !entry.started?.[part]);
+        });
         if (!behindIt) recorded = handled.delete(alertId);
       }
       if (recorded || [...plays.values()].some((entry) => entry.finished && entry.saved)) flush({ changed: false });

@@ -600,6 +600,17 @@ struct AlertHandlerTests {
         #expect(daemon.confirmed == ["a1 s1"])
     }
 
+    /// A part no daemon could record this process as playing (500: neither of its files could be saved) is not
+    /// permitted: the app asks again and presents it only once a daemon answered, so the sink never holds it unknowingly.
+    @Test func aPartNoDaemonCouldRecordIsAskedForAgainAndPresentedOnlyAfterAnAnswer() async {
+        let handler = await partsHandler()
+        daemon.answerParts([.failure(storageFailed), .failure(storageFailed)])
+        await handler.receive(alert("a1"))
+        #expect(daemon.log.dropFirst() == ["ack a1 s1", "playing a1 notification", "playing a1 notification", "playing a1 notification",
+                                           "play a1 notification", "played a1 notification"])
+        #expect(daemon.confirmed == ["a1 s1"])
+    }
+
     /// A daemon that cannot record a finished part (500 every time) does not hold back the rest of the alert: the app says
     /// so for up to its bound, then plays the next part, and goes on saying so until the daemon forgets the alert.
     @Test func aFinishedPartNoDaemonRecordsDoesNotHoldBackTheRest() async {

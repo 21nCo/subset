@@ -146,16 +146,17 @@ test('alert handoffs, acknowledgements and a carried play journal are saved with
   assert.deepEqual(JSON.parse(readFileSync(paths.scheduler, 'utf8')), { version: 1, marks });
 });
 
-test('the play journal and the parts handlers finished that it alone holds are saved to plays.json and read back; malformed ones are dropped', (t) => {
+test('the play journal and the parts handlers finished or started that it alone holds are saved to plays.json and read back; malformed ones are dropped', (t) => {
   const { paths, stateStore } = storeIn(t);
   assert.deepEqual(stateStore.loadPlays(), { plays: [], progress: [] });
   const play = { alertId: 'a9', alert: { timerId: 't_00000001', kind: 'finish', at: NOW }, timer: { id: 't_00000001', name: 'Egg' }, keys: [], played: [], finished: false };
   const progress = { alertId: 'a0', played: ['notification'] };
-  stateStore.savePlays([play], [progress]);
-  assert.deepEqual(stateStore.loadPlays(), { plays: [play], progress: [progress] });
+  const started = { alertId: 'a2', played: [], started: { 'sound:0': { pid: 42, birth: 'b', boot: 'x', app: true } } };
+  stateStore.savePlays([play], [progress, started]);
+  assert.deepEqual(stateStore.loadPlays(), { plays: [play], progress: [progress, started] });
   stateStore.savePlays([play]);
   assert.deepEqual(JSON.parse(readFileSync(paths.plays, 'utf8')), { version: 1, plays: [play] });
-  writeFileSync(paths.plays, JSON.stringify({ version: 1, plays: [play, { alertId: 'a8' }], progress: [progress, { alertId: 'a1', played: ['Glass'] }, { played: [] }, null] }));
+  writeFileSync(paths.plays, JSON.stringify({ version: 1, plays: [play, { alertId: 'a8' }], progress: [progress, { alertId: 'a1', played: ['Glass'] }, { played: [] }, null, { ...started, started: { Glass: started.started['sound:0'] } }, { ...started, started: { 'sound:0': { pid: 0 } } }] }));
   assert.deepEqual(stateStore.loadPlays(), { plays: [play], progress: [progress] });
   writeFileSync(paths.plays, '{');
   assert.deepEqual(stateStore.loadPlays(), { plays: [], progress: [] });
