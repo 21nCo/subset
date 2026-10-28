@@ -411,8 +411,7 @@ function fixScheduler(context) {
  * its request timed out), and it stalled past the orphan bound, still running: the sink holds the
  * notification for it. Returns the daemon and spawner that hold it, and the ids.
  */
-async function heldWhileAppRuns(t, { restart }) {
-  const spawner = partSpawn();
+async function heldWhileAppRuns(t, { restart, spawner = partSpawn() }) {
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
   await finishCountdown(context, { sound: false });
   const { alertId, subscriberId } = await takeAlert(context, stream);
@@ -460,37 +459,32 @@ for (const restart of [false, true]) {
 
 test('a part the sink held for the app and gave back while plays.json could not be written is shown once by the next daemon after a crash, at once, the app still running', async (t) => {
   for (const how of ['release', 'another process']) {
-    const { holder, alertId, subscriberId } = await heldWhileAppRuns(t, { restart: false });
-    // The daemon is killed before its sink plays the part given back: its wait for the app stops polling.
-    const { sleep } = holder.processes;
-    const waiting = [];
-    holder.processes.sleep = () => new Promise((resolve) => waiting.push(resolve));
+    // The daemon is killed as its sink starts the part given back: the files it leaves are those on disk then.
+    let holder;
+    let left;
+    const spawner = partSpawn({ hold: () => ((left ??= filesLeftByKill(t, holder)), false) });
+    const held = await heldWhileAppRuns(t, { restart: false, spawner });
+    ({ holder } = held);
+    const { alertId, subscriberId } = held;
+    // A write of plays.json that fails keeps the file it would have replaced, which holds the part for the app.
+    const stale = readFileSync(join(holder.dataDir, 'plays.json'));
+    assert.equal(JSON.parse(stale).plays[0].running.notification.app, true);
+    breakPlays(holder);
+    const asked =
+      how === 'release'
+        ? await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })
+        : await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP + 1 });
+    assert.equal(asked.status, 410, how);
+    await eventually(() => left !== undefined);
+    assert.equal(JSON.parse(readFileSync(join(left, 'scheduler.json'), 'utf8')).plays[0].running?.notification, undefined, how);
+    writeFileSync(join(left, 'plays.json'), stale);
+    // The app runs on and asks nothing more, as it was told the sink plays it.
+    const { next, spawner: after } = await successorOf(t, { clock: holder.clock, processes: appProcesses() }, partSpawn(), left);
+    await eventually(() => after.started.length === 1);
+    await eventually(() => plays(next.dataDir).length === 0);
     await settle();
-    try {
-      // A write of plays.json that fails keeps the file it would have replaced, which holds the part for the app.
-      const stale = readFileSync(join(holder.dataDir, 'plays.json'));
-      assert.equal(JSON.parse(stale).plays[0].running.notification.app, true);
-      breakPlays(holder);
-      const asked =
-        how === 'release'
-          ? await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })
-          : await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP + 1 });
-      assert.equal(asked.status, 410, how);
-      const [carried] = scheduler(holder.dataDir).plays;
-      assert.equal(carried.running?.notification, undefined, how);
-      const left = filesLeftByKill(t, holder);
-      writeFileSync(join(left, 'plays.json'), stale);
-      // The app runs on and asks nothing more, as it was told the sink plays it.
-      const { next, spawner: after } = await successorOf(t, { clock: holder.clock, processes: appProcesses() }, partSpawn(), left);
-      await eventually(() => after.started.length === 1);
-      await eventually(() => plays(next.dataDir).length === 0);
-      await settle();
-      assert.deepEqual(after.started, ['notification'], how);
-      assert.equal(next.processes.live.has(APP), true, how);
-    } finally {
-      holder.processes.sleep = sleep;
-      for (const resolve of waiting) resolve();
-    }
+    assert.deepEqual(after.started, ['notification'], how);
+    assert.equal(next.processes.live.has(APP), true, how);
   }
 });
 
@@ -715,6 +709,59 @@ for (const handler of [true, false]) {
     spawner.release();
   });
 }
+
+test('while plays.json cannot be written, a daemon killed as it looks up a sink process\'s birth has scheduler.json carry its pid: the next daemon waits for it and plays no part twice', async (t) => {
+  const processes = appProcesses();
+  // Each spawned process gets a pid and runs, alive to `processes`, until `exit()`.
+  const children = [];
+  const spawner = {
+    started: [],
+    spawn(command, args) {
+      const child = new EventEmitter();
+      child.kill = () => {};
+      child.pid = 5_000 + children.length;
+      spawner.started.push(command === OSASCRIPT ? 'notification' : basename(args[0], '.aiff'));
+      processes.live.add(child.pid);
+      children.push({
+        pid: child.pid,
+        exit() {
+          processes.live.delete(child.pid);
+          child.emit('exit', 0, null);
+        }
+      });
+      return child;
+    }
+  };
+  const { context } = await daemonWithSink(t, spawner, { processes });
+  // The daemon is killed at its first lookup of a birth: the files it leaves are those on disk then.
+  let left;
+  let carriedAtBirth;
+  const { birth } = processes;
+  processes.birth = (pid) => {
+    if (!left) {
+      carriedAtBirth = scheduler(context.dataDir).plays?.[0]?.running;
+      left = filesLeftByKill(t, context);
+    }
+    return birth(pid);
+  };
+  breakPlays(context);
+  await finishCountdown(context);
+  await eventually(() => left !== undefined);
+  assert.deepEqual(spawner.started, ['Glass', 'notification']);
+  assert.deepEqual(carriedAtBirth, { 'sound:0': { pid: 5_000, birth: null, boot: 'b1' }, notification: { pid: 5_001, birth: null, boot: 'b1' } });
+
+  const { next, spawner: after } = await successorOf(t, context, partSpawn(), left);
+  next.clock.advance(1_000);
+  // The first Glass and the notification still run: the next daemon waits for them.
+  const polls = processes.polls;
+  await eventually(() => processes.polls - polls >= 20);
+  assert.deepEqual(after.started, []);
+  for (const child of children.slice(0, 2)) child.exit();
+  await eventually(() => after.started.length === 2);
+  await settle();
+  assert.deepEqual(after.started, ['Glass', 'Glass']);
+  for (const child of children) child.exit();
+});
 
 const SINK_DAEMON = fileURLToPath(new URL('./sink-daemon.mjs', import.meta.url));
 const lines = (path) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : []);
@@ -1007,6 +1054,61 @@ test("the sink records each part's process as it spawns, its pid before the birt
   handlers.replay([]);
   await handlers.stop();
   assert.deepEqual(sink.received, []);
+});
+
+test("while plays.json cannot be written, a sink process's pid is carried by the save the failed write asks for before its birth is looked up", async () => {
+  const processes = fakeProcesses({ lives: { 9: Infinity, 10: Infinity } });
+  const order = [];
+  const { birth } = processes;
+  processes.birth = (pid) => {
+    order.push(`birth ${pid}`);
+    return birth(pid);
+  };
+  const journal = createPlayJournal({
+    persist() {
+      throw new Error('EACCES');
+    },
+    // As alert-handlers' requestSave: a scheduler.json save of what the journal carries, once the current task ends.
+    onBehind: () => queueMicrotask(() => order.push(journal.carried[0]?.running)),
+    processes
+  });
+  journal.begin('a2', { alert: finish, timer: egg });
+  journal.started('a2', 'sound:0', 9);
+  // No blocking lookup in the task that spawned the process, before any file holds its pid.
+  assert.deepEqual(order, []);
+  await new Promise(setImmediate);
+  const spawned = { 'sound:0': { pid: 9, birth: null, boot: 'b1' } };
+  assert.deepEqual(order, [spawned, spawned, 'birth 9', { 'sound:0': { pid: 9, birth: 'birth-9', boot: 'b1' } }]);
+  // A part that finished before its lookup needs none.
+  journal.started('a2', 'sound:1', 10);
+  journal.done('a2', 'sound:1');
+  await new Promise(setImmediate);
+  assert.equal(order.includes('birth 10'), false);
+});
+
+test('a part held for its handler is decided at once when the handler finishes it or gives it back, or the journal closes; a give-back undone in the same task keeps it held', async () => {
+  const app = { pid: 7, birth: 'birth-7', boot: 'b1', app: true };
+  const cases = [
+    { how: 'finished', act: (journal) => journal.done('a1', 'sound:0'), held: [], played: true },
+    { how: 'given back', act: (journal) => journal.giveBack('a1', ['sound:0']), held: [], played: false },
+    { how: 'given back and restored', act: (journal) => journal.giveBack('a1', ['sound:0']).restore(), held: ['sound:0'], played: false, waits: true },
+    { how: 'closed', act: (journal) => journal.close(), held: ['sound:0'], played: false }
+  ];
+  for (const { how, act, held, played, waits = false } of cases) {
+    const processes = fakeProcesses({ lives: { 7: Infinity } });
+    // A poll that never ends of itself: only a wake decides the part.
+    processes.sleep = () => new Promise(() => {});
+    const journal = createPlayJournal({ entries: [{ ...leftRunning({ 'sound:0': app }), subscriberId: 's1' }], processes });
+    let decided = false;
+    journal.awaitHandler('a1', 'sound:0').then(() => (decided = true));
+    await new Promise(setImmediate);
+    assert.equal(decided, false, how);
+    act(journal);
+    await new Promise(setImmediate);
+    assert.equal(decided, !waits, how);
+    assert.deepEqual(journal.held('a1'), held, how);
+    assert.equal(journal.played('a1').has('sound:0'), played, how);
+  }
 });
 
 test('a journal that cannot be written is carried by scheduler.json until it can; a finished play is dropped only once neither file holds it unfinished', () => {

@@ -98,6 +98,8 @@ const serialize = (play) => {
  * one that exited in this boot counts as finished, as nothing else stops it. Its pid and boot are
  * written as soon as it is spawned, and its birth (which tells a reused pid) in a second write, so a
  * daemon that ends between the spawn and the first write, a moment, leaves the part to play again.
+ * While `plays.json` cannot be written, the birth is looked up only once the `scheduler.json` save
+ * that write's failure asked for has carried the pid (`started`).
  * A part an alert handler (the app, `app: true`) started and did not say it finished is `held`: a
  * running app is no proof it finished it, so it stays undecided in the journal, across daemons, for
  * as long as the app runs (`awaitHandler`), until the app says it finished it (`done`) or ends, and
@@ -133,6 +135,8 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
   const progressOf = ([alertId, { played, started, rev }]) => ({ alertId, played: [...played], ...(Object.keys(started).length ? { started: { ...started } } : {}), ...(rev ? { rev } : {}) });
   let behind = false;
   let closed = false;
+  /** Resolves the current poll of each `awaitHandler` (see `wake`). */
+  const wakes = new Set();
   for (const { alertId, alert, timer, subscriberId = null, keys, played, running = {}, finished, rev = 0 } of entries) {
     const known = plays.get(alertId);
     if (!known) {
@@ -176,6 +180,16 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
   function markDone(entry, part) {
     entry.played.add(part);
     entry.running.delete(part);
+    wake();
+  }
+
+  /**
+   * Ends every `awaitHandler` poll now, so a part its handler finished or gave back is decided at
+   * once; each checks again only once the current task ends, after a `giveBack` that is restored.
+   */
+  function wake() {
+    for (const resolve of wakes) resolve();
+    wakes.clear();
   }
 
   /** Whether `child` ran in an earlier boot, or one that cannot be told, so it died with it. */
@@ -251,16 +265,24 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
 
     /**
      * Records the process `pid` the sink spawned to play `part` of `alertId`: its pid and boot at
-     * once, then its birth, whose lookup takes a few milliseconds.
+     * once, then its birth, whose lookup blocks for a few milliseconds (up to 2 s). When `plays.json`
+     * cannot be written, the lookup waits for the `scheduler.json` save `onBehind()` asked for in a
+     * microtask, which carries the pid, so a daemon that ends meanwhile has written it somewhere.
      */
     started(alertId, part, pid) {
       const entry = plays.get(alertId);
       if (!entry || entry.finished || entry.played.has(part) || !Number.isSafeInteger(pid) || pid <= 0) return;
       const child = { pid, birth: null, boot: processes.boot() };
       entry.running.set(part, child);
-      flush();
-      child.birth = processes.birth(pid);
-      if (child.birth !== null && entry.running.get(part) === child) flush();
+      const lookUpBirth = () => {
+        if (entry.running.get(part) !== child) return;
+        child.birth = processes.birth(pid);
+        if (child.birth !== null && entry.running.get(part) === child) flush();
+      };
+      const error = flush();
+      // Queued after the save onBehind() queued, so that save runs first.
+      if (error && !isLockLost(error)) queueMicrotask(lookUpBirth);
+      else lookUpBirth();
     },
 
     /** Records that `part` of `alertId` finished playing. */
@@ -299,6 +321,7 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
       const entry = plays.get(alertId);
       const children = parts.map((part) => [part, entry.running.get(part)]);
       for (const part of parts) entry.running.delete(part);
+      wake();
       const error = flush();
       return {
         error,
@@ -310,9 +333,10 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
 
     /**
      * Resolves once `part` of `alertId`, which the handler's process holds, is decided: the handler
-     * said it finished it (`played(alertId)` holds it), or its process ended, or the handler gave it
-     * back (`giveBack`; it does not, and the sink plays it), or the journal was closed first (still
-     * held, for the next daemon).
+     * said it finished it (`played(alertId)` holds it), or its process ended (seen within
+     * `HANDLER_POLL_MS`), or the handler gave it back (`giveBack`; it does not, and the sink plays
+     * it), or the journal was closed first (still held, for the next daemon). The first and the last
+     * two end the wait at once (`wake`).
      */
     async awaitHandler(alertId, part) {
       const entry = plays.get(alertId);
@@ -321,7 +345,13 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
       const alive = watch(child, HANDLER_POLL_MS);
       while (!entry.played.has(part) && entry.running.get(part) === child && alive()) {
         if (closed) return;
-        await processes.sleep(HANDLER_POLL_MS);
+        await new Promise((resolve) => {
+          wakes.add(resolve);
+          processes.sleep(HANDLER_POLL_MS).then(() => {
+            wakes.delete(resolve);
+            resolve();
+          });
+        });
       }
       if (!entry.played.has(part)) entry.running.delete(part);
     },
@@ -329,6 +359,7 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
     /** Stops every wait for a handler: the parts stay held in the journal, for the next daemon. */
     close() {
       closed = true;
+      wake();
     },
 
     /** Writes the entries and progress earlier daemons left, so `plays.json` holds them before `scheduler.json` is saved again. */
