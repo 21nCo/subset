@@ -3,13 +3,46 @@ import SystemHelper
 import XCTest
 
 final class HelperCommandTests: XCTestCase {
+    private let home = HelperFixtures.home
+
     func testCommandsParseWithTheirDefaults() throws {
-        XCTAssertEqual(try HelperInvocation.parse(["status", "--json"]),
+        XCTAssertEqual(try HelperInvocation.parse(["status", "--json"], home: home),
                        HelperInvocation(command: .status, json: true))
-        XCTAssertEqual(try HelperInvocation.parse(["processes"]).command, .processes(layer: .app))
-        XCTAssertEqual(try HelperInvocation.parse(["processes", "--layer", "launch"]).command,
+        XCTAssertEqual(try HelperInvocation.parse(["processes"], home: home).command, .processes(layer: .app))
+        XCTAssertEqual(try HelperInvocation.parse(["processes", "--layer", "launch"], home: home).command,
                        .processes(layer: .launch))
-        XCTAssertEqual(try HelperInvocation.parse(["--version"]).command, .version)
+        XCTAssertEqual(try HelperInvocation.parse(["disk", "--path", "/tmp"], home: home).command,
+                       .disk(path: "/tmp", depth: 1, timeout: .seconds(60)))
+        XCTAssertEqual(try HelperInvocation.parse(["disk", "--path=~/dev", "--depth", "3", "--timeout", "1.5"], home: home).command,
+                       .disk(path: "/Users/me/dev", depth: 3, timeout: .milliseconds(1500)))
+        XCTAssertEqual(try HelperInvocation.parse(["disk", "--suggestions", "--path", "~", "--absolute"], home: home),
+                       HelperInvocation(command: .suggestions(path: "/Users/me", timeout: .seconds(60)), absolute: true))
+        XCTAssertEqual(try HelperInvocation.parse(["--version"], home: home).command, .version)
+    }
+
+    /// The timeout applied is whole milliseconds, never 0, and a decimal binary floating point cannot hold exactly is
+    /// not rounded up past it.
+    func testTimeoutsAreWholeMillisecondsAboveZero() throws {
+        func timeout(_ text: String) throws -> Duration? {
+            guard case let .disk(_, _, timeout) = try HelperInvocation.parse(["disk", "--path", "/tmp", "--timeout", text],
+                                                                              home: home).command else { return nil }
+            return timeout
+        }
+        XCTAssertEqual(try timeout("0.001"), .milliseconds(1))
+        XCTAssertEqual(try timeout("0.003"), .milliseconds(3))
+        XCTAssertEqual(try timeout("0.0001"), .milliseconds(1))
+        XCTAssertEqual(try timeout("0.0015"), .milliseconds(2))
+        XCTAssertEqual(try timeout("1e-9"), .milliseconds(1))
+        XCTAssertEqual(try timeout("2.5"), .milliseconds(2500))
+    }
+
+    func testMillisecondsPrintAsExactSeconds() {
+        XCTAssertEqual(JSONValue.milliseconds(60_000).pretty, "60")
+        XCTAssertEqual(JSONValue.milliseconds(200).pretty, "0.2")
+        XCTAssertEqual(JSONValue.milliseconds(1).pretty, "0.001")
+        XCTAssertEqual(JSONValue.milliseconds(1_050).pretty, "1.05")
+        XCTAssertEqual(JSONValue.milliseconds(86_400_000).pretty, "86400")
+        XCTAssertEqual(JSONValue.milliseconds(-1_500).pretty, "-1.5")
     }
 
     func testUsageErrorsExitTwoWithAMessageAndNoOutput() async {
@@ -18,7 +51,15 @@ final class HelperCommandTests: XCTestCase {
             (["clean"], "Unknown command clean."),
             (["status", "--force"], "Unknown option --force."),
             (["status", "--layer", "app"], "--layer does not apply to status."),
+            (["status", "--path", "/tmp"], "--path does not apply to status."),
             (["processes", "--layer", "team"], "--layer must be app, vendor, launch, or project, not team."),
+            (["disk"], "disk needs --path <dir>."),
+            (["disk", "--path"], "--path needs a value."),
+            (["disk", "--path", "/a", "--path", "/b"], "--path is given more than once."),
+            (["disk", "--path", "/tmp", "--depth", "-1"], "--depth must be a whole number from 0 to 64, not -1."),
+            (["disk", "--path", "/tmp", "--depth", "x"], "--depth must be a whole number from 0 to 64, not x."),
+            (["disk", "--path", "/tmp", "--timeout", "0"], "--timeout must be a number of seconds above 0, not 0."),
+            (["disk", "--suggestions", "--path", "/tmp", "--depth", "2"], "--depth does not apply to disk --suggestions."),
             (["status", "extra"], "Unexpected argument extra."),
             // An empty or `=`-only argument is a usage error, not a crash.
             (["status", ""], "An argument is empty."),
@@ -26,7 +67,11 @@ final class HelperCommandTests: XCTestCase {
             (["processes", "--layer"], "--layer needs a value."),
             (["processes", "--layer", "app", "--layer", "vendor"], "--layer is given more than once."),
             (["processes", "--layer="], "--layer must be app, vendor, launch, or project, not ."),
-            (["disk", "--path", "/tmp"], "Unknown option --path."),
+            (["disk", "--path", "/tmp", "="], "Unexpected argument =."),
+            (["disk", "--path", "/tmp", "=x"], "Unexpected argument =x."),
+            (["disk", "--path="], "disk needs --path <dir>."),
+            (["disk", "--path", ""], "disk needs --path <dir>."),
+            (["disk", "--path", "/tmp", "--timeout="], "--timeout must be a number of seconds above 0, not ."),
             (["status", "--json="], "Unknown option --json=.")
         ]
         for (arguments, message) in cases {

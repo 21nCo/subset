@@ -29,6 +29,8 @@ public enum HelperLayer: String, CaseIterable, Sendable {
 public enum HelperCommand: Equatable, Sendable {
     case status
     case processes(layer: HelperLayer)
+    case disk(path: String, depth: Int, timeout: Duration)
+    case suggestions(path: String, timeout: Duration)
     case version
     case help
 }
@@ -46,6 +48,8 @@ public struct HelperInvocation: Equatable, Sendable {
     }
 
     public static let version = "0.1.0"
+    public static let defaultTimeout: Duration = .seconds(60)
+    public static let defaultDepth = 1
 
     public static let usage = """
         Usage: subset-system <command> [options]
@@ -57,6 +61,10 @@ public struct HelperInvocation: Equatable, Sendable {
                                           App groups by CPU and by memory, from two samples 1 second apart
           processes [--layer app|vendor|launch|project] [--json]
                                           Every process grouped by origin (default layer: app)
+          disk --path <dir> [--depth N] [--timeout S] [--json]
+                                          Scan a folder (default depth 1, timeout 60 s) with its volume's space
+          disk --suggestions --path <dir> [--timeout S] [--json]
+                                          Reclaim rule matches for a scan, with the catalog version
           --version                       Print the helper's version
 
         Options:
@@ -66,14 +74,15 @@ public struct HelperInvocation: Equatable, Sendable {
         Exit codes: 0 ok, 2 usage error, 3 partial result, 4 timeout, 5 internal error.
         """
 
-    /// Parses `arguments` (without the program name). Throws a message for a usage error.
-    public static func parse(_ arguments: [String]) throws(HelperUsageError) -> HelperInvocation {
+    /// Parses `arguments` (without the program name). `home` expands a `--path` starting with `~`. Throws a message
+    /// for a usage error.
+    public static func parse(_ arguments: [String], home: String) throws(HelperUsageError) -> HelperInvocation {
         var options: [String: String] = [:]
         var flags = Set<String>()
         var words: [String] = []
         var remaining = arguments[...]
-        let valued: Set<String> = ["--layer"]
-        let switches: Set<String> = ["--json", "--absolute", "--version", "--help", "-h"]
+        let valued: Set<String> = ["--layer", "--path", "--depth", "--timeout"]
+        let switches: Set<String> = ["--json", "--absolute", "--suggestions", "--version", "--help", "-h"]
         while let argument = remaining.popFirst() {
             guard !argument.isEmpty, !argument.hasPrefix("=") else {
                 throw HelperUsageError(argument.isEmpty ? "An argument is empty." : "Unexpected argument \(argument).")
@@ -114,14 +123,43 @@ public struct HelperInvocation: Equatable, Sendable {
         let command: HelperCommand
         switch name {
         case "status":
-            try reject(["--layer"], for: name)
+            try reject(["--layer", "--path", "--depth", "--timeout", "--suggestions"], for: name)
             command = .status
         case "processes":
+            try reject(["--path", "--depth", "--timeout", "--suggestions"], for: name)
             let text = options["--layer"] ?? HelperLayer.app.rawValue
             guard let layer = HelperLayer(rawValue: text) else {
                 throw HelperUsageError("--layer must be app, vendor, launch, or project, not \(text).")
             }
             command = .processes(layer: layer)
+        case "disk":
+            try reject(["--layer"], for: name)
+            guard let raw = options["--path"], !raw.isEmpty else { throw HelperUsageError("disk needs --path <dir>.") }
+            let path = raw == "~" ? home : raw.hasPrefix("~/") ? home + raw.dropFirst() : raw
+            var timeout = defaultTimeout
+            if let text = options["--timeout"] {
+                guard let seconds = Double(text), seconds.isFinite, seconds > 0, seconds <= 86_400 else {
+                    throw HelperUsageError("--timeout must be a number of seconds above 0, not \(text).")
+                }
+                // Whole milliseconds, rounded up, so the timeout applied is the one reported and never 0; a
+                // decimal such as 0.003 that binary floating point cannot hold exactly stays 3 ms, not 4.
+                let milliseconds = seconds * 1000
+                let nearest = milliseconds.rounded()
+                timeout = .milliseconds(Int64(abs(milliseconds - nearest) < 1e-6 ? max(nearest, 1) : milliseconds.rounded(.up)))
+            }
+            if flags.contains("--suggestions") {
+                try reject(["--depth"], for: "disk --suggestions")
+                command = .suggestions(path: path, timeout: timeout)
+            } else {
+                var depth = defaultDepth
+                if let text = options["--depth"] {
+                    guard let value = Int(text), (0...64).contains(value) else {
+                        throw HelperUsageError("--depth must be a whole number from 0 to 64, not \(text).")
+                    }
+                    depth = value
+                }
+                command = .disk(path: path, depth: depth, timeout: timeout)
+            }
         default:
             throw HelperUsageError("Unknown command \(name).")
         }

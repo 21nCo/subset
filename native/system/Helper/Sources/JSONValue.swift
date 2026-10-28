@@ -9,6 +9,8 @@ public enum JSONValue: Equatable, Sendable {
     case unsigned(UInt64)
     /// Written with at most two decimals; a value that is not finite is written as `null`.
     case double(Double)
+    /// A duration in whole milliseconds, written exactly as seconds: `60`, `0.2`, `0.001`, `-1.5`.
+    case milliseconds(Int64)
     case string(String)
     case array([JSONValue])
     case object([(String, JSONValue)])
@@ -33,6 +35,12 @@ public enum JSONValue: Equatable, Sendable {
             guard value.isFinite else { return "null" }
             let rounded = (value * 100).rounded() / 100
             return rounded == rounded.rounded() && abs(rounded) < 1e15 ? String(Int64(rounded)) : String(rounded)
+        case let .milliseconds(value):
+            let (whole, fraction) = value.quotientAndRemainder(dividingBy: 1000)
+            guard fraction != 0 else { return String(whole) }
+            var decimals = String(format: "%03lld", fraction.magnitude)
+            while decimals.hasSuffix("0") { decimals.removeLast() }
+            return (value < 0 ? "-" : "") + String(whole.magnitude) + "." + decimals
         case let .string(value): return Self.quoted(value)
         case let .array(values):
             guard !values.isEmpty else { return "[]" }

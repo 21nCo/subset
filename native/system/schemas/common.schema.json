@@ -21,13 +21,17 @@
         "additionalProperties": false,
         "properties": {
           "code": {
-            "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "usageUnavailable", "originSignalsNotRead"]
+            "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "usageUnavailable", "originSignalsNotRead",
+                     "cannotResolve", "notADirectory", "notLocal", "timedOut", "scanIncomplete", "volumeUnavailable",
+                     "snapshotsUnavailable", "installedAppsUnread", "simulatorRuntimesUnknown", "dockerUnavailable",
+                     "devicePlistUnread", "modificationTimeUnknown"]
           },
           "message": { "type": "string" }
         }
       }
     },
     "count": { "type": "integer", "minimum": 0 },
+    "bytes": { "type": "integer", "minimum": 0 },
     "optionalBytes": { "type": ["integer", "null"], "minimum": 0 },
     "optionalPercent": { "type": ["number", "null"], "minimum": 0 },
     "layer": { "enum": ["app", "vendor", "launch", "project"] },
@@ -55,6 +59,32 @@
         "memoryBytes": { "$ref": "#/$defs/optionalBytes", "description": "Physical footprint; approximate." },
         "memoryUnmeasuredCount": { "$ref": "#/$defs/count" }
       }
+    },
+    "diskTotals": {
+      "type": ["object", "null"],
+      "required": ["allocatedBytes", "logicalBytes", "privateBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "allocatedBytes": { "$ref": "#/$defs/bytes" },
+        "logicalBytes": { "$ref": "#/$defs/bytes" },
+        "privateBytes": { "$ref": "#/$defs/bytes" }
+      }
+    },
+    "scanOutcome": {
+      "enum": ["completed", "timedOut", "failed"],
+      "description": "timedOut: the scan was stopped at --timeout and sizes count only what was read; failed: the path could not be scanned."
+    },
+    "unreadablePaths": {
+      "type": "array",
+      "description": "The first 100 items that could not be read; restricted.unreadablePaths counts them all.",
+      "maxItems": 100,
+      "items": { "type": "string" }
+    },
+    "diskRestricted": {
+      "type": "object",
+      "required": ["unreadablePaths"],
+      "additionalProperties": false,
+      "properties": { "unreadablePaths": { "$ref": "#/$defs/count" } }
     },
     "processRestricted": {
       "type": "object",
