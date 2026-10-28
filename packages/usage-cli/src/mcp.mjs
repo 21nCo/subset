@@ -112,10 +112,10 @@ function historyText(series, hours, accountId) {
  * what the session already observed starts no period. `observedAt` is when the latest observation
  * supporting the period was made (a `claude auth status` query's start, or a recorded period's start).
  * Only no record (no file, or no entry for the account) is a first sighting, which adopts the snapshots
- * already collected. A record the session cannot use (one that cannot be read, is malformed, or starts
- * later than `now`, as when the clock was set back or the file was edited) is unknown, not absent: it
- * keeps the session's period, and without one the period starts at `now` (`unknown: true`), so the
- * snapshots collected before stay hidden and those collected after show.
+ * already collected. A record the session cannot use (one that cannot be read, is not in the form the
+ * dashboard writes, or starts later than `now`, as when the clock was set back or the file was edited)
+ * is unknown, not absent: it keeps the session's period, and without one the period starts at `now`
+ * (`unknown: true`), so the snapshots collected before stay hidden and those collected after show.
  * @typedef {{ email: string, since: number, observedAt: number, unknown?: true }} IdentityPeriod
  * @param {IdentityPeriod | undefined} kept The session's period for the account.
  * @param {unknown} stored The account's entry in `claude-identities.json`, `{ email, since }`, read now:
@@ -128,8 +128,7 @@ function historyText(series, hours, accountId) {
  */
 export function claudeIdentityPeriod(kept, stored, answer, now) {
   let period = kept;
-  const usable = typeof stored?.email === 'string' && typeof stored.since === 'number' && Number.isFinite(stored.since) && stored.since <= now;
-  if (usable && !(stored.since <= period?.since)) {
+  if (usableRecord(stored, now) && !(stored.since <= period?.since)) {
     period = !period || stored.email === period.email || stored.since > period.observedAt
       ? { email: stored.email, since: stored.since, observedAt: Math.max(stored.since, stored.email === period?.email ? period.observedAt : 0) }
       // The session saw its email after the recorded change to another: it was signed in again since.
@@ -146,6 +145,13 @@ export function claudeIdentityPeriod(kept, stored, answer, now) {
   // then the account was signed in elsewhere in between, so the period restarts at the latest observation.
   return { period: answer.observedAt > period.since ? restarted(period, period.observedAt) : period, current: false };
 }
+
+/**
+ * Whether a stored entry is a period as the persist path writes it: a non-empty lowercase email, and a
+ * start from 0 to `now`. Any other entry cannot be the dashboard's record, so it is unknown.
+ */
+const usableRecord = (stored, now) => typeof stored?.email === 'string' && stored.email !== '' && stored.email === stored.email.toLowerCase()
+  && Number.isFinite(stored.since) && stored.since >= 0 && stored.since <= now;
 
 /** The period, starting no earlier than `since`; a later start is known, not `unknown`. */
 const restarted = (period, since) => (since > period.since ? { email: period.email, since, observedAt: period.observedAt } : period);
@@ -299,18 +305,18 @@ export function providerProcesses(log) {
      * still running after the grace period. Any still running at the limit, including one started just
      * before it, gets SIGKILL and a short wait. Returns the number of calls still unanswered.
      * @param {Set<Promise<unknown>>} pending
-     * @param {{ limit?: number }} [options]
+     * @param {{ limit?: number, now?: () => number }} [options] `now` is the clock the limit is measured on.
      */
-    async end(pending, { limit = STOP_LIMIT_MS } = {}) {
+    async end(pending, { limit = STOP_LIMIT_MS, now = Date.now } = {}) {
       stopping = true;
-      const deadline = Date.now() + limit;
-      while (Date.now() < deadline) {
+      const deadline = now() + limit;
+      while (now() < deadline) {
         const list = live();
         if (list.length) {
           for (const child of list) child.kill('SIGTERM');
-          await exited(list, Math.min(TERM_GRACE_MS, deadline - Date.now()));
+          await exited(list, Math.min(TERM_GRACE_MS, deadline - now()));
           for (const child of list.filter(running)) child.kill('SIGKILL');
-          await exited(list, Math.max(0, Math.min(TERM_GRACE_MS, deadline - Date.now())));
+          await exited(list, Math.max(0, Math.min(TERM_GRACE_MS, deadline - now())));
         } else if (pending.size) {
           // A call whose subprocess ended answers with that provider's error, or starts another subprocess.
           await Promise.race([Promise.allSettled(pending), after(50)]);

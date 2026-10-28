@@ -464,13 +464,20 @@ test('stopping ends a provider that started just before the limit and ignores SI
   };
   const child = ignoringTerm(999_999);
   const limit = 300;
-  const pending = new Set([new Promise((resolveRead) => {
-    setTimeout(() => { diagnostics.channel('child_process').publish({ process: child }); setImmediate(() => child.emit('spawn')); child.once('exit', resolveRead); }, limit - 30);
-  })]);
+  // The limit is measured on a clock the test moves, so the child starts before it whatever the load.
+  let clock = 0;
+  const pending = new Set([new Promise((resolveRead) => child.once('exit', resolveRead))]);
+  // end()'s timers do not keep the process alive.
   const keepAlive = setInterval(() => {}, 1_000);
+  t.after(() => clearInterval(keepAlive));
   const started = Date.now();
-  await processes.end(pending, { limit });
-  clearInterval(keepAlive);
+  // end() runs up to its first wait at once: stopping, with no subprocess yet and the read still running.
+  const ending = processes.end(pending, { limit, now: () => clock });
+  diagnostics.channel('child_process').publish({ process: child });
+  child.emit('spawn');
+  assert.deepEqual(child.signals, ['SIGTERM']);
+  clock = limit;
+  await ending;
   const took = Date.now() - started;
   assert.deepEqual([child.signals, child.signalCode], [['SIGTERM', 'SIGKILL'], 'SIGKILL'], logs.join('\n'));
   assert.ok(took < limit + 500, `stopping took ${took} ms`);
@@ -661,7 +668,11 @@ test('the session identity rule: periods only move forward, and an out-of-date s
   // A session without one starts its period now, whatever the email: snapshots collected before it
   // stay hidden, and those collected after it show.
   const unknown = (email, since, observedAt) => ({ ...period(email, since, observedAt), unknown: true });
-  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { email: 'a', since: '700' }, { since: 900 }, { email: 'a', since: 2000 }, { email: 'b', since: 2000 }]) {
+  // Malformed is anything the dashboard does not write: an empty or uppercase email, or a start that is
+  // not a number from 0 to now.
+  const unusable = [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { email: 'a', since: '700' }, { since: 900 }, { email: 'a', since: 2000 }, { email: 'b', since: 2000 },
+    { email: '', since: 800 }, { email: 'A', since: 800 }, { email: 'B', since: 800 }, { email: 'a', since: -5 }, { email: 'b', since: -5 }, { email: 'a', since: Infinity }, { email: 'a', since: NaN }];
+  for (const stored of unusable) {
     assert.deepEqual(rule(period('b', 700, 720), stored, answer('b', 720)), { period: period('b', 700, 720), current: true }, JSON.stringify(stored));
     assert.deepEqual(rule(period('b', 700, 720), stored, answer('a', 800)), { period: period('a', 1000, 800), current: true }, JSON.stringify(stored));
     assert.deepEqual(rule(undefined, stored, answer('a', 10)), { period: unknown('a', 1000, 10), current: true }, JSON.stringify(stored));
