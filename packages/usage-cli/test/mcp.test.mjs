@@ -405,6 +405,50 @@ test('subset-usage mcp hides an earlier sign-in\'s snapshot after a change in th
   assert.deepEqual(JSON.parse(await readFile(fixture.profilesFile, 'utf8')).map((profile) => profile.id), ['claude_work']);
 });
 
+test('subset-usage mcp applies a later sign-in change the dashboard recorded over the one it kept for the session', async (t) => {
+  const fixture = await claudeFixture(t);
+  const identitiesFile = join(fixture.data, 'claude-identities.json');
+  // The dashboard records the start of a sign-in period after the snapshots collected before it.
+  const recordIdentity = async (email) => {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    await writeFile(identitiesFile, JSON.stringify({ claude_work: { email, since: Date.now() } }));
+  };
+  await fixture.signIn('b');
+  await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } }));
+  fixture.collect('b', 5);
+  const mcp = await fixture.start();
+  // The session keeps the change from a@ to b@.
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
+  fixture.collect('b', 10);
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 90));
+
+  // Between reads the user signs in as a@ and collects a snapshot, then signs back in as b@, which
+  // the dashboard records. The session's own b@ period started earlier and must not show a@'s quota.
+  await fixture.signIn('a');
+  fixture.collect('a', 45);
+  await fixture.signIn('b');
+  await recordIdentity('b@example.com');
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
+  fixture.collect('b', 20);
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
+
+  // The session sees a@, then between reads the user collects as b@ and signs back in as a@, which
+  // the dashboard records. The session's a@ period started earlier and must not show b@'s quota.
+  await fixture.signIn('a');
+  assert.deepEqual(await mcp.work(), hidden('a@example.com'));
+  fixture.collect('a', 30);
+  assert.deepEqual(await mcp.work(), shown('a@example.com', 70));
+  await fixture.signIn('b');
+  fixture.collect('b', 40);
+  await fixture.signIn('a');
+  await recordIdentity('a@example.com');
+  const before = await tree(fixture.root);
+  assert.deepEqual(await mcp.work(), hidden('a@example.com'));
+  await mcp.stop();
+  // Apart from the test's own writes, the session changed nothing.
+  assert.deepEqual(await tree(fixture.root), before);
+});
+
 test('subset-usage mcp takes no arguments and is listed in --help', () => {
   const extra = spawnSync(process.execPath, ['src/server.mjs', 'mcp', 'now'], { cwd: hostDirectory, encoding: 'utf8', timeout: 10_000 });
   assert.equal(extra.status, 2);

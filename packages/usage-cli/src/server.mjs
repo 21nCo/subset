@@ -117,12 +117,15 @@ async function claudeIdentities() {
   try { const value = JSON.parse(await readFile(identitiesFile, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
   catch { return {}; }
 }
+// Of two records of one account's identity, the current period is the one that started later.
+const laterPeriod = (kept, other) => (!kept ? other : Number(other?.since) > Number(kept.since) ? other : kept);
 
 /**
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
  * Claude account is shown without being saved, and sign-in changes are tracked in memory only.
  * A long-lived reader that does not persist (`mcp`) passes `identityMemory`, which keeps the
- * identity periods it observed across reads and takes precedence over the file.
+ * identity periods it observed across reads; for each account the later period, from the file or
+ * from memory, applies.
  * @param {{ persist?: boolean, identityMemory?: Map<string, { email: string, since: number }> }} [options]
  */
 async function status({ persist = true, identityMemory } = {}) {
@@ -135,7 +138,8 @@ async function status({ persist = true, identityMemory } = {}) {
     const candidate = await accounts.defaultClaudeCandidate().catch(() => null);
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
-  const identities = { ...await claudeIdentities(), ...Object.fromEntries(identityMemory ?? []) };
+  const identities = await claudeIdentities();
+  for (const [id, period] of identityMemory ?? []) identities[id] = laterPeriod(period, identities[id]);
   // Only the entries this read changed are written back; others may have been updated concurrently.
   const changedIdentities = new Set();
   const boundToIdentity = (profile, snapshot, auth) => {
@@ -261,7 +265,8 @@ async function status({ persist = true, identityMemory } = {}) {
       if (profile.provider !== current.provider) results.set(ownerId, { ...current, alsoIn: [...new Set([...(current.alsoIn ?? []), profile.provider])] });
     }
   }));
-  for (const id of identityMemory ? changedIdentities : []) identityMemory.set(id, identities[id]);
+  // Concurrent reads may finish out of order; an older period never replaces a newer one.
+  for (const id of identityMemory ? changedIdentities : []) identityMemory.set(id, laterPeriod(identityMemory.get(id), identities[id]));
   if (persist && changedIdentities.size) {
     // Atomic and serialized: a torn file would reset identities and re-attribute old snapshots.
     identityQueue = identityQueue.then(async () => {
