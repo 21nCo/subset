@@ -36,7 +36,7 @@ test('the bundle is executable, imports only Node built-ins and its own chunks, 
   const source = readFileSync(CLI, 'utf8');
   assert.ok(source.startsWith('#!/usr/bin/env node\n'));
   assert.equal(statSync(CLI).mode & 0o111, 0o111);
-  // Code lines only: a JSDoc type such as import('@subset/timer').TimerDefinition is not an import.
+  // Code lines only: a JSDoc type such as import('@subset.dev/timer-core').TimerDefinition is not an import.
   const imports = (file) => {
     const code = readFileSync(join(PACKAGE_ROOT, 'dist', file), 'utf8').split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
     return [...code.matchAll(/(?:\bfrom|\bimport\()\s*["']([^"']+)["']/g)].map((match) => match[1]);

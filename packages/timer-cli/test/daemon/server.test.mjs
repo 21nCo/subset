@@ -4,7 +4,7 @@ import { request } from 'node:http';
 import { connect } from 'node:net';
 import { join } from 'node:path';
 import test from 'node:test';
-import { TIMER_LIMITS, TIMER_VIEW_ID, emptyStore, parseStore, runOperation, transitionsBetween } from '@subset/timer';
+import { TIMER_LIMITS, TIMER_VIEW_ID, emptyStore, parseStore, runOperation, transitionsBetween } from '@subset.dev/timer-core';
 import { DaemonRunningError, IDLE_EXIT_MS, REARM_MS, createFakeClock, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 

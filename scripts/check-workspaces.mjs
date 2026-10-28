@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { isRepoRelativePath, prereleaseProblems } from './release-macos.mjs';
+import { WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
 
 const root = new URL('../', import.meta.url);
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, root), 'utf8'));
 const rootManifest = readJson('package.json');
 
 assert.deepEqual(rootManifest.workspaces, ['packages/*', 'apps/*']);
+assert.match(rootManifest.name, WORKSPACE_NAME, 'The root package must use the @subset.dev scope');
 
 const names = new Set();
 const workspaces = [];
@@ -15,15 +17,7 @@ for (const kind of ['packages', 'apps']) {
   for (const entry of readdirSync(new URL(`${kind}/`, root), { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const manifest = readJson(join(kind, entry.name, 'package.json'));
-    assert.equal(typeof manifest.private, 'boolean', `${manifest.name} must declare whether it is private`);
-    if (kind === 'apps') {
-      assert.match(manifest.name, /^@subset\/[a-z0-9-]+$/);
-      assert.equal(manifest.private, true, `${manifest.name} is an app host and must remain private`);
-    } else if (manifest.private) {
-      assert.match(manifest.name, /^@(subset|subset\.dev)\/[a-z0-9-]+$/);
-    } else {
-      assert.match(manifest.name, /^@subset\.dev\/[a-z0-9-]+$/, `${manifest.name} must use the @subset.dev npm scope to publish`);
-    }
+    assert.deepEqual(workspaceManifestProblems(kind, manifest), [], `${kind}/${entry.name} has an invalid manifest`);
     assert.equal(names.has(manifest.name), false, `Duplicate workspace ${manifest.name}`);
     names.add(manifest.name);
     workspaces.push(manifest);
@@ -87,7 +81,7 @@ if (existsSync(nativeRoot)) {
 const minutesContract = readFileSync(new URL('packages/minutes/src/contract.ts', root), 'utf8').match(/MINUTES_CONTRACT_VERSION = (\d+) as const/);
 const minutesSwift = readFileSync(new URL('native/minutes/MacApp/MinutesCLI.swift', root), 'utf8').match(/supportedContractVersion = (\d+)/);
 assert.ok(minutesContract && minutesSwift, 'Could not find the Minutes contract version in TypeScript and Swift');
-assert.equal(minutesSwift[1], minutesContract[1], 'native/minutes supports a different Minutes contract version than @subset/minutes');
+assert.equal(minutesSwift[1], minutesContract[1], 'native/minutes supports a different Minutes contract version than @subset.dev/minutes-core');
 for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
   assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
@@ -142,9 +136,8 @@ for (const capability of capabilities) {
   }
 }
 
-assert.equal(names.has('@subset/catalog'), true);
-assert.equal(names.has('@subset/directory'), true);
-assert.equal(names.has('@subset/mgraph-contracts'), true);
-assert.equal(names.has('@subset/mgraph-store'), true);
-assert.equal(names.has('@subset/minutes'), true);
+// Private domain packages that share a name with a published CLI take the -core suffix (AGENTS.md).
+for (const name of ['catalog', 'directory', 'mgraph-contracts', 'mgraph-store', 'minutes-core', 'usage-core', 'timer-core', 'usage-web', 'timer-web']) {
+  assert.equal(names.has(`@subset.dev/${name}`), true, `Missing workspace @subset.dev/${name}`);
+}
 console.log(`Validated ${names.size} Subset workspaces.`);

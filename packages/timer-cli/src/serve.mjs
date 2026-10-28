@@ -3,7 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
-import { OPERATION_NAMES } from '@subset/timer';
+import { OPERATION_NAMES } from '@subset.dev/timer-core';
 
 /** The first port `serve` tries; without `--port` it moves on to the next free one. */
 export const DEFAULT_PORT = 4175;

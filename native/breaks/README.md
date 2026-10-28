@@ -244,7 +244,7 @@ The project's `MARKETING_VERSION` is 0.1.1, the next version after the released 
 
 - Release: [macos/breaks/v0.1.0](https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0), built by the **Release macOS app** workflow (run 38075115184) from the tag at commit `313b064`.
 - Download: [Breaks-0.1.0.dmg](https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg). The release also has `Breaks-0.1.0.zip` (the stapled app) and `SHA256SUMS`.
-- DMG SHA-256: `5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e`. The same value is in the release's [SHA256SUMS](https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/SHA256SUMS) and in `@subset/catalog`.
+- DMG SHA-256: `5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e`. The same value is in the release's [SHA256SUMS](https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/SHA256SUMS) and in `@subset.dev/catalog`.
 - Version 0.1.0, bundle ID `dev.subset.breaks`, macOS 14 or later, universal binary (arm64 and x86_64).
 - Signed by Developer ID Application: Blank labs private limited (SAZVPX4CAA), with the hardened runtime. The DMG and the app are notarized, and both have stapled tickets.
 

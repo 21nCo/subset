@@ -2,7 +2,7 @@ import type { ErrorCode, Platform } from './contract.js';
 import type { MeetingLink } from './link.js';
 
 /**
- * The browser automation seam. `@subset/minutes/chrome` implements it with playwright-core and the
+ * The browser automation seam. `@subset.dev/minutes-core/chrome` implements it with playwright-core and the
  * system Chrome; tests use a fake. Nothing outside the driver touches Playwright.
  */
 export interface MeetingDriver {

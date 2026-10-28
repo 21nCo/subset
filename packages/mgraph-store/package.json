@@ -1,5 +1,5 @@
 {
-  "name": "@subset/mgraph-store",
+  "name": "@subset.dev/mgraph-store",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,10 +13,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build --workspace=@subset/mgraph-contracts && npm run build && node --test test/*.test.mjs"
+    "test": "npm run build --workspace=@subset.dev/mgraph-contracts && npm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@subset/mgraph-contracts": "*",
+    "@subset.dev/mgraph-contracts": "*",
     "zod": "^4.6.5"
   },
   "devDependencies": {

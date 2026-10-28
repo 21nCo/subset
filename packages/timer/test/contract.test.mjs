@@ -21,9 +21,9 @@ function assertValid(schema, value, label) {
 
 test('checked-in fixtures match what the package produces', async () => {
   const expected = contractFixtures();
-  assert.deepEqual((await readdir(directory)).sort(), Object.keys(expected).sort(), 'run `npm run fixtures --workspace=@subset/timer`');
+  assert.deepEqual((await readdir(directory)).sort(), Object.keys(expected).sort(), 'run `npm run fixtures --workspace=@subset.dev/timer-core`');
   for (const [file, value] of Object.entries(expected)) {
-    assert.equal(await readFile(new URL(file, directory), 'utf8'), fixtureText(value), `${file} is stale; run \`npm run fixtures --workspace=@subset/timer\``);
+    assert.equal(await readFile(new URL(file, directory), 'utf8'), fixtureText(value), `${file} is stale; run \`npm run fixtures --workspace=@subset.dev/timer-core\``);
   }
 });
 

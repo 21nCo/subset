@@ -33,7 +33,7 @@
     "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
   },
   "devDependencies": {
-    "@subset/usage": "*",
+    "@subset.dev/usage-core": "*",
     "rolldown": "1.2.11"
   }
 }

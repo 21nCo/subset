@@ -1,6 +1,6 @@
 import Foundation
 
-// The app's view of the @subset/timer contract, schema version 1 (packages/timer/src/model.ts, agent.ts and
+// The app's view of the @subset.dev/timer-core contract, schema version 1 (packages/timer/src/model.ts, agent.ts and
 // operations.ts). Times are wall-clock epoch milliseconds. The daemon validates every input and owns every
 // change; these types only carry what it sends and receives.
 

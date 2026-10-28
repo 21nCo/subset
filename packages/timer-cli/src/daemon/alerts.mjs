@@ -1,4 +1,4 @@
-import { intervalStep } from '@subset/timer';
+import { intervalStep } from '@subset.dev/timer-core';
 
 /**
  * @typedef {'segment' | 'tick' | 'finish' | 'missedWhileAway'} AlertKind
@@ -20,7 +20,7 @@ import { intervalStep } from '@subset/timer';
  *   counts as delivered, so a daemon that ends mid-play does not play it again (SET-169: an
  *   idempotent sink).
  * @property {string} name Shown by `daemon status`.
- * @property {(alert: TimerAlert, timer: import('@subset/timer').TimerDefinition) => void | Promise<void>} alert
+ * @property {(alert: TimerAlert, timer: import('@subset.dev/timer-core').TimerDefinition) => void | Promise<void>} alert
  */
 
 /** The step fields an alert carries. */

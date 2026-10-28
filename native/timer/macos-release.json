@@ -3,5 +3,5 @@
   "scheme": "Timer",
   "app": "Timer",
   "team": "SAZVPX4CAA",
-  "workspaces": ["@subset/timer", "@subset/timer-web", "@subset.dev/timer"]
+  "workspaces": ["@subset.dev/timer-core", "@subset.dev/timer-web", "@subset.dev/timer"]
 }

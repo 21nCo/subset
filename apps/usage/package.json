@@ -1,5 +1,5 @@
 {
-  "name": "@subset/usage-web",
+  "name": "@subset.dev/usage-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@21n/fonts": "1.0.1",
-    "@subset/usage": "*",
+    "@subset.dev/usage-core": "*",
     "phosphor-svelte": "3.1.0",
     "svelte": "^5.57.1"
   },

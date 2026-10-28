@@ -25,7 +25,7 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 | Command | What it does |
 | --- | --- |
 | `serve` (default) | Starts the dashboard on `127.0.0.1` (port 4174, or the next free port) and opens it. `--port <n>` requires that port; `--no-open` skips the browser. Ctrl-C stops it. |
-| `status` | Prints the normalized usage status (`@subset/usage` contract, schema version 1) and exits. It writes nothing: a signed-in default Claude account is shown without being saved, and no history is recorded. |
+| `status` | Prints the normalized usage status (`@subset.dev/usage-core` contract, schema version 1) and exits. It writes nothing: a signed-in default Claude account is shown without being saved, and no history is recorded. |
 | `collect --account <id>` | Saves a quota snapshot from a Claude Code or Antigravity status line. Installed collectors call it through a shim; you rarely run it yourself. |
 | `--help`, `--version` | |
 
@@ -39,7 +39,7 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 
 ## Development
 
-From the repository root, `npm run build` builds `@subset/usage`, the `apps/usage` view, and this package: `dist/cli.mjs` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `npm test --workspace=@subset.dev/usage` runs the CLI tests. `npm run serve --workspace=@subset.dev/usage` runs the source without bundling.
+From the repository root, `npm run build` builds `@subset.dev/usage-core`, the `apps/usage` view, and this package: `dist/cli.mjs` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `npm test --workspace=@subset.dev/usage` runs the CLI tests. `npm run serve --workspace=@subset.dev/usage` runs the source without bundling.
 
 ## Release
 

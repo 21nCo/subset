@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { McpFnTestClient, assertManifestContract, validateMcpFnSchemaPortability } from '@mcpfn/testing';
-import { BUILT_IN_PRESET_IDS, schemas } from '@subset/timer';
+import { BUILT_IN_PRESET_IDS, schemas } from '@subset.dev/timer-core';
 import { defineTimerMcpServer } from '../../src/mcp/server.mjs';
 import { DaemonUnavailableError, createClient } from '../../src/daemon/index.mjs';
 import { FIXTURES, cliDaemon } from '../cli/helpers.mjs';

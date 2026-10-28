@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, wr
 import { request } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
-import { emptyStore, runOperation, transitionsBetween } from '@subset/timer';
+import { emptyStore, runOperation, transitionsBetween } from '@subset.dev/timer-core';
 import { ACK_TIMEOUT_MS, MAX_UNRECEIVED, ORPHANED_ALERT_MS, SETTLED_RETENTION_MS, createAlertHandlers, createFakeClock, createRecordingSink, createScheduler, createStateStore, daemonPaths, socketRequest } from '../../src/daemon/index.mjs';
 import { eventually, rawRequest, spawnDaemonProcess, startTestDaemon, subscribe, tempDataDir, within } from './helpers.mjs';
 

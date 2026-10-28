@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { isMinutesDoctor, isMinutesEvent, isMinutesStatus } from '@subset/minutes';
+import { isMinutesDoctor, isMinutesEvent, isMinutesStatus } from '@subset.dev/minutes-core';
 import { main } from '../src/main.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));

@@ -2,7 +2,7 @@
 // Input schemas reuse the SET-74 `schemas` for ids, names, labels, phases and rounds; durations are
 // whole seconds. No tool schema has a top-level oneOf, anyOf, allOf or not, which some hosts refuse,
 // so the rules between fields (exactly one start mode, `id` or `name`) are checked here.
-import { TIMER_LIMITS, TIMER_SCHEMA_VERSION, schemas, timerLine } from '@subset/timer';
+import { TIMER_LIMITS, TIMER_SCHEMA_VERSION, schemas, timerLine } from '@subset.dev/timer-core';
 import { presetLine } from '../commands/presets.mjs';
 import { CliError, call, endsAt, findPreset, formatLocalTime, resolveName } from '../commands/shared.mjs';
 import { DurationError, parseUntil } from '../parse-duration.mjs';

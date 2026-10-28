@@ -1,4 +1,4 @@
-import { formatDuration } from '@subset/timer';
+import { formatDuration } from '@subset.dev/timer-core';
 import { intervalSpec } from './timers.mjs';
 import { call, resolveRef } from './shared.mjs';
 

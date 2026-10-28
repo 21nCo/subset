@@ -1,6 +1,6 @@
 import Foundation
 
-/// The app's view of the shared `@subset/minutes` contract. The CLI (`subset-minutes`) owns every
+/// The app's view of the shared `@subset.dev/minutes-core` contract. The CLI (`subset-minutes`) owns every
 /// operation; the app spawns it with `--json` and decodes its output. Keep `supportedContractVersion`
 /// equal to `MINUTES_CONTRACT_VERSION` in `packages/minutes/src/contract.ts`
 /// (`scripts/check-workspaces.mjs` enforces this).

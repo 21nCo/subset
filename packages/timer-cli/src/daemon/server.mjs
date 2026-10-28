@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, lstatSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset/timer';
+import { OPERATION_NAMES, agentTimerResult, project, runOperation, settle } from '@subset.dev/timer-core';
 import { ACK_TIMEOUT_MS, createAlertHandlers } from './alert-handlers.mjs';
 import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';

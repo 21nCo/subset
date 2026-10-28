@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { emptyStore, parseStore } from '@subset/timer';
+import { emptyStore, parseStore } from '@subset.dev/timer-core';
 
 const TEMP_SUFFIX = /\.\d+\.[0-9a-f]{8}\.tmp$/;
 const MARKS_VERSION = 1;

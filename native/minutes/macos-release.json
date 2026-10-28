@@ -3,5 +3,5 @@
   "scheme": "Minutes",
   "app": "Minutes",
   "team": "SAZVPX4CAA",
-  "workspaces": ["@subset/minutes", "@subset.dev/minutes"]
+  "workspaces": ["@subset.dev/minutes-core", "@subset.dev/minutes"]
 }

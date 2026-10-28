@@ -1,4 +1,4 @@
-import { TIMER_ID_PATTERN, timerLine } from '@subset/timer';
+import { TIMER_ID_PATTERN, timerLine } from '@subset.dev/timer-core';
 import { parseDuration, parseUntil } from '../parse-duration.mjs';
 import { CliError, call, endsAt, findPreset, formatLocalTime, resolveTimer, usageError } from './shared.mjs';
 

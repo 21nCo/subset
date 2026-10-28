@@ -1,4 +1,4 @@
-// Bundles the CLI with the private @subset/minutes package inlined. playwright-core stays an
+// Bundles the CLI with the private @subset.dev/minutes-core package inlined. playwright-core stays an
 // external runtime dependency: it resolves files relative to its own install and does not survive
 // bundling. The build also stages app-runtime/, the self-contained copy the macOS app embeds
 // (dist plus playwright-core); app-runtime/ is not part of the npm package.
@@ -18,7 +18,7 @@ if (process.argv.includes('--check')) {
   if (!text.startsWith('#!/usr/bin/env node')) { console.error('dist/cli.mjs has no shebang.'); process.exit(1); }
   const chunks = (await readdir(path.join(root, 'dist'))).filter((name) => name.endsWith('.mjs'));
   const sources = await Promise.all(chunks.map((name) => readFile(path.join(root, 'dist', name), 'utf8')));
-  if (sources.some((source) => /(?:from|import\()\s*["']@subset\//.test(source))) { console.error('dist/ still imports a private @subset/* workspace.'); process.exit(1); }
+  if (sources.some((source) => /(?:from|import\()\s*["']@subset\.dev\//.test(source))) { console.error('dist/ still imports a @subset.dev workspace; bundle it instead.'); process.exit(1); }
   process.exit(0);
 }
 

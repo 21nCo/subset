@@ -13,7 +13,7 @@ import { timerTools } from '../../src/mcp/tools.mjs';
 import { PACKAGE_ROOT, cliDaemon } from '../cli/helpers.mjs';
 
 const REPO = join(PACKAGE_ROOT, '../..');
-// The package test script builds @subset/timer-web, which writes the view here.
+// The package test script builds @subset.dev/timer-web, which writes the view here.
 const BOARD_HTML = join(PACKAGE_ROOT, 'mcp-app/board.html');
 const MIME = 'text/html;profile=mcp-app';
 const NO_DOMAINS = { connectDomains: [], resourceDomains: [], frameDomains: [] };

@@ -2,8 +2,8 @@
 // state arrives as a server-sent event stream from /api/events. Every request carries the header
 // X-Subset-Timer: 1, which the server requires on /api/*. EventSource cannot send a header, so the
 // stream is read with fetch.
-import type { TimerBoardResult } from '@subset/timer';
-import type { TimerActionOutcome, TimerBoardActions } from '@subset/timer/view-model';
+import type { TimerBoardResult } from '@subset.dev/timer-core';
+import type { TimerActionOutcome, TimerBoardActions } from '@subset.dev/timer-core/view-model';
 
 const API_HEADERS = { 'X-Subset-Timer': '1' };
 /** The first wait before reopening a stream that failed; it doubles after each failure, up to the maximum. */
