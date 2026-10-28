@@ -144,5 +144,13 @@ export const capabilities = [
     state: 'building',
     proposedSurfaces: ['web', 'macos', 'embed', 'agent-cli', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'bookmarks',
+    name: 'Bookmarks',
+    summary: 'Save web links with their titles, descriptions, and preview images on a server you host, and find them again from a browser, the terminal, or an AI agent.',
+    state: 'planned',
+    proposedSurfaces: ['web', 'agent-cli', 'agent-view'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
