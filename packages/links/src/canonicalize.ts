@@ -68,7 +68,8 @@ export function canonicalizeUrl(input: string | URL): string {
   if (url.search) {
     const pairs = url.search.slice(1).split('&');
     const kept = pairs.filter((pair) => !isTrackingParameter(decodeParameterName(pair)));
-    if (kept.length !== pairs.length) url.search = kept.length ? `?${kept.join('&')}` : '';
+    // A query with no parameter left is removed; empty pairs between kept parameters stay as they were.
+    if (kept.length !== pairs.length) url.search = kept.some((pair) => pair !== '') ? `?${kept.join('&')}` : '';
   }
   return url.href;
 }

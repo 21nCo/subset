@@ -13,6 +13,17 @@ function page(size, { before = '', after = '' } = {}) {
   return `${head}${body.slice(0, size - head.length)}${after}</body></html>`;
 }
 
+/** The fastest of three parses in milliseconds, so one run preempted by a busy host does not count. */
+function bestTime(html) {
+  let best = Infinity;
+  for (let run = 0; run < 3; run++) {
+    const started = performance.now();
+    parseLinkDetails(html, { url });
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+}
+
 test('fixture: a 3 MB document is parsed only up to its first 512 KB', () => {
   const late = '<meta property="og:title" content="Too late"><link rel="icon" href="/late.png">';
   const html = page(3 * KB * KB, { before: '<meta name="description" content="Early">' });
@@ -30,13 +41,30 @@ test('fixture: a 3 MB document is parsed only up to its first 512 KB', () => {
   assert.equal(parseLinkDetails(inside, { url }).title, 'Too late');
 });
 
+test('a string is cut at 512 KB of UTF-8, the same place as its bytes', () => {
+  // 262,144 two-byte characters fill the limit in about half as many UTF-16 code units.
+  const late = '<meta property="og:title" content="Too late"><link rel="icon" href="/late.png">';
+  const html = `<title>Early</title><!--${'é'.repeat(MAX_DOCUMENT_BYTES / 2)}-->${late}${'x'.repeat(3 * KB * KB)}`;
+  assert.ok(html.indexOf(late) < MAX_DOCUMENT_BYTES);
+  const fromString = parseLinkDetails(html, { url });
+  assert.equal(fromString.title, 'Early');
+  assert.deepEqual(fromString.icons, [{ url: 'https://example.com/favicon.ico', rel: 'icon' }]);
+  assert.deepEqual(parseLinkDetails(new TextEncoder().encode(html), { url }), fromString);
+});
+
 test('the 512 KB cut does not split a character', () => {
-  // A 4-byte character straddling the cut is dropped from byte input; a surrogate pair from string input.
-  const bytes = new TextEncoder().encode(`<title>${'a'.repeat(MAX_DOCUMENT_BYTES - 9)}😀😀</title>`);
-  const title = parseLinkDetails(bytes, { url }).title;
-  assert.ok(!title.includes('�'));
-  const text = `<title>${'a'.repeat(MAX_DOCUMENT_BYTES - 8)}😀</title>`;
-  assert.ok(!/[\uD800-\uDBFF]$/.test(parseLinkDetails(text, { url }).title));
+  // A comment of multi-byte filler, then `<title>X ` and 4-byte emoji, the first ending exactly at the limit or
+  // straddling it. The title is collapsed and short, so the cut shows in it for both input forms.
+  const prefix = '<!--';
+  const suffix = '--><title>X ';
+  for (const [filler, fillerBytes] of [['é', 2], ['\uD800', 3]]) {
+    for (const [emojiStart, title] of [[MAX_DOCUMENT_BYTES - 4, 'X 😀'], [MAX_DOCUMENT_BYTES - 2, 'X']]) {
+      const bytes = emojiStart - prefix.length - suffix.length;
+      const html = `${prefix}${filler.repeat(Math.floor(bytes / fillerBytes))}${'a'.repeat(bytes % fillerBytes)}${suffix}😀😀`;
+      assert.equal(parseLinkDetails(html, { url }).title, title, `string, ${fillerBytes}-byte filler`);
+      assert.equal(parseLinkDetails(new TextEncoder().encode(html), { url }).title, title, `bytes, ${fillerBytes}-byte filler`);
+    }
+  }
 });
 
 test('a 512 KB document parses in under 100 ms', () => {
@@ -54,25 +82,14 @@ test('a 512 KB document parses in under 100 ms', () => {
   };
   for (const [name, html] of Object.entries(fixtures)) {
     assert.ok(html.length >= MAX_DOCUMENT_BYTES * 0.95, `${name} is about 512 KB`);
-    const started = performance.now();
-    parseLinkDetails(html, { url });
-    const elapsed = performance.now() - started;
+    const elapsed = bestTime(html);
     assert.ok(elapsed < 100, `${name} took ${elapsed.toFixed(1)} ms`);
   }
 });
 
 test('parse time grows linearly with document size', () => {
-  const time = (html) => {
-    let best = Infinity;
-    for (let run = 0; run < 3; run++) {
-      const started = performance.now();
-      parseLinkDetails(html, { url });
-      best = Math.min(best, performance.now() - started);
-    }
-    return best;
-  };
-  const small = time(page(MAX_DOCUMENT_BYTES / 8));
-  const large = time(page(MAX_DOCUMENT_BYTES));
+  const small = bestTime(page(MAX_DOCUMENT_BYTES / 8));
+  const large = bestTime(page(MAX_DOCUMENT_BYTES));
   // Eight times the input; a quadratic step would take about 64 times as long. Allow generous noise.
   assert.ok(large < Math.max(small, 1) * 24, `64 KB took ${small.toFixed(1)} ms, 512 KB took ${large.toFixed(1)} ms`);
 });

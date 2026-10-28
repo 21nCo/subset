@@ -50,6 +50,14 @@ test('keeps query order and encoding', () => {
   const query = 'b=2&a=1&b=1&flag&&q=a+b&r=a%20b&s=%E2%9C%93';
   assert.equal(canonicalizeUrl(`https://example.com/?${query}`), `https://example.com/?${query}`);
   assert.equal(canonicalizeUrl(`https://example.com/?utm_source=x&${query}&gclid=1`), `https://example.com/?${query}`);
+  assert.equal(canonicalizeUrl('https://example.com/p?a=1&&utm_source=x&&b=2'), 'https://example.com/p?a=1&&&b=2');
+});
+
+test('removes a query that removal leaves without parameters', () => {
+  for (const query of ['utm_source=x&', '&gclid=1', '&utm_source=x&&fbclid=1&', 'utm_source=x&&']) {
+    assert.equal(canonicalizeUrl(`https://example.com/p?${query}`), 'https://example.com/p', query);
+  }
+  assert.equal(canonicalizeUrl('https://example.com/p?utm_source=x&#!/route'), 'https://example.com/p#!/route');
 });
 
 test('removes each listed tracking parameter', () => {

@@ -1,6 +1,6 @@
 import { scanHtml } from './tokens.js';
 
-/** Only this much of a document is parsed: bytes for binary input, UTF-16 code units for a string. */
+/** Only this many bytes of a document are parsed. A string counts as its UTF-8 encoding. */
 export const MAX_DOCUMENT_BYTES = 512 * 1024;
 
 // The HTML standard's encoding sniffing looks for a <meta> charset in the first 1,024 bytes.
@@ -25,16 +25,18 @@ export function parseContentType(value: string | undefined): ContentType | undef
 }
 
 /**
- * The first `MAX_DOCUMENT_BYTES` of a document as text. Bytes are decoded with, in order, a byte order mark,
+ * The first `MAX_DOCUMENT_BYTES` of a document as text, with a string measured as UTF-8. Bytes are decoded with, in order, a byte order mark,
  * the Content-Type charset, a `<meta>` charset in the first 1,024 bytes, or UTF-8. A label the runtime's
  * TextDecoder does not support is skipped.
  */
 export function decodeDocument(input: string | ArrayBuffer | ArrayBufferView, headerCharset?: string): string {
   if (typeof input === 'string') {
-    if (input.length <= MAX_DOCUMENT_BYTES) return input;
-    // Do not leave half of a surrogate pair at the cut.
-    const end = isHighSurrogate(input.charCodeAt(MAX_DOCUMENT_BYTES - 1)) ? MAX_DOCUMENT_BYTES - 1 : MAX_DOCUMENT_BYTES;
-    return input.slice(0, end);
+    // A UTF-16 code unit is at most 3 UTF-8 bytes.
+    if (input.length * 3 <= MAX_DOCUMENT_BYTES) return input;
+    // encodeInto stops at the first character that does not fit, so `read` never splits one, and it
+    // counts a lone surrogate as the 3 bytes of U+FFFD, as TextEncoder#encode does for byte input.
+    const { read } = new TextEncoder().encodeInto(input, new Uint8Array(MAX_DOCUMENT_BYTES));
+    return input.slice(0, read);
   }
   const bytes = toBytes(input).subarray(0, MAX_DOCUMENT_BYTES);
   const encoding = bomEncoding(bytes) ?? supportedEncoding(headerCharset) ?? metaEncoding(bytes) ?? 'utf-8';
@@ -87,8 +89,4 @@ function metaEncoding(bytes: Uint8Array): string | undefined {
   if (encoding === 'utf-16le' || encoding === 'utf-16be') return 'utf-8';
   if (encoding === 'x-user-defined') return 'windows-1252';
   return encoding;
-}
-
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff;
 }
