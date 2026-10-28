@@ -109,10 +109,15 @@ test('usage_status filters to one provider: its own accounts, logins for its sub
   assert.deepEqual(await ids('hermes'), ['hermes_claude']);
   assert.deepEqual(await ids('pi'), ['chatgpt_main']);
   assert.deepEqual(await ids('amp'), ['amp_cli']);
-  const filtered = await call('usage_status', { provider: 'claude-code' });
-  assert.ok(isUsageStatus(filtered.structuredContent));
-  assert.equal(filtered.content[0].text, usageText(filtered.structuredContent));
-  // No account of that provider: the text names it rather than saying nothing is configured.
+  // Every filtered result with accounts is valid and its text is usageText of exactly those accounts.
+  for (const provider of ['claude-code', 'hermes', 'pi', 'amp', 'codex-chatgpt']) {
+    const filtered = await call('usage_status', { provider });
+    assert.ok(isUsageStatus(filtered.structuredContent), provider);
+    assert.ok(filtered.structuredContent.accounts.length, provider);
+    assert.equal(filtered.content[0].text, usageText(filtered.structuredContent), provider);
+  }
+  // The one exception: no account of that provider. The text names it rather than saying, as
+  // usageText would, that no accounts are configured at all.
   const none = await call('usage_status', { provider: 'cursor' });
   assert.deepEqual(none.structuredContent.accounts, []);
   assert.equal(none.content[0].text, 'No Cursor team (cursor) accounts are configured.');
@@ -197,8 +202,8 @@ async function tree(root) {
 }
 
 /** `subset-usage mcp` as a child process speaking newline-delimited JSON-RPC on its stdin and stdout. */
-function startMcp(env) {
-  const child = spawn(process.execPath, ['src/server.mjs', 'mcp'], { cwd: hostDirectory, env, stdio: ['pipe', 'pipe', 'pipe'] });
+function startMcp(env, entry = 'src/server.mjs') {
+  const child = spawn(process.execPath, [entry, 'mcp'], { cwd: hostDirectory, env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   const frames = [];
@@ -304,25 +309,59 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   assert.deepEqual(await tree(root), before);
 });
 
+test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exits 0 when stdin closes', async (t) => {
+  const built = await Promise.all(['cli.mjs', 'mcp-server.mjs'].map((name) => stat(join(hostDirectory, 'dist', name)).then(() => true, () => false)));
+  assert.deepEqual(built, [true, true], 'dist/ is missing: run npm run build first');
+  const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-dist-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [config, data, claude] = ['config', 'data', 'claude'].map((name) => join(root, name));
+  for (const directory of [config, data]) await mkdir(directory);
+  const profilesFile = join(config, 'profiles.json');
+  await writeFile(profilesFile, '[]');
+  // No Claude config directory, so no default Claude account is read.
+  const before = await tree(root);
+  const mcp = startMcp({ ...process.env, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: claude }, 'dist/cli.mjs');
+  t.after(() => mcp.child.kill());
+  const init = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
+  assert.deepEqual(init.result.serverInfo, { name: 'subset-usage', version: manifest.version });
+  mcp.send({ method: 'notifications/initialized' });
+  assert.deepEqual((await mcp.request('tools/list', {})).result.tools.map((tool) => tool.name).sort(), ['usage_history', 'usage_status']);
+  const status = (await mcp.request('tools/call', { name: 'usage_status', arguments: {} })).result;
+  assert.ok(isUsageStatus(status.structuredContent), JSON.stringify(status));
+  assert.deepEqual(status.structuredContent.accounts, []);
+  assert.equal(status.content[0].text, usageText(status.structuredContent, new Date(status.structuredContent.generatedAt)));
+  mcp.child.stdin.end();
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  assert.equal(mcp.rest(), '');
+  assert.deepEqual(mcp.frames.map((frame) => [frame.id, 'result' in frame]), [[1, true], [2, true], [3, true]]);
+  assert.deepEqual(await tree(root), before);
+});
+
 /**
  * A data directory with one Claude account, `claude_work`, whose sign-in email the `claude` shim
  * takes from the config directory's name (`a@example.com` in `.../a`). The auth answer is cached
  * per directory for a minute, so a test signs the account in as someone else by pointing it at
- * another directory, which is the same sign-in change to the identity check.
+ * another directory, which is the same sign-in change to the identity check. The sign-in check of
+ * a directory named `slow` signals `started` in `gate` and answers only once `gate/open` exists.
  */
-async function claudeFixture(t) {
+async function claudeFixture(t, { gate } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-identity-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const [bin, config, data] = ['bin', 'config', 'data'].map((name) => join(root, name));
-  for (const directory of [bin, config, data, join(root, 'a'), join(root, 'b'), join(root, 'default')]) await mkdir(directory);
+  for (const directory of [bin, config, data, join(root, 'a'), join(root, 'b'), join(root, 'slow'), join(root, 'default')]) await mkdir(directory);
   await writeFile(join(bin, 'claude'), `#!/bin/sh
+if [ "$(basename "$CLAUDE_CONFIG_DIR")" = slow ]; then
+  : > "$SUBSET_TEST_GATE/started"
+  while [ ! -e "$SUBSET_TEST_GATE/open" ]; do sleep 0.05; done
+fi
 printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"%s@example.com"}\n' "$(basename "$CLAUDE_CONFIG_DIR")"
 `, { mode: 0o700 });
   const profilesFile = join(config, 'profiles.json');
-  const signIn = (name) => writeFile(profilesFile, JSON.stringify([
-    { id: 'claude_work', label: 'Work', provider: 'claude-code', managed: false, snapshotFile: join(data, 'usage-snapshots', 'claude_work.json'), claudeConfigDir: join(root, name) },
-  ]));
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'default') };
+  const claudeProfile = (id, name) => ({ id, label: id, provider: 'claude-code', managed: false, snapshotFile: join(data, 'usage-snapshots', `${id}.json`), claudeConfigDir: join(root, name) });
+  // With a gate, a second account whose sign-in check waits for the test is configured too.
+  const signIn = (name) => writeFile(profilesFile, JSON.stringify([claudeProfile('claude_work', name), ...(gate ? [claudeProfile('claude_slow', 'slow')] : [])]));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'default'), SUBSET_TEST_GATE: gate ?? '' };
   const collect = (name, usedPercentage) => {
     const result = spawnSync(process.execPath, ['src/server.mjs', 'collect', '--account', 'claude_work'], {
       cwd: hostDirectory, env: { ...env, CLAUDE_CONFIG_DIR: join(root, name) }, encoding: 'utf8', timeout: 10_000,
@@ -352,6 +391,7 @@ printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","emai
   return { root, data, profilesFile, signIn, collect, start };
 }
 
+const delay = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
 const hidden = (email) => ({ email, state: 'unavailable', remaining: [], errors: ['claude_identity_changed'] });
 const shown = (email, remaining) => ({ email, state: 'ok', remaining: [remaining], errors: [] });
 
@@ -403,6 +443,42 @@ test('subset-usage mcp hides an earlier sign-in\'s snapshot after a change in th
   // No read recorded an identity, adopted the default account or recorded history; only the collector wrote.
   assert.deepEqual((await readdir(fixture.data)).sort(), ['collector-runs', 'usage-snapshots']);
   assert.deepEqual(JSON.parse(await readFile(fixture.profilesFile, 'utf8')).map((profile) => profile.id), ['claude_work']);
+});
+
+test('subset-usage mcp keeps one period for a sign-in change that overlapping reads observe', async (t) => {
+  const gate = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-gate-'));
+  t.after(() => rm(gate, { recursive: true, force: true }));
+  const fixture = await claudeFixture(t, { gate });
+  await fixture.signIn('b');
+  const identities = JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } });
+  await writeFile(join(fixture.data, 'claude-identities.json'), identities);
+  fixture.collect('b', 10);
+  const mcp = await fixture.start();
+  const before = await tree(fixture.root);
+
+  // The first read observes the change from a@ to b@, then waits for the other account's sign-in check.
+  const first = mcp.work();
+  for (let tries = 0; !(await readdir(gate)).includes('started'); tries += 1) {
+    assert.ok(tries < 200, 'the first read never reached the waiting account');
+    await delay(25);
+  }
+  // claude_work's own check answers at once, and the read binds it right after.
+  await delay(750);
+  fixture.collect('b', 20);
+  // A second read, while the first is still running, sees the same sign-in and must not start a new
+  // period after the snapshot collected in between.
+  const second = mcp.work();
+  await delay(500);
+  await writeFile(join(gate, 'open'), '');
+  assert.deepEqual(await first, hidden('b@example.com'));
+  assert.deepEqual(await second, shown('b@example.com', 80));
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
+  await mcp.stop();
+  // Only the test's collector wrote: one snapshot and its run record.
+  const after = new Map((await tree(fixture.root)).map(([name, ...rest]) => [name, rest]));
+  for (const [name, ...rest] of before) if (!/^data\/(usage-snapshots|collector-runs)(\/|$)/.test(name)) assert.deepEqual(after.get(name), rest, name);
+  assert.deepEqual([...after.keys()].filter((name) => !before.some(([known]) => known === name)), []);
+  assert.equal(await readFile(join(fixture.data, 'claude-identities.json'), 'utf8'), identities);
 });
 
 test('subset-usage mcp applies a later sign-in change the dashboard recorded over the one it kept for the session', async (t) => {

@@ -19,7 +19,8 @@ jobs:
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
       - run: npm test --workspace=@subset.dev/usage-core
-      # The usage CLI tests, including the MCP server over stdio (SET-104), run the source against temp data directories.
+      # The usage CLI tests, including the MCP server over stdio (SET-104), run the source and the built dist/cli.mjs
+      # against temp data directories.
       - run: npm test --workspace=@subset.dev/usage
       # The Timer daemon and CLI tests run against a real Unix socket, use the built @subset.dev/timer-core and
       # rebuild dist/cli.mjs for the packaging checks.

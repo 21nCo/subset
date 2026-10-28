@@ -124,8 +124,8 @@ const laterPeriod = (kept, other) => (!kept ? other : Number(other?.since) > Num
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
  * Claude account is shown without being saved, and sign-in changes are tracked in memory only.
  * A long-lived reader that does not persist (`mcp`) passes `identityMemory`, which keeps the
- * identity periods it observed across reads; for each account the later period, from the file or
- * from memory, applies.
+ * identity periods it observed across reads, recorded as each change is observed; for each account
+ * the later period, from the file or from memory, applies.
  * @param {{ persist?: boolean, identityMemory?: Map<string, { email: string, since: number }> }} [options]
  */
 async function status({ persist = true, identityMemory } = {}) {
@@ -139,19 +139,22 @@ async function status({ persist = true, identityMemory } = {}) {
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
   const identities = await claudeIdentities();
-  for (const [id, period] of identityMemory ?? []) identities[id] = laterPeriod(period, identities[id]);
+  // The session's memory is consulted when each account is bound, not copied at the start, so reads
+  // that overlap one sign-in change share the period the first of them started.
+  const currentIdentity = (id) => (identityMemory ? laterPeriod(identityMemory.get(id), identities[id]) : identities[id]);
   // Only the entries this read changed are written back; others may have been updated concurrently.
   const changedIdentities = new Set();
   const boundToIdentity = (profile, snapshot, auth) => {
     const email = auth?.email?.toLowerCase();
     if (!email) return snapshot;
-    const known = identities[profile.id];
+    const known = currentIdentity(profile.id);
     if (!known || known.email !== email) {
       // First sighting adopts existing snapshots; a change starts a new identity period.
       identities[profile.id] = { email, since: known ? Date.now() : 0 };
       changedIdentities.add(profile.id);
+      identityMemory?.set(profile.id, identities[profile.id]);
     }
-    const since = identities[profile.id].since;
+    const since = currentIdentity(profile.id).since;
     if (!snapshot.observedAt || Date.parse(snapshot.observedAt) >= since) return snapshot;
     return { ...snapshot, observedAt: null, state: 'unavailable', windows: [],
       errors: [{ code: 'claude_identity_changed', message: 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.' }] };
@@ -265,8 +268,6 @@ async function status({ persist = true, identityMemory } = {}) {
       if (profile.provider !== current.provider) results.set(ownerId, { ...current, alsoIn: [...new Set([...(current.alsoIn ?? []), profile.provider])] });
     }
   }));
-  // Concurrent reads may finish out of order; an older period never replaces a newer one.
-  for (const id of identityMemory ? changedIdentities : []) identityMemory.set(id, laterPeriod(identityMemory.get(id), identities[id]));
   if (persist && changedIdentities.size) {
     // Atomic and serialized: a torn file would reset identities and re-attribute old snapshots.
     identityQueue = identityQueue.then(async () => {
