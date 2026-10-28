@@ -1,4 +1,4 @@
-import { project, transitionsBetween } from '@subset/timer';
+import { project, transitionsBetween } from '@subset.dev/timer-core';
 import { alertFromTransition } from './alerts.mjs';
 
 /** A transition handled more than this long after it happened was missed, for example during sleep. */

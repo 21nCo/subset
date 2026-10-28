@@ -1,5 +1,5 @@
 {
-  "name": "@subset/directory",
+  "name": "@subset.dev/directory",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@subset/catalog": "*",
+    "@subset.dev/catalog": "*",
     "svelte": "^5.57.1"
   },
   "devDependencies": {

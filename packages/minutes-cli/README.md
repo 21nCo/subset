@@ -38,7 +38,7 @@ The first Ctrl-C (SIGINT), SIGTERM, or SIGHUP makes the bot finalize the file: i
 
 ### JSON output for agents and apps
 
-`join --json` streams one event per line using the [`@subset/minutes` contract](../minutes/README.md#event-contract-version-1), version 1. The event types are `started`, `state`, `status`, `recording`, `error`, and `ended`. The last line is always `ended`. An invalid link produces `error` with code `invalid_link`, then `ended` with reason `failed`, and the command exits `2`:
+`join --json` streams one event per line using the [`@subset.dev/minutes-core` contract](../minutes/README.md#event-contract-version-1), version 1. The event types are `started`, `state`, `status`, `recording`, `error`, and `ended`. The last line is always `ended`. An invalid link produces `error` with code `invalid_link`, then `ended` with reason `failed`, and the command exits `2`:
 
 ```sh
 $ subset-minutes join https://example.com/x --json
@@ -59,7 +59,7 @@ An agent should use `status --json` and `doctor --json` to read state. `join` st
 
 ## Development
 
-`npm run build` at the repository root builds `@subset/minutes`, then this package. The build bundles `src/` with rolldown (with `@subset/minutes` inlined) into `dist/`: `cli.mjs` plus a lazily loaded `chrome.mjs` chunk, so `status` and `doctor` never load Playwright. `playwright-core` stays an external, pinned runtime dependency, because it resolves files relative to its own install and does not survive bundling. The build also stages `app-runtime/`, which is `dist/` plus `node_modules/playwright-core`. The macOS app embeds that copy. It is gitignored and not part of the npm package.
+`npm run build` at the repository root builds `@subset.dev/minutes-core`, then this package. The build bundles `src/` with rolldown (with `@subset.dev/minutes-core` inlined) into `dist/`: `cli.mjs` plus a lazily loaded `chrome.mjs` chunk, so `status` and `doctor` never load Playwright. `playwright-core` stays an external, pinned runtime dependency, because it resolves files relative to its own install and does not survive bundling. The build also stages `app-runtime/`, which is `dist/` plus `node_modules/playwright-core`. The macOS app embeds that copy. It is gitignored and not part of the npm package.
 
 `npm test --workspace=@subset.dev/minutes` runs the CLI tests: help, version, and usage errors; the structured `invalid_link` error; read-only `status --json`; `doctor --json`; and SIGINT, SIGTERM, and stdin-close stops. The stop tests use `test/fixtures/fake-cli.mjs`, which is the real entry point with a fake driver, so they never start Chrome.
 

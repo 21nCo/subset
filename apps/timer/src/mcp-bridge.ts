@@ -6,8 +6,8 @@
 // `ui/resource-teardown`. Every tool call has a deadline, so a reply the host never sends cannot stall
 // the refresh or leave a control busy. It touches no DOM, so it runs under `node --test` with a fake host.
 // `@modelcontextprotocol/ext-apps` 2.0.3 was evaluated and not used; see the README.
-import type { OperationName, TimerBoardResult, TimerError } from '@subset/timer';
-import type { TimerActionOutcome, TimerBoardActions } from '@subset/timer/view-model';
+import type { OperationName, TimerBoardResult, TimerError } from '@subset.dev/timer-core';
+import type { TimerActionOutcome, TimerBoardActions } from '@subset.dev/timer-core/view-model';
 
 export const PROTOCOL_VERSION = '2026-01-26';
 /** How often the bridge reads timer_list while the view is visible. */

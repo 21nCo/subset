@@ -7,7 +7,7 @@ import { z } from 'zod';
 import {
   parseGraphSnapshot, parseObservation, processingStatusSchema,
   type GraphSnapshot, type Observation,
-} from '@subset/mgraph-contracts';
+} from '@subset.dev/mgraph-contracts';
 
 /** SQLite layout understood by writers and required by read-only clients. */
 export const STORE_SCHEMA_VERSION = 6;

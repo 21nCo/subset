@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readSnapshotProfile } from '@subset/usage/snapshots';
+import { readSnapshotProfile } from '@subset.dev/usage-core/snapshots';
 import { createAccounts } from '../src/accounts.mjs';
 
 async function fixture(t) {

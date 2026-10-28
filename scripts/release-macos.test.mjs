@@ -115,7 +115,7 @@ test('validates release manifests', () => {
   assert.deepEqual(validateManifest({ project: 'Breaks.xcodeproj', scheme: 'BreaksMac', app: 'Breaks', team: 'SAZVPX4CAA' }, 'breaks'), []);
   assert.deepEqual(validateManifest({ project: 'A.xcodeproj', scheme: 'A', app: 'A' }, 'a'), []);
   const base = { project: 'A.xcodeproj', scheme: 'A', app: 'A' };
-  assert.deepEqual(validateManifest({ ...base, workspaces: ['@subset/minutes', '@subset.dev/minutes'] }, 'a'), []);
+  assert.deepEqual(validateManifest({ ...base, workspaces: ['@subset.dev/minutes-core', '@subset.dev/minutes'] }, 'a'), []);
   assert.deepEqual(validateManifest({ ...base, prepare: 'scripts/setup.sh' }, 'a'), []);
   for (const workspaces of [[], 'x', ['Bad Name'], [7]]) {
     assert.match(validateManifest({ ...base, workspaces }, 'a').join(), /"workspaces"/, String(workspaces));

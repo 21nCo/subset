@@ -19,7 +19,7 @@ import {
   runDoctor,
   runMeetingSession,
   writeSessionRecord,
-} from '@subset/minutes';
+} from '@subset.dev/minutes-core';
 import manifest from '../package.json' with { type: 'json' };
 
 export const usage = `Usage: subset-minutes <command> [options]
@@ -318,7 +318,7 @@ async function join(io, positionals, values, { environment, profileDirectory, ou
 
 async function defaultDriver() {
   // Loaded only for join, so status and doctor work without starting Playwright.
-  const { createChromeDriver } = await import('@subset/minutes/chrome');
+  const { createChromeDriver } = await import('@subset.dev/minutes-core/chrome');
   return createChromeDriver();
 }
 

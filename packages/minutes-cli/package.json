@@ -37,7 +37,7 @@
     "playwright-core": "1.59.1"
   },
   "devDependencies": {
-    "@subset/minutes": "*",
+    "@subset.dev/minutes-core": "*",
     "rolldown": "1.2.11"
   }
 }

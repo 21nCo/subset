@@ -18,8 +18,8 @@ jobs:
       - run: npm run build
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
-      - run: npm test --workspace=@subset/usage
-      # The Timer daemon and CLI tests run against a real Unix socket, use the built @subset/timer and
+      - run: npm test --workspace=@subset.dev/usage-core
+      # The Timer daemon and CLI tests run against a real Unix socket, use the built @subset.dev/timer-core and
       # rebuild dist/cli.mjs for the packaging checks.
       - run: npm test --workspace=@subset.dev/timer
         timeout-minutes: 10

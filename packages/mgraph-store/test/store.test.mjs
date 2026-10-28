@@ -9,7 +9,7 @@ import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { decodeIpcRequest, parseIpcResponse, sourceHash } from '@subset/mgraph-contracts';
+import { decodeIpcRequest, parseIpcResponse, sourceHash } from '@subset.dev/mgraph-contracts';
 import { MGraphStore, STORE_SCHEMA_VERSION, StoreConflict, StoreUnavailable } from '../dist/index.js';
 
 /** Give each database test an isolated file and remove its WAL and lock sidecars afterward. */

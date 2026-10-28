@@ -4,9 +4,9 @@ import { mkdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
-import { readCodexProfile } from '@subset/usage/codex';
-import { readClaudeAuthStatus } from '@subset/usage/claude';
-import { sanitizeSnapshot, normalizeSnapshot } from '@subset/usage/snapshots';
+import { readCodexProfile } from '@subset.dev/usage-core/codex';
+import { readClaudeAuthStatus } from '@subset.dev/usage-core/claude';
+import { sanitizeSnapshot, normalizeSnapshot } from '@subset.dev/usage-core/snapshots';
 
 const validId = /^[a-zA-Z0-9_-]{1,64}$/;
 const validEnv = /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/;

@@ -1,4 +1,4 @@
-// Bundles the CLI with the private @subset/usage package inlined, and copies the built
+// Bundles the CLI with the private @subset.dev/usage-core package inlined, and copies the built
 // dashboard from apps/usage/dist into web/. The published package has no runtime dependencies.
 import { cp, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,7 @@ await build({
   external: [/^node:/],
   output: { file: `${root}dist/cli.mjs`, format: 'esm', banner: '#!/usr/bin/env node' },
 });
-if (!(await exists(`${webSource}index.html`))) { console.error('apps/usage/dist is missing. Build @subset/usage-web first.'); process.exit(1); }
+if (!(await exists(`${webSource}index.html`))) { console.error('apps/usage/dist is missing. Build @subset.dev/usage-web first.'); process.exit(1); }
 await rm(`${root}web`, { recursive: true, force: true });
 await mkdir(`${root}web`, { recursive: true });
 await cp(webSource, `${root}web`, { recursive: true });

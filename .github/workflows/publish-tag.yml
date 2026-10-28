@@ -67,7 +67,7 @@ jobs:
         run: node ./scripts/resolve-release-tag.mjs "${RELEASE_TAG}"
 
       # Published packages bundle private workspaces (for example the CLI bundles
-      # @subset/usage and the built dashboard), so install and build from the root.
+      # @subset.dev/usage-core and the built dashboard), so install and build from the root.
       - name: Install workspace dependencies
         # No dependency needs an install script on Linux (only macOS's optional fsevents has one).
         run: npm ci --ignore-scripts

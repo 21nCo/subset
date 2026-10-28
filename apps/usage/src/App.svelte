@@ -14,12 +14,12 @@
   import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
   import WarningIcon from 'phosphor-svelte/lib/WarningIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
-  import UsageDashboard from '@subset/usage/view';
-  import ProviderIcon from '@subset/usage/provider-icon';
+  import UsageDashboard from '@subset.dev/usage-core/view';
+  import ProviderIcon from '@subset.dev/usage-core/provider-icon';
   import BrandMark from './BrandMark.svelte';
-  import { createUsageStatus, isUsageStatus, type UsageAccount, type UsageProvider, type UsageStatus } from '@subset/usage';
-  import { emptyUsageHistory, isUsageHistory, type UsageHistory } from '@subset/usage/history';
-  import { accountBadge, accountName, agoText, providerMeta, type PercentMode, type SortMode } from '@subset/usage/present';
+  import { createUsageStatus, isUsageStatus, type UsageAccount, type UsageProvider, type UsageStatus } from '@subset.dev/usage-core';
+  import { emptyUsageHistory, isUsageHistory, type UsageHistory } from '@subset.dev/usage-core/history';
+  import { accountBadge, accountName, agoText, providerMeta, type PercentMode, type SortMode } from '@subset.dev/usage-core/present';
 
   type ConnectedProfile = {
     id: string; label: string; provider: UsageProvider; managed: boolean; current: boolean; collectCommand?: string;

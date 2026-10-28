@@ -1,4 +1,4 @@
-# @subset/minutes
+# @subset.dev/minutes-core
 
 The Minutes capability: send a visible notetaker bot to a Google Meet or Zoom (web client) meeting in the system Google Chrome and record the other participants' audio to a local WebM file. This private workspace owns the domain logic and the contract. The `subset-minutes` CLI ([`@subset.dev/minutes`](../minutes-cli/README.md)) bundles it, and the [macOS app](../../native/minutes/README.md) runs that CLI. There is one implementation.
 
@@ -25,7 +25,7 @@ Status: building. No bot has joined a real meeting since this package was extrac
 | `driver` | The `MeetingDriver` / `MeetingPage` interface, which is the browser seam, plus `MinutesError`, which carries a contract error code. |
 | `store` | `writeSessionRecord` (atomic, mode 0600) and `readStatus`. |
 | `doctor` | `runDoctor` and `findChrome`. Filesystem access goes through an injectable probe. |
-| `@subset/minutes/chrome` | `createChromeDriver`: playwright-core with the system Chrome, the Meet and Zoom adapters, and audio capture. This is the only module that imports Playwright. Import it only when a session runs. |
+| `@subset.dev/minutes-core/chrome` | `createChromeDriver`: playwright-core with the system Chrome, the Meet and Zoom adapters, and audio capture. This is the only module that imports Playwright. Import it only when a session runs. |
 
 ### Session states
 
@@ -74,7 +74,7 @@ The Chrome driver launches the installed Google Chrome (or `SUBSET_MINUTES_CHROM
 
 ## Tests
 
-`npm test --workspace=@subset/minutes` builds the package, then runs `node --test`:
+`npm test --workspace=@subset.dev/minutes-core` builds the package, then runs `node --test`:
 
 - `link.test.mjs`: accepted and rejected links, the Zoom web-client mapping, and passcode redaction.
 - `contract.test.mjs`: every event shape, rejection of unknown versions, types, values, and extra fields, and the status and doctor validators.

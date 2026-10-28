@@ -4,7 +4,7 @@ import * as nodeFs from 'node:fs';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { emptyStore, runOperation } from '@subset/timer';
+import { emptyStore, runOperation } from '@subset.dev/timer-core';
 import { createStateStore, daemonPaths } from '../../src/daemon/index.mjs';
 import { startTestDaemon, tempDataDir } from './helpers.mjs';
 

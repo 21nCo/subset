@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import TimerBoard from '@subset/timer/view';
+  import TimerBoard from '@subset.dev/timer-core/view';
   import type { Bridge } from './mcp-bridge.js';
 
   let { bridge }: { bridge: Bridge } = $props();

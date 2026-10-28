@@ -1,6 +1,6 @@
 # M Graph contracts (SET-5)
 
-This private `@subset/mgraph-contracts` workspace defines the local memory service's data and IPC boundary. Its consumers are a future collector adapter, local store, and memory query client. It does not collect Accessibility data, persist records, serve IPC, render a UI, or connect to a hosted service. The SET-4 native spike still emits its own `CaptureResult`; a later adapter must convert successful captures into this contract and must not treat failed captures as text.
+This private `@subset.dev/mgraph-contracts` workspace defines the local memory service's data and IPC boundary. Its consumers are a future collector adapter, local store, and memory query client. It does not collect Accessibility data, persist records, serve IPC, render a UI, or connect to a hosted service. The SET-4 native spike still emits its own `CaptureResult`; a later adapter must convert successful captures into this contract and must not treat failed captures as text.
 
 ## Versions and exported validation
 
@@ -44,7 +44,7 @@ For a future Unix socket transport, use one UTF-8 JSON value per frame with an e
 | IPC correlation | Wrong operation, response ID, or wire version; v2 diagnostic masked; unsafe retry assumption | Full v1 request/reply and v2 cursor round trips, malformed request diagnostic, response-correlation tests; retry/authorization policy documented |
 | Portability | Generated schema differs from runtime shape | Ajv validates representative generated JSON Schema artifacts |
 
-Run `npm run test --workspace=@subset/mgraph-contracts`. Repository gates are `npm run check` and `npm run build`. Tests prove the contract implementation and generated artifacts, not persistence, native permissions, live IPC, or hosted behavior. For this issue, Railway Postgres, Cloudflare Preview, connected provider sandboxes, and Aside Browser have no runtime boundary to exercise; the final reviewer can verify the schema/provenance contract with the generated artifacts and focused tests.
+Run `npm run test --workspace=@subset.dev/mgraph-contracts`. Repository gates are `npm run check` and `npm run build`. Tests prove the contract implementation and generated artifacts, not persistence, native permissions, live IPC, or hosted behavior. For this issue, Railway Postgres, Cloudflare Preview, connected provider sandboxes, and Aside Browser have no runtime boundary to exercise; the final reviewer can verify the schema/provenance contract with the generated artifacts and focused tests.
 
 ## Superfunctions reuse check
 

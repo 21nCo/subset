@@ -1,4 +1,4 @@
-// Bundles the CLI, its daemon and alert sinks with the private @subset/timer package (and its zod
+// Bundles the CLI, its daemon and alert sinks with the private @subset.dev/timer-core package (and its zod
 // dependency) inlined into dist/cli.mjs, and copies the built board from apps/timer/dist into web/
 // for `serve`. The apps/timer build writes the MCP App view to mcp-app/board.html itself. The MCP server and @mcpfn/core, which `subset-timer mcp` alone loads, go to
 // dist/mcp-server.mjs, and code both use to dist/common.mjs. The published package has no runtime dependencies,
@@ -25,7 +25,7 @@ if (process.argv.includes('--check')) {
   if (!(await readFile(cli, 'utf8')).startsWith('#!/usr/bin/env node')) { console.error('dist/cli.mjs has no shebang.'); process.exit(1); }
   const chunks = (await readdir(path.join(root, 'dist'))).filter((name) => name.endsWith('.mjs'));
   const sources = await Promise.all(chunks.map((name) => readFile(path.join(root, 'dist', name), 'utf8')));
-  // Code lines only: a kept JSDoc type such as import('@subset/timer').TimerDefinition is not an import.
+  // Code lines only: a kept JSDoc type such as import('@subset.dev/timer-core').TimerDefinition is not an import.
   const code = (source) => source.split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
   if (sources.some((source) => /(?:\bfrom|\bimport\()\s*["'](?!node:)[^."'/]/.test(code(source)))) { console.error('dist/ still imports a package; bundle it instead.'); process.exit(1); }
   process.exit(0);
@@ -37,7 +37,7 @@ if (process.argv.includes('--stage-app-runtime')) {
   process.exit(0);
 }
 
-if (!(await exists(path.join(webSource, 'index.html'))) || !(await exists(path.join(root, 'mcp-app/board.html')))) { console.error('apps/timer/dist or mcp-app/board.html is missing. Build @subset/timer-web first.'); process.exit(1); }
+if (!(await exists(path.join(webSource, 'index.html'))) || !(await exists(path.join(root, 'mcp-app/board.html')))) { console.error('apps/timer/dist or mcp-app/board.html is missing. Build @subset.dev/timer-web first.'); process.exit(1); }
 await rm(path.join(root, 'dist'), { recursive: true, force: true });
 const { output } = await build({
   input: { cli: path.join(root, 'src/cli.mjs') },

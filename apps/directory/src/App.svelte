@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { capabilities } from '@subset/catalog';
-  import type { CapabilityListing, Surface } from '@subset/catalog';
+  import { capabilities } from '@subset.dev/catalog';
+  import type { CapabilityListing, Surface } from '@subset.dev/catalog';
 
   const surfaceLabels: Record<Surface, string> = {
     web: 'web',

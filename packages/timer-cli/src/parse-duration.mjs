@@ -1,4 +1,4 @@
-import { TIMER_LIMITS } from '@subset/timer';
+import { TIMER_LIMITS } from '@subset.dev/timer-core';
 
 const UNIT_MS = { h: 3_600_000, m: 60_000, s: 1_000 };
 // Units in descending order, each at most once: 90s, 25m, 1h30m, 1h0m30s.

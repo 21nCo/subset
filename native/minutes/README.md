@@ -1,8 +1,8 @@
 # Minutes (macOS app)
 
-Minutes sends a notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio. This SwiftUI app is one host for the capability. It checks the local setup, accepts a meeting link, and runs the shared **`subset-minutes` CLI** ([`@subset.dev/minutes`](../../packages/minutes-cli/README.md)), which bundles the capability package [`@subset/minutes`](../../packages/minutes/README.md). The app shows the CLI's state (joining, in meeting, finished, failed) with a meeting timer and points to the finished audio file. The bot itself drives a visible Google Chrome window, mutes itself, and writes WebM/Opus audio.
+Minutes sends a notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio. This SwiftUI app is one host for the capability. It checks the local setup, accepts a meeting link, and runs the shared **`subset-minutes` CLI** ([`@subset.dev/minutes`](../../packages/minutes-cli/README.md)), which bundles the capability package [`@subset.dev/minutes-core`](../../packages/minutes/README.md). The app shows the CLI's state (joining, in meeting, finished, failed) with a meeting timer and points to the finished audio file. The bot itself drives a visible Google Chrome window, mutes itself, and writes WebM/Opus audio.
 
-The app owns only a lightweight link pre-check for the form. Strict link validation, the Meet and Zoom join flows, audio capture, the session lifecycle, and file naming all live in `@subset/minutes`. The app runs the CLI and reads its documented outputs: the versioned `join` NDJSON stream and the `doctor --json` report. It passes the meeting link on stdin (`--link-from-stdin`), so a Zoom passcode is not visible in the process list.
+The app owns only a lightweight link pre-check for the form. Strict link validation, the Meet and Zoom join flows, audio capture, the session lifecycle, and file naming all live in `@subset.dev/minutes-core`. The app runs the CLI and reads its documented outputs: the versioned `join` NDJSON stream and the `doctor --json` report. It passes the meeting link on stdin (`--link-from-stdin`), so a Zoom passcode is not visible in the process list.
 
 This app was ported from a proof of concept. It builds locally, but it does not transcribe or summarize. It is not released, and no surface is listed as available.
 
@@ -30,7 +30,7 @@ This app was ported from a proof of concept. It builds locally, but it does not 
 
 ### Contract with the CLI
 
-The app decodes the `@subset/minutes` event contract (`MinutesCLI.swift`). `MinutesContract.supportedContractVersion` is `1`. Before decoding, the app checks each line's `v`. A line with an unknown version or type is shown as an error and is never guessed at. A non-JSON line is logged as plain text.
+The app decodes the `@subset.dev/minutes-core` event contract (`MinutesCLI.swift`). `MinutesContract.supportedContractVersion` is `1`. Before decoding, the app checks each line's `v`. A line with an unknown version or type is shown as an error and is never guessed at. A non-JSON line is logged as plain text.
 
 - `state` drives the status card: `launching`/`joining` show as Joining, `in_meeting` starts the timer, and `stopping` shows as Leaving.
 - `recording` sets the file card.
@@ -69,7 +69,7 @@ For releases, the CLI is bundled in the app rather than installed separately wit
 ## Build and run
 
 ```sh
-npm ci && npm run build                 # repository root: builds @subset/minutes and stages packages/minutes-cli/app-runtime
+npm ci && npm run build                 # repository root: builds @subset.dev/minutes-core and stages packages/minutes-cli/app-runtime
 cd native/minutes
 ruby ProjectGenerator.rb                # optional: regenerates Minutes.xcodeproj
 xcodebuild -project Minutes.xcodeproj -scheme Minutes -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO build
@@ -101,7 +101,7 @@ Ported from `21nCo/21n`, branch `dev`, path `poc/ios/MeetingRecordingPOC`, last 
 
 - **Removed a hardcoded hosted-bot API key and a plain-HTTP server IP address.** They were default values in the POC's `ContentView.swift`. The matching App Transport Security exception was also removed from `Info.plist`. Treat that key as exposed in the 21n repository history and rotate it.
 - **Removed the dependency on the private `21nCo/super-functions.next` Swift package (branch `NPX-32`).** It supplied `RecFnBotSDK` (a hosted bot server) and `RecFnDesktopSDK` (ScreenCaptureKit, whisper.cpp transcription, and notes). A public repository cannot build against a private branch, and AGENTS.md disallows copying Superfunctions source. The hosted bot, transcript, and desktop notetaker panels are therefore not in this port.
-- **Moved the bot runtime out of the app.** The first commit of this PR kept the POC's TypeScript `BotRuntime/` as a pnpm sidecar inside `native/minutes`. It is now the `@subset/minutes` package and the `@subset.dev/minutes` CLI. `BotRuntime/` and its lockfile were removed, so there is one implementation. The package README lists the fixes made during the extraction.
+- **Moved the bot runtime out of the app.** The first commit of this PR kept the POC's TypeScript `BotRuntime/` as a pnpm sidecar inside `native/minutes`. It is now the `@subset.dev/minutes-core` package and the `@subset.dev/minutes` CLI. `BotRuntime/` and its lockfile were removed, so there is one implementation. The package README lists the fixes made during the extraction.
 - **Renamed the app.** The project, target, scheme, and product are now `Minutes`, and the bundle ID is `dev.subset.minutes`. The default output folder changed from `~/Desktop/MeetingRecordings` to `~/Documents/Minutes Recordings`.
 - **Trimmed `Info.plist` usage strings.** Only the Apple Events string remains, for **Use Current Tab**.
 

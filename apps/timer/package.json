@@ -1,5 +1,5 @@
 {
-  "name": "@subset/timer-web",
+  "name": "@subset.dev/timer-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "vite build && vite build --config vite.mcp-app.config.ts"
   },
   "dependencies": {
-    "@subset/timer": "*",
+    "@subset.dev/timer-core": "*",
     "svelte": "^5.57.1",
     "zod": "4.6.5"
   },

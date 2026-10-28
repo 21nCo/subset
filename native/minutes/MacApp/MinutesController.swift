@@ -60,7 +60,7 @@ struct MinutesReadiness: Equatable {
 }
 
 /// A first-pass check of the link for the form: an `https` link on a Google Meet or Zoom host.
-/// The CLI (`parseMeetingLink` in `@subset/minutes`) is the authority and rejects anything else with a
+/// The CLI (`parseMeetingLink` in `@subset.dev/minutes-core`) is the authority and rejects anything else with a
 /// structured `invalid_link` error, which the app shows like any other failure.
 enum MeetingLink {
     case googleMeet(URL)
@@ -103,7 +103,7 @@ enum MeetingLink {
 }
 
 /// Runs the shared Minutes CLI (`subset-minutes`, package `@subset.dev/minutes`) as a child process.
-/// `join --json` streams the versioned NDJSON contract from `@subset/minutes`; this class turns those
+/// `join --json` streams the versioned NDJSON contract from `@subset.dev/minutes-core`; this class turns those
 /// events into UI state. The app implements no meeting logic of its own.
 @MainActor
 final class MinutesController: ObservableObject {

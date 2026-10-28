@@ -5,8 +5,8 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { TimerBoardResult } from '@subset/timer';
-  import TimerBoard from '@subset/timer/view';
+  import type { TimerBoardResult } from '@subset.dev/timer-core';
+  import TimerBoard from '@subset.dev/timer-core/view';
   import { actions, followState, type Connection } from './transport.js';
 
   let result = $state.raw<TimerBoardResult | null>(null);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { chmodSync } from 'node:fs';
 import test from 'node:test';
-import { BUILT_IN_PRESETS, project, transitionsBetween } from '@subset/timer';
+import { BUILT_IN_PRESETS, project, transitionsBetween } from '@subset.dev/timer-core';
 import { LATE_MS, REARM_MS, RECORDING_LIMIT, createFakeClock, createRecordingSink, createScheduler, socketRequest, startDaemon } from '../../src/daemon/index.mjs';
 import { startTestDaemon, tempDataDir } from './helpers.mjs';
 
