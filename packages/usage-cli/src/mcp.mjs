@@ -16,6 +16,8 @@ const PENDING_LIMIT_MS = 10_000;
 const TERM_GRACE_MS = 1_000;
 // How long stopping may take in all, ending subprocesses and answering the calls waiting on them.
 const STOP_LIMIT_MS = 5_000;
+// After that limit, how long the subprocesses still running then, and their calls, have after a final SIGKILL.
+const FINAL_WAIT_MS = 500;
 
 const LOCAL = 'The data is local: it comes from the subset-usage configuration on this computer, the quota snapshots its collectors saved and, only when the user turned on local sign-ins in the dashboard, the usage endpoints of the tools signed in here. Nothing is sent to Subset.';
 const READING = 'Each account has a state, a source and observedAt. An observation older than 5 minutes is stale: say when it was observed. A status-line snapshot is the last value a CLI collected, not a live read. A null percentage or reset time is unavailable, not zero; never estimate it. A calculated-estimate remaining percentage (~ in the text) is derived from provider-reported usage. errors[] says why an account has no values; local_sign_ins_off means the user can turn on local sign-ins in the dashboard\'s Settings.';
@@ -109,10 +111,12 @@ function historyText(series, hours, accountId) {
  * period the dashboard recorded in `claude-identities.json` applies, and a sign-in answer older than
  * what the session already observed starts no period. `observedAt` is when the latest observation
  * supporting the period was made (a `claude auth status` query's start, or a recorded period's start).
- * A recorded start later than `now` is not evidence (the clock was set back, or the file was edited) and
- * is ignored. A record that cannot be read is unknown: it keeps the session's period, but without one the
- * session cannot tell whose snapshots were collected, so it shows none and starts no period.
- * @typedef {{ email: string, since: number, observedAt: number }} IdentityPeriod
+ * Only no record (no file, or no entry for the account) is a first sighting, which adopts the snapshots
+ * already collected. A record the session cannot use (one that cannot be read, is malformed, or starts
+ * later than `now`, as when the clock was set back or the file was edited) is unknown, not absent: it
+ * keeps the session's period, and without one the period starts at `now` (`unknown: true`), so the
+ * snapshots collected before stay hidden and those collected after show.
+ * @typedef {{ email: string, since: number, observedAt: number, unknown?: true }} IdentityPeriod
  * @param {IdentityPeriod | undefined} kept The session's period for the account.
  * @param {unknown} stored The account's entry in `claude-identities.json`, `{ email, since }`, read now:
  * `undefined` when the file has none or does not exist, and anything else that is not such an entry
@@ -124,25 +128,27 @@ function historyText(series, hours, accountId) {
  */
 export function claudeIdentityPeriod(kept, stored, answer, now) {
   let period = kept;
-  const valid = typeof stored?.email === 'string' && typeof stored.since === 'number' && Number.isFinite(stored.since);
-  if (valid && stored.since <= now && !(stored.since <= period?.since)) {
+  const usable = typeof stored?.email === 'string' && typeof stored.since === 'number' && Number.isFinite(stored.since) && stored.since <= now;
+  if (usable && !(stored.since <= period?.since)) {
     period = !period || stored.email === period.email || stored.since > period.observedAt
       ? { email: stored.email, since: stored.since, observedAt: Math.max(stored.since, stored.email === period?.email ? period.observedAt : 0) }
       // The session saw its email after the recorded change to another: it was signed in again since.
-      : { ...period, since: Math.max(period.since, period.observedAt) };
+      : restarted(period, period.observedAt);
   }
   if (!period) {
-    if (stored !== undefined && !valid) return { period: undefined, current: false };
-    // A first sighting adopts the snapshots already collected.
-    return { period: { email: answer.email, since: 0, observedAt: answer.observedAt }, current: true };
+    // A first sighting adopts the snapshots already collected; an unknown record adopts none.
+    return { period: stored === undefined ? { email: answer.email, since: 0, observedAt: answer.observedAt } : { email: answer.email, since: now, observedAt: answer.observedAt, unknown: true }, current: true };
   }
   if (answer.email === period.email) return { period: { ...period, observedAt: Math.max(period.observedAt, answer.observedAt) }, current: true };
   // A newer answer is a sign-in change, and its period starts when the session observes it.
   if (answer.observedAt > period.observedAt) return { period: { email: answer.email, since: now, observedAt: answer.observedAt }, current: true };
   // An older answer that arrives late changes nothing, unless it was queried after the period started:
   // then the account was signed in elsewhere in between, so the period restarts at the latest observation.
-  return { period: answer.observedAt > period.since ? { ...period, since: Math.max(period.since, period.observedAt) } : period, current: false };
+  return { period: answer.observedAt > period.since ? restarted(period, period.observedAt) : period, current: false };
 }
+
+/** The period, starting no earlier than `since`; a later start is known, not `unknown`. */
+const restarted = (period, since) => (since > period.since ? { email: period.email, since, observedAt: period.observedAt } : period);
 
 /** The identity periods one MCP session keeps in memory, for `status({ identitySession })`. */
 export function identitySession() {
@@ -151,9 +157,8 @@ export function identitySession() {
     /** Applies one read's sign-in answer synchronously, so overlapping reads share each period. */
     bind(id, stored, answer, now = Date.now()) {
       const { period, current } = claudeIdentityPeriod(periods.get(id), stored, answer, now);
-      if (!period) return { since: Infinity, current };
       periods.set(id, period);
-      return { since: period.since, current };
+      return { since: period.since, current, unknown: period.unknown === true };
     },
   };
 }
@@ -257,7 +262,9 @@ const exited = (list, ms) => Promise.race([Promise.all(list.map((child) => runni
 export function providerProcesses(log) {
   const children = new Set();
   let stopping = false;
-  diagnostics.subscribe('child_process', ({ process: child }) => {
+  // Once set, a subprocess that starts gets SIGKILL, as no later pass would escalate a SIGTERM.
+  let final = false;
+  const track = ({ process: child }) => {
     children.add(child);
     // A subprocess that failed to start (a provider CLI that is not installed) emits error and
     // close, never exit.
@@ -267,26 +274,36 @@ export function providerProcesses(log) {
     // provider) gets each later subprocess ended as it starts. The channel publishes before the
     // spawn, when kill() would signal PID 0, this whole process group; so it waits for the PID.
     if (stopping) child.once('spawn', () => {
-      log(`stopping; ending ${basename(String(child.spawnfile))}, which a read started meanwhile`);
-      child.kill('SIGTERM');
+      log(`stopping; ending ${basename(String(child.spawnfile))} (PID ${child.pid}), which a read started meanwhile`);
+      child.kill(final ? 'SIGKILL' : 'SIGTERM');
     });
-  });
+  };
+  diagnostics.subscribe('child_process', track);
   const live = () => [...children].filter(running);
+  const killAll = () => {
+    final = true;
+    for (const child of live()) child.kill('SIGKILL');
+  };
   return {
     get stopping() { return stopping; },
     /** The number of subprocesses tracked, running or not yet closed. */
     get tracked() { return children.size; },
-    /** Ends every running subprocess at once (a second signal). */
-    kill() { for (const child of live()) child.kill('SIGKILL'); },
+    /** Ends every running subprocess at once (a second signal), and every one that starts after. */
+    kill: killAll,
+    /** Stops tracking the subprocesses this process starts. */
+    close() { diagnostics.unsubscribe('child_process', track); },
     /**
      * Ends every subprocess, including those the reads in `pending` start meanwhile, until no
      * subprocess runs and every call has settled, or the limit passes. SIGTERM comes first, so a
      * launcher (a shell or Node entrypoint) can end the provider it started; SIGKILL follows for any
-     * still running after the grace period. Returns the number of calls still unanswered.
+     * still running after the grace period. Any still running at the limit, including one started just
+     * before it, gets SIGKILL and a short wait. Returns the number of calls still unanswered.
+     * @param {Set<Promise<unknown>>} pending
+     * @param {{ limit?: number }} [options]
      */
-    async end(pending) {
+    async end(pending, { limit = STOP_LIMIT_MS } = {}) {
       stopping = true;
-      const deadline = Date.now() + STOP_LIMIT_MS;
+      const deadline = Date.now() + limit;
       while (Date.now() < deadline) {
         const list = live();
         if (list.length) {
@@ -299,6 +316,10 @@ export function providerProcesses(log) {
           await Promise.race([Promise.allSettled(pending), after(50)]);
         } else break;
       }
+      killAll();
+      const finalDeadline = Date.now() + FINAL_WAIT_MS;
+      await exited(live(), FINAL_WAIT_MS);
+      await Promise.race([Promise.allSettled(pending), after(Math.max(0, finalDeadline - Date.now()))]);
       const left = live();
       if (left.length) log(`${left.length} provider subprocess(es) did not exit`);
       return pending.size;
@@ -312,7 +333,8 @@ export function providerProcesses(log) {
  * protocol stream. When stdin closes, the calls already received are answered; reads still running
  * after the pending limit, or at a signal, have their subprocesses ended and answer with that
  * provider's error. No provider subprocess a read started outlives the server, except a process
- * started by a launcher that ignores SIGTERM: SIGKILL then ends only the launcher.
+ * started by a launcher that does not pass SIGTERM on to it (it ignores SIGTERM, or dies of it
+ * without forwarding): SIGTERM or SIGKILL then ends only the launcher.
  * @param {Parameters<typeof defineUsageMcpServer>[0]} options
  */
 export async function serveStdio({ log = stderrLog, ...options }) {

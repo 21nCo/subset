@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import diagnostics from 'node:diagnostics_channel';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -434,8 +435,9 @@ function assertAmpFailed(mcp) {
   assert.deepEqual(mcp.frames.map((frame) => frame.id), [1, 3]);
 }
 
-test('the server stops tracking a provider subprocess that failed to start', async () => {
+test('the server stops tracking a provider subprocess that failed to start', async (t) => {
   const processes = providerProcesses(() => {});
+  t.after(() => processes.close());
   // A provider CLI that is not installed: its subprocess emits error and close, never exit.
   const missing = join(tmpdir(), 'subset-usage-no-such-provider');
   for (let read = 0; read < 3; read += 1) {
@@ -444,6 +446,53 @@ test('the server stops tracking a provider subprocess that failed to start', asy
     await new Promise((resolveClose) => child.once('close', resolveClose));
     assert.equal(processes.tracked, 0, `read ${read + 1} left its failed subprocess tracked`);
   }
+});
+
+test('stopping ends a provider that started just before the limit and ignores SIGTERM, before it returns', async (t) => {
+  const logs = [];
+  const processes = providerProcesses((message) => logs.push(message));
+  t.after(() => processes.close());
+  // Published on the channel the server tracks, as Node does for each subprocess; it ignores SIGTERM.
+  const ignoringTerm = (pid) => {
+    const child = Object.assign(new EventEmitter(), { pid, exitCode: null, signalCode: null, spawnfile: 'amp', signals: [] });
+    child.kill = (signal) => {
+      child.signals.push(signal);
+      if (signal === 'SIGKILL') setImmediate(() => { child.signalCode = signal; child.emit('exit', null, signal); child.emit('close'); });
+      return true;
+    };
+    return child;
+  };
+  const child = ignoringTerm(999_999);
+  const limit = 300;
+  const pending = new Set([new Promise((resolveRead) => {
+    setTimeout(() => { diagnostics.channel('child_process').publish({ process: child }); setImmediate(() => child.emit('spawn')); child.once('exit', resolveRead); }, limit - 30);
+  })]);
+  const keepAlive = setInterval(() => {}, 1_000);
+  const started = Date.now();
+  await processes.end(pending, { limit });
+  clearInterval(keepAlive);
+  const took = Date.now() - started;
+  assert.deepEqual([child.signals, child.signalCode], [['SIGTERM', 'SIGKILL'], 'SIGKILL'], logs.join('\n'));
+  assert.ok(took < limit + 500, `stopping took ${took} ms`);
+  // One that starts after the final pass gets SIGKILL at once.
+  const later = ignoringTerm(999_998);
+  diagnostics.channel('child_process').publish({ process: later });
+  later.emit('spawn');
+  assert.deepEqual(later.signals, ['SIGKILL']);
+  assert.deepEqual(logs, ['stopping; ending amp (PID 999999), which a read started meanwhile', 'stopping; ending amp (PID 999998), which a read started meanwhile']);
+});
+
+test('stopping ends a provider still running at the limit with SIGKILL, and waits for it', async (t) => {
+  const processes = providerProcesses(() => {});
+  t.after(() => processes.close());
+  const child = spawn('/bin/sh', ['-c', "trap '' TERM; echo ready; exec sleep 120"], { stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => child.kill('SIGKILL'));
+  await once(child.stdout, 'data');
+  const started = Date.now();
+  // No time left: the provider has not even had its SIGTERM.
+  await processes.end(new Set(), { limit: 0 });
+  assert.ok(Date.now() - started < 600, `stopping took ${Date.now() - started} ms`);
+  assert.equal(processExists(child.pid), false, `PID ${child.pid} outlived the stop`);
 });
 
 test('subset-usage mcp ends a stalled provider and the process its launcher started, answers the call, and exits 0 when stdin closes', async (t) => {
@@ -492,9 +541,10 @@ test('subset-usage mcp ends a provider a read starts after SIGTERM ended its sig
   const [code, signal] = await mcp.exited;
   assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
   assert.equal(processExists(claude), false, `claude (PID ${claude}) outlived the server`);
-  // Amp started after the server began stopping, and was ended; if it got to record its PID, that process is gone.
-  assert.match(mcp.stderr(), /stopping; ending amp, which a read started meanwhile/);
-  for (const pid of await pids('amp')) assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
+  // Amp started after the server began stopping, and was ended: the process the log names is gone.
+  const late = Number(/stopping; ending amp \(PID (\d+)\), which a read started meanwhile/.exec(mcp.stderr())?.[1]);
+  assert.ok(late > 0, mcp.stderr());
+  for (const pid of new Set([late, ...await pids('amp')])) assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
   assertAmpFailed(mcp);
 });
 
@@ -606,21 +656,31 @@ test('the session identity rule: periods only move forward, and an out-of-date s
   assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 700 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
   assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 0 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
   assert.deepEqual(rule(period('b', 700, 720), undefined, answer('b', 720)), { period: period('b', 700, 720), current: true });
-  // A record that cannot be read (null) or is malformed is unknown: a held period stays and the
-  // answer applies to it as usual, but a session without one shows nothing and starts no period.
-  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { email: 'a', since: '700' }, { since: 900 }]) {
+  // A record the session cannot use is unknown, not absent: one that cannot be read (null), is
+  // malformed, or starts later than now. A held period stays and the answer applies to it as usual.
+  // A session without one starts its period now, whatever the email: snapshots collected before it
+  // stay hidden, and those collected after it show.
+  const unknown = (email, since, observedAt) => ({ ...period(email, since, observedAt), unknown: true });
+  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { email: 'a', since: '700' }, { since: 900 }, { email: 'a', since: 2000 }, { email: 'b', since: 2000 }]) {
     assert.deepEqual(rule(period('b', 700, 720), stored, answer('b', 720)), { period: period('b', 700, 720), current: true }, JSON.stringify(stored));
     assert.deepEqual(rule(period('b', 700, 720), stored, answer('a', 800)), { period: period('a', 1000, 800), current: true }, JSON.stringify(stored));
-    assert.deepEqual(rule(undefined, stored, answer('a', 10)), { period: undefined, current: false }, JSON.stringify(stored));
+    assert.deepEqual(rule(undefined, stored, answer('a', 10)), { period: unknown('a', 1000, 10), current: true }, JSON.stringify(stored));
+    assert.deepEqual(rule(undefined, stored, answer('b', 10)), { period: unknown('b', 1000, 10), current: true }, JSON.stringify(stored));
   }
-  // A recorded start later than now is no evidence: it is handled as if there were no record, so it
-  // neither hides the snapshots of a sign-in that matches nor makes a newer sign-in change look out of date.
-  assert.deepEqual(rule(undefined, { email: 'a', since: 2000 }, answer('a', 10)), { period: period('a', 0, 10), current: true });
+  // A future start neither hides the snapshots of a held sign-in that matches nor makes a newer
+  // sign-in change look out of date.
   assert.deepEqual(rule(period('a', 0, 900), { email: 'a', since: 2000 }, answer('a', 950)), { period: period('a', 0, 950), current: true });
   assert.deepEqual(rule(period('a', 0, 900), { email: 'a', since: 2000 }, answer('b', 950)), { period: period('b', 1000, 950), current: true });
   assert.deepEqual(rule(period('a', 0, 900), { email: 'b', since: 2000 }, answer('a', 950)), { period: period('a', 0, 950), current: true });
   // Once now passes it, the same start is a recorded period like any other.
   assert.deepEqual(rule(period('a', 0, 900), { email: 'b', since: 2000 }, answer('b', 950), 2500), { period: period('b', 2000, 2000), current: true });
+  // An unknown start moves forward like any other: an answer of the same email keeps it, and a later
+  // recorded period, or a sign-in the session observes later, replaces it.
+  assert.deepEqual(rule(unknown('a', 1000, 10), null, answer('a', 1100), 1200), { period: unknown('a', 1000, 1100), current: true });
+  assert.deepEqual(rule(unknown('a', 1000, 10), { email: 'a', since: 0 }, answer('a', 1100), 1200), { period: unknown('a', 1000, 1100), current: true });
+  assert.deepEqual(rule(unknown('a', 1000, 10), { email: 'a', since: 2000 }, answer('a', 2100), 2500), { period: period('a', 2000, 2100), current: true });
+  assert.deepEqual(rule(unknown('a', 1000, 10), { email: 'b', since: 2000 }, answer('b', 2100), 2500), { period: period('b', 2000, 2100), current: true });
+  assert.deepEqual(rule(unknown('a', 1000, 10), undefined, answer('b', 1100), 1200), { period: period('b', 1200, 1100), current: true });
 });
 
 test('subset-usage mcp keeps a sign-in change from the stored identity for the session, without writing it', async (t) => {
@@ -796,26 +856,31 @@ test('subset-usage mcp applies a later sign-in change the dashboard recorded ove
   assert.deepEqual(await tree(fixture.root), before);
 });
 
-test('subset-usage mcp shows no Claude snapshot while the recorded sign-ins cannot be read, and adopts them once they can', async (t) => {
-  const fixture = await claudeFixture(t);
-  const identitiesFile = join(fixture.data, 'claude-identities.json');
-  await fixture.signIn('a');
-  fixture.collect('a', 10);
-  // A torn record: the snapshot may have been collected under another sign-in.
-  await writeFile(identitiesFile, '{"claude_work":{"email":"b@exa');
-  const mcp = await fixture.start();
-  const before = await tree(fixture.root);
-  assert.deepEqual(await mcp.work(), hidden('a@example.com'));
-  const message = async () => (await mcp.call('usage_status')).structuredContent.accounts.find((item) => item.id === 'claude_work').errors[0].message;
-  assert.match(await message(), /claude-identities\.json\) cannot be read/);
-  await assertOnlyTestWrites(fixture.root, before, testWrites);
-  // Once the record reads again, its period applies as usual.
-  await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } }));
-  const valid = await tree(fixture.root);
-  assert.deepEqual(await mcp.work(), shown('a@example.com', 90));
-  await mcp.stop();
-  assert.deepEqual(await tree(fixture.root), valid);
-});
+for (const [name, record] of [['cannot be read', '{"claude_work":{"email":"b@exa'], ['start later than now', JSON.stringify({ claude_work: { email: 'b@example.com', since: Date.now() + 86_400_000 } })]]) {
+  test(`subset-usage mcp hides the Claude snapshots collected before its first read while the recorded sign-ins ${name}`, async (t) => {
+    const fixture = await claudeFixture(t);
+    const identitiesFile = join(fixture.data, 'claude-identities.json');
+    await fixture.signIn('a');
+    fixture.collect('a', 10);
+    // The snapshot may have been collected under another sign-in.
+    await writeFile(identitiesFile, record);
+    const mcp = await fixture.start();
+    const before = await tree(fixture.root);
+    assert.deepEqual(await mcp.work(), hidden('a@example.com'));
+    const message = async () => (await mcp.call('usage_status')).structuredContent.accounts.find((item) => item.id === 'claude_work').errors[0].message;
+    assert.match(await message(), /claude-identities\.json\) cannot be read or starts later than now/);
+    assert.deepEqual(await tree(fixture.root), before);
+    // A snapshot collected after the session observed the sign-in shows.
+    fixture.collect('a', 20);
+    assert.deepEqual(await mcp.work(), shown('a@example.com', 80));
+    // A record that reads again, but starts no later, does not move the session's period back.
+    await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } }));
+    const valid = await tree(fixture.root);
+    assert.deepEqual(await mcp.work(), shown('a@example.com', 80));
+    await mcp.stop();
+    assert.deepEqual(await tree(fixture.root), valid);
+  });
+}
 
 test('subset-usage mcp takes no arguments and is listed in --help', () => {
   const extra = spawnSync(process.execPath, ['src/server.mjs', 'mcp', 'now'], { cwd: hostDirectory, encoding: 'utf8', timeout: 10_000 });

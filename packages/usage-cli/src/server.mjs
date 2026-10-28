@@ -154,13 +154,14 @@ async function status({ persist = true, identitySession } = {}) {
     if (!email) return snapshot;
     let since;
     let current = true;
+    let unknown = false;
     if (identitySession) {
       // The file is read now, not at the start of the read, so a period the dashboard recorded
       // meanwhile applies; the session applies it and this answer in one synchronous step. A file
       // that cannot be read is unknown, not empty (null), so it never adopts earlier snapshots.
       const record = await claudeIdentityRecord();
       const stored = record && (Object.hasOwn(record, profile.id) ? record[profile.id] : undefined);
-      ({ since, current } = identitySession.bind(profile.id, stored, { email, observedAt: queriedAt }));
+      ({ since, current, unknown } = identitySession.bind(profile.id, stored, { email, observedAt: queriedAt }));
     } else {
       const known = identities[profile.id];
       if (!known || known.email !== email) {
@@ -171,9 +172,9 @@ async function status({ persist = true, identitySession } = {}) {
       ({ since } = identities[profile.id]);
     }
     if (!snapshot.observedAt || (current && Date.parse(snapshot.observedAt) >= since)) return snapshot;
-    // An MCP session that cannot read the recorded sign-ins (since is Infinity) cannot tell whose snapshot it is.
-    const message = since === Infinity
-      ? 'The record of this Claude account\'s sign-ins (claude-identities.json) cannot be read, so it is unknown whose snapshot this is. Open the dashboard to record the sign-in again.'
+    // An MCP session that could not use the recorded sign-ins when it first saw the account cannot tell whose earlier snapshot it is.
+    const message = current && unknown
+      ? 'The record of this Claude account\'s sign-ins (claude-identities.json) cannot be read or starts later than now, so it is unknown whose snapshot this is. Quota appears after the next response in a CLI session.'
       : 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.';
     return { ...snapshot, observedAt: null, state: 'unavailable', windows: [], errors: [{ code: 'claude_identity_changed', message }] };
   };
