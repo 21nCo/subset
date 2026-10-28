@@ -44,7 +44,7 @@ Only the first 512 KB (`MAX_DOCUMENT_BYTES`) is parsed: 524,288 bytes, counting 
 | `language` | `<html lang>`, when it has the shape of a BCP 47 tag |
 | `type` | `og:type` |
 | `author` | `<meta name="author">`, then `article:author` |
-| `publishedTime` | `article:published_time` as written, when it is an ISO 8601 date or extended-format date-time with valid fields |
+| `publishedTime` | `article:published_time` as written, when it is an ISO 8601 date or extended-format date-time with valid fields; a leap second (`:60`) is rejected |
 
 Open Graph, Twitter and `article:` keys are read from either the `property` or `name` attribute; `description` and `author` only from `name`. A source whose value is empty after cleanup, or whose URL is not http(s), falls through to the next. Entities are decoded, whitespace runs collapse to one space and values are trimmed. Relative URLs resolve against the document URL; `<base href>` is ignored. Tags may appear anywhere in the document, so a page without `<head>` still works. Script, style and comment content is ignored, and malformed markup is recovered the way a browser's tokenizer does (an unterminated tag absorbs what follows it).
 

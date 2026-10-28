@@ -26,6 +26,17 @@ test('accepts minimal and complete records', () => {
   assert.equal(isLinkDetailsV1({ ...minimal, title: '😀'.repeat(500), description: 'd'.repeat(2000) }), true);
 });
 
+test('checks every icon position, so a sparse icons array is rejected', () => {
+  const icon = full.icons[0];
+  const dense = [icon, icon];
+  assert.equal(isLinkDetailsV1({ ...minimal, icons: dense }), true);
+  for (const icons of [Array(1), [icon, , icon], Object.assign(Array(2), { 0: icon })]) {
+    assert.equal(isLinkDetailsV1({ ...minimal, icons }), false);
+    // The same record after a JSON round trip (holes become null) is also rejected: storage cannot change the verdict.
+    assert.equal(isLinkDetailsV1(JSON.parse(JSON.stringify({ ...minimal, icons }))), false);
+  }
+});
+
 test('rejects records that do not match version 1', () => {
   const invalid = {
     'not an object': 'https://example.com/',
@@ -46,6 +57,8 @@ test('rejects records that do not match version 1', () => {
     'invalid language': { ...minimal, language: 'en us' },
     'non-ISO published time': { ...minimal, publishedTime: 'Jan 1 2024' },
     'impossible date': { ...minimal, publishedTime: '2024-02-30' },
+    'leap second': { ...minimal, publishedTime: '2024-03-05T12:30:60Z' },
+    'leap second at the end of a UTC day': { ...minimal, publishedTime: '2016-12-31T23:59:60Z' },
     'missing icons': { version: 1, url: minimal.url, contentType: 'text/html' },
     '17 icons': { ...minimal, icons: Array(17).fill(full.icons[0]) },
     'icon with unknown rel': { ...minimal, icons: [{ url: 'https://example.com/i.png', rel: 'mask-icon' }] },

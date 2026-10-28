@@ -12,7 +12,7 @@ export interface LinkIcon {
   /** Absolute http or https URL. */
   url: string;
   rel: LinkIconRel;
-  /** The `sizes` attribute as written, for example `180x180` or `any`. */
+  /** The `sizes` attribute, whitespace collapsed and lowercased, for example `180x180` or `any`. */
   sizes?: string;
   /** The declared media type, for example `image/png`. */
   type?: string;
@@ -37,7 +37,7 @@ export interface LinkDetailsV1 {
   /** Declared icons, or the site's `/favicon.ico` when none is declared. */
   icons: LinkIcon[];
   author?: string;
-  /** `article:published_time` as written, when it is an ISO 8601 date or date-time. */
+  /** `article:published_time` as written, when it is an ISO 8601 date or date-time (see `isIso8601`). */
   publishedTime?: string;
   /** The document's media type without parameters, for example `text/html`. */
   contentType: string;
@@ -81,7 +81,13 @@ export function isLinkDetailsV1(value: unknown): value is LinkDetailsV1 {
   if (value.language !== undefined && !isLanguageTag(value.language)) return false;
   if (value.publishedTime !== undefined && !isIso8601(value.publishedTime)) return false;
   if (typeof value.contentType !== 'string' || !MEDIA_TYPE.test(value.contentType)) return false;
-  return Array.isArray(value.icons) && value.icons.length <= MAX_ICONS && value.icons.every(isLinkIcon);
+  return Array.isArray(value.icons) && value.icons.length <= MAX_ICONS && everyIcon(value.icons);
+}
+
+// Checks every index, so a sparse array (a hole, which `every` would skip) is rejected.
+function everyIcon(icons: unknown[]): boolean {
+  for (let index = 0; index < icons.length; index++) if (!isLinkIcon(icons[index])) return false;
+  return true;
 }
 
 function isLinkIcon(value: unknown): value is LinkIcon {
@@ -96,7 +102,10 @@ function isLinkIcon(value: unknown): value is LinkIcon {
   );
 }
 
-/** Whether `value` is an ISO 8601 calendar date or date-time in extended format, with real field values. */
+/**
+ * Whether `value` is an ISO 8601 calendar date or date-time in extended format, with real field values.
+ * Leap seconds (second `60`) are rejected, as JavaScript `Date` cannot represent them.
+ */
 export function isIso8601(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const match = ISO_8601.exec(value);
@@ -110,7 +119,7 @@ export function isIso8601(value: unknown): value is string {
     date.getUTCDate() === Number(day) &&
     Number(hour) <= 23 &&
     Number(minute) <= 59 &&
-    Number(second) <= 60 &&
+    Number(second) <= 59 &&
     Number(offsetHour) <= 23 &&
     Number(offsetMinute) <= 59
   );

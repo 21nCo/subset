@@ -138,8 +138,10 @@ test('site name, language, type, published time come from their single sources',
 
 test('published time accepts ISO 8601 dates and date-times only', () => {
   const published = (value) => parse(head(meta('property', 'article:published_time', value))).publishedTime;
-  for (const value of ['2024-03-05', '2024-03-05T10:20Z', '2024-03-05T10:20:30.123Z', '2024-02-29T00:00:00-08:00']) assert.equal(published(value), value);
-  for (const value of ['March 5, 2024', '2024-02-30', '2023-02-29T00:00Z', '2024-03-05T25:00Z', '1709600000', '2024-3-5', '2024-03-05 10:20']) {
+  for (const value of ['2024-03-05', '2024-03-05T10:20Z', '2024-03-05T10:20:30.123Z', '2024-02-29T00:00:00-08:00', '2016-12-31T23:59:59Z']) {
+    assert.equal(published(value), value);
+  }
+  for (const value of ['March 5, 2024', '2024-02-30', '2023-02-29T00:00Z', '2024-03-05T25:00Z', '1709600000', '2024-3-5', '2024-03-05 10:20', '2024-03-05T12:30:60Z', '2016-12-31T23:59:60Z']) {
     assert.equal(published(value), undefined, value);
   }
 });
