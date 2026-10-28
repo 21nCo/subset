@@ -173,8 +173,10 @@ async function open(input: string | URL, settings: Settings, accept: string, dea
     await check(url, settings, deadline);
     let response: Response;
     let pending: Promise<Response> | undefined;
+    // Called without a receiver: a runtime's own fetch throws "Illegal invocation" when `this` is settings.
+    const fetchFunction = settings.fetch;
     try {
-      pending = settings.fetch(url.href, {
+      pending = fetchFunction(url.href, {
         method: 'GET',
         headers: { accept, 'user-agent': settings.userAgent },
         redirect: 'manual',
@@ -245,8 +247,10 @@ async function check(url: URL, settings: Settings, deadline: Deadline): Promise<
   if (!Array.isArray(addresses) || addresses.length === 0) {
     throw new LinkFetchError('network', `${hostname} did not resolve to any address`, { url: url.href });
   }
-  // A value that is not an address string counts as blocked.
-  if (addresses.some((address) => typeof address !== 'string' || isBlockedAddress(address))) {
+  // A value that is not an address string counts as blocked. Every index is read, so a hole is checked too.
+  for (let index = 0; index < addresses.length; index++) {
+    const address: unknown = addresses[index];
+    if (typeof address === 'string' && !isBlockedAddress(address)) continue;
     throw new LinkFetchError('blocked_address', `${hostname} resolves to a private or reserved address`, { url: url.href });
   }
 }

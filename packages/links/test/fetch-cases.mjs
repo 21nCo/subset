@@ -146,7 +146,9 @@ export const cases = [
     name: 'isBlockedAddress and isBlockedHostname expose the same rules, failing closed on malformed addresses',
     async run(lib) {
       equal(['10.0.0.1', '[::1]', '::ffff:7f00:1', 'fe80::1%eth0', '010.0.0.1', '1.2.3', '::1::', 'example.com'].map(lib.isBlockedAddress), [true, true, true, true, true, true, true, true], 'blocked');
-      equal(['8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8', '1:2:3:4:5:6:7:8'].map(lib.isBlockedAddress), [false, false, false, false], 'public');
+      // A dotted IPv4 piece is valid only at the very end of an IPv6 address.
+      equal(['127.0.0.1::', '10.0.0.1::', '8.8.8.8::1', '1:8.8.8.8::', '1:2:3:4:5:8.8.8.8:7'].map(lib.isBlockedAddress), [true, true, true, true, true], 'misplaced dotted piece');
+      equal(['8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8', '1:2:3:4:5:6:7:8', '64:ff9b::8.8.8.8', '1:2:3:4:5:6:8.8.8.8'].map(lib.isBlockedAddress), [false, false, false, false, false, false], 'public');
       equal(['localhost', 'A.Local.', 'x.home.arpa', 'example.com', 'notlocal'].map(lib.isBlockedHostname), [true, true, true, false, false], 'hostnames');
     }
   },
@@ -231,9 +233,10 @@ export const cases = [
       const lookups = [];
       const resolveHost = (hostname) => {
         lookups.push(hostname);
-        return { 'example.com': ['93.184.215.14', '2606:2800:21f:cb07:6820:80da:af6b:8b2c'], 'rebind.example': ['93.184.215.14', '10.0.0.5'], 'six.example': ['::1'], 'mapped.example': ['::ffff:127.0.0.1'], 'zone.example': ['fe80::1%en0'], 'junk.example': ['not-an-address'] }[hostname] ?? [];
+        return { 'example.com': ['93.184.215.14', '2606:2800:21f:cb07:6820:80da:af6b:8b2c'], 'rebind.example': ['93.184.215.14', '10.0.0.5'], 'six.example': ['::1'], 'mapped.example': ['::ffff:127.0.0.1'], 'zone.example': ['fe80::1%en0'], 'junk.example': ['not-an-address'], 'dotted.example': ['127.0.0.1::'], 'hole.example': Array(1), 'gap.example': [, '93.184.215.14'], 'number.example': ['93.184.215.14', 167772161] }[hostname] ?? [];
       };
-      for (const hostname of ['rebind.example', 'six.example', 'mapped.example', 'zone.example', 'junk.example']) {
+      // Malformed results fail closed: a hole or a non-string anywhere in the list blocks the hop.
+      for (const hostname of ['rebind.example', 'six.example', 'mapped.example', 'zone.example', 'junk.example', 'dotted.example', 'hole.example', 'gap.example', 'number.example']) {
         const fake = fakeFetch({});
         await rejects(lib, lib.fetchLinkDetails(`https://${hostname}/`, { fetch: fake.fetch, resolveHost }), 'blocked_address', hostname);
         equal(fake.urls(), [], `requests for ${hostname}`);
@@ -444,6 +447,23 @@ export const cases = [
       const custom = fakeFetch({ 'https://example.com/': html('<title>x</title>') });
       await lib.fetchLinkDetails('https://example.com/', { fetch: custom.fetch, userAgent: 'Memotron/2' });
       equal(new Headers(custom.calls[0].init.headers).get('user-agent'), 'Memotron/2', 'custom user agent');
+    }
+  },
+  {
+    name: 'an injected fetch is called without a receiver, as a runtime fetch requires',
+    async run(lib) {
+      // A runtime's own fetch (workerd, browsers) throws "Illegal invocation" when called on another object.
+      const urls = [];
+      function strictFetch(url) {
+        if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+        urls.push(url);
+        if (url === 'https://example.com/') return Promise.resolve(redirect('https://example.com/page')());
+        if (url === 'https://example.com/page') return Promise.resolve(html('<title>Unbound</title>')());
+        return Promise.resolve(new Response(Uint8Array.from([1, 2]), { headers: { 'content-type': 'image/png' } }));
+      }
+      equal((await lib.fetchLinkDetails('https://example.com/', { fetch: strictFetch })).title, 'Unbound', 'fetchLinkDetails title');
+      equal((await lib.fetchResource('https://example.com/icon.png', { fetch: strictFetch })).contentType, 'image/png', 'fetchResource type');
+      equal(urls, ['https://example.com/', 'https://example.com/page', 'https://example.com/icon.png'], 'requests');
     }
   },
   {

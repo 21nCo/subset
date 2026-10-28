@@ -69,12 +69,13 @@ function parseIpv6(value: string): number[] | undefined {
   const address = value.replace(/%[^%]+$/, '');
   const halves = address.split('::');
   if (halves.length > 2) return undefined;
-  const parse = (part: string): number[] | undefined => {
+  // A dotted IPv4 tail may only end the whole address, so `127.0.0.1::` is not an address.
+  const parse = (part: string, last: boolean): number[] | undefined => {
     if (part === '') return [];
     const groups: number[] = [];
     const pieces = part.split(':');
     for (const [index, piece] of pieces.entries()) {
-      if (index === pieces.length - 1 && piece.includes('.')) {
+      if (last && index === pieces.length - 1 && piece.includes('.')) {
         const ipv4 = parseIpv4(piece);
         if (ipv4 === undefined) return undefined;
         groups.push(ipv4 >>> 16, ipv4 & 0xffff);
@@ -86,8 +87,8 @@ function parseIpv6(value: string): number[] | undefined {
     }
     return groups;
   };
-  const head = parse(halves[0]);
-  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  const head = parse(halves[0], halves.length === 1);
+  const tail = halves.length === 2 ? parse(halves[1], true) : [];
   if (!head || !tail) return undefined;
   if (halves.length === 1) return head.length === 8 ? head : undefined;
   const missing = 8 - head.length - tail.length;

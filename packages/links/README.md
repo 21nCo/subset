@@ -80,7 +80,8 @@ interface LinkDetailsV1 {
 import { fetchLinkDetails, fetchResource, LinkFetchError } from '@subset.dev/links';
 import { lookup } from 'node:dns/promises';
 
-// On Node, pass resolveHost so a public name that resolves to a private address is refused too.
+// On Node, pass resolveHost so a name that resolves to a private address before the request is refused too.
+// It is not a DNS rebinding defense: see the note on pinning the connection below.
 const resolveHost = async (hostname: string) => (await lookup(hostname, { all: true })).map((entry) => entry.address);
 
 try {
@@ -95,7 +96,7 @@ try {
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `fetch` | the global `fetch` | Any function with the web `fetch` signature |
+| `fetch` | the global `fetch` | Any function with the web `fetch` signature, called without a receiver, so `globalThis.fetch` can be passed as is |
 | `resolveHost` | none | `(hostname) => addresses[]`, sync or async; every address is checked before the hop is requested. A check before the request only, not a DNS rebinding defense (see below) |
 | `timeoutMs` | 5,000 | One limit for the whole operation: every hop, resolution and the body. At most 2,147,483,647 (`RangeError` above) |
 | `maxBytes` | 2,000,000 | Most body bytes read. `fetchLinkDetails` stops once the body fills it, without waiting for more |
@@ -107,7 +108,7 @@ try {
 Security rules, a closed set checked on the first URL and again on every redirect hop before it is requested:
 
 - Only `http` and `https` (`invalid_url` otherwise, including a redirect to another scheme), on port 80 or 443 unless `allowPorts` lists the port (`blocked_port`).
-- `blocked_address` for the hostnames `localhost`, `local`, `internal` and `home.arpa` and any name ending in `.` plus one of them (case and trailing dots ignored); IPv4 literals in 0.0.0.0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16, 198.18/15, 224/4 and 240/4, in any form the URL parser accepts (`http://2130706433/` is 127.0.0.1); IPv6 literals `::`, `::1`, fc00::/7, fe80::/10, and IPv4-mapped addresses (`::ffff:a.b.c.d`) in a blocked IPv4 range. With `resolveHost`, a hostname is blocked when any address it returns is blocked or is not an IP address; a failed or empty resolution is `network`. IP literals are not passed to `resolveHost`.
+- `blocked_address` for the hostnames `localhost`, `local`, `internal` and `home.arpa` and any name ending in `.` plus one of them (case and trailing dots ignored); IPv4 literals in 0.0.0.0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16, 198.18/15, 224/4 and 240/4, in any form the URL parser accepts (`http://2130706433/` is 127.0.0.1); IPv6 literals `::`, `::1`, fc00::/7, fe80::/10, and IPv4-mapped addresses (`::ffff:a.b.c.d`) in a blocked IPv4 range. With `resolveHost`, a hostname is blocked when any address it returns is blocked or is not an IP address string (a hole in the list counts); a failed or empty resolution is `network`. IP literals are not passed to `resolveHost`.
 - Redirects (301, 302, 303, 307 and 308 with a `Location`) are followed manually with `redirect: 'manual'`, resolving the location against the current hop. More than `maxRedirects` is `too_many_redirects`.
 - Requests are `GET` with only `Accept` and `User-Agent` headers and `credentials: 'omit'`. Credentials in a URL (`user:pass@`) are removed before the request and from the returned URLs; cookies from a response are never sent back.
 - Nothing else is blocked: NAT64 (64:ff9b::/96), 6to4, IPv4-compatible IPv6 and single-label names are allowed by decision. `isBlockedAddress` and `isBlockedHostname` expose the rules.
@@ -142,7 +143,7 @@ Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `appl
 | Hostile or large input | Quadratic parsing, unbounded output, wrong charset | 3 MB document cut at 512 KB (string and bytes), a multi-byte string cut at the same byte as its UTF-8 bytes, a character straddling the cut, seven 512 KB adversarial fixtures under 100 ms, a linearity ratio check, caps, windows-1251, ISO-8859-1 and BOM decoding (`test/limits.test.mjs`, `test/parse.test.mjs`) |
 | Portability | A Node built-in or global slips in | `tsconfig.json` has no Node types; `test/workerd.test.mjs` bundles the package, fails on any Node built-in import and runs it in workerd, comparing its output with Node's |
 | Stored records | Corrupt or foreign data accepted as `LinkDetailsV1` | `test/validator.test.mjs` |
-| Fetching untrusted URLs | A request reaches a private address, directly, by redirect or by resolution | One vector per blocked hostname pattern, IPv4 range and IPv6 form, with public neighbours outside each prefix; public-to-private redirects; private `resolveHost` results on the first hop and a redirect hop. The fake `fetch` serves only listed URLs and every case asserts the exact requests made (`test/fetch-cases.mjs`) |
+| Fetching untrusted URLs | A request reaches a private address, directly, by redirect or by resolution | One vector per blocked hostname pattern, IPv4 range and IPv6 form, with public neighbours outside each prefix; public-to-private redirects; private `resolveHost` results on the first hop and a redirect hop; malformed results (a hole, a non-string, `127.0.0.1::`) blocked; a `fetch` that requires no receiver called correctly on every hop. The fake `fetch` serves only listed URLs and every case asserts the exact requests made (`test/fetch-cases.mjs`) |
 | Fetch limits | The host hangs or reads unbounded data | Timeouts with a `fetch` that ignores the signal, one that honours it, a stalled `resolveHost`, a stalled body and a slow redirect chain; an endless body cut at `maxBytes` and cancelled; a body filling `maxBytes` parsed without another read when the next read stalls; a response arriving after the timeout cancelled; `timeoutMs` above 2^31 - 1 refused; the redirect limit at 5, 6 and 0 |
 | Fetch results | Wrong type handling, charset or error code | Each content type, header and meta charset and their order, every error code, the default and custom user agent, credential removal and `fetchResource` type and size checks |
 
