@@ -13,8 +13,9 @@ import { intervalStep } from '@subset.dev/timer-core';
  * @property {number} [missed] For `missedWhileAway`: how many transitions it stands for.
  *
  * @typedef {object} AlertProgress What the daemon passes a sink with each alert, from its play journal.
- * @property {Set<string>} played The parts (`notification`, `sound:<index>`) an earlier play of this
- *   alert, or its handler, finished: the sink plays the others.
+ * @property {{ has: (part: string) => boolean }} played The parts (`notification`, `sound:<index>`)
+ *   not to play: those an earlier play of this alert, or its handler, finished, and those its handler
+ *   may still be playing. The sink plays the others.
  * @property {(part: string, pid: number | undefined) => void} [started] Called by the sink once it has
  *   spawned the process playing a part, so a next daemon can tell whether that process outlived it.
  * @property {(part: string) => void} done Called by the sink as each part finishes.
@@ -25,7 +26,7 @@ import { intervalStep } from '@subset.dev/timer-core';
  *   part the sink reports `started` and `done`, so each alert is delivered once across a daemon crash
  *   too: the next daemon plays an alert the sink finished not at all, and one it was playing only from
  *   the parts not done, waiting for a process still playing one. A sink that ignores `progress` has its
- *   alert played again in full after a crash mid-play.
+ *   alert played again in full after a crash mid-play, and when its handler ended mid-part.
  * @property {string} name Shown by `daemon status`.
  * @property {(alert: TimerAlert, timer: import('@subset.dev/timer-core').TimerDefinition, progress?: AlertProgress) => void | Promise<void>} alert
  */

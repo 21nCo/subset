@@ -187,14 +187,8 @@ export async function startDaemon({
     plays,
     progress,
     processes,
-    savePlays(entries, handled) {
-      try {
-        write(() => stateStore.savePlays(entries, handled));
-      } catch (error) {
-        // A daemon that lost daemon.lock leaves the journal to the one that holds it.
-        if (!(error instanceof LockLostError)) throw error;
-      }
-    }
+    // A daemon that lost daemon.lock writes no journal (LockLostError): the one that holds it has it.
+    savePlays: (entries, handled) => write(() => stateStore.savePlays(entries, handled))
   });
 
   /**
@@ -511,7 +505,8 @@ export async function startDaemon({
    * The handler asks whether it may play one part of an alert it took (`playing`: yes while it holds
    * the alert, recording its process `pid` as playing it), or says it finished that part (`played`),
    * so the sink never plays it, once `scheduler.json` or `plays.json` holds that. When neither can be
-   * saved it gets 500 or 503, so the handler says so again.
+   * saved it gets 500, and 503 once this daemon no longer holds `daemon.lock`, whenever that was
+   * lost, so the handler asks again, and the next daemon.
    */
   async function part(request, response, alertId, state) {
     const { ok, input } = await readJson(request, response);
@@ -521,8 +516,8 @@ export async function startDaemon({
       const pid = state === 'playing' ? ', "pid": its process id' : '';
       return fail(response, 400, 'invalid_input', `The body must be { "subscriberId": string, "part": "notification" or "sound:<index>"${pid} }.`);
     }
-    // Once shutting down the daemon saves no more, so the handler asks the next daemon.
-    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+    // Once shutting down, or no longer holding daemon.lock, the daemon saves no more, so the handler asks the next daemon.
+    if (closing || !stillHeld()) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
     let result;
     try {
       result = alertHandlers[state](alertId, input.subscriberId, input.part, input.pid);

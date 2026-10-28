@@ -28,6 +28,8 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var finishAnswers: [Result<Void, DaemonError>] = []
     private var lostFinishes = 0
     private var finishesFail = false
+    private var heldFinishes: Set<String> = []
+    private var recordedInLog: Set<String> = []
     private var partsInLog = false
     private var duringPart: (@Sendable () async -> Void)?
 
@@ -62,6 +64,19 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// Answers every later "played" with a server error, as a daemon that can save neither file does.
     func failEveryFinish() {
         lock.withLock { finishesFail = true }
+    }
+
+    /// Gives no answer to "played" for `part` until `answerHeldFinishes()`, and logs each it answers then as
+    /// "recorded <alertId> <part>".
+    func holdFinishes(of part: AlertPart) {
+        lock.withLock {
+            heldFinishes.insert(part.name)
+            recordedInLog.insert(part.name)
+        }
+    }
+
+    func answerHeldFinishes() {
+        lock.withLock { heldFinishes = [] }
     }
 
     /// Runs `action` while the next request to start a part is on its way, before its answer.
@@ -147,6 +162,9 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
 
     func finishPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
         let (logged, answer): (Bool, Result<Void, DaemonError>) = lock.withLock {
+            if heldFinishes.contains(part.name) { return (partsInLog, .failure(.timedOut)) }
+            // A daemon that heard the app received the alert has forgotten it.
+            if confirmations.contains("\(alertId) \(subscriberId)") { return (partsInLog, .failure(notFound)) }
             if lostFinishes > 0 {
                 lostFinishes -= 1
                 return (partsInLog, .failure(.timedOut))
@@ -156,6 +174,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
         }
         if logged { record("played \(alertId) \(part.name)") }
         try answer.get()
+        if lock.withLock({ recordedInLog.contains(part.name) }) { record("recorded \(alertId) \(part.name)") }
     }
 
     func confirmAlert(_ alertId: String, subscriberId: String) async throws {
@@ -193,6 +212,11 @@ private func finishWithSound(_ id: String) -> TimerAlert {
 }
 
 private let expired = DaemonError.rejected(status: 410, TimerError(code: "alert_expired", message: "", issues: nil))
+
+private let notFound = DaemonError.rejected(status: 404, TimerError(code: "not_found", message: "No alert has that id.", issues: nil))
+
+/// What a daemon older than the part routes answers to them.
+private let noRoute = DaemonError.rejected(status: 404, TimerError(code: "not_found", message: "No route /v1/alerts/a1/playing.", issues: nil))
 
 private let storageFailed = DaemonError.rejected(status: 500, TimerError(code: "storage_failed", message: "", issues: nil))
 
@@ -577,7 +601,7 @@ struct AlertHandlerTests {
     }
 
     /// A daemon that cannot record a finished part (500 every time) does not hold back the rest of the alert: the app says
-    /// so for up to its bound, then plays the next part.
+    /// so for up to its bound, then plays the next part, and goes on saying so until the daemon forgets the alert.
     @Test func aFinishedPartNoDaemonRecordsDoesNotHoldBackTheRest() async {
         let handler = await partsHandler(reportBound: .milliseconds(20))
         daemon.failEveryFinish()
@@ -585,6 +609,32 @@ struct AlertHandlerTests {
         #expect(daemon.log.filter { $0.hasPrefix("play a1") } == ["play a1 notification", "play a1 sound:0", "play a1 sound:1", "play a1 sound:2"])
         #expect(daemon.log.filter { $0 == "played a1 notification" }.count > 1)
         #expect(daemon.confirmed == ["a1 s1"])
+    }
+
+    /// A finished part no daemon records within `reportBound` is said again in the background until one does, without
+    /// holding back the parts after it; a handback waits until a daemon heard it, so the sink never plays it again.
+    @Test func aFinishedPartUnrecordedPastTheBoundIsSaidUntilADaemonRecordsItAndBeforeAHandback() async {
+        let handler = await partsHandler(reportBound: .milliseconds(20), refusing: .sound(1))
+        daemon.holdFinishes(of: .notification)
+        let receiving = Task { await handler.receive(finishWithSound("a1")) }
+        while !daemon.log.contains("playing a1 sound:1") { try? await Task.sleep(for: .milliseconds(5)) }
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(!daemon.log.contains("release a1 s1"))
+        daemon.answerHeldFinishes()
+        await receiving.value
+        let log = daemon.log.filter { $0.hasPrefix("play a1") || $0.hasPrefix("recorded") || $0.hasPrefix("release") }
+        #expect(log == ["play a1 notification", "play a1 sound:0", "recorded a1 notification", "release a1 s1"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// A daemon older than the app, without the part routes (404 `No route`), gets the alert back for its sink.
+    @Test func aDaemonWithoutPartRoutesGetsTheAlertBack() async {
+        let handler = await partsHandler()
+        daemon.answerParts([.failure(noRoute)])
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { !$0.hasPrefix("register") && !$0.hasPrefix("unregister") } ==
+                ["ack a1 s1", "playing a1 notification", "release a1 s1", "sink a1"])
+        #expect(daemon.confirmed.isEmpty)
     }
 
     /// A part the app could not present (the notification center refused the notification) is not reported finished: the
