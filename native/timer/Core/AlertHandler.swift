@@ -173,8 +173,9 @@ extension DaemonClient: AlertHandlerDaemon {
 /// have taken and not finished, and waits until the daemon hears the app received each one it played. The daemon's sink
 /// plays an alert the app took and never said it received 30 s after the app's stream last closed (`ORPHANED_ALERT_MS`),
 /// without the parts the app said it finished; a part the app started and did not say it finished is held for as long
-/// as the app runs (a stalled app that says so later, to that daemon or the next, has it recorded) and played once the
-/// app has ended (its sound ended with it). So when the app quits past its bound, is force-quit, crashes or stalls, no
+/// as the app runs (a stalled app that says so later, to that daemon or the next, has it recorded; one that asks again to
+/// play it, its permit's answer lost, is permitted it again; one that hands the alert back has the sink play it at once)
+/// and played once the app has ended (its sound ended with it). So when the app quits past its bound, is force-quit, crashes or stalls, no
 /// part is lost and none the app finished plays again. A part can play twice only if the app ends between finishing it
 /// and a daemon hearing so. A daemon too old to know parts (no `playing` route) gets each alert back, for its sink.
 @MainActor

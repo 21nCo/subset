@@ -10,6 +10,7 @@ import { createMacosSink } from '../../src/alerts/index.mjs';
 import { OSASCRIPT } from '../../src/alerts/macos.mjs';
 import {
   ACK_TIMEOUT_MS,
+  IDLE_EXIT_MS,
   LEFT_PROCESS_WAIT_MS,
   ORPHANED_ALERT_MS,
   SETTLED_RETENTION_MS,
@@ -402,6 +403,97 @@ function fixScheduler(context) {
   rmSync(path, { recursive: true });
   renameSync(`${path}.saved`, path);
 }
+
+/**
+ * The app was permitted to show a sound-off finish, but the answer did not reach it (a daemon crash, or
+ * its request timed out), and it stalled past the orphan bound, still running: the sink holds the
+ * notification for it. Returns the daemon and spawner that hold it, and the ids.
+ */
+async function heldWhileAppRuns(t, { restart }) {
+  const spawner = partSpawn();
+  const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+  await finishCountdown(context, { sound: false });
+  const { alertId, subscriberId } = await takeAlert(context, stream);
+  assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
+  const { holder, sink } = await stallPastOrphanBound(t, context, stream, spawner, { part: 'notification', restart });
+  return { spawner, holder, sink, alertId, subscriberId };
+}
+
+for (const restart of [false, true]) {
+  const after = restart ? ' and a daemon crash' : '';
+  test(`an app that asks again to show a part the sink holds for it, past the orphan bound${after}, is permitted it at once and shows it once: the sink never does`, async (t) => {
+    const { spawner, holder, sink, alertId, subscriberId } = await heldWhileAppRuns(t, { restart });
+    const asked = await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP });
+    assert.deepEqual([asked.status, asked.body], [200, { alertId, part: 'notification', playing: true }]);
+    // Still held while the app shows it, however long that takes.
+    await pastEveryBound(holder.processes);
+    assert.equal(plays(holder.dataDir)[0].running.notification.app, true);
+    // It showed it: the sink took the rest over (none), so it is told so, and its notification counts.
+    assert.equal((await call(holder, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).status, 410);
+    await eventually(() => plays(holder.dataDir).length === 0);
+    holder.processes.live.delete(APP);
+    await settle();
+    assert.deepEqual([spawner.started, sink.started], [[], []]);
+  });
+
+  test(`${restart ? 'after a daemon crash, ' : ''}a part the sink holds for the app is shown by the sink at once, the app still running, when the app hands the alert back or another process asks to show it`, async (t) => {
+    for (const how of ['release', 'another process']) {
+      const { spawner, holder, sink, alertId, subscriberId } = await heldWhileAppRuns(t, { restart });
+      const asked =
+        how === 'release'
+          ? await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })
+          : await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP + 1 });
+      assert.deepEqual([asked.status, asked.body.error?.code], [410, 'alert_expired'], how);
+      await eventually(() => sink.started.length === 1);
+      await eventually(() => plays(holder.dataDir).length === 0);
+      // Nothing holds it any more: asking again, or the app ending, shows nothing more.
+      assert.equal((await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 410);
+      assert.equal((await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })).status, 410);
+      holder.processes.live.delete(APP);
+      await settle();
+      assert.deepEqual([spawner.started, sink.started], restart ? [[], ['notification']] : [['notification'], ['notification']], how);
+    }
+  });
+}
+
+test('a handback of a part the sink holds for the app is answered only once a file records it: neither -> 500 and still held; scheduler.json alone carries it', async (t) => {
+  const { spawner, holder, alertId, subscriberId } = await heldWhileAppRuns(t, { restart: false });
+  breakScheduler(holder);
+  breakPlays(holder);
+  const refused = await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId });
+  assert.deepEqual([refused.status, refused.body.error?.code], [500, 'storage_failed']);
+  await pastEveryBound(holder.processes);
+  assert.deepEqual(spawner.started, []);
+  // plays.json still cannot be written: the save of scheduler.json that answers carries the journal without the hold.
+  fixScheduler(holder);
+  assert.equal((await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })).status, 410);
+  const [carried] = scheduler(holder.dataDir).plays;
+  assert.equal(carried.alertId, alertId);
+  assert.equal(carried.running?.notification, undefined);
+  await eventually(() => spawner.started.length === 1);
+  await settle();
+  assert.deepEqual(spawner.started, ['notification']);
+});
+
+test('a daemon whose sink holds a part for a stalled app does not exit idle; once the app ends the part plays once and the idle exit starts over', async (t) => {
+  const { spawner, holder } = await heldWhileAppRuns(t, { restart: false });
+  let exited = false;
+  holder.daemon.closed.then(() => {
+    exited = true;
+  });
+  holder.clock.advance(3 * IDLE_EXIT_MS);
+  await pastEveryBound(holder.processes);
+  assert.equal(exited, false);
+  holder.processes.live.delete(APP);
+  await eventually(() => spawner.started.length === 1);
+  await eventually(() => plays(holder.dataDir).length === 0);
+  holder.clock.advance(IDLE_EXIT_MS - 1);
+  await settle();
+  assert.equal(exited, false);
+  holder.clock.advance(1);
+  assert.equal(await within(holder.daemon.closed), 0);
+  assert.deepEqual(spawner.started, ['notification']);
+});
 
 for (const crash of [false, true]) {
   test(`a finished part whose scheduler.json save fails is answered once plays.json holds it, so an app that then ends has it played once${crash ? ', also after a daemon crash' : ''}`, async (t) => {

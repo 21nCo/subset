@@ -81,7 +81,8 @@ const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running
  * running app is no proof it finished it, so it stays undecided in the journal, across daemons, for
  * as long as the app runs (`awaitHandler`), until the app says it finished it (`done`) or ends, and
  * then it plays, as its sound ended with the app. The sink plays the other parts meanwhile. A part
- * from an earlier boot, or whose boot cannot be told, died with that boot, so it plays again.
+ * from an earlier boot, or whose boot cannot be told, died with that boot, so it plays again. A
+ * handler that asks about a part held for it decides it at once (`holder`, `giveBack`).
  *
  * `progress` are the parts an alert handler finished (`played`) or was permitted to start, with its
  * process (`started`), of alerts it holds, which `scheduler.json` has not recorded yet as it could
@@ -243,16 +244,42 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
     /** The parts of `alertId` its handler's process may still be playing, after `settle`: the sink plays the others. */
     held: (alertId) => [...(plays.get(alertId)?.running ?? [])].filter(([, child]) => child.app).map(([part]) => part),
 
+    /** The process of the alert handler `subscriberId` the sink holds `part` of `alertId` for, or null. */
+    holder(alertId, part, subscriberId) {
+      const entry = plays.get(alertId);
+      const child = entry?.subscriberId === subscriberId ? entry.running.get(part) : null;
+      return child?.app ? child : null;
+    },
+
+    /**
+     * Gives the parts `parts` of `alertId`, held for its handler's process, back to the sink, which
+     * plays them once `awaitHandler` sees it; returns the error of a failed write (see `flush`), and
+     * `restore()`, which holds them again.
+     */
+    giveBack(alertId, parts) {
+      const entry = plays.get(alertId);
+      const children = parts.map((part) => [part, entry.running.get(part)]);
+      for (const part of parts) entry.running.delete(part);
+      const error = flush();
+      return {
+        error,
+        restore: () => {
+          for (const [part, child] of children) entry.running.set(part, child);
+        }
+      };
+    },
+
     /**
      * Resolves once `part` of `alertId`, which the handler's process holds, is decided: the handler
-     * said it finished it (`played(alertId)` holds it), or its process ended (it does not, and the
-     * sink plays it), or the journal was closed first (still held, for the next daemon).
+     * said it finished it (`played(alertId)` holds it), or its process ended, or the handler gave it
+     * back (`giveBack`; it does not, and the sink plays it), or the journal was closed first (still
+     * held, for the next daemon).
      */
     async awaitHandler(alertId, part) {
       const entry = plays.get(alertId);
       const child = entry?.running.get(part);
       if (!child?.app) return;
-      while (!entry.played.has(part) && processes.alive(child)) {
+      while (!entry.played.has(part) && entry.running.get(part) === child && processes.alive(child)) {
         if (closed) return;
         await processes.sleep(HANDLER_POLL_MS);
       }

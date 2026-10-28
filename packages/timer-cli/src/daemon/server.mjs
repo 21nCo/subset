@@ -187,6 +187,8 @@ export async function startDaemon({
     plays,
     progress,
     processes,
+    // A play that held the daemon busy has ended, so its idle exit starts over.
+    onIdle: () => updateIdle({ activity: true }),
     // A daemon that lost daemon.lock writes no journal (LockLostError): the one that holds it has it.
     savePlays: (entries, handled) => write(() => stateStore.savePlays(entries, handled))
   });
@@ -288,7 +290,8 @@ export async function startDaemon({
   });
 
   const busy = () => {
-    if (subscribers.size) return true;
+    // A sink play, one holding a part for a stalled app included, owes that part: the daemon stays to play it.
+    if (subscribers.size || alertHandlers.busy) return true;
     const now = clock.now();
     return store.timers.some((timer) => ['running', 'paused'].includes(project(timer, now).status));
   };

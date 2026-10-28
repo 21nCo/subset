@@ -26,8 +26,9 @@ export const MAX_UNRECEIVED = 1_000;
  * the handler had not said it finished (`played`), and a part it started (`playing`) is held for its
  * process: the sink plays the others, and that one only once the process has ended (quit,
  * force-quit or crashed) without the handler saying it finished it, as its sound ended with it. A
- * handler that stalled and says so later, to this daemon or the next, has it recorded as finished.
- * So each part plays once: those it finished by it, the others by the sink.
+ * handler that stalled and says so later, to this daemon or the next, has it recorded as finished,
+ * and one that asks again to play it is permitted it, and one that hands the alert back has the
+ * sink play it at once. So each part plays once: those it finished by it, the others by the sink.
  */
 export const ORPHANED_ALERT_MS = 30_000;
 
@@ -105,6 +106,7 @@ export function createAlertHandlers({
   progress = [],
   savePlays = () => {},
   processes = systemProcesses,
+  onIdle = () => {},
   newId = newAlertId,
   ackTimeoutMs = ACK_TIMEOUT_MS
 }) {
@@ -243,7 +245,10 @@ export function createAlertHandlers({
     const running = playRest(alertId, alert, timer);
     playing.add(running);
     // Neither settle's, awaitHandler's nor deliverToSink's promise rejects.
-    running.then(() => playing.delete(running));
+    running.then(() => {
+      playing.delete(running);
+      if (!stopped && !playing.size) onIdle();
+    });
   }
 
   /**
@@ -280,6 +285,25 @@ export function createAlertHandlers({
       done: (part) => journal.done(alertId, part)
     };
     return deliverToSink(sink, alert, timer, log, progress);
+  }
+
+  /**
+   * Gives `parts` of `alertId`, which the sink holds for its handler's process, back to the sink,
+   * which plays them, once `plays.json`, or else `scheduler.json`, records that. When neither can,
+   * this throws and the sink holds them still, so the handler asks again; a daemon that lost
+   * `daemon.lock` throws its `LockLostError`.
+   */
+  function giveBack(alertId, parts) {
+    const { error, restore } = journal.giveBack(alertId, parts);
+    if (!error) return;
+    try {
+      // The failed write left the journal behind, so this save carries it.
+      if (isLockLost(error)) throw error;
+      save(checkpoint());
+    } catch (failure) {
+      restore();
+      throw failure;
+    }
   }
 
   /** Plays a pending alert through the sink, once, and records the fallback, while this daemon holds the lock. */
@@ -345,6 +369,13 @@ export function createAlertHandlers({
     },
     get status() {
       return { registered: handler !== null, pending: pending.size, ...counts };
+    },
+    /**
+     * Whether the sink is playing or owes a part of an alert (one it holds for a handler's process
+     * included), so the daemon does not exit idle; `onIdle()` is called once it no longer is.
+     */
+    get busy() {
+      return playing.size > 0 || journal.unfinished.length > 0;
     },
     /** The alerts waiting for an acknowledgement, as `replay` takes them. */
     get handoffs() {
@@ -456,9 +487,21 @@ export function createAlertHandlers({
      * it finished it (see `ORPHANED_ALERT_MS`). When neither can be written this throws and permits
      * nothing, forgetting the process, so the handler asks again. A pending alert gets 409
      * (`invalid_state`), and one the sink played 410, so the handler plays nothing more of it. A
-     * daemon that lost `daemon.lock` throws its `LockLostError` and permits nothing.
+     * part the sink holds for the handler's process (it was permitted that part before the sink took
+     * the alert over, here or in an earlier daemon, and may not have had the answer) is permitted
+     * again to that process, still held, so its `played` records it; any other process gets 410 and
+     * the part is given back to the sink, which plays it (see `giveBack`). A daemon that lost
+     * `daemon.lock` throws its `LockLostError` and permits nothing.
      */
     playing(alertId, subscriberId, part, pid) {
+      const holder = journal.holder(alertId, part, subscriberId);
+      if (holder) {
+        if (holder.pid === pid && processes.alive(holder)) return { ok: true };
+        giveBack(alertId, [part]);
+        remember(alertId, subscriberId);
+        log(`alert ${alertId}: another process of its handler asked to play ${part}; the ${sink.name} sink plays it.`);
+        return expired();
+      }
       const refusal = heldBy(alertId, subscriberId);
       if (refusal) return refusal;
       const held = taken.get(alertId);
@@ -541,11 +584,21 @@ export function createAlertHandlers({
      * example because it may no longer post notifications: the sink plays it once, without the parts
      * the handler finished, and a later
      * acknowledgement or release gets 410, as for any alert the sink played. A taken one is first
-     * saved as a handoff; a failed save throws and leaves it taken. A daemon that is stopping, or
-     * lost `daemon.lock`, answers 503 and changes nothing, so the handler asks the next daemon,
-     * which has the alert saved.
+     * saved as a handoff; a failed save throws and leaves it taken. One the sink took over while it
+     * holds a part for the handler's process (see `playing`) has those parts given back to the sink,
+     * which plays them, once that is saved (see `giveBack`), and the answer is 410. A daemon that is
+     * stopping, or lost `daemon.lock`, answers 503 and changes nothing, so the handler asks the next
+     * daemon, which has the alert saved.
      */
     release(alertId, subscriberId) {
+      const parts = journal.held(alertId).filter((part) => journal.holder(alertId, part, subscriberId));
+      if (parts.length) {
+        if (stopped || !owns()) return unavailable();
+        giveBack(alertId, parts);
+        remember(alertId, subscriberId);
+        log(`alert ${alertId} was handed back by its handler; the ${sink.name} sink plays ${parts.join(', ')}.`);
+        return expired();
+      }
       const refusal = notOwnedBy(alertId, subscriberId);
       if (refusal) return refusal;
       const held = taken.get(alertId);
