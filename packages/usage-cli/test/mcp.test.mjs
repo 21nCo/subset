@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { McpFnTestClient, assertManifestContract, validateMcpFnSchemaPortability } from '@mcpfn/testing';
 import { USAGE_PROVIDERS, createUsageStatus, isUsageStatus, usageText } from '@subset.dev/usage-core';
-import { claudeIdentityPeriod, defineUsageMcpServer } from '../src/mcp.mjs';
+import { claudeIdentityPeriod, defineUsageMcpServer, providerProcesses } from '../src/mcp.mjs';
 
 const hostDirectory = fileURLToPath(new URL('..', import.meta.url));
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -407,10 +407,11 @@ async function stalledRead(t, { amp, claude }) {
 // Writes the PIDs atomically, so the test never reads half a line.
 const recordPids = (pids) => `echo ${pids} > "$PIDS.tmp" && mv "$PIDS.tmp" "$PIDS"`;
 // A launcher, as a shell or Node entrypoint such as codex.js is: it starts the provider as its own
-// child, forwards SIGTERM and SIGINT to it, and waits. SIGKILL would end only the launcher.
+// child, forwards SIGTERM and SIGINT to it, and waits. SIGKILL would end only the launcher. It reaps
+// the provider before it exits: where PID 1 does not reap, an orphan zombie still has its PID.
 const launcher = `sleep 120 &
 child=$!
-trap 'kill $child; exit 143' TERM INT
+trap 'kill $child; wait $child; exit 143' TERM INT
 ${recordPids('"$$ $child"')}
 wait $child`;
 // A provider that ignores SIGTERM; exec keeps both the PID and the ignored signal.
@@ -432,6 +433,18 @@ function assertAmpFailed(mcp) {
   assert.deepEqual(reply.result.structuredContent.accounts.map((item) => [item.id, item.errors.map((error) => error.code)]), [['amp_cli', ['amp_failed']]]);
   assert.deepEqual(mcp.frames.map((frame) => frame.id), [1, 3]);
 }
+
+test('the server stops tracking a provider subprocess that failed to start', async () => {
+  const processes = providerProcesses(() => {});
+  // A provider CLI that is not installed: its subprocess emits error and close, never exit.
+  const missing = join(tmpdir(), 'subset-usage-no-such-provider');
+  for (let read = 0; read < 3; read += 1) {
+    const child = execFile(missing, [], () => {});
+    assert.equal(processes.tracked, 1);
+    await new Promise((resolveClose) => child.once('close', resolveClose));
+    assert.equal(processes.tracked, 0, `read ${read + 1} left its failed subprocess tracked`);
+  }
+});
 
 test('subset-usage mcp ends a stalled provider and the process its launcher started, answers the call, and exits 0 when stdin closes', async (t) => {
   const { mcp, pids } = await stalledRead(t, { amp: launcher });

@@ -20,6 +20,37 @@ export async function dependencyDir(dir, name) {
   }
 }
 
+/** The MIT licence text after its copyright line, as the upstream repositories below ship it. */
+const MIT = `Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`;
+
+/**
+ * The licence of a bundled package that ships no licence file, from its upstream repository's
+ * LICENSE, with the copyright line as that file states it, for the version checked. Generation
+ * fails for any other package or version without a licence file.
+ */
+const UPSTREAM_LICENCES = {
+  // https://github.com/21nCo/super-functions/blob/dev/LICENSE
+  '@mcpfn/core@0.0.5': `MIT License\n\nCopyright (c) 2025 21n\n\n${MIT}`,
+  // https://github.com/cfworker/cfworker/blob/main/LICENSE.md
+  '@cfworker/json-schema@4.1.1': `MIT License\n\nCopyright (c) 2020 Jeremy Danyow\n\n${MIT}`,
+};
+
 const readManifest = async (dir) => JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));
 
 /**
@@ -46,10 +77,8 @@ export async function notices(chunks) {
   for (const [dir, inlinedVersion] of roots) {
     const manifest = await readManifest(dir);
     const licenceFile = (await readdir(dir)).find((name) => /^(?:licen[cs]e|copying)(?:\.\w+)?$/i.test(name));
-    const author = typeof manifest.author === 'string' ? manifest.author : manifest.author?.name;
-    const text = licenceFile
-      ? (await readFile(path.join(dir, licenceFile), 'utf8')).trim()
-      : `${manifest.license}${author ? `, copyright ${author}` : ''}. The package ships no licence file.`;
+    const text = licenceFile ? (await readFile(path.join(dir, licenceFile), 'utf8')).trim() : UPSTREAM_LICENCES[`${manifest.name}@${manifest.version}`];
+    if (!text) throw new Error(`${manifest.name} ${manifest.version} ships no licence file; check its upstream licence and add it to UPSTREAM_LICENCES in scripts/notices.mjs.`);
     entries.push({ heading: `${manifest.name} ${inlinedVersion ?? manifest.version} (${manifest.license})`, text });
   }
   entries.sort((a, b) => a.heading.localeCompare(b.heading));

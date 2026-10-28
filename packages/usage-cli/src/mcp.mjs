@@ -254,12 +254,15 @@ const exited = (list, ms) => Promise.race([Promise.all(list.map((child) => runni
  * sqlite3, keychain reads). Their readers end them with timers of their own, which do not survive
  * this process, so the server ends them when it stops.
  */
-function providerProcesses(log) {
+export function providerProcesses(log) {
   const children = new Set();
   let stopping = false;
   diagnostics.subscribe('child_process', ({ process: child }) => {
     children.add(child);
+    // A subprocess that failed to start (a provider CLI that is not installed) emits error and
+    // close, never exit.
     child.once('exit', () => children.delete(child));
+    child.once('close', () => children.delete(child));
     // A read that goes on after its subprocess was ended (an auth or keychain check, then the
     // provider) gets each later subprocess ended as it starts. The channel publishes before the
     // spawn, when kill() would signal PID 0, this whole process group; so it waits for the PID.
@@ -271,6 +274,8 @@ function providerProcesses(log) {
   const live = () => [...children].filter(running);
   return {
     get stopping() { return stopping; },
+    /** The number of subprocesses tracked, running or not yet closed. */
+    get tracked() { return children.size; },
     /** Ends every running subprocess at once (a second signal). */
     kill() { for (const child of live()) child.kill('SIGKILL'); },
     /**
