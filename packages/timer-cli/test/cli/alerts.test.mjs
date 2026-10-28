@@ -89,6 +89,27 @@ test('macOS plays only the built-in sounds, and none when the timer has sound of
   assert.deepEqual(Object.keys(MACOS_SOUNDS).sort(), ['finish', 'segment', 'tick']);
 });
 
+test('a sink plays only the parts not yet played, and reports each part as it finishes', async () => {
+  const finish = { timerId: 't_ab12cd34', kind: 'finish', at };
+  const { spawn, calls } = recordingSpawn();
+  const done = [];
+  await createMacosSink({ spawn }).alert(finish, timer('Tea'), { played: new Set(['notification', 'sound:0']), done: (part) => done.push(part) });
+  assert.deepEqual(calls.map((call) => call.command), [AFPLAY, AFPLAY]);
+  assert.deepEqual(done, ['sound:1', 'sound:2']);
+  // A part that fails is not reported, and the sounds after it do not play.
+  const failing = recordingSpawn({ code: 1 });
+  const reported = [];
+  await assert.rejects(createMacosSink({ spawn: failing.spawn }).alert(finish, timer('Tea'), { played: new Set(), done: (part) => reported.push(part) }), /exited with code 1/);
+  assert.deepEqual([failing.calls.map((call) => call.command), reported], [[AFPLAY, OSASCRIPT], []]);
+  const linux = recordingSpawn();
+  const linuxDone = [];
+  await createLinuxSink({ notifySend: '/usr/bin/notify-send', paplay: '/usr/bin/paplay', spawn: linux.spawn }).alert(finish, timer('Tea'), {
+    played: new Set(['sound:0', 'sound:1', 'sound:2']),
+    done: (part) => linuxDone.push(part)
+  });
+  assert.deepEqual([linux.calls.map((call) => call.command), linuxDone], [['/usr/bin/notify-send'], ['notification']]);
+});
+
 test('Linux passes the name to notify-send after --, plays freedesktop sounds with paplay, and honours sound off', async () => {
   for (const name of INJECTION_NAMES) {
     const { spawn, calls } = recordingSpawn();

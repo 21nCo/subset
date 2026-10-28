@@ -23,6 +23,9 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var released: Set<String> = []
     private var duringAck: (@Sendable () async -> Void)?
     private var duringRelease: (@Sendable () async -> Void)?
+    private var partAnswers: [Result<Void, DaemonError>] = []
+    private var lostParts = 0
+    private var partsInLog = false
 
     var log: [String] { lock.withLock { entries } }
     /// The subscriber the daemon holds as its handler.
@@ -37,6 +40,16 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     /// The answers to the next acknowledgements, in order; once used up, each is `.acknowledged`.
     func answerAcks(_ answers: [Result<AlertAcknowledgement, DaemonError>]) {
         lock.withLock { acks = answers }
+    }
+
+    /// Records each part the app starts in `log` too, as "playing <alertId> <part>", and answers the next ones as told:
+    /// `lost` get no answer after the daemon recorded them, then `answers` in order, then 200.
+    func answerParts(_ answers: [Result<Void, DaemonError>] = [], lost: Int = 0) {
+        lock.withLock {
+            partsInLog = true
+            partAnswers = answers
+            lostParts = lost
+        }
     }
 
     /// Runs `action` while the next acknowledgement is on its way, before its answer.
@@ -102,6 +115,18 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
         return try answer.get()
     }
 
+    func startPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
+        let (logged, answer): (Bool, Result<Void, DaemonError>) = lock.withLock {
+            if lostParts > 0 {
+                lostParts -= 1
+                return (partsInLog, .failure(.timedOut))
+            }
+            return (partsInLog, partAnswers.isEmpty ? .success(()) : partAnswers.removeFirst())
+        }
+        if logged { record("playing \(alertId) \(part.name)") }
+        try answer.get()
+    }
+
     func confirmAlert(_ alertId: String, subscriberId: String) async throws {
         let lost = lock.withLock {
             confirmations.append("\(alertId) \(subscriberId)")
@@ -126,9 +151,17 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     }
 }
 
+/// A finish with sound off, so its one part is its notification and it plays once.
 private func alert(_ id: String?, kind: TimerAlert.Kind = .finish) -> TimerAlert {
-    TimerAlert(timerId: "t_1", kind: kind, at: 1_000, alertId: id, ackRequired: id == nil ? nil : true)
+    TimerAlert(timerId: "t_1", kind: kind, at: 1_000, alertId: id, ackRequired: id == nil ? nil : true, sound: false)
 }
+
+/// A finish with sound on: its notification, then Glass three times.
+private func finishWithSound(_ id: String) -> TimerAlert {
+    TimerAlert(timerId: "t_1", kind: .finish, at: 1_000, alertId: id, ackRequired: true)
+}
+
+private let expired = DaemonError.rejected(status: 410, TimerError(code: "alert_expired", message: "", issues: nil))
 
 private let conflict = DaemonError.rejected(status: 409, TimerError(code: "handler_registered", message: "Another alert handler is registered.", issues: nil))
 
@@ -143,12 +176,18 @@ private final class Quitting {
     var task: Task<Void, Never>?
 }
 
+/// The handler under test, for a `play` that acts on it.
+@MainActor
+private final class HandlerBox {
+    var handler: AlertHandler?
+}
+
 @MainActor
 struct AlertHandlerTests {
     let daemon = FakeAlertDaemon()
 
     func handler(permitted: Bool = true, subscriber: String? = "s1", retryDelay: Duration = .milliseconds(1)) async -> AlertHandler {
-        let handler = AlertHandler(daemon: daemon, retryDelay: retryDelay, ackRetryDelay: .milliseconds(1)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        let handler = AlertHandler(daemon: daemon, retryDelay: retryDelay, ackRetryDelay: .milliseconds(1)) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(permitted)
         handler.subscribed(subscriber)
         await handler.settled()
@@ -196,7 +235,7 @@ struct AlertHandlerTests {
     }
 
     @Test func anAcknowledgementIsSentForTheStreamTheAlertCameOnAfterTheStreamReconnects() async {
-        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(true)
         handler.subscribed("s1")
         await handler.settled()
@@ -238,7 +277,7 @@ struct AlertHandlerTests {
     @Test func permissionRevokedWithoutACheckIsSeenBeforeTheAckAndHandsAlertsBackToTheDaemon() async {
         let permission = Permission()
         let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
-                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+                                   isPermitted: { permission.granted }) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(true)
         handler.subscribed("s1")
         await handler.settled()
@@ -257,7 +296,7 @@ struct AlertHandlerTests {
     func permissionRevokedWhileAnAckIsAnsweredHandsTheAlertBackSoItPlaysOnce(_ lost: FakeAlertDaemon.Lost?) async {
         let permission = Permission()
         let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
-                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+                                   isPermitted: { permission.granted }) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(true)
         handler.subscribed("s1")
         await handler.settled()
@@ -277,7 +316,7 @@ struct AlertHandlerTests {
     @Test func permissionGrantedAgainWhileAnAlertIsHandedBackKeepsTheAppRegistered() async {
         let permission = Permission()
         let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
-                                   isPermitted: { permission.granted }) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+                                   isPermitted: { permission.granted }) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(true)
         handler.subscribed("s1")
         await handler.settled()
@@ -339,7 +378,7 @@ struct AlertHandlerTests {
     /// Quitting after playing an alert waits until a daemon hears that the app received it, so the daemon never plays it
     /// too once the app's stream is gone.
     @Test func quittingWaitsUntilTheDaemonHearsTheAppReceivedAnAlertItPlayed() async {
-        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] in daemon.record("play \($0.alertId ?? "-")") }
+        let handler = AlertHandler(daemon: daemon, ackRetryDelay: .milliseconds(20)) { [daemon] alert, _ in daemon.record("play \(alert.alertId ?? "-")") }
         handler.setPermitted(true)
         handler.subscribed("s1")
         await handler.settled()
@@ -432,7 +471,7 @@ struct AlertHandlerTests {
     @Test func aRegistrationWhoseAnswerWasLostIsUnregisteredWhenPermissionIsRevoked() async {
         daemon.lose(registrations: [.afterApplying])
         // No timed retry during the test, so `settled()` would wait for it: only the permission check acts.
-        let handler = AlertHandler(daemon: daemon, retryDelay: .seconds(600)) { _ in }
+        let handler = AlertHandler(daemon: daemon, retryDelay: .seconds(600)) { _, _ in }
         handler.setPermitted(true)
         handler.subscribed("s1")
         for _ in 0..<500 where handler.registration == .inactive { try? await Task.sleep(nanoseconds: 2_000_000) }
@@ -452,6 +491,102 @@ struct AlertHandlerTests {
         #expect(daemon.handler == "s1")
         #expect(daemon.log == ["register s1", "register s1"])
         #expect(handler.registration == .registered)
+    }
+
+    private func partsHandler(permission: Permission = Permission()) async -> AlertHandler {
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+                                   isPermitted: { permission.granted }) { [daemon] alert, part in
+            daemon.record("play \(alert.alertId ?? "-") \(part.name)")
+            await Task.yield()
+        }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.answerParts()
+        return handler
+    }
+
+    @Test func anAlertsPartsAreItsNotificationThenItsSounds() {
+        #expect(AlertPart.plan(for: finishWithSound("a1")).map(\.name) == ["notification", "sound:0", "sound:1", "sound:2"])
+        #expect(AlertPart.plan(for: alert("a1")) == [.notification])
+        #expect(AlertPart.plan(for: TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 3)) == [.sound(0)])
+        #expect(AlertPart.plan(for: TimerAlert(timerId: "t_1", kind: .segment, at: 1, sound: false)).isEmpty)
+        #expect(AlertPart.plan(for: TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 1, missed: 2)) == [.notification])
+    }
+
+    /// The daemon records each part before the app plays it, so the sink of a daemon whose app ended before saying it
+    /// received the alert plays only the parts the app never started (play-journal.test.mjs).
+    @Test func eachPartIsRecordedByTheDaemonBeforeItPlaysAndTheReceiptFollowsTheLast() async {
+        let handler = await partsHandler()
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.dropFirst() == ["ack a1 s1",
+                                           "playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0",
+                                           "playing a1 sound:1", "play a1 sound:1", "playing a1 sound:2", "play a1 sound:2"])
+        #expect(daemon.confirmed == ["a1 s1"])
+    }
+
+    /// A part the daemon recorded but whose answer was lost is sent again until a daemon answers, then played once.
+    @Test func aPartWhoseAnswerWasLostIsSentAgainAndPlaysOnce() async {
+        let handler = await partsHandler()
+        daemon.answerParts(lost: 2)
+        await handler.receive(alert("a1"))
+        #expect(daemon.log.dropFirst() == ["ack a1 s1", "playing a1 notification", "playing a1 notification", "playing a1 notification",
+                                           "play a1 notification"])
+    }
+
+    /// Once the daemon's sink has played the alert (410, after the app stalled 30 s), the app plays no more of it and
+    /// sends no receipt.
+    @Test func aRefusedPartStopsTheAlert() async {
+        let handler = await partsHandler()
+        daemon.answerParts([.success(()), .success(()), .failure(expired)])
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { $0.hasPrefix("play a1") } == ["play a1 notification", "play a1 sound:0"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Permission revoked mid-alert: the app finishes the part it is playing, then hands the alert back, so the daemon's
+    /// sink plays the parts it did not start.
+    @Test func permissionRevokedMidAlertHandsTheRestBack() async {
+        let permission = Permission()
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+                                   isPermitted: { permission.granted }) { [daemon] alert, part in
+            daemon.record("play \(alert.alertId ?? "-") \(part.name)")
+            if part == .sound(0) { permission.granted = false }
+        }
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.answerParts()
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { $0.hasPrefix("play") || $0.hasPrefix("release") || $0.hasPrefix("sink") } ==
+                ["playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0", "release a1 s1", "sink a1"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Quitting mid-alert: the app finishes the part it is playing and hands the rest back before quitting returns.
+    @Test func quittingMidAlertHandsTheRestBackBeforeItReturns() async {
+        let quitting = Quitting()
+        let box = HandlerBox()
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1)) { [daemon] alert, part in
+            daemon.record("play \(alert.alertId ?? "-") \(part.name)")
+            guard part == .sound(0), let handler = box.handler else { return }
+            // The user quits while the first Glass plays.
+            quitting.task = Task {
+                await handler.quit()
+                daemon.record("quit")
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        box.handler = handler
+        handler.setPermitted(true)
+        handler.subscribed("s1")
+        await handler.settled()
+        daemon.answerParts()
+        await handler.receive(finishWithSound("a1"))
+        await quitting.task?.value
+        #expect(daemon.log.filter { $0.hasPrefix("play") || $0.hasPrefix("release") || $0.hasPrefix("quit") } ==
+                ["playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0", "release a1 s1", "quit"])
+        #expect(daemon.confirmed.isEmpty)
     }
 
     @Test func theDaemonsAlertDecodes() throws {

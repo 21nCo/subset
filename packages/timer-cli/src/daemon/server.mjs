@@ -7,8 +7,9 @@ import { ACK_TIMEOUT_MS, createAlertHandlers } from './alert-handlers.mjs';
 import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
+import { createPlayJournal } from './play-journal.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
-import { createStateStore } from './store.mjs';
+import { ALERT_PART, createStateStore } from './store.mjs';
 
 export const HEARTBEAT_MS = 15_000;
 export const IDLE_EXIT_MS = 10 * 60_000;
@@ -22,8 +23,11 @@ const SUBSCRIBER_STALL_MS = 30_000;
 const MAX_QUEUED_ALERT_BYTES = 1024 * 1024;
 /** How long requests already being handled get to finish, with a 503 at most, once shutdown begins. */
 const SHUTDOWN_GRACE_MS = 1_000;
-/** How long shutdown waits for the sink to finish the alerts it played at shutdown (the finish's Glass sounds take about 3 s). */
-const SINK_DRAIN_MS = 5_000;
+/**
+ * How long shutdown waits for the sink to finish the alerts it is playing (the finish's Glass sounds
+ * take about 3 s), still holding `daemon.lock` so it can journal them and no next daemon resumes them.
+ */
+export const SINK_DRAIN_MS = 5_000;
 const STATUS_BY_CODE = { invalid_input: 400, not_found: 404, invalid_state: 409, limit_reached: 409 };
 /** The name a socket is bound under before it is renamed to `daemon.sock`; no longer than that name. */
 const BIND_NAME = /^\.ds-[0-9a-f]{6}$/;
@@ -98,11 +102,13 @@ export async function startDaemon({
   let marks;
   let unsettled;
   let acknowledged;
+  let plays;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
     ({ handoffs: unsettled, acknowledged } = stateStore.loadAlerts());
+    plays = stateStore.loadPlays();
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -162,6 +168,18 @@ export async function startDaemon({
     for (const response of subscribers.keys()) send(response, event, data);
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
+  const journal = createPlayJournal({
+    entries: plays,
+    log,
+    persist(entries) {
+      try {
+        write(() => stateStore.savePlays(entries));
+      } catch (error) {
+        // A daemon that lost daemon.lock leaves the journal to the one that holds it.
+        if (!(error instanceof LockLostError)) throw error;
+      }
+    }
+  });
   const alertHandlers = createAlertHandlers({
     clock,
     sink,
@@ -170,7 +188,8 @@ export async function startDaemon({
     isOpen: (id) => subscriberIds.has(id),
     owns: () => stillHeld(),
     save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
-    acknowledged
+    acknowledged,
+    journal
   });
 
   /**
@@ -237,18 +256,20 @@ export async function startDaemon({
     }
     savedStretches = new Set(list.map(stretchKey));
     marksDirty = false;
+    alertHandlers.saved();
   }
 
   const scheduler = createScheduler({
     clock,
     initialMarks: marks,
     getTimers: () => store.timers,
+    delivered: (key) => alertHandlers.delivered(key),
     onRun(alerts, now) {
       // A successor that took the lock delivers these alerts itself.
       if (!stillHeld()) return;
       // An alert handed to the handler is saved below with the marks that pass it, so a daemon that
       // ends before it is acknowledged leaves it for the next daemon to play.
-      for (const { alert, timer } of alerts) alertHandlers.deliver(alert, timer);
+      for (const { alert, timer, keys } of alerts) alertHandlers.deliver(alert, timer, keys);
       const current = scheduler.marks;
       const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
       // A save that failed is retried at every later run, so a restart never reports as missed
@@ -482,6 +503,30 @@ export async function startDaemon({
   }
 
   /**
+   * The handler is about to play one part of an alert it took, so the sink never plays that part
+   * once that is saved. A failed save gets 500 or 503 and changes nothing, so the handler asks again
+   * before it plays the part.
+   */
+  async function playing(request, response, alertId) {
+    const { ok, input } = await readJson(request, response);
+    if (!ok) return;
+    if (!isId(input?.subscriberId) || typeof input.part !== 'string' || !ALERT_PART.test(input.part)) {
+      return fail(response, 400, 'invalid_input', 'The body must be { "subscriberId": string, "part": "notification" or "sound:<index>" }.');
+    }
+    // Once shutting down the daemon saves no more, so the handler asks the next daemon.
+    if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+    let result;
+    try {
+      result = alertHandlers.playing(alertId, input.subscriberId, input.part);
+    } catch (error) {
+      if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
+      log(`could not save scheduler.json: ${error.message}`);
+      return fail(response, 500, 'storage_failed', 'The daemon could not record the part.');
+    }
+    settleRequest(response, result, { alertId, part: input.part, playing: true });
+  }
+
+  /**
    * The handler hands that alert back unplayed, so the sink plays it once that is saved. One whose
    * body arrives once shutdown has begun gets 503 and stays taken, so nothing plays that shutdown
    * does not wait for, and the handler asks the next daemon.
@@ -565,6 +610,11 @@ export async function startDaemon({
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
       return received(request, response, receivedId);
     }
+    const playingId = idIn(pathname, '/v1/alerts/', '/playing');
+    if (playingId !== null) {
+      if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
+      return playing(request, response, playingId);
+    }
     const releasedId = idIn(pathname, '/v1/alerts/', '/release');
     if (releasedId !== null) {
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
@@ -632,12 +682,9 @@ export async function startDaemon({
       } catch (error) {
         if (!isCode(error, 'ENOENT')) log(`could not remove the socket: ${error.message}`);
       }
-      try {
-        lock.release();
-      } catch (error) {
-        log(`could not remove the lock: ${error.message}`);
-      }
-      // The process may exit once closed resolves, so the sink first finishes what shutdown played.
+      // The process may exit once closed resolves, so the sink first finishes what it is playing, and
+      // journals it while this daemon still holds the lock: a play cut off at the bound is left in
+      // the journal, so the next daemon plays only what had not finished.
       await new Promise((resolve) => {
         const bound = setTimeout(resolve, SINK_DRAIN_MS);
         const drained = () => {
@@ -646,6 +693,11 @@ export async function startDaemon({
         };
         played.then(drained, drained);
       });
+      try {
+        lock.release();
+      } catch (error) {
+        log(`could not remove the lock: ${error.message}`);
+      }
       resolveClosed(code);
     });
     server.closeIdleConnections();
@@ -653,9 +705,10 @@ export async function startDaemon({
   }
 
   heartbeatHandle = clock.setTimeout(heartbeat, heartbeatMs);
-  // Alerts an earlier daemon handed over and that were never settled are played once, and the first
-  // run saves scheduler.json without them; shutdown still waits for the sink to finish them.
-  if (unsettled.length) {
+  // Alerts an earlier daemon handed over and that were never settled, and plays its sink never
+  // finished, are played once, and the first run saves scheduler.json without them, so the journal
+  // can forget them; shutdown still waits for the sink to finish them.
+  if (unsettled.length || plays.length) {
     alertHandlers.replay(unsettled);
     marksDirty = true;
   }

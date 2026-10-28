@@ -216,9 +216,9 @@ test('shutdown resolves closed only once the sink has finished the alerts it pla
   context.daemon.shutdown().then((code) => {
     closedWith = code;
   });
-  await eventually(() => playing.length === 1 && !existsSync(context.daemon.paths.lock));
+  await eventually(() => playing.length === 1 && !existsSync(context.daemon.paths.socket));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.deepEqual([playing, closedWith], [['Egg'], null]);
+  assert.deepEqual([playing, closedWith, existsSync(context.daemon.paths.lock)], [['Egg'], null, true]);
   finishPlaying();
   assert.equal(await within(context.daemon.closed), 0);
 });
@@ -259,17 +259,22 @@ function slowSink() {
   };
 }
 
-/** Shuts the daemon down while its slow sink plays: closed waits until the sink has finished. */
+/**
+ * Shuts the daemon down while its slow sink plays: closed waits until the sink has finished, and the
+ * daemon keeps daemon.lock until then, so no next daemon resumes the play it is finishing.
+ */
 async function assertShutdownWaitsForSink(context) {
   let closedWith = null;
   context.daemon.shutdown().then((code) => {
     closedWith = code;
   });
-  await eventually(() => !existsSync(context.daemon.paths.lock));
+  await eventually(() => !existsSync(context.daemon.paths.socket));
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(closedWith, null);
+  assert.equal(existsSync(context.daemon.paths.lock), true);
   context.sink.finishAll();
   assert.equal(await within(context.daemon.closed), 0);
+  assert.equal(existsSync(context.daemon.paths.lock), false);
 }
 
 test('shutdown waits for a handoff the daemon replayed at startup, though scheduler.json no longer holds it', async (t) => {
@@ -974,7 +979,9 @@ test(`an alert acknowledged before the daemon was killed, whose handler never as
 function filesLeftByKill(t, context) {
   const next = tempDataDir(t);
   mkdirSync(next, { recursive: true });
-  for (const name of ['state.json', 'scheduler.json']) writeFileSync(join(next, name), readFileSync(join(context.dataDir, name)));
+  for (const name of ['state.json', 'scheduler.json', 'plays.json']) {
+    if (existsSync(join(context.dataDir, name))) writeFileSync(join(next, name), readFileSync(join(context.dataDir, name)));
+  }
   return next;
 }
 

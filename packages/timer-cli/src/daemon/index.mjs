@@ -1,9 +1,10 @@
 export { ACK_TIMEOUT_MS, MAX_UNRECEIVED, ORPHANED_ALERT_MS, SETTLED_RETENTION_MS, createAlertHandlers } from './alert-handlers.mjs';
 export { RECORDING_LIMIT, alertFromTransition, createRecordingSink, deliverToSink } from './alerts.mjs';
-export { DEFAULT_DAEMON_ENTRY, DaemonUnavailableError, START_TIMEOUT_MS, createClient, isNotListening, socketRequest } from './client.mjs';
+export { DEFAULT_DAEMON_ENTRY, DaemonUnavailableError, LOCKED_START_EXTRA_MS, START_TIMEOUT_MS, createClient, isNotListening, socketRequest } from './client.mjs';
 export { acquireLock, holderAlive, holdsLock, isReusedPid, pidAlive, processBirth, readLock, releaseLock, removeStaleLock } from './lock.mjs';
 export { DataDirError, checkSocketPath, daemonPaths, ensureDataDir, resolveDataDir } from './paths.mjs';
 export { LATE_MS, REARM_MS, createScheduler, systemClock } from './scheduler.mjs';
-export { DaemonRunningError, HEARTBEAT_MS, IDLE_EXIT_MS, LockLostError, runDaemonCommand, runInForeground, startDaemon } from './server.mjs';
-export { createStateStore, writeFileAtomic } from './store.mjs';
+export { DaemonRunningError, HEARTBEAT_MS, IDLE_EXIT_MS, LockLostError, SINK_DRAIN_MS, runDaemonCommand, runInForeground, startDaemon } from './server.mjs';
+export { ALERT_PART, createStateStore, writeFileAtomic } from './store.mjs';
+export { createPlayJournal, transitionKey } from './play-journal.mjs';
 export { createFakeClock } from './fake-clock.mjs';

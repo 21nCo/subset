@@ -154,6 +154,9 @@ func realDaemonHandsAlertsToOneHandlerAndRefusesALateAcknowledgement() async thr
     #expect(try await client.acknowledgeAlert(alertId, subscriberId: handlerId) == .acknowledged)
     // Until the app says it read that answer, the daemon gives it again; after, it no longer knows the alert.
     #expect(try await client.acknowledgeAlert(alertId, subscriberId: handlerId) == .acknowledged)
+    // The app says so before it plays each part (its sound is off: only the notification); saying so again is harmless.
+    try await client.startPlaying(alertId, part: .notification, subscriberId: handlerId)
+    try await client.startPlaying(alertId, part: .notification, subscriberId: handlerId)
     try await client.confirmAlert(alertId, subscriberId: handlerId)
     await #expect(throws: DaemonError.rejected(status: 404, TimerError(code: "not_found", message: "No alert has that id.", issues: nil))) {
         try await client.acknowledgeAlert(alertId, subscriberId: handlerId)
@@ -164,6 +167,9 @@ func realDaemonHandsAlertsToOneHandlerAndRefusesALateAcknowledgement() async thr
     let second = try await waitFor("the second finish") { await handler.alerts.count == 2 ? await handler.alerts.last : nil }
     try await Task.sleep(nanoseconds: 2_500_000_000)
     #expect(try await client.acknowledgeAlert(try #require(second.alertId), subscriberId: handlerId) == .expired)
+    await #expect(throws: DaemonError.rejected(status: 410, TimerError(code: "alert_expired", message: "The daemon already played that alert.", issues: nil))) {
+        try await client.startPlaying(try #require(second.alertId), part: .notification, subscriberId: handlerId)
+    }
 
     // Handed back after it was taken: the daemon's sink plays it, so a later acknowledgement is refused.
     try await client.perform("start", countdown)

@@ -9,7 +9,7 @@ enum SystemSound: String, Equatable, Sendable {
     case glass = "Glass"
 
     /// The sounds for an alert, in order: Tink for a tick, Pop for a new step, Glass three times for the finish, and
-    /// none for alerts missed while away. A timer whose `sound` is off plays none.
+    /// none for alerts missed while away. A timer whose `sound` is off plays none. `AlertPart.sound(i)` is the i-th.
     static func sequence(for kind: TimerAlert.Kind, soundOn: Bool) -> [SystemSound] {
         guard soundOn else { return [] }
         switch kind {
@@ -21,34 +21,30 @@ enum SystemSound: String, Equatable, Sendable {
     }
 }
 
-/// Plays a sequence of sounds one after another; tests substitute a fake.
+/// Plays one sound and returns once it has finished; tests substitute a fake.
 @MainActor
 protocol SoundPlaying: AnyObject {
-    func play(_ sounds: [SystemSound])
+    func play(_ sound: SystemSound) async
 }
 
-/// Plays sounds with `NSSound`, each sequence in order. Sequences that overlap, such as a tick during the finish, play
-/// side by side.
+/// Plays sounds with `NSSound`. Sounds of alerts that overlap, such as a tick during the finish, play side by side.
 @MainActor
 final class SystemSoundPlayer: NSObject, SoundPlaying, NSSoundDelegate {
-    /// The sequences still playing, by the sound now playing in each.
-    private var playing: [ObjectIdentifier: (sound: NSSound, rest: ArraySlice<SystemSound>)] = [:]
+    /// The sounds still playing, each with what waits for it to finish.
+    private var playing: [ObjectIdentifier: (sound: NSSound, finished: CheckedContinuation<Void, Never>)] = [:]
 
-    func play(_ sounds: [SystemSound]) {
-        start(sounds[...])
-    }
-
-    private func start(_ sounds: ArraySlice<SystemSound>) {
+    func play(_ sound: SystemSound) async {
         // Each play needs its own copy: a named NSSound is shared and plays once at a time.
-        guard let first = sounds.first, let sound = NSSound(named: first.rawValue)?.copy() as? NSSound else { return }
-        sound.delegate = self
-        playing[ObjectIdentifier(sound)] = (sound, sounds.dropFirst())
-        if !sound.play() { finished(ObjectIdentifier(sound)) }
+        guard let copy = NSSound(named: sound.rawValue)?.copy() as? NSSound else { return }
+        copy.delegate = self
+        await withCheckedContinuation { continuation in
+            playing[ObjectIdentifier(copy)] = (copy, continuation)
+            if !copy.play() { finished(ObjectIdentifier(copy)) }
+        }
     }
 
     private func finished(_ id: ObjectIdentifier) {
-        guard let entry = playing.removeValue(forKey: id) else { return }
-        start(entry.rest)
+        playing.removeValue(forKey: id)?.finished.resume()
     }
 
     nonisolated func sound(_ sound: NSSound, didFinishPlaying flag: Bool) {

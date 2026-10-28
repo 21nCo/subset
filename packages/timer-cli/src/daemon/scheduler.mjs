@@ -1,5 +1,6 @@
 import { project, transitionsBetween } from '@subset.dev/timer-core';
 import { alertFromTransition } from './alerts.mjs';
+import { transitionKey } from './play-journal.mjs';
 
 /** A transition handled more than this long after it happened was missed, for example during sleep. */
 export const LATE_MS = 2_000;
@@ -35,13 +36,15 @@ const sameStretch = (mark, stretch) => mark.startedAt === stretch.startedAt && m
  * it jumped over. It arms one timeout for the earliest upcoming transition across running timers
  * (at most `REARM_MS` ahead).
  *
- * Every run calls `onRun(alerts, now)`, with the alerts for the transitions since each mark: those
- * more than `LATE_MS` old collapse into one `missedWhileAway` alert per timer, ahead of the ones on
- * time. `initialMarks` are the marks an earlier daemon persisted, possibly several for one timer;
- * on the first run a stretch with none counts from its start, so what happened while no daemon ran
- * is reported as missed.
+ * Every run calls `onRun(alerts, now)`, with `{ alert, timer, keys }` for the transitions since each
+ * mark: those more than `LATE_MS` old collapse into one `missedWhileAway` alert per timer, ahead of
+ * the ones on time. `keys` are the `transitionKey`s of the transitions an alert stands for. A
+ * transition for which `delivered(key)` is true is left out: an earlier daemon played it before it
+ * could save the mark that passes it. `initialMarks` are the marks an earlier daemon persisted,
+ * possibly several for one timer; on the first run a stretch with none counts from its start, so
+ * what happened while no daemon ran is reported as missed.
  */
-export function createScheduler({ clock = systemClock, getTimers, onRun, initialMarks = null }) {
+export function createScheduler({ clock = systemClock, getTimers, onRun, initialMarks = null, delivered = () => false }) {
   let marks = new Map();
   let persisted = initialMarks ?? [];
   let firstRun = true;
@@ -71,18 +74,18 @@ export function createScheduler({ clock = systemClock, getTimers, onRun, initial
   function collect(timer, now, missed, onTime) {
     const mark = marks.get(timer.definition.id);
     if (!mark) return;
-    const transitions = transitionsBetween(timer, mark.through, now);
-    if (now > mark.through) marks.set(mark.timerId, { ...mark, through: now });
     const { definition } = timer;
+    const transitions = transitionsBetween(timer, mark.through, now).filter((transition) => !delivered(transitionKey(definition.id, transition)));
+    if (now > mark.through) marks.set(mark.timerId, { ...mark, through: now });
     const late = transitions.filter((transition) => now - transition.at > LATE_MS);
     if (late.length) {
       const alert = { timerId: definition.id, kind: 'missedWhileAway', missed: late.length, at: now };
       const { step } = project(timer, now);
       if (step) alert.segment = stepSegment(step);
-      missed.push({ alert, timer: definition });
+      missed.push({ alert, timer: definition, keys: late.map((transition) => transitionKey(definition.id, transition)) });
     }
     for (const transition of transitions) {
-      if (now - transition.at <= LATE_MS) onTime.push({ alert: alertFromTransition(transition, definition), timer: definition });
+      if (now - transition.at <= LATE_MS) onTime.push({ alert: alertFromTransition(transition, definition), timer: definition, keys: [transitionKey(definition.id, transition)] });
     }
   }
 

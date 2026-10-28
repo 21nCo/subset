@@ -12,15 +12,19 @@ import { intervalStep } from '@subset.dev/timer-core';
  * @property {1 | 2 | 3} [secondsLeft] For `tick`.
  * @property {number} [missed] For `missedWhileAway`: how many transitions it stands for.
  *
+ * @typedef {object} AlertProgress What the daemon passes a sink with each alert, from its play journal.
+ * @property {Set<string>} played The parts (`notification`, `sound:<index>`) an earlier play of this
+ *   alert finished, or its handler started: the sink plays the others.
+ * @property {(part: string) => void} done Called by the sink as each part finishes.
+ *
  * @typedef {object} AlertSink Plays or shows alerts. The daemon waits for a sink only at shutdown (at most
  *   5 s, for every play it started), and a sink that throws or rejects is logged and ignored. A sink
- *   honours `timer.sound` itself. Delivery through a sink is at least once: a daemon that ends after
- *   the sink played an alert, but before it could save that, leaves the alert to the next daemon.
- *   Each alert is delivered exactly once while the daemon keeps running; a play that has started
- *   counts as delivered, so a daemon that ends mid-play does not play it again (SET-169: an
- *   idempotent sink).
+ *   honours `timer.sound` itself. The daemon journals each play before it calls the sink, and each
+ *   part the sink reports `done`, so each alert is delivered once across a daemon crash too: the next
+ *   daemon plays an alert the sink finished not at all, and one it was playing only from the parts not
+ *   done. A sink that ignores `progress` has its alert played again in full after a crash mid-play.
  * @property {string} name Shown by `daemon status`.
- * @property {(alert: TimerAlert, timer: import('@subset.dev/timer-core').TimerDefinition) => void | Promise<void>} alert
+ * @property {(alert: TimerAlert, timer: import('@subset.dev/timer-core').TimerDefinition, progress?: AlertProgress) => void | Promise<void>} alert
  */
 
 /** The step fields an alert carries. */
@@ -70,7 +74,7 @@ export function createRecordingSink({ limit = RECORDING_LIMIT } = {}) {
  * that answers with a promise, one that fulfils (never rejects) when the sink is done, even when
  * `log` throws while reporting the sink's failure.
  */
-export function deliverToSink(sink, alert, timer, log) {
+export function deliverToSink(sink, alert, timer, log, progress = { played: new Set(), done: () => {} }) {
   const report = (error) => {
     try {
       log(`alert sink ${sink.name} failed: ${error?.message ?? error}`);
@@ -79,7 +83,7 @@ export function deliverToSink(sink, alert, timer, log) {
     }
   };
   try {
-    const pending = sink.alert(alert, timer);
+    const pending = sink.alert(alert, timer, progress);
     if (pending && typeof pending.then === 'function') return pending.then(undefined, report);
   } catch (error) {
     report(error);

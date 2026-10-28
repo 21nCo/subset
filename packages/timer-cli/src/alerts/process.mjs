@@ -33,9 +33,29 @@ export function runProcess(spawn, command, args) {
   });
 }
 
-/** Plays `sounds` one after another, each with `play(path)`. */
-export async function playInOrder(play, sounds) {
-  for (const sound of sounds) await play(sound);
+/**
+ * Plays an alert's parts: `sounds` one after another with `playSound(sound)`, as `sound:<index>`,
+ * and beside them `notify()`, as `notification`, when given. Parts in `progress.played` are skipped,
+ * and `progress.done(part)` is called as each one ends, so a daemon that ends mid-play leaves the
+ * next one only what had not finished. A part that fails stops the sounds after it; once every part
+ * has ended, the first failure is thrown.
+ */
+export async function playParts({ sounds = [], playSound, notify = null }, { played = new Set(), done = () => {} } = {}) {
+  const tasks = [];
+  const remaining = sounds.map((sound, index) => ({ sound, part: `sound:${index}` })).filter(({ part }) => !played.has(part));
+  if (remaining.length) {
+    tasks.push(
+      (async () => {
+        for (const { sound, part } of remaining) {
+          await playSound(sound);
+          done(part);
+        }
+      })()
+    );
+  }
+  if (notify && !played.has('notification')) tasks.push(notify().then(() => done('notification')));
+  const failed = (await Promise.allSettled(tasks)).find((outcome) => outcome.status === 'rejected');
+  if (failed) throw failed.reason;
 }
 
 export const defaultSpawn = nodeSpawn;

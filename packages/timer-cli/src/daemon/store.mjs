@@ -5,13 +5,24 @@ import { emptyStore, parseStore } from '@subset.dev/timer-core';
 
 const TEMP_SUFFIX = /\.\d+\.[0-9a-f]{8}\.tmp$/;
 const MARKS_VERSION = 1;
+const PLAYS_VERSION = 1;
+/** The parts of an alert a sink or a handler plays (alerts/process.mjs `playParts`). */
+export const ALERT_PART = /^(notification|sound:[0-9]{1,2})$/;
 
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.startedAt) && isTime(mark.base) && isTime(mark.through);
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isHandoff = (handoff) =>
   typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
-const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
+const isParts = (value) => Array.isArray(value) && value.every((part) => typeof part === 'string' && ALERT_PART.test(part));
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string' && (entry.played === undefined || isParts(entry.played));
+const isPlay = (entry) =>
+  isHandoff(entry) &&
+  (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&
+  Array.isArray(entry.keys) &&
+  entry.keys.every((key) => typeof key === 'string') &&
+  isParts(entry.played) &&
+  typeof entry.finished === 'boolean';
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
@@ -77,10 +88,11 @@ function syncDirectory(directory, fs) {
 
 /**
  * The daemon's persistent state in its data directory: `state.json` (the SET-74 store, schema
- * version 1) and `scheduler.json` (for each running stretch, the time through which its alerts were
+ * version 1), `scheduler.json` (for each running stretch, the time through which its alerts were
  * handled, the alerts handed to the alert handler that it has not yet acknowledged, and those it
- * acknowledged whose answer it may not have received). Only the daemon holding `daemon.lock` creates
- * one.
+ * acknowledged whose answer it may not have received, with the parts it started playing) and
+ * `plays.json` (the play journal, see `createPlayJournal`). Only the daemon holding `daemon.lock`
+ * creates one.
  */
 export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Date.now } = {}) {
   /** Removes temp files a crash left between a write and its rename. */
@@ -88,7 +100,7 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     for (const name of fs.readdirSync(paths.dataDir)) {
       if (!TEMP_SUFFIX.test(name)) continue;
       const target = name.replace(TEMP_SUFFIX, '');
-      if (target !== basename(paths.state) && target !== basename(paths.scheduler)) continue;
+      if (![paths.state, paths.scheduler, paths.plays].some((path) => target === basename(path))) continue;
       try {
         fs.unlinkSync(join(paths.dataDir, name));
       } catch (error) {
@@ -175,5 +187,23 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
-  return { load, save, loadMarks, loadAlerts, saveMarks };
+  /** The play journal's entries (see `createPlayJournal`); none when the file is missing or unreadable. */
+  function loadPlays() {
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(paths.plays, 'utf8'));
+    } catch (error) {
+      if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
+      if (error instanceof SyntaxError) log(`plays.json could not be read (${error.message}); no play is resumed.`);
+      return [];
+    }
+    if (value?.version !== PLAYS_VERSION || !Array.isArray(value.plays)) return [];
+    return value.plays.filter(isPlay);
+  }
+
+  function savePlays(plays) {
+    writeFileAtomic(paths.plays, `${JSON.stringify({ version: PLAYS_VERSION, plays })}\n`, { fs, log });
+  }
+
+  return { load, save, loadMarks, loadAlerts, saveMarks, loadPlays, savePlays };
 }
