@@ -96,9 +96,9 @@ try {
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `fetch` | the global `fetch` | Any function with the web `fetch` signature |
-| `resolveHost` | none | `(hostname) => addresses[]`, sync or async; every address is checked before the hop is requested |
-| `timeoutMs` | 5,000 | One limit for the whole operation: every hop, resolution and the body |
-| `maxBytes` | 2,000,000 | Most body bytes read |
+| `resolveHost` | none | `(hostname) => addresses[]`, sync or async; every address is checked before the hop is requested. A check before the request only, not a DNS rebinding defense (see below) |
+| `timeoutMs` | 5,000 | One limit for the whole operation: every hop, resolution and the body. At most 2,147,483,647 (`RangeError` above) |
+| `maxBytes` | 2,000,000 | Most body bytes read. `fetchLinkDetails` stops once the body fills it, without waiting for more |
 | `maxRedirects` | 5 | Most redirects followed |
 | `userAgent` | `DEFAULT_USER_AGENT`, `SubsetLinks/0.1.0 (+https://subset.dev)` | Sent as `User-Agent` |
 | `allowPorts` | none | Ports allowed besides 80 and 443 |
@@ -115,10 +115,11 @@ Security rules, a closed set checked on the first URL and again on every redirec
 Decisions and limits:
 
 - Without `resolveHost` (Workers, browser extensions) a public name that resolves to a private address is not detected. This is a non-goal: a Worker's egress cannot reach its host's private network, and an extension fetches what its user's browser can already open.
-- `resolveHost` checks the addresses before the request, and `fetch` resolves the name again. A Node host that must also stop DNS rebinding between the two passes a `fetch` whose connector checks the address it connects to, for example an undici `Agent` with a `connect.lookup` that applies `isBlockedAddress`.
+- `resolveHost` checks the addresses before the request, and `fetch` resolves the name again, so it does not stop DNS rebinding between the two. This portable package uses no Node networking, so it cannot pin the connection itself. A Node host that must stop rebinding passes a `fetch` whose connector checks the address it connects to on every hop, for example an undici `Agent` with a `connect.lookup` that rejects any address for which `isBlockedAddress` is true.
+- When the timeout wins over a `fetch` that ignores the abort signal, a response that arrives later is cancelled unread.
 - A browser's `fetch` returns an opaque response for `redirect: 'manual'`, so the next hop cannot be checked: that is `network`. Workers and Node expose the `Location`.
 
-Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `application/xhtml+xml`, or a missing or malformed `Content-Type` (read as HTML, as `parseLinkDetails` does) is read up to `maxBytes` and parsed with `parseLinkDetails`. The stream is cancelled at the cut, and the charset comes from a byte order mark, the header, the `<meta>` tag, then UTF-8. Any other type gives `{ version, url, title, icons, contentType }` without reading the body: `title` is the URL's last path segment, percent-decoded, omitted when empty (`/feed/`), and `icons` is the `/favicon.ico` fallback. `url` is always the final URL after redirects.
+Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `application/xhtml+xml`, or a missing or malformed `Content-Type` (read as HTML, as `parseLinkDetails` does) is read up to `maxBytes` and parsed with `parseLinkDetails`. Reading stops as soon as the body fills `maxBytes`, without waiting for another chunk or the end of the stream, so a body of exactly `maxBytes` counts as cut: no further read can tell it from a larger one. The stream is cancelled at the cut, and the charset comes from a byte order mark, the header, the `<meta>` tag, then UTF-8. Any other type gives `{ version, url, title, icons, contentType }` without reading the body: `title` is the URL's last path segment, percent-decoded, omitted when empty (`/feed/`), and `icons` is the `/favicon.ico` fallback. `url` is always the final URL after redirects.
 
 | Code | When |
 | --- | --- |
@@ -128,7 +129,7 @@ Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `appl
 | `timeout` | `timeoutMs` passed, whether or not `fetch` or `resolveHost` honours the abort signal |
 | `too_many_redirects` | More than `maxRedirects` redirects |
 | `http_status` | The final response is not 2xx, including a 3xx without `Location`; `status` holds it |
-| `too_large` | `fetchLinkDetails`: the body passed `maxBytes` and its first `maxBytes` gave no details beyond the URL, type and fallback icon. `fetchResource`: the body, or its declared `Content-Length`, passed `maxBytes` |
+| `too_large` | `fetchLinkDetails`: the body filled `maxBytes` and those bytes gave no details beyond the URL, type and fallback icon. `fetchResource`: the body, or its declared `Content-Length`, passed `maxBytes` |
 | `network` | `fetch`, the body stream or `resolveHost` failed, `resolveHost` returned no address, or the runtime hid a redirect |
 | `unsupported_type` | `fetchResource` only: the response type matches no `accept` range (a missing type counts as `application/octet-stream`) |
 
@@ -142,7 +143,7 @@ Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `appl
 | Portability | A Node built-in or global slips in | `tsconfig.json` has no Node types; `test/workerd.test.mjs` bundles the package, fails on any Node built-in import and runs it in workerd, comparing its output with Node's |
 | Stored records | Corrupt or foreign data accepted as `LinkDetailsV1` | `test/validator.test.mjs` |
 | Fetching untrusted URLs | A request reaches a private address, directly, by redirect or by resolution | One vector per blocked hostname pattern, IPv4 range and IPv6 form, with public neighbours outside each prefix; public-to-private redirects; private `resolveHost` results on the first hop and a redirect hop. The fake `fetch` serves only listed URLs and every case asserts the exact requests made (`test/fetch-cases.mjs`) |
-| Fetch limits | The host hangs or reads unbounded data | Timeouts with a `fetch` that ignores the signal, one that honours it, a stalled `resolveHost`, a stalled body and a slow redirect chain; an endless body cut at `maxBytes` and cancelled; the redirect limit at 5, 6 and 0 |
+| Fetch limits | The host hangs or reads unbounded data | Timeouts with a `fetch` that ignores the signal, one that honours it, a stalled `resolveHost`, a stalled body and a slow redirect chain; an endless body cut at `maxBytes` and cancelled; a body filling `maxBytes` parsed without another read when the next read stalls; a response arriving after the timeout cancelled; `timeoutMs` above 2^31 - 1 refused; the redirect limit at 5, 6 and 0 |
 | Fetch results | Wrong type handling, charset or error code | Each content type, header and meta charset and their order, every error code, the default and custom user agent, credential removal and `fetchResource` type and size checks |
 
 Run `npm test --workspace=@subset.dev/links`; the root `npm run check` runs it too. The fetcher cases run under Node (`test/fetch.test.mjs`) and unchanged inside workerd (`test/workerd.test.mjs`). Live sites and live fetching are not tested here: they are deferred to SET-190. Railway Postgres, Cloudflare Preview, connected provider sandboxes and Aside Browser have no runtime boundary in this package; the workerd test runs the Workers runtime locally and is not a Cloudflare deployment.

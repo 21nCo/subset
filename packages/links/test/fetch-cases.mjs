@@ -310,10 +310,47 @@ export const cases = [
       // The same markup within the limit is a valid, empty record, not too_large.
       const small = await lib.fetchLinkDetails('https://example.com/', { fetch: fakeFetch({ 'https://example.com/': html('<div>filler</div>'.repeat(10)) }).fetch, maxBytes: 4096 });
       equal(small, { version: 1, url: 'https://example.com/', icons: [{ url: 'https://example.com/favicon.ico', rel: 'icon' }], contentType: 'text/html' }, 'small record');
-      // Exactly maxBytes is not a cut.
+      // A body filling maxBytes counts as cut: no further read can tell it from a larger one.
       const exact = '<div>filler</div>'.repeat(4);
-      const whole = await lib.fetchLinkDetails('https://example.com/', { fetch: fakeFetch({ 'https://example.com/': html(exact) }).fetch, maxBytes: encoder.encode(exact).length });
-      equal(whole.title, undefined, 'exact-size record');
+      await rejects(lib, lib.fetchLinkDetails('https://example.com/', { fetch: fakeFetch({ 'https://example.com/': html(exact) }).fetch, maxBytes: encoder.encode(exact).length }), 'too_large', 'exact-size blank');
+    }
+  },
+  {
+    name: 'a body filling maxBytes is parsed without waiting for another read',
+    async run(lib) {
+      const prefix = '<title>Ready</title>';
+      const stalled = trackedStream((pull) => (pull === 0 ? prefix : never()));
+      const fake = fakeFetch({ 'https://example.com/': () => new Response(stalled.stream, { headers: { 'content-type': 'text/html' } }) });
+      const details = await lib.fetchLinkDetails('https://example.com/', { fetch: fake.fetch, maxBytes: encoder.encode(prefix).length, timeoutMs: 1000 });
+      equal(details.title, 'Ready', 'title from a body filling maxBytes');
+      equal([stalled.pulls, stalled.cancelled], [1, true], 'one read, then cancelled');
+    }
+  },
+  {
+    name: 'a response arriving after the timeout is cancelled unread',
+    async run(lib) {
+      for (const [label, operation] of [
+        ['fetchLinkDetails', lib.fetchLinkDetails],
+        ['fetchResource', lib.fetchResource]
+      ]) {
+        const body = trackedStream(() => '<title>Late</title>');
+        let deliver;
+        // A fetch that ignores the abort signal and answers only once the test delivers its response.
+        const late = fakeFetch({
+          'https://example.com/': () => new Promise((resolve) => (deliver = () => resolve(new Response(body.stream, { headers: { 'content-type': 'text/html' } }))))
+        });
+        let forced = false;
+        const fallback = setTimeout(() => {
+          forced = true;
+          deliver();
+        }, 2000);
+        await rejects(lib, operation('https://example.com/', { fetch: late.fetch, timeoutMs: 15 }), 'timeout', label);
+        clearTimeout(fallback);
+        if (forced) fail(`${label}: the timeout waited for the late response`);
+        deliver();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        equal([body.pulls, body.cancelled], [0, true], `${label}: late body cancelled unread`);
+      }
     }
   },
   {
@@ -452,6 +489,8 @@ export const cases = [
       for (const [label, options, type] of [
         ['timeoutMs 0', { timeoutMs: 0 }, RangeError],
         ['timeoutMs NaN', { timeoutMs: Number.NaN }, RangeError],
+        // setTimeout would fire at once for a longer delay.
+        ['timeoutMs 2**31', { timeoutMs: 2 ** 31 }, RangeError],
         ['maxBytes 0', { maxBytes: 0 }, RangeError],
         ['maxRedirects -1', { maxRedirects: -1 }, RangeError],
         ['allowPorts 70000', { allowPorts: [70000] }, RangeError],
@@ -476,6 +515,8 @@ export const cases = [
         if (!(error instanceof TypeError)) fail(`accept ${JSON.stringify(accept)}: expected TypeError, got ${error}`);
       }
       equal(fake.urls(), [], 'requests');
+      const longest = fakeFetch({ 'https://example.com/': html('<title>Patient</title>') });
+      equal((await lib.fetchLinkDetails('https://example.com/', { fetch: longest.fetch, timeoutMs: 2 ** 31 - 1 })).title, 'Patient', 'timeoutMs 2**31 - 1');
     }
   }
 ];

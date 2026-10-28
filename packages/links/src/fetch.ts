@@ -40,17 +40,25 @@ export class LinkFetchError extends Error {
 
 /** The subset of the web `fetch` the fetcher calls. */
 export type FetchFunction = (input: string, init: RequestInit) => Promise<Response>;
-/** Resolves a hostname to its IP addresses, for example with Node's `dns.lookup(hostname, { all: true })`. */
+/**
+ * Resolves a hostname to its IP addresses, for example with Node's `dns.lookup(hostname, { all: true })`.
+ * This is a check before each request only: `fetch` resolves the name again when it connects, so it does not
+ * stop DNS rebinding. A Node host that needs that pins the connection too, for example with an undici `Agent`
+ * whose `connect.lookup` rejects any address for which `isBlockedAddress` is true, on every redirect hop.
+ */
 export type ResolveHost = (hostname: string) => readonly string[] | Promise<readonly string[]>;
 
 export interface SafeFetchOptions {
   /** Defaults to the global `fetch`. */
   fetch?: FetchFunction;
-  /** When given, every address it returns for a hostname is checked before that hostname is fetched. */
+  /**
+   * When given, every address it returns for a hostname is checked before that hostname is fetched. A check
+   * before the request only, not a defense against DNS rebinding: see `ResolveHost`.
+   */
   resolveHost?: ResolveHost;
-  /** Limit for the whole operation, redirects, resolution and body included. Defaults to 5,000 ms. */
+  /** Limit for the whole operation, redirects, resolution and body included. Defaults to 5,000 ms; at most 2,147,483,647. */
   timeoutMs?: number;
-  /** Most body bytes read. */
+  /** Most body bytes read. `fetchLinkDetails` stops reading once the body fills it and counts that as a cut. */
   maxBytes?: number;
   /** Most redirects followed. Defaults to 5. */
   maxRedirects?: number;
@@ -77,6 +85,7 @@ export interface FetchedResource {
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_MAX_BYTES = 2_000_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const HTML_ACCEPT = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8';
@@ -115,10 +124,11 @@ export async function fetchLinkDetails(input: string | URL, options: FetchLinkDe
       discard(response);
       return fileDetails(url, contentType.essence);
     }
-    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline);
+    // Stops at maxBytes without waiting for more, so a body that fills the limit counts as cut.
+    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline, true);
     const details = parseLinkDetails(bytes, { url, contentType: header });
     if (truncated && !hasDocumentDetails(details, url)) {
-      throw new LinkFetchError('too_large', `The body exceeds ${settings.maxBytes} bytes and its start has no link details`, { url: url.href });
+      throw new LinkFetchError('too_large', `The body reaches ${settings.maxBytes} bytes and its start has no link details`, { url: url.href });
     }
     return details;
   } finally {
@@ -148,7 +158,7 @@ export async function fetchResource(input: string | URL, options: FetchResourceO
       discard(response);
       throw tooLarge();
     }
-    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline);
+    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline, false);
     if (truncated) throw tooLarge();
     return { url: url.href, contentType, bytes };
   } finally {
@@ -162,17 +172,19 @@ async function open(input: string | URL, settings: Settings, accept: string, dea
   for (let redirects = 0; ; redirects++) {
     await check(url, settings, deadline);
     let response: Response;
+    let pending: Promise<Response> | undefined;
     try {
-      response = await deadline.race(
-        settings.fetch(url.href, {
-          method: 'GET',
-          headers: { accept, 'user-agent': settings.userAgent },
-          redirect: 'manual',
-          credentials: 'omit',
-          signal: deadline.signal
-        })
-      );
+      pending = settings.fetch(url.href, {
+        method: 'GET',
+        headers: { accept, 'user-agent': settings.userAgent },
+        redirect: 'manual',
+        credentials: 'omit',
+        signal: deadline.signal
+      });
+      response = await deadline.race(pending);
     } catch (error) {
+      // When the deadline wins, a response that still arrives is released rather than left open.
+      Promise.resolve(pending).then((late) => late && discard(late), () => {});
       throw failure(error, deadline, url);
     }
     // A browser's fetch hides a manual redirect's Location, so the next hop cannot be checked.
@@ -239,8 +251,18 @@ async function check(url: URL, settings: Settings, deadline: Deadline): Promise<
   }
 }
 
-/** Reads at most `maxBytes` of the body, then cancels the stream. */
-async function readBody(response: Response, maxBytes: number, url: URL, deadline: Deadline): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+/**
+ * Reads at most `maxBytes` of the body, then cancels the stream. With `stopAtLimit`, reading stops as soon as
+ * the body fills `maxBytes` and that counts as truncated; without it, one more read tells a body of exactly
+ * `maxBytes` from a larger one.
+ */
+async function readBody(
+  response: Response,
+  maxBytes: number,
+  url: URL,
+  deadline: Deadline,
+  stopAtLimit: boolean
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   let truncated = false;
@@ -261,6 +283,10 @@ async function readBody(response: Response, maxBytes: number, url: URL, deadline
       }
       chunks.push(next.value);
       total += next.value.byteLength;
+      if (stopAtLimit && total === maxBytes) {
+        truncated = true;
+        break;
+      }
     }
   } catch (error) {
     throw failure(error, deadline, url);
@@ -365,7 +391,10 @@ function settle(options: SafeFetchOptions): Settings {
   if (typeof fetchFunction !== 'function') throw new TypeError('options.fetch must be a function');
   if (options.resolveHost !== undefined && typeof options.resolveHost !== 'function') throw new TypeError('options.resolveHost must be a function');
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('options.timeoutMs must be a positive number');
+  // setTimeout fires at once for a delay above 2^31 - 1 ms.
+  if (typeof timeoutMs !== 'number' || !(timeoutMs > 0 && timeoutMs <= MAX_TIMEOUT_MS)) {
+    throw new RangeError(`options.timeoutMs must be a positive number up to ${MAX_TIMEOUT_MS}`);
+  }
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('options.maxBytes must be a positive integer');
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
