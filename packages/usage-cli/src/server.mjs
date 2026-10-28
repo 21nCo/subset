@@ -360,13 +360,14 @@ const publicErrors = new Set([
   'Could not restore the CLI status line for this account. Fix its settings.json, then remove the account again.',
 ]);
 
-const usage = `Usage: subset-usage [serve|status|collect] [options]
+const usage = `Usage: subset-usage [serve|status|mcp|collect] [options]
 
   serve                 Open the local usage dashboard (default)
     --port <number>     Port on 127.0.0.1 (default 4174, or the next free one)
     --no-open           Do not open a browser
     --web-dir <path>    Serve the dashboard from another build (development)
   status                Print current usage as JSON
+  mcp                   Run a read-only MCP server on stdin and stdout until stdin closes
   collect --account <id>
                         Save a quota snapshot from a CLI status line (used by installed collectors)
   --help, --version
@@ -375,14 +376,25 @@ const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const option = (name) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
 const command = args[0] && !args[0].startsWith('-') ? args[0] : 'serve';
+const packageVersion = async () => JSON.parse(await readFile(resolve(packageRoot, 'package.json'), 'utf8').catch(() => '{}')).version ?? 'unknown';
 if (flag('--help') || flag('-h')) {
   process.stdout.write(usage);
 } else if (flag('--version') || flag('-v')) {
-  const manifest = JSON.parse(await readFile(resolve(packageRoot, 'package.json'), 'utf8').catch(() => '{}'));
-  process.stdout.write(`${manifest.version ?? 'unknown'}\n`);
+  process.stdout.write(`${await packageVersion()}\n`);
 } else if (command === 'status') {
   try { process.stdout.write(`${JSON.stringify(await status({ persist: false }))}\n`); }
   catch { process.stderr.write('Could not read usage configuration.\n'); process.exitCode = 1; }
+} else if (command === 'mcp') {
+  if (args.length > 1) { process.stderr.write(usage); process.exit(2); }
+  // Loaded only here, so the other commands (collect runs on every status-line update) skip the MCP code.
+  const { serveStdio } = await import('./mcp.mjs');
+  // Reads as `status` does, so it writes nothing; history is read as `/api/history` returns it.
+  const providers = await accounts.profiles().then((profiles) => profiles.map((profile) => profile.provider), () => null);
+  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false }), readHistory: loadHistory, providers });
+  // Provider reads still in flight would keep the process alive after the host closed stdin; nothing
+  // here waits to be written, so exit once stdout has drained.
+  await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));
+  process.exit(0);
 } else if (command === 'collect') {
   const id = args.length === 3 && args[1] === '--account' ? args[2] : null;
   const chunks = [];

@@ -26,8 +26,27 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 | --- | --- |
 | `serve` (default) | Starts the dashboard on `127.0.0.1` (port 4174, or the next free port) and opens it. `--port <n>` requires that port; `--no-open` skips the browser. Ctrl-C stops it. |
 | `status` | Prints the normalized usage status (`@subset.dev/usage-core` contract, schema version 1) and exits. It writes nothing: a signed-in default Claude account is shown without being saved, and no history is recorded. |
+| `mcp` | Runs a read-only MCP server on stdin and stdout for an MCP host, until the host closes stdin. See [MCP server](#mcp-server). |
 | `collect --account <id>` | Saves a quota snapshot from a Claude Code or Antigravity status line. Installed collectors call it through a shim; you rarely run it yourself. |
 | `--help`, `--version` | |
+
+## MCP server
+
+`subset-usage mcp` is a local MCP server over stdio. It gives any MCP host the same answer as `status`, without the dashboard. Add it to a host as a stdio server whose command is `subset-usage` with the argument `mcp`. The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-usage` with the package version. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. It exits 0 when the host closes stdin.
+
+| Tool | Input | Result |
+| --- | --- | --- |
+| `usage_status` | `provider` (optional): one of the providers in the usage contract | The usage status (schema version 1) as `structuredContent`, and the plain-text summary `usageText` as text. With `provider`, only that provider's accounts: those read through it, harness logins for its subscription, and cards it is also signed in to. |
+| `usage_history` | `hours` (optional, 1–168, default 48), `accountId` (optional, an id from `usage_status`) | The history points the dashboard stored in that range, as `/api/history` returns them (observation time in epoch milliseconds and used percent per account and window), with the range as `from` and `to`, and a short text summary per window. |
+
+- **Read-only:** both tools have `readOnlyHint: true`. Neither writes anything: `usage_status` reads as `status` does (the signed-in default Claude account is shown without being saved, a Claude sign-in change is tracked in memory only, and no history is recorded), and `usage_history` only reads the history file. The server never changes the **Use local sign-ins** setting; a read uses whatever the user chose on the dashboard.
+- **Open world:** `usage_status` has `openWorldHint: true`, because with local sign-ins on it calls the usage endpoints of the tools signed in on this computer. `usage_history` calls nothing and has `openWorldHint: false`.
+- **Least data:** results pass through `agentUsageResult`, which removes the host-internal `workspaceId` and `retryAfterMs`. A sign-in email stays in `structuredContent`, as the contract allows, and out of the text.
+- **Descriptions** say the data is local, list the providers configured when the server started, and say how to read stale (observed more than 5 minutes ago), snapshot, estimated and unavailable values.
+- **Errors:** input that does not match a tool's schema returns `isError` with code `invalid_input` and the offending fields. A configuration or history file that cannot be read returns `isError` with code `usage_unavailable` and a fixed message; the detail goes to stderr. A provider's failure is not a tool error: it appears in that account's `errors[]`, as in `status`.
+- History exists only for the times the dashboard was open, because the dashboard records it as it reads usage.
+
+The MCP server does not provide `ui://` view resources, write tools, or an HTTP transport. Behavior in a specific MCP host has not been verified yet.
 
 ## Data and permissions
 
@@ -39,7 +58,7 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 
 ## Development
 
-From the repository root, `npm run build` builds `@subset.dev/usage-core`, the `apps/usage` view, and this package: `dist/cli.mjs` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `npm test --workspace=@subset.dev/usage` runs the CLI tests. `npm run serve --workspace=@subset.dev/usage` runs the source without bundling.
+From the repository root, `npm run build` builds `@subset.dev/usage-core`, the `apps/usage` view, and this package: `dist/` (bundled with rolldown, no runtime dependencies) and `web/` (a copy of `apps/usage/dist`). `dist/cli.mjs` loads `dist/mcp-server.mjs`, which holds the MCP server and `@mcpfn/core`, only for `mcp`; code the two share is in `dist/common.mjs`. The build writes the name, version, licence and licence text of every bundled package to `dist/THIRD_PARTY_NOTICES.md`, which the package ships. `npm test --workspace=@subset.dev/usage` runs the CLI tests; `test/mcp.test.mjs` covers the MCP server with `@mcpfn/testing`'s in-memory client and with `subset-usage mcp` as a child process against a temp data directory. `npm run serve --workspace=@subset.dev/usage` runs the source without bundling.
 
 ## Release
 
