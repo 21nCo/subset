@@ -58,20 +58,20 @@ test('tools/list returns the two read-only tools with their schemas, annotations
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.equal(tool.inputSchema.required, undefined, 'every input is optional');
     assert.deepEqual(validateMcpFnSchemaPortability(tool.inputSchema, tool.name), [], tool.name);
-    assert.equal(tool.annotations.readOnlyHint, true, tool.name);
-    assert.match(tool.description, /local/, tool.name);
+    // Both only read, and both report values that came from provider usage endpoints.
+    assert.deepEqual(tool.annotations, { readOnlyHint: true, openWorldHint: true }, tool.name);
+    assert.match(tool.description, /The data is local/, tool.name);
+    // Each description lists the configured providers once each, and says how to read stale and unavailable values.
+    assert.match(tool.description, /Providers configured when this server started: ChatGPT \(codex-chatgpt\), Claude \(claude-code\), Hermes \(hermes\), Amp \(amp\)\./, tool.name);
+    assert.match(tool.description, /more than 5 minutes|older than 5 minutes/, tool.name);
+    assert.match(tool.description, /unavailable[^.]*not zero/, tool.name);
     assert.ok(tool.title, tool.name);
   }
   assert.deepEqual(byName.usage_status.inputSchema.properties.provider.enum, [...USAGE_PROVIDERS]);
   assert.deepEqual(Object.keys(byName.usage_status.inputSchema.properties), ['provider']);
-  // A status read may call provider usage endpoints when local sign-ins are on; the history read calls none.
-  assert.equal(byName.usage_status.annotations.openWorldHint, true);
-  assert.equal(byName.usage_history.annotations.openWorldHint, false);
   const { hours, accountId } = byName.usage_history.inputSchema.properties;
   assert.deepEqual([hours.type, hours.minimum, hours.maximum], ['integer', 1, 168]);
   assert.equal(accountId.pattern, '^[a-zA-Z0-9_-]{1,64}$');
-  // The status description lists the configured providers once each, and says how to read stale and unavailable values.
-  assert.match(byName.usage_status.description, /Providers configured when this server started: ChatGPT \(codex-chatgpt\), Claude \(claude-code\), Hermes \(hermes\), Amp \(amp\)\./);
   assert.match(byName.usage_status.description, /older than 5 minutes is stale/);
   assert.match(byName.usage_status.description, /null percentage or reset time is unavailable, not zero/);
   assert.match(byName.usage_history.description, /only while it is open/);
@@ -130,8 +130,10 @@ test('invalid input is an invalid_input tool error; a failed configuration read 
 
   const failing = await session(t, { readStatus: async () => { throw new Error('Could not read usage profiles configuration.'); }, readHistory: async () => { throw new Error('EACCES /private/path'); } });
   const error = assertError(await failing.call('usage_status'), 'usage_unavailable');
-  assert.doesNotMatch(error.message, /private/);
-  assertError(await failing.call('usage_history'), 'usage_unavailable');
+  assert.match(error.message, /^Could not read the usage configuration\./);
+  const historyError = assertError(await failing.call('usage_history'), 'usage_unavailable');
+  assert.match(historyError.message, /^Could not read the stored usage history\./);
+  assert.doesNotMatch(historyError.message, /private/);
   assert.equal(failing.logs.length, 2);
   assert.equal(logs.length, 0);
 });
@@ -286,15 +288,121 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   const invalid = (await mcp.request('tools/call', { name: 'usage_history', arguments: { hours: 500 } })).result;
   assert.deepEqual([invalid.isError, invalid.structuredContent.error.code], [true, 'invalid_input']);
 
+  // Calls sent right before stdin closes are still answered.
+  const lastStatus = mcp.request('tools/call', { name: 'usage_status', arguments: {} });
+  const lastHistory = mcp.request('tools/call', { name: 'usage_history', arguments: {} });
   mcp.child.stdin.end();
   const [code, signal] = await mcp.exited;
   assert.deepEqual({ code, signal }, { code: 0, signal: null });
+  assert.ok(isUsageStatus((await lastStatus).result.structuredContent));
+  assert.equal((await lastHistory).result.structuredContent.series.claude_work[key].length, 2);
   // stdout held only complete JSON-RPC replies; the log line went to stderr.
   assert.equal(mcp.rest(), '');
-  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]), [1, 2, 3, 4, 5, 6].map((id) => ['2.0', id, true]));
+  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]).sort((a, b) => a[1] - b[1]), [1, 2, 3, 4, 5, 6, 7, 8].map((id) => ['2.0', id, true]));
   assert.match(mcp.stderr(), new RegExp(`^subset-usage mcp: ${manifest.version.replaceAll('.', '\\.')} serving on stdio$`, 'm'));
   // No file or directory was added, removed or modified: no profile, identity, preference or history write.
   assert.deepEqual(await tree(root), before);
+});
+
+/**
+ * A data directory with one Claude account, `claude_work`, whose sign-in email the `claude` shim
+ * takes from the config directory's name (`a@example.com` in `.../a`). The auth answer is cached
+ * per directory for a minute, so a test signs the account in as someone else by pointing it at
+ * another directory, which is the same sign-in change to the identity check.
+ */
+async function claudeFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-identity-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [bin, config, data] = ['bin', 'config', 'data'].map((name) => join(root, name));
+  for (const directory of [bin, config, data, join(root, 'a'), join(root, 'b'), join(root, 'default')]) await mkdir(directory);
+  await writeFile(join(bin, 'claude'), `#!/bin/sh
+printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"%s@example.com"}\n' "$(basename "$CLAUDE_CONFIG_DIR")"
+`, { mode: 0o700 });
+  const profilesFile = join(config, 'profiles.json');
+  const signIn = (name) => writeFile(profilesFile, JSON.stringify([
+    { id: 'claude_work', label: 'Work', provider: 'claude-code', managed: false, snapshotFile: join(data, 'usage-snapshots', 'claude_work.json'), claudeConfigDir: join(root, name) },
+  ]));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'default') };
+  const collect = (name, usedPercentage) => {
+    const result = spawnSync(process.execPath, ['src/server.mjs', 'collect', '--account', 'claude_work'], {
+      cwd: hostDirectory, env: { ...env, CLAUDE_CONFIG_DIR: join(root, name) }, encoding: 'utf8', timeout: 10_000,
+      input: JSON.stringify({ rate_limits: { five_hour: { used_percentage: usedPercentage, resets_at: 1900000000 } } }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const start = async () => {
+    const mcp = startMcp(env);
+    t.after(() => mcp.child.kill());
+    await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
+    mcp.send({ method: 'notifications/initialized' });
+    const call = async (name) => (await mcp.request('tools/call', { name, arguments: name === 'usage_status' ? { provider: 'claude-code' } : {} })).result;
+    const work = async () => {
+      const result = await call('usage_status');
+      assert.ok(isUsageStatus(result.structuredContent));
+      const account = result.structuredContent.accounts.find((item) => item.id === 'claude_work');
+      return { email: account.email, state: account.state, remaining: account.windows.map((entry) => entry.remainingPercent), errors: account.errors.map((error) => error.code) };
+    };
+    const stop = async () => {
+      mcp.child.stdin.end();
+      const [code] = await mcp.exited;
+      assert.equal(code, 0, mcp.stderr());
+    };
+    return { call, work, stop, stderr: mcp.stderr };
+  };
+  return { root, data, profilesFile, signIn, collect, start };
+}
+
+const hidden = (email) => ({ email, state: 'unavailable', remaining: [], errors: ['claude_identity_changed'] });
+const shown = (email, remaining) => ({ email, state: 'ok', remaining: [remaining], errors: [] });
+
+test('subset-usage mcp keeps a sign-in change from the stored identity for the session, without writing it', async (t) => {
+  const fixture = await claudeFixture(t);
+  await fixture.signIn('b');
+  // The dashboard last saw this account signed in as a@; it is now b@.
+  const identities = JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } });
+  await writeFile(join(fixture.data, 'claude-identities.json'), identities);
+  fixture.collect('b', 10);
+  // A history file that cannot be parsed is an error, not an empty history.
+  await writeFile(join(fixture.data, 'usage-history.json'), '{"schemaVersion":1,');
+  const mcp = await fixture.start();
+
+  // The snapshot predates the change this read observes, so it could be a@'s.
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
+  fixture.collect('b', 20);
+  const before = await tree(fixture.root);
+  // The change is kept for the session: snapshots collected after it show, on every later read.
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
+  const history = await mcp.call('usage_history');
+  assert.deepEqual([history.isError, history.structuredContent.error.code], [true, 'usage_unavailable']);
+  assert.match(mcp.stderr(), /usage_history failed: SyntaxError/);
+  await mcp.stop();
+  assert.deepEqual(await tree(fixture.root), before);
+  assert.equal(await readFile(join(fixture.data, 'claude-identities.json'), 'utf8'), identities);
+});
+
+test('subset-usage mcp hides an earlier sign-in\'s snapshot after a change in the session, without writing the identity', async (t) => {
+  const fixture = await claudeFixture(t);
+  await fixture.signIn('a');
+  fixture.collect('a', 10);
+  const mcp = await fixture.start();
+  // No history file is an empty history, not an error.
+  const history = await mcp.call('usage_history');
+  assert.deepEqual([history.isError, history.structuredContent.series], [undefined, {}]);
+
+  // With no stored identity the first sighting adopts the snapshot.
+  assert.deepEqual(await mcp.work(), shown('a@example.com', 90));
+  await fixture.signIn('b');
+  // a@'s snapshot is not shown as b@'s.
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
+  fixture.collect('b', 30);
+  const before = await tree(fixture.root);
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 70));
+  await mcp.stop();
+  assert.deepEqual(await tree(fixture.root), before);
+  // No read recorded an identity, adopted the default account or recorded history; only the collector wrote.
+  assert.deepEqual((await readdir(fixture.data)).sort(), ['collector-runs', 'usage-snapshots']);
+  assert.deepEqual(JSON.parse(await readFile(fixture.profilesFile, 'utf8')).map((profile) => profile.id), ['claude_work']);
 });
 
 test('subset-usage mcp takes no arguments and is listed in --help', () => {

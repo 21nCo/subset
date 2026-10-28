@@ -49,10 +49,17 @@ const dataRoot = dataDirectory ?? resolve(homedir(), '.local/share/subset');
 // Usage history holds only observation times and percentages for trend charts.
 const historyFile = resolve(dataRoot, 'usage-history.json');
 let historyQueue = Promise.resolve();
-async function loadHistory() {
-  try { const value = JSON.parse(await readFile(historyFile, 'utf8')); return isUsageHistory(value) ? value : emptyUsageHistory(); }
-  catch { return emptyUsageHistory(); }
+/** The stored history; no file is an empty history, and an unreadable or invalid file is an error. */
+async function readStoredHistory() {
+  let text;
+  try { text = await readFile(historyFile, 'utf8'); }
+  catch (error) { if (error?.code === 'ENOENT') return emptyUsageHistory(); throw error; }
+  const value = JSON.parse(text);
+  if (!isUsageHistory(value)) throw new Error('The usage history file is not valid.');
+  return value;
 }
+// The dashboard starts over from an empty history when the file cannot be read.
+const loadHistory = () => readStoredHistory().catch(() => emptyUsageHistory());
 function recordHistory(current) { return updateHistory((history) => recordUsageHistory(history, current)); }
 function updateHistory(change) {
   historyQueue = historyQueue.then(async () => {
@@ -114,8 +121,11 @@ async function claudeIdentities() {
 /**
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
  * Claude account is shown without being saved, and sign-in changes are tracked in memory only.
+ * A long-lived reader that does not persist (`mcp`) passes `identityMemory`, which keeps the
+ * identity periods it observed across reads and takes precedence over the file.
+ * @param {{ persist?: boolean, identityMemory?: Map<string, { email: string, since: number }> }} [options]
  */
-async function status({ persist = true } = {}) {
+async function status({ persist = true, identityMemory } = {}) {
   // A missing or failed Claude CLI must not hide the other accounts.
   let configured;
   if (persist) {
@@ -125,7 +135,7 @@ async function status({ persist = true } = {}) {
     const candidate = await accounts.defaultClaudeCandidate().catch(() => null);
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
-  const identities = await claudeIdentities();
+  const identities = { ...await claudeIdentities(), ...Object.fromEntries(identityMemory ?? []) };
   // Only the entries this read changed are written back; others may have been updated concurrently.
   const changedIdentities = new Set();
   const boundToIdentity = (profile, snapshot, auth) => {
@@ -251,6 +261,7 @@ async function status({ persist = true } = {}) {
       if (profile.provider !== current.provider) results.set(ownerId, { ...current, alsoIn: [...new Set([...(current.alsoIn ?? []), profile.provider])] });
     }
   }));
+  for (const id of identityMemory ? changedIdentities : []) identityMemory.set(id, identities[id]);
   if (persist && changedIdentities.size) {
     // Atomic and serialized: a torn file would reset identities and re-attribute old snapshots.
     identityQueue = identityQueue.then(async () => {
@@ -388,9 +399,12 @@ if (flag('--help') || flag('-h')) {
   if (args.length > 1) { process.stderr.write(usage); process.exit(2); }
   // Loaded only here, so the other commands (collect runs on every status-line update) skip the MCP code.
   const { serveStdio } = await import('./mcp.mjs');
-  // Reads as `status` does, so it writes nothing; history is read as `/api/history` returns it.
+  // Reads as `status` does, so it writes nothing, but keeps Claude sign-in changes for the session:
+  // snapshots from before a change stay hidden, and those collected after it show. History is the
+  // stored file as `/api/history` returns it, except that an unreadable file is an error, not empty.
   const providers = await accounts.profiles().then((profiles) => profiles.map((profile) => profile.provider), () => null);
-  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false }), readHistory: loadHistory, providers });
+  const identityMemory = new Map();
+  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identityMemory }), readHistory: readStoredHistory, providers });
   // Provider reads still in flight would keep the process alive after the host closed stdin; nothing
   // here waits to be written, so exit once stdout has drained.
   await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));

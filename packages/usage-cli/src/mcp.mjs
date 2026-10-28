@@ -8,9 +8,12 @@ import { providerMeta } from '@subset.dev/usage-core/present';
 const HOUR_MS = 60 * 60_000;
 const DEFAULT_HOURS = 48;
 const MAX_HOURS = 168;
+// After stdin closes, calls already received get this long to answer before the server exits.
+const PENDING_LIMIT_MS = 10_000;
 
 const LOCAL = 'The data is local: it comes from the subset-usage configuration on this computer, the quota snapshots its collectors saved and, only when the user turned on local sign-ins in the dashboard, the usage endpoints of the tools signed in here. Nothing is sent to Subset.';
 const READING = 'Each account has a state, a source and observedAt. An observation older than 5 minutes is stale: say when it was observed. A status-line snapshot is the last value a CLI collected, not a live read. A null percentage or reset time is unavailable, not zero; never estimate it. A calculated-estimate remaining percentage (~ in the text) is derived from provider-reported usage. errors[] says why an account has no values; local_sign_ins_off means the user can turn on local sign-ins in the dashboard\'s Settings.';
+const HISTORY_READING = 'Each point is [observation time, used percent] for one quota window. The last point is only as current as its time: if it is more than 5 minutes old, say when it was observed, and call usage_status for the current value. A window or account with no points in range is unavailable for that time, not zero use; never fill gaps.';
 const INSTRUCTIONS = 'Subset usage reports AI subscription usage (quota left, reset times, spend and balances) for the accounts set up in the subset-usage dashboard on this computer. Both tools only read. Always give the observation time with a value, and call stale or unavailable values what they are.';
 
 /** `ChatGPT (codex-chatgpt), Claude (claude-code)` for the providers the configuration names, once each. */
@@ -74,8 +77,9 @@ function historyText(series, hours, accountId) {
  * @param {string[] | null} options.providers The configured providers, or null when the configuration could not be read.
  * @param {() => number} [options.now]
  * @param {(message: string) => void} [options.log]
+ * @param {Set<Promise<unknown>>} [options.pending] Receives each running call until it settles.
  */
-export function usageTools({ readStatus, readHistory, providers, now = Date.now, log = () => {} }) {
+export function usageTools({ readStatus, readHistory, providers, now = Date.now, log = () => {}, pending }) {
   const definitions = [
     {
       name: 'usage_status',
@@ -99,13 +103,13 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
     {
       name: 'usage_history',
       title: 'Usage history',
-      description: `The used percentage over time for each account (accountId from usage_status) and quota window, as the dashboard recorded it: observation time in epoch milliseconds and used percent, over the number of hours given (1 to ${MAX_HOURS}, default ${DEFAULT_HOURS}). It holds no labels, plans or errors. The data is local: the dashboard on this computer records it only while it is open and keeps 8 days, so gaps mean it was closed, not that nothing was used.`,
+      description: `The used percentage over time for each account (accountId from usage_status) and quota window, as the dashboard recorded it: observation time in epoch milliseconds and used percent, over the number of hours given (1 to ${MAX_HOURS}, default ${DEFAULT_HOURS}). It holds no labels, plans or errors. The data is local: the dashboard on this computer records it only while it is open and keeps 8 days, so gaps mean it was closed, not that nothing was used. ${providersText(providers)} ${HISTORY_READING}`,
       inputSchema: objectSchema({
         hours: { type: 'integer', minimum: 1, maximum: MAX_HOURS, description: `How many hours back to read; default ${DEFAULT_HOURS}.` },
         accountId: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,64}$', description: 'Only this account, by its id from usage_status.' },
       }),
-      // Reads only the history file; it calls no provider.
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      // Reads only the history file, but its points came from the same provider reads as usage_status.
+      annotations: { readOnlyHint: true, openWorldHint: true },
       async handler({ hours = DEFAULT_HOURS, accountId }) {
         const end = now();
         const start = end - hours * HOUR_MS;
@@ -116,14 +120,21 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
   ];
   return definitions.map((definition) => ({
     ...definition,
-    async handler(args) {
-      try {
-        return await definition.handler(args);
-      } catch (error) {
-        // The configuration's own messages name no paths or tokens; anything else stays on stderr.
-        log(`${definition.name} failed: ${error?.stack ?? error}`);
-        return toolError('usage_unavailable', 'Could not read the usage configuration or history. Open the dashboard (subset-usage) to check the accounts.');
-      }
+    handler(args) {
+      const call = (async () => {
+        try {
+          return await definition.handler(args);
+        } catch (error) {
+          // The detail can name paths; it stays on stderr.
+          log(`${definition.name} failed: ${error?.stack ?? error}`);
+          return toolError('usage_unavailable', definition.name === 'usage_history'
+            ? 'Could not read the stored usage history. Open the dashboard (subset-usage) to record it again.'
+            : 'Could not read the usage configuration. Open the dashboard (subset-usage) to check the accounts.');
+        }
+      })();
+      pending?.add(call);
+      call.finally(() => pending?.delete(call));
+      return call;
     },
     handleInvalidArguments: (_args, issues) => invalidInput(issues),
   }));
@@ -157,9 +168,20 @@ export async function serveStdio({ log = stderrLog, ...options }) {
     process.stdin.once('end', resolve);
     process.stdin.once('close', resolve);
   });
-  const server = defineUsageMcpServer({ ...options, log }).createServer();
+  const pending = new Set();
+  const server = defineUsageMcpServer({ ...options, log, pending }).createServer();
   await server.serveStdio();
   log(`${options.version} serving on stdio`);
   await stdinClosed;
+  // Requests in the last chunk start their handlers after `end` is emitted; let them start, then
+  // answer every call already received, unless a read takes longer than the limit.
+  await new Promise((resolveTick) => setImmediate(resolveTick));
+  let timer;
+  const limit = new Promise((resolveLimit) => { timer = setTimeout(resolveLimit, PENDING_LIMIT_MS); });
+  const settled = await Promise.race([Promise.allSettled(pending).then(() => true), limit.then(() => false)]);
+  clearTimeout(timer);
+  if (!settled) log(`stdin closed; ${pending.size} call(s) still running after ${PENDING_LIMIT_MS / 1000} s were not answered`);
+  // The protocol sends each reply after its handler settles.
+  await new Promise((resolveTick) => setImmediate(resolveTick));
   await server.close();
 }
