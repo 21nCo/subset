@@ -1,6 +1,6 @@
 import { isBlockedAddress, isBlockedHostname, isIpAddress } from './address.js';
 import { parseHttpUrl } from './canonicalize.js';
-import { parseContentType } from './decode.js';
+import { MAX_DOCUMENT_BYTES, parseContentType } from './decode.js';
 import { MAX_TITLE_LENGTH, type LinkDetailsV1 } from './details.js';
 import { parseLinkDetails } from './parse.js';
 
@@ -39,6 +39,10 @@ export class LinkFetchError extends Error {
 }
 
 /** The subset of the web `fetch` the fetcher calls. */
+/**
+ * The subset of the web `fetch` the fetcher calls. It must honour `redirect: 'manual'`: a response it reached by
+ * following a redirect itself is refused with `network`, because the hops it followed were never checked.
+ */
 export type FetchFunction = (input: string, init: RequestInit) => Promise<Response>;
 /**
  * Resolves a hostname to its IP addresses, for example with Node's `dns.lookup(hostname, { all: true })`.
@@ -58,7 +62,10 @@ export interface SafeFetchOptions {
   resolveHost?: ResolveHost;
   /** Limit for the whole operation, redirects, resolution and body included. Defaults to 5,000 ms; at most 2,147,483,647. */
   timeoutMs?: number;
-  /** Most body bytes read. `fetchLinkDetails` stops reading once the body fills it and counts that as a cut. */
+  /**
+   * Most body bytes read. `fetchLinkDetails` reads at most the smaller of this and `MAX_DOCUMENT_BYTES`, the part
+   * `parseLinkDetails` parses, and stops once the body fills that bound, counting it as a cut.
+   */
   maxBytes?: number;
   /** Most redirects followed. Defaults to 5. */
   maxRedirects?: number;
@@ -124,11 +131,13 @@ export async function fetchLinkDetails(input: string | URL, options: FetchLinkDe
       discard(response);
       return fileDetails(url, contentType.essence);
     }
-    // Stops at maxBytes without waiting for more, so a body that fills the limit counts as cut.
-    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline, true);
+    // Bytes past MAX_DOCUMENT_BYTES are never parsed, so they are not read. Stops at the bound without waiting
+    // for more, so a body that fills it counts as cut.
+    const limit = Math.min(settings.maxBytes, MAX_DOCUMENT_BYTES);
+    const { bytes, truncated } = await readBody(response, limit, url, deadline, true);
     const details = parseLinkDetails(bytes, { url, contentType: header });
     if (truncated && !hasDocumentDetails(details, url)) {
-      throw new LinkFetchError('too_large', `The body reaches ${settings.maxBytes} bytes and its start has no link details`, { url: url.href });
+      throw new LinkFetchError('too_large', `The body reaches ${limit} bytes and its start has no link details`, { url: url.href });
     }
     return details;
   } finally {
@@ -193,6 +202,10 @@ async function open(input: string | URL, settings: Settings, accept: string, dea
     if (response.type === 'opaqueredirect') {
       throw new LinkFetchError('network', 'The runtime hides redirect targets, so the redirect cannot be checked', { url: url.href });
     }
+    if (followedRedirect(response, url)) {
+      discard(response);
+      throw new LinkFetchError('network', 'The fetch followed a redirect itself, so its hops cannot be checked', { url: url.href });
+    }
     const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get('location') : null;
     if (location !== null) {
       discard(response);
@@ -208,6 +221,27 @@ async function open(input: string | URL, settings: Settings, accept: string, dea
     }
     return { response, url };
   }
+}
+
+/**
+ * Whether `fetch` ignored `redirect: 'manual'` and answered from another URL. A response URL never has a fragment,
+ * so the requested URL is compared without one; a response URL that does not parse counts as followed.
+ */
+function followedRedirect(response: Response, url: URL): boolean {
+  if (response.redirected === true) return true;
+  const responseUrl: unknown = response.url;
+  if (responseUrl === undefined || responseUrl === '') return false;
+  if (typeof responseUrl !== 'string') return true;
+  let actual: URL;
+  try {
+    actual = new URL(responseUrl);
+  } catch {
+    return true;
+  }
+  const requested = new URL(url.href);
+  actual.hash = '';
+  requested.hash = '';
+  return actual.href !== requested.href;
 }
 
 /** Parses a URL (relative to `base` for a redirect), removing any credentials so they are never sent. */

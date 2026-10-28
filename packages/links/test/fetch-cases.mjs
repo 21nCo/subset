@@ -330,6 +330,53 @@ export const cases = [
     }
   },
   {
+    name: 'an HTML body is read only up to MAX_DOCUMENT_BYTES, the part the parser sees',
+    async run(lib) {
+      equal(lib.MAX_DOCUMENT_BYTES, 524_288, 'parse bound');
+      const chunk = 64 * 1024;
+      // An endless body of 64 KiB chunks; `marker` fills the start of chunk `at`, the 8th and last within the bound.
+      const endless = (marker, at) => trackedStream((pull) => (pull === at ? marker.padEnd(chunk, ' ') : ' '.repeat(chunk)));
+      const serve = (body) => fakeFetch({ 'https://example.com/': () => new Response(body.stream, { headers: { 'content-type': 'text/html' } }) }).fetch;
+      const deep = endless('<title>Deep</title>', 7);
+      equal((await lib.fetchLinkDetails('https://example.com/', { fetch: serve(deep) })).title, 'Deep', 'title in the last parsed chunk');
+      equal([deep.pulls, deep.cancelled], [8, true], 'default maxBytes: 8 chunks read, then cancelled');
+      const blank = endless('<title>Too late</title>', 8);
+      const error = await rejects(lib, lib.fetchLinkDetails('https://example.com/', { fetch: serve(blank), maxBytes: 4_000_000 }), 'too_large', 'nothing in the parsed part');
+      if (!error.message.includes('524288')) fail(`too_large names the bound read: ${error.message}`);
+      equal([blank.pulls, blank.cancelled], [8, true], 'a larger maxBytes reads no further');
+    }
+  },
+  {
+    name: 'a response the injected fetch reached by following a redirect itself is refused',
+    async run(lib) {
+      // As a fetch that ignores redirect: 'manual' answers: the final response, from another URL.
+      const followed = (body, fields) => () => {
+        const response = new Response(body.stream, { headers: { 'content-type': 'text/html' } });
+        for (const [key, value] of Object.entries(fields)) Object.defineProperty(response, key, { value });
+        return response;
+      };
+      const vectors = [
+        ['redirected to a private address', { redirected: true, url: 'http://10.0.0.5/admin' }],
+        ['redirected without a URL', { redirected: true }],
+        ['answered from another URL', { url: 'https://example.org/other' }],
+        ['answered from an unparseable URL', { url: 'not a url' }]
+      ];
+      for (const [label, fields] of vectors) {
+        for (const [name, operation] of [['fetchLinkDetails', lib.fetchLinkDetails], ['fetchResource', lib.fetchResource]]) {
+          const body = trackedStream(() => '<title>Internal admin</title>');
+          const fake = fakeFetch({ 'https://example.com/page': followed(body, fields) });
+          await rejects(lib, operation('https://example.com/page', { fetch: fake.fetch }), 'network', `${name}: ${label}`);
+          equal(fake.urls(), ['https://example.com/page'], `${name}: ${label}: one request`);
+          equal([body.pulls, body.cancelled], [0, true], `${name}: ${label}: body cancelled unread`);
+        }
+      }
+      // A response URL is the requested URL without its fragment, as a runtime's fetch reports it.
+      const same = trackedStream((pull) => (pull === 0 ? '<title>Same</title>' : undefined));
+      const fake = fakeFetch({ 'https://example.com/page#top': followed(same, { redirected: false, url: 'https://example.com/page' }) });
+      equal((await lib.fetchLinkDetails('https://example.com/page#top', { fetch: fake.fetch })).title, 'Same', 'own URL accepted');
+    }
+  },
+  {
     name: 'a response arriving after the timeout is cancelled unread',
     async run(lib) {
       for (const [label, operation] of [
