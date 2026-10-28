@@ -44,6 +44,14 @@ const { output } = await build({
     banner: (chunk) => (chunk.isEntry ? '#!/usr/bin/env node' : ''),
   },
 });
+// The chunk names above hold only while the MCP server is the one dynamic entry and the rest of the
+// shared code is one chunk; anything else would give two chunks one name.
+const chunks = output.filter((item) => item.type === 'chunk' && !item.isEntry);
+const server = chunks.filter((chunk) => chunk.isDynamicEntry);
+if (server.length !== 1 || server[0].facadeModuleId !== `${root}src/mcp.mjs` || chunks.length > 2) {
+  console.error(`Expected dist/mcp-server.mjs from src/mcp.mjs and at most one shared chunk; got ${chunks.map((chunk) => chunk.facadeModuleId ?? chunk.name).join(', ')}.`);
+  process.exit(1);
+}
 await writeFile(`${root}dist/THIRD_PARTY_NOTICES.md`, await notices(output));
 if (!(await exists(`${webSource}index.html`))) { console.error('apps/usage/dist is missing. Build @subset.dev/usage-web first.'); process.exit(1); }
 await rm(`${root}web`, { recursive: true, force: true });

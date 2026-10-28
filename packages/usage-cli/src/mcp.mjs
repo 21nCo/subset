@@ -2,6 +2,7 @@
 // the dashboard's history, and writes nothing: no identities, no default Claude account, no history,
 // and never the local sign-ins preference. Stdout carries only protocol frames.
 import diagnostics from 'node:diagnostics_channel';
+import { basename } from 'node:path';
 import { defineMcpFnServer } from '@mcpfn/core';
 import { USAGE_PROVIDERS, agentUsageResult } from '@subset.dev/usage-core';
 import { providerMeta } from '@subset.dev/usage-core/present';
@@ -11,8 +12,10 @@ const DEFAULT_HOURS = 48;
 const MAX_HOURS = 168;
 // After stdin closes, calls already received get this long to answer before the server exits.
 const PENDING_LIMIT_MS = 10_000;
-// How long a provider subprocess the server ended, and the call waiting on it, get to finish.
-const CHILD_EXIT_LIMIT_MS = 2_000;
+// When the server stops, how long a provider subprocess has after SIGTERM, and then after SIGKILL, to exit.
+const TERM_GRACE_MS = 1_000;
+// How long stopping may take in all, ending subprocesses and answering the calls waiting on them.
+const STOP_LIMIT_MS = 5_000;
 
 const LOCAL = 'The data is local: it comes from the subset-usage configuration on this computer, the quota snapshots its collectors saved and, only when the user turned on local sign-ins in the dashboard, the usage endpoints of the tools signed in here. Nothing is sent to Subset.';
 const READING = 'Each account has a state, a source and observedAt. An observation older than 5 minutes is stale: say when it was observed. A status-line snapshot is the last value a CLI collected, not a live read. A null percentage or reset time is unavailable, not zero; never estimate it. A calculated-estimate remaining percentage (~ in the text) is derived from provider-reported usage. errors[] says why an account has no values; local_sign_ins_off means the user can turn on local sign-ins in the dashboard\'s Settings.';
@@ -71,12 +74,15 @@ function invalidInput(issues) {
   return toolError('invalid_input', message || 'The arguments do not match the tool schema.', { issues: mapped });
 }
 
-/** One account's, or every account's, stored points from `start` to `end`. Built with fromEntries, so an ID such as `__proto__` stays an ordinary key. */
+/**
+ * One account's, or every account's, stored points from `start` to `end`, oldest first whatever order
+ * the file holds them in. Built with fromEntries, so an ID such as `__proto__` stays an ordinary key.
+ */
 function historyInRange(history, start, end, accountId) {
   return Object.fromEntries(Object.entries(history.series)
     .filter(([id]) => accountId === undefined || id === accountId)
     .map(([id, windows]) => [id, Object.fromEntries(Object.entries(windows)
-      .map(([key, points]) => [key, points.filter(([time]) => time >= start && time <= end)])
+      .map(([key, points]) => [key, points.filter(([time]) => time >= start && time <= end).sort(([a], [b]) => a - b)])
       .filter(([, points]) => points.length))])
     .filter(([, windows]) => Object.keys(windows).length));
 }
@@ -103,25 +109,33 @@ function historyText(series, hours, accountId) {
  * period the dashboard recorded in `claude-identities.json` applies, and a sign-in answer older than
  * what the session already observed starts no period. `observedAt` is when the latest observation
  * supporting the period was made (a `claude auth status` query's start, or a recorded period's start).
+ * A recorded start later than `now` is not evidence (the clock was set back, or the file was edited) and
+ * is ignored. A record that cannot be read is unknown: it keeps the session's period, but without one the
+ * session cannot tell whose snapshots were collected, so it shows none and starts no period.
  * @typedef {{ email: string, since: number, observedAt: number }} IdentityPeriod
  * @param {IdentityPeriod | undefined} kept The session's period for the account.
- * @param {unknown} stored The account's entry in `claude-identities.json`, `{ email, since }`, read now.
+ * @param {unknown} stored The account's entry in `claude-identities.json`, `{ email, since }`, read now:
+ * `undefined` when the file has none or does not exist, and anything else that is not such an entry
+ * (`null` for a file that cannot be read or parsed) when it is unknown.
  * @param {{ email: string, observedAt: number }} answer The signed-in email, and when it was queried.
  * @param {number} now
- * @returns {{ period: IdentityPeriod, current: boolean }} The period to keep, and whether the answer is
- * current; an out-of-date answer's snapshot is not shown under its email.
+ * @returns {{ period: IdentityPeriod | undefined, current: boolean }} The period to keep, and whether the
+ * answer is current; an out-of-date answer's snapshot is not shown under its email.
  */
 export function claudeIdentityPeriod(kept, stored, answer, now) {
   let period = kept;
-  const recorded = Number(stored?.since);
-  if (typeof stored?.email === 'string' && Number.isFinite(recorded) && !(recorded <= period?.since)) {
-    period = !period || stored.email === period.email || recorded > period.observedAt
-      ? { email: stored.email, since: recorded, observedAt: Math.max(recorded, stored.email === period?.email ? period.observedAt : 0) }
+  const valid = typeof stored?.email === 'string' && typeof stored.since === 'number' && Number.isFinite(stored.since);
+  if (valid && stored.since <= now && !(stored.since <= period?.since)) {
+    period = !period || stored.email === period.email || stored.since > period.observedAt
+      ? { email: stored.email, since: stored.since, observedAt: Math.max(stored.since, stored.email === period?.email ? period.observedAt : 0) }
       // The session saw its email after the recorded change to another: it was signed in again since.
       : { ...period, since: Math.max(period.since, period.observedAt) };
   }
-  // A first sighting adopts the snapshots already collected.
-  if (!period) return { period: { email: answer.email, since: 0, observedAt: answer.observedAt }, current: true };
+  if (!period) {
+    if (stored !== undefined && !valid) return { period: undefined, current: false };
+    // A first sighting adopts the snapshots already collected.
+    return { period: { email: answer.email, since: 0, observedAt: answer.observedAt }, current: true };
+  }
   if (answer.email === period.email) return { period: { ...period, observedAt: Math.max(period.observedAt, answer.observedAt) }, current: true };
   // A newer answer is a sign-in change, and its period starts when the session observes it.
   if (answer.observedAt > period.observedAt) return { period: { email: answer.email, since: now, observedAt: answer.observedAt }, current: true };
@@ -137,6 +151,7 @@ export function identitySession() {
     /** Applies one read's sign-in answer synchronously, so overlapping reads share each period. */
     bind(id, stored, answer, now = Date.now()) {
       const { period, current } = claudeIdentityPeriod(periods.get(id), stored, answer, now);
+      if (!period) return { since: Infinity, current };
       periods.set(id, period);
       return { since: period.since, current };
     },
@@ -158,7 +173,7 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
     {
       name: 'usage_status',
       title: 'Usage status',
-      description: `Current AI subscription usage for each account: quota windows with remaining percentage and reset time, plan, spend and balances, and errors. Give provider to read only that provider's accounts. ${LOCAL} ${providersText(providers)} ${READING}`,
+      description: `Current AI subscription usage for each account: quota windows with remaining percentage and reset time, plan, spend and balances, and errors. Give provider to return only that provider's accounts; every account is still read, so the call takes as long as an unfiltered one. ${LOCAL} ${providersText(providers)} ${READING}`,
       inputSchema: objectSchema({
         provider: { type: 'string', enum: [...USAGE_PROVIDERS], description: 'Only accounts of this provider: read through it, for its subscription, or also signed in through it.' },
       }),
@@ -229,43 +244,81 @@ export function defineUsageMcpServer({ version, ...options }) {
 export const stderrLog = (message) => process.stderr.write(`subset-usage mcp: ${message}\n`);
 
 const running = (child) => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+/** Resolves with `value` after `ms`, without keeping the process alive for it. */
+const after = (ms, value) => new Promise((resolveAfter) => { setTimeout(resolveAfter, ms, value).unref(); });
+/** Resolves once every child in `list` has exited, or after `ms`. */
+const exited = (list, ms) => Promise.race([Promise.all(list.map((child) => running(child) && new Promise((resolveExit) => child.once('exit', resolveExit)))), after(ms)]);
 
 /**
- * Ends the provider subprocesses still running (reads, so nothing is left half-written) and waits,
- * up to a limit, until they have exited.
- * @param {Set<import('node:child_process').ChildProcess>} children
+ * The provider subprocesses this process starts (claude auth status, amp usage, codex app-server,
+ * sqlite3, keychain reads). Their readers end them with timers of their own, which do not survive
+ * this process, so the server ends them when it stops.
  */
-async function endChildren(children) {
-  const live = [...children].filter(running);
-  if (!live.length) return;
-  let timer;
-  const limit = new Promise((resolveLimit) => { timer = setTimeout(resolveLimit, CHILD_EXIT_LIMIT_MS); });
-  await Promise.race([Promise.all(live.map((child) => {
-    const exited = new Promise((resolveExit) => child.once('exit', resolveExit));
-    child.kill('SIGKILL');
-    return running(child) ? exited : undefined;
-  })), limit]);
-  clearTimeout(timer);
+function providerProcesses(log) {
+  const children = new Set();
+  let stopping = false;
+  diagnostics.subscribe('child_process', ({ process: child }) => {
+    children.add(child);
+    child.once('exit', () => children.delete(child));
+    // A read that goes on after its subprocess was ended (an auth or keychain check, then the
+    // provider) gets each later subprocess ended as it starts. The channel publishes before the
+    // spawn, when kill() would signal PID 0, this whole process group; so it waits for the PID.
+    if (stopping) child.once('spawn', () => {
+      log(`stopping; ending ${basename(String(child.spawnfile))}, which a read started meanwhile`);
+      child.kill('SIGTERM');
+    });
+  });
+  const live = () => [...children].filter(running);
+  return {
+    get stopping() { return stopping; },
+    /** Ends every running subprocess at once (a second signal). */
+    kill() { for (const child of live()) child.kill('SIGKILL'); },
+    /**
+     * Ends every subprocess, including those the reads in `pending` start meanwhile, until no
+     * subprocess runs and every call has settled, or the limit passes. SIGTERM comes first, so a
+     * launcher (a shell or Node entrypoint) can end the provider it started; SIGKILL follows for any
+     * still running after the grace period. Returns the number of calls still unanswered.
+     */
+    async end(pending) {
+      stopping = true;
+      const deadline = Date.now() + STOP_LIMIT_MS;
+      while (Date.now() < deadline) {
+        const list = live();
+        if (list.length) {
+          for (const child of list) child.kill('SIGTERM');
+          await exited(list, Math.min(TERM_GRACE_MS, deadline - Date.now()));
+          for (const child of list.filter(running)) child.kill('SIGKILL');
+          await exited(list, Math.max(0, Math.min(TERM_GRACE_MS, deadline - Date.now())));
+        } else if (pending.size) {
+          // A call whose subprocess ended answers with that provider's error, or starts another subprocess.
+          await Promise.race([Promise.allSettled(pending), after(50)]);
+        } else break;
+      }
+      const left = live();
+      if (left.length) log(`${left.length} provider subprocess(es) did not exit`);
+      return pending.size;
+    },
+  };
 }
 
 /**
  * Serves the tools on this process's stdin and stdout until stdin closes, SIGTERM or SIGINT. Anything
  * that would print to stdout through `console` goes to stderr instead, so it cannot corrupt the
- * protocol stream. No provider subprocess a read started outlives it.
+ * protocol stream. When stdin closes, the calls already received are answered; reads still running
+ * after the pending limit, or at a signal, have their subprocesses ended and answer with that
+ * provider's error. No provider subprocess a read started outlives the server, except a process
+ * started by a launcher that ignores SIGTERM: SIGKILL then ends only the launcher.
  * @param {Parameters<typeof defineUsageMcpServer>[0]} options
  */
 export async function serveStdio({ log = stderrLog, ...options }) {
   for (const method of ['log', 'info', 'debug']) console[method] = (...args) => console.error(...args);
-  // Provider readers start subprocesses (claude auth status, amp usage, codex app-server, sqlite3) and
-  // end them with their own timers, which do not survive this process. Every one is tracked here.
-  const children = new Set();
-  diagnostics.subscribe('child_process', ({ process: child }) => {
-    children.add(child);
-    child.once('exit', () => children.delete(child));
-  });
-  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
-    log(`${signal}; stopping`);
-    void endChildren(children).finally(() => process.exit(0));
+  const processes = providerProcesses(log);
+  const signalled = new Promise((resolveSignal) => {
+    for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
+      // A second signal, or one while stopping, does not wait for the grace period.
+      if (processes.stopping) processes.kill();
+      resolveSignal(signal);
+    });
   });
   // A host that closes its end mid-reply makes stdout fail with EPIPE; that ends the session, not the process with a stack trace.
   process.stdout.on('error', (error) => log(`stdout: ${error.message}`));
@@ -277,24 +330,17 @@ export async function serveStdio({ log = stderrLog, ...options }) {
   const server = defineUsageMcpServer({ ...options, log, pending }).createServer();
   await server.serveStdio();
   log(`${options.version} serving on stdio`);
-  await stdinClosed;
-  // Requests in the last chunk start their handlers after `end` is emitted; let them start, then
-  // answer every call already received, unless a read takes longer than the limit.
-  await new Promise((resolveTick) => setImmediate(resolveTick));
-  let timer;
-  const limit = new Promise((resolveLimit) => { timer = setTimeout(resolveLimit, PENDING_LIMIT_MS); });
-  const settled = await Promise.race([Promise.allSettled(pending).then(() => true), limit.then(() => false)]);
-  clearTimeout(timer);
-  if (!settled) {
-    log(`stdin closed; ending the provider reads still running after ${PENDING_LIMIT_MS / 1000} s`);
-    // A read whose subprocess ended reports that provider's error, and its call is answered.
-    await endChildren(children);
-    const answered = await Promise.race([Promise.allSettled(pending).then(() => true), new Promise((resolveWait) => { timer = setTimeout(() => resolveWait(false), CHILD_EXIT_LIMIT_MS); })]);
-    clearTimeout(timer);
-    if (!answered) log(`${pending.size} call(s) were not answered`);
+  let reason = await Promise.race([stdinClosed.then(() => null), signalled]);
+  if (reason === null) {
+    // Requests in the last chunk start their handlers after `end` is emitted; let them start, then
+    // answer every call already received, unless a read takes longer than the limit.
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    reason = await Promise.race([Promise.allSettled(pending).then(() => null), after(PENDING_LIMIT_MS, 'limit'), signalled]);
   }
+  if (reason) log(reason === 'limit' ? `stdin closed; ending the provider reads still running after ${PENDING_LIMIT_MS / 1000} s` : `${reason}; stopping`);
   // A subprocess a settled read left behind ends too.
-  await endChildren(children);
+  const unanswered = await processes.end(pending);
+  if (unanswered) log(`${unanswered} call(s) were not answered`);
   // The protocol sends each reply after its handler settles.
   await new Promise((resolveTick) => setImmediate(resolveTick));
   await server.close();

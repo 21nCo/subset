@@ -120,6 +120,12 @@ async function claudeIdentities() {
   try { const value = JSON.parse(await readFile(identitiesFile, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
   catch { return {}; }
 }
+/** For an MCP session: the file's entries, `{}` when there is no file, or null when it cannot be read or is not an object. */
+async function claudeIdentityRecord() {
+  let text;
+  try { text = await readFile(identitiesFile, 'utf8'); } catch (error) { return error?.code === 'ENOENT' ? {} : null; }
+  try { const value = JSON.parse(text); return value && typeof value === 'object' && !Array.isArray(value) ? value : null; } catch { return null; }
+}
 
 /**
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
@@ -150,8 +156,10 @@ async function status({ persist = true, identitySession } = {}) {
     let current = true;
     if (identitySession) {
       // The file is read now, not at the start of the read, so a period the dashboard recorded
-      // meanwhile applies; the session applies it and this answer in one synchronous step.
-      const stored = (await claudeIdentities())[profile.id];
+      // meanwhile applies; the session applies it and this answer in one synchronous step. A file
+      // that cannot be read is unknown, not empty (null), so it never adopts earlier snapshots.
+      const record = await claudeIdentityRecord();
+      const stored = record && (Object.hasOwn(record, profile.id) ? record[profile.id] : undefined);
       ({ since, current } = identitySession.bind(profile.id, stored, { email, observedAt: queriedAt }));
     } else {
       const known = identities[profile.id];
@@ -163,8 +171,11 @@ async function status({ persist = true, identitySession } = {}) {
       ({ since } = identities[profile.id]);
     }
     if (!snapshot.observedAt || (current && Date.parse(snapshot.observedAt) >= since)) return snapshot;
-    return { ...snapshot, observedAt: null, state: 'unavailable', windows: [],
-      errors: [{ code: 'claude_identity_changed', message: 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.' }] };
+    // An MCP session that cannot read the recorded sign-ins (since is Infinity) cannot tell whose snapshot it is.
+    const message = since === Infinity
+      ? 'The record of this Claude account\'s sign-ins (claude-identities.json) cannot be read, so it is unknown whose snapshot this is. Open the dashboard to record the sign-in again.'
+      : 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.';
+    return { ...snapshot, observedAt: null, state: 'unavailable', windows: [], errors: [{ code: 'claude_identity_changed', message }] };
   };
   const { localCredentials } = await accounts.usagePreferences();
   // Each tool's login store is read once per status read.
@@ -420,7 +431,7 @@ if (flag('--help') || flag('-h')) {
   const session = identitySession();
   await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identitySession: session }), readHistory: readStoredHistory, providers });
   // serveStdio ended every provider subprocess; a read still waiting on anything else would keep the
-  // process alive after the host closed stdin, and nothing here waits to be written, so exit once stdout has drained.
+  // process alive after the host closed stdin or signalled, and nothing here waits to be written, so exit once stdout has drained.
   await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));
   process.exit(0);
 } else if (command === 'collect') {

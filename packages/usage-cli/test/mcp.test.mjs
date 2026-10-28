@@ -77,6 +77,8 @@ test('tools/list returns the two read-only tools with their schemas, annotations
   assert.deepEqual([hours.type, hours.minimum, hours.maximum], ['integer', 1, 168]);
   assert.equal(accountId.pattern, '^[a-zA-Z0-9_-]{1,64}$');
   assert.match(byName.usage_status.description, /older than 5 minutes is stale/);
+  // The filter applies to the result; it does not make the call faster.
+  assert.match(byName.usage_status.description, /only that provider's accounts; every account is still read/);
   assert.match(byName.usage_status.description, /null percentage or reset time is unavailable, not zero/);
   assert.match(byName.usage_history.description, /only while it is open/);
   // usage_status returns the UsageStatus contract (isUsageStatus); usage_history declares its envelope.
@@ -204,6 +206,17 @@ test('usage_history returns the stored points in range, time and percentages onl
   const rejected = await malformed.call('usage_history');
   assert.equal(rejected.isError, true);
   assert.doesNotMatch(JSON.stringify(rejected), /"10"/);
+
+  // Points stored out of order come back oldest first, and the text's first and last are by time;
+  // the stored history is not changed.
+  const unsorted = { schemaVersion: 1, series: { claude_work: { [key('five_hour', '5-hour')]: [[NOW - HOUR, 80], [NOW - 49 * HOUR, 1], [NOW - 48 * HOUR, 20], [NOW, 60], [NOW - 2 * HOUR, 40]] } } };
+  const stored = JSON.stringify(unsorted);
+  const shuffled = await session(t, { readHistory: async () => unsorted });
+  await shuffled.mcp.listTools();
+  const ordered = await shuffled.call('usage_history');
+  assert.deepEqual(ordered.structuredContent.series.claude_work[key('five_hour', '5-hour')], [[NOW - 48 * HOUR, 20], [NOW - 2 * HOUR, 40], [NOW - HOUR, 80], [NOW, 60]]);
+  assert.match(ordered.content[0].text, /^claude_work 5-hour: 4 points; used 20% at 2026-10-26T12:00:00\.000Z, 60% at 2026-10-28T12:00:00\.000Z \(lowest 20%, highest 80%\)$/m);
+  assert.equal(JSON.stringify(unsorted), stored);
 
   const unknown = await read({ accountId: 'missing' });
   assert.deepEqual(unknown.structuredContent.series, {});
@@ -358,68 +371,118 @@ test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exit
 });
 
 /**
- * `subset-usage mcp` with one account, Amp, whose `amp` records its PID and then never answers, and
- * a `usage_status` call (id 3) waiting on it. Returns once the stalled `amp` is running.
+ * `subset-usage mcp` with one account, Amp, and a `usage_status` call (id 3) waiting on it. `amp` is
+ * the given shell script body; it writes the PIDs it wants checked to `$PIDS` as one line. When
+ * `claude` is given, the default Claude config directory exists and `claude` runs that body, so the
+ * read checks its sign-in before it reads Amp. Returns once the script that must stall first wrote its PIDs.
  */
-async function stalledAmp(t) {
+async function stalledRead(t, { amp, claude }) {
   const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-stall-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const [bin, config, data] = ['bin', 'config', 'data'].map((name) => join(root, name));
-  for (const directory of [bin, config, data]) await mkdir(directory);
-  const pidFile = join(root, 'amp.pid');
-  // exec keeps the PID, so the recorded PID is the process the server started.
-  await writeFile(join(bin, 'amp'), `#!/bin/sh
-echo $$ > '${pidFile}.tmp' && mv '${pidFile}.tmp' '${pidFile}'
-exec sleep 120
-`, { mode: 0o700 });
+  const [bin, config, data, defaultClaude] = ['bin', 'config', 'data', 'claude'].map((name) => join(root, name));
+  for (const directory of [bin, config, data, ...(claude ? [defaultClaude] : [])]) await mkdir(directory);
+  const pidFiles = { amp: join(root, 'amp.pids'), claude: join(root, 'claude.pids') };
+  for (const [name, body] of Object.entries({ amp, claude })) {
+    if (body) await writeFile(join(bin, name), `#!/bin/sh\nPIDS='${pidFiles[name]}'\n${body}\n`, { mode: 0o700 });
+  }
   const profilesFile = join(config, 'profiles.json');
   await writeFile(profilesFile, JSON.stringify([{ id: 'amp_cli', label: 'Amp', provider: 'amp' }]));
-  const mcp = startMcp({ ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'claude') });
-  let pid;
-  t.after(() => {
+  const mcp = startMcp({ ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: defaultClaude });
+  const pids = async (name) => readFile(pidFiles[name], 'utf8').then((text) => text.trim().split(' ').map(Number).filter((pid) => pid > 0), () => []);
+  t.after(async () => {
     mcp.child.kill('SIGKILL');
-    if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    for (const pid of [...await pids('amp'), ...await pids('claude')]) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
   });
   await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
   mcp.send({ method: 'notifications/initialized' });
   mcp.send({ id: 3, method: 'tools/call', params: { name: 'usage_status', arguments: {} } });
-  for (let tries = 0; pid === undefined; tries += 1) {
-    assert.ok(tries < 500, `amp never started. ${mcp.stderr()}`);
-    pid = await readFile(pidFile, 'utf8').then((text) => Number(text), () => undefined);
-    if (pid === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  const first = claude ? 'claude' : 'amp';
+  for (let tries = 0; !(await pids(first)).length; tries += 1) {
+    assert.ok(tries < 500, `${first} never started. ${mcp.stderr()}`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
-  return { mcp, pid };
+  return { mcp, pids };
 }
+
+// Writes the PIDs atomically, so the test never reads half a line.
+const recordPids = (pids) => `echo ${pids} > "$PIDS.tmp" && mv "$PIDS.tmp" "$PIDS"`;
+// A launcher, as a shell or Node entrypoint such as codex.js is: it starts the provider as its own
+// child, forwards SIGTERM and SIGINT to it, and waits. SIGKILL would end only the launcher.
+const launcher = `sleep 120 &
+child=$!
+trap 'kill $child; exit 143' TERM INT
+${recordPids('"$$ $child"')}
+wait $child`;
+// A provider that ignores SIGTERM; exec keeps both the PID and the ignored signal.
+const ignoresTerm = `trap '' TERM
+${recordPids('$$')}
+exec sleep 120`;
 
 /** Whether the operating system still has a process with this PID. */
 function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
 }
 
-test('subset-usage mcp ends a stalled provider subprocess, answers its call, and exits 0 when stdin closes', async (t) => {
-  const { mcp, pid } = await stalledAmp(t);
-  assert.ok(processExists(pid));
-  mcp.child.stdin.end();
-  const [code, signal] = await mcp.exited;
-  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
-  assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
-  // The call was answered with Amp's error once its read ended; stdout held only protocol frames.
+/** The waiting call (id 3) was answered with Amp's error, and stdout held only protocol frames. */
+function assertAmpFailed(mcp) {
   assert.equal(mcp.rest(), '');
   const reply = mcp.frames.find((frame) => frame.id === 3);
   assert.ok(reply, `the waiting call was not answered. ${mcp.stderr()}`);
   assert.ok(isUsageStatus(reply.result.structuredContent));
   assert.deepEqual(reply.result.structuredContent.accounts.map((item) => [item.id, item.errors.map((error) => error.code)]), [['amp_cli', ['amp_failed']]]);
+  assert.deepEqual(mcp.frames.map((frame) => frame.id), [1, 3]);
+}
+
+test('subset-usage mcp ends a stalled provider and the process its launcher started, answers the call, and exits 0 when stdin closes', async (t) => {
+  const { mcp, pids } = await stalledRead(t, { amp: launcher });
+  const started = await pids('amp');
+  assert.equal(started.length, 2);
+  assert.ok(started.every(processExists));
+  mcp.child.stdin.end();
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  for (const pid of started) assert.equal(processExists(pid), false, `PID ${pid} outlived the server`);
+  assertAmpFailed(mcp);
   assert.match(mcp.stderr(), /stdin closed; ending the provider reads still running after 10 s/);
 });
 
-test('subset-usage mcp ends a stalled provider subprocess and exits 0 on SIGTERM', async (t) => {
-  const { mcp, pid } = await stalledAmp(t);
+test('subset-usage mcp ends a stalled provider and the process its launcher started, and exits 0 on SIGTERM', async (t) => {
+  const { mcp, pids } = await stalledRead(t, { amp: launcher });
+  const started = await pids('amp');
+  const signalled = Date.now();
   mcp.child.kill('SIGTERM');
   const [code, signal] = await mcp.exited;
   assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  assert.ok(Date.now() - signalled < 4_000, `stopping took ${Date.now() - signalled} ms`);
+  for (const pid of started) assert.equal(processExists(pid), false, `PID ${pid} outlived the server`);
+  assertAmpFailed(mcp);
+});
+
+test('subset-usage mcp ends a provider that ignores SIGTERM with SIGKILL after a grace period on SIGTERM', async (t) => {
+  const { mcp, pids } = await stalledRead(t, { amp: ignoresTerm });
+  const [pid] = await pids('amp');
+  const signalled = Date.now();
+  mcp.child.kill('SIGTERM');
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  const took = Date.now() - signalled;
+  assert.ok(took >= 900 && took < 4_000, `stopping took ${took} ms`);
   assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
-  assert.equal(mcp.rest(), '');
-  assert.deepEqual(mcp.frames.map((frame) => frame.id), [1]);
+  assertAmpFailed(mcp);
+});
+
+test('subset-usage mcp ends a provider a read starts after SIGTERM ended its sign-in check, and exits 0', async (t) => {
+  // The read waits on the default Claude sign-in check; when that ends, it goes on to read Amp.
+  const { mcp, pids } = await stalledRead(t, { claude: `${recordPids('$$')}\nexec sleep 120`, amp: `${recordPids('$$')}\nexec sleep 120` });
+  const [claude] = await pids('claude');
+  mcp.child.kill('SIGTERM');
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  assert.equal(processExists(claude), false, `claude (PID ${claude}) outlived the server`);
+  // Amp started after the server began stopping, and was ended; if it got to record its PID, that process is gone.
+  assert.match(mcp.stderr(), /stopping; ending amp, which a read started meanwhile/);
+  for (const pid of await pids('amp')) assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
+  assertAmpFailed(mcp);
 });
 
 /**
@@ -530,10 +593,21 @@ test('the session identity rule: periods only move forward, and an out-of-date s
   assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 700 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
   assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 0 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
   assert.deepEqual(rule(period('b', 700, 720), undefined, answer('b', 720)), { period: period('b', 700, 720), current: true });
-  // A malformed stored entry is no period.
-  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { since: 900 }]) {
+  // A record that cannot be read (null) or is malformed is unknown: a held period stays and the
+  // answer applies to it as usual, but a session without one shows nothing and starts no period.
+  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { email: 'a', since: '700' }, { since: 900 }]) {
     assert.deepEqual(rule(period('b', 700, 720), stored, answer('b', 720)), { period: period('b', 700, 720), current: true }, JSON.stringify(stored));
+    assert.deepEqual(rule(period('b', 700, 720), stored, answer('a', 800)), { period: period('a', 1000, 800), current: true }, JSON.stringify(stored));
+    assert.deepEqual(rule(undefined, stored, answer('a', 10)), { period: undefined, current: false }, JSON.stringify(stored));
   }
+  // A recorded start later than now is no evidence: it is handled as if there were no record, so it
+  // neither hides the snapshots of a sign-in that matches nor makes a newer sign-in change look out of date.
+  assert.deepEqual(rule(undefined, { email: 'a', since: 2000 }, answer('a', 10)), { period: period('a', 0, 10), current: true });
+  assert.deepEqual(rule(period('a', 0, 900), { email: 'a', since: 2000 }, answer('a', 950)), { period: period('a', 0, 950), current: true });
+  assert.deepEqual(rule(period('a', 0, 900), { email: 'a', since: 2000 }, answer('b', 950)), { period: period('b', 1000, 950), current: true });
+  assert.deepEqual(rule(period('a', 0, 900), { email: 'b', since: 2000 }, answer('a', 950)), { period: period('a', 0, 950), current: true });
+  // Once now passes it, the same start is a recorded period like any other.
+  assert.deepEqual(rule(period('a', 0, 900), { email: 'b', since: 2000 }, answer('b', 950), 2500), { period: period('b', 2000, 2000), current: true });
 });
 
 test('subset-usage mcp keeps a sign-in change from the stored identity for the session, without writing it', async (t) => {
@@ -707,6 +781,27 @@ test('subset-usage mcp applies a later sign-in change the dashboard recorded ove
   await mcp.stop();
   // Apart from the test's own writes, the session changed nothing.
   assert.deepEqual(await tree(fixture.root), before);
+});
+
+test('subset-usage mcp shows no Claude snapshot while the recorded sign-ins cannot be read, and adopts them once they can', async (t) => {
+  const fixture = await claudeFixture(t);
+  const identitiesFile = join(fixture.data, 'claude-identities.json');
+  await fixture.signIn('a');
+  fixture.collect('a', 10);
+  // A torn record: the snapshot may have been collected under another sign-in.
+  await writeFile(identitiesFile, '{"claude_work":{"email":"b@exa');
+  const mcp = await fixture.start();
+  const before = await tree(fixture.root);
+  assert.deepEqual(await mcp.work(), hidden('a@example.com'));
+  const message = async () => (await mcp.call('usage_status')).structuredContent.accounts.find((item) => item.id === 'claude_work').errors[0].message;
+  assert.match(await message(), /claude-identities\.json\) cannot be read/);
+  await assertOnlyTestWrites(fixture.root, before, testWrites);
+  // Once the record reads again, its period applies as usual.
+  await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } }));
+  const valid = await tree(fixture.root);
+  assert.deepEqual(await mcp.work(), shown('a@example.com', 90));
+  await mcp.stop();
+  assert.deepEqual(await tree(fixture.root), valid);
 });
 
 test('subset-usage mcp takes no arguments and is listed in --help', () => {
