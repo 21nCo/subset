@@ -34,6 +34,18 @@ for (const manifest of workspaces) {
   }
 }
 
+// @subset.dev/links is shared by Bookmarks, its browser extension and Memotron in Nucleum, so it depends on and
+// imports no other workspace (SET-171).
+const links = workspaces.find((manifest) => manifest.name === '@subset.dev/links');
+assert.ok(links, 'Missing workspace @subset.dev/links');
+for (const dependency of Object.keys({ ...links.dependencies, ...links.optionalDependencies, ...links.peerDependencies })) {
+  assert.ok(!names.has(dependency), `@subset.dev/links cannot depend on workspace ${dependency}`);
+}
+for (const entry of readdirSync(new URL('packages/links/src/', root))) {
+  const source = readFileSync(new URL(`packages/links/src/${entry}`, root), 'utf8');
+  assert.doesNotMatch(source, /\bfrom\s+['"]@subset\.dev\//, `packages/links/src/${entry} imports another workspace`);
+}
+
 // Publishable packages are listed for the tag workflow, bundle private workspaces instead of
 // depending on them at runtime, and declare which files they ship.
 const releaseTargets = readJson('release-packages.json');
