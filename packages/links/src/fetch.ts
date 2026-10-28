@@ -133,13 +133,16 @@ export async function fetchLinkDetails(input: string | URL, options: FetchLinkDe
     // A missing or malformed Content-Type is read as HTML, as parseLinkDetails does.
     if (contentType && !HTML_TYPES.has(contentType.essence)) {
       discard(response);
-      return fileDetails(url, contentType.essence);
+      const details = fileDetails(url, contentType.essence);
+      deadline.check(url);
+      return details;
     }
     // Bytes past MAX_DOCUMENT_BYTES are never parsed, so they are not read. Stops at the bound without waiting
     // for more, so a body that fills it counts as cut.
     const limit = Math.min(settings.maxBytes, MAX_DOCUMENT_BYTES);
     const { bytes, truncated } = await readBody(response, limit, url, deadline, true);
     const details = parseLinkDetails(bytes, { url, contentType: header });
+    deadline.check(url);
     if (truncated && !hasDocumentDetails(details, url)) {
       throw new LinkFetchError('too_large', `The body reaches ${limit} bytes and its start has no link details`, { url: url.href });
     }
@@ -172,6 +175,7 @@ export async function fetchResource(input: string | URL, options: FetchResourceO
       throw tooLarge();
     }
     const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline, false);
+    deadline.check(url);
     if (truncated) throw tooLarge();
     return { url: url.href, contentType, bytes };
   } finally {
@@ -393,9 +397,10 @@ function failure(error: unknown, deadline: Deadline, url: URL): LinkFetchError {
 }
 
 /**
- * The time limit of one operation. It throws `timeout` from `step` and `race` once `timeoutMs` has passed,
- * judged by the clock rather than by its timer alone, and aborts the signal. `step` also yields to timers and
- * other tasks every few calls, so reads that are always ready can neither outlast the limit nor hold the
+ * The time limit of one operation. It throws `timeout` from `step`, `race` and `check` once `timeoutMs` has
+ * passed, judged by the clock rather than by its timer alone, and aborts the signal. `race` also rejects work
+ * that settles after the limit, so a late response, read or resolution is never used. `step` yields to timers
+ * and other tasks every few calls, so reads that are always ready can neither outlast the limit nor hold the
  * event loop. `race` keeps one subscription per pending call and drops it when the work settles.
  */
 class Deadline {
@@ -428,23 +433,33 @@ class Deadline {
     }
   }
 
-  /** Settles as `work` does, or rejects with `timeout` when the time is up first, whether or not `work` honours the signal. */
+  /**
+   * Settles as `work` does, or rejects with `timeout` when the time is up first or when `work` settles after it,
+   * whether or not `work` honours the signal. `work` is observed before anything else, so its later rejection is
+   * never left unhandled.
+   */
   race<T>(work: Promise<T>, url: URL): Promise<T> {
-    this.check(url);
     return new Promise<T>((resolve, reject) => {
       const expire = () => reject(this.error(url));
-      this.waiters.add(expire);
-      work.then(
+      Promise.resolve(work).then(
         (value) => {
           this.waiters.delete(expire);
-          resolve(value);
+          if (this.expired) reject(this.error(url));
+          else resolve(value);
         },
         (error: unknown) => {
           this.waiters.delete(expire);
-          reject(error);
+          reject(this.expired ? this.error(url) : error);
         }
       );
+      if (this.expired) expire();
+      else this.waiters.add(expire);
     });
+  }
+
+  /** Throws `timeout` once the time is up; called before an operation returns its result. */
+  check(url: URL): void {
+    if (this.expired) throw this.error(url);
   }
 
   error(url: URL): LinkFetchError {
@@ -454,10 +469,6 @@ class Deadline {
   clear(): void {
     clearTimeout(this.timer);
     this.waiters.clear();
-  }
-
-  private check(url: URL): void {
-    if (this.expired) throw this.error(url);
   }
 
   private expire(): void {
