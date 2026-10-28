@@ -30,11 +30,14 @@ const isRunning = (value) =>
         isNameOrNull(child.boot) &&
         (child.app === undefined || child.app === true)
     ));
+/** The revision of a copy of an acknowledgement, its progress or a play (see `createPlayJournal`). */
+const isRev = (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0);
 const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played)) && isRunning(handoff.started);
-const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
-const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played) && isRunning(entry.started);
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string' && isRev(entry.rev);
+const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played) && isRunning(entry.started) && isRev(entry.rev);
 const isPlay = (entry) =>
   isAlert(entry) &&
+  isRev(entry.rev) &&
   (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&
   Array.isArray(entry.keys) &&
   entry.keys.every((key) => typeof key === 'string') &&

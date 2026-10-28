@@ -118,10 +118,11 @@ export function createAlertHandlers({
   /** alertId → { subscriberId, at }, for alerts the sink played, least recently asked first. */
   const settled = new Map();
   /**
-   * alertId → { subscriberId, alert, timer, played, started, unsaved }, for acknowledged alerts whose
-   * handler has not said it received them; `played` are the parts it said it finished (`unsaved` while
-   * no save of `scheduler.json` holds them all), and `started` its process for each part it started
-   * and has not said it finished.
+   * alertId → { subscriberId, alert, timer, played, started, unsaved, rev }, for acknowledged alerts
+   * whose handler has not said it received them; `played` are the parts it said it finished
+   * (`unsaved` while no save of `scheduler.json` holds them all), `started` its process for each part
+   * it started and has not said it finished, and `rev` a revision each change to them raises, so the
+   * newer of the copies in `scheduler.json` and `plays.json` tells which process a part is held for.
    */
   const taken = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
@@ -174,18 +175,20 @@ export function createAlertHandlers({
   // and no stream of this daemon is their handler yet.
   // Parts only plays.json holds, as scheduler.json could not be saved, are added to theirs.
   const handled = new Map(journal.handled.map(({ alertId, ...parts }) => [alertId, parts]));
-  for (const { alertId, subscriberId, alert, timer, played = [], started = {} } of acknowledged) {
+  for (const { alertId, subscriberId, alert, timer, played = [], started = {}, rev = 0 } of acknowledged) {
     const progress = handled.get(alertId);
     const finished = [...new Set([...played, ...(progress?.played ?? [])])];
-    const playing = withoutParts({ ...started, ...progress?.started }, finished);
-    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played: finished, started: playing, unsaved: false });
+    // An older copy only plays.json kept (a write that would drop it failed) names no process.
+    const newer = progress && (progress.rev ?? 0) >= rev;
+    const playing = withoutParts({ ...started, ...(newer ? progress.started : {}) }, finished);
+    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played: finished, started: playing, unsaved: false, rev: Math.max(rev, progress?.rev ?? 0) });
   }
   for (const { subscriberId } of acknowledged) orphan(subscriberId);
 
   const progressOf = ({ played = [], started = {} }) => ({ ...(played.length ? { played } : {}), ...(Object.keys(started).length ? { started } : {}) });
   const handoffs = (except = null) =>
     [...pending].filter(([alertId]) => alertId !== except).map(([alertId, entry]) => ({ alertId, alert: entry.alert, timer: entry.timer, ...progressOf(entry) }));
-  const acknowledgement = (alertId, held) => ({ alertId, subscriberId: held.subscriberId, alert: held.alert, timer: held.timer, ...progressOf(held) });
+  const acknowledgement = (alertId, held) => ({ alertId, subscriberId: held.subscriberId, alert: held.alert, timer: held.timer, ...progressOf(held), ...(held.rev ? { rev: held.rev } : {}) });
   /**
    * What `save` records: the pending alerts and the acknowledged ones not yet received, plus `next`,
    * each with the parts its handler finished, and the play journal while `plays.json` is behind.
@@ -470,7 +473,7 @@ export function createAlertHandlers({
         save(checkpoint({ alertId, subscriberId, alert, timer }));
         pending.delete(alertId);
         clock.clearTimeout(entry.handle);
-        taken.set(alertId, { subscriberId, alert, timer, played: [], started: {}, unsaved: false });
+        taken.set(alertId, { subscriberId, alert, timer, played: [], started: {}, unsaved: false, rev: 0 });
         counts.acknowledged += 1;
         return { ok: true };
       }
@@ -508,6 +511,7 @@ export function createAlertHandlers({
       if (held.played.includes(part)) return { ok: true };
       const before = held.started;
       held.started = { ...held.started, [part]: executorOf(processes, pid, { app: true }) };
+      held.rev += 1;
       try {
         save(checkpoint());
       } catch (error) {
@@ -548,6 +552,7 @@ export function createAlertHandlers({
         held.played = [...held.played, part];
         held.started = withoutParts(held.started, [part]);
         held.unsaved = true;
+        held.rev += 1;
       }
       try {
         save(checkpoint());

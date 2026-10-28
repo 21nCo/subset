@@ -10,6 +10,7 @@ import { createMacosSink } from '../../src/alerts/index.mjs';
 import { OSASCRIPT } from '../../src/alerts/macos.mjs';
 import {
   ACK_TIMEOUT_MS,
+  BIRTH_CHECK_MS,
   IDLE_EXIT_MS,
   LEFT_PROCESS_WAIT_MS,
   ORPHANED_ALERT_MS,
@@ -70,6 +71,7 @@ function appProcesses(live = new Set([APP])) {
     polls: 0,
     boot: () => 'b1',
     birth: (pid) => `birth-${pid}`,
+    exists: (pid) => live.has(pid),
     alive: ({ pid }) => live.has(pid),
     kill: () => {},
     sleep() {
@@ -456,6 +458,42 @@ for (const restart of [false, true]) {
   });
 }
 
+test('a part the sink held for the app and gave back while plays.json could not be written is shown once by the next daemon after a crash, at once, the app still running', async (t) => {
+  for (const how of ['release', 'another process']) {
+    const { holder, alertId, subscriberId } = await heldWhileAppRuns(t, { restart: false });
+    // The daemon is killed before its sink plays the part given back: its wait for the app stops polling.
+    const { sleep } = holder.processes;
+    const waiting = [];
+    holder.processes.sleep = () => new Promise((resolve) => waiting.push(resolve));
+    await settle();
+    try {
+      // A write of plays.json that fails keeps the file it would have replaced, which holds the part for the app.
+      const stale = readFileSync(join(holder.dataDir, 'plays.json'));
+      assert.equal(JSON.parse(stale).plays[0].running.notification.app, true);
+      breakPlays(holder);
+      const asked =
+        how === 'release'
+          ? await call(holder, `/v1/alerts/${alertId}/release`, { subscriberId })
+          : await call(holder, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP + 1 });
+      assert.equal(asked.status, 410, how);
+      const [carried] = scheduler(holder.dataDir).plays;
+      assert.equal(carried.running?.notification, undefined, how);
+      const left = filesLeftByKill(t, holder);
+      writeFileSync(join(left, 'plays.json'), stale);
+      // The app runs on and asks nothing more, as it was told the sink plays it.
+      const { next, spawner: after } = await successorOf(t, { clock: holder.clock, processes: appProcesses() }, partSpawn(), left);
+      await eventually(() => after.started.length === 1);
+      await eventually(() => plays(next.dataDir).length === 0);
+      await settle();
+      assert.deepEqual(after.started, ['notification'], how);
+      assert.equal(next.processes.live.has(APP), true, how);
+    } finally {
+      holder.processes.sleep = sleep;
+      for (const resolve of waiting) resolve();
+    }
+  }
+});
+
 test('a handback of a part the sink holds for the app is answered only once a file records it: neither -> 500 and still held; scheduler.json alone carries it', async (t) => {
   const { spawner, holder, alertId, subscriberId } = await heldWhileAppRuns(t, { restart: false });
   breakScheduler(holder);
@@ -504,7 +542,7 @@ for (const crash of [false, true]) {
     assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
     breakScheduler(context);
     assert.equal((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).status, 200);
-    assert.deepEqual(JSON.parse(readFileSync(join(context.dataDir, 'plays.json'), 'utf8')).progress, [{ alertId, played: ['notification'] }]);
+    assert.deepEqual(JSON.parse(readFileSync(join(context.dataDir, 'plays.json'), 'utf8')).progress, [{ alertId, played: ['notification'], rev: 2 }]);
     await appEnds(context, stream);
     let sink = { context, spawner };
     if (crash) {
@@ -821,6 +859,7 @@ function fakeProcesses({ boot = 'b1', lives = {} } = {}) {
     },
     boot: () => boot,
     birth: (pid) => `birth-${pid}`,
+    exists: (pid) => (lives[pid] ?? 0) > 0 && !killed.includes(pid),
     alive: ({ pid }) => (lives[pid] ?? 0) > 0 && !killed.includes(pid),
     kill: (pid) => killed.push(pid),
     async sleep() {
@@ -1013,6 +1052,84 @@ test('a journal that cannot be written is carried by scheduler.json until it can
   const calls = behindCalls;
   journal.saved([]);
   assert.equal(behindCalls, calls);
+});
+
+test('copies of one play are merged in revision order: the newer copy says which parts are left running, a part finished in either counts', () => {
+  const app = { pid: APP, birth: 'b', boot: 'b1', app: true };
+  const held = { ...leftRunning({ notification: app }), played: [], subscriberId: 's1', rev: 3 };
+  const givenBack = { ...leftRunning({}), played: [], subscriberId: 's1', rev: 4 };
+  for (const entries of [[held, givenBack], [givenBack, held]]) {
+    const writes = [];
+    const journal = createPlayJournal({ entries, persist: (written) => writes.push(written), processes: fakeProcesses() });
+    assert.deepEqual([journal.held('a1'), journal.left('a1')], [[], false]);
+    // The merged entry is written with a revision above either copy's.
+    journal.recover();
+    assert.deepEqual([writes[0][0].running, writes[0][0].rev], [undefined, 5]);
+  }
+  // A newer copy that holds the part for a later ask holds it again; copies of one revision are the same, and joined.
+  const again = createPlayJournal({ entries: [givenBack, { ...held, rev: 5 }], processes: fakeProcesses() });
+  assert.deepEqual(again.held('a1'), ['notification']);
+  const sink = { pid: 9, birth: 'birth-9', boot: 'b1' };
+  const same = createPlayJournal({ entries: [{ ...held, rev: 2 }, { ...leftRunning({ 'sound:0': sink }), played: ['sound:1'], rev: 2 }, { ...givenBack, rev: 1, played: ['sound:2'] }], processes: fakeProcesses() });
+  assert.deepEqual([same.held('a1'), [...same.played('a1')].sort()], [['notification'], ['sound:1', 'sound:2']]);
+  // Each change to an entry raises its revision once, however often it is written or carried.
+  const writes = [];
+  const journal = createPlayJournal({ persist: (written) => writes.push(written[0]?.rev), processes: fakeProcesses() });
+  journal.begin('a2', { alert: finish, timer: egg });
+  assert.equal(journal.carried.length, 0);
+  journal.started('a2', 'sound:0', 9);
+  journal.done('a2', 'sound:0');
+  journal.recover();
+  assert.deepEqual(writes, [1, 2, 3, 4, 4]);
+});
+
+test("the newer of an acknowledgement and the progress only plays.json holds says which process holds each part the app started", () => {
+  const executor = (pid) => ({ pid, birth: `birth-${pid}`, boot: 'b1', app: true });
+  const acknowledged = [{ alertId: 'a1', subscriberId: 's1', alert: finish, timer: egg, played: ['notification'], started: { 'sound:0': executor(APP + 1) }, rev: 3 }];
+  const handlersWith = (progress) => createAlertHandlers({ clock: createFakeClock(), sink: createRecordingSink(), log: () => {}, publish: () => {}, isOpen: () => true, acknowledged, progress, processes: fakeProcesses() });
+  // A write that would have dropped the progress failed, keeping an older copy: the acknowledgement holds.
+  const older = handlersWith([{ alertId: 'a1', played: [], started: { 'sound:0': executor(APP) }, rev: 2 }]);
+  assert.deepEqual(older.checkpoint.acknowledged.map(({ started, rev }) => [started, rev]), [[{ 'sound:0': executor(APP + 1) }, 3]]);
+  // scheduler.json could not be saved: the progress is newer.
+  const newer = handlersWith([{ alertId: 'a1', played: ['notification', 'sound:0'], started: { 'sound:1': executor(APP) }, rev: 5 }]);
+  assert.deepEqual(newer.checkpoint.acknowledged.map(({ played, started, rev }) => [played, started, rev]), [[['notification', 'sound:0'], { 'sound:1': executor(APP) }, 5]]);
+});
+
+test('a wait for a process asks only whether its pid exists on each poll, and checks its birth every BIRTH_CHECK_MS: a pid given to another process is still told', async () => {
+  const app = { pid: 7, birth: 'birth-7', boot: 'b1', app: true };
+  const pollsPerCheck = BIRTH_CHECK_MS / 1_000;
+  for (const reusedAt of [Infinity, 2 * pollsPerCheck + 5]) {
+    const processes = fakeProcesses({ lives: { 7: Infinity } });
+    let checks = 0;
+    processes.alive = () => {
+      checks += 1;
+      return processes.sleeps < reusedAt;
+    };
+    const journal = createPlayJournal({ entries: [{ ...leftRunning({ 'sound:0': app }), subscriberId: 's1' }], processes });
+    const { sleep } = processes;
+    processes.sleep = async () => {
+      await sleep();
+      if (processes.sleeps === 10 * pollsPerCheck) journal.close();
+    };
+    await journal.awaitHandler('a1', 'sound:0');
+    if (reusedAt === Infinity) {
+      assert.deepEqual([processes.sleeps, checks, journal.held('a1')], [10 * pollsPerCheck, 11, ['sound:0']]);
+    } else {
+      // Told at the first birth check after the pid was given away, and played again.
+      assert.deepEqual([processes.sleeps, checks, journal.held('a1')], [3 * pollsPerCheck, 4, []]);
+    }
+  }
+  // A sink process waited for to the bound is checked once at the start and once before it is stopped.
+  const processes = fakeProcesses({ lives: { 7: Infinity } });
+  let checks = 0;
+  const { alive } = processes;
+  processes.alive = (child) => {
+    checks += 1;
+    return alive(child);
+  };
+  const journal = createPlayJournal({ entries: [leftRunning({ 'sound:0': { pid: 7, birth: 'birth-7', boot: 'b1' } })], processes });
+  await journal.settle('a1');
+  assert.deepEqual([checks, processes.killed], [2, [7]]);
 });
 
 test('copies of one play from plays.json and scheduler.json are merged, each part finished in either counting', () => {
