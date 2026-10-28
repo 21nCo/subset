@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F01A9AAA95E2153FF25D27D9AD11FA90"
+               BlueprintIdentifier = "E97B14F0DF243D46474470145DAE1CB2"
                BuildableName = "Subset System.app"
                BlueprintName = "SubsetSystem"
                ReferencedContainer = "container:System.xcodeproj">
@@ -44,7 +44,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "F01A9AAA95E2153FF25D27D9AD11FA90"
+            BlueprintIdentifier = "E97B14F0DF243D46474470145DAE1CB2"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -81,6 +81,16 @@
                ReferencedContainer = "container:System.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "637B3B9A34964BB822D73FC4D4D3044F"
+               BuildableName = "SystemHelperTests.xctest"
+               BlueprintName = "SystemHelperTests"
+               ReferencedContainer = "container:System.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
@@ -97,7 +107,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "F01A9AAA95E2153FF25D27D9AD11FA90"
+            BlueprintIdentifier = "E97B14F0DF243D46474470145DAE1CB2"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
@@ -114,7 +124,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "F01A9AAA95E2153FF25D27D9AD11FA90"
+            BlueprintIdentifier = "E97B14F0DF243D46474470145DAE1CB2"
             BuildableName = "Subset System.app"
             BlueprintName = "SubsetSystem"
             ReferencedContainer = "container:System.xcodeproj">
