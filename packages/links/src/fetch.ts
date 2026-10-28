@@ -1,0 +1,395 @@
+import { isBlockedAddress, isBlockedHostname, isIpAddress } from './address.js';
+import { parseHttpUrl } from './canonicalize.js';
+import { parseContentType } from './decode.js';
+import { MAX_TITLE_LENGTH, type LinkDetailsV1 } from './details.js';
+import { parseLinkDetails } from './parse.js';
+
+// Kept equal to package.json by test/fetch.test.mjs.
+const VERSION = '0.1.0';
+/** The User-Agent sent when the caller passes none. */
+export const DEFAULT_USER_AGENT = `SubsetLinks/${VERSION} (+https://subset.dev)`;
+
+/** Why a fetch failed. `unsupported_type` comes only from `fetchResource`. */
+export type LinkFetchErrorCode =
+  | 'invalid_url'
+  | 'blocked_address'
+  | 'blocked_port'
+  | 'timeout'
+  | 'too_many_redirects'
+  | 'http_status'
+  | 'too_large'
+  | 'network'
+  | 'unsupported_type';
+
+/** The error `fetchLinkDetails` and `fetchResource` reject with. */
+export class LinkFetchError extends Error {
+  readonly code: LinkFetchErrorCode;
+  /** The HTTP status, for `http_status`. */
+  readonly status?: number;
+  /** The URL being fetched when the error happened, without credentials. Absent for `invalid_url` on the input. */
+  readonly url?: string;
+
+  constructor(code: LinkFetchErrorCode, message: string, details: { status?: number; url?: string; cause?: unknown } = {}) {
+    super(message, details.cause === undefined ? undefined : { cause: details.cause });
+    this.name = 'LinkFetchError';
+    this.code = code;
+    if (details.status !== undefined) this.status = details.status;
+    if (details.url !== undefined) this.url = details.url;
+  }
+}
+
+/** The subset of the web `fetch` the fetcher calls. */
+export type FetchFunction = (input: string, init: RequestInit) => Promise<Response>;
+/** Resolves a hostname to its IP addresses, for example with Node's `dns.lookup(hostname, { all: true })`. */
+export type ResolveHost = (hostname: string) => readonly string[] | Promise<readonly string[]>;
+
+export interface SafeFetchOptions {
+  /** Defaults to the global `fetch`. */
+  fetch?: FetchFunction;
+  /** When given, every address it returns for a hostname is checked before that hostname is fetched. */
+  resolveHost?: ResolveHost;
+  /** Limit for the whole operation, redirects, resolution and body included. Defaults to 5,000 ms. */
+  timeoutMs?: number;
+  /** Most body bytes read. */
+  maxBytes?: number;
+  /** Most redirects followed. Defaults to 5. */
+  maxRedirects?: number;
+  /** Defaults to `DEFAULT_USER_AGENT`. */
+  userAgent?: string;
+  /** Ports allowed besides 80 and 443. */
+  allowPorts?: readonly number[];
+}
+
+/** `maxBytes` defaults to 2,000,000. */
+export type FetchLinkDetailsOptions = SafeFetchOptions;
+
+export interface FetchResourceOptions extends SafeFetchOptions {
+  /** Accepted media ranges, such as `image/png` or `image/*`. Sent as the Accept header. Defaults to any type. */
+  accept?: readonly string[];
+}
+
+export interface FetchedResource {
+  /** The resource's URL after redirects, without credentials. */
+  url: string;
+  /** Media type without parameters; `application/octet-stream` when the response declares none. */
+  contentType: string;
+  bytes: Uint8Array;
+}
+
+const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_MAX_BYTES = 2_000_000;
+const DEFAULT_MAX_REDIRECTS = 5;
+const HTML_ACCEPT = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8';
+const HTML_TYPES = new Set(['text/html', 'application/xhtml+xml']);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MEDIA_RANGE = /^(?:\*\/\*|[a-z0-9!#$%&'*+.^_`|~-]+\/(?:\*|[a-z0-9!#$%&'*+.^_`|~-]+))$/;
+// Details fields a document can supply besides the URL, content type and fallback icon.
+const BASE_KEYS = new Set(['version', 'url', 'icons', 'contentType']);
+
+interface Settings {
+  fetch: FetchFunction;
+  resolveHost?: ResolveHost;
+  timeoutMs: number;
+  maxBytes: number;
+  maxRedirects: number;
+  userAgent: string;
+  allowPorts: ReadonlySet<number>;
+}
+
+/**
+ * Fetches an http(s) page and reads its link details. Every hop, including each redirect, is checked
+ * against the blocked hostnames, addresses and ports before any request is made to it, and against the
+ * addresses `resolveHost` returns when it is given. HTML is parsed with `parseLinkDetails`; another media
+ * type yields the URL, content type and a title from the file name, without reading the body. Rejects with
+ * `LinkFetchError`, or with a `TypeError` or `RangeError` for invalid options.
+ */
+export async function fetchLinkDetails(input: string | URL, options: FetchLinkDetailsOptions = {}): Promise<LinkDetailsV1> {
+  const settings = settle(options);
+  const deadline = new Deadline(settings.timeoutMs);
+  try {
+    const { response, url } = await open(input, settings, HTML_ACCEPT, deadline);
+    const header = response.headers.get('content-type') ?? undefined;
+    const contentType = parseContentType(header);
+    // A missing or malformed Content-Type is read as HTML, as parseLinkDetails does.
+    if (contentType && !HTML_TYPES.has(contentType.essence)) {
+      discard(response);
+      return fileDetails(url, contentType.essence);
+    }
+    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline);
+    const details = parseLinkDetails(bytes, { url, contentType: header });
+    if (truncated && !hasDocumentDetails(details, url)) {
+      throw new LinkFetchError('too_large', `The body exceeds ${settings.maxBytes} bytes and its start has no link details`, { url: url.href });
+    }
+    return details;
+  } finally {
+    deadline.clear();
+  }
+}
+
+/**
+ * Fetches a resource such as an icon with the same address, redirect and time checks as `fetchLinkDetails`.
+ * Rejects with `unsupported_type` when the media type matches no `accept` range and with `too_large` when
+ * the body exceeds `maxBytes` (default 2,000,000).
+ */
+export async function fetchResource(input: string | URL, options: FetchResourceOptions = {}): Promise<FetchedResource> {
+  const settings = settle(options);
+  const accept = mediaRanges(options.accept);
+  const deadline = new Deadline(settings.timeoutMs);
+  try {
+    const { response, url } = await open(input, settings, accept.join(', '), deadline);
+    const contentType = parseContentType(response.headers.get('content-type') ?? undefined)?.essence ?? 'application/octet-stream';
+    if (!accept.some((range) => matchesRange(range, contentType))) {
+      discard(response);
+      throw new LinkFetchError('unsupported_type', `The response type ${contentType} is not accepted`, { url: url.href });
+    }
+    const tooLarge = () => new LinkFetchError('too_large', `The body exceeds ${settings.maxBytes} bytes`, { url: url.href });
+    // A declared length over the limit fails before any of the body is read.
+    if (Number(response.headers.get('content-length') ?? Number.NaN) > settings.maxBytes) {
+      discard(response);
+      throw tooLarge();
+    }
+    const { bytes, truncated } = await readBody(response, settings.maxBytes, url, deadline);
+    if (truncated) throw tooLarge();
+    return { url: url.href, contentType, bytes };
+  } finally {
+    deadline.clear();
+  }
+}
+
+/** Requests `input`, following redirects manually and checking every hop, until a 2xx response. */
+async function open(input: string | URL, settings: Settings, accept: string, deadline: Deadline): Promise<{ response: Response; url: URL }> {
+  let url = target(input);
+  for (let redirects = 0; ; redirects++) {
+    await check(url, settings, deadline);
+    let response: Response;
+    try {
+      response = await deadline.race(
+        settings.fetch(url.href, {
+          method: 'GET',
+          headers: { accept, 'user-agent': settings.userAgent },
+          redirect: 'manual',
+          credentials: 'omit',
+          signal: deadline.signal
+        })
+      );
+    } catch (error) {
+      throw failure(error, deadline, url);
+    }
+    // A browser's fetch hides a manual redirect's Location, so the next hop cannot be checked.
+    if (response.type === 'opaqueredirect') {
+      throw new LinkFetchError('network', 'The runtime hides redirect targets, so the redirect cannot be checked', { url: url.href });
+    }
+    const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get('location') : null;
+    if (location !== null) {
+      discard(response);
+      if (redirects >= settings.maxRedirects) {
+        throw new LinkFetchError('too_many_redirects', `More than ${settings.maxRedirects} redirects`, { url: url.href });
+      }
+      url = target(location, url);
+      continue;
+    }
+    if (response.status < 200 || response.status > 299) {
+      discard(response);
+      throw new LinkFetchError('http_status', `The server answered ${response.status}`, { status: response.status, url: url.href });
+    }
+    return { response, url };
+  }
+}
+
+/** Parses a URL (relative to `base` for a redirect), removing any credentials so they are never sent. */
+function target(input: string | URL, base?: URL): URL {
+  let url: URL;
+  try {
+    url = parseHttpUrl(input, base);
+  } catch (error) {
+    throw new LinkFetchError('invalid_url', base ? 'The redirect target is not an http or https URL' : 'Expected an absolute http or https URL', {
+      url: base?.href,
+      cause: error
+    });
+  }
+  url.username = '';
+  url.password = '';
+  return url;
+}
+
+async function check(url: URL, settings: Settings, deadline: Deadline): Promise<void> {
+  const hostname = url.hostname;
+  const literal = isIpAddress(hostname);
+  if (literal ? isBlockedAddress(hostname) : isBlockedHostname(hostname)) {
+    throw new LinkFetchError('blocked_address', `${hostname} is a private or reserved address`, { url: url.href });
+  }
+  const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
+  if (port !== 80 && port !== 443 && !settings.allowPorts.has(port)) {
+    throw new LinkFetchError('blocked_port', `Port ${port} is not allowed`, { url: url.href });
+  }
+  if (literal || !settings.resolveHost) return;
+  const resolveHost = settings.resolveHost;
+  let addresses: readonly string[];
+  try {
+    addresses = await deadline.race(Promise.resolve().then(() => resolveHost(hostname)));
+  } catch (error) {
+    throw failure(error, deadline, url);
+  }
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw new LinkFetchError('network', `${hostname} did not resolve to any address`, { url: url.href });
+  }
+  // A value that is not an address string counts as blocked.
+  if (addresses.some((address) => typeof address !== 'string' || isBlockedAddress(address))) {
+    throw new LinkFetchError('blocked_address', `${hostname} resolves to a private or reserved address`, { url: url.href });
+  }
+}
+
+/** Reads at most `maxBytes` of the body, then cancels the stream. */
+async function readBody(response: Response, maxBytes: number, url: URL, deadline: Deadline): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  let done = false;
+  const reader = response.body?.getReader();
+  if (!reader) return { bytes: new Uint8Array(0), truncated };
+  try {
+    while (!done) {
+      const next = await deadline.race(reader.read());
+      done = next.done;
+      if (next.done) break;
+      const room = maxBytes - total;
+      if (next.value.byteLength > room) {
+        chunks.push(next.value.subarray(0, room));
+        total += room;
+        truncated = true;
+        break;
+      }
+      chunks.push(next.value);
+      total += next.value.byteLength;
+    }
+  } catch (error) {
+    throw failure(error, deadline, url);
+  } finally {
+    if (!done) reader.cancel().catch(() => {});
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { bytes, truncated };
+}
+
+/** Releases a body that will not be read. */
+function discard(response: Response): void {
+  try {
+    response.body?.cancel().catch(() => {});
+  } catch {
+    // An already locked or consumed body needs no release.
+  }
+}
+
+/** The record for a non-HTML response: URL, content type, fallback icon and the file name as title. */
+function fileDetails(url: URL, contentType: string): LinkDetailsV1 {
+  const base = parseLinkDetails('', { url, contentType });
+  const title = fileName(url);
+  return title ? { version: 1, url: base.url, title, icons: base.icons, contentType: base.contentType } : base;
+}
+
+function fileName(url: URL): string | undefined {
+  const segment = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
+  let name: string;
+  try {
+    name = decodeURIComponent(segment);
+  } catch {
+    name = segment;
+  }
+  name = name.replace(/\s+/g, ' ').trim();
+  return name ? [...name].slice(0, MAX_TITLE_LENGTH).join('') : undefined;
+}
+
+/** Whether the document supplied anything beyond the URL, content type and fallback icon. */
+function hasDocumentDetails(details: LinkDetailsV1, url: URL): boolean {
+  if (Object.keys(details).some((key) => !BASE_KEYS.has(key))) return true;
+  const fallback = new URL('/favicon.ico', url).href;
+  return details.icons.some((icon) => icon.url !== fallback || icon.rel !== 'icon' || icon.sizes !== undefined || icon.type !== undefined);
+}
+
+function matchesRange(range: string, type: string): boolean {
+  if (range === '*/*') return true;
+  return range.endsWith('/*') ? type.startsWith(range.slice(0, -1)) : type === range;
+}
+
+function failure(error: unknown, deadline: Deadline, url: URL): LinkFetchError {
+  if (deadline.expired) return deadline.error(url);
+  if (error instanceof LinkFetchError) return error;
+  return new LinkFetchError('network', error instanceof Error ? error.message : 'The request failed', { url: url.href, cause: error });
+}
+
+/** One timer for the whole operation. `race` rejects with `timeout` when it fires, whether or not the awaited work honours the abort signal. */
+class Deadline {
+  readonly signal: AbortSignal;
+  expired = false;
+  private readonly controller = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly expiry: Promise<never>;
+  private readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    this.timeoutMs = timeoutMs;
+    this.signal = this.controller.signal;
+    let expire!: () => void;
+    this.expiry = new Promise<never>((_, reject) => {
+      expire = () => reject(new LinkFetchError('timeout', `No complete response within ${timeoutMs} ms`));
+    });
+    this.expiry.catch(() => {});
+    this.timer = setTimeout(() => {
+      this.expired = true;
+      expire();
+      this.controller.abort();
+    }, timeoutMs);
+  }
+
+  race<T>(work: Promise<T>): Promise<T> {
+    return Promise.race([work, this.expiry]);
+  }
+
+  error(url: URL): LinkFetchError {
+    return new LinkFetchError('timeout', `No complete response within ${this.timeoutMs} ms`, { url: url.href });
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
+}
+
+function settle(options: SafeFetchOptions): Settings {
+  if (typeof options !== 'object' || options === null) throw new TypeError('Expected an options object');
+  const fetchFunction = options.fetch ?? globalFetch();
+  if (typeof fetchFunction !== 'function') throw new TypeError('options.fetch must be a function');
+  if (options.resolveHost !== undefined && typeof options.resolveHost !== 'function') throw new TypeError('options.resolveHost must be a function');
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('options.timeoutMs must be a positive number');
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('options.maxBytes must be a positive integer');
+  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0) throw new RangeError('options.maxRedirects must be a non-negative integer');
+  const userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
+  if (typeof userAgent !== 'string' || userAgent.trim() === '') throw new TypeError('options.userAgent must be a non-empty string');
+  const allowPorts = options.allowPorts ?? [];
+  if (!Array.isArray(allowPorts) || !allowPorts.every((port) => Number.isInteger(port) && port >= 1 && port <= 65535)) {
+    throw new RangeError('options.allowPorts must be port numbers from 1 to 65535');
+  }
+  return { fetch: fetchFunction, resolveHost: options.resolveHost, timeoutMs, maxBytes, maxRedirects, userAgent, allowPorts: new Set(allowPorts) };
+}
+
+function mediaRanges(accept: readonly string[] | undefined): string[] {
+  if (accept === undefined) return ['*/*'];
+  if (!Array.isArray(accept) || accept.length === 0) throw new TypeError('options.accept must be a non-empty array of media ranges');
+  return accept.map((range) => {
+    const value = typeof range === 'string' ? range.trim().toLowerCase() : '';
+    if (!MEDIA_RANGE.test(value) || (value.startsWith('*/') && value !== '*/*')) throw new TypeError(`options.accept has an invalid media range: ${String(range)}`);
+    return value;
+  });
+}
+
+// Bound so a runtime whose fetch requires `this` to be the global (Workers, browsers) accepts the call.
+function globalFetch(): FetchFunction | undefined {
+  return typeof globalThis.fetch === 'function' ? (input, init) => globalThis.fetch(input, init) : undefined;
+}

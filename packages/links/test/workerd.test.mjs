@@ -1,7 +1,8 @@
 // Bundles the built package the way a Worker or browser extension would, failing on any import of a Node
-// built-in, then runs it inside workerd (the Cloudflare Workers runtime, without the nodejs_compat flag) and
-// checks it returns exactly what it returns on Node. Recent workerd serves some node: modules even without
-// that flag, so the bundling step, not workerd, is what rejects a Node dependency.
+// built-in, then runs it inside workerd (the Cloudflare Workers runtime, without the nodejs_compat flag): the
+// parser must return exactly what it returns on Node, and every fetcher case in fetch-cases.mjs must pass.
+// Recent workerd serves some node: modules even without that flag, so the bundling step, not workerd, is what
+// rejects a Node dependency.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,6 +13,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'rolldown';
 import { canonicalizeUrl, isLinkDetailsV1, parseLinkDetails } from '../dist/index.js';
+import { cases } from './fetch-cases.mjs';
 
 const workerd = createRequire(import.meta.url)('workerd').default;
 const directory = mkdtempSync(join(tmpdir(), 'links-workerd-'));
@@ -62,6 +64,29 @@ export default {
   }
 };
 `);
+  assert.match(await runInWorkerd('parse', entry), /links: workerd output matches Node/);
+});
+
+test('the fetcher cases run unchanged in workerd', async () => {
+  const entry = join(directory, 'fetch-entry.mjs');
+  writeFileSync(entry, `
+import * as lib from ${JSON.stringify(fileURLToPath(new URL('../dist/index.js', import.meta.url)))};
+import { cases } from ${JSON.stringify(fileURLToPath(new URL('fetch-cases.mjs', import.meta.url)))};
+export default {
+  async test() {
+    for (const { name, run } of cases) {
+      await run(lib);
+      console.log('links fetch case passed: ' + name);
+    }
+  }
+};
+`);
+  const output = await runInWorkerd('fetch', entry);
+  for (const { name } of cases) assert.ok(output.includes(`links fetch case passed: ${name}`), `workerd did not pass: ${name}`);
+});
+
+/** Bundles `entry` for the browser platform, failing on any Node built-in import, runs it with `workerd test` and returns its output. */
+async function runInWorkerd(name, entry) {
   const nodeImports = [];
   const rejectNodeBuiltins = {
     name: 'reject-node-builtins',
@@ -69,16 +94,16 @@ export default {
       if (source.startsWith('node:') || builtinModules.includes(source.split('/')[0])) nodeImports.push(`${importer} imports ${source}`);
     }
   };
-  await build({ input: entry, platform: 'browser', plugins: [rejectNodeBuiltins], logLevel: 'silent', output: { file: join(directory, 'worker.js'), format: 'esm' } });
+  await build({ input: entry, platform: 'browser', plugins: [rejectNodeBuiltins], logLevel: 'silent', output: { file: join(directory, `${name}.js`), format: 'esm' } });
   assert.deepEqual(nodeImports, [], 'the package imports a Node built-in');
 
-  writeFileSync(join(directory, 'config.capnp'), `using Workerd = import "/workerd/workerd.capnp";
+  writeFileSync(join(directory, `${name}.capnp`), `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (services = [(name = "links", worker = .worker)]);
-const worker :Workerd.Worker = (modules = [(name = "worker", esModule = embed "worker.js")], compatibilityDate = "2026-10-01");
+const worker :Workerd.Worker = (modules = [(name = "worker", esModule = embed "${name}.js")], compatibilityDate = "2026-10-01");
 `);
-  const run = spawnSync(workerd, ['test', '--verbose', join(directory, 'config.capnp')], { encoding: 'utf8', timeout: 60_000 });
+  const run = spawnSync(workerd, ['test', '--verbose', join(directory, `${name}.capnp`)], { encoding: 'utf8', timeout: 60_000 });
   const output = `${run.stdout}\n${run.stderr}`;
   assert.equal(run.status, 0, output);
-  assert.match(output, /links: workerd output matches Node/);
   assert.match(output, /\[ PASS \]/);
-});
+  return output;
+}
