@@ -8,6 +8,7 @@ import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
+import { systemProcesses } from './play-journal.mjs';
 import { ALERT_PART, createStateStore } from './store.mjs';
 
 export const HEARTBEAT_MS = 15_000;
@@ -84,6 +85,7 @@ function listen(server, socketPath) {
  *
  * `startupHook(step)` runs, for tests, once the lock is taken (`locked`) and once the socket is
  * bound but not yet published (`bound`). Throws `LockLostError` when the lock is lost before then.
+ * `processes` tells, for the play journal, whether a sink process or the alert handler still runs.
  */
 export async function startDaemon({
   dataDir = resolveDataDir(),
@@ -92,6 +94,7 @@ export async function startDaemon({
   log = stderrLog,
   idleExitMs = IDLE_EXIT_MS,
   heartbeatMs = HEARTBEAT_MS,
+  processes = systemProcesses,
   startupHook = async () => {}
 } = {}) {
   const paths = ensureDataDir(dataDir);
@@ -102,6 +105,7 @@ export async function startDaemon({
   let unsettled;
   let acknowledged;
   let plays;
+  let progress;
   try {
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
@@ -109,7 +113,9 @@ export async function startDaemon({
     let carried;
     ({ handoffs: unsettled, acknowledged, plays: carried } = stateStore.loadAlerts());
     // A copy scheduler.json carried while plays.json could not be written is merged with it.
-    plays = [...stateStore.loadPlays(), ...carried];
+    let journaled;
+    ({ plays: journaled, progress } = stateStore.loadPlays());
+    plays = [...journaled, ...carried];
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -179,9 +185,11 @@ export async function startDaemon({
     save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
     acknowledged,
     plays,
-    savePlays(entries) {
+    progress,
+    processes,
+    savePlays(entries, handled) {
       try {
-        write(() => stateStore.savePlays(entries));
+        write(() => stateStore.savePlays(entries, handled));
       } catch (error) {
         // A daemon that lost daemon.lock leaves the journal to the one that holds it.
         if (!(error instanceof LockLostError)) throw error;
@@ -501,20 +509,23 @@ export async function startDaemon({
 
   /**
    * The handler asks whether it may play one part of an alert it took (`playing`: yes while it holds
-   * the alert), or says it finished that part (`played`), so the sink never plays it, once that is
-   * saved. A failed save gets 500 or 503 and changes nothing, so the handler says so again.
+   * the alert, recording its process `pid` as playing it), or says it finished that part (`played`),
+   * so the sink never plays it, once `scheduler.json` or `plays.json` holds that. When neither can be
+   * saved it gets 500 or 503, so the handler says so again.
    */
   async function part(request, response, alertId, state) {
     const { ok, input } = await readJson(request, response);
     if (!ok) return;
-    if (!isId(input?.subscriberId) || typeof input.part !== 'string' || !ALERT_PART.test(input.part)) {
-      return fail(response, 400, 'invalid_input', 'The body must be { "subscriberId": string, "part": "notification" or "sound:<index>" }.');
+    const pidOk = state !== 'playing' || (Number.isSafeInteger(input?.pid) && input.pid > 0);
+    if (!isId(input?.subscriberId) || typeof input.part !== 'string' || !ALERT_PART.test(input.part) || !pidOk) {
+      const pid = state === 'playing' ? ', "pid": its process id' : '';
+      return fail(response, 400, 'invalid_input', `The body must be { "subscriberId": string, "part": "notification" or "sound:<index>"${pid} }.`);
     }
     // Once shutting down the daemon saves no more, so the handler asks the next daemon.
     if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
     let result;
     try {
-      result = alertHandlers[state](alertId, input.subscriberId, input.part);
+      result = alertHandlers[state](alertId, input.subscriberId, input.part, input.pid);
     } catch (error) {
       if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
       log(`could not save scheduler.json: ${error.message}`);

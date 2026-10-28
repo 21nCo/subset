@@ -6,7 +6,10 @@ import { holderAlive, processBirth } from './lock.mjs';
 /** The key of one SET-74 transition of a timer, as the scheduler and the play journal name it. */
 export const transitionKey = (timerId, transition) => `${timerId}:${transition.type}:${transition.at}`;
 
-/** How long a daemon waits for a sound or notification process an earlier daemon left running before it stops it. */
+/**
+ * How long a daemon waits for a sound or notification process an earlier daemon left running before
+ * it stops it, and for a live alert handler (the app) to say it finished a part it started.
+ */
 export const LEFT_PROCESS_WAIT_MS = ALERT_PROCESS_TIMEOUT_MS;
 const POLL_MS = 100;
 const BOOT_ID = /^[0-9A-Fa-f-]{1,64}$/;
@@ -41,6 +44,11 @@ export const systemProcesses = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 };
 
+/** `{ pid, birth, boot }` of the process `pid` now, with `app: true` for an alert handler's. */
+export function executorOf(processes, pid, { app = false } = {}) {
+  return { pid, birth: processes.birth(pid), boot: processes.boot(), ...(app ? { app } : {}) };
+}
+
 const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running, finished }]) => ({
   alertId,
   alert,
@@ -48,7 +56,7 @@ const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running
   ...(subscriberId === null ? {} : { subscriberId }),
   keys,
   played: [...played],
-  ...(running.size ? { running: Object.fromEntries(running) } : {}),
+  ...(running.size ? { running: Object.fromEntries([...running].map(([part, child]) => [part, { ...child }])) } : {}),
   finished
 });
 
@@ -62,23 +70,34 @@ const serialize = ([alertId, { alert, timer, subscriberId, keys, played, running
  * finished (it plays nothing, though `scheduler.json` may still hold it as a handoff or
  * acknowledgement, or hold marks behind the transitions it stands for, `keys`).
  *
- * A part left running is decided by its process, which outlives the daemon that spawned it
- * (`settle`): one still running is waited for, up to `LEFT_PROCESS_WAIT_MS`, and one that exited in
- * this boot counts as finished, as nothing else stops it; one from an earlier boot, or whose boot
- * cannot be told, died with that boot, so its part plays again. So does a part whose process was
- * spawned by a daemon that ended before writing it.
+ * A part left running is decided by its executor (`settle`). A sink process outlives the daemon
+ * that spawned it: one still running is waited for, up to `LEFT_PROCESS_WAIT_MS`, then stopped, and
+ * one that exited in this boot counts as finished, as nothing else stops it. Its pid and boot are
+ * written as soon as it is spawned, and its birth (which tells a reused pid) in a second write, so a
+ * daemon that ends between the spawn and the first write, a moment, leaves the part to play again.
+ * A part an alert handler (the app, `app: true`) started and did not say it finished is waited for
+ * while the app runs, until it says so (`done`) or `LEFT_PROCESS_WAIT_MS` passes: an app still
+ * running then, stalled, counts it as finished, as its sound plays in the app's process. One the app
+ * ended in plays again, as its sound ended with the app. A part from an earlier boot, or whose boot
+ * cannot be told, died with that boot, so it plays again.
+ *
+ * `progress` are the parts an alert handler finished of alerts it holds, which `scheduler.json` has
+ * not recorded yet as it could not be saved (`handled`): the next daemon adds them to its
+ * acknowledgements, and a save of `scheduler.json` that records them drops them.
  *
  * An entry is kept until its play has finished and `scheduler.json` has been saved since without an
  * unfinished copy of it, and a write of the journal then drops it. A write that fails is logged,
  * the journal is `behind` and `onBehind()` is called: until a write succeeds again (which calls it
  * once more), every save of `scheduler.json` carries the entries (`carried`), so whichever file can
  * be written records the play, and a daemon that ends meanwhile leaves the next one each part's
- * state. `persist` writes the entries; `entries` are those earlier daemons left, from either file:
- * copies of one play are merged, as each only ever gains parts.
+ * state. `persist(entries, progress)` writes the journal; `entries` are those earlier daemons left,
+ * from either file: copies of one play are merged, as each only ever gains parts.
  */
-export function createPlayJournal({ entries = [], persist = () => {}, log = () => {}, onBehind = () => {}, processes = systemProcesses } = {}) {
-  /** alertId → { alert, timer, subscriberId, keys, played: Set, running: Map(part → { pid, birth, boot }), finished, saved }. */
+export function createPlayJournal({ entries = [], progress = [], persist = () => {}, log = () => {}, onBehind = () => {}, processes = systemProcesses } = {}) {
+  /** alertId → { alert, timer, subscriberId, keys, played: Set, running: Map(part → { pid, birth, boot, app? }), finished, saved }. */
   const plays = new Map();
+  /** alertId → the parts its handler finished that `scheduler.json` may not hold. */
+  const handled = new Map(progress.map(({ alertId, played }) => [alertId, [...played]]));
   let behind = false;
   for (const { alertId, alert, timer, subscriberId = null, keys, played, running = {}, finished } of entries) {
     const known = plays.get(alertId);
@@ -97,7 +116,10 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
   function flush({ changed = true } = {}) {
     const forget = [...plays].filter(([, entry]) => entry.finished && entry.saved).map(([alertId]) => alertId);
     try {
-      persist([...plays].filter(([alertId]) => !forget.includes(alertId)).map(serialize));
+      persist(
+        [...plays].filter(([alertId]) => !forget.includes(alertId)).map(serialize),
+        [...handled].map(([alertId, played]) => ({ alertId, played }))
+      );
     } catch (error) {
       log(`could not save plays.json: ${error.message}`);
       const was = behind;
@@ -118,7 +140,10 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
     entry.running.delete(part);
   }
 
-  /** Waits until the process left playing `part` has exited, stopping it after `LEFT_PROCESS_WAIT_MS`. */
+  /**
+   * Waits until the executor left playing `part` has ended or finished it, up to
+   * `LEFT_PROCESS_WAIT_MS`, then records the part as finished or to play again (see above).
+   */
   async function waitFor(entry, part, child) {
     const boot = processes.boot();
     if (child.boot === null || boot === null || child.boot !== boot) {
@@ -126,13 +151,16 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
       return;
     }
     for (let waited = 0; processes.alive(child); waited += POLL_MS) {
+      if (entry.played.has(part)) return;
       if (waited >= LEFT_PROCESS_WAIT_MS) {
-        if (child.birth !== null) processes.kill(child.pid);
-        break;
+        if (!child.app && child.birth !== null) processes.kill(child.pid);
+        markDone(entry, part);
+        return;
       }
       await processes.sleep(POLL_MS);
     }
-    markDone(entry, part);
+    if (child.app && !entry.played.has(part)) entry.running.delete(part);
+    else markDone(entry, part);
   }
 
   return {
@@ -158,18 +186,28 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
       return behind ? [...plays].map(serialize) : [];
     },
 
-    /** Records, before the sink is called, that it starts playing `alertId`, with the parts `played` already. */
-    begin(alertId, { alert, timer, subscriberId = null, keys = [], played = [] }) {
-      plays.set(alertId, { alert, timer, subscriberId, keys, played: new Set(played), running: new Map(), finished: false, saved: false });
+    /**
+     * Records, before the sink is called, that it starts playing `alertId`, with the parts `played`
+     * already and those its handler's executor may still be playing (`running`, `part → executor`).
+     */
+    begin(alertId, { alert, timer, subscriberId = null, keys = [], played = [], running = {} }) {
+      const left = Object.entries(running).filter(([part]) => !played.includes(part));
+      plays.set(alertId, { alert, timer, subscriberId, keys, played: new Set(played), running: new Map(left), finished: false, saved: false });
       flush();
     },
 
-    /** Records the process `pid` the sink spawned to play `part` of `alertId`. */
+    /**
+     * Records the process `pid` the sink spawned to play `part` of `alertId`: its pid and boot at
+     * once, then its birth, whose lookup takes a few milliseconds.
+     */
     started(alertId, part, pid) {
       const entry = plays.get(alertId);
       if (!entry || entry.finished || entry.played.has(part) || !Number.isSafeInteger(pid) || pid <= 0) return;
-      entry.running.set(part, { pid, birth: processes.birth(pid), boot: processes.boot() });
+      const child = { pid, birth: null, boot: processes.boot() };
+      entry.running.set(part, child);
       flush();
+      child.birth = processes.birth(pid);
+      if (child.birth !== null && entry.running.get(part) === child) flush();
     },
 
     /** Records that `part` of `alertId` finished playing. */
@@ -178,6 +216,24 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
       if (!entry || entry.finished || entry.played.has(part)) return;
       markDone(entry, part);
       flush();
+    },
+
+    /** Whether the alert handler's executor may still be playing `part` of `alertId`, which the sink waits for. */
+    awaitsHandler: (alertId, part) => plays.get(alertId)?.running.get(part)?.app === true,
+
+    /** The parts of alerts their handler holds that it finished and `scheduler.json` may not hold (see above). */
+    get handled() {
+      return [...handled].map(([alertId, played]) => ({ alertId, played: [...played] }));
+    },
+
+    /**
+     * Records that the handler finished the parts `played` of `alertId`, which it holds, as
+     * `scheduler.json` could not be saved; true once `plays.json` holds them.
+     */
+    handle(alertId, played) {
+      handled.set(alertId, [...played]);
+      flush();
+      return !behind;
     },
 
     /** Records that the sink finished `alertId` (played, failed or gave up). */
@@ -201,18 +257,25 @@ export function createPlayJournal({ entries = [], persist = () => {}, log = () =
       if (!entry?.running.size) return;
       await Promise.all([...entry.running].map(([part, child]) => waitFor(entry, part, child).catch(() => entry.running.delete(part))));
       const done = [...entry.played];
-      log(`alert ${alertId} was left playing by the last daemon; ${done.length ? `${done.join(', ')} finished` : 'no part finished'}.`);
+      log(`alert ${alertId}: of the parts left playing, ${done.length ? `${done.join(', ')} finished` : 'none finished'}.`);
       flush();
     },
 
     /**
      * Called once `scheduler.json` has been saved with `carried` (the journal entries that save
-     * carried): plays that finished and that it no longer holds unfinished are dropped.
+     * carried) and `held` (the handoffs and acknowledgements it saved): plays that finished and that
+     * it no longer holds unfinished are dropped, and so are the handled parts it holds, of alerts
+     * that are not held by an alert with fewer parts.
      */
-    saved(carried = []) {
+    saved(carried = [], held = []) {
       const copies = new Set(carried.filter((entry) => !entry.finished).map(({ alertId }) => alertId));
       for (const [alertId, entry] of plays) entry.saved = !copies.has(alertId);
-      if ([...plays.values()].some((entry) => entry.finished && entry.saved)) flush({ changed: false });
+      let recorded = false;
+      for (const [alertId, played] of handled) {
+        const behindIt = held.find((entry) => entry.alertId === alertId && played.some((part) => !(entry.played ?? []).includes(part)));
+        if (!behindIt) recorded = handled.delete(alertId);
+      }
+      if (recorded || [...plays.values()].some((entry) => entry.finished && entry.saved)) flush({ changed: false });
     }
   };
 }

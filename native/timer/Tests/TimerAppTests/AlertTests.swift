@@ -45,6 +45,8 @@ private final class FakeDaemon: AlertHandlerDaemon, @unchecked Sendable {
 private final class FakeNotifications: UserNotifying {
     let log: Log
     var authorized: Bool
+    /// Set to have the notification center refuse the next notifications.
+    var refusing = false
     var posted: [TimerNotification] = []
 
     init(log: Log, authorized: Bool) {
@@ -59,7 +61,11 @@ private final class FakeNotifications: UserNotifying {
 
     func isAuthorized() async -> Bool { authorized }
 
-    func post(_ notification: TimerNotification) async {
+    func post(_ notification: TimerNotification) async throws {
+        if refusing {
+            log.add("refused \(notification.title)")
+            throw NotificationsUnavailable()
+        }
         posted.append(notification)
         log.add("notify \(notification.title): \(notification.body)")
     }
@@ -76,8 +82,8 @@ private final class FakeSounds: SoundPlaying {
 
 extension AlertPresenter {
     /// Presents every part of `alert`, in order, as the app does once it has taken it.
-    func present(_ alert: TimerAlert) async {
-        for part in AlertPart.plan(for: alert) { await present(alert, part) }
+    func present(_ alert: TimerAlert) async throws {
+        for part in AlertPart.plan(for: alert) { try await present(alert, part) }
     }
 }
 
@@ -116,10 +122,10 @@ struct AlertTests {
     @Test func eachKindPlaysItsSoundAndTheFinishAndMissedAlertsNameTheTimer() async throws {
         let (presenter, notifications) = presenter()
         let work = TimerAlert.Step(index: 1, round: 1, phase: .work, label: "Work", durationMs: 20_000)
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 3, timerName: "Tabata", sound: true))
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .segment, at: 2, segment: work, timerName: "Tabata", sound: true))
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 3, alertId: "a3", ackRequired: true, timerName: "Tabata", sound: true))
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 4, segment: work, missed: 3, timerName: "Tabata", sound: true))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 3, timerName: "Tabata", sound: true))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .segment, at: 2, segment: work, timerName: "Tabata", sound: true))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 3, alertId: "a3", ackRequired: true, timerName: "Tabata", sound: true))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 4, segment: work, missed: 3, timerName: "Tabata", sound: true))
         #expect(log.all == ["sound Tink", "sound Pop", "notify Tabata: Finished.", "sound Glass", "sound Glass", "sound Glass",
                             "notify Tabata: Missed 3 alerts while away. Now: Work."])
         #expect(notifications.posted.map(\.id).first == "a3")
@@ -128,9 +134,9 @@ struct AlertTests {
 
     @Test func aTimerWithSoundOffOnlyNotifies() async throws {
         let (presenter, _) = presenter()
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 1, timerName: "Tabata", sound: false))
-        await presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 2, timerName: "Tabata", sound: false))
-        await presenter.present(TimerAlert(timerId: "t_9", kind: .missedWhileAway, at: 3, missed: 1))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .tick, at: 1, secondsLeft: 1, timerName: "Tabata", sound: false))
+        try await presenter.present(TimerAlert(timerId: "t_1", kind: .finish, at: 2, timerName: "Tabata", sound: false))
+        try await presenter.present(TimerAlert(timerId: "t_9", kind: .missedWhileAway, at: 3, missed: 1))
         #expect(log.all == ["notify Tabata: Finished.", "notify Timer: Missed 1 alert while away."])
     }
 
@@ -222,6 +228,25 @@ struct AlertTests {
         daemon.release()
         await quitting.value
         #expect(log.all == ["register s1", "ack a1", "unregister s1", "release a1", "quit"])
+        #expect(notifications.posted.isEmpty)
+    }
+
+    /// A finish whose notification the notification center refuses is handed back, so the daemon's sink shows it and
+    /// plays its sounds; the app plays none of it.
+    @Test func aNotificationTheCenterRefusesIsHandedBackToTheDaemon() async {
+        let daemon = FakeDaemon(log: log)
+        let notifications = FakeNotifications(log: log, authorized: true)
+        let controller = TimerController(paths: DaemonPaths(dataDir: "/tmp/unused"), alertDaemon: daemon, notifications: notifications, sounds: FakeSounds(log: log))
+        controller.checkNotifications()
+        controller.handle(event("subscriber", #"{"subscriberId":"s1"}"#))
+        controller.handle(state(timerName: "Egg", sound: true))
+        await until { controller.alerts.registration == .registered }
+        notifications.refusing = true
+        controller.handle(event("alert", #"{"timerId":"t_1","kind":"finish","at":1000,"alertId":"a1","ackRequired":true}"#))
+        await until { log.all.contains("release a1") && log.all.contains("unregister s1") }
+        // Handing back also gives up the handler role, so the daemon plays the next alerts.
+        #expect(log.all.prefix(3) == ["register s1", "ack a1", "refused Egg"])
+        #expect(Set(log.all.dropFirst(3)) == ["unregister s1", "release a1"])
         #expect(notifications.posted.isEmpty)
     }
 

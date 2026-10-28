@@ -67,9 +67,12 @@ protocol UserNotifying: AnyObject {
     func requestAuthorization() async -> Bool
     /// Whether notifications are allowed now, without asking.
     func isAuthorized() async -> Bool
-    /// Returns once the notification center has taken the notification (or refused it).
-    func post(_ notification: TimerNotification) async
+    /// Returns once the notification center has taken the notification, and throws when it refused it.
+    func post(_ notification: TimerNotification) async throws
 }
+
+/// The notification center is unavailable, outside an app bundle.
+struct NotificationsUnavailable: Error {}
 
 /// `UNUserNotificationCenter`. Outside an app bundle (for example `swift run`) the center is unavailable, so the app
 /// reports no permission there and the daemon keeps playing alerts.
@@ -104,8 +107,8 @@ final class SystemUserNotifications: NSObject, UserNotifying, UNUserNotification
         }
     }
 
-    func post(_ notification: TimerNotification) async {
-        guard let center else { return }
+    func post(_ notification: TimerNotification) async throws {
+        guard let center else { throw NotificationsUnavailable() }
         let content = UNMutableNotificationContent()
         content.title = notification.title
         content.body = notification.body
@@ -114,7 +117,7 @@ final class SystemUserNotifications: NSObject, UserNotifying, UNUserNotification
         // The app plays its own sounds; the notification respects Focus as an ordinary one.
         content.sound = nil
         content.interruptionLevel = .active
-        try? await center.add(UNNotificationRequest(identifier: notification.id, content: content, trigger: nil))
+        try await center.add(UNNotificationRequest(identifier: notification.id, content: content, trigger: nil))
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
@@ -139,12 +142,13 @@ struct AlertPresenter {
     let notifications: UserNotifying
     let sounds: SoundPlaying
 
-    /// Presents `part` of `alert` and returns once it has finished. Uses the alert's `timerName` and `sound`. An alert
-    /// without them names its timer "Timer" and plays its sounds, as the daemon's sink would for a timer it no longer knows.
-    func present(_ alert: TimerAlert, _ part: AlertPart) async {
+    /// Presents `part` of `alert` and returns once it has finished; throws when the notification center refused its
+    /// notification, so the daemon's sink shows it. Uses the alert's `timerName` and `sound`. An alert without them names
+    /// its timer "Timer" and plays its sounds, as the daemon's sink would for a timer it no longer knows.
+    func present(_ alert: TimerAlert, _ part: AlertPart) async throws {
         switch part {
         case .notification:
-            if let notification = TimerNotification(alert, name: alert.timerName ?? "Timer") { await notifications.post(notification) }
+            if let notification = TimerNotification(alert, name: alert.timerName ?? "Timer") { try await notifications.post(notification) }
         case .sound(let index):
             let sequence = SystemSound.sequence(for: alert.kind, soundOn: alert.sound ?? true)
             if sequence.indices.contains(index) { await sounds.play(sequence[index]) }

@@ -111,7 +111,7 @@ test('alert handoffs, acknowledgements and a carried play journal are saved with
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [], plays: [] });
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
   const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false }, played: ['notification'] };
-  const acknowledged = { ...handoff, alertId: 'a0', subscriberId: 's1' };
+  const acknowledged = { ...handoff, alertId: 'a0', subscriberId: 's1', started: { 'sound:0': { pid: 7, birth: 'ps-y', boot: 'b1', app: true } } };
   const play = { ...handoff, alertId: 'a9', keys: ['t_00000001:finish:5000'], played: ['sound:0'], running: { 'sound:1': { pid: 42, birth: 'ps-x', boot: null } }, finished: false };
   stateStore.saveMarks(marks, { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] });
   assert.deepEqual([stateStore.loadMarks(), stateStore.loadAlerts()], [marks, { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] }]);
@@ -121,7 +121,16 @@ test('alert handoffs, acknowledgements and a carried play journal are saved with
       version: 1,
       marks,
       handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, { ...handoff, played: ['Glass'] }, null],
-      acknowledged: [acknowledged, { alertId: 'a3' }, { ...acknowledged, alertId: 4 }, { alertId: 'a5', subscriberId: 's1' }, { ...acknowledged, played: 'notification' }, null],
+      acknowledged: [
+        acknowledged,
+        { alertId: 'a3' },
+        { ...acknowledged, alertId: 4 },
+        { alertId: 'a5', subscriberId: 's1' },
+        { ...acknowledged, played: 'notification' },
+        { ...acknowledged, started: { 'sound:0': { pid: 7, birth: null, boot: null, app: 'yes' } } },
+        { ...acknowledged, started: [] },
+        null
+      ],
       plays: [
         play,
         { ...play, finished: undefined },
@@ -135,6 +144,21 @@ test('alert handoffs, acknowledgements and a carried play journal are saved with
   assert.deepEqual(stateStore.loadAlerts(), { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] });
   stateStore.saveMarks(marks);
   assert.deepEqual(JSON.parse(readFileSync(paths.scheduler, 'utf8')), { version: 1, marks });
+});
+
+test('the play journal and the parts handlers finished that it alone holds are saved to plays.json and read back; malformed ones are dropped', (t) => {
+  const { paths, stateStore } = storeIn(t);
+  assert.deepEqual(stateStore.loadPlays(), { plays: [], progress: [] });
+  const play = { alertId: 'a9', alert: { timerId: 't_00000001', kind: 'finish', at: NOW }, timer: { id: 't_00000001', name: 'Egg' }, keys: [], played: [], finished: false };
+  const progress = { alertId: 'a0', played: ['notification'] };
+  stateStore.savePlays([play], [progress]);
+  assert.deepEqual(stateStore.loadPlays(), { plays: [play], progress: [progress] });
+  stateStore.savePlays([play]);
+  assert.deepEqual(JSON.parse(readFileSync(paths.plays, 'utf8')), { version: 1, plays: [play] });
+  writeFileSync(paths.plays, JSON.stringify({ version: 1, plays: [play, { alertId: 'a8' }], progress: [progress, { alertId: 'a1', played: ['Glass'] }, { played: [] }, null] }));
+  assert.deepEqual(stateStore.loadPlays(), { plays: [play], progress: [progress] });
+  writeFileSync(paths.plays, '{');
+  assert.deepEqual(stateStore.loadPlays(), { plays: [], progress: [] });
 });
 
 test('a directory fsync that fails after the rename keeps the new file and is logged, not thrown', (t) => {

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { deliverToSink } from './alerts.mjs';
-import { createPlayJournal } from './play-journal.mjs';
+import { createPlayJournal, executorOf, systemProcesses } from './play-journal.mjs';
 
 /** How long a registered handler has to acknowledge an alert before the daemon's sink plays it. */
 export const ACK_TIMEOUT_MS = 2_000;
@@ -23,13 +23,17 @@ export const MAX_UNRECEIVED = 1_000;
  * earlier daemon) without its saying it received the alert. Then the sink plays it, and a later
  * acknowledgement or handback gets 410. A handler registering again cancels this, and its next
  * departure starts it over. So an alert a handler took is never lost. The sink plays only the parts
- * the handler had not said it finished (`played`), so one that ended, was force-quit, crashed or
- * stalled after playing some parts and before the daemon recorded its receipt has each part played
- * once: those it finished by it, the others, including one it was cut off in, by the sink.
+ * the handler had not said it finished (`played`), and a part it started (`playing`) is decided by
+ * its process first: the sink waits while it still runs, so one that stalled mid-part has that part
+ * played once, by it, and one that ended in it (quit, force-quit or crashed) has it played again, as
+ * its sound ended with it. So each part plays once: those it finished by it, the others by the sink.
  */
 export const ORPHANED_ALERT_MS = 30_000;
 
 export const newAlertId = () => randomBytes(16).toString('hex');
+
+/** `started` without the parts in `parts`. */
+const withoutParts = (started, parts) => Object.fromEntries(Object.entries(started).filter(([part]) => !parts.includes(part)));
 
 /**
  * Hands each alert to exactly one player: the registered alert handler (the Timer app) or the
@@ -56,15 +60,17 @@ export const newAlertId = () => randomBytes(16).toString('hex');
  * handler last stopped being the handler (or after the next daemon started), unless it is the
  * handler again by then, so an app that ended before playing it does not lose it. Before the handler
  * plays each part of an alert it took, it asks whether it may (`playing`: while it still holds it),
- * and once that part finished it says so (`played`), answered once that is saved with the alert, so
- * the sink never plays a part the handler finished. A handler that may no longer present an alert it
- * took hands it back (`release`), and the sink plays the parts it had not finished once that is
- * saved: the alert is saved as a handoff again, with those parts, so a daemon that ends before the
- * sink has played it leaves it for the next one to play from the same parts. When that save throws,
- * the alert stays taken and the error is thrown to the caller.
+ * which records its process (`pid`) as playing that part, and once that part finished it says so
+ * (`played`), answered once `scheduler.json` or else `plays.json` holds it, so the sink never plays a
+ * part the handler finished. A handler that may no longer present an alert it took hands it back
+ * (`release`) between parts, and the sink plays the parts it had not finished once that is saved: the
+ * alert is saved as a handoff again, with those parts, so a daemon that ends before the sink has
+ * played it leaves it for the next one to play from the same parts. When that save throws, the alert
+ * stays taken and the error is thrown to the caller.
  *
  * Every sink play is recorded in the play journal (see `createPlayJournal`; `plays` are the entries
- * earlier daemons left, `savePlays` writes them, and `processes` tells the fate of a sink process)
+ * earlier daemons left, `progress` the parts handlers finished that only it holds, `savePlays` writes
+ * them, and `processes` tells the fate of a sink process or a handler's)
  * before the sink is called, with the parts the handler finished, and as each part's process is
  * spawned and each part and the play finish. So a daemon that ends mid-play, or after a play whose
  * checkpoint it could not save, leaves the next one an alert it plays from the parts not finished,
@@ -94,21 +100,24 @@ export function createAlertHandlers({
   save = () => {},
   acknowledged = [],
   plays = [],
+  progress = [],
   savePlays = () => {},
-  processes,
+  processes = systemProcesses,
   newId = newAlertId,
   ackTimeoutMs = ACK_TIMEOUT_MS
 }) {
   let handler = null;
   // A journal write that failed leaves scheduler.json to carry the journal, so it is saved at once.
-  const journal = createPlayJournal({ entries: plays, persist: savePlays, log, onBehind: requestSave, ...(processes ? { processes } : {}) });
-  /** alertId → { alert, timer, subscriberId, keys, played, handle }, for alerts the handler has not yet acknowledged. */
+  const journal = createPlayJournal({ entries: plays, progress, persist: savePlays, log, onBehind: requestSave, processes });
+  /** alertId → { alert, timer, subscriberId, keys, played, started, handle }, for alerts the handler has not yet acknowledged. */
   const pending = new Map();
   /** alertId → { subscriberId, at }, for alerts the sink played, least recently asked first. */
   const settled = new Map();
   /**
-   * alertId → { subscriberId, alert, timer, played }, for acknowledged alerts whose handler has not
-   * said it received them; `played` are the parts it said it finished.
+   * alertId → { subscriberId, alert, timer, played, started, unsaved }, for acknowledged alerts whose
+   * handler has not said it received them; `played` are the parts it said it finished (`unsaved` while
+   * no save of `scheduler.json` holds them all), and `started` its process for each part it started
+   * and has not said it finished.
    */
   const taken = new Map();
   const counts = { acknowledged: 0, fallbacks: 0 };
@@ -159,15 +168,17 @@ export function createAlertHandlers({
   let leftUnfinished = journal.unfinished;
   // A daemon that ended before these handlers said they received their 200 left them for this one,
   // and no stream of this daemon is their handler yet.
-  for (const { alertId, subscriberId, alert, timer, played = [] } of acknowledged) {
-    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played });
+  const handled = new Map(journal.handled.map(({ alertId, played }) => [alertId, played]));
+  for (const { alertId, subscriberId, alert, timer, played = [], started = {} } of acknowledged) {
+    const finished = [...new Set([...played, ...(handled.get(alertId) ?? [])])];
+    if (!journal.has(alertId)) taken.set(alertId, { subscriberId, alert, timer, played: finished, started: withoutParts(started, finished), unsaved: false });
   }
   for (const { subscriberId } of acknowledged) orphan(subscriberId);
 
-  const progressOf = (played) => (played.length ? { played } : {});
+  const progressOf = ({ played = [], started = {} }) => ({ ...(played.length ? { played } : {}), ...(Object.keys(started).length ? { started } : {}) });
   const handoffs = (except = null) =>
-    [...pending].filter(([alertId]) => alertId !== except).map(([alertId, { alert, timer, played }]) => ({ alertId, alert, timer, ...progressOf(played) }));
-  const acknowledgement = (alertId, { subscriberId, alert, timer, played }) => ({ alertId, subscriberId, alert, timer, ...progressOf(played) });
+    [...pending].filter(([alertId]) => alertId !== except).map(([alertId, entry]) => ({ alertId, alert: entry.alert, timer: entry.timer, ...progressOf(entry) }));
+  const acknowledgement = (alertId, held) => ({ alertId, subscriberId: held.subscriberId, alert: held.alert, timer: held.timer, ...progressOf(held) });
   /**
    * What `save` records: the pending alerts and the acknowledged ones not yet received, plus `next`,
    * each with the parts its handler finished, and the play journal while `plays.json` is behind.
@@ -219,13 +230,13 @@ export function createAlertHandlers({
   /**
    * Plays `alertId` through the sink unless stopped, journaled first, skipping the parts already
    * `played` (by a handler, or by an earlier play the journal holds). A part an earlier daemon's
-   * process may still be playing is first decided from that process (`journal.settle`), and the
-   * rest plays after it, unless this daemon stopped meanwhile. `stop()` waits for each play this
-   * starts.
+   * process, or the handler's (`started`), may still be playing is first decided from that process
+   * (`journal.settle`), and the rest plays after it, unless this daemon stopped meanwhile. `stop()`
+   * waits for each play this starts.
    */
-  function play(alertId, alert, timer, { subscriberId = null, keys = [], played = [] } = {}) {
+  function play(alertId, alert, timer, { subscriberId = null, keys = [], played = [], started = {} } = {}) {
     if (stopped) return;
-    if (!journal.has(alertId)) journal.begin(alertId, { alert, timer, subscriberId, keys, played });
+    if (!journal.has(alertId)) journal.begin(alertId, { alert, timer, subscriberId, keys, played, running: started });
     const running = journal.left(alertId) ? journal.settle(alertId).then(() => (stopped ? undefined : startSink(alertId, alert, timer))) : startSink(alertId, alert, timer);
     if (!running) return;
     playing.add(running);
@@ -318,9 +329,16 @@ export function createAlertHandlers({
     },
     /** Whether a journaled play stands for the transition with this key (see `createScheduler`). */
     delivered: (key) => journal.delivered(key),
-    /** Called once `scheduler.json` has been saved with `saved`, so the journal forgets the plays that finished before. */
-    saved(saved = {}) {
-      journal.saved(saved.plays);
+    /**
+     * Called once `scheduler.json` has been saved with `saved`, so the journal forgets the plays that
+     * finished before and the handled parts it now holds.
+     */
+    saved({ plays: carried = [], handoffs: left = [], acknowledged: kept = [] } = {}) {
+      for (const { alertId, played = [] } of kept) {
+        const held = taken.get(alertId);
+        if (held && held.played.every((part) => played.includes(part))) held.unsaved = false;
+      }
+      journal.saved(carried, [...left, ...kept]);
     },
     /** `{ handoffs, acknowledged }`, as `save` takes it. */
     get checkpoint() {
@@ -395,10 +413,10 @@ export function createAlertHandlers({
       }
       if (entry) {
         const { alert, timer } = entry;
-        save(checkpoint({ alertId, subscriberId, alert, timer, played: [] }));
+        save(checkpoint({ alertId, subscriberId, alert, timer }));
         pending.delete(alertId);
         clock.clearTimeout(entry.handle);
-        taken.set(alertId, { subscriberId, alert, timer, played: [] });
+        taken.set(alertId, { subscriberId, alert, timer, played: [], started: {}, unsaved: false });
         counts.acknowledged += 1;
         return { ok: true };
       }
@@ -409,31 +427,54 @@ export function createAlertHandlers({
 
     /**
      * Whether the handler `subscriberId` may play `part` of `alertId`, which it took: yes while it
-     * still holds it, so the sink has not played it. Nothing is recorded: a part the handler starts and
-     * never says it finished is the sink's to play again, as it ended with the handler. A pending alert
-     * gets 409 (`invalid_state`), and one the sink played 410, so the handler plays nothing more of it.
+     * still holds it, so the sink has not played it. Its process `pid` is recorded as playing that
+     * part, and saved with the alert when `scheduler.json` can be written (a failed save is logged),
+     * so the sink decides that part by the process if the handler leaves without saying it finished
+     * it (see `ORPHANED_ALERT_MS`). A pending alert gets 409 (`invalid_state`), and one the sink
+     * played 410, so the handler plays nothing more of it.
      */
-    playing(alertId, subscriberId) {
-      return heldBy(alertId, subscriberId) ?? { ok: true };
-    },
-
-    /**
-     * The handler `subscriberId` finished playing `part` of `alertId`, which it took, so the sink never
-     * plays that part, once that is saved; a failed save throws and changes nothing, so the handler
-     * says so again. Saying so again is a no-op. Refused as `playing` is.
-     */
-    played(alertId, subscriberId, part) {
+    playing(alertId, subscriberId, part, pid) {
       const refusal = heldBy(alertId, subscriberId);
       if (refusal) return refusal;
       const held = taken.get(alertId);
       if (held.played.includes(part)) return { ok: true };
-      const before = held.played;
-      held.played = [...before, part];
+      held.started = { ...held.started, [part]: executorOf(processes, pid, { app: true }) };
       try {
         save(checkpoint());
       } catch (error) {
-        held.played = before;
-        throw error;
+        log(`could not record that the alert handler plays ${part} of alert ${alertId}: ${error.message}`);
+      }
+      return { ok: true };
+    },
+
+    /**
+     * The handler `subscriberId` finished playing `part` of `alertId`, which it took, so the sink never
+     * plays that part; answered once `scheduler.json`, or, when that cannot be saved, `plays.json`
+     * holds it. When neither can be written this throws, and the part is still known as finished to
+     * this daemon, so its sink does not play it; saying so again tries to save it again, and once it is
+     * saved, saying so again is a no-op. A part the sink waits for, as the handler was playing it when
+     * the sink took the alert over, is recorded as finished in its play, and the answer is 410 as the
+     * sink plays the rest. Refused as `playing` is.
+     */
+    played(alertId, subscriberId, part) {
+      const refusal = heldBy(alertId, subscriberId);
+      if (refusal) {
+        if (refusal.status === 410 && journal.awaitsHandler(alertId, part)) journal.done(alertId, part);
+        return refusal;
+      }
+      const held = taken.get(alertId);
+      if (held.played.includes(part) && !held.unsaved) return { ok: true };
+      if (!held.played.includes(part)) {
+        held.played = [...held.played, part];
+        held.started = withoutParts(held.started, [part]);
+        held.unsaved = true;
+      }
+      try {
+        save(checkpoint());
+        held.unsaved = false;
+      } catch (error) {
+        if (!journal.handle(alertId, held.played)) throw error;
+        log(`could not save scheduler.json (${error.message}); plays.json holds the parts of alert ${alertId} its handler finished.`);
       }
       return { ok: true };
     },
@@ -478,7 +519,8 @@ export function createAlertHandlers({
       if (stopped || !owns()) return unavailable();
       if (held) {
         taken.delete(alertId);
-        pending.set(alertId, { ...held, handle: null });
+        // A handler hands an alert back between parts, so a part it started and did not finish plays.
+        pending.set(alertId, { ...held, started: {}, handle: null });
         try {
           save(checkpoint());
         } catch (error) {
@@ -497,11 +539,11 @@ export function createAlertHandlers({
      * journal holds that its sink never finished.
      */
     replay(saved) {
-      for (const { alertId, alert, timer, played = [] } of saved) {
+      for (const { alertId, alert, timer, played = [], started = {} } of saved) {
         if (journal.has(alertId)) continue;
         const rest = played.length ? ` the parts its handler did not finish (${played.join(', ')} finished)` : ' it';
         log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was unacknowledged when the last daemon ended; the ${sink.name} sink plays${rest}.`);
-        play(alertId, alert, timer, { played });
+        play(alertId, alert, timer, { played, started });
       }
       const resumed = leftUnfinished;
       leftUnfinished = [];

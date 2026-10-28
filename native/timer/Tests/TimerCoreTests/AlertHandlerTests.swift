@@ -27,6 +27,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var lostParts = 0
     private var finishAnswers: [Result<Void, DaemonError>] = []
     private var lostFinishes = 0
+    private var finishesFail = false
     private var partsInLog = false
     private var duringPart: (@Sendable () async -> Void)?
 
@@ -56,6 +57,11 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
             finishAnswers = finishes
             self.lostFinishes = lostFinishes
         }
+    }
+
+    /// Answers every later "played" with a server error, as a daemon that can save neither file does.
+    func failEveryFinish() {
+        lock.withLock { finishesFail = true }
     }
 
     /// Runs `action` while the next request to start a part is on its way, before its answer.
@@ -145,6 +151,7 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
                 lostFinishes -= 1
                 return (partsInLog, .failure(.timedOut))
             }
+            if finishesFail { return (partsInLog, .failure(storageFailed)) }
             return (partsInLog, finishAnswers.isEmpty ? .success(()) : finishAnswers.removeFirst())
         }
         if logged { record("played \(alertId) \(part.name)") }
@@ -186,6 +193,11 @@ private func finishWithSound(_ id: String) -> TimerAlert {
 }
 
 private let expired = DaemonError.rejected(status: 410, TimerError(code: "alert_expired", message: "", issues: nil))
+
+private let storageFailed = DaemonError.rejected(status: 500, TimerError(code: "storage_failed", message: "", issues: nil))
+
+/// What a `play` throws for a part it could not present.
+private struct NotPresented: Error {}
 
 private let conflict = DaemonError.rejected(status: 409, TimerError(code: "handler_registered", message: "Another alert handler is registered.", issues: nil))
 
@@ -517,9 +529,11 @@ struct AlertHandlerTests {
         #expect(handler.registration == .registered)
     }
 
-    private func partsHandler(permission: Permission = Permission()) async -> AlertHandler {
-        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
+    private func partsHandler(permission: Permission = Permission(), reportBound: Duration = .seconds(5),
+                              refusing refused: AlertPart? = nil) async -> AlertHandler {
+        let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1), reportBound: reportBound,
                                    isPermitted: { permission.granted }) { [daemon] alert, part in
+            if part == refused { throw NotPresented() }
             daemon.record("play \(alert.alertId ?? "-") \(part.name)")
             await Task.yield()
         }
@@ -560,6 +574,27 @@ struct AlertHandlerTests {
         #expect(daemon.log.dropFirst() == ["ack a1 s1", "playing a1 notification", "playing a1 notification", "playing a1 notification",
                                            "play a1 notification", "played a1 notification", "played a1 notification", "played a1 notification"])
         #expect(daemon.confirmed == ["a1 s1"])
+    }
+
+    /// A daemon that cannot record a finished part (500 every time) does not hold back the rest of the alert: the app says
+    /// so for up to its bound, then plays the next part.
+    @Test func aFinishedPartNoDaemonRecordsDoesNotHoldBackTheRest() async {
+        let handler = await partsHandler(reportBound: .milliseconds(20))
+        daemon.failEveryFinish()
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { $0.hasPrefix("play a1") } == ["play a1 notification", "play a1 sound:0", "play a1 sound:1", "play a1 sound:2"])
+        #expect(daemon.log.filter { $0 == "played a1 notification" }.count > 1)
+        #expect(daemon.confirmed == ["a1 s1"])
+    }
+
+    /// A part the app could not present (the notification center refused the notification) is not reported finished: the
+    /// app hands the alert back, so the daemon's sink presents it and the parts after it.
+    @Test func aPartTheAppCouldNotPresentIsHandedBack() async {
+        let handler = await partsHandler(refusing: .notification)
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { !$0.hasPrefix("register") && !$0.hasPrefix("unregister") } ==
+                ["ack a1 s1", "playing a1 notification", "release a1 s1", "sink a1"])
+        #expect(daemon.confirmed.isEmpty)
     }
 
     /// Permission revoked while the request to start a part is retried, or while its answer is on its way: the app shows

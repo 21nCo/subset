@@ -96,7 +96,7 @@ public protocol AlertHandlerDaemon: Sendable {
 
 extension DaemonClient: AlertHandlerDaemon {
     private struct SubscriberBody: Encodable { var subscriberId: String }
-    private struct PartBody: Encodable { var subscriberId: String; var part: String }
+    private struct PartBody: Encodable { var subscriberId: String; var part: String; var pid: Int32? }
     private struct Ignored: Decodable {}
 
     /// `POST /v1/alert-handlers`: makes the event stream `subscriberId` the one alert handler. A 409 means another is.
@@ -121,15 +121,18 @@ extension DaemonClient: AlertHandlerDaemon {
     }
 
     /// `POST /v1/alerts/<alertId>/playing`: whether the app may play `part` of an alert it took. It may while the daemon's
-    /// sink has not played the alert; a 410 means it has, so the app plays no more of it. Nothing is recorded.
+    /// sink has not played the alert; a 410 means it has, so the app plays no more of it. The daemon records this process
+    /// as playing that part, so if the app leaves before it says it finished it, the daemon's sink waits while this
+    /// process still runs and plays the part again only once it has ended.
     public func startPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
-        let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/playing",
-                                   body: try JSONEncoder().encode(PartBody(subscriberId: subscriberId, part: part.name)))
+        let body = PartBody(subscriberId: subscriberId, part: part.name, pid: ProcessInfo.processInfo.processIdentifier)
+        let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/playing", body: try JSONEncoder().encode(body))
         _ = try Self.decode(Ignored.self, status: reply.status, body: reply.body)
     }
 
     /// `POST /v1/alerts/<alertId>/played`: the app finished `part` of an alert it took, so the daemon's sink never plays
-    /// that part. Saying so again gets the same answer; a 410 means the sink played the alert.
+    /// that part. Saying so again gets the same answer, and a 500 means the daemon could not save it, though it will not
+    /// play it itself; a 410 means the sink played the alert.
     public func finishPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
         let reply = try await send("POST", "/v1/alerts/\(Self.pathSegment(alertId))/played",
                                    body: try JSONEncoder().encode(PartBody(subscriberId: subscriberId, part: part.name)))
@@ -163,13 +166,16 @@ extension DaemonClient: AlertHandlerDaemon {
 /// unregisters it when that stream closes. For each alert that asks for acknowledgement, the app acknowledges first and
 /// plays only on `.acknowledged`: an alert the daemon's sink already played (410), or that the daemon handed to someone
 /// else, is never played here. It then plays the alert part by part (`AlertPart.plan`), each only once a daemon said the
-/// app may (`startPlaying`), says when each part finished (`finishPlaying`, until a daemon records it), and says it
-/// received the alert after the last. Quitting (`quit(within:)`) hands back every alert the app may have taken and not
-/// finished, and waits until the daemon hears the app received each one it played. The daemon's sink plays an alert the
-/// app took and never said it received 30 s after the app's stream last closed (`ORPHANED_ALERT_MS`), without the parts
-/// the app said it finished, so when the app quits past its bound, is force-quit, crashes or stalls, no part is lost and
-/// none the app finished plays again: a sound cut short by the app ending, or a part it never showed, is the sink's to
-/// play. Only a part that ended in the instant before the daemon recorded it can play twice.
+/// app may (`startPlaying`, which records this process as playing it), says when each part finished (`finishPlaying`,
+/// for up to `reportBound`), and says it received the alert after the last. A part the app could not present (the
+/// notification center refused it) hands the alert back. Quitting (`quit(within:)`) hands back every alert the app may
+/// have taken and not finished, and waits until the daemon hears the app received each one it played. The daemon's sink
+/// plays an alert the app took and never said it received 30 s after the app's stream last closed (`ORPHANED_ALERT_MS`),
+/// without the parts the app said it finished; a part the app started and did not say it finished is waited for while
+/// the app still runs (a stalled app finishes it) and played again once the app has ended (its sound ended with it). So
+/// when the app quits past its bound, is force-quit, crashes or stalls, no part is lost and none the app finished plays
+/// again. A part can play twice only if the app ends between finishing it and a daemon hearing so, or no daemon hears
+/// so within `reportBound` and the app then ends.
 @MainActor
 public final class AlertHandler {
     public enum Registration: Equatable, Sendable {
@@ -185,10 +191,11 @@ public final class AlertHandler {
     public var onChange: () -> Void = {}
 
     private let daemon: AlertHandlerDaemon
-    private let play: @MainActor (TimerAlert, AlertPart) async -> Void
+    private let play: @MainActor (TimerAlert, AlertPart) async throws -> Void
     private let isPermitted: @MainActor () async -> Bool
     private let retryDelay: Duration
     private let ackRetryDelay: Duration
+    private let reportBound: Duration
     private var subscriberId: String?
     private var permitted = false
     /// The stream the daemon may hold as its handler: `confirmed` once the daemon said so, unconfirmed while a request
@@ -203,15 +210,19 @@ public final class AlertHandler {
     private var unsettled = 0
     private var waitingToQuit: [CheckedContinuation<Void, Never>] = []
 
-    /// `play` presents one part of an alert the app has taken over, and returns once it has finished. A registration
-    /// request the daemon did not answer is tried again after `retryDelay`, and at the next permission check; an
-    /// acknowledgement or a part, after `ackRetryDelay`. `isPermitted` reads whether the app may still post notifications,
-    /// before each acknowledgement and before each part.
+    /// `play` presents one part of an alert the app has taken over, and returns once it has finished; it throws when it
+    /// could not present it. A registration request the daemon did not answer is tried again after `retryDelay`, and at
+    /// the next permission check; an acknowledgement or a part, after `ackRetryDelay`. Saying a part finished is tried
+    /// again for up to `reportBound`, then the app goes on with the next part, so a daemon that cannot save does not hold
+    /// back the rest of the alert. `isPermitted` reads whether the app may still post notifications, before each
+    /// acknowledgement and before each part.
     public init(daemon: AlertHandlerDaemon, retryDelay: Duration = .seconds(2), ackRetryDelay: Duration = .milliseconds(250),
-                isPermitted: @escaping @MainActor () async -> Bool = { true }, play: @escaping @MainActor (TimerAlert, AlertPart) async -> Void) {
+                reportBound: Duration = .seconds(5), isPermitted: @escaping @MainActor () async -> Bool = { true },
+                play: @escaping @MainActor (TimerAlert, AlertPart) async throws -> Void) {
         self.daemon = daemon
         self.retryDelay = retryDelay
         self.ackRetryDelay = ackRetryDelay
+        self.reportBound = reportBound
         self.isPermitted = isPermitted
         self.play = play
     }
@@ -391,17 +402,17 @@ public final class AlertHandler {
             // may not show, and gives up the handler role, so the daemon plays this alert and the next ones. An
             // acknowledgement already sent may have been taken, so that alert is handed back.
             if asked { await handBack(alertId, subscriberId: subscriberId) } else { setPermitted(false) }
-        case .answer(.expired), .refused:
+        case .answer(.expired), .refused, .unanswered:
             break
         }
         return false
     }
 
     /// Plays the alert part by part, each once a daemon said the app may, and says when each finished, until a daemon
-    /// records it, so the daemon's sink never plays it too; true once every part played. Revoked, or quitting, before a
-    /// part (also while the acknowledgement's or that part's answer was on its way): the app hands the alert back rather
-    /// than show what it may not, and the daemon's sink plays the parts it did not finish. Refused (the sink played the
-    /// alert, 410): the app plays no more.
+    /// records it or `reportBound` passes, so the daemon's sink never plays it too; true once every part played. Revoked,
+    /// or quitting, before a part (also while the acknowledgement's or that part's answer was on its way), or a part the
+    /// app could not present: the app hands the alert back rather than show what it may not, and the daemon's sink plays
+    /// the parts it did not finish. Refused (the sink played the alert, 410): the app plays no more.
     private func playParts(_ alert: TimerAlert, alertId: String, subscriberId: String) async -> Bool {
         let daemon = daemon
         for part in AlertPart.plan(for: alert) {
@@ -411,15 +422,25 @@ public final class AlertHandler {
             case .revoked:
                 await handBack(alertId, subscriberId: subscriberId)
                 return false
-            case .refused:
+            case .refused, .unanswered:
                 return false
             }
             guard await mayPresent() else {
                 await handBack(alertId, subscriberId: subscriberId)
                 return false
             }
-            await play(alert, part)
-            guard case .answer = await untilAnswered({ try await daemon.finishPlaying(alertId, part: part, subscriberId: subscriberId) }) else {
+            do {
+                try await play(alert, part)
+            } catch {
+                // Not presented, so not reported finished: the daemon's sink presents it, and the parts after it.
+                await handBack(alertId, subscriberId: subscriberId)
+                return false
+            }
+            switch await untilAnswered(within: reportBound, { try await daemon.finishPlaying(alertId, part: part, subscriberId: subscriberId) }) {
+            case .answer, .unanswered:
+                // Unanswered: the daemon knows the app started this part, so its sink does not play it while the app runs.
+                break
+            case .refused, .revoked:
                 return false
             }
         }
@@ -443,11 +464,15 @@ public final class AlertHandler {
         case refused
         /// The app may no longer post notifications, or is quitting, so the request was not sent again.
         case revoked
+        /// No daemon answered it within the bound.
+        case unanswered
     }
 
-    /// Sends `request` every `ackRetryDelay` until a daemon answers it, while `permitted` holds before each attempt.
-    private func untilAnswered<Answer>(while permitted: @MainActor () async -> Bool = { true },
+    /// Sends `request` every `ackRetryDelay` until a daemon answers it, while `permitted` holds before each attempt, and
+    /// for no longer than `bound` when given.
+    private func untilAnswered<Answer>(while permitted: @MainActor () async -> Bool = { true }, within bound: Duration? = nil,
                                        _ request: () async throws -> Answer) async -> Outcome<Answer> {
+        let deadline = bound.map { ContinuousClock.now + $0 }
         while !Task.isCancelled {
             guard await permitted() else { return .revoked }
             do {
@@ -455,6 +480,7 @@ public final class AlertHandler {
             } catch where Self.refused(error) {
                 return .refused
             } catch {
+                if let deadline, ContinuousClock.now >= deadline { return .unanswered }
                 try? await Task.sleep(for: ackRetryDelay)
             }
         }

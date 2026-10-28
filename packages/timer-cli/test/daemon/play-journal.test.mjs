@@ -51,9 +51,21 @@ const plays = (dataDir) => {
 };
 const scheduler = (dataDir) => JSON.parse(readFileSync(join(dataDir, 'scheduler.json'), 'utf8'));
 
+/** The pid the app (the alert handler) says it runs as. */
+const APP = 4242;
+
+/**
+ * The processes a daemon sees: the app runs as `APP` while `live` holds it, in this boot, and a wait
+ * for a part it plays polls quickly.
+ */
+function appProcesses(live = new Set([APP])) {
+  return { live, boot: () => 'b1', birth: (pid) => `birth-${pid}`, alive: ({ pid }) => live.has(pid), kill: () => {}, sleep: () => new Promise((resolve) => setTimeout(resolve, 1)) };
+}
+
 /** A daemon with the macOS sink on `spawner`, with a registered handler when `handler` is true. */
-async function daemonWithSink(t, spawner, { handler = false } = {}) {
-  const context = await startTestDaemon(t, { sink: createMacosSink({ spawn: spawner.spawn }) });
+async function daemonWithSink(t, spawner, { handler = false, processes = appProcesses() } = {}) {
+  const context = await startTestDaemon(t, { sink: createMacosSink({ spawn: spawner.spawn }), processes });
+  context.processes = processes;
   if (!handler) return { context };
   const stream = subscribe(context.daemon.paths.socket);
   t.after(stream.close);
@@ -102,7 +114,9 @@ function filesLeftByKill(t, context) {
 
 /** The next daemon, on the files `context` left, at the time it was killed, with its own macOS sink. */
 async function successorOf(t, context, spawner = partSpawn(), dataDir = filesLeftByKill(t, context)) {
-  const next = await startTestDaemon(t, { dataDir, clock: createFakeClock(context.clock.now()), sink: createMacosSink({ spawn: spawner.spawn }) });
+  const processes = context.processes ?? appProcesses();
+  const next = await startTestDaemon(t, { dataDir, clock: createFakeClock(context.clock.now()), sink: createMacosSink({ spawn: spawner.spawn }), processes });
+  next.processes = processes;
   return { next, spawner };
 }
 
@@ -190,8 +204,9 @@ async function takeAlert(context, stream) {
   return { alertId, subscriberId };
 }
 
-/** The app's stream closes, and once `ORPHANED_ALERT_MS` has passed the sink plays what the app left. */
+/** The app's process ends, and so its stream: once `ORPHANED_ALERT_MS` has passed the sink plays what the app left. */
 async function appEnds(context, stream) {
+  context.processes.live.delete(APP);
   stream.close();
   await eventually(() => context.daemon.alertHandler.registered === false);
 }
@@ -203,12 +218,12 @@ test('an app that ends while playing a part has the sink play that part and the 
     await finishCountdown(context);
     const { alertId, subscriberId } = await takeAlert(context, stream);
     // The app asks before each part and says once it finished it; saying so twice records it once.
-    assert.deepEqual((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification' })).body, { alertId, part: 'notification', playing: true });
+    assert.deepEqual((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).body, { alertId, part: 'notification', playing: true });
     for (let i = 0; i < 2; i += 1) {
       assert.deepEqual((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).body, { alertId, part: 'notification', played: true });
     }
     // The app is killed while the first Glass plays: only asking to play it is not recorded.
-    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'sound:0' })).status, 200);
+    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'sound:0', pid: APP })).status, 200);
     assert.deepEqual(scheduler(context.dataDir).acknowledged[0].played, ['notification']);
     await appEnds(context, stream);
     let sink = { context, spawner };
@@ -231,7 +246,7 @@ test('an app that ends after asking to show a sound-off finish, before showing i
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
   await finishCountdown(context, { sound: false });
   const { alertId, subscriberId } = await takeAlert(context, stream);
-  assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification' })).status, 200);
+  assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
   await appEnds(context, stream);
   context.clock.advance(ORPHANED_ALERT_MS);
   await eventually(() => spawner.started.length === 1);
@@ -245,7 +260,7 @@ test('an app that ends after finishing every part of an alert, before its receip
   await finishCountdown(context);
   const { alertId, subscriberId } = await takeAlert(context, stream);
   for (const part of ['notification', 'sound:0', 'sound:1', 'sound:2']) {
-    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part })).status, 200);
+    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part, pid: APP })).status, 200);
     assert.equal((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part })).status, 200);
   }
   await appEnds(context, stream);
@@ -256,7 +271,7 @@ test('an app that ends after finishing every part of an alert, before its receip
   assert.equal(scheduler(context.dataDir).acknowledged, undefined);
 });
 
-test("a part is refused unless the alert is the asker's and taken, and a finished part whose save fails is not recorded, so the sink plays it", async (t) => {
+test("a part is refused unless the alert is the asker's and taken, and asking to play one records the app's process as playing it", async (t) => {
   const spawner = partSpawn();
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
   await finishCountdown(context);
@@ -267,25 +282,121 @@ test("a part is refused unless the alert is the asker's and taken, and a finishe
     const reply = await call(context, `/v1/alerts/${id}/${state}`, body);
     return [reply.status, reply.body.error?.code];
   };
-  for (const state of ['playing', 'played']) assert.deepEqual(await ask(state, { subscriberId, part: 'sound:0' }), [409, 'invalid_state']);
+  for (const state of ['playing', 'played']) assert.deepEqual(await ask(state, { subscriberId, part: 'sound:0', pid: APP }), [409, 'invalid_state']);
   assert.equal((await call(context, `/v1/alerts/${alertId}/ack`, { subscriberId })).status, 200);
   for (const state of ['playing', 'played']) {
-    for (const part of [undefined, 'sound', 'sound:-1', 'sound:100', 'Glass', '../notification']) assert.deepEqual(await ask(state, { subscriberId, part }), [400, 'invalid_input'], `${state} ${part}`);
-    assert.deepEqual(await ask(state, { subscriberId: 'another stream', part: 'sound:0' }), [409, 'not_alert_handler']);
-    assert.deepEqual(await ask(state, { subscriberId, part: 'sound:0' }, 'f'.repeat(32)), [404, 'not_found']);
+    for (const part of [undefined, 'sound', 'sound:-1', 'sound:100', 'Glass', '../notification']) {
+      assert.deepEqual(await ask(state, { subscriberId, part, pid: APP }), [400, 'invalid_input'], `${state} ${part}`);
+    }
+    assert.deepEqual(await ask(state, { subscriberId: 'another stream', part: 'sound:0', pid: APP }), [409, 'not_alert_handler']);
+    assert.deepEqual(await ask(state, { subscriberId, part: 'sound:0', pid: APP }, 'f'.repeat(32)), [404, 'not_found']);
   }
-  // A failed save gets 500 and records nothing.
-  breakScheduler(context);
-  assert.deepEqual(await ask('played', { subscriberId, part: 'notification' }), [500, 'storage_failed']);
-  const path = join(context.dataDir, 'scheduler.json');
-  rmSync(path, { recursive: true });
-  renameSync(`${path}.saved`, path);
-  assert.equal(scheduler(context.dataDir).acknowledged[0].played, undefined);
+  for (const pid of [undefined, 0, -1, 1.5, String(APP)]) assert.deepEqual(await ask('playing', { subscriberId, part: 'sound:0', pid }), [400, 'invalid_input'], `pid ${pid}`);
+  assert.deepEqual(await ask('playing', { subscriberId, part: 'sound:0', pid: APP }), [200, undefined]);
+  assert.deepEqual(scheduler(context.dataDir).acknowledged[0].started, { 'sound:0': { pid: APP, birth: `birth-${APP}`, boot: 'b1', app: true } });
   await appEnds(context, stream);
   context.clock.advance(ORPHANED_ALERT_MS);
   await eventually(() => spawner.started.length === 4);
   // Once the sink has played it, the app is told so, and plays nothing more of it.
-  for (const state of ['playing', 'played']) assert.deepEqual(await ask(state, { subscriberId, part: 'sound:1' }), [410, 'alert_expired']);
+  for (const state of ['playing', 'played']) assert.deepEqual(await ask(state, { subscriberId, part: 'sound:1', pid: APP }), [410, 'alert_expired']);
+});
+
+for (const resumes of [true, false]) {
+  test(`an app that stalls mid-part past the orphan bound${resumes ? ' and then says it finished it' : ''} has that part played once, by it: the sink waits for it and plays only the rest`, async (t) => {
+    const spawner = partSpawn();
+    const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+    await finishCountdown(context);
+    const { alertId, subscriberId } = await takeAlert(context, stream);
+    for (const [part, state] of [['notification', 'playing'], ['notification', 'played'], ['sound:0', 'playing']]) {
+      assert.equal((await call(context, `/v1/alerts/${alertId}/${state}`, { subscriberId, part, pid: APP })).status, 200);
+    }
+    // The app stalls in the first Glass: the daemon drops its stream, and its process still runs.
+    stream.close();
+    await eventually(() => context.daemon.alertHandler.registered === false);
+    context.clock.advance(ORPHANED_ALERT_MS);
+    if (resumes) {
+      await eventually(() => plays(context.dataDir)[0]?.running?.['sound:0']?.app === true);
+      // The sink plays the rest, so the app is told to play no more.
+      assert.equal((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'sound:0' })).status, 410);
+    }
+    await eventually(() => spawner.started.length === 2);
+    await settle();
+    assert.deepEqual(spawner.started, ['Glass', 'Glass']);
+    assert.ok(context.logs.some((line) => line.includes(`alert ${alertId}: of the parts left playing, notification, sound:0 finished`)));
+  });
+}
+
+/** Lets `scheduler.json` be saved again, as it was before `breakScheduler`. */
+function fixScheduler(context) {
+  const path = join(context.dataDir, 'scheduler.json');
+  rmSync(path, { recursive: true });
+  renameSync(`${path}.saved`, path);
+}
+
+for (const crash of [false, true]) {
+  test(`a finished part whose scheduler.json save fails is answered once plays.json holds it, so an app that then ends has it played once${crash ? ', also after a daemon crash' : ''}`, async (t) => {
+    const spawner = partSpawn();
+    const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+    await finishCountdown(context);
+    const { alertId, subscriberId } = await takeAlert(context, stream);
+    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
+    breakScheduler(context);
+    assert.equal((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).status, 200);
+    assert.deepEqual(JSON.parse(readFileSync(join(context.dataDir, 'plays.json'), 'utf8')).progress, [{ alertId, played: ['notification'] }]);
+    await appEnds(context, stream);
+    let sink = { context, spawner };
+    if (crash) {
+      const { next, spawner: after } = await successorOf(t, context);
+      sink = { context: next, spawner: after };
+    }
+    sink.context.clock.advance(ORPHANED_ALERT_MS);
+    await eventually(() => sink.spawner.started.length === 3);
+    await settle();
+    // The notification the app showed is not shown again; the Glass sounds it never started play.
+    assert.deepEqual(sink.spawner.started, ['Glass', 'Glass', 'Glass']);
+    if (crash) {
+      assert.deepEqual(spawner.started, []);
+      // Once scheduler.json is saved without the acknowledgement, plays.json no longer holds the part.
+      await eventually(() => JSON.parse(readFileSync(join(sink.context.dataDir, 'plays.json'), 'utf8')).progress === undefined);
+    }
+  });
+}
+
+for (const retry of [false, true]) {
+  test(`a finished part neither file can record gets 500 yet this daemon never plays it${retry ? ', and saying so again saves it' : ''}`, async (t) => {
+    const spawner = partSpawn();
+    const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+    await finishCountdown(context);
+    const { alertId, subscriberId } = await takeAlert(context, stream);
+    assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
+    breakScheduler(context);
+    breakPlays(context);
+    const played = await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' });
+    assert.deepEqual([played.status, played.body.error?.code], [500, 'storage_failed']);
+    if (retry) {
+      fixScheduler(context);
+      assert.equal((await call(context, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).status, 200);
+      assert.deepEqual(scheduler(context.dataDir).acknowledged[0].played, ['notification']);
+      return;
+    }
+    await appEnds(context, stream);
+    context.clock.advance(ORPHANED_ALERT_MS);
+    await eventually(() => spawner.started.length === 3);
+    await settle();
+    assert.deepEqual(spawner.started, ['Glass', 'Glass', 'Glass']);
+  });
+}
+
+test('a handback after the app asked to show a part and did not (the notification center refused it) has the sink show it, though the app still runs', async (t) => {
+  const spawner = partSpawn();
+  const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
+  await finishCountdown(context, { sound: false });
+  const { alertId, subscriberId } = await takeAlert(context, stream);
+  assert.equal((await call(context, `/v1/alerts/${alertId}/playing`, { subscriberId, part: 'notification', pid: APP })).status, 200);
+  assert.equal((await call(context, `/v1/alerts/${alertId}/release`, { subscriberId })).status, 200);
+  await eventually(() => spawner.started.length === 1);
+  await settle();
+  assert.deepEqual(spawner.started, ['notification']);
 });
 
 test('a handback after the app finished some parts, then a crash before the sink recorded its play anywhere, has the next daemon play only the rest', async (t) => {
@@ -412,7 +523,11 @@ test('a part an earlier daemon left running is decided by its process: waited fo
     { name: 'never ending', child: { pid: 7, birth: 'birth-7', boot: 'b1' }, lives: { 7: Infinity }, done: true, killed: [7] },
     { name: 'never ending, birth unknown', child: { pid: 7, birth: null, boot: 'b1' }, lives: { 7: Infinity }, done: true, killed: [] },
     { name: 'from an earlier boot', child: { pid: 7, birth: 'birth-7', boot: 'b0' }, lives: { 7: Infinity }, done: false },
-    { name: 'boot unknown', child: { pid: 7, birth: 'birth-7', boot: null }, lives: {}, done: false }
+    { name: 'boot unknown', child: { pid: 7, birth: 'birth-7', boot: null }, lives: {}, done: false },
+    // A part the app (the alert handler) started: its sound plays in the app's process.
+    { name: 'the app, stalled', child: { pid: 7, birth: 'birth-7', boot: 'b1', app: true }, lives: { 7: Infinity }, done: true, killed: [] },
+    { name: 'the app, which ended in it', child: { pid: 7, birth: 'birth-7', boot: 'b1', app: true }, lives: { 7: 2 }, done: false, sleeps: 2 },
+    { name: 'the app, from an earlier boot', child: { pid: 7, birth: 'birth-7', boot: 'b0', app: true }, lives: { 7: Infinity }, done: false }
   ];
   for (const { name, child, lives, done, sleeps = undefined, killed = undefined } of cases) {
     const processes = fakeProcesses({ lives });
@@ -425,22 +540,45 @@ test('a part an earlier daemon left running is decided by its process: waited fo
     assert.equal(writes.at(-1)[0].running, undefined, name);
     if (sleeps !== undefined) assert.equal(processes.sleeps, sleeps, name);
     if (killed !== undefined) assert.deepEqual(processes.killed, killed, name);
-    if (name === 'never ending') assert.equal(processes.sleeps, LEFT_PROCESS_WAIT_MS / 100, name);
+    if (name === 'never ending' || name === 'the app, stalled') assert.equal(processes.sleeps, LEFT_PROCESS_WAIT_MS / 100, name);
   }
 });
 
-test("the sink records each part's process as it spawns, and a daemon stopped while waiting for a left process hands nothing to its sink", async () => {
+test('a part the app started is waited for only until it says it finished it', async () => {
+  const processes = fakeProcesses({ lives: { 7: Infinity } });
+  const { sleep } = processes;
+  // The app says it finished the part during the second poll.
+  processes.sleep = async () => {
+    await sleep();
+    if (processes.sleeps === 2) journal.done('a1', 'sound:0');
+  };
+  const journal = createPlayJournal({ entries: [leftRunning({ 'sound:0': { pid: 7, birth: 'birth-7', boot: 'b1', app: true } })], processes });
+  assert.equal(journal.awaitsHandler('a1', 'sound:0'), true);
+  await journal.settle('a1');
+  assert.deepEqual([...journal.played('a1')].sort(), ['notification', 'sound:0']);
+  assert.deepEqual([processes.sleeps, processes.killed], [2, []]);
+});
+
+test("the sink records each part's process as it spawns, its pid before the birth lookup, and a daemon stopped while waiting for a left process hands nothing to its sink", async () => {
   const processes = fakeProcesses({ lives: { 7: Infinity } });
   const writes = [];
+  const atBirth = [];
+  const { birth } = processes;
+  processes.birth = (pid) => {
+    atBirth.push(writes.at(-1)[0].running);
+    return birth(pid);
+  };
   const journal = createPlayJournal({ persist: (entries) => writes.push(entries), processes });
   journal.begin('a2', { alert: finish, timer: egg });
   journal.started('a2', 'sound:0', 9);
+  // The pid and boot are written before the birth lookup, and the birth in a second write.
+  assert.deepEqual(atBirth, [{ 'sound:0': { pid: 9, birth: null, boot: 'b1' } }]);
   assert.deepEqual(writes.at(-1)[0].running, { 'sound:0': { pid: 9, birth: 'birth-9', boot: 'b1' } });
   journal.done('a2', 'sound:0');
   assert.equal(writes.at(-1)[0].running, undefined);
   // A spawn that reported no pid records nothing.
   journal.started('a2', 'sound:1', undefined);
-  assert.equal(writes.length, 3);
+  assert.equal(writes.length, 4);
 
   const sink = createRecordingSink();
   const handlers = createAlertHandlers({ clock: createFakeClock(), sink, log: () => {}, publish: () => {}, isOpen: () => true, plays: [leftRunning({ 'sound:0': { pid: 7, birth: 'birth-7', boot: 'b1' } })], processes });

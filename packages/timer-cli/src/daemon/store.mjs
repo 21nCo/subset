@@ -15,13 +15,24 @@ const isObject = (value) => typeof value === 'object' && value !== null && !Arra
 const isParts = (value) => Array.isArray(value) && value.every((part) => typeof part === 'string' && ALERT_PART.test(part));
 const isAlert = (entry) =>
   typeof entry?.alertId === 'string' && isObject(entry.alert) && typeof entry.alert.timerId === 'string' && typeof entry.alert.kind === 'string' && isObject(entry.timer);
-const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played));
-const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
 const isNameOrNull = (value) => value === null || (typeof value === 'string' && value.length <= 128);
+/** `part → { pid, birth, boot, app? }`: the process playing each part (see `createPlayJournal`). */
 const isRunning = (value) =>
   value === undefined ||
   (isObject(value) &&
-    Object.entries(value).every(([part, child]) => ALERT_PART.test(part) && isObject(child) && Number.isSafeInteger(child.pid) && child.pid > 0 && isNameOrNull(child.birth) && isNameOrNull(child.boot)));
+    Object.entries(value).every(
+      ([part, child]) =>
+        ALERT_PART.test(part) &&
+        isObject(child) &&
+        Number.isSafeInteger(child.pid) &&
+        child.pid > 0 &&
+        isNameOrNull(child.birth) &&
+        isNameOrNull(child.boot) &&
+        (child.app === undefined || child.app === true)
+    ));
+const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played)) && isRunning(handoff.started);
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
+const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played);
 const isPlay = (entry) =>
   isAlert(entry) &&
   (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&
@@ -198,7 +209,10 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
-  /** The play journal's entries (see `createPlayJournal`); none when the file is missing or unreadable. */
+  /**
+   * The play journal (see `createPlayJournal`): `{ plays, progress }`, each empty when the file is
+   * missing or unreadable.
+   */
   function loadPlays() {
     let value;
     try {
@@ -206,14 +220,16 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     } catch (error) {
       if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
       if (error instanceof SyntaxError) log(`plays.json could not be read (${error.message}); no play is resumed.`);
-      return [];
+      return { plays: [], progress: [] };
     }
-    if (value?.version !== PLAYS_VERSION || !Array.isArray(value.plays)) return [];
-    return value.plays.filter(isPlay);
+    const list = (key, valid) => (value?.version === PLAYS_VERSION && Array.isArray(value[key]) ? value[key].filter((item) => valid(item)) : []);
+    return { plays: list('plays', isPlay), progress: list('progress', isProgress) };
   }
 
-  function savePlays(plays) {
-    writeFileAtomic(paths.plays, `${JSON.stringify({ version: PLAYS_VERSION, plays })}\n`, { fs, log });
+  function savePlays(plays, progress = []) {
+    const value = { version: PLAYS_VERSION, plays };
+    if (progress.length) value.progress = progress;
+    writeFileAtomic(paths.plays, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
   return { load, save, loadMarks, loadAlerts, saveMarks, loadPlays, savePlays };
