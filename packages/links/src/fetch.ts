@@ -38,7 +38,6 @@ export class LinkFetchError extends Error {
   }
 }
 
-/** The subset of the web `fetch` the fetcher calls. */
 /**
  * The subset of the web `fetch` the fetcher calls. It must honour `redirect: 'manual'`: a response it reached by
  * following a redirect itself is refused with `network`, because the hops it followed were never checked.
