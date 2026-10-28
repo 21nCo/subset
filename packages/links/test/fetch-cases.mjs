@@ -150,6 +150,13 @@ export const cases = [
       equal(['127.0.0.1::', '10.0.0.1::', '8.8.8.8::1', '1:8.8.8.8::', '1:2:3:4:5:8.8.8.8:7'].map(lib.isBlockedAddress), [true, true, true, true, true], 'misplaced dotted piece');
       equal(['8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8', '1:2:3:4:5:6:7:8', '64:ff9b::8.8.8.8', '1:2:3:4:5:6:8.8.8.8'].map(lib.isBlockedAddress), [false, false, false, false, false, false], 'public');
       equal(['localhost', 'A.Local.', 'x.home.arpa', 'example.com', 'notlocal'].map(lib.isBlockedHostname), [true, true, true, false, false], 'hostnames');
+      equal(['localhost.', 'x.local...', 'home.arpa.', 'example.com.', '...'].map(lib.isBlockedHostname), [true, true, true, false, false], 'trailing dots');
+      // Trailing dots are removed in linear time: a long run of inner dots once took seconds.
+      const dots = '.'.repeat(200_000);
+      const started = performance.now();
+      equal([lib.isBlockedHostname(`a${dots}x`), lib.isBlockedHostname(`a${dots}local${dots}`)], [false, true], 'long dot runs');
+      const elapsed = performance.now() - started;
+      if (elapsed > 500) fail(`200,000 dots took ${Math.round(elapsed)} ms`);
     }
   },
   {
@@ -287,6 +294,41 @@ export const cases = [
       const hop = (next) => () => new Promise((resolve) => setTimeout(() => resolve(redirect(next)()), 20));
       const slowChain = fakeFetch({ 'https://example.com/1': hop('/2'), 'https://example.com/2': hop('/3'), 'https://example.com/3': hop('/4'), 'https://example.com/4': html('<title>Late</title>') });
       await rejects(lib, lib.fetchLinkDetails('https://example.com/1', { fetch: slowChain.fetch, timeoutMs: 50 }), 'timeout', 'slow chain');
+    }
+  },
+  {
+    name: 'timeout ends work that is always ready, a body or a redirect chain, without holding the event loop',
+    async run(lib) {
+      const operations = [
+        ['fetchLinkDetails', lib.fetchLinkDetails],
+        ['fetchResource', lib.fetchResource]
+      ];
+      // Every read resolves at once: empty chunks never fill maxBytes, and 1-byte chunks would take far longer than the limit to.
+      for (const [chunkName, chunk] of [['empty', ''], ['1-byte', 'x']]) {
+        for (const [name, operation] of operations) {
+          const label = `${name}: endless ${chunkName} chunks`;
+          const body = trackedStream(() => chunk);
+          const fake = fakeFetch({ 'https://example.com/': () => new Response(body.stream, { headers: { 'content-type': 'text/html' } }) });
+          let ticked = false;
+          setTimeout(() => (ticked = true), 5);
+          await rejects(lib, operation('https://example.com/', { fetch: fake.fetch, timeoutMs: 50 }), 'timeout', label);
+          equal([ticked, body.cancelled], [true, true], `${label}: other timers ran, stream cancelled`);
+          if (body.pulls < 2) fail(`${label}: read only ${body.pulls} chunks`);
+        }
+      }
+      // A server that redirects at once to a new URL every time, with a redirect limit that is never reached.
+      for (const [name, operation] of operations) {
+        const requests = [];
+        const chain = async (url) => {
+          requests.push(url);
+          return redirect(`/${requests.length}`)();
+        };
+        let ticked = false;
+        setTimeout(() => (ticked = true), 5);
+        await rejects(lib, operation('https://example.com/0', { fetch: chain, timeoutMs: 50, maxRedirects: 1e9 }), 'timeout', `${name}: endless redirects`);
+        equal(ticked, true, `${name}: endless redirects: other timers ran`);
+        if (requests.length < 2) fail(`${name}: endless redirects: only ${requests.length} requests`);
+      }
     }
   },
   {

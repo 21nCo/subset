@@ -22,7 +22,10 @@ const IPV4 = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
 
 /** Whether a hostname (as `URL#hostname` gives it, lowercase, any trailing dots ignored) is a blocked name. */
 export function isBlockedHostname(hostname: string): boolean {
-  const name = hostname.toLowerCase().replace(/\.+$/, '');
+  // A backward scan rather than /\.+$/, which takes quadratic time on a long run of inner dots.
+  let end = hostname.length;
+  while (end > 0 && hostname.charCodeAt(end - 1) === 0x2e) end--;
+  const name = hostname.slice(0, end).toLowerCase();
   return BLOCKED_HOST_SUFFIXES.some((suffix) => name === suffix || name.endsWith(`.${suffix}`));
 }
 

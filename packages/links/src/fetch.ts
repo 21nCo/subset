@@ -59,7 +59,10 @@ export interface SafeFetchOptions {
    * before the request only, not a defense against DNS rebinding: see `ResolveHost`.
    */
   resolveHost?: ResolveHost;
-  /** Limit for the whole operation, redirects, resolution and body included. Defaults to 5,000 ms; at most 2,147,483,647. */
+  /**
+   * Limit for the whole operation, redirects, resolution and body included, even when every step is ready at once.
+   * Defaults to 5,000 ms; at most 2,147,483,647.
+   */
   timeoutMs?: number;
   /**
    * Most body bytes read. `fetchLinkDetails` reads at most the smaller of this and `MAX_DOCUMENT_BYTES`, the part
@@ -97,6 +100,8 @@ const DEFAULT_MAX_REDIRECTS = 5;
 const HTML_ACCEPT = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8';
 const HTML_TYPES = new Set(['text/html', 'application/xhtml+xml']);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// How many hops and body reads run between two yields to the event loop.
+const YIELD_EVERY_STEPS = 16;
 const MEDIA_RANGE = /^(?:\*\/\*|[a-z0-9!#$%&'*+.^_`|~-]+\/(?:\*|[a-z0-9!#$%&'*+.^_`|~-]+))$/;
 // Details fields a document can supply besides the URL, content type and fallback icon.
 const BASE_KEYS = new Set(['version', 'url', 'icons', 'contentType']);
@@ -178,6 +183,7 @@ export async function fetchResource(input: string | URL, options: FetchResourceO
 async function open(input: string | URL, settings: Settings, accept: string, deadline: Deadline): Promise<{ response: Response; url: URL }> {
   let url = target(input);
   for (let redirects = 0; ; redirects++) {
+    await deadline.step(url);
     await check(url, settings, deadline);
     let response: Response;
     let pending: Promise<Response> | undefined;
@@ -191,7 +197,7 @@ async function open(input: string | URL, settings: Settings, accept: string, dea
         credentials: 'omit',
         signal: deadline.signal
       });
-      response = await deadline.race(pending);
+      response = await deadline.race(pending, url);
     } catch (error) {
       // When the deadline wins, a response that still arrives is released rather than left open.
       Promise.resolve(pending).then((late) => late && discard(late), () => {});
@@ -273,7 +279,7 @@ async function check(url: URL, settings: Settings, deadline: Deadline): Promise<
   const resolveHost = settings.resolveHost;
   let addresses: readonly string[];
   try {
-    addresses = await deadline.race(Promise.resolve().then(() => resolveHost(hostname)));
+    addresses = await deadline.race(Promise.resolve().then(() => resolveHost(hostname)), url);
   } catch (error) {
     throw failure(error, deadline, url);
   }
@@ -308,7 +314,8 @@ async function readBody(
   if (!reader) return { bytes: new Uint8Array(0), truncated };
   try {
     while (!done) {
-      const next = await deadline.race(reader.read());
+      await deadline.step(url);
+      const next = await deadline.race(reader.read(), url);
       done = next.done;
       if (next.done) break;
       const room = maxBytes - total;
@@ -385,32 +392,59 @@ function failure(error: unknown, deadline: Deadline, url: URL): LinkFetchError {
   return new LinkFetchError('network', error instanceof Error ? error.message : 'The request failed', { url: url.href, cause: error });
 }
 
-/** One timer for the whole operation. `race` rejects with `timeout` when it fires, whether or not the awaited work honours the abort signal. */
+/**
+ * The time limit of one operation. It throws `timeout` from `step` and `race` once `timeoutMs` has passed,
+ * judged by the clock rather than by its timer alone, and aborts the signal. `step` also yields to timers and
+ * other tasks every few calls, so reads that are always ready can neither outlast the limit nor hold the
+ * event loop. `race` keeps one subscription per pending call and drops it when the work settles.
+ */
 class Deadline {
   readonly signal: AbortSignal;
-  expired = false;
   private readonly controller = new AbortController();
+  private readonly started = performance.now();
+  private readonly waiters = new Set<() => void>();
   private readonly timer: ReturnType<typeof setTimeout>;
-  private readonly expiry: Promise<never>;
   private readonly timeoutMs: number;
+  private ended = false;
+  private steps = 0;
 
   constructor(timeoutMs: number) {
     this.timeoutMs = timeoutMs;
     this.signal = this.controller.signal;
-    let expire!: () => void;
-    this.expiry = new Promise<never>((_, reject) => {
-      expire = () => reject(new LinkFetchError('timeout', `No complete response within ${timeoutMs} ms`));
-    });
-    this.expiry.catch(() => {});
-    this.timer = setTimeout(() => {
-      this.expired = true;
-      expire();
-      this.controller.abort();
-    }, timeoutMs);
+    this.timer = setTimeout(() => this.expire(), timeoutMs);
   }
 
-  race<T>(work: Promise<T>): Promise<T> {
-    return Promise.race([work, this.expiry]);
+  get expired(): boolean {
+    if (!this.ended && performance.now() - this.started >= this.timeoutMs) this.expire();
+    return this.ended;
+  }
+
+  /** Called before each hop and each body read. */
+  async step(url: URL): Promise<void> {
+    this.check(url);
+    if (++this.steps % YIELD_EVERY_STEPS === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      this.check(url);
+    }
+  }
+
+  /** Settles as `work` does, or rejects with `timeout` when the time is up first, whether or not `work` honours the signal. */
+  race<T>(work: Promise<T>, url: URL): Promise<T> {
+    this.check(url);
+    return new Promise<T>((resolve, reject) => {
+      const expire = () => reject(this.error(url));
+      this.waiters.add(expire);
+      work.then(
+        (value) => {
+          this.waiters.delete(expire);
+          resolve(value);
+        },
+        (error: unknown) => {
+          this.waiters.delete(expire);
+          reject(error);
+        }
+      );
+    });
   }
 
   error(url: URL): LinkFetchError {
@@ -419,6 +453,20 @@ class Deadline {
 
   clear(): void {
     clearTimeout(this.timer);
+    this.waiters.clear();
+  }
+
+  private check(url: URL): void {
+    if (this.expired) throw this.error(url);
+  }
+
+  private expire(): void {
+    if (this.ended) return;
+    this.ended = true;
+    clearTimeout(this.timer);
+    this.controller.abort();
+    for (const waiter of this.waiters) waiter();
+    this.waiters.clear();
   }
 }
 
