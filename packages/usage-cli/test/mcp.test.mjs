@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { McpFnTestClient, assertManifestContract, validateMcpFnSchemaPortability } from '@mcpfn/testing';
 import { USAGE_PROVIDERS, createUsageStatus, isUsageStatus, usageText } from '@subset.dev/usage-core';
-import { defineUsageMcpServer } from '../src/mcp.mjs';
+import { claudeIdentityPeriod, defineUsageMcpServer } from '../src/mcp.mjs';
 
 const hostDirectory = fileURLToPath(new URL('..', import.meta.url));
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -42,10 +42,14 @@ async function session(t, options = {}) {
   return { mcp, declaration, logs, call: (name, args = {}) => mcp.callTool(name, args) };
 }
 
+/** The error's code and message; `usage_history` declares an output schema, so its errors carry them in the text only. */
 function assertError(result, code) {
   assert.equal(result.isError, true, JSON.stringify(result));
+  const { text } = result.content[0];
+  assert.ok(text.startsWith(`${code}: `), text);
+  if (!result.structuredContent) return { code, message: text.slice(code.length + 2) };
   assert.equal(result.structuredContent.error.code, code);
-  assert.equal(result.content[0].text, `${code}: ${result.structuredContent.error.message}`);
+  assert.equal(text, `${code}: ${result.structuredContent.error.message}`);
   return result.structuredContent.error;
 }
 
@@ -75,6 +79,15 @@ test('tools/list returns the two read-only tools with their schemas, annotations
   assert.match(byName.usage_status.description, /older than 5 minutes is stale/);
   assert.match(byName.usage_status.description, /null percentage or reset time is unavailable, not zero/);
   assert.match(byName.usage_history.description, /only while it is open/);
+  // usage_status returns the UsageStatus contract (isUsageStatus); usage_history declares its envelope.
+  assert.equal(byName.usage_status.outputSchema, undefined);
+  const output = byName.usage_history.outputSchema;
+  assert.deepEqual(validateMcpFnSchemaPortability(output, 'usage_history output'), []);
+  assert.deepEqual([output.type, output.required, output.additionalProperties], ['object', ['schemaVersion', 'from', 'to', 'series'], false]);
+  assert.deepEqual(output.properties.schemaVersion, { const: 1 });
+  assert.deepEqual([output.properties.from.format, output.properties.to.format], ['date-time', 'date-time']);
+  const point = output.properties.series.additionalProperties.additionalProperties.items;
+  assert.deepEqual([point.type, point.items, point.minItems, point.maxItems], ['array', { type: 'number' }, 2, 2]);
   assert.deepEqual(mcp.client.getServerVersion(), { name: 'subset-usage', version: manifest.version });
 });
 
@@ -109,18 +122,16 @@ test('usage_status filters to one provider: its own accounts, logins for its sub
   assert.deepEqual(await ids('hermes'), ['hermes_claude']);
   assert.deepEqual(await ids('pi'), ['chatgpt_main']);
   assert.deepEqual(await ids('amp'), ['amp_cli']);
-  // Every filtered result with accounts is valid and its text is usageText of exactly those accounts.
-  for (const provider of ['claude-code', 'hermes', 'pi', 'amp', 'codex-chatgpt']) {
+  // Every filtered result is valid and its text is usageText of exactly those accounts, also when
+  // the provider has none.
+  for (const provider of USAGE_PROVIDERS) {
     const filtered = await call('usage_status', { provider });
     assert.ok(isUsageStatus(filtered.structuredContent), provider);
-    assert.ok(filtered.structuredContent.accounts.length, provider);
-    assert.equal(filtered.content[0].text, usageText(filtered.structuredContent), provider);
+    assert.deepEqual(filtered.content, [{ type: 'text', text: usageText(filtered.structuredContent) }], provider);
   }
-  // The one exception: no account of that provider. The text names it rather than saying, as
-  // usageText would, that no accounts are configured at all.
   const none = await call('usage_status', { provider: 'cursor' });
   assert.deepEqual(none.structuredContent.accounts, []);
-  assert.equal(none.content[0].text, 'No Cursor team (cursor) accounts are configured.');
+  assert.equal(none.content[0].text, usageText(createUsageStatus([], new Date(NOW))));
 });
 
 test('invalid input is an invalid_input tool error; a failed configuration read is usage_unavailable', async (t) => {
@@ -128,8 +139,8 @@ test('invalid input is an invalid_input tool error; a failed configuration read 
   const { call, logs } = await session(t, { readStatus: async () => { reads.push('status'); return fixtureStatus(); }, readHistory: async () => { reads.push('history'); return { schemaVersion: 1, series: {} }; } });
   assert.match(assertError(await call('usage_status', { provider: 'chatgpt' }), 'invalid_input').issues[0].path, /^provider$/);
   assert.deepEqual(assertError(await call('usage_status', { provider: 'amp', extra: true }), 'invalid_input').issues, [{ path: 'extra', message: 'is not a known field' }]);
-  for (const hours of [0, 169, 1.5, '48']) assert.equal(assertError(await call('usage_history', { hours }), 'invalid_input').issues[0].path, 'hours', String(hours));
-  assert.equal(assertError(await call('usage_history', { accountId: '../other' }), 'invalid_input').issues[0].path, 'accountId');
+  for (const hours of [0, 169, 1.5, '48']) assert.match(assertError(await call('usage_history', { hours }), 'invalid_input').message, /^hours: /, String(hours));
+  assert.match(assertError(await call('usage_history', { accountId: '../other' }), 'invalid_input').message, /^accountId: /);
   // Rejected before any read.
   assert.deepEqual(reads, []);
 
@@ -154,7 +165,9 @@ test('usage_history returns the stored points in range, time and percentages onl
     // An ordinary account ID, never the object prototype.
     ['__proto__']: { [key('five_hour', '5-hour')]: [[NOW - HOUR, 3]] },
   } };
-  const { call } = await session(t, { readHistory: async () => JSON.parse(JSON.stringify(history)) });
+  const { call, mcp } = await session(t, { readHistory: async () => JSON.parse(JSON.stringify(history)) });
+  // With the tool list loaded, the MCP client validates every result against the declared output schema.
+  await mcp.listTools();
   const read = async (args) => {
     const result = await call('usage_history', args);
     assert.equal(result.isError, undefined, JSON.stringify(result));
@@ -185,6 +198,12 @@ test('usage_history returns the stored points in range, time and percentages onl
   assert.deepEqual(Object.keys(week.structuredContent.series), ['chatgpt_main']);
   assert.deepEqual(week.structuredContent.series.chatgpt_main[key('weekly', 'Weekly')], [[NOW - 100 * HOUR, 70]]);
   assert.equal(week.structuredContent.series.chatgpt_main[key('five_hour', '5-hour')][0][0], NOW - 49 * HOUR);
+
+  // The declared schema is enforced: a point that is not [time, percent] is never returned.
+  const malformed = await session(t, { readHistory: async () => ({ schemaVersion: 1, series: { claude_work: { [key('five_hour', '5-hour')]: [[NOW, '10']] } } }) });
+  const rejected = await malformed.call('usage_history');
+  assert.equal(rejected.isError, true);
+  assert.doesNotMatch(JSON.stringify(rejected), /"10"/);
 
   const unknown = await read({ accountId: 'missing' });
   assert.deepEqual(unknown.structuredContent.series, {});
@@ -291,7 +310,7 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   const history = (await mcp.request('tools/call', { name: 'usage_history', arguments: { hours: 4 } })).result;
   assert.deepEqual(history.structuredContent.series, { claude_work: { [key]: [[now - 3 * HOUR, 8], [now - 30 * 60_000, 10]] } });
   const invalid = (await mcp.request('tools/call', { name: 'usage_history', arguments: { hours: 500 } })).result;
-  assert.deepEqual([invalid.isError, invalid.structuredContent.error.code], [true, 'invalid_input']);
+  assert.match(assertError(invalid, 'invalid_input').message, /^hours: /);
 
   // Calls sent right before stdin closes are still answered.
   const lastStatus = mcp.request('tools/call', { name: 'usage_status', arguments: {} });
@@ -339,29 +358,97 @@ test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exit
 });
 
 /**
+ * `subset-usage mcp` with one account, Amp, whose `amp` records its PID and then never answers, and
+ * a `usage_status` call (id 3) waiting on it. Returns once the stalled `amp` is running.
+ */
+async function stalledAmp(t) {
+  const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-stall-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [bin, config, data] = ['bin', 'config', 'data'].map((name) => join(root, name));
+  for (const directory of [bin, config, data]) await mkdir(directory);
+  const pidFile = join(root, 'amp.pid');
+  // exec keeps the PID, so the recorded PID is the process the server started.
+  await writeFile(join(bin, 'amp'), `#!/bin/sh
+echo $$ > '${pidFile}.tmp' && mv '${pidFile}.tmp' '${pidFile}'
+exec sleep 120
+`, { mode: 0o700 });
+  const profilesFile = join(config, 'profiles.json');
+  await writeFile(profilesFile, JSON.stringify([{ id: 'amp_cli', label: 'Amp', provider: 'amp' }]));
+  const mcp = startMcp({ ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'claude') });
+  let pid;
+  t.after(() => {
+    mcp.child.kill('SIGKILL');
+    if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  });
+  await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
+  mcp.send({ method: 'notifications/initialized' });
+  mcp.send({ id: 3, method: 'tools/call', params: { name: 'usage_status', arguments: {} } });
+  for (let tries = 0; pid === undefined; tries += 1) {
+    assert.ok(tries < 500, `amp never started. ${mcp.stderr()}`);
+    pid = await readFile(pidFile, 'utf8').then((text) => Number(text), () => undefined);
+    if (pid === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  return { mcp, pid };
+}
+
+/** Whether the operating system still has a process with this PID. */
+function processExists(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
+}
+
+test('subset-usage mcp ends a stalled provider subprocess, answers its call, and exits 0 when stdin closes', async (t) => {
+  const { mcp, pid } = await stalledAmp(t);
+  assert.ok(processExists(pid));
+  mcp.child.stdin.end();
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
+  // The call was answered with Amp's error once its read ended; stdout held only protocol frames.
+  assert.equal(mcp.rest(), '');
+  const reply = mcp.frames.find((frame) => frame.id === 3);
+  assert.ok(reply, `the waiting call was not answered. ${mcp.stderr()}`);
+  assert.ok(isUsageStatus(reply.result.structuredContent));
+  assert.deepEqual(reply.result.structuredContent.accounts.map((item) => [item.id, item.errors.map((error) => error.code)]), [['amp_cli', ['amp_failed']]]);
+  assert.match(mcp.stderr(), /stdin closed; ending the provider reads still running after 10 s/);
+});
+
+test('subset-usage mcp ends a stalled provider subprocess and exits 0 on SIGTERM', async (t) => {
+  const { mcp, pid } = await stalledAmp(t);
+  mcp.child.kill('SIGTERM');
+  const [code, signal] = await mcp.exited;
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
+  assert.equal(processExists(pid), false, `amp (PID ${pid}) outlived the server`);
+  assert.equal(mcp.rest(), '');
+  assert.deepEqual(mcp.frames.map((frame) => frame.id), [1]);
+});
+
+/**
  * A data directory with one Claude account, `claude_work`, whose sign-in email the `claude` shim
  * takes from the config directory's name (`a@example.com` in `.../a`). The auth answer is cached
  * per directory for a minute, so a test signs the account in as someone else by pointing it at
- * another directory, which is the same sign-in change to the identity check. The sign-in check of
- * a directory named `slow` signals `started` in `gate` and answers only once `gate/open` exists.
+ * another directory, which is the same sign-in change to the identity check. The sign-in check of a
+ * directory named `slow<name>` answers `<name>@example.com`, but first creates `started` in the gate
+ * directory and waits until the test creates `open` there.
  */
-async function claudeFixture(t, { gate } = {}) {
+async function claudeFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-identity-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const [bin, config, data] = ['bin', 'config', 'data'].map((name) => join(root, name));
-  for (const directory of [bin, config, data, join(root, 'a'), join(root, 'b'), join(root, 'slow'), join(root, 'default')]) await mkdir(directory);
+  const [bin, config, data, gate] = ['bin', 'config', 'data', 'gate'].map((name) => join(root, name));
+  for (const directory of [bin, config, data, gate, ...['a', 'b', 'slowa', 'slowb', 'default'].map((name) => join(root, name))]) await mkdir(directory);
   await writeFile(join(bin, 'claude'), `#!/bin/sh
-if [ "$(basename "$CLAUDE_CONFIG_DIR")" = slow ]; then
+name="$(basename "$CLAUDE_CONFIG_DIR")"
+case "$name" in slow*)
   : > "$SUBSET_TEST_GATE/started"
-  while [ ! -e "$SUBSET_TEST_GATE/open" ]; do sleep 0.05; done
-fi
-printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"%s@example.com"}\n' "$(basename "$CLAUDE_CONFIG_DIR")"
+  while [ ! -e "$SUBSET_TEST_GATE/open" ]; do sleep 0.02; done
+  name="\${name#slow}";;
+esac
+printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"%s@example.com"}\n' "$name"
 `, { mode: 0o700 });
   const profilesFile = join(config, 'profiles.json');
-  const claudeProfile = (id, name) => ({ id, label: id, provider: 'claude-code', managed: false, snapshotFile: join(data, 'usage-snapshots', `${id}.json`), claudeConfigDir: join(root, name) });
-  // With a gate, a second account whose sign-in check waits for the test is configured too.
-  const signIn = (name) => writeFile(profilesFile, JSON.stringify([claudeProfile('claude_work', name), ...(gate ? [claudeProfile('claude_slow', 'slow')] : [])]));
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'default'), SUBSET_TEST_GATE: gate ?? '' };
+  const signIn = (name) => writeFile(profilesFile, JSON.stringify([
+    { id: 'claude_work', label: 'Work', provider: 'claude-code', managed: false, snapshotFile: join(data, 'usage-snapshots', 'claude_work.json'), claudeConfigDir: join(root, name) },
+  ]));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SUBSET_USAGE_PROFILES_FILE: profilesFile, SUBSET_USAGE_DATA_DIR: data, CLAUDE_CONFIG_DIR: join(root, 'default'), SUBSET_TEST_GATE: gate };
   const collect = (name, usedPercentage) => {
     const result = spawnSync(process.execPath, ['src/server.mjs', 'collect', '--account', 'claude_work'], {
       cwd: hostDirectory, env: { ...env, CLAUDE_CONFIG_DIR: join(root, name) }, encoding: 'utf8', timeout: 10_000,
@@ -369,6 +456,14 @@ printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","emai
     });
     assert.equal(result.status, 0, result.stderr);
   };
+  /** Resolves once a slow sign-in check is waiting; observed on the file system, not timed. */
+  const gateStarted = async () => {
+    for (let tries = 0; !(await readdir(gate)).includes('started'); tries += 1) {
+      assert.ok(tries < 500, 'no sign-in check reached the gate');
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+  };
+  const openGate = () => writeFile(join(gate, 'open'), '');
   const start = async () => {
     const mcp = startMcp(env);
     t.after(() => mcp.child.kill());
@@ -388,12 +483,58 @@ printf '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","emai
     };
     return { call, work, stop, stderr: mcp.stderr };
   };
-  return { root, data, profilesFile, signIn, collect, start };
+  return { root, data, profilesFile, signIn, collect, gateStarted, openGate, start };
 }
 
-const delay = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
 const hidden = (email) => ({ email, state: 'unavailable', remaining: [], errors: ['claude_identity_changed'] });
 const shown = (email, remaining) => ({ email, state: 'ok', remaining: [remaining], errors: [] });
+const awaiting = (email) => ({ email, state: 'unavailable', remaining: [], errors: ['claude_awaiting_snapshot'] });
+
+/** Apart from what the test itself wrote (`written`), nothing under the fixture changed. */
+async function assertOnlyTestWrites(root, before, written) {
+  const after = new Map((await tree(root)).map(([name, ...rest]) => [name, rest]));
+  for (const [name, ...rest] of before) if (!written.test(name)) assert.deepEqual(after.get(name), rest, name);
+  assert.deepEqual([...after.keys()].filter((name) => !written.test(name) && !before.some(([known]) => known === name)), []);
+}
+// The test signs in by rewriting the profiles, the collector writes the snapshot and its run record,
+// and the gate holds the slow sign-in's signals. A first snapshot also adds its directories to data/.
+const testWrites = /^(config|data\/(usage-snapshots|collector-runs)|gate)(\/|$)|^data$/;
+
+test('the session identity rule: periods only move forward, and an out-of-date sign-in answer changes nothing', () => {
+  const period = (email, since, observedAt) => ({ email, since, observedAt });
+  const answer = (email, observedAt) => ({ email, observedAt });
+  const rule = (kept, stored, given, now = 1000) => claudeIdentityPeriod(kept, stored, given, now);
+  // A first sighting adopts the snapshots already collected; a recorded period applies as recorded.
+  assert.deepEqual(rule(undefined, undefined, answer('a', 10)), { period: period('a', 0, 10), current: true });
+  assert.deepEqual(rule(undefined, { email: 'a', since: 0 }, answer('a', 10)), { period: period('a', 0, 10), current: true });
+  // A newer answer for another email starts a period when the session observes it.
+  assert.deepEqual(rule(undefined, { email: 'a', since: 0 }, answer('b', 10)), { period: period('b', 1000, 10), current: true });
+  assert.deepEqual(rule(period('a', 0, 10), undefined, answer('b', 20)), { period: period('b', 1000, 20), current: true });
+  // The same email keeps the period, and its latest observation, whatever order answers arrive in.
+  assert.deepEqual(rule(period('b', 500, 20), undefined, answer('b', 30)), { period: period('b', 500, 30), current: true });
+  assert.deepEqual(rule(period('b', 500, 30), undefined, answer('b', 20)), { period: period('b', 500, 30), current: true });
+  // An older answer for another email is out of date: it starts no period. Queried before the period
+  // started it changes nothing; queried after, the account was signed in elsewhere in between, so the
+  // period restarts at the latest observation of its email.
+  assert.deepEqual(rule(period('b', 500, 600), undefined, answer('a', 400)), { period: period('b', 500, 600), current: false });
+  assert.deepEqual(rule(period('b', 0, 20), undefined, answer('a', 10)), { period: period('b', 20, 20), current: false });
+  // A later period the dashboard recorded applies: the same email signed in again, or another email
+  // after the session's latest observation.
+  assert.deepEqual(rule(period('b', 500, 520), { email: 'b', since: 700 }, answer('b', 520)), { period: period('b', 700, 700), current: true });
+  assert.deepEqual(rule(period('a', 0, 520), { email: 'a', since: 700 }, answer('a', 520)), { period: period('a', 700, 700), current: true });
+  assert.deepEqual(rule(period('b', 500, 520), { email: 'a', since: 700 }, answer('a', 520)), { period: period('a', 700, 700), current: true });
+  // A recorded change to another email that the session's own later observation contradicts: its
+  // email signed in again, so its period restarts there.
+  assert.deepEqual(rule(period('b', 500, 900), { email: 'a', since: 700 }, answer('b', 900)), { period: period('b', 900, 900), current: true });
+  // Recorded periods no later than the session's are ignored, so the session never moves back.
+  assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 700 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
+  assert.deepEqual(rule(period('b', 700, 720), { email: 'a', since: 0 }, answer('b', 720)), { period: period('b', 700, 720), current: true });
+  assert.deepEqual(rule(period('b', 700, 720), undefined, answer('b', 720)), { period: period('b', 700, 720), current: true });
+  // A malformed stored entry is no period.
+  for (const stored of [null, 'b', { email: 'a' }, { email: 'a', since: 'later' }, { since: 900 }]) {
+    assert.deepEqual(rule(period('b', 700, 720), stored, answer('b', 720)), { period: period('b', 700, 720), current: true }, JSON.stringify(stored));
+  }
+});
 
 test('subset-usage mcp keeps a sign-in change from the stored identity for the session, without writing it', async (t) => {
   const fixture = await claudeFixture(t);
@@ -414,7 +555,7 @@ test('subset-usage mcp keeps a sign-in change from the stored identity for the s
   assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
   assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
   const history = await mcp.call('usage_history');
-  assert.deepEqual([history.isError, history.structuredContent.error.code], [true, 'usage_unavailable']);
+  assert.match(assertError(history, 'usage_unavailable').message, /^Could not read the stored usage history\./);
   assert.match(mcp.stderr(), /usage_history failed: SyntaxError/);
   await mcp.stop();
   assert.deepEqual(await tree(fixture.root), before);
@@ -446,39 +587,82 @@ test('subset-usage mcp hides an earlier sign-in\'s snapshot after a change in th
 });
 
 test('subset-usage mcp keeps one period for a sign-in change that overlapping reads observe', async (t) => {
-  const gate = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-gate-'));
-  t.after(() => rm(gate, { recursive: true, force: true }));
-  const fixture = await claudeFixture(t, { gate });
-  await fixture.signIn('b');
+  const fixture = await claudeFixture(t);
   const identities = JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } });
   await writeFile(join(fixture.data, 'claude-identities.json'), identities);
+  await fixture.signIn('b');
   fixture.collect('b', 10);
+  await fixture.signIn('slowb');
   const mcp = await fixture.start();
   const before = await tree(fixture.root);
 
-  // The first read observes the change from a@ to b@, then waits for the other account's sign-in check.
+  // The first read asks for the sign-in (b@) and waits at the gate.
   const first = mcp.work();
-  for (let tries = 0; !(await readdir(gate)).includes('started'); tries += 1) {
-    assert.ok(tries < 200, 'the first read never reached the waiting account');
-    await delay(25);
-  }
-  // claude_work's own check answers at once, and the read binds it right after.
-  await delay(750);
+  await fixture.gateStarted();
+  // A second read observes the change from a@ to b@ and finishes first.
+  await fixture.signIn('b');
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
   fixture.collect('b', 20);
-  // A second read, while the first is still running, sees the same sign-in and must not start a new
-  // period after the snapshot collected in between.
-  const second = mcp.work();
-  await delay(500);
-  await writeFile(join(gate, 'open'), '');
-  assert.deepEqual(await first, hidden('b@example.com'));
-  assert.deepEqual(await second, shown('b@example.com', 80));
+  // The first read then sees the same sign-in: it must not start another period after the snapshot
+  // collected in between.
+  await fixture.openGate();
+  assert.deepEqual(await first, shown('b@example.com', 80));
   assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
   await mcp.stop();
-  // Only the test's collector wrote: one snapshot and its run record.
-  const after = new Map((await tree(fixture.root)).map(([name, ...rest]) => [name, rest]));
-  for (const [name, ...rest] of before) if (!/^data\/(usage-snapshots|collector-runs)(\/|$)/.test(name)) assert.deepEqual(after.get(name), rest, name);
-  assert.deepEqual([...after.keys()].filter((name) => !before.some(([known]) => known === name)), []);
+  await assertOnlyTestWrites(fixture.root, before, testWrites);
   assert.equal(await readFile(join(fixture.data, 'claude-identities.json'), 'utf8'), identities);
+});
+
+test('subset-usage mcp ignores an older sign-in answer that arrives after a newer one', async (t) => {
+  const fixture = await claudeFixture(t);
+  await fixture.signIn('slowa');
+  const mcp = await fixture.start();
+  const before = await tree(fixture.root);
+
+  // The first read asks while the account is signed in as a@, and waits at the gate.
+  const first = mcp.work();
+  await fixture.gateStarted();
+  // The account signs in as b@; a second read observes that first.
+  await fixture.signIn('b');
+  assert.deepEqual(await mcp.work(), awaiting('b@example.com'));
+  fixture.collect('b', 20);
+  // The first read's a@ answer is out of date: b@'s snapshot is not shown under a@, and the session stays at b@.
+  await fixture.openGate();
+  assert.deepEqual(await first, hidden('a@example.com'));
+  assert.deepEqual(await mcp.work(), shown('b@example.com', 80));
+  await mcp.stop();
+  await assertOnlyTestWrites(fixture.root, before, testWrites);
+  assert.deepEqual((await readdir(fixture.data)).sort(), ['collector-runs', 'usage-snapshots']);
+});
+
+test('subset-usage mcp applies a period the dashboard recorded during a read, and keeps it', async (t) => {
+  const fixture = await claudeFixture(t);
+  const identitiesFile = join(fixture.data, 'claude-identities.json');
+  await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'a@example.com', since: 0 } }));
+  await fixture.signIn('b');
+  const mcp = await fixture.start();
+  // The session observes the change from a@ to b@.
+  assert.deepEqual(await mcp.work(), awaiting('b@example.com'));
+
+  // A read asks for the sign-in (b@) and waits at the gate. Meanwhile the user signs in as a@ and
+  // collects a snapshot, then signs back in as b@, which the dashboard records.
+  await fixture.signIn('slowb');
+  const first = mcp.work();
+  await fixture.gateStarted();
+  await fixture.signIn('a');
+  fixture.collect('a', 45);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  await fixture.signIn('b');
+  await writeFile(identitiesFile, JSON.stringify({ claude_work: { email: 'b@example.com', since: Date.now() } }));
+  // a@'s quota must not show as b@'s, in the read already running either.
+  await fixture.openGate();
+  assert.deepEqual(await first, hidden('b@example.com'));
+  // The session keeps that period even if the file no longer holds it.
+  await rm(identitiesFile);
+  const before = await tree(fixture.root);
+  assert.deepEqual(await mcp.work(), hidden('b@example.com'));
+  await mcp.stop();
+  assert.deepEqual(await tree(fixture.root), before);
 });
 
 test('subset-usage mcp applies a later sign-in change the dashboard recorded over the one it kept for the session', async (t) => {

@@ -32,14 +32,17 @@ const dataDirectory = process.env.SUBSET_USAGE_DATA_DIR ? resolve(process.env.SU
 // `claude auth status` can take seconds; reuse each directory's answer briefly. The live Claude
 // read is throttled to five minutes anyway, so a token refresh by the CLI is never far behind.
 const authCache = new Map();
-function claudeAuth(configDir) {
+/** The directory's sign-in answer, with `at`, when its query started. */
+function claudeAuthEntry(configDir) {
   const entry = authCache.get(configDir);
-  if (entry && Date.now() - entry.at < 60_000) return entry.value;
+  if (entry && Date.now() - entry.at < 60_000) return entry;
   const value = readClaudeAuthStatus(configDir);
-  authCache.set(configDir, { at: Date.now(), value });
+  const fresh = { at: Date.now(), value };
+  authCache.set(configDir, fresh);
   value.catch(() => authCache.delete(configDir));
-  return value;
+  return fresh;
 }
+const claudeAuth = (configDir) => claudeAuthEntry(configDir).value;
 const accounts = createAccounts({ profilesFile, readClaudeAuth: claudeAuth, ...(dataDirectory ? {
   managedRoot: resolve(dataDirectory, 'codex-accounts'),
   snapshotRoot: resolve(dataDirectory, 'usage-snapshots'),
@@ -117,18 +120,16 @@ async function claudeIdentities() {
   try { const value = JSON.parse(await readFile(identitiesFile, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
   catch { return {}; }
 }
-// Of two records of one account's identity, the current period is the one that started later.
-const laterPeriod = (kept, other) => (!kept ? other : Number(other?.since) > Number(kept.since) ? other : kept);
 
 /**
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
  * Claude account is shown without being saved, and sign-in changes are tracked in memory only.
- * A long-lived reader that does not persist (`mcp`) passes `identityMemory`, which keeps the
- * identity periods it observed across reads, recorded as each change is observed; for each account
- * the later period, from the file or from memory, applies.
- * @param {{ persist?: boolean, identityMemory?: Map<string, { email: string, since: number }> }} [options]
+ * A long-lived reader that does not persist (`mcp`) passes `identitySession`, which keeps the
+ * identity periods it observed across reads and decides, when each account is bound, which
+ * snapshots show (see `claudeIdentityPeriod` in mcp.mjs).
+ * @param {{ persist?: boolean, identitySession?: ReturnType<typeof import('./mcp.mjs').identitySession> }} [options]
  */
-async function status({ persist = true, identityMemory } = {}) {
+async function status({ persist = true, identitySession } = {}) {
   // A missing or failed Claude CLI must not hide the other accounts.
   let configured;
   if (persist) {
@@ -138,24 +139,30 @@ async function status({ persist = true, identityMemory } = {}) {
     const candidate = await accounts.defaultClaudeCandidate().catch(() => null);
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
-  const identities = await claudeIdentities();
-  // The session's memory is consulted when each account is bound, not copied at the start, so reads
-  // that overlap one sign-in change share the period the first of them started.
-  const currentIdentity = (id) => (identityMemory ? laterPeriod(identityMemory.get(id), identities[id]) : identities[id]);
+  // A session reads the file as it binds each account, below.
+  const identities = identitySession ? {} : await claudeIdentities();
   // Only the entries this read changed are written back; others may have been updated concurrently.
   const changedIdentities = new Set();
-  const boundToIdentity = (profile, snapshot, auth) => {
+  const boundToIdentity = async (profile, snapshot, auth, queriedAt) => {
     const email = auth?.email?.toLowerCase();
     if (!email) return snapshot;
-    const known = currentIdentity(profile.id);
-    if (!known || known.email !== email) {
-      // First sighting adopts existing snapshots; a change starts a new identity period.
-      identities[profile.id] = { email, since: known ? Date.now() : 0 };
-      changedIdentities.add(profile.id);
-      identityMemory?.set(profile.id, identities[profile.id]);
+    let since;
+    let current = true;
+    if (identitySession) {
+      // The file is read now, not at the start of the read, so a period the dashboard recorded
+      // meanwhile applies; the session applies it and this answer in one synchronous step.
+      const stored = (await claudeIdentities())[profile.id];
+      ({ since, current } = identitySession.bind(profile.id, stored, { email, observedAt: queriedAt }));
+    } else {
+      const known = identities[profile.id];
+      if (!known || known.email !== email) {
+        // First sighting adopts existing snapshots; a change starts a new identity period.
+        identities[profile.id] = { email, since: known ? Date.now() : 0 };
+        changedIdentities.add(profile.id);
+      }
+      ({ since } = identities[profile.id]);
     }
-    const since = currentIdentity(profile.id).since;
-    if (!snapshot.observedAt || Date.parse(snapshot.observedAt) >= since) return snapshot;
+    if (!snapshot.observedAt || (current && Date.parse(snapshot.observedAt) >= since)) return snapshot;
     return { ...snapshot, observedAt: null, state: 'unavailable', windows: [],
       errors: [{ code: 'claude_identity_changed', message: 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.' }] };
   };
@@ -185,8 +192,9 @@ async function status({ persist = true, identityMemory } = {}) {
     }
     if (profile.provider === 'claude-code' && profile.claudeConfigDir) {
       // `claude auth status` runs first so Claude Code can refresh its own token before a live read.
-      const auth = await claudeAuth(profile.claudeConfigDir);
-      const snapshot = boundToIdentity(profile, await readSnapshotProfile(profile), auth);
+      const { value, at } = claudeAuthEntry(profile.claudeConfigDir);
+      const auth = await value;
+      const snapshot = await boundToIdentity(profile, await readSnapshotProfile(profile), auth, at);
       // The sign-in wrapper rewrites a missing snapshot's message; keep the identity-change reason.
       const identityError = snapshot.errors.find((error) => error.code === 'claude_identity_changed');
       const authed = withClaudeAuth(snapshot, auth);
@@ -404,15 +412,15 @@ if (flag('--help') || flag('-h')) {
 } else if (command === 'mcp') {
   if (args.length > 1) { process.stderr.write(usage); process.exit(2); }
   // Loaded only here, so the other commands (collect runs on every status-line update) skip the MCP code.
-  const { serveStdio } = await import('./mcp.mjs');
+  const { identitySession, serveStdio } = await import('./mcp.mjs');
   // Reads as `status` does, so it writes nothing, but keeps Claude sign-in changes for the session:
   // snapshots from before a change stay hidden, and those collected after it show. History is the
   // stored file as `/api/history` returns it, except that an unreadable file is an error, not empty.
   const providers = await accounts.profiles().then((profiles) => profiles.map((profile) => profile.provider), () => null);
-  const identityMemory = new Map();
-  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identityMemory }), readHistory: readStoredHistory, providers });
-  // Provider reads still in flight would keep the process alive after the host closed stdin; nothing
-  // here waits to be written, so exit once stdout has drained.
+  const session = identitySession();
+  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identitySession: session }), readHistory: readStoredHistory, providers });
+  // serveStdio ended every provider subprocess; a read still waiting on anything else would keep the
+  // process alive after the host closed stdin, and nothing here waits to be written, so exit once stdout has drained.
   await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));
   process.exit(0);
 } else if (command === 'collect') {

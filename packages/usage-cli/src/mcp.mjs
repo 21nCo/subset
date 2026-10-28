@@ -1,6 +1,7 @@
 // The read-only usage MCP server (SET-104) over stdio. It answers from the same reads as `status` and
 // the dashboard's history, and writes nothing: no identities, no default Claude account, no history,
 // and never the local sign-ins preference. Stdout carries only protocol frames.
+import diagnostics from 'node:diagnostics_channel';
 import { defineMcpFnServer } from '@mcpfn/core';
 import { USAGE_PROVIDERS, agentUsageResult } from '@subset.dev/usage-core';
 import { providerMeta } from '@subset.dev/usage-core/present';
@@ -10,6 +11,8 @@ const DEFAULT_HOURS = 48;
 const MAX_HOURS = 168;
 // After stdin closes, calls already received get this long to answer before the server exits.
 const PENDING_LIMIT_MS = 10_000;
+// How long a provider subprocess the server ended, and the call waiting on it, get to finish.
+const CHILD_EXIT_LIMIT_MS = 2_000;
 
 const LOCAL = 'The data is local: it comes from the subset-usage configuration on this computer, the quota snapshots its collectors saved and, only when the user turned on local sign-ins in the dashboard, the usage endpoints of the tools signed in here. Nothing is sent to Subset.';
 const READING = 'Each account has a state, a source and observedAt. An observation older than 5 minutes is stale: say when it was observed. A status-line snapshot is the last value a CLI collected, not a live read. A null percentage or reset time is unavailable, not zero; never estimate it. A calculated-estimate remaining percentage (~ in the text) is derived from provider-reported usage. errors[] says why an account has no values; local_sign_ins_off means the user can turn on local sign-ins in the dashboard\'s Settings.';
@@ -26,6 +29,30 @@ function providersText(providers) {
 }
 
 const objectSchema = (properties) => ({ type: 'object', properties, additionalProperties: false });
+
+/** The `usage_history` result: the range read and, per account and window, `[epoch ms, used percent]` points. */
+const historyOutputSchema = {
+  type: 'object',
+  required: ['schemaVersion', 'from', 'to', 'series'],
+  additionalProperties: false,
+  properties: {
+    schemaVersion: { const: 1 },
+    from: { type: 'string', format: 'date-time', description: 'Start of the range read, inclusive.' },
+    to: { type: 'string', format: 'date-time', description: 'End of the range read (now), inclusive.' },
+    series: {
+      type: 'object',
+      description: 'Per accountId, per window key (`limitId`, U+0000, label), the points in range, oldest first. Accounts and windows without points are left out.',
+      additionalProperties: {
+        type: 'object',
+        additionalProperties: {
+          type: 'array',
+          minItems: 1,
+          items: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: '[observation time in epoch milliseconds, used percent]' },
+        },
+      },
+    },
+  },
+};
 
 /** `isError` with the code and message in the text and in `structuredContent.error`. */
 function toolError(code, message, details = {}) {
@@ -70,6 +97,53 @@ function historyText(series, hours, accountId) {
 }
 
 /**
+ * One Claude account's identity period in a session that writes nothing. Status-line snapshots carry
+ * no identity, so a snapshot shows under the signed-in email only if it was observed at or after the
+ * start (`since`) of that email's current period. The session's knowledge only moves forward: a later
+ * period the dashboard recorded in `claude-identities.json` applies, and a sign-in answer older than
+ * what the session already observed starts no period. `observedAt` is when the latest observation
+ * supporting the period was made (a `claude auth status` query's start, or a recorded period's start).
+ * @typedef {{ email: string, since: number, observedAt: number }} IdentityPeriod
+ * @param {IdentityPeriod | undefined} kept The session's period for the account.
+ * @param {unknown} stored The account's entry in `claude-identities.json`, `{ email, since }`, read now.
+ * @param {{ email: string, observedAt: number }} answer The signed-in email, and when it was queried.
+ * @param {number} now
+ * @returns {{ period: IdentityPeriod, current: boolean }} The period to keep, and whether the answer is
+ * current; an out-of-date answer's snapshot is not shown under its email.
+ */
+export function claudeIdentityPeriod(kept, stored, answer, now) {
+  let period = kept;
+  const recorded = Number(stored?.since);
+  if (typeof stored?.email === 'string' && Number.isFinite(recorded) && !(recorded <= period?.since)) {
+    period = !period || stored.email === period.email || recorded > period.observedAt
+      ? { email: stored.email, since: recorded, observedAt: Math.max(recorded, stored.email === period?.email ? period.observedAt : 0) }
+      // The session saw its email after the recorded change to another: it was signed in again since.
+      : { ...period, since: Math.max(period.since, period.observedAt) };
+  }
+  // A first sighting adopts the snapshots already collected.
+  if (!period) return { period: { email: answer.email, since: 0, observedAt: answer.observedAt }, current: true };
+  if (answer.email === period.email) return { period: { ...period, observedAt: Math.max(period.observedAt, answer.observedAt) }, current: true };
+  // A newer answer is a sign-in change, and its period starts when the session observes it.
+  if (answer.observedAt > period.observedAt) return { period: { email: answer.email, since: now, observedAt: answer.observedAt }, current: true };
+  // An older answer that arrives late changes nothing, unless it was queried after the period started:
+  // then the account was signed in elsewhere in between, so the period restarts at the latest observation.
+  return { period: answer.observedAt > period.since ? { ...period, since: Math.max(period.since, period.observedAt) } : period, current: false };
+}
+
+/** The identity periods one MCP session keeps in memory, for `status({ identitySession })`. */
+export function identitySession() {
+  const periods = new Map();
+  return {
+    /** Applies one read's sign-in answer synchronously, so overlapping reads share each period. */
+    bind(id, stored, answer, now = Date.now()) {
+      const { period, current } = claudeIdentityPeriod(periods.get(id), stored, answer, now);
+      periods.set(id, period);
+      return { since: period.since, current };
+    },
+  };
+}
+
+/**
  * The tool definitions for `@mcpfn/core`.
  * @param {object} options
  * @param {() => Promise<import('@subset.dev/usage-core').UsageStatus>} options.readStatus Reads every account without writing.
@@ -95,9 +169,7 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
         const accounts = provider === undefined ? status.accounts
           : status.accounts.filter((account) => account.provider === provider || account.service === provider || account.alsoIn?.includes(provider));
         const { structuredContent, text } = agentUsageResult({ ...status, accounts });
-        // usageText says no accounts are configured at all; with a filter, say which provider has none.
-        const shown = provider !== undefined && !accounts.length && status.accounts.length ? `No ${providerMeta[provider].name} (${provider}) accounts are configured.` : text;
-        return { content: [{ type: 'text', text: shown }], structuredContent };
+        return { content: [{ type: 'text', text }], structuredContent };
       },
     },
     {
@@ -108,6 +180,7 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
         hours: { type: 'integer', minimum: 1, maximum: MAX_HOURS, description: `How many hours back to read; default ${DEFAULT_HOURS}.` },
         accountId: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,64}$', description: 'Only this account, by its id from usage_status.' },
       }),
+      outputSchema: historyOutputSchema,
       // Reads only the history file, but its points came from the same provider reads as usage_status.
       annotations: { readOnlyHint: true, openWorldHint: true },
       async handler({ hours = DEFAULT_HOURS, accountId }) {
@@ -155,13 +228,45 @@ export function defineUsageMcpServer({ version, ...options }) {
 /** Writes one diagnostic line to stderr. */
 export const stderrLog = (message) => process.stderr.write(`subset-usage mcp: ${message}\n`);
 
+const running = (child) => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+
 /**
- * Serves the tools on this process's stdin and stdout until stdin closes. Anything that would print
- * to stdout through `console` goes to stderr instead, so it cannot corrupt the protocol stream.
+ * Ends the provider subprocesses still running (reads, so nothing is left half-written) and waits,
+ * up to a limit, until they have exited.
+ * @param {Set<import('node:child_process').ChildProcess>} children
+ */
+async function endChildren(children) {
+  const live = [...children].filter(running);
+  if (!live.length) return;
+  let timer;
+  const limit = new Promise((resolveLimit) => { timer = setTimeout(resolveLimit, CHILD_EXIT_LIMIT_MS); });
+  await Promise.race([Promise.all(live.map((child) => {
+    const exited = new Promise((resolveExit) => child.once('exit', resolveExit));
+    child.kill('SIGKILL');
+    return running(child) ? exited : undefined;
+  })), limit]);
+  clearTimeout(timer);
+}
+
+/**
+ * Serves the tools on this process's stdin and stdout until stdin closes, SIGTERM or SIGINT. Anything
+ * that would print to stdout through `console` goes to stderr instead, so it cannot corrupt the
+ * protocol stream. No provider subprocess a read started outlives it.
  * @param {Parameters<typeof defineUsageMcpServer>[0]} options
  */
 export async function serveStdio({ log = stderrLog, ...options }) {
   for (const method of ['log', 'info', 'debug']) console[method] = (...args) => console.error(...args);
+  // Provider readers start subprocesses (claude auth status, amp usage, codex app-server, sqlite3) and
+  // end them with their own timers, which do not survive this process. Every one is tracked here.
+  const children = new Set();
+  diagnostics.subscribe('child_process', ({ process: child }) => {
+    children.add(child);
+    child.once('exit', () => children.delete(child));
+  });
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+    log(`${signal}; stopping`);
+    void endChildren(children).finally(() => process.exit(0));
+  });
   // A host that closes its end mid-reply makes stdout fail with EPIPE; that ends the session, not the process with a stack trace.
   process.stdout.on('error', (error) => log(`stdout: ${error.message}`));
   const stdinClosed = new Promise((resolve) => {
@@ -180,7 +285,16 @@ export async function serveStdio({ log = stderrLog, ...options }) {
   const limit = new Promise((resolveLimit) => { timer = setTimeout(resolveLimit, PENDING_LIMIT_MS); });
   const settled = await Promise.race([Promise.allSettled(pending).then(() => true), limit.then(() => false)]);
   clearTimeout(timer);
-  if (!settled) log(`stdin closed; ${pending.size} call(s) still running after ${PENDING_LIMIT_MS / 1000} s were not answered`);
+  if (!settled) {
+    log(`stdin closed; ending the provider reads still running after ${PENDING_LIMIT_MS / 1000} s`);
+    // A read whose subprocess ended reports that provider's error, and its call is answered.
+    await endChildren(children);
+    const answered = await Promise.race([Promise.allSettled(pending).then(() => true), new Promise((resolveWait) => { timer = setTimeout(() => resolveWait(false), CHILD_EXIT_LIMIT_MS); })]);
+    clearTimeout(timer);
+    if (!answered) log(`${pending.size} call(s) were not answered`);
+  }
+  // A subprocess a settled read left behind ends too.
+  await endChildren(children);
   // The protocol sends each reply after its handler settles.
   await new Promise((resolveTick) => setImmediate(resolveTick));
   await server.close();

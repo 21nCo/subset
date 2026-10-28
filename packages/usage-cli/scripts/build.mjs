@@ -22,9 +22,10 @@ if (process.argv.includes('--check')) {
   if (!head.startsWith('#!/usr/bin/env node')) { console.error('dist/cli.mjs has no shebang.'); process.exit(1); }
   const chunks = (await readdir(`${root}dist`)).filter((name) => name.endsWith('.mjs'));
   const sources = await Promise.all(chunks.map((name) => readFile(`${root}dist/${name}`, 'utf8')));
-  // Code lines only: a kept JSDoc type such as import('@subset.dev/usage-core').UsageStatus is not an import.
+  // Code lines only: a kept JSDoc type such as import('@subset.dev/usage-core').UsageStatus is not an import,
+  // and neither is the string "from" (a schema's property name).
   const code = (source) => source.split('\n').filter((line) => !/^\s*(?:\*|\/\/)/.test(line)).join('\n');
-  if (sources.some((source) => /(?:\bfrom|\bimport\()\s*["'](?!node:)[^."'/]/.test(code(source)))) { console.error('dist/ still imports a package; bundle it instead.'); process.exit(1); }
+  if (sources.some((source) => /(?:(?<!["'])\bfrom|\bimport\()\s*["'](?!node:)[^."'/]/.test(code(source)))) { console.error('dist/ still imports a package; bundle it instead.'); process.exit(1); }
   process.exit(0);
 }
 
