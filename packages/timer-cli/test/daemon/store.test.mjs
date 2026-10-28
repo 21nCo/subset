@@ -103,27 +103,36 @@ test('scheduler marks read back; an unreadable or older file is ignored', (t) =>
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
   stateStore.saveMarks(marks);
   assert.deepEqual(stateStore.loadMarks(), marks);
-  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [], plays: [] });
 });
 
-test('alert handoffs and acknowledgements are saved with the marks and read back; malformed ones are dropped', (t) => {
+test('alert handoffs, acknowledgements and a carried play journal are saved with the marks and read back; malformed ones are dropped', (t) => {
   const { paths, stateStore } = storeIn(t);
-  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [] });
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [], acknowledged: [], plays: [] });
   const marks = [{ timerId: 't_00000001', startedAt: NOW, base: 0, through: NOW + 5_000 }];
-  const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false } };
+  const handoff = { alertId: 'a1', alert: { timerId: 't_00000001', kind: 'finish', at: NOW + 5_000 }, timer: { id: 't_00000001', name: 'Egg', sound: false }, played: ['notification'] };
   const acknowledged = { ...handoff, alertId: 'a0', subscriberId: 's1' };
-  stateStore.saveMarks(marks, { handoffs: [handoff], acknowledged: [acknowledged] });
-  assert.deepEqual([stateStore.loadMarks(), stateStore.loadAlerts()], [marks, { handoffs: [handoff], acknowledged: [acknowledged] }]);
+  const play = { ...handoff, alertId: 'a9', keys: ['t_00000001:finish:5000'], played: ['sound:0'], running: { 'sound:1': { pid: 42, birth: 'ps-x', boot: null } }, finished: false };
+  stateStore.saveMarks(marks, { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] });
+  assert.deepEqual([stateStore.loadMarks(), stateStore.loadAlerts()], [marks, { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] }]);
   writeFileSync(
     paths.scheduler,
     JSON.stringify({
       version: 1,
       marks,
-      handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, null],
-      acknowledged: [acknowledged, { alertId: 'a3' }, { ...acknowledged, alertId: 4 }, { alertId: 'a5', subscriberId: 's1' }, null]
+      handoffs: [handoff, { alertId: 'a2' }, { alertId: 3, alert: handoff.alert, timer: handoff.timer }, { ...handoff, played: ['Glass'] }, null],
+      acknowledged: [acknowledged, { alertId: 'a3' }, { ...acknowledged, alertId: 4 }, { alertId: 'a5', subscriberId: 's1' }, { ...acknowledged, played: 'notification' }, null],
+      plays: [
+        play,
+        { ...play, finished: undefined },
+        { ...play, running: { 'sound:1': { pid: 0, birth: null, boot: null } } },
+        { ...play, running: { 'sound:1': { pid: 42 } } },
+        { ...play, running: { Glass: { pid: 42, birth: null, boot: null } } },
+        { ...play, keys: [1] }
+      ]
     })
   );
-  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [handoff], acknowledged: [acknowledged] });
+  assert.deepEqual(stateStore.loadAlerts(), { handoffs: [handoff], acknowledged: [acknowledged], plays: [play] });
   stateStore.saveMarks(marks);
   assert.deepEqual(JSON.parse(readFileSync(paths.scheduler, 'utf8')), { version: 1, marks });
 });

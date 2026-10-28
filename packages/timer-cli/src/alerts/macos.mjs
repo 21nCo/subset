@@ -33,8 +33,8 @@ export function createMacosSink({ spawn = defaultSpawn } = {}) {
       await playParts(
         {
           sounds: timer.sound === false ? [] : (MACOS_SOUNDS[alert.kind] ?? []),
-          playSound: (path) => runProcess(spawn, AFPLAY, [path]),
-          notify: notification && (() => runProcess(spawn, OSASCRIPT, osascriptArgs(notification.title, notification.body)))
+          playSound: (path, onStart) => runProcess(spawn, AFPLAY, [path], onStart),
+          notify: notification && ((onStart) => runProcess(spawn, OSASCRIPT, osascriptArgs(notification.title, notification.body), onStart))
         },
         progress
       );

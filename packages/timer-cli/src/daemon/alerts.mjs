@@ -14,15 +14,18 @@ import { intervalStep } from '@subset.dev/timer-core';
  *
  * @typedef {object} AlertProgress What the daemon passes a sink with each alert, from its play journal.
  * @property {Set<string>} played The parts (`notification`, `sound:<index>`) an earlier play of this
- *   alert finished, or its handler started: the sink plays the others.
+ *   alert, or its handler, finished: the sink plays the others.
+ * @property {(part: string, pid: number | undefined) => void} [started] Called by the sink once it has
+ *   spawned the process playing a part, so a next daemon can tell whether that process outlived it.
  * @property {(part: string) => void} done Called by the sink as each part finishes.
  *
  * @typedef {object} AlertSink Plays or shows alerts. The daemon waits for a sink only at shutdown (at most
  *   5 s, for every play it started), and a sink that throws or rejects is logged and ignored. A sink
  *   honours `timer.sound` itself. The daemon journals each play before it calls the sink, and each
- *   part the sink reports `done`, so each alert is delivered once across a daemon crash too: the next
- *   daemon plays an alert the sink finished not at all, and one it was playing only from the parts not
- *   done. A sink that ignores `progress` has its alert played again in full after a crash mid-play.
+ *   part the sink reports `started` and `done`, so each alert is delivered once across a daemon crash
+ *   too: the next daemon plays an alert the sink finished not at all, and one it was playing only from
+ *   the parts not done, waiting for a process still playing one. A sink that ignores `progress` has its
+ *   alert played again in full after a crash mid-play.
  * @property {string} name Shown by `daemon status`.
  * @property {(alert: TimerAlert, timer: import('@subset.dev/timer-core').TimerDefinition, progress?: AlertProgress) => void | Promise<void>} alert
  */

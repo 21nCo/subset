@@ -6,5 +6,5 @@ export { DataDirError, checkSocketPath, daemonPaths, ensureDataDir, resolveDataD
 export { LATE_MS, REARM_MS, createScheduler, systemClock } from './scheduler.mjs';
 export { DaemonRunningError, HEARTBEAT_MS, IDLE_EXIT_MS, LockLostError, SINK_DRAIN_MS, runDaemonCommand, runInForeground, startDaemon } from './server.mjs';
 export { ALERT_PART, createStateStore, writeFileAtomic } from './store.mjs';
-export { createPlayJournal, transitionKey } from './play-journal.mjs';
+export { LEFT_PROCESS_WAIT_MS, bootId, createPlayJournal, systemProcesses, transitionKey } from './play-journal.mjs';
 export { createFakeClock } from './fake-clock.mjs';

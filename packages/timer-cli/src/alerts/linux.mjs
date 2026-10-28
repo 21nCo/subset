@@ -26,8 +26,8 @@ export function createLinuxSink({ notifySend = null, paplay = null, spawn = defa
       await playParts(
         {
           sounds: paplay && timer.sound !== false ? (LINUX_SOUNDS[alert.kind]?.filter((path) => soundExists(path)) ?? []) : [],
-          playSound: (path) => runProcess(spawn, paplay, [path]),
-          notify: notification && (() => runProcess(spawn, notifySend, notifySendArgs(notification.title, notification.body)))
+          playSound: (path, onStart) => runProcess(spawn, paplay, [path], onStart),
+          notify: notification && ((onStart) => runProcess(spawn, notifySend, notifySendArgs(notification.title, notification.body), onStart))
         },
         progress
       );

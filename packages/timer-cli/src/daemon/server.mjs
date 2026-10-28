@@ -7,7 +7,6 @@ import { ACK_TIMEOUT_MS, createAlertHandlers } from './alert-handlers.mjs';
 import { createRecordingSink } from './alerts.mjs';
 import { acquireLock } from './lock.mjs';
 import { ensureDataDir, resolveDataDir } from './paths.mjs';
-import { createPlayJournal } from './play-journal.mjs';
 import { createScheduler, systemClock } from './scheduler.mjs';
 import { ALERT_PART, createStateStore } from './store.mjs';
 
@@ -107,8 +106,10 @@ export async function startDaemon({
     stateStore = createStateStore(paths, { log, now: clock.now });
     store = stateStore.load();
     marks = stateStore.loadMarks();
-    ({ handoffs: unsettled, acknowledged } = stateStore.loadAlerts());
-    plays = stateStore.loadPlays();
+    let carried;
+    ({ handoffs: unsettled, acknowledged, plays: carried } = stateStore.loadAlerts());
+    // A copy scheduler.json carried while plays.json could not be written is merged with it.
+    plays = [...stateStore.loadPlays(), ...carried];
     await startupHook('locked');
     // While we hold the lock, any socket file left here belongs to a daemon that is gone.
     if (!lock.isHeld()) throw new LockLostError();
@@ -168,18 +169,6 @@ export async function startDaemon({
     for (const response of subscribers.keys()) send(response, event, data);
   };
   const broadcastState = () => broadcast('state', agentTimerResult(store, clock.now()));
-  const journal = createPlayJournal({
-    entries: plays,
-    log,
-    persist(entries) {
-      try {
-        write(() => stateStore.savePlays(entries));
-      } catch (error) {
-        // A daemon that lost daemon.lock leaves the journal to the one that holds it.
-        if (!(error instanceof LockLostError)) throw error;
-      }
-    }
-  });
   const alertHandlers = createAlertHandlers({
     clock,
     sink,
@@ -189,7 +178,15 @@ export async function startDaemon({
     owns: () => stillHeld(),
     save: (checkpoint) => saveMarks(scheduler.marks, checkpoint),
     acknowledged,
-    journal
+    plays,
+    savePlays(entries) {
+      try {
+        write(() => stateStore.savePlays(entries));
+      } catch (error) {
+        // A daemon that lost daemon.lock leaves the journal to the one that holds it.
+        if (!(error instanceof LockLostError)) throw error;
+      }
+    }
   });
 
   /**
@@ -256,7 +253,7 @@ export async function startDaemon({
     }
     savedStretches = new Set(list.map(stretchKey));
     marksDirty = false;
-    alertHandlers.saved();
+    alertHandlers.saved(checkpoint);
   }
 
   const scheduler = createScheduler({
@@ -503,11 +500,11 @@ export async function startDaemon({
   }
 
   /**
-   * The handler is about to play one part of an alert it took, so the sink never plays that part
-   * once that is saved. A failed save gets 500 or 503 and changes nothing, so the handler asks again
-   * before it plays the part.
+   * The handler asks whether it may play one part of an alert it took (`playing`: yes while it holds
+   * the alert), or says it finished that part (`played`), so the sink never plays it, once that is
+   * saved. A failed save gets 500 or 503 and changes nothing, so the handler says so again.
    */
-  async function playing(request, response, alertId) {
+  async function part(request, response, alertId, state) {
     const { ok, input } = await readJson(request, response);
     if (!ok) return;
     if (!isId(input?.subscriberId) || typeof input.part !== 'string' || !ALERT_PART.test(input.part)) {
@@ -517,13 +514,13 @@ export async function startDaemon({
     if (closing) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
     let result;
     try {
-      result = alertHandlers.playing(alertId, input.subscriberId, input.part);
+      result = alertHandlers[state](alertId, input.subscriberId, input.part);
     } catch (error) {
       if (error instanceof LockLostError) return fail(response, 503, 'daemon_unavailable', 'The daemon is shutting down.');
       log(`could not save scheduler.json: ${error.message}`);
       return fail(response, 500, 'storage_failed', 'The daemon could not record the part.');
     }
-    settleRequest(response, result, { alertId, part: input.part, playing: true });
+    settleRequest(response, result, { alertId, part: input.part, [state]: true });
   }
 
   /**
@@ -610,10 +607,11 @@ export async function startDaemon({
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
       return received(request, response, receivedId);
     }
-    const playingId = idIn(pathname, '/v1/alerts/', '/playing');
-    if (playingId !== null) {
+    for (const state of ['playing', 'played']) {
+      const partId = idIn(pathname, '/v1/alerts/', `/${state}`);
+      if (partId === null) continue;
       if (request.method !== 'POST') return methodNotAllowed(response, ['POST']);
-      return playing(request, response, playingId);
+      return part(request, response, partId, state);
     }
     const releasedId = idIn(pathname, '/v1/alerts/', '/release');
     if (releasedId !== null) {

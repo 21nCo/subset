@@ -25,7 +25,10 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
     private var duringRelease: (@Sendable () async -> Void)?
     private var partAnswers: [Result<Void, DaemonError>] = []
     private var lostParts = 0
+    private var finishAnswers: [Result<Void, DaemonError>] = []
+    private var lostFinishes = 0
     private var partsInLog = false
+    private var duringPart: (@Sendable () async -> Void)?
 
     var log: [String] { lock.withLock { entries } }
     /// The subscriber the daemon holds as its handler.
@@ -42,14 +45,22 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
         lock.withLock { acks = answers }
     }
 
-    /// Records each part the app starts in `log` too, as "playing <alertId> <part>", and answers the next ones as told:
-    /// `lost` get no answer after the daemon recorded them, then `answers` in order, then 200.
-    func answerParts(_ answers: [Result<Void, DaemonError>] = [], lost: Int = 0) {
+    /// Records in `log` each part the app asks to start, as "playing <alertId> <part>", and each it says it finished, as
+    /// "played <alertId> <part>", and answers the next ones as told: `lost` (`lostFinishes`) get no answer, then
+    /// `answers` (`finishes`) in order, then 200.
+    func answerParts(_ answers: [Result<Void, DaemonError>] = [], lost: Int = 0, finishes: [Result<Void, DaemonError>] = [], lostFinishes: Int = 0) {
         lock.withLock {
             partsInLog = true
             partAnswers = answers
             lostParts = lost
+            finishAnswers = finishes
+            self.lostFinishes = lostFinishes
         }
+    }
+
+    /// Runs `action` while the next request to start a part is on its way, before its answer.
+    func whileNextPartIsAnswered(_ action: @escaping @Sendable () async -> Void) {
+        lock.withLock { duringPart = action }
     }
 
     /// Runs `action` while the next acknowledgement is on its way, before its answer.
@@ -124,6 +135,19 @@ final class FakeAlertDaemon: AlertHandlerDaemon, @unchecked Sendable {
             return (partsInLog, partAnswers.isEmpty ? .success(()) : partAnswers.removeFirst())
         }
         if logged { record("playing \(alertId) \(part.name)") }
+        if let action = lock.withLock({ duringPart.take() }) { await action() }
+        try answer.get()
+    }
+
+    func finishPlaying(_ alertId: String, part: AlertPart, subscriberId: String) async throws {
+        let (logged, answer): (Bool, Result<Void, DaemonError>) = lock.withLock {
+            if lostFinishes > 0 {
+                lostFinishes -= 1
+                return (partsInLog, .failure(.timedOut))
+            }
+            return (partsInLog, finishAnswers.isEmpty ? .success(()) : finishAnswers.removeFirst())
+        }
+        if logged { record("played \(alertId) \(part.name)") }
         try answer.get()
     }
 
@@ -514,24 +538,51 @@ struct AlertHandlerTests {
         #expect(AlertPart.plan(for: TimerAlert(timerId: "t_1", kind: .missedWhileAway, at: 1, missed: 2)) == [.notification])
     }
 
-    /// The daemon records each part before the app plays it, so the sink of a daemon whose app ended before saying it
-    /// received the alert plays only the parts the app never started (play-journal.test.mjs).
-    @Test func eachPartIsRecordedByTheDaemonBeforeItPlaysAndTheReceiptFollowsTheLast() async {
+    /// The app asks before each part and says once each finished, so the sink of a daemon whose app ended before saying
+    /// it received the alert plays only the parts the app did not finish (play-journal.test.mjs).
+    @Test func eachPartIsAskedForBeforeItPlaysAndRecordedOnceItFinishedAndTheReceiptFollowsTheLast() async {
         let handler = await partsHandler()
         await handler.receive(finishWithSound("a1"))
         #expect(daemon.log.dropFirst() == ["ack a1 s1",
-                                           "playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0",
-                                           "playing a1 sound:1", "play a1 sound:1", "playing a1 sound:2", "play a1 sound:2"])
+                                           "playing a1 notification", "play a1 notification", "played a1 notification",
+                                           "playing a1 sound:0", "play a1 sound:0", "played a1 sound:0",
+                                           "playing a1 sound:1", "play a1 sound:1", "played a1 sound:1",
+                                           "playing a1 sound:2", "play a1 sound:2", "played a1 sound:2"])
         #expect(daemon.confirmed == ["a1 s1"])
     }
 
-    /// A part the daemon recorded but whose answer was lost is sent again until a daemon answers, then played once.
+    /// A part whose answer was lost is asked for again until a daemon answers, then played once; a finished part is said
+    /// again until a daemon records it, before the next part.
     @Test func aPartWhoseAnswerWasLostIsSentAgainAndPlaysOnce() async {
         let handler = await partsHandler()
-        daemon.answerParts(lost: 2)
+        daemon.answerParts(lost: 2, lostFinishes: 2)
         await handler.receive(alert("a1"))
         #expect(daemon.log.dropFirst() == ["ack a1 s1", "playing a1 notification", "playing a1 notification", "playing a1 notification",
-                                           "play a1 notification"])
+                                           "play a1 notification", "played a1 notification", "played a1 notification", "played a1 notification"])
+        #expect(daemon.confirmed == ["a1 s1"])
+    }
+
+    /// Permission revoked while the request to start a part is retried, or while its answer is on its way: the app shows
+    /// nothing more and hands the alert back, so the daemon's sink plays the parts it did not finish.
+    @Test(arguments: [0, 1])
+    func permissionRevokedWhileAPartIsAskedForHandsTheAlertBackUnplayed(lost: Int) async {
+        let permission = Permission()
+        let handler = await partsHandler(permission: permission)
+        daemon.answerParts(lost: lost)
+        daemon.whileNextPartIsAnswered { await MainActor.run { permission.granted = false } }
+        await handler.receive(alert("a1"))
+        #expect(daemon.log.filter { !$0.hasPrefix("register") && !$0.hasPrefix("unregister") } ==
+                ["ack a1 s1", "playing a1 notification", "release a1 s1", "sink a1"])
+        #expect(daemon.confirmed.isEmpty)
+    }
+
+    /// Once the daemon's sink has played the alert, saying a part finished is refused (410): the app plays no more of it.
+    @Test func aRefusedFinishStopsTheAlert() async {
+        let handler = await partsHandler()
+        daemon.answerParts(finishes: [.failure(expired)])
+        await handler.receive(finishWithSound("a1"))
+        #expect(daemon.log.filter { $0.hasPrefix("play a1") } == ["play a1 notification"])
+        #expect(daemon.confirmed.isEmpty)
     }
 
     /// Once the daemon's sink has played the alert (410, after the app stalled 30 s), the app plays no more of it and
@@ -544,8 +595,8 @@ struct AlertHandlerTests {
         #expect(daemon.confirmed.isEmpty)
     }
 
-    /// Permission revoked mid-alert: the app finishes the part it is playing, then hands the alert back, so the daemon's
-    /// sink plays the parts it did not start.
+    /// Permission revoked mid-alert: the app finishes the part it is playing and says so, then hands the alert back, so the
+    /// daemon's sink plays the parts it did not finish.
     @Test func permissionRevokedMidAlertHandsTheRestBack() async {
         let permission = Permission()
         let handler = AlertHandler(daemon: daemon, retryDelay: .milliseconds(1), ackRetryDelay: .milliseconds(1),
@@ -559,11 +610,12 @@ struct AlertHandlerTests {
         daemon.answerParts()
         await handler.receive(finishWithSound("a1"))
         #expect(daemon.log.filter { $0.hasPrefix("play") || $0.hasPrefix("release") || $0.hasPrefix("sink") } ==
-                ["playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0", "release a1 s1", "sink a1"])
+                ["playing a1 notification", "play a1 notification", "played a1 notification", "playing a1 sound:0", "play a1 sound:0",
+                 "played a1 sound:0", "release a1 s1", "sink a1"])
         #expect(daemon.confirmed.isEmpty)
     }
 
-    /// Quitting mid-alert: the app finishes the part it is playing and hands the rest back before quitting returns.
+    /// Quitting mid-alert: the app finishes the part it is playing, says so and hands the rest back before quitting returns.
     @Test func quittingMidAlertHandsTheRestBackBeforeItReturns() async {
         let quitting = Quitting()
         let box = HandlerBox()
@@ -585,7 +637,8 @@ struct AlertHandlerTests {
         await handler.receive(finishWithSound("a1"))
         await quitting.task?.value
         #expect(daemon.log.filter { $0.hasPrefix("play") || $0.hasPrefix("release") || $0.hasPrefix("quit") } ==
-                ["playing a1 notification", "play a1 notification", "playing a1 sound:0", "play a1 sound:0", "release a1 s1", "quit"])
+                ["playing a1 notification", "play a1 notification", "played a1 notification", "playing a1 sound:0", "play a1 sound:0",
+                 "played a1 sound:0", "release a1 s1", "quit"])
         #expect(daemon.confirmed.isEmpty)
     }
 

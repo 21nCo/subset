@@ -12,16 +12,23 @@ export const ALERT_PART = /^(notification|sound:[0-9]{1,2})$/;
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.startedAt) && isTime(mark.base) && isTime(mark.through);
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
-const isHandoff = (handoff) =>
-  typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
 const isParts = (value) => Array.isArray(value) && value.every((part) => typeof part === 'string' && ALERT_PART.test(part));
-const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string' && (entry.played === undefined || isParts(entry.played));
+const isAlert = (entry) =>
+  typeof entry?.alertId === 'string' && isObject(entry.alert) && typeof entry.alert.timerId === 'string' && typeof entry.alert.kind === 'string' && isObject(entry.timer);
+const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played));
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
+const isNameOrNull = (value) => value === null || (typeof value === 'string' && value.length <= 128);
+const isRunning = (value) =>
+  value === undefined ||
+  (isObject(value) &&
+    Object.entries(value).every(([part, child]) => ALERT_PART.test(part) && isObject(child) && Number.isSafeInteger(child.pid) && child.pid > 0 && isNameOrNull(child.birth) && isNameOrNull(child.boot)));
 const isPlay = (entry) =>
-  isHandoff(entry) &&
+  isAlert(entry) &&
   (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&
   Array.isArray(entry.keys) &&
   entry.keys.every((key) => typeof key === 'string') &&
   isParts(entry.played) &&
+  isRunning(entry.running) &&
   typeof entry.finished === 'boolean';
 
 function isCode(error, ...codes) {
@@ -164,8 +171,8 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
   }
 
   /**
-   * The alert checkpoint `saveMarks` recorded (see `createAlertHandlers`): `{ handoffs, acknowledged }`,
-   * each empty when unknown.
+   * The alert checkpoint `saveMarks` recorded (see `createAlertHandlers`): `{ handoffs, acknowledged,
+   * plays }`, each empty when unknown; `plays` is the copy of the play journal it carried.
    */
   function loadAlerts() {
     let value;
@@ -173,17 +180,21 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
       value = JSON.parse(fs.readFileSync(paths.scheduler, 'utf8'));
     } catch (error) {
       if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
-      return { handoffs: [], acknowledged: [] };
+      return { handoffs: [], acknowledged: [], plays: [] };
     }
     const list = (key, valid) => (value?.version === MARKS_VERSION && Array.isArray(value[key]) ? value[key].filter((item) => valid(item)) : []);
-    return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged) };
+    return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged), plays: list('plays', isPlay) };
   }
 
-  /** Saves the marks and, in the same write, the alert checkpoint: handoffs and remembered acknowledgements. */
-  function saveMarks(marks, { handoffs = [], acknowledged = [] } = {}) {
+  /**
+   * Saves the marks and, in the same write, the alert checkpoint: handoffs, remembered
+   * acknowledgements and the play journal while `plays.json` cannot be written.
+   */
+  function saveMarks(marks, { handoffs = [], acknowledged = [], plays = [] } = {}) {
     const value = { version: MARKS_VERSION, marks };
     if (handoffs.length) value.handoffs = handoffs;
     if (acknowledged.length) value.acknowledged = acknowledged;
+    if (plays.length) value.plays = plays;
     writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
