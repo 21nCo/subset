@@ -1,5 +1,14 @@
 import { isLinkDetailsV1, type LinkDetailsV1 } from '@subset.dev/links';
 import {
+  MAX_IMPORT_ITEMS,
+  tooManyItems,
+  warningList,
+  type ImportItem,
+  type ImportResult,
+  type ImportWarning,
+  type ParsedImport
+} from './import.js';
+import {
   MAX_NOTES_LENGTH,
   MAX_TITLE_LENGTH,
   normalizeBoolean,
@@ -10,6 +19,7 @@ import {
   normalizeText,
   normalizeUrl
 } from './input.js';
+import { renderNetscape } from './netscape.js';
 import { BOOKMARKS_RESOURCE_VERSION, DETAILS_STATES, type DetailsState } from './schema.js';
 import { BookmarkError, type Bookmark, type BookmarksExecutor, type DetailsQueue, type Tag } from './types.js';
 
@@ -52,6 +62,10 @@ export interface BookmarkOperations {
   mergeTags(sourceTagIds: string[], targetTagId: string): Promise<Tag>;
   /** Marks the bookmark's details pending again and enqueues a fetch. */
   retryDetails(id: string): Promise<Bookmark>;
+  /** Saves parsed import items the way `addBookmark` saves a URL, many at a time. */
+  importBookmarks(input: ParsedImport | readonly ImportItem[]): Promise<ImportResult>;
+  /** Every bookmark as a Netscape bookmark file, oldest first. */
+  exportNetscape(): Promise<string>;
 }
 
 export interface BookmarkOperationsOptions<TContext> {
@@ -67,9 +81,67 @@ const PAGE_SIZE = 100;
 /** Rounds of optimistic retries (duplicate checks, `apiId` claims and guarded updates) before giving up. */
 const MAX_ATTEMPTS = 64;
 const BOOKMARK_SELECT = ['*', 'tags.*'];
+/** Import items saved per step: one apiId claim and one batch of datafn inserts (under datafn's default 500). */
+const IMPORT_BATCH = 100;
 
 type Row = Record<string, unknown>;
 type TagInput = { name: string; nameKey: string };
+
+/** An import item that passed the checks: what `addBookmark` would save for it. */
+interface ImportEntry {
+  url: string;
+  canonicalUrl: string;
+  title: string | null;
+  notes: string | null;
+  tags: TagInput[];
+  unread: boolean;
+  archived: boolean;
+}
+
+/** An import entry and the bookmark that has its URL. */
+type SavedEntry = { id: string; entry: ImportEntry };
+
+/** Trims optional import text and cuts it to `max` characters with a warning, where `addBookmark` would refuse it. */
+function clampText(value: unknown, field: string, max: number, warn: (message: string) => void): string | null {
+  if (typeof value !== 'string') return null;
+  const chars = [...value.trim()];
+  if (chars.length <= max) return chars.length === 0 ? null : chars.join('');
+  warn(`The ${field} was cut to ${max.toLocaleString('en-US')} characters`);
+  return chars.slice(0, max).join('').trim();
+}
+
+/** Checks an import item: null (with a warning) when its URL cannot be saved. Invalid tags are dropped with a warning. */
+function toImportEntry(item: unknown, position: number, add: (warning: ImportWarning) => void): ImportEntry | null {
+  const record = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {};
+  const rawUrl = typeof record.url === 'string' ? record.url : undefined;
+  const warn = (message: string) => add({ item: position, ...(rawUrl === undefined ? {} : { url: rawUrl }), message });
+  let target: { url: string; canonicalUrl: string };
+  try {
+    target = normalizeUrl(rawUrl ?? '');
+  } catch (error) {
+    if (!(error instanceof BookmarkError)) throw error;
+    warn(`Skipped: ${error.message}`);
+    return null;
+  }
+  const tags: TagInput[] = [];
+  for (const name of Array.isArray(record.tags) ? (record.tags as unknown[]) : []) {
+    try {
+      const tag = normalizeTagName(name);
+      if (!tags.some((other) => other.nameKey === tag.nameKey)) tags.push(tag);
+    } catch (error) {
+      if (!(error instanceof BookmarkError)) throw error;
+      warn(`Tag dropped: ${error.message}`);
+    }
+  }
+  return {
+    ...target,
+    title: clampText(record.title, 'title', MAX_TITLE_LENGTH, warn),
+    notes: clampText(record.notes, 'notes', MAX_NOTES_LENGTH, warn),
+    tags,
+    unread: record.unread === true,
+    archived: record.archived === true
+  };
+}
 
 /** The details of a bookmark whose page changed: none yet, and a fetch pending. */
 const CLEARED_DETAILS = { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null };
@@ -195,6 +267,17 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     }
   }
 
+  /** Sends the mutations as one datafn batch, which runs each on its own: true for each that succeeded. */
+  async function mutateEach(payloads: Row[]): Promise<boolean[]> {
+    if (payloads.length === 0) return [];
+    const results = await executor.mutate<unknown>(
+      payloads.map((payload) => ({ version, ...payload })),
+      context
+    );
+    if (!Array.isArray(results) || results.length !== payloads.length) throw new Error('datafn returned no result for a batch of mutations');
+    return results.map((result) => (result as { ok?: unknown } | null)?.ok === true);
+  }
+
   async function getBookmarkRow(id: string): Promise<Row | null> {
     const [row] = await query({ resource: 'bookmarks', select: BOOKMARK_SELECT, filters: { id: normalizeId(id, 'id') }, limit: 1 });
     return row ?? null;
@@ -248,19 +331,23 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   /**
-   * Claims the next `apiId` by inserting it into `bookmark_api_ids`. Claims are never deleted, so the primary key
-   * settles concurrent claims of one number, ids only grow and a deleted bookmark's id is not handed out again.
+   * Claims the next `count` apiIds, from the last claimed number plus one, by inserting one row into
+   * `bookmark_api_ids` whose id is the first number and whose value is the last. Claims are never deleted, so the
+   * primary key settles concurrent claims from one number: the loser reads the new last number and claims after it.
+   * Every claim starts right after the last one read, so a range is claimed whole or not at all; ids only grow and a
+   * deleted bookmark's id is not handed out again. Returns the first number.
    */
-  async function allocateApiId(): Promise<number> {
+  async function allocateApiIds(count = 1): Promise<number> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const [last] = await query({ resource: 'bookmark_api_ids', select: ['value'], sort: ['-value'], limit: 1 });
       const next = (last ? toNumber(last.value) : 0) + 1;
-      if (!Number.isSafeInteger(next) || next < 1) throw new Error(`The last apiId is ${String(last?.value)}`);
+      const end = next + count - 1;
+      if (!Number.isSafeInteger(end) || next < 1) throw new Error(`The last apiId is ${String(last?.value)}`);
       try {
-        await mutate({ resource: 'bookmark_api_ids', operation: 'insert', id: String(next), record: { value: next } });
+        await mutate({ resource: 'bookmark_api_ids', operation: 'insert', id: String(next), record: { value: end } });
         return next;
       } catch (error) {
-        // Another writer claimed the number first: read the new last one.
+        // Another writer claimed from the number first: read the new last one.
         if (!(await isApiIdClaimed(next))) throw error;
       }
     }
@@ -429,7 +516,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       serialized(executor, async (): Promise<{ id: string; duplicate: boolean } | null> => {
         const existingId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
         if (existingId) return { id: existingId, duplicate: true };
-        const apiId = await allocateApiId();
+        const apiId = await allocateApiIds();
         const id = crypto.randomUUID();
         const record = {
           apiId,
@@ -830,6 +917,189 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     throw new BookmarkError('conflict', 'Could not retry the details because of concurrent writes; try again');
   }
 
+  /** The ids of the saved bookmarks with these canonical URLs. */
+  async function bookmarkIdsByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, string>> {
+    const found = new Map<string, string>();
+    for (const chunk of chunks(canonicalUrls)) {
+      const rows = await query({ resource: 'bookmarks', select: ['id', 'canonicalUrl'], filters: { canonicalUrl: { $in: chunk } }, limit: PAGE_SIZE });
+      for (const row of rows) found.set(String(row.canonicalUrl), String(row.id));
+    }
+    return found;
+  }
+
+  /**
+   * Saves one batch of import entries, as `addBookmark` saves one URL: in the per-executor chain, entries already
+   * saved are found, and the rest get one claimed range of apiIds and are inserted in one datafn batch. An insert
+   * that fails because another process saved the URL meanwhile makes that entry an existing one.
+   */
+  function saveImportBatch(batch: ImportEntry[]) {
+    return serialized(executor, async (): Promise<{ created: SavedEntry[]; existing: SavedEntry[] }> => {
+      const found = await bookmarkIdsByCanonicalUrl(batch.map((entry) => entry.canonicalUrl));
+      const existing: SavedEntry[] = [];
+      const fresh: ImportEntry[] = [];
+      for (const entry of batch) {
+        const id = found.get(entry.canonicalUrl);
+        if (id === undefined) fresh.push(entry);
+        else existing.push({ id, entry });
+      }
+      if (fresh.length === 0) return { created: [], existing };
+      const first = await allocateApiIds(fresh.length);
+      const rows = fresh.map((entry, index) => ({ id: crypto.randomUUID(), entry, apiId: first + index }));
+      const inserted = await mutateEach(
+        rows.map(({ id, entry, apiId }) => ({
+          resource: 'bookmarks',
+          operation: 'insert',
+          id,
+          record: {
+            apiId,
+            url: entry.url,
+            canonicalUrl: entry.canonicalUrl,
+            userTitle: entry.title,
+            notes: entry.notes,
+            unread: entry.unread,
+            archived: entry.archived,
+            ...CLEARED_DETAILS,
+            // Only an untitled bookmark needs its details for a title; one with a title is not fetched.
+            detailsState: entry.title === null ? 'pending' : 'ready',
+            detailsRequest: null
+          }
+        }))
+      );
+      const created = rows.filter((_, index) => inserted[index]);
+      const failed = rows.filter((_, index) => !inserted[index]);
+      if (failed.length > 0) {
+        const now = await bookmarkIdsByCanonicalUrl(failed.map(({ entry }) => entry.canonicalUrl));
+        for (const { entry } of failed) {
+          const id = now.get(entry.canonicalUrl);
+          if (id === undefined) throw new Error(`Saving the bookmark for ${entry.url} failed`);
+          existing.push({ id, entry });
+        }
+      }
+      return { created: created.map(({ id, entry }) => ({ id, entry })), existing };
+    });
+  }
+
+  /**
+   * Gives saved import entries their tags. New bookmarks are linked a tag at a time, up to a page of bookmarks per
+   * datafn relate. Then the merge records of every requested tag a bookmark has are read: a merge records its source
+   * before its last read of the source's bookmarks, so one that missed these links is found, and those bookmarks
+   * follow its records through `addTagsTo`, as `addBookmark` does. So do bookmarks a relate refused (a tag deleted
+   * meanwhile) and saved bookmarks that lack a requested tag.
+   */
+  async function tagImported(created: SavedEntry[], existing: SavedEntry[], tagsByKey: Map<string, Tag>, warn: (warning: ImportWarning) => void): Promise<void> {
+    const entries = new Map([...created, ...existing].map(({ id, entry }) => [id, entry]));
+    // Tag id -> the bookmarks here that asked for it and have it.
+    const holders = new Map<string, Set<string>>();
+    const hold = (tagId: string, bookmarkId: string) => holders.set(tagId, (holders.get(tagId) ?? new Set()).add(bookmarkId));
+    const oneByOne = new Set<string>();
+
+    const byTag = new Map<string, string[]>();
+    for (const { id, entry } of created) {
+      for (const input of entry.tags) {
+        const tagId = (tagsByKey.get(input.nameKey) as Tag).id;
+        const ids = byTag.get(tagId);
+        if (ids) ids.push(id);
+        else byTag.set(tagId, [id]);
+      }
+    }
+    for (const [tagId, bookmarkIds] of byTag) {
+      for (const chunk of chunks(bookmarkIds)) {
+        try {
+          await relate('relate', 'tags', tagId, chunk);
+          for (const id of chunk) hold(tagId, id);
+        } catch {
+          for (const id of chunk) oneByOne.add(id);
+        }
+      }
+    }
+
+    const tagged = existing.filter(({ entry }) => entry.tags.length > 0).map(({ id }) => id);
+    for (const chunk of chunks(tagged)) {
+      for (const row of await query({ resource: 'bookmarks', select: BOOKMARK_SELECT, filters: { id: { $in: chunk } }, limit: PAGE_SIZE })) {
+        const bookmark = toBookmark(row);
+        const have = new Map(bookmark.tags.map((tag) => [tag.nameKey, tag.id]));
+        for (const input of (entries.get(bookmark.id) as ImportEntry).tags) {
+          const tagId = have.get(input.nameKey);
+          if (tagId === undefined) oneByOne.add(bookmark.id);
+          else hold(tagId, bookmark.id);
+        }
+      }
+    }
+
+    for (const tagId of (await mergeTargets([...holders.keys()])).keys()) for (const id of holders.get(tagId) ?? []) oneByOne.add(id);
+    for (const id of oneByOne) {
+      const entry = entries.get(id) as ImportEntry;
+      const bookmark = await getBookmark(id);
+      if (bookmark) await addTagsTo(bookmark, entry.tags);
+      else warn({ url: entry.url, message: 'The bookmark was deleted while it was being imported, so it has no tags' });
+    }
+  }
+
+  async function importBookmarks(input: ParsedImport | readonly ImportItem[]): Promise<ImportResult> {
+    const parsed: { items?: unknown; warnings?: unknown } = Array.isArray(input) ? { items: input } : ((input ?? {}) as object);
+    if (!Array.isArray(parsed.items)) throw new BookmarkError('invalid-input', 'The import must be an array of items or the result of parseImport');
+    if (parsed.items.length > MAX_IMPORT_ITEMS) throw tooManyItems();
+    const warnings = warningList(Array.isArray(parsed.warnings) ? (parsed.warnings as ImportWarning[]) : []);
+    // One entry per canonical URL: a later item with the same URL is merged into it, as a duplicate add would be.
+    const entries = new Map<string, ImportEntry>();
+    let skipped = 0;
+    let merged = 0;
+    parsed.items.forEach((item: unknown, index) => {
+      const entry = toImportEntry(item, index + 1, warnings.add);
+      if (!entry) {
+        skipped++;
+        return;
+      }
+      const earlier = entries.get(entry.canonicalUrl);
+      if (!earlier) {
+        entries.set(entry.canonicalUrl, entry);
+        return;
+      }
+      merged++;
+      for (const tag of entry.tags) if (!earlier.tags.some((other) => other.nameKey === tag.nameKey)) earlier.tags.push(tag);
+    });
+    const allTags = new Map<string, TagInput>();
+    for (const entry of entries.values()) for (const tag of entry.tags) if (!allTags.has(tag.nameKey)) allTags.set(tag.nameKey, tag);
+    const tagsByKey = new Map((await ensureTags([...allTags.values()])).map((tag) => [tag.nameKey, tag]));
+
+    let added = 0;
+    for (const batch of chunks([...entries.values()], IMPORT_BATCH)) {
+      const { created, existing } = await saveImportBatch(batch);
+      added += created.length;
+      merged += existing.length;
+      // As in an add, the details are enqueued before tagging.
+      for (const { id, entry } of created) {
+        if (entry.title === null) {
+          await detailsQueue.enqueue({ bookmarkId: id, url: entry.url, canonicalUrl: entry.canonicalUrl, detailsRequest: null }, { dedupeKey: id });
+        }
+      }
+      await tagImported(created, existing, tagsByKey, warnings.add);
+    }
+    return { added, merged, skipped, warnings: warnings.list() };
+  }
+
+  async function exportNetscape(): Promise<string> {
+    const bookmarks: Bookmark[] = [];
+    for (let after = 0; ; ) {
+      const rows = await query({ resource: 'bookmarks', select: BOOKMARK_SELECT, filters: { apiId: { $gt: after } }, sort: ['apiId'], limit: PAGE_SIZE });
+      for (const row of rows) bookmarks.push(toBookmark(row));
+      if (rows.length < PAGE_SIZE) break;
+      after = bookmarks[bookmarks.length - 1].apiId;
+    }
+    return renderNetscape(
+      bookmarks.map((bookmark) => ({
+        url: bookmark.url,
+        title: bookmark.userTitle ?? bookmark.details?.title ?? null,
+        notes: bookmark.notes,
+        tags: bookmark.tags.map((tag) => tag.name),
+        unread: bookmark.unread,
+        archived: bookmark.archived,
+        createdAt: bookmark.createdAt,
+        updatedAt: bookmark.updatedAt
+      }))
+    );
+  }
+
   return {
     getBookmark,
     addBookmark,
@@ -841,6 +1111,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     removeTags,
     renameTag,
     mergeTags,
-    retryDetails
+    retryDetails,
+    importBookmarks,
+    exportNetscape
   };
 }

@@ -1,0 +1,249 @@
+// importBookmarks and exportNetscape through the datafn executor: what an import saves, how it merges with saved
+// bookmarks, the export -> import round trip, apiIds, merge records and a concurrent writer.
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { after, before, describe, test } from 'node:test';
+import { BookmarkError, MAX_IMPORT_ITEMS, MAX_IMPORT_WARNINGS, createBookmarkOperations, parseImport } from '../dist/index.js';
+import { hookedExecutor, pausePoint, recordingQueue, setup } from './support.mjs';
+
+const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
+const FIXTURES = [
+  ['chrome.html', 'netscape-html'],
+  ['firefox.html', 'netscape-html'],
+  ['safari.html', 'netscape-html'],
+  ['linkding.html', 'netscape-html'],
+  ['raindrop.html', 'netscape-html'],
+  ['pocket.csv', 'pocket-csv']
+];
+const rejectsWith = (promise, code) => assert.rejects(promise, (error) => error instanceof BookmarkError && error.code === code);
+
+/** Every bookmark of the owner, oldest first, in the shape an export keeps. */
+async function saved(host) {
+  const ids = [];
+  for (let after = 0; ; ) {
+    const { data } = await host.server.executor.query(
+      { version: 1, resource: 'bookmarks', select: ['id', 'apiId'], filters: { apiId: { $gt: after } }, sort: ['apiId'], limit: 100 },
+      { userId: 'owner' }
+    );
+    ids.push(...data.map((row) => row.id));
+    if (data.length < 100) break;
+    after = Number(data.at(-1).apiId);
+  }
+  const bookmarks = await Promise.all(ids.map((id) => host.ops.getBookmark(id)));
+  return bookmarks.map(({ url, userTitle, notes, unread, archived, tags }) => ({ url, userTitle, notes, unread, archived, tags: tags.map((tag) => tag.name) }));
+}
+
+async function byUrl(host, url) {
+  const { data } = await host.server.executor.query(
+    { version: 1, resource: 'bookmarks', select: ['id'], filters: { url }, limit: 1 },
+    { userId: 'owner' }
+  );
+  return data[0] ? host.ops.getBookmark(data[0].id) : null;
+}
+
+for (const backend of ['memory', 'sqlite', 'postgres']) {
+  describe(`import and export on ${backend}`, () => {
+    let host;
+    before(async () => {
+      host = await setup(backend);
+    });
+    after(() => host.close());
+
+    test('every exporter fixture imports, skipping links that are not http(s)', async () => {
+      const expected = {
+        'chrome.html': { added: 5, merged: 0, skipped: 2 },
+        'firefox.html': { added: 3, merged: 1, skipped: 1 },
+        'safari.html': { added: 4, merged: 0, skipped: 0 },
+        'linkding.html': { added: 3, merged: 0, skipped: 0 },
+        'raindrop.html': { added: 3, merged: 0, skipped: 0 },
+        'pocket.csv': { added: 3, merged: 0, skipped: 1 }
+      };
+      for (const [name, kind] of FIXTURES) {
+        const { warnings, ...counts } = await host.ops.importBookmarks(parseImport(fixture(name), kind));
+        assert.deepEqual(counts, expected[name], name);
+        assert.equal(warnings.length, counts.skipped, name);
+      }
+      const chrome = await host.ops.importBookmarks(parseImport(fixture('chrome.html'), 'netscape-html'));
+      assert.deepEqual(chrome.warnings, [
+        { item: 5, url: 'javascript:void(document.title)', message: 'Skipped: Only http and https URLs are supported, not javascript:' },
+        { item: 7, url: 'chrome://settings/', message: 'Skipped: Only http and https URLs are supported, not chrome:' }
+      ]);
+
+      const rust = await byUrl(host, 'https://doc.rust-lang.org/book/');
+      assert.equal(rust.userTitle, 'The Rust Programming Language');
+      assert.deepEqual(rust.tags.map((tag) => tag.name), ['Dev-Tools', 'Rust-Go']);
+      // Firefox's second copy of the article (another spelling of its URL) only adds its tags. Its Other Bookmarks
+      // folder is the tag Chrome's Other bookmarks folder made, which keeps its first spelling.
+      const article = await byUrl(host, 'https://www.example.org/article');
+      assert.equal(article.userTitle, 'An article');
+      assert.equal(article.notes, 'Saved for the weekend.\nSecond line > first.');
+      assert.deepEqual(article.tags.map((tag) => tag.name), ['long-read', 'notes', 'Other-bookmarks', 'reading']);
+      const django = await byUrl(host, 'https://www.djangoproject.com/');
+      assert.equal(django.archived, true);
+      assert.deepEqual(django.tags.map((tag) => tag.name), ['python']);
+      const linkding = await byUrl(host, 'https://github.com/sissbruecker/linkding');
+      assert.equal(linkding.unread, true);
+      const quotes = await byUrl(host, 'https://example.org/q');
+      assert.equal(quotes.archived, true);
+      assert.equal(quotes.userTitle, 'Quotes, "commas" and line breaks');
+    });
+
+    test('only an untitled import is pending details, with the job an add enqueues', async () => {
+      const queue = recordingQueue();
+      const ops = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: { userId: 'owner' } });
+      const result = await ops.importBookmarks([
+        { url: 'https://details.example/titled', title: 'Has a title' },
+        { url: 'https://details.example/untitled?utm_source=x', title: '  ' }
+      ]);
+      assert.equal(result.added, 2);
+      const titled = await byUrl(host, 'https://details.example/titled');
+      const untitled = await byUrl(host, 'https://details.example/untitled?utm_source=x');
+      assert.equal(titled.detailsState, 'ready');
+      assert.equal(titled.details, null);
+      assert.equal(untitled.detailsState, 'pending');
+      assert.equal(untitled.userTitle, null);
+      assert.deepEqual(
+        queue.jobs.map(({ job, options }) => ({ job, options })),
+        [
+          {
+            job: { bookmarkId: untitled.id, url: untitled.url, canonicalUrl: 'https://details.example/untitled', detailsRequest: null },
+            options: { dedupeKey: untitled.id }
+          }
+        ]
+      );
+    });
+
+    test('an item whose URL is saved, here or earlier in the file, only adds its new tags', async () => {
+      const { bookmark } = await host.ops.addBookmark('https://merge.example/page', { title: 'Mine', notes: 'keep', tags: ['kept'] });
+      const queue = recordingQueue();
+      const ops = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: { userId: 'owner' } });
+      const result = await ops.importBookmarks([
+        { url: 'https://MERGE.example/page?fbclid=1', title: 'Theirs', notes: 'replace', tags: ['KEPT', 'new'], unread: true, archived: true },
+        { url: 'https://merge.example/other', title: 'First copy', tags: ['one'] },
+        { url: 'https://merge.example/other#again', title: 'Second copy', tags: ['two', 'ONE'] }
+      ]);
+      assert.deepEqual(result, { added: 1, merged: 2, skipped: 0, warnings: [] });
+      const merged = await host.ops.getBookmark(bookmark.id);
+      assert.deepEqual(
+        { url: merged.url, userTitle: merged.userTitle, notes: merged.notes, unread: merged.unread, archived: merged.archived, apiId: merged.apiId },
+        { url: bookmark.url, userTitle: 'Mine', notes: 'keep', unread: false, archived: false, apiId: bookmark.apiId }
+      );
+      assert.deepEqual(merged.tags.map((tag) => tag.name), ['kept', 'new']);
+      const other = await byUrl(host, 'https://merge.example/other');
+      assert.equal(other.userTitle, 'First copy');
+      assert.deepEqual(other.tags.map((tag) => tag.name), ['one', 'two']);
+      assert.equal(queue.jobs.length, 0);
+      // Importing the same items again changes nothing.
+      const again = await ops.importBookmarks([{ url: 'https://merge.example/other', tags: ['one'] }]);
+      assert.deepEqual(again, { added: 0, merged: 1, skipped: 0, warnings: [] });
+    });
+
+    test('export then import reproduces the same bookmarks and tags', async () => {
+      const source = await setup(backend);
+      const target = await setup(backend);
+      try {
+        for (const [name, kind] of FIXTURES) await source.ops.importBookmarks(parseImport(fixture(name), kind));
+        const { bookmark } = await source.ops.addBookmark('https://notes.example/', { notes: 'Multi-line\n  notes <b>&amp;</b>', tags: ['Café'], unread: true });
+        await source.ops.setArchived(bookmark.id, true);
+        const exported = await source.ops.exportNetscape();
+        const result = await target.ops.importBookmarks(parseImport(exported, 'netscape-html'));
+        const original = await saved(source);
+        assert.deepEqual(result, { added: original.length, merged: 0, skipped: 0, warnings: [] });
+        assert.deepEqual(await saved(target), original);
+        // The archived marker is not a tag, and importing the export where it came from changes nothing.
+        assert.ok(!original.some((entry) => entry.tags.includes('linkding:bookmarks.archived')));
+        assert.deepEqual(await source.ops.importBookmarks(parseImport(exported, 'netscape-html')), { added: 0, merged: original.length, skipped: 0, warnings: [] });
+        assert.deepEqual(await saved(source), original);
+      } finally {
+        await source.close();
+        await target.close();
+      }
+    });
+
+    test('an import claims consecutive apiIds after the last one, which later adds continue', async () => {
+      const first = (await host.ops.addBookmark('https://ids.example/first')).bookmark.apiId;
+      await host.ops.importBookmarks(['a', 'b', 'c'].map((name) => ({ url: `https://ids.example/${name}`, title: name })));
+      const imported = await Promise.all(['a', 'b', 'c'].map((name) => byUrl(host, `https://ids.example/${name}`)));
+      assert.deepEqual(imported.map((bookmark) => bookmark.apiId), [first + 1, first + 2, first + 3]);
+      await host.ops.deleteBookmarks([imported[2].id]);
+      assert.equal((await host.ops.addBookmark('https://ids.example/next')).bookmark.apiId, first + 4);
+    });
+
+    test('bad items are skipped or trimmed with warnings, and warnings are capped', async () => {
+      const long = 'x'.repeat(600);
+      const result = await host.ops.importBookmarks([
+        { url: 'https://warn.example/long', title: long, tags: ['ok', 'has space', ''] },
+        { url: 42 },
+        null,
+        ...Array.from({ length: MAX_IMPORT_WARNINGS }, (_, index) => ({ url: `mailto:${index}@example.com` }))
+      ]);
+      assert.equal(result.added, 1);
+      assert.equal(result.skipped, MAX_IMPORT_WARNINGS + 2);
+      assert.equal(result.warnings.length, MAX_IMPORT_WARNINGS + 1);
+      assert.deepEqual(result.warnings.slice(0, 3), [
+        { item: 1, url: 'https://warn.example/long', message: 'Tag dropped: Tag name "has space" contains whitespace, a comma or a control character' },
+        { item: 1, url: 'https://warn.example/long', message: 'Tag dropped: A tag name cannot be empty' },
+        { item: 1, url: 'https://warn.example/long', message: 'The title was cut to 512 characters' }
+      ]);
+      assert.deepEqual(result.warnings.at(-1), { message: '5 more warnings not shown' });
+      const saved = await byUrl(host, 'https://warn.example/long');
+      assert.equal(saved.userTitle, 'x'.repeat(512));
+      assert.deepEqual(saved.tags.map((tag) => tag.name), ['ok']);
+    });
+
+    test('more than 50,000 items or input that is not items fail before anything is saved', async () => {
+      const before = (await saved(host)).length;
+      await rejectsWith(host.ops.importBookmarks(Array.from({ length: MAX_IMPORT_ITEMS + 1 }, () => ({ url: 'https://too.example/' }))), 'too-large');
+      await rejectsWith(host.ops.importBookmarks({ items: 'nope' }), 'invalid-input');
+      await rejectsWith(host.ops.importBookmarks(null), 'invalid-input');
+      assert.equal((await saved(host)).length, before);
+    });
+
+    test('a tag a merge has recorded also gives its merge target, as an add does', async () => {
+      const source = (await host.ops.addBookmark('https://merging.example/seed', { tags: ['Before'] })).bookmark.tags[0];
+      const target = (await host.ops.addBookmark('https://merging.example/seed2', { tags: ['After'] })).bookmark.tags[0];
+      // A merge interrupted after its record and its move, before the source is deleted.
+      const interrupted = createBookmarkOperations({
+        executor: hookedExecutor(host.server.executor, {
+          beforeMutate: (payload) => {
+            if (payload.resource === 'tags' && payload.operation === 'delete') throw new Error('interrupted');
+          }
+        }),
+        detailsQueue: recordingQueue(),
+        context: { userId: 'owner' }
+      });
+      await assert.rejects(interrupted.mergeTags([source.id], target.id), /interrupted/);
+      await host.ops.importBookmarks([{ url: 'https://merging.example/imported', tags: ['before'] }]);
+      const imported = await byUrl(host, 'https://merging.example/imported');
+      assert.deepEqual(imported.tags.map((tag) => tag.name), ['After', 'Before']);
+      // Repeating the merge finishes it, and the imported bookmark keeps the target.
+      await host.ops.mergeTags([source.id], target.id);
+      assert.deepEqual((await host.ops.getBookmark(imported.id)).tags.map((tag) => tag.name), ['After']);
+    });
+
+    if (backend !== 'memory') {
+      // The memory adapter has no unique index, so it supports one executor per user only.
+      test('a URL another process saves while the import inserts it is merged, not failed', async () => {
+        const second = await host.another();
+        const point = pausePoint();
+        const importer = createBookmarkOperations({
+          executor: hookedExecutor(second.executor, { beforeMutate: (payload) => Array.isArray(payload) && point.pause() }),
+          detailsQueue: recordingQueue(),
+          context: { userId: 'owner' }
+        });
+        const importing = importer.importBookmarks([
+          { url: 'https://race.example/a', title: 'A', tags: ['imported'] },
+          { url: 'https://race.example/b', title: 'B', tags: ['imported'] }
+        ]);
+        await point.reached;
+        const { bookmark } = await host.ops.addBookmark('https://race.example/b', { title: 'Theirs' });
+        point.release();
+        assert.deepEqual(await importing, { added: 1, merged: 1, skipped: 0, warnings: [] });
+        const raced = await host.ops.getBookmark(bookmark.id);
+        assert.equal(raced.userTitle, 'Theirs');
+        assert.deepEqual(raced.tags.map((tag) => tag.name), ['imported']);
+        assert.equal((await byUrl(host, 'https://race.example/a')).userTitle, 'A');
+      });
+    }
+  });
+}

@@ -1,0 +1,47 @@
+// SET-174's scale check: a 50,000-item synthetic Netscape file imports on SQLite within 120 seconds (the owner-revised
+// budget of 2026-10-30). Every bookmark is one datafn insert and every tag link one join-row write, which with
+// @datafn/server 0.2.0 over the @superfunctions/db 0.3.0 drizzle adapter take about 0.35 ms and 0.2 ms each on an
+// Apple M-series laptop and about twice that on CI (see the README); SFNS-52 tracks a datafn bulk write.
+// It runs after the other suites (see package.json), not beside them, so their work does not count against the budget.
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { MAX_IMPORT_ITEMS, parseImport } from '../../dist/index.js';
+import { setup } from '../support.mjs';
+
+const BUDGET_MS = 120_000;
+
+/** 50 folders of 1,000 links; every tenth link also has two TAGS, every fifth has no title, every seventh a note. */
+function syntheticFile() {
+  const lines = ['<!DOCTYPE NETSCAPE-Bookmark-file-1>', '<TITLE>Bookmarks</TITLE>', '<H1>Bookmarks</H1>', '<DL><p>'];
+  for (let folder = 0; folder < 50; folder++) {
+    lines.push(`<DT><H3 ADD_DATE="1700000000">Folder ${folder}</H3>`, '<DL><p>');
+    for (let index = folder; index < MAX_IMPORT_ITEMS; index += 50) {
+      const tags = index % 10 === 0 ? ' TAGS="reading,later"' : '';
+      lines.push(`<DT><A HREF="https://site${index % 997}.example/articles/${index}?utm_source=feed" ADD_DATE="${1_700_000_000 + index}"${tags}>${index % 5 === 0 ? '' : `Article ${index}`}</A>`);
+      if (index % 7 === 0) lines.push(`<DD>Note for article ${index}`);
+    }
+    lines.push('</DL><p>');
+  }
+  lines.push('</DL><p>');
+  return lines.join('\n');
+}
+
+test(
+  `a ${MAX_IMPORT_ITEMS.toLocaleString('en-US')}-item file imports on SQLite within ${BUDGET_MS / 1000} s`,
+  { timeout: 10 * 60_000 },
+  async () => {
+    const file = syntheticFile();
+    const host = await setup('sqlite');
+    try {
+      const started = performance.now();
+      const result = await host.ops.importBookmarks(parseImport(file, 'netscape-html'));
+      const elapsed = performance.now() - started;
+      console.log(`imported ${result.added} bookmarks from ${(file.length / 1e6).toFixed(1)} MB in ${(elapsed / 1000).toFixed(1)} s`);
+      assert.deepEqual(result, { added: MAX_IMPORT_ITEMS, merged: 0, skipped: 0, warnings: [] });
+      assert.equal(host.queue.jobs.length, MAX_IMPORT_ITEMS / 5);
+      assert.ok(elapsed < BUDGET_MS, `took ${(elapsed / 1000).toFixed(1)} s`);
+    } finally {
+      await host.close();
+    }
+  }
+);

@@ -73,7 +73,7 @@ export interface BookmarksExecutor<TContext = unknown> {
   mutate<TResult = unknown>(payload: unknown, context?: TContext): Promise<TResult>;
 }
 
-export type BookmarkErrorCode = 'invalid-input' | 'invalid-url' | 'not-found' | 'duplicate-url' | 'tag-conflict' | 'conflict';
+export type BookmarkErrorCode = 'invalid-input' | 'invalid-url' | 'not-found' | 'duplicate-url' | 'tag-conflict' | 'conflict' | 'too-large';
 
 export class BookmarkError extends Error {
   readonly code: BookmarkErrorCode;

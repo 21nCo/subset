@@ -1,4 +1,18 @@
 export { displayTitle } from './display.js';
+export {
+  IMPORT_KINDS,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_ITEMS,
+  MAX_IMPORT_WARNINGS,
+  toTagName,
+  type ImportItem,
+  type ImportKind,
+  type ImportResult,
+  type ImportWarning,
+  type ParsedImport
+} from './import.js';
+export { LINKDING_ARCHIVED_TAG, renderNetscape, type NetscapeBookmark } from './netscape.js';
+export { parseImport } from './parse-import.js';
 export { MAX_NOTES_LENGTH, MAX_TAG_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH, normalizeTagName } from './input.js';
 export {
   createBookmarkOperations,
