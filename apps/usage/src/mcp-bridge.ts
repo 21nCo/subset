@@ -3,15 +3,24 @@
 // following the bridge Timer chose in SET-80 (no `@modelcontextprotocol/ext-apps`; see the README). It
 // sends `ui/initialize`, reads the theme from the host context, takes the `usage_status` result the host
 // passes as the dashboard's `status`, reads `usage_history` once connected, and calls `usage_status`
-// again only when the user presses Refresh: there is no polling. Every tool call has a deadline, so a
-// reply the host never sends cannot leave Refresh busy. It touches no DOM, so it runs under `node --test`
-// with a fake host.
+// again only when the user presses Refresh or R: there is no polling. Every tool call has a deadline, so a
+// reply the host never sends cannot leave Refresh busy. It touches no DOM beyond the events it is given,
+// so it runs under `node --test` with a fake host.
 import { isUsageStatus, type UsageStatus } from '@subset.dev/usage-core';
 import { isUsageHistory, type UsageHistory } from '@subset.dev/usage-core/history';
 
 export const PROTOCOL_VERSION = '2026-01-26';
-/** How long a tool call waits for the host's reply. */
-export const READ_TIMEOUT_MS = 15_000;
+/**
+ * How long usage_status waits for the host's reply. It must outlast the server's slowest read, or a valid
+ * status that arrives late is dropped. `subset-usage mcp` reads every account at once, and the slowest
+ * account bounds the read: the stored-login lookup (5 s), then a Cursor sign-in that waits for a macOS
+ * Keychain prompt (60 s) and two HTTPS reads (15 s each), or Claude Code's `claude auth status` (10 s),
+ * Keychain (60 s) and usage read (15 s); then a harness login read through another harness (two HTTPS reads,
+ * 15 s each): about 125 s. Three minutes leaves room for process start and the host's own relay.
+ */
+export const STATUS_TIMEOUT_MS = 180_000;
+/** How long usage_history waits: the server reads one local file. */
+export const HISTORY_TIMEOUT_MS = 15_000;
 /** The hours of history read: the dashboard's 7-day activity and trend ranges (usage_history's maximum). */
 export const HISTORY_HOURS = 168;
 
@@ -35,10 +44,15 @@ export interface BridgeState {
   closed: boolean;
 }
 
-/** The window the view runs in, as far as the bridge needs it. */
+export interface MessageEventLike { source: unknown; data: unknown }
+export interface KeyEventLike { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; target: unknown; preventDefault(): void }
+
+/** The window the view runs in, as far as the bridge needs it: the host's messages and the user's key presses. */
 export interface ViewWindow {
-  addEventListener(type: 'message', listener: (event: { source: unknown; data: unknown }) => void): void;
-  removeEventListener(type: 'message', listener: (event: { source: unknown; data: unknown }) => void): void;
+  addEventListener(type: 'message', listener: (event: MessageEventLike) => void): void;
+  addEventListener(type: 'keydown', listener: (event: KeyEventLike) => void): void;
+  removeEventListener(type: 'message', listener: (event: MessageEventLike) => void): void;
+  removeEventListener(type: 'keydown', listener: (event: KeyEventLike) => void): void;
 }
 
 /** The host's window: `window.parent`. */
@@ -60,7 +74,10 @@ export interface Bridge {
   subscribe(listener: (state: BridgeState) => void): () => void;
   /** Sends `ui/initialize` and `ui/notifications/initialized`, then reads usage_history. */
   connect(): Promise<void>;
-  /** Calls usage_status, with the provider the agent's call named, then reads usage_history again. */
+  /**
+   * Calls usage_status, with the provider the agent's call named, then reads usage_history again. The
+   * view's R key does the same once a status or tool error is shown, as the dashboard's Refresh advertises.
+   */
   refresh(): Promise<void>;
   /** Tells the host the view's size, once connected and only when it changed. */
   sizeChanged(width: number, height: number): void;
@@ -137,8 +154,8 @@ export function createBridge({
     });
   }
 
-  async function callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
-    const result = await request('tools/call', { name, arguments: args }, { ms: READ_TIMEOUT_MS, message: `The host did not reply to ${name}.` });
+  async function callTool(name: string, args: Record<string, unknown>, ms: number): Promise<CallToolResult> {
+    const result = await request('tools/call', { name, arguments: args }, { ms, message: `The host did not reply to ${name}.` });
     if (!isObject(result)) throw new Error('The host returned no tool result.');
     return result as CallToolResult;
   }
@@ -147,7 +164,7 @@ export function createBridge({
   async function loadHistory() {
     const read = ++historyRead;
     try {
-      const result = await callTool('usage_history', { hours: HISTORY_HOURS });
+      const result = await callTool('usage_history', { hours: HISTORY_HOURS }, HISTORY_TIMEOUT_MS);
       if (read !== historyRead || current.closed || result.isError || !isUsageHistory(result.structuredContent)) return;
       const { schemaVersion, series } = result.structuredContent;
       update({ history: { schemaVersion, series } });
@@ -161,7 +178,7 @@ export function createBridge({
     const issued = generation;
     update({ busy: true });
     try {
-      const result = statusOf(await callTool('usage_status', provider === undefined ? {} : { provider }));
+      const result = statusOf(await callTool('usage_status', provider === undefined ? {} : { provider }, STATUS_TIMEOUT_MS));
       // A tool result the host passed meanwhile is newer than this read.
       if (current.closed || issued !== generation) return;
       if ('status' in result) update({ status: result.status, toolError: null, refreshError: null });
@@ -222,7 +239,7 @@ export function createBridge({
     }
   }
 
-  const listener = (event: { source: unknown; data: unknown }) => {
+  const listener = (event: MessageEventLike) => {
     // Only the host's own messages count; anything else in the page, or not JSON-RPC, is ignored.
     if (event.source !== host || current.closed) return;
     const message = event.data;
@@ -236,6 +253,18 @@ export function createBridge({
   };
   view.addEventListener('message', listener);
 
+  // R refreshes, with the guards of the standalone dashboard (App.svelte): no modifier, and not while
+  // typing in a field or a dialog. It works only where a Refresh button is shown: with a status or an error.
+  const onKey = (event: KeyEventLike) => {
+    const target = event.target as { closest?: (selectors: string) => unknown } | null;
+    if (event.key !== 'r' || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (typeof target?.closest === 'function' && target.closest('input, textarea, select, dialog')) return;
+    if (!current.status && !current.toolError) return;
+    event.preventDefault();
+    void refresh();
+  };
+  view.addEventListener('keydown', onKey);
+
   function sendSize() {
     if (!ready || !size || current.closed) return;
     const key = `${size.width}x${size.height}`;
@@ -247,6 +276,7 @@ export function createBridge({
   function close() {
     if (current.closed) return;
     view.removeEventListener('message', listener);
+    view.removeEventListener('keydown', onKey);
     update({ closed: true, busy: false });
     for (const waiting of pending.values()) {
       if (waiting.deadline !== null) cancel(waiting.deadline);

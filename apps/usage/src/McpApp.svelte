@@ -40,9 +40,14 @@
 {/snippet}
 
 <main>
-  <!-- The bridge holds a tool error or a status, never both: the error shows in place of the dashboard. -->
+  <!-- The bridge holds a tool error or a status, never both: the error shows in place of the dashboard,
+       with a Refresh that reads usage_status again (the R key does the same). -->
   {#if view.toolError}
-    <p class="error" role="alert">{view.toolError}</p>
+    <div class="failed">
+      <p class="error" role="alert">{view.toolError}</p>
+      {#if view.refreshError}{@render notice()}{/if}
+      <button type="button" onclick={refresh} disabled={view.busy} aria-keyshortcuts="r">{view.busy ? 'Checking' : 'Refresh'}</button>
+    </div>
   {:else}
     <UsageDashboard status={view.status ?? waiting} loading={!view.status} busy={view.busy} refresh={view.status ? refresh : undefined}
       history={view.history} notice={view.refreshError ? notice : undefined} {sortMode} {setSortMode} {showTrends} {setShowTrends} />
@@ -68,8 +73,33 @@
     padding: 0 0 12px;
     color: light-dark(#5c5f63, #a4a5a8);
   }
-  .error {
+  .failed {
+    display: grid;
+    justify-items: start;
+    gap: 12px;
     padding: 12px 20px;
+  }
+  .error {
     color: light-dark(#b3261e, #ff8a80);
+  }
+  .failed .notice {
+    padding: 0;
+  }
+  button {
+    font: 500 13px/1 var(--subset-font);
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid light-dark(#d6d4cc, #34343a);
+    background: light-dark(#fff, #1f1f22);
+    color: inherit;
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+  button:focus-visible {
+    outline: 2px solid light-dark(#1a73e8, #8ab4f8);
+    outline-offset: 2px;
   }
 </style>

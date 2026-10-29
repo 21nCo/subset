@@ -105,6 +105,7 @@ async function mcpSession(t, state = {}) {
  */
 function fakeHost(mcp, { theme = 'dark' } = {}) {
   const listeners = new Set();
+  const keyListeners = new Set();
   const inflight = new Set();
   const host = {
     sent: [],
@@ -122,14 +123,26 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
       },
     },
     view: {
-      addEventListener: (type, listener) => (assert.equal(type, 'message'), listeners.add(listener)),
-      removeEventListener: (type, listener) => listeners.delete(listener),
+      addEventListener: (type, listener) => (assert.ok(['message', 'keydown'].includes(type), type), (type === 'message' ? listeners : keyListeners).add(listener)),
+      removeEventListener: (type, listener) => (type === 'message' ? listeners : keyListeners).delete(listener),
     },
     /** Posts `data` to the view from `from` (the host's window unless given). */
     deliver(data, from = host.window) {
       for (const listener of [...listeners]) listener({ source: from, data: structuredClone(data) });
     },
     notify: (method, params) => host.deliver({ jsonrpc: '2.0', method, params }),
+    /** The user presses `key` on the view; `inField` puts the focus in an input. Returns whether the view took it. */
+    press(key, { inField = false, ...modifiers } = {}) {
+      const event = { key, metaKey: false, ctrlKey: false, altKey: false, ...modifiers, prevented: false,
+        target: { closest: (selectors) => (inField && selectors.split(', ').includes('input') ? {} : null) }, preventDefault() { event.prevented = true; } };
+      for (const listener of [...keyListeners]) listener(event);
+      return event.prevented;
+    },
+    /** Answers the view's last withheld tool call with `result`. */
+    answerLast(result) {
+      const { id } = host.sent.findLast((message) => message.method === 'tools/call');
+      host.deliver({ jsonrpc: '2.0', id, result });
+    },
     /** Waits until every request the view sent has its answer and the view has taken it. */
     async idle() {
       do {
@@ -137,7 +150,7 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
         await new Promise(setImmediate);
       } while (inflight.size);
     },
-    listening: () => listeners.size,
+    listening: () => listeners.size + keyListeners.size,
   };
   const reply = (id, body) => host.deliver({ jsonrpc: '2.0', id, ...body });
   async function answer(message) {
@@ -158,17 +171,19 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
   return host;
 }
 
-/** Fake timeouts: `expire(ms)` runs the live timeouts of that delay, as if that long had passed. */
+/** Fake timeouts on a fake clock: `advance(ms)` runs every live timeout due by then, as if that long had passed. */
 function fakeTimeouts() {
   const live = new Map();
   let next = 0;
+  let now = 0;
   return {
-    setTimeout: (callback, ms) => (live.set(++next, { callback, ms }), next),
+    setTimeout: (callback, ms) => (live.set(++next, { callback, due: now + ms }), next),
     clearTimeout: (handle) => live.delete(handle),
     size: () => live.size,
-    expire(ms) {
+    advance(ms) {
+      now += ms;
       for (const [handle, timeout] of [...live]) {
-        if (timeout.ms !== ms) continue;
+        if (timeout.due > now) continue;
         live.delete(handle);
         timeout.callback();
       }
@@ -358,7 +373,11 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   const refreshed = bridge.refresh();
   await host.idle();
   assert.equal(bridge.state().busy, true);
-  timeouts.expire(view.READ_TIMEOUT_MS);
+  // usage_history's shorter deadline does not end a usage_status call; its own does.
+  timeouts.advance(view.HISTORY_TIMEOUT_MS);
+  await host.idle();
+  assert.equal(bridge.state().busy, true);
+  timeouts.advance(view.STATUS_TIMEOUT_MS - view.HISTORY_TIMEOUT_MS);
   await refreshed;
   assert.equal(bridge.state().busy, false);
   assert.equal(bridge.state().refreshError, 'The host did not reply to usage_status.');
@@ -385,6 +404,85 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
     assert.equal(bridge.state().refreshError, 'The usage tool failed.', JSON.stringify(content));
     assert.deepEqual(bridge.state().status, newer.structuredContent);
   }
+});
+
+test('Refresh outlasts the server\'s slowest provider reads: a status that arrives after them is shown', async (t) => {
+  const { host, bridge, mcp, timeouts } = await connectedBridge(t);
+  await passToolResult({ mcp, host });
+  host.withhold = ({ name }) => name === 'usage_status';
+  const refreshed = bridge.refresh();
+  await host.idle();
+  // `amp usage` may run 20 s; a Keychain prompt with two HTTPS reads after it, and a harness fallback, about 125 s.
+  for (const ms of [21_000, 104_000]) {
+    timeouts.advance(ms);
+    await host.idle();
+    assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [true, null], `${ms} ms`);
+  }
+  // One account read and one that timed out: the status is valid, and the view shows both.
+  const slow = createUsageStatus([
+    account('chatgpt_main', 'codex-chatgpt', { label: 'Main ChatGPT', windows: [window(40)] }),
+    account('amp_cli', 'amp', { label: 'Amp CLI', state: 'unavailable', windows: [], observedAt: null, errors: [{ code: 'amp_timeout', message: 'The amp usage command timed out.' }] }),
+  ], new Date(NOW));
+  host.withhold = null;
+  host.answerLast({ content: [{ type: 'text', text: 'Usage' }], structuredContent: slow });
+  await Promise.all([refreshed, host.idle()]);
+  assert.deepEqual([bridge.state().status, bridge.state().refreshError, bridge.state().busy], [slow, null, false]);
+  const markup = rendered(bridge);
+  for (const text of ['Main ChatGPT', 'Amp CLI', 'The amp usage command timed out.']) assert.ok(markup.includes(text), text);
+  assert.doesNotMatch(markup, /Could not refresh/);
+});
+
+test('the R key the Refresh button advertises refreshes, only while Refresh is shown and never with a modifier or in a field', async (t) => {
+  const { host, bridge, mcp } = await connectedBridge(t);
+  const statusCalls = () => host.calls.filter(({ name }) => name === 'usage_status').length;
+  // Before the tool result there is no Refresh, so R does nothing.
+  assert.equal(host.press('r'), false);
+  await passToolResult({ mcp, host });
+  assert.match(rendered(bridge), /<button[^>]*aria-keyshortcuts="r"/);
+  for (const [key, options] of [['r', { metaKey: true }], ['r', { ctrlKey: true }], ['r', { altKey: true }], ['r', { inField: true }], ['x', {}]]) {
+    assert.equal(host.press(key, options), false, `${key} ${JSON.stringify(options)}`);
+  }
+  await host.idle();
+  assert.equal(statusCalls(), 0);
+
+  assert.equal(host.press('r'), true);
+  await host.idle();
+  assert.deepEqual(host.calls.slice(-2).map(({ name }) => name), ['usage_status', 'usage_history']);
+  assert.equal(statusCalls(), 1);
+  // Teardown removes the key listener with the message listener.
+  host.deliver({ jsonrpc: '2.0', id: 'teardown-1', method: 'ui/resource-teardown', params: {} });
+  assert.equal(host.press('r'), false);
+  assert.equal(statusCalls(), 1);
+});
+
+test('an error shows with a Refresh that reads usage_status again: success shows the dashboard, a failure keeps the error', async (t) => {
+  const { host, bridge } = await connectedBridge(t);
+  host.notify('ui/notifications/tool-input', { arguments: { provider: 'amp' } });
+  host.notify('ui/notifications/tool-cancelled', {});
+  let markup = rendered(bridge);
+  assert.match(markup, /role="alert">The usage_status call was cancelled\./);
+  assert.deepEqual(buttonLabels(markup), ['Refresh']);
+  assert.match(markup, /<button[^>]*aria-keyshortcuts="r"[^>]*>Refresh<\/button>/);
+
+  host.refuse = () => 'The user declined.';
+  const failed = bridge.refresh();
+  assert.match(rendered(bridge), /<button[^>]*disabled[^>]*>Checking<\/button>/);
+  await Promise.all([failed, host.idle()]);
+  assert.deepEqual([bridge.state().status, bridge.state().toolError, bridge.state().refreshError], [null, 'The usage_status call was cancelled.', 'The user declined.']);
+  markup = rendered(bridge);
+  assert.match(markup, /role="alert">The usage_status call was cancelled\./);
+  assert.match(markup, /Could not refresh: The user declined\./);
+  assert.match(markup, /<button(?![^>]*disabled)[^>]*>Refresh<\/button>/);
+
+  host.refuse = null;
+  assert.equal(host.press('r'), true);
+  await host.idle();
+  assert.deepEqual(host.calls.slice(-2), [{ name: 'usage_status', arguments: { provider: 'amp' } }, { name: 'usage_history', arguments: { hours: 168 } }]);
+  assert.deepEqual([bridge.state().toolError, bridge.state().refreshError], [null, null]);
+  assert.deepEqual(bridge.state().status.accounts.map(({ id }) => id), ['amp_cli']);
+  markup = rendered(bridge);
+  assert.ok(markup.includes('Amp CLI'));
+  assert.doesNotMatch(markup, /role="alert"|Could not refresh/);
 });
 
 test('an error or unreadable tool result shows in place of the dashboard until a later result succeeds', async (t) => {
