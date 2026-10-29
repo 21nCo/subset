@@ -1,12 +1,30 @@
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { selectSink } from '../alerts/index.mjs';
+import { holderAlive, readLock } from '../daemon/lock.mjs';
 import { resolveDataDir } from '../daemon/paths.mjs';
 import { DaemonRunningError, runInForeground, startDaemon as startDaemonServer } from '../daemon/server.mjs';
 import { CliError } from './shared.mjs';
 
-/** How long `daemon stop` waits for the daemon to close its socket. */
-const STOP_TIMEOUT_MS = 5_000;
+/**
+ * How long `daemon stop` waits for the daemon to go: it closes its socket once requests already
+ * being handled answer (1 s), then keeps `daemon.lock` while its sink finishes what it is playing
+ * (`SINK_DRAIN_MS`, 5 s).
+ */
+const STOP_TIMEOUT_MS = 8_000;
+
+/** True while the daemon with `pid` still holds `daemon.lock` at `lockPath`. */
+function holdsDaemonLock(lockPath, pid) {
+  if (!lockPath) return false;
+  let held;
+  try {
+    held = readLock(lockPath);
+  } catch {
+    // A lock this user cannot read tells nothing about the daemon; its socket is already gone.
+    return false;
+  }
+  return held?.pid === pid && holderAlive(held);
+}
 
 /** The running daemon's `/v1/daemon` reply body, or null when none answers. Never starts one. */
 async function runningDaemon(client) {
@@ -56,14 +74,17 @@ export const daemonCommands = {
     options: {},
     positionals: [0, 0],
     async run({ client }) {
-      if (!(await runningDaemon(client))) return { json: { stopped: false }, text: 'The Timer daemon is not running.' };
+      const daemon = await runningDaemon(client);
+      if (!daemon) return { json: { stopped: false }, text: 'The Timer daemon is not running.' };
       try {
         await client.shutdown();
       } catch {
         // It may close the connection as it exits; the wait below tells.
       }
       const deadline = performance.now() + STOP_TIMEOUT_MS;
-      while (await runningDaemon(client)) {
+      // It has stopped once its socket is gone and it no longer holds the lock, so a `daemon run`
+      // right after starts; a daemon another client started meanwhile is not waited for.
+      while ((await runningDaemon(client))?.pid === daemon.pid || holdsDaemonLock(client.paths?.lock, daemon.pid)) {
         if (performance.now() > deadline) throw new CliError('daemon_unavailable', `The Timer daemon did not stop within ${STOP_TIMEOUT_MS / 1000} s.`);
         await sleep(50);
       }

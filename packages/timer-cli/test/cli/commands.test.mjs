@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createSilentSink } from '../../src/alerts/index.mjs';
 import { createClient, socketRequest } from '../../src/daemon/index.mjs';
 import { HELP, VERSION } from '../../src/commands/index.mjs';
 import { FIXTURES, PACKAGE_ROOT, cliDaemon, refuseSpawn, runCli } from './helpers.mjs';
-import { tempDataDir } from '../daemon/helpers.mjs';
+import { eventually, tempDataDir, within } from '../daemon/helpers.mjs';
 
 // "Ends at" lines are local times; the fixtures' 09:00 UTC reads the same everywhere this runs.
 process.env.TZ = 'UTC';
@@ -316,6 +316,48 @@ test('daemon status reports the pid, data directory and alert sink; daemon stop 
   await daemon.closed;
   const again = await run(['daemon', 'stop']);
   assert.deepEqual({ code: again.code, stdout: again.stdout }, { code: 0, stdout: 'The Timer daemon is not running.\n' });
+});
+
+test('daemon stop returns only once the daemon finishing its sink has let go of the lock, so a daemon run right after starts', async (t) => {
+  let finishPlaying;
+  const playing = [];
+  const sink = {
+    name: 'slow',
+    alert(alert, timer) {
+      playing.push(timer.name);
+      return new Promise((resolve) => {
+        finishPlaying = resolve;
+      });
+    }
+  };
+  const { run, daemon, dataDir, op, clock } = await cliDaemon(t, { sink });
+  assert.equal((await op('start', { timer: { kind: 'countdown', durationMs: 1_000, countdownTicks: false, name: 'Egg' } })).status, 200);
+  clock.advance(1_000);
+  await eventually(() => playing.length === 1);
+
+  let stopped = null;
+  const stopping = run(['daemon', 'stop', '--json']).then((result) => {
+    stopped = result;
+    return result;
+  });
+  // The socket is gone, but the daemon still holds the lock while its sink plays.
+  await eventually(() => !existsSync(daemon.paths.socket));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual([stopped, existsSync(daemon.paths.lock)], [null, true]);
+  finishPlaying();
+  const result = await within(stopping, 5_000, 'daemon stop');
+  assert.deepEqual({ code: result.code, json: result.json() }, { code: 0, json: { stopped: true } });
+  assert.equal(existsSync(daemon.paths.lock), false);
+
+  const foreground = [];
+  const next = await runCli(['daemon', 'run', '--json'], {
+    env: { SUBSET_TIMER_ALERTS: 'off', SUBSET_TIMER_DATA_DIR: dataDir },
+    foreground: async (started) => {
+      foreground.push(started.pid);
+      await started.shutdown();
+    }
+  });
+  assert.deepEqual({ code: next.code, stdout: next.stdout, foreground }, { code: 0, stdout: '', foreground: [process.pid] });
 });
 
 test('daemon run runs the daemon with the selected sink in the foreground', async () => {
