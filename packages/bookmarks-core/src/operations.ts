@@ -692,7 +692,13 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           }
           throw new BookmarkError('conflict', `Tag ${target.name} is being merged into another tag; finish that merge first`);
         }
-        if (bookmarkIds.length === 0) break;
+        if (bookmarkIds.length === 0) {
+          // A merge back into this target that saw the cycle may have withdrawn the record since the walk: record
+          // again, then read and walk again, so the cycle gives conflict and a bookmark tagged meanwhile is moved.
+          if ((await mergedInto(id)) === target.id) break;
+          await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
+          continue;
+        }
         await relate('unrelate', 'tags', id, bookmarkIds);
       }
       await mutate({ resource: 'tags', operation: 'delete', id });

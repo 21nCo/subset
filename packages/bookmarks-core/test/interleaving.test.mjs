@@ -353,6 +353,56 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       }
     });
 
+    // Pauses the merge once the walk after an empty read of the source found the target live, just before it reads
+    // its record again and deletes the source.
+    const afterFinalWalk = (source, target, point) => {
+      let empty = false;
+      return (payload, result) => {
+        if (payload.filters?.['tags.id'] === source.id) empty = result.data.length === 0;
+        else if (empty && payload.resource === 'tags' && payload.filters?.id === target.id) return point.pause();
+      };
+    };
+
+    for (const interrupted of [false, true]) {
+      const p = interrupted ? 'wi' : 'wp';
+      test(`a merge whose record was withdrawn after its last walk does not delete a source tagged meanwhile${interrupted ? ' (merge back interrupted)' : ''}`, { timeout: 60_000 }, async () => {
+        const seed = (await ops.addBookmark(`https://${p}.example/seed`, { tags: [`${p}-a`, `${p}-b`] })).bookmark;
+        const [a, b] = seed.tags;
+        await ops.removeTags(seed.id, [a.name, b.name]);
+        const x = (await ops.addBookmark(`https://${p}.example/x`)).bookmark;
+        const [walked, withdrawing] = [pausePoint(), pausePoint()];
+        const intoB = (await writer({ afterQuery: afterFinalWalk(a, b, walked) })).mergeTags([a.id], b.id);
+        await walked.reached;
+        // A merge back sees the cycle and stops before withdrawing its record (or fails there).
+        const beforeWithdraw = (payload) => {
+          if (payload.resource !== 'tag_merges' || payload.operation !== 'delete' || payload.id !== b.id) return undefined;
+          if (interrupted) throw new Error('injected failure');
+          return withdrawing.pause();
+        };
+        const intoA = (await writer({ beforeMutate: beforeWithdraw })).mergeTags([b.id], a.id);
+        if (interrupted) await assert.rejects(intoA, /injected failure/);
+        else await withdrawing.reached;
+        // Repeating the first merge sees the record back and withdraws the first record, so A is a plain tag again.
+        await rejectsWith(ops.mergeTags([a.id], b.id), 'conflict');
+        assert.deepEqual((await ops.addTags(x.id, [a.name])).tags, [a]);
+        if (interrupted) {
+          walked.release();
+          await rejectsWith(intoB, 'conflict');
+          assert.deepEqual((await ops.getBookmark(x.id)).tags, [a, b]);
+          await rejectsWith(ops.mergeTags([a.id], b.id), 'conflict');
+          assert.deepEqual((await ops.getBookmark(x.id)).tags, [a, b]);
+          assert.deepEqual(await ops.mergeTags([b.id], a.id), a);
+          assert.deepEqual((await ops.getBookmark(x.id)).tags, [a]);
+        } else {
+          withdrawing.release();
+          await rejectsWith(intoA, 'conflict');
+          walked.release();
+          assert.deepEqual(await intoB, b);
+          assert.deepEqual((await ops.getBookmark(x.id)).tags, [b]);
+        }
+      });
+    }
+
     test('a merge whose target is gone with no merge record keeps its source and fails with conflict', async () => {
       const seed = (await ops.addBookmark('https://gone-target.example/', { tags: ['gt-s', 'gt-t'] })).bookmark;
       const [s, t] = seed.tags;
