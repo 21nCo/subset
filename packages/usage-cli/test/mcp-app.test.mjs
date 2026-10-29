@@ -102,6 +102,7 @@ async function mcpSession(t, state = {}) {
 /**
  * A host on postMessage: it answers `ui/initialize` with `theme` and runs each `tools/call` on the usage
  * server, as an MCP Apps host does. A call `withhold` picks gets no reply; `refuse` answers it with an error.
+ * `initialize` set to 'withhold' or 'refuse' does the same to `ui/initialize`.
  */
 function fakeHost(mcp, { theme = 'dark' } = {}) {
   const listeners = new Set();
@@ -112,6 +113,7 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
     calls: [],
     withhold: null,
     refuse: null,
+    initialize: 'answer',
     window: {
       postMessage(message, targetOrigin) {
         assert.equal(targetOrigin, '*');
@@ -162,7 +164,9 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
     await null;
     if (!message.method || !('id' in message)) return;
     if (message.method === 'ui/initialize') {
-      return reply(message.id, { result: { protocolVersion: '2026-01-26', hostInfo: { name: 'fake-host', version: '1.0.0' }, hostCapabilities: { serverTools: {} }, hostContext: { theme } } });
+      if (host.initialize === 'withhold') return;
+      if (host.initialize === 'refuse') return reply(message.id, { error: { code: -32000, message: 'Not now.' } });
+      return reply(message.id, { result: initializeResult(theme) });
     }
     if (message.method === 'tools/call') {
       host.calls.push(message.params);
@@ -174,6 +178,8 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
   }
   return host;
 }
+
+const initializeResult = (theme) => ({ protocolVersion: '2026-01-26', hostInfo: { name: 'fake-host', version: '1.0.0' }, hostCapabilities: { serverTools: {} }, hostContext: { theme } });
 
 /** Fake timeouts on a fake clock: `advance(ms)` runs every live timeout due by then, as if that long had passed. */
 function fakeTimeouts() {
@@ -218,9 +224,22 @@ async function passToolResult({ mcp, host }, args = {}) {
 /** The markup `McpApp.svelte` renders for the bridge's current state. */
 const rendered = (bridge) => view.render(view.McpApp, { props: { bridge } }).body;
 
-/** Each button's label: its aria-label, or its text without markup. */
-const buttonLabels = (markup) => [...markup.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
-  .map(([, attributes, inner]) => attributes.match(/aria-label="([^"]*)"/)?.[1] ?? inner.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim());
+/** The text of `markup`: the runs between its tags, joined (read out, not stripped, so no tag is left half-removed). */
+const textOf = (markup) => [...`>${markup}`.matchAll(/>([^<]*)/g)].map(([, text]) => text).join('');
+
+/** Each button's label: its aria-label, or its text. */
+const buttonLabels = (markup) => [...markup.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button\s*>/gi)]
+  .map(([, attributes, inner]) => attributes.match(/aria-label="([^"]*)"/)?.[1] ?? textOf(inner).replace(/\s+/g, ' ').trim());
+
+/** The local sign-ins disclosure AGENTS.md requires: every tool named, and the endpoints called undocumented. */
+const LOCAL_SIGN_IN_TOOLS = ['Claude Code', 'Factory Droid', 'the Cursor app', 'Devin', 'Pi', 'OpenCode', 'omp', 'Hermes', 'Antigravity account email'];
+function assertDisclosure(markup) {
+  const text = textOf(markup).replace(/\s+/g, ' ');
+  const disclosure = text.match(/With Use local sign-ins on,[^.]*\.[^.]*\./)?.[0];
+  assert.ok(disclosure, 'the local sign-ins disclosure is shown');
+  for (const tool of LOCAL_SIGN_IN_TOOLS) assert.ok(disclosure.includes(tool), tool);
+  assert.match(disclosure, /usage endpoints are undocumented/);
+}
 
 /**
  * The dashboard's write controls, by its own labels: Manage accounts (manageAccounts), the account menu
@@ -269,7 +288,9 @@ test('the built dashboard.html inlines its scripts, styles and trend chart and l
   assert.match(html, /^<!doctype html>/i);
   // Trend charts are on by default only while the file stays under 1.5 MB (SET-105); above it they start off.
   assert.ok(Buffer.byteLength(html) < 1.5 * 1024 * 1024, `dashboard.html is ${Buffer.byteLength(html)} bytes`);
-  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+  // Closing tags may carry spaces or attributes (`</script >`), which a browser still reads as the end.
+  const blocks = [...html.matchAll(/<(script|style)\b([^>]*)>([\s\S]*?)<\/\1\b[^>]*>/gi)];
+  const scripts = blocks.filter(([, tag]) => tag.toLowerCase() === 'script').map(([, , attributes, code]) => [, attributes, code]);
   assert.equal(scripts.length, 1);
   assert.equal(scripts[0][1].trim(), 'type="module"');
   const [, , code] = scripts[0];
@@ -281,10 +302,17 @@ test('the built dashboard.html inlines its scripts, styles and trend chart and l
   assert.doesNotMatch(code, /\bimport\s*\(/);
   assert.doesNotMatch(code, /__VITE_[A-Z_]+__/);
   assert.doesNotMatch(code, /\bimport\s*["'{*]|\bfrom\s*["'](?:https?:)?\/\//);
-  const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((match) => match[1]);
+  const styles = blocks.filter(([, tag]) => tag.toLowerCase() === 'style').map(([, , , css]) => css);
   assert.ok(styles.some((css) => css.includes('--subset-font')), 'the page sets the system font stack');
-  // The markup outside the inlined code: no script src, stylesheet link, or any src or href.
-  const markup = html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+  // The markup outside the inlined code (the text between the blocks, read out rather than stripped): no
+  // script src, stylesheet link, or any src or href.
+  let markup = '';
+  let from = 0;
+  for (const block of blocks) {
+    markup += html.slice(from, block.index);
+    from = block.index + block[0].length;
+  }
+  markup += html.slice(from);
   assert.doesNotMatch(markup, /<script\b[^>]*\bsrc\s*=/i);
   assert.doesNotMatch(markup, /<link\b/i);
   assert.doesNotMatch(markup, /\s(?:src|href|srcset|action|poster)\s*=/i);
@@ -366,14 +394,20 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   const { host, bridge, mcp, timeouts } = await connectedBridge(t);
   const result = await passToolResult({ mcp, host });
 
+  // History is read again only after a status: a refused, failed or unreadable Refresh reads nothing more,
+  // so a host that asks before each call does not ask again right after the user declined.
+  const callsSince = (before) => host.calls.slice(before).map(({ name }) => name);
+  let before = host.calls.length;
   host.refuse = () => 'The user declined.';
   await Promise.all([bridge.refresh(), host.idle()]);
   assert.equal(bridge.state().refreshError, 'The user declined.');
   assert.deepEqual(bridge.state().status, result.structuredContent);
   assert.match(rendered(bridge), /Could not refresh: The user declined\./);
+  assert.deepEqual(callsSince(before), ['usage_status']);
 
   host.refuse = null;
   host.withhold = ({ name }) => name === 'usage_status';
+  before = host.calls.length;
   const refreshed = bridge.refresh();
   await host.idle();
   assert.equal(bridge.state().busy, true);
@@ -393,6 +427,7 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   await host.idle();
   assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [false, view.STATUS_LATE]);
   assert.equal(host.callIds('usage_status').length, 3);
+  assert.deepEqual(callsSince(before), ['usage_status', 'usage_status']);
 
   // A tool result the host passes while a Refresh is out is newer: the late reply does not replace it.
   const late = bridge.refresh();
@@ -407,15 +442,25 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
 
   // A malformed error envelope from the host gets the plain message, never a TypeError from reading it.
   host.withhold = ({ name }) => name === 'usage_status';
-  for (const content of [{}, [null], 'text']) {
-    const malformed = bridge.refresh();
+  const replyTo = async (body) => {
+    const pressed = bridge.refresh();
     await host.idle();
-    const id = host.sent.findLast((message) => message.method === 'tools/call').id;
-    host.deliver({ jsonrpc: '2.0', id, result: { isError: true, content, structuredContent: { error: 'down' } } });
-    await Promise.all([malformed, host.idle()]);
+    host.deliver({ jsonrpc: '2.0', id: host.callIds('usage_status').at(-1), ...body });
+    await Promise.all([pressed, host.idle()]);
+  };
+  before = host.calls.length;
+  for (const content of [{}, [null], 'text']) {
+    await replyTo({ result: { isError: true, content, structuredContent: { error: 'down' } } });
     assert.equal(bridge.state().refreshError, 'The usage tool failed.', JSON.stringify(content));
     assert.deepEqual(bridge.state().status, newer.structuredContent);
   }
+  // A result that is not a usage status, or no result at all, is shown as a failure too.
+  await replyTo({ result: { content: [], structuredContent: { schemaVersion: 1, accounts: 'none' } } });
+  assert.match(bridge.state().refreshError, /not a usage status/);
+  await replyTo({ result: 'none' });
+  assert.equal(bridge.state().refreshError, 'The host returned no tool result.');
+  assert.deepEqual(bridge.state().status, newer.structuredContent);
+  assert.deepEqual(callsSince(before), Array(5).fill('usage_status'));
 });
 
 /** A status read late: one account read and one that timed out, which the view shows side by side. */
@@ -551,6 +596,88 @@ test('usage_history follows the same rule: its deadline ends the wait, a later r
   assert.deepEqual(bridge.state().history, history([[NOW - HOUR, 30]]));
 });
 
+test('ui/initialize has a deadline: a withheld or refused answer shows a failure with a Refresh that asks again', async (t) => {
+  const session = await mcpSession(t);
+  const start = (initialize) => {
+    const host = fakeHost(session.mcp);
+    host.initialize = initialize;
+    const timeouts = fakeTimeouts();
+    const bridge = view.createBridge({ host: host.window, view: host.view, appInfo: { name: 'subset-usage-dashboard', version: '1.0.0' }, ...timeouts });
+    t.after(() => bridge.close());
+    return { host, timeouts, bridge, connected: bridge.connect() };
+  };
+  const initializeIds = (host) => host.sent.filter(({ method }) => method === 'ui/initialize').map(({ id }) => id);
+  const initializedSent = (host) => host.sent.filter(({ method }) => method === 'ui/notifications/initialized').length;
+
+  // Withheld: at the deadline the view stops loading and says so, with the disclosure and a Refresh.
+  const withheld = start('withhold');
+  await withheld.host.idle();
+  withheld.timeouts.advance(view.CONNECT_TIMEOUT_MS - 1);
+  assert.match(rendered(withheld.bridge), /aria-label="Loading accounts"/);
+  withheld.timeouts.advance(1);
+  await withheld.connected;
+  assert.deepEqual([withheld.bridge.state().connectError, withheld.bridge.state().busy], [view.CONNECT_LATE, false]);
+  let markup = rendered(withheld.bridge);
+  assert.ok(textOf(markup).includes(view.CONNECT_LATE));
+  assert.doesNotMatch(markup, /Loading accounts/);
+  assert.deepEqual(buttonLabels(markup), ['Refresh']);
+  assertDisclosure(markup);
+  assert.deepEqual([initializedSent(withheld.host), withheld.host.calls], [0, []]);
+  // Refresh (or R) sends ui/initialize again, busy while it waits.
+  assert.equal(withheld.host.press('r'), true);
+  assert.equal(withheld.bridge.state().busy, true);
+  await withheld.host.idle();
+  const [first, second] = initializeIds(withheld.host);
+  assert.ok(second > first);
+  // The first answer, late, still connects: initialized once, history read, the failure gone.
+  withheld.host.deliver({ jsonrpc: '2.0', id: first, result: initializeResult('light') });
+  await withheld.host.idle();
+  assert.deepEqual([withheld.bridge.state().connectError, withheld.bridge.state().busy, withheld.bridge.state().theme], [null, false, 'light']);
+  assert.deepEqual(withheld.bridge.state().history, fixtureHistory());
+  // The second answer, and the second deadline, change nothing.
+  withheld.host.deliver({ jsonrpc: '2.0', id: second, result: initializeResult('dark') });
+  withheld.timeouts.advance(view.CONNECT_TIMEOUT_MS);
+  await withheld.host.idle();
+  assert.deepEqual([initializedSent(withheld.host), withheld.bridge.state().connectError, withheld.bridge.state().theme], [1, null, 'light']);
+  assert.deepEqual(withheld.host.calls.map(({ name }) => name), ['usage_history']);
+  await passToolResult({ mcp: session.mcp, host: withheld.host });
+  assert.ok(rendered(withheld.bridge).includes('Main ChatGPT'));
+
+  // Refused: the host's message shows; Refresh asks again, and an answer connects.
+  const refused = start('refuse');
+  await refused.host.idle();
+  await refused.connected;
+  assert.equal(refused.bridge.state().connectError, 'The host did not connect the usage view: Not now.');
+  assert.match(rendered(refused.bridge), /role="alert">The host did not connect the usage view: Not now\./);
+  refused.host.initialize = 'answer';
+  await Promise.all([refused.bridge.refresh(), refused.host.idle()]);
+  assert.deepEqual([refused.bridge.state().connectError, refused.bridge.state().busy, initializedSent(refused.host)], [null, false, 1]);
+  assert.deepEqual(refused.host.calls.map(({ name }) => name), ['usage_history']);
+  assert.equal(refused.timeouts.size(), 0);
+
+  // An older ui/initialize's refusal after a newer one was sent does not show while the newer one waits.
+  const raced = start('withhold');
+  await raced.host.idle();
+  raced.timeouts.advance(view.CONNECT_TIMEOUT_MS);
+  await raced.connected;
+  void raced.bridge.refresh();
+  await raced.host.idle();
+  raced.host.deliver({ jsonrpc: '2.0', id: initializeIds(raced.host)[0], error: { code: -32000, message: 'Too late.' } });
+  await raced.host.idle();
+  assert.deepEqual([raced.bridge.state().connectError, raced.bridge.state().busy], [view.CONNECT_LATE, true]);
+
+  // Teardown while ui/initialize waits ends it: a later answer is not read and nothing more is sent.
+  const tornDown = start('withhold');
+  await tornDown.host.idle();
+  tornDown.host.deliver({ jsonrpc: '2.0', id: 'teardown-1', method: 'ui/resource-teardown', params: {} });
+  await tornDown.connected;
+  const sent = tornDown.host.sent.length;
+  tornDown.host.deliver({ jsonrpc: '2.0', id: initializeIds(tornDown.host)[0], result: initializeResult('dark') });
+  tornDown.timeouts.advance(view.CONNECT_TIMEOUT_MS);
+  await tornDown.host.idle();
+  assert.deepEqual([tornDown.bridge.state().closed, tornDown.bridge.state().connectError, tornDown.host.sent.length, tornDown.timeouts.size()], [true, null, sent, 0]);
+});
+
 test('the R key the Refresh button advertises refreshes, only while Refresh is shown and never with a modifier or in a field', async (t) => {
   const { host, bridge, mcp } = await connectedBridge(t);
   const statusCalls = () => host.calls.filter(({ name }) => name === 'usage_status').length;
@@ -584,10 +711,13 @@ test('an error shows with a Refresh that reads usage_status again: success shows
   assert.match(markup, /<button[^>]*aria-keyshortcuts="r"[^>]*>Refresh<\/button>/);
 
   host.refuse = () => 'The user declined.';
+  const before = host.calls.length;
   const failed = bridge.refresh();
   assert.match(rendered(bridge), /<button[^>]*disabled[^>]*>Checking<\/button>/);
   await Promise.all([failed, host.idle()]);
   assert.deepEqual([bridge.state().status, bridge.state().toolError, bridge.state().refreshError], [null, 'The usage_status call was cancelled.', 'The user declined.']);
+  // A declined Refresh reads no history.
+  assert.deepEqual(host.calls.slice(before).map(({ name }) => name), ['usage_status']);
   markup = rendered(bridge);
   assert.match(markup, /role="alert">The usage_status call was cancelled\./);
   assert.match(markup, /Could not refresh: The user declined\./);
@@ -634,6 +764,9 @@ test('the view renders no write control: the page passes the dashboard none of i
   await passToolResult({ mcp, host });
   const markup = rendered(bridge);
   assert.deepEqual(writeControls(markup), []);
+  // The local sign-ins disclosure shows with the accounts, without any control for the setting.
+  assertDisclosure(markup);
+  assert.ok(!buttonLabels(markup).some((label) => /sign-in/i.test(label)), 'no local sign-ins control');
   // The check finds the write controls when the dashboard is given its write props.
   const status = fixtureStatus();
   const write = view.render(view.UsageDashboard, { props: { status, manageAccounts() {}, openAccount() {}, togglePin() {}, redeemReset: async () => '' } }).body;

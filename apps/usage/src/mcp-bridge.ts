@@ -3,8 +3,9 @@
 // following the bridge Timer chose in SET-80 (no `@modelcontextprotocol/ext-apps`; see the README). It
 // sends `ui/initialize`, reads the theme from the host context, takes the `usage_status` result the host
 // passes as the dashboard's `status`, reads `usage_history` once connected, and calls `usage_status`
-// again only when the user presses Refresh or R: there is no polling. Every tool call has a deadline, so a
-// reply the host never sends cannot leave Refresh busy, but a reply that comes later is still taken. It
+// again only when the user presses Refresh or R: there is no polling. `ui/initialize` and every tool call
+// have a deadline, so a reply the host never sends cannot leave the view loading or Refresh busy, but a
+// reply that comes later is still taken. It
 // touches no DOM beyond the events it is given, so it runs under `node --test` with a fake host.
 import { isUsageStatus, type UsageStatus } from '@subset.dev/usage-core';
 import { isUsageHistory, type UsageHistory } from '@subset.dev/usage-core/history';
@@ -27,6 +28,10 @@ export const STATUS_TIMEOUT_MS = 180_000;
 export const HISTORY_TIMEOUT_MS = 15_000;
 /** The notice when usage_status has not replied by its deadline. */
 export const STATUS_LATE = 'The host has not replied to usage_status yet; the status shows here when it does.';
+/** How long the view waits for the host to answer `ui/initialize` (no server call); a later answer still connects. */
+export const CONNECT_TIMEOUT_MS = 15_000;
+/** The message when the host has not answered `ui/initialize` by its deadline. */
+export const CONNECT_LATE = 'The host has not connected the usage view yet. Refresh asks it again.';
 /** The hours of history read: the dashboard's 7-day activity and trend ranges (usage_history's maximum). */
 export const HISTORY_HOURS = 168;
 
@@ -42,7 +47,9 @@ export interface BridgeState {
   toolError: string | null;
   /** The latest Refresh failed or has not replied by its deadline; the dashboard keeps the last status. */
   refreshError: string | null;
-  /** A Refresh is running. */
+  /** The host refused `ui/initialize` or has not answered it by its deadline; null once connected. */
+  connectError: string | null;
+  /** A Refresh, or a new `ui/initialize` it sent, is running. */
   busy: boolean;
   /** The host's theme; null follows `prefers-color-scheme`. */
   theme: Theme | null;
@@ -78,12 +85,17 @@ export interface Bridge {
   state(): BridgeState;
   /** Calls `listener` after every change; returns a function that removes it. */
   subscribe(listener: (state: BridgeState) => void): () => void;
-  /** Sends `ui/initialize` and `ui/notifications/initialized`, then reads usage_history. */
+  /**
+   * Sends `ui/initialize` and, once the host answers, `ui/notifications/initialized`, then reads
+   * usage_history. Never rejects: a refusal or a missing answer by the deadline sets `connectError`, and a
+   * later answer still connects. Settles once history is read, or at the deadline.
+   */
   connect(): Promise<void>;
   /**
-   * Calls usage_status, with the provider the agent's call named, then reads usage_history again. The
-   * view's R key does the same once a status or tool error is shown, as the dashboard's Refresh advertises.
-   * Settles once the reply is shown and history read, or at the deadline; a later reply is still shown.
+   * Calls usage_status, with the provider the agent's call named, then reads usage_history again if the
+   * reply is a status. The view's R key does the same once a status or an error is shown, as the
+   * dashboard's Refresh advertises. Settles once the reply is shown and history read, or at the deadline; a
+   * later reply is still shown. Before the host has answered `ui/initialize`, it sends `ui/initialize` again.
    */
   refresh(): Promise<void>;
   /** Tells the host the view's size, once connected and only when it changed. */
@@ -126,7 +138,7 @@ export function createBridge({
   setTimeout: after = globalThis.setTimeout,
   clearTimeout: cancel = globalThis.clearTimeout as (handle: unknown) => void
 }: BridgeOptions): Bridge {
-  let current: BridgeState = { status: null, history: undefined, toolError: null, refreshError: null, busy: false, theme: null, closed: false };
+  let current: BridgeState = { status: null, history: undefined, toolError: null, refreshError: null, connectError: null, busy: false, theme: null, closed: false };
   const listeners = new Set<(state: BridgeState) => void>();
   const update = (change: Partial<BridgeState>) => {
     current = { ...current, ...change };
@@ -136,6 +148,8 @@ export function createBridge({
   let nextId = 0;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; deadline: unknown }>();
   let ready = false;
+  // Each `ui/initialize` sent: the first answer connects, and only the latest one's failure shows.
+  let connectOrder = 0;
   // The provider the agent's usage_status call named, so Refresh shows the same accounts.
   let provider: string | undefined;
   // Every status source is numbered when it starts: a tool result the host passes when it arrives, a
@@ -199,7 +213,7 @@ export function createBridge({
     });
   }
 
-  /** A Refresh's reply: shown unless something newer was; returns whether it was taken. */
+  /** A Refresh's reply: shown unless something newer was; returns whether a status was taken (only then is history read again). */
   function takeRefresh(order: number, result: { status: UsageStatus } | { error: string }): boolean {
     if (current.closed) return false;
     const latest = order === latestRefresh;
@@ -211,13 +225,13 @@ export function createBridge({
       return true;
     }
     // An earlier Refresh's failure says nothing about the one now running or shown.
-    if (!latest) return false;
-    update({ refreshError: result.error });
-    return true;
+    if (latest) update({ refreshError: result.error });
+    return false;
   }
 
   function refresh(): Promise<void> {
-    if (current.busy || current.closed || !ready) return Promise.resolve();
+    if (current.busy || current.closed) return Promise.resolve();
+    if (!ready) return connect();
     const order = ++statusOrder;
     latestRefresh = order;
     update({ busy: true });
@@ -230,6 +244,39 @@ export function createBridge({
       callTool('usage_status', provider === undefined ? {} : { provider }, { ms: STATUS_TIMEOUT_MS, expired })
         .then(statusOf, (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }))
         .then((result) => (takeRefresh(order, result) ? loadHistory() : undefined))
+        .finally(done);
+    });
+  }
+
+  /** The host's answer to `ui/initialize`: the first one connects the view; any later one is ignored. */
+  function initialized(result: unknown): Promise<void> | undefined {
+    if (ready || current.closed) return undefined;
+    ready = true;
+    if (isObject(result)) readHostContext(result.hostContext);
+    send({ method: 'ui/notifications/initialized' });
+    // Before the answer only a `ui/initialize` can be running, so busy was its wait.
+    update({ connectError: null, busy: false });
+    sendSize();
+    return loadHistory();
+  }
+
+  function connect(): Promise<void> {
+    if (ready || current.closed || current.busy) return Promise.resolve();
+    const order = ++connectOrder;
+    // The first `ui/initialize` shows the dashboard's loading state; one Refresh sends again shows it busy.
+    if (order > 1) update({ busy: true });
+    // A failure shows only for the latest `ui/initialize`, and only while the view is still not connected.
+    const failed = (message: string) => {
+      if (ready || current.closed || order !== connectOrder) return;
+      update({ connectError: message, busy: false });
+    };
+    return new Promise((done) => {
+      const expired = () => {
+        failed(CONNECT_LATE);
+        done();
+      };
+      request('ui/initialize', { protocolVersion: PROTOCOL_VERSION, appInfo, appCapabilities: {} }, { ms: CONNECT_TIMEOUT_MS, expired })
+        .then(initialized, (error: unknown) => failed(`The host did not connect the usage view: ${error instanceof Error ? error.message : String(error)}`))
         .finally(done);
     });
   }
@@ -302,7 +349,7 @@ export function createBridge({
     const target = event.target as { closest?: (selectors: string) => unknown } | null;
     if (event.key !== 'r' || event.metaKey || event.ctrlKey || event.altKey) return;
     if (typeof target?.closest === 'function' && target.closest('input, textarea, select, dialog')) return;
-    if (!current.status && !current.toolError) return;
+    if (!current.status && !current.toolError && !current.connectError) return;
     event.preventDefault();
     void refresh();
   };
@@ -335,15 +382,7 @@ export function createBridge({
       listeners.add(next);
       return () => listeners.delete(next);
     },
-    async connect() {
-      const result = await request('ui/initialize', { protocolVersion: PROTOCOL_VERSION, appInfo, appCapabilities: {} });
-      if (current.closed) return;
-      if (isObject(result)) readHostContext(result.hostContext);
-      send({ method: 'ui/notifications/initialized' });
-      ready = true;
-      sendSize();
-      await loadHistory();
-    },
+    connect,
     refresh,
     sizeChanged(width, height) {
       size = { width, height };

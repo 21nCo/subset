@@ -32,6 +32,6 @@ new ResizeObserver(() => {
   });
 }).observe(document.body);
 
-void bridge.connect().catch(() => {
-  // No host answered ui/initialize (the page was opened outside an MCP host); the view stays waiting.
-});
+// If the host refuses ui/initialize or does not answer in time (as outside an MCP host), the view says so
+// and its Refresh asks again.
+void bridge.connect();
