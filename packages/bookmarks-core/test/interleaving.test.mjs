@@ -235,15 +235,68 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       for (const bookmark of [first, late]) assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
     });
 
-    test('merge records that point at each other are followed once', async () => {
+    test('a merge back into a tag recorded as merging into the source fails with conflict, and records are followed once', async () => {
       const { bookmark } = await ops.addBookmark('https://mergecycle.example/', { tags: ['mc-a', 'mc-b'] });
       const [a, b] = bookmark.tags;
-      // A is recorded as merged into B but the merge stops before deleting A; B is then merged into A.
+      // A is recorded as merged into B but the merge stops before deleting A.
       const broken = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tags' && payload.operation === 'delete') });
       await assert.rejects(broken.mergeTags([a.id], b.id), /injected failure/);
-      assert.deepEqual(await ops.mergeTags([b.id], a.id), a);
+      // Merging B back into A would leave the bookmarks on neither: it fails and withdraws its record.
+      await rejectsWith(ops.mergeTags([b.id], a.id), 'conflict');
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [a, b]);
+      // When that withdrawal is interrupted too, both records stay, and tagging with A follows each once.
+      const stuck = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tag_merges' && payload.operation === 'delete') });
+      await assert.rejects(stuck.mergeTags([b.id], a.id), /injected failure/);
       const other = (await ops.addBookmark('https://mergecycle.example/2', { tags: ['MC-A'] })).bookmark;
-      assert.deepEqual(other.tags, [a]);
+      assert.deepEqual(other.tags, [a, b]);
+      // Each merge withdraws its own record on conflict, so after one does the other completes.
+      await rejectsWith(ops.mergeTags([a.id], b.id), 'conflict');
+      assert.deepEqual(await ops.mergeTags([b.id], a.id), a);
+      for (const id of [bookmark.id, other.id]) assert.deepEqual((await ops.getBookmark(id)).tags, [a]);
+    });
+
+    // Pauses a merge after a read of the tag's bookmarks that found some, before it moves them.
+    const afterMemberRead = (tag, point) => (payload, result) => payload.filters?.['tags.id'] === tag.id && result.data.length > 0 && point.pause();
+
+    test('crossed merges of two tags: at most one succeeds and the bookmark keeps a live tag', async () => {
+      const { bookmark } = await ops.addBookmark('https://crossed.example/', { tags: ['cx-a', 'cx-b'] });
+      const [a, b] = bookmark.tags;
+      const [pointA, pointB] = [pausePoint(), pausePoint()];
+      const intoB = (await writer({ afterQuery: afterMemberRead(a, pointA) })).mergeTags([a.id], b.id);
+      await pointA.reached;
+      const intoA = (await writer({ afterQuery: afterMemberRead(b, pointB) })).mergeTags([b.id], a.id);
+      await pointB.reached;
+      pointA.release();
+      pointB.release();
+      const results = await Promise.allSettled([intoB, intoA]);
+      for (const result of results) if (result.status === 'rejected') assert.equal(result.reason.code, 'conflict', String(result.reason));
+      const won = results.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+      assert.ok(won.length <= 1, 'both merges succeeded');
+      const tags = (await ops.getBookmark(bookmark.id)).tags;
+      if (won.length === 1) {
+        assert.deepEqual(tags, won);
+      } else {
+        assert.deepEqual(tags, [a, b]);
+        // Both withdrew their records, so the merge can be run again.
+        assert.deepEqual(await ops.mergeTags([a.id], b.id), b);
+        assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [b]);
+      }
+    });
+
+    test('a merge into a tag whose own merge is finishing ends on the last target', async () => {
+      const tagged = (await ops.addBookmark('https://chained.example/1', { tags: ['ch-s'] })).bookmark;
+      const other = (await ops.addBookmark('https://chained.example/2', { tags: ['ch-t', 'ch-u'] })).bookmark;
+      const s = tagged.tags[0];
+      const [t, u] = other.tags;
+      await ops.removeTags(other.id, ['ch-t']);
+      const point = pausePoint();
+      // T into U pauses after reading that T has no bookmarks, before deleting T; S into T then completes.
+      const merging = (await writer({ afterQuery: afterEmptyMemberRead(t, point) })).mergeTags([t.id], u.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([s.id], t.id), t);
+      point.release();
+      assert.deepEqual(await merging, u);
+      assert.deepEqual((await ops.getBookmark(tagged.id)).tags, [u]);
     });
 
     if (backend === 'sqlite') {

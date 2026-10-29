@@ -195,6 +195,21 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(tagNames(saved), ['t0', 't1', 't2', 't3', 't4', 't5']);
     });
 
+    test('concurrent moves and adds onto one URL leave one bookmark with it', async () => {
+      const others = await Promise.all(['1', '2'].map(async (n) => (await ops.addBookmark(`https://moverace.example/${n}`)).bookmark));
+      const results = await Promise.allSettled([
+        ...others.map((bookmark) => ops.updateBookmark(bookmark.id, { url: 'https://moverace.example/same' })),
+        ops.addBookmark('https://moverace.example/same')
+      ]);
+      const holders = [];
+      for (const bookmark of others) if ((await ops.getBookmark(bookmark.id)).url === 'https://moverace.example/same') holders.push(bookmark.id);
+      const added = results[2].value;
+      if (!added.duplicate) holders.push(added.bookmark.id);
+      assert.equal(holders.length, 1, JSON.stringify(results.map((result) => result.status)));
+      assert.equal(added.bookmark.id, holders[0]);
+      for (const result of results.slice(0, 2)) if (result.status === 'rejected') assert.equal(result.reason.code, 'duplicate-url');
+    });
+
     if (backend !== 'memory') {
       // The memory adapter keys rows by id across namespaces, so it holds one user; the migrations key by (__ns, id).
       test('each user has their own bookmarks, tags and apiId sequence', async () => {

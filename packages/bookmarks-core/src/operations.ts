@@ -436,7 +436,10 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     const duplicateUrl = (existingId: string, cause?: unknown) =>
       new BookmarkError('duplicate-url', `Another bookmark already has ${target?.canonicalUrl}`, { existingId, cause });
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    // One read, check and write: the bookmark when there is nothing to write, `true` once written, `false` to decide
+    // again. With a `url` it runs in the per-executor chain, like an add, so on the memory adapter (no unique index)
+    // no other writer here can take the canonical URL between the check and the write.
+    const writeOnce = async (): Promise<Bookmark | boolean> => {
       const current = await requireBookmark(id);
       const record: Row = { ...fields };
       // Without a URL only existence is guarded (so `merge` cannot recreate a deleted row). With one, `url`,
@@ -471,12 +474,19 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           if (otherId && otherId !== current.id) throw duplicateUrl(otherId, error);
         }
         // The bookmark was deleted (not-found on the next read) or its URL changed since it was read: decide again.
-        if (isGuardConflict(error)) continue;
+        if (isGuardConflict(error)) return false;
         throw error;
       }
+      return true;
+    };
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const written = await (target ? serialized(executor, writeOnce) : writeOnce());
+      if (written === false) continue;
+      if (written !== true) return written;
       // After any URL write, moved or not, a pending bookmark gets a job for the page it is on now: so repeating an
       // update whose enqueue failed recovers, and so does a write that datafn let past a concurrent move.
-      return target ? requestDetails(current.id) : requireBookmark(current.id);
+      return target ? requestDetails(id) : requireBookmark(id);
     }
     throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
   }
@@ -558,6 +568,30 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     return row ? String(row.targetId) : null;
   }
 
+  /**
+   * Links the bookmarks to the tag and, like linkTags, on along its merge records. `moved` when they reached a live
+   * tag no merge has recorded, `retry` when one of the bookmarks was deleted, and `conflict` when the records lead
+   * back to a tag already passed (merges into each other, one of them `sourceId`'s) or end at a deleted tag.
+   */
+  async function attachAlongMerges(bookmarkIds: string[], tagId: string, sourceId: string): Promise<'moved' | 'retry' | 'conflict'> {
+    const passed = new Set([sourceId]);
+    for (let tag = tagId; !passed.has(tag); ) {
+      passed.add(tag);
+      let linked = true;
+      try {
+        await relate('relate', 'tags', tag, bookmarkIds);
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+        if (await findTag(tag)) return 'retry';
+        linked = false;
+      }
+      const next = await mergedInto(tag);
+      if (next === null) return linked ? 'moved' : 'conflict';
+      tag = next;
+    }
+    return 'conflict';
+  }
+
   async function mergeTags(sourceTagIds: string[], targetTagId: string): Promise<Tag> {
     const target = await requireTag(targetTagId);
     const sources = normalizeIds(sourceTagIds, 'sourceTagIds').filter((id) => id !== target.id);
@@ -572,18 +606,24 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       // Recorded before the last read of the source's bookmarks, so a link written after that read is followed to
       // the target by linkTags; `merge` creates the row or points it at this target.
       await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
-      // Moves the source's bookmarks until it has none, so one tagged while the merge runs is moved too.
+      // Moves the source's bookmarks until it has none, so one tagged while the merge runs is moved too. They are
+      // unlinked from the source only once linked to the end of the target's merges, which a later merge of that
+      // tag reads after recording it, so a merge of the target running meanwhile carries them on.
       for (let attempt = 0; ; attempt++) {
         const bookmarkIds = await taggedBookmarkIds(id);
         if (bookmarkIds.length === 0) break;
         if (attempt === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not merge the tags because of concurrent writes; try again');
-        try {
-          await relate('relate', 'tags', target.id, bookmarkIds);
-        } catch (error) {
-          // A bookmark deleted since the read: read the members again (the target is checked so this cannot spin).
-          if (!isNotFound(error)) throw error;
-          await requireTag(target.id);
-          continue;
+        const moved = await attachAlongMerges(bookmarkIds, target.id, id);
+        if (moved === 'retry') continue;
+        if (moved === 'conflict') {
+          // The target is being merged back into the source (or the merges cross): withdraw this merge's record so
+          // the source stays a plain tag, and keep its bookmarks on it.
+          try {
+            await mutate({ resource: 'tag_merges', operation: 'delete', id, if: { id, targetId: target.id } });
+          } catch (error) {
+            if (!isGuardConflict(error)) throw error;
+          }
+          throw new BookmarkError('conflict', `Tag ${target.name} is being merged into another tag; finish that merge first`);
         }
         await relate('unrelate', 'tags', id, bookmarkIds);
       }
