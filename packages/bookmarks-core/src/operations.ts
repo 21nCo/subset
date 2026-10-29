@@ -561,13 +561,13 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     for (const id of normalizeIds(ids, 'ids')) {
       const bookmark = await getBookmark(id);
       if (!bookmark) continue;
-      // datafn leaves join rows behind when a record is deleted, so the tag links go first.
-      await relate(
-        'unrelate',
-        'bookmarks',
-        id,
-        bookmark.tags.map((tag) => tag.id)
-      );
+      // datafn leaves join rows behind when a record is deleted, so the tag links go first, until a read finds none
+      // (a tag added meanwhile is unlinked too).
+      for (let tags = bookmark.tags, attempt = 0; tags.length > 0; attempt++) {
+        if (attempt === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not delete the bookmark because of concurrent writes; try again');
+        await relate('unrelate', 'bookmarks', id, tags.map((tag) => tag.id));
+        tags = (await getBookmark(id))?.tags ?? [];
+      }
       await mutate({ resource: 'bookmarks', operation: 'delete', id });
       deleted.push(id);
     }

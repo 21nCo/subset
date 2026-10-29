@@ -675,6 +675,26 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual((await ops.addBookmark('https://del.example/3', { tags: ['D-TAG'] })).bookmark.tags, one.tags);
     });
 
+    test('a tag added while a delete unlinks is unlinked too, so no join row outlives the bookmark', async () => {
+      const { bookmark } = await ops.addBookmark('https://del-tagged.example/', { tags: ['dt-a'] });
+      const point = pausePoint();
+      const deleter = await writer({ beforeMutate: (payload) => payload.operation === 'unrelate' && point.pause() });
+      const deleting = deleter.deleteBookmarks([bookmark.id]);
+      await point.reached;
+      assert.deepEqual(
+        (await ops.addTags(bookmark.id, ['dt-b'])).tags.map((tag) => tag.name),
+        ['dt-a', 'dt-b']
+      );
+      point.release();
+      assert.deepEqual(await deleting, { deleted: [bookmark.id] });
+      assert.equal(await ops.getBookmark(bookmark.id), null);
+      const kept = (await ops.addBookmark('https://del-tagged.example/other', { tags: ['DT-B'] })).bookmark.tags;
+      assert.deepEqual(kept.map((tag) => tag.name), ['dt-b']);
+      const sql = 'SELECT count(*) AS n FROM bookmark_tags WHERE "from" = ';
+      if (host.raw) assert.equal(host.raw.prepare(`${sql}?`).get(bookmark.id).n, 0);
+      if (host.pglite) assert.equal(Number((await host.pglite.query(`${sql}$1`, [bookmark.id])).rows[0].n), 0);
+    });
+
     test('an add interrupted while tagging still has its details job, and adding again adds the tags', async () => {
       const queue = recordingQueue();
       const broken = await writer({ beforeMutate: failOnce((payload) => payload.operation === 'relate') }, queue);

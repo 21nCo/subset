@@ -78,7 +78,7 @@ export const BACKENDS = {
     const pglite = new PGlite();
     await pglite.exec(migrationSql('postgres'));
     const db = drizzleAdapter({ db: drizzlePglite(pglite, { schema: drizzleTables(pgTable, postgresColumn) }), dialect: 'postgres' });
-    return { server: await server(db), another: () => server(db), close: async () => pglite.close() };
+    return { server: await server(db), another: () => server(db), pglite, close: async () => pglite.close() };
   }
 };
 
