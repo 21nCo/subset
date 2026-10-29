@@ -139,3 +139,40 @@ test('a request, resolution or read that fails after the limit leaves no unhandl
   assert.equal(result.stdout.trim(), 'ok');
   assert.equal(result.status, 0);
 });
+
+// Node only: a child process with --expose-gc measures the heap, which workerd does not expose.
+test('memory held while reading follows the bytes kept, not the number of reads', () => {
+  const script = `
+    import * as lib from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)};
+    const held = () => { gc(); const usage = process.memoryUsage(); return usage.heapUsed + usage.arrayBuffers; };
+    const growth = {};
+    for (const [name, operation] of [['fetchLinkDetails', lib.fetchLinkDetails], ['fetchResource', lib.fetchResource]]) {
+      for (const size of [0, 1]) {
+        // 16,000 always-ready reads of empty or 1-byte chunks: memory is measured after 1,000 and before closing.
+        let pulls = 0;
+        let start = 0;
+        let end = 0;
+        const stream = new ReadableStream({
+          pull(controller) {
+            pulls++;
+            if (pulls === 1000) start = held();
+            if (pulls === 16000) {
+              end = held();
+              controller.close();
+            } else controller.enqueue(new Uint8Array(size));
+          }
+        }, { highWaterMark: 0 });
+        const fetch = async () => new Response(stream, { headers: { 'content-type': 'text/html' } });
+        await operation('https://example.com/', { fetch, timeoutMs: 60_000 }).catch(() => {});
+        growth[name + ' ' + size + '-byte'] = end - start;
+      }
+    }
+    console.log(JSON.stringify(growth));
+  `;
+  const result = spawnSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(result.stderr, '');
+  // Keeping each chunk object would hold about 200 bytes per read, over 3 MB here.
+  for (const [label, bytes] of Object.entries(JSON.parse(result.stdout))) {
+    assert.ok(bytes < 1_000_000, `${label}: ${bytes} bytes held after 15,000 more reads`);
+  }
+});

@@ -65,8 +65,10 @@ export interface SafeFetchOptions {
    */
   timeoutMs?: number;
   /**
-   * Most body bytes read. `fetchLinkDetails` reads at most the smaller of this and `MAX_DOCUMENT_BYTES`, the part
-   * `parseLinkDetails` parses, and stops once the body fills that bound, counting it as a cut.
+   * Most body bytes kept. The stream is cancelled once the bound is reached, so the last read may have received
+   * part of a chunk beyond it, which is dropped. `fetchLinkDetails` keeps at most the smaller of this and
+   * `MAX_DOCUMENT_BYTES`, the part `parseLinkDetails` parses, and stops once the body fills that bound, counting it
+   * as a cut.
    */
   maxBytes?: number;
   /** Most redirects followed. Defaults to 5. */
@@ -102,6 +104,8 @@ const HTML_TYPES = new Set(['text/html', 'application/xhtml+xml']);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 // How many hops and body reads run between two yields to the event loop.
 const YIELD_EVERY_STEPS = 16;
+// First size of the buffer a body is copied into; it doubles as needed, up to the byte limit.
+const INITIAL_BODY_BYTES = 64 * 1024;
 const MEDIA_RANGE = /^(?:\*\/\*|[a-z0-9!#$%&'*+.^_`|~-]+\/(?:\*|[a-z0-9!#$%&'*+.^_`|~-]+))$/;
 // Details fields a document can supply besides the URL, content type and fallback icon.
 const BASE_KEYS = new Set(['version', 'url', 'icons', 'contentType']);
@@ -299,9 +303,11 @@ async function check(url: URL, settings: Settings, deadline: Deadline): Promise<
 }
 
 /**
- * Reads at most `maxBytes` of the body, then cancels the stream. With `stopAtLimit`, reading stops as soon as
- * the body fills `maxBytes` and that counts as truncated; without it, one more read tells a body of exactly
- * `maxBytes` from a larger one.
+ * Keeps at most `maxBytes` of the body, then cancels the stream; the read that passes the bound may have
+ * received the rest of its chunk, which is dropped. With `stopAtLimit`, reading stops as soon as the body fills
+ * `maxBytes` and that counts as truncated; without it, one more read tells a body of exactly `maxBytes` from a
+ * larger one. Each chunk is copied into one buffer that grows up to `maxBytes`, so memory follows the bytes
+ * kept, not the number of reads.
  */
 async function readBody(
   response: Response,
@@ -310,28 +316,27 @@ async function readBody(
   deadline: Deadline,
   stopAtLimit: boolean
 ): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-  const chunks: Uint8Array[] = [];
+  let buffer = new Uint8Array(0);
   let total = 0;
   let truncated = false;
   let done = false;
   const reader = response.body?.getReader();
-  if (!reader) return { bytes: new Uint8Array(0), truncated };
+  if (!reader) return { bytes: buffer, truncated };
   try {
     while (!done) {
       await deadline.step(url);
       const next = await deadline.race(reader.read(), url);
       done = next.done;
       if (next.done) break;
-      const room = maxBytes - total;
-      if (next.value.byteLength > room) {
-        chunks.push(next.value.subarray(0, room));
-        total += room;
-        truncated = true;
-        break;
+      const kept = Math.min(next.value.byteLength, maxBytes - total);
+      if (total + kept > buffer.byteLength) {
+        const grown = new Uint8Array(Math.min(maxBytes, Math.max(total + kept, buffer.byteLength * 2, INITIAL_BODY_BYTES)));
+        grown.set(buffer.subarray(0, total));
+        buffer = grown;
       }
-      chunks.push(next.value);
-      total += next.value.byteLength;
-      if (stopAtLimit && total === maxBytes) {
+      buffer.set(next.value.subarray(0, kept), total);
+      total += kept;
+      if (kept < next.value.byteLength || (stopAtLimit && total === maxBytes)) {
         truncated = true;
         break;
       }
@@ -341,13 +346,7 @@ async function readBody(
   } finally {
     if (!done) reader.cancel().catch(() => {});
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { bytes, truncated };
+  return { bytes: total === buffer.byteLength ? buffer : buffer.slice(0, total), truncated };
 }
 
 /** Releases a body that will not be read. */

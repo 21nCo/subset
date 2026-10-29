@@ -361,6 +361,36 @@ export const cases = [
     }
   },
   {
+    name: 'a body in many small and empty chunks is kept byte for byte, in order, and cut inside a chunk',
+    async run(lib) {
+      // About 200 KB in chunks of up to 4,999 bytes with an empty chunk after every two, so the kept bytes outgrow several buffer sizes.
+      const parts = [];
+      for (let index = 0; parts.reduce((sum, part) => sum + part.length, 0) < 200_000; index++) {
+        parts.push(index % 3 === 2 ? new Uint8Array(0) : Uint8Array.from({ length: (index * 37) % 5000 }, (_, offset) => (index + offset) % 251));
+      }
+      const whole = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+      parts.reduce((offset, part) => (whole.set(part, offset), offset + part.length), 0);
+      const serve = (body) => fakeFetch({ 'https://example.com/i': () => new Response(body.stream, { headers: { 'content-type': 'image/png' } }) }).fetch;
+      const chunked = () => trackedStream((pull) => parts[pull]);
+      // Two reads at once each get their own bytes.
+      const [first, second] = await Promise.all([lib.fetchResource('https://example.com/i', { fetch: serve(chunked()) }), lib.fetchResource('https://example.com/i', { fetch: serve(chunked()) })]);
+      for (const [label, resource] of [['first', first], ['second', second]]) {
+        equal(resource.bytes.length, whole.length, `${label} length`);
+        if (!resource.bytes.every((byte, index) => byte === whole[index])) fail(`${label}: bytes differ from the body`);
+      }
+      const exact = await lib.fetchResource('https://example.com/i', { fetch: serve(chunked()), maxBytes: whole.length });
+      equal(exact.bytes.length, whole.length, 'chunked body of exactly maxBytes');
+      const cut = chunked();
+      await rejects(lib, lib.fetchResource('https://example.com/i', { fetch: serve(cut), maxBytes: whole.length - 1 }), 'too_large', 'one byte over maxBytes');
+      equal(cut.cancelled, true, 'cut inside its last chunk, then cancelled');
+      // HTML split into small chunks with empty ones between them parses as one document.
+      const page = '<html lang="en"><head><title>Split</title><meta name="description" content="In pieces"></head></html>';
+      const pieces = trackedStream((pull) => (pull >= page.length * 2 ? undefined : pull % 2 ? '' : page.slice(pull / 2, pull / 2 + 1)));
+      const details = await lib.fetchLinkDetails('https://example.com/', { fetch: fakeFetch({ 'https://example.com/': () => new Response(pieces.stream, { headers: { 'content-type': 'text/html' } }) }).fetch });
+      equal([details.title, details.description, details.language], ['Split', 'In pieces', 'en'], 'details from 1-byte chunks');
+    }
+  },
+  {
     name: 'a body filling maxBytes is parsed without waiting for another read',
     async run(lib) {
       const prefix = '<title>Ready</title>';
@@ -570,6 +600,9 @@ export const cases = [
       const blocked = fakeFetch({ 'https://example.com/favicon': redirect('http://127.0.0.1/icon.png') });
       await rejects(lib, lib.fetchResource('https://example.com/favicon', { fetch: blocked.fetch }), 'blocked_address', 'private icon');
       equal(blocked.urls(), ['https://example.com/favicon'], 'requests for a private icon');
+      const resolved = fakeFetch({});
+      await rejects(lib, lib.fetchResource('https://icons.example/favicon.ico', { fetch: resolved.fetch, resolveHost: () => ['192.168.1.10'] }), 'blocked_address', 'icon host resolving privately');
+      equal(resolved.urls(), [], 'requests for an icon host resolving privately');
 
       const unread = trackedStream(() => '<html>');
       const wrongType = fakeFetch({ 'https://example.com/i': () => new Response(unread.stream, { headers: { 'content-type': 'text/html' } }) });
