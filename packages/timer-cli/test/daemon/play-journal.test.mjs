@@ -507,6 +507,64 @@ test('a handback of a part the sink holds for the app is answered only once a fi
   assert.deepEqual(spawner.started, ['notification']);
 });
 
+test('a part the sink holds for the app that the app says it finished is answered 410 only once a file records it: neither -> 500 and not played; saying so again once scheduler.json can be saved records it for the next daemon', async (t) => {
+  const { spawner, holder, alertId, subscriberId } = await heldWhileAppRuns(t, { restart: false });
+  breakScheduler(holder);
+  breakPlays(holder);
+  const refused = await call(holder, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' });
+  assert.deepEqual([refused.status, refused.body.error?.code], [500, 'storage_failed']);
+  // This daemon knows the app finished it: the app ending plays nothing.
+  holder.processes.live.delete(APP);
+  await settle();
+  assert.deepEqual(spawner.started, []);
+  // plays.json still cannot be written: the save of scheduler.json that answers carries the finished part.
+  fixScheduler(holder);
+  assert.equal((await call(holder, `/v1/alerts/${alertId}/played`, { subscriberId, part: 'notification' })).status, 410);
+  const [carried] = scheduler(holder.dataDir).plays;
+  assert.deepEqual([carried.alertId, carried.played], [alertId, ['notification']]);
+  // A daemon killed now leaves the next one nothing to play.
+  const { spawner: after } = await successorOf(t, holder);
+  await settle();
+  assert.deepEqual([spawner.started, after.started], [[], []]);
+});
+
+test('a daemon whose lock is replaced while its sink holds a part for the app plays nothing once the app ends: the daemon that holds the lock plays it once', async (t) => {
+  const { spawner, holder } = await heldWhileAppRuns(t, { restart: false });
+  const lockPath = holder.daemon.paths.lock;
+  writeFileSync(lockPath, JSON.stringify({ pid: 1, token: 'another daemon' }));
+  holder.processes.live.delete(APP);
+  assert.equal(await within(holder.daemon.closed), 1);
+  await settle();
+  assert.deepEqual(spawner.started, []);
+  // The daemon that replaced the lock has gone, so the next one takes it, and plays the part the app left.
+  unlinkSync(lockPath);
+  const { spawner: after } = await successorOf(t, holder, partSpawn(), holder.dataDir);
+  await eventually(() => after.started.length === 1);
+  await settle();
+  assert.deepEqual([spawner.started, after.started], [[], ['notification']]);
+});
+
+for (const path of ['with no handler', 'unacknowledged']) {
+  test(`while plays.json cannot be written, a sink play ${path} is carried by scheduler.json before its first process spawns: a daemon killed then leaves it to the next daemon, which plays it once`, async (t) => {
+    // The daemon is killed as its sink spawns the first process: the files it leaves are those on disk then.
+    let context;
+    let left;
+    const spawner = partSpawn({ hold: () => ((left ??= filesLeftByKill(t, context)), false) });
+    ({ context } = await daemonWithSink(t, spawner, { handler: path === 'unacknowledged' }));
+    breakPlays(context);
+    await finishCountdown(context);
+    if (path === 'unacknowledged') context.clock.advance(ACK_TIMEOUT_MS);
+    await eventually(() => left !== undefined);
+    const [carried] = scheduler(left).plays ?? [];
+    assert.deepEqual([carried?.finished, carried?.played], [false, []]);
+    const { spawner: after } = await successorOf(t, context, partSpawn(), left);
+    await eventually(() => after.started.includes('notification'));
+    await settle();
+    assert.equal(after.started.filter((what) => what === 'notification').length, 1);
+    spawner.release();
+  });
+}
+
 test('a daemon whose sink holds a part for a stalled app does not exit idle; once the app ends the part plays once and the idle exit starts over', async (t) => {
   const { spawner, holder } = await heldWhileAppRuns(t, { restart: false });
   let exited = false;
@@ -664,7 +722,7 @@ test('a handback after the app asked to show a part and did not (the notificatio
   assert.deepEqual(spawner.started, ['notification']);
 });
 
-test('a handback after the app finished some parts, then a crash before the sink recorded its play anywhere, has the next daemon play only the rest', async (t) => {
+test('a handback after the app finished some parts, then a crash as the sink is called while plays.json cannot be written, has the next daemon play only the rest: scheduler.json already carries the play', async (t) => {
   const spawner = partSpawn();
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });
   await finishCountdown(context);
@@ -678,7 +736,7 @@ test('a handback after the app finished some parts, then a crash before the sink
   };
   assert.equal((await call(context, `/v1/alerts/${alertId}/release`, { subscriberId })).status, 200);
   assert.ok(left);
-  assert.deepEqual(scheduler(left).handoffs.map(({ played }) => played), [['notification', 'sound:0']]);
+  assert.deepEqual(scheduler(left).plays.map(({ alertId: id, played }) => [id, played]), [[alertId, ['notification', 'sound:0']]]);
 
   const { spawner: after } = await successorOf(t, context, partSpawn(), left);
   await eventually(() => after.started.length === 2);

@@ -255,12 +255,13 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
 
     /**
      * Records, before the sink is called, that it starts playing `alertId`, with the parts `played`
-     * already and those its handler's executor may still be playing (`running`, `part → executor`).
+     * already and those its handler's executor may still be playing (`running`, `part → executor`);
+     * returns the error of a failed write (see `flush`).
      */
     begin(alertId, { alert, timer, subscriberId = null, keys = [], played = [], running = {} }) {
       const left = Object.entries(running).filter(([part]) => !played.includes(part));
       plays.set(alertId, { alert, timer, subscriberId, keys, played: new Set(played), running: new Map(left), finished: false, saved: false, rev: 0 });
-      flush();
+      return flush();
     },
 
     /**
@@ -285,12 +286,12 @@ export function createPlayJournal({ entries = [], progress = [], persist = () =>
       else lookUpBirth();
     },
 
-    /** Records that `part` of `alertId` finished playing. */
+    /** Records that `part` of `alertId` finished playing; returns the error of a failed write (see `flush`). */
     done(alertId, part) {
       const entry = plays.get(alertId);
-      if (!entry || entry.finished || entry.played.has(part)) return;
+      if (!entry || entry.finished || entry.played.has(part)) return null;
       markDone(entry, part);
-      flush();
+      return flush();
     },
 
     /**

@@ -13,15 +13,15 @@ import { CliError } from './shared.mjs';
  */
 const STOP_TIMEOUT_MS = 8_000;
 
-/** True while the daemon with `pid` still holds `daemon.lock` at `lockPath`. */
+/** True while the daemon with `pid` may still hold `daemon.lock` at `lockPath`. */
 function holdsDaemonLock(lockPath, pid) {
   if (!lockPath) return false;
   let held;
   try {
     held = readLock(lockPath);
   } catch {
-    // A lock this user cannot read tells nothing about the daemon; its socket is already gone.
-    return false;
+    // A lock that cannot be read may still be the daemon's: asked again until it can, or the wait ends.
+    return true;
   }
   return held?.pid === pid && holderAlive(held);
 }
@@ -82,8 +82,8 @@ export const daemonCommands = {
         // It may close the connection as it exits; the wait below tells.
       }
       const deadline = performance.now() + STOP_TIMEOUT_MS;
-      // It has stopped once its socket is gone and it no longer holds the lock, so a `daemon run`
-      // right after starts; a daemon another client started meanwhile is not waited for.
+      // It has stopped once its socket is gone and the lock shows it no longer holds it, so a
+      // `daemon run` right after starts; a daemon another client started meanwhile is not waited for.
       while ((await runningDaemon(client))?.pid === daemon.pid || holdsDaemonLock(client.paths?.lock, daemon.pid)) {
         if (performance.now() > deadline) throw new CliError('daemon_unavailable', `The Timer daemon did not stop within ${STOP_TIMEOUT_MS / 1000} s.`);
         await sleep(50);

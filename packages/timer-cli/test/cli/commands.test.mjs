@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createSilentSink } from '../../src/alerts/index.mjs';
@@ -358,6 +359,41 @@ test('daemon stop returns only once the daemon finishing its sink has let go of 
     }
   });
   assert.deepEqual({ code: next.code, stdout: next.stdout, foreground }, { code: 0, stdout: '', foreground: [process.pid] });
+});
+
+test('daemon stop counts a daemon.lock it cannot read as still held: it returns once the lock can be read, and fails at its bound if it never can', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'std-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const lock = join(dir, 'daemon.lock');
+  for (const recovers of [true, false]) {
+    // A directory in its place: every read of the lock fails.
+    mkdirSync(lock);
+    let answering = true;
+    const client = {
+      paths: { lock },
+      async status() {
+        if (!answering) throw new Error('connect ENOENT');
+        return { status: 200, body: { pid: process.pid } };
+      },
+      async shutdown() {
+        answering = false;
+      }
+    };
+    let stopped = null;
+    const stopping = runCli(['daemon', 'stop', '--json'], { client }).then((result) => (stopped = result));
+    // The socket is gone, but the lock cannot tell whether the daemon still holds it.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(stopped, null, `recovers: ${recovers}`);
+    if (recovers) rmSync(lock, { recursive: true });
+    const result = await within(stopping, 10_000, 'daemon stop');
+    assert.deepEqual(
+      { code: result.code, json: result.json() },
+      recovers
+        ? { code: 0, json: { stopped: true } }
+        : { code: 3, json: { error: { code: 'daemon_unavailable', message: 'The Timer daemon did not stop within 8 s.' } } }
+    );
+    rmSync(lock, { recursive: true, force: true });
+  }
 });
 
 test('daemon run runs the daemon with the selected sink in the foreground', async () => {
