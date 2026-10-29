@@ -73,4 +73,23 @@ public enum HelperRunner {
         registry.shutDown()
         return output
     }
+
+    /// For a helper sent `SIGTERM`, `SIGINT`, or `SIGHUP` (an agent's timeout, Ctrl-C, a closed terminal) while it
+    /// awaits a command, which macOS would leave running: sends `SIGKILL` to every command `registry` holds, then exits
+    /// with 128 plus the signal's number. A dispatch signal source does the work; the handler installed is empty, and
+    /// `exec` resets it for commands launched later. Keep the returned cancel closure alive while the helper runs.
+    public static func stopCommandsOnTermination(registry: CommandRegistry = .shared,
+                                                 exit: @escaping @Sendable (Int32) -> Void = { Darwin.exit($0) }) -> () -> Void {
+        let queue = DispatchQueue(label: "subset-system.termination")
+        let watched = [SIGTERM, SIGINT, SIGHUP].map { signo in
+            let source = DispatchSource.makeSignalSource(signal: signo, queue: queue)
+            source.setEventHandler {
+                registry.shutDown()
+                exit(128 + signo)
+            }
+            source.resume()
+            return (source, signal(signo) { _ in /* The signal source does the work. */ })
+        }
+        return { for (source, previous) in watched { signal(Int32(source.handle), previous); source.cancel() } }
+    }
 }

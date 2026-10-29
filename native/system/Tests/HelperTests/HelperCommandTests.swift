@@ -34,6 +34,7 @@ final class HelperCommandTests: XCTestCase {
         XCTAssertEqual(try timeout("0.0015"), .milliseconds(2))
         XCTAssertEqual(try timeout("1e-9"), .milliseconds(1))
         XCTAssertEqual(try timeout("2.5"), .milliseconds(2500))
+        XCTAssertEqual(try timeout("86400"), .seconds(86_400))
     }
 
     func testMillisecondsPrintAsExactSeconds() {
@@ -58,7 +59,9 @@ final class HelperCommandTests: XCTestCase {
             (["disk", "--path", "/a", "--path", "/b"], "--path is given more than once."),
             (["disk", "--path", "/tmp", "--depth", "-1"], "--depth must be a whole number from 0 to 64, not -1."),
             (["disk", "--path", "/tmp", "--depth", "x"], "--depth must be a whole number from 0 to 64, not x."),
-            (["disk", "--path", "/tmp", "--timeout", "0"], "--timeout must be a number of seconds above 0, not 0."),
+            (["disk", "--path", "/tmp", "--timeout", "0"], "--timeout must be a number of seconds above 0 and up to 86400, not 0."),
+            (["disk", "--path", "/tmp", "--timeout", "86400.001"], "--timeout must be a number of seconds above 0 and up to 86400, not 86400.001."),
+            (["disk", "--path", "/tmp", "--timeout", "86401"], "--timeout must be a number of seconds above 0 and up to 86400, not 86401."),
             (["disk", "--suggestions", "--path", "/tmp", "--depth", "2"], "--depth does not apply to disk --suggestions."),
             (["status", "extra"], "Unexpected argument extra."),
             // An empty or `=`-only argument is a usage error, not a crash.
@@ -71,7 +74,7 @@ final class HelperCommandTests: XCTestCase {
             (["disk", "--path", "/tmp", "=x"], "Unexpected argument =x."),
             (["disk", "--path="], "disk needs --path <dir>."),
             (["disk", "--path", ""], "disk needs --path <dir>."),
-            (["disk", "--path", "/tmp", "--timeout="], "--timeout must be a number of seconds above 0, not ."),
+            (["disk", "--path", "/tmp", "--timeout="], "--timeout must be a number of seconds above 0 and up to 86400, not ."),
             (["status", "--json="], "Unknown option --json=.")
         ]
         for (arguments, message) in cases {

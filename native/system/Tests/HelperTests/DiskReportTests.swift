@@ -217,9 +217,6 @@ final class DiskReportTests: XCTestCase {
 
     }
 
-    /// Every suggestion left incomplete or unavailable by something the scan's flags do not explain makes the result
-    /// partial, with that cause's code, and keeps what was measured. What the flags explain as no failure (an iCloud
-    /// placeholder) or what nothing reported depends on (an unread app no entry may belong to) leaves it complete.
     /// `tmutil` stopped at its timeout gets `SIGKILL` only a second after `SIGTERM`, which never fires once the helper
     /// exits, so the helper's exit path kills it first.
     func testHelperExitKillsACommandThatIgnoredSIGTERMAtItsTimeout() async throws {
@@ -245,6 +242,39 @@ final class DiskReportTests: XCTestCase {
         XCTAssertFalse(Self.isRunning(pid), "pid \(pid) is still running")
     }
 
+    /// A helper told to stop while it awaits a command (`SIGTERM` from an agent's timeout, Ctrl-C's `SIGINT`, a closed
+    /// terminal's `SIGHUP`) kills the command before it exits with 128 plus the signal's number, so none outlives it.
+    func testHelperStoppedBySignalKillsTheCommandsItStarted() async throws {
+        for signo in [SIGTERM, SIGINT, SIGHUP] {
+            let folder = try TemporaryFolder()
+            let pidFile = folder.path + "/pid"
+            let registry = CommandRegistry()
+            let exitCode = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+            let cancel = HelperRunner.stopCommandsOnTermination(registry: registry) { code in exitCode.withLock { $0 = code } }
+            defer { cancel() }
+            let run = Task {
+                await ProcessCommandRunner(registry: registry).run(
+                    "/bin/sh", arguments: ["-c", "trap '' TERM; echo $$ > \"$1\"; exec /bin/sleep 30", "sh", pidFile],
+                    environment: [:], timeout: .seconds(30))
+            }
+            var deadline = ContinuousClock.now + .seconds(10)
+            while (try? String(contentsOfFile: pidFile, encoding: .utf8))?.hasSuffix("\n") != true, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let pid = try XCTUnwrap(pid_t(String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+            defer { kill(pid, SIGKILL) }
+            kill(getpid(), signo)
+            deadline = ContinuousClock.now + .seconds(5)
+            while exitCode.withLock({ $0 }) == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(exitCode.withLock { $0 }, 128 + signo, "signal \(signo)")
+            // The command is gone at once, not left to a delayed `SIGKILL` that would never fire.
+            deadline = ContinuousClock.now + .milliseconds(500)
+            while Self.isRunning(pid), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(Self.isRunning(pid), "signal \(signo): pid \(pid) is still running")
+            _ = await run.value
+        }
+    }
+
     private static func isRunning(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 && !isZombie(pid) }
 
     private static func isZombie(_ pid: pid_t) -> Bool {
@@ -255,6 +285,9 @@ final class DiskReportTests: XCTestCase {
         return info.kp_proc.p_stat == SZOMB
     }
 
+    /// Every suggestion left incomplete or unavailable by something the scan's flags do not explain makes the result
+    /// partial, with that cause's code, and keeps what was measured. What the flags explain as no failure (an iCloud
+    /// placeholder) or what nothing reported depends on (an unread app no entry may belong to) leaves it complete.
     func testEveryValueARuleCouldNotJudgeMakesSuggestionsPartial() async throws {
         let devices = "Library/Developer/CoreSimulator/Devices"
         let runtime = try PropertyListSerialization.data(fromPropertyList: ["runtime": "com.apple.CoreSimulator.SimRuntime.iOS-1-0"],

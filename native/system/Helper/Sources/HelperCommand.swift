@@ -62,7 +62,7 @@ public struct HelperInvocation: Equatable, Sendable {
           processes [--layer app|vendor|launch|project] [--json]
                                           Every process grouped by origin (default layer: app)
           disk --path <dir> [--depth N] [--timeout S] [--json]
-                                          Scan a folder (default depth 1, timeout 60 s) with its volume's space
+                                          Scan a folder (default depth 1, timeout 60 s, up to 86400 s) with its volume's space
           disk --suggestions --path <dir> [--timeout S] [--json]
                                           Reclaim rule matches for a scan, with the catalog version
           --version                       Print the helper's version
@@ -139,7 +139,7 @@ public struct HelperInvocation: Equatable, Sendable {
             var timeout = defaultTimeout
             if let text = options["--timeout"] {
                 guard let seconds = Double(text), seconds.isFinite, seconds > 0, seconds <= 86_400 else {
-                    throw HelperUsageError("--timeout must be a number of seconds above 0, not \(text).")
+                    throw HelperUsageError("--timeout must be a number of seconds above 0 and up to 86400, not \(text).")
                 }
                 // Whole milliseconds, rounded up, so the timeout applied is the one reported and never 0; a
                 // decimal such as 0.003 that binary floating point cannot hold exactly stays 3 ms, not 4.
