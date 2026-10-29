@@ -8,12 +8,13 @@ public struct DiskProbe: Sendable {
     public var scan: @Sendable (_ root: String) async -> Result<DiskScanResult, DiskScanError>
     /// The summary of the volume holding a folder.
     public var volume: @Sendable (_ root: String) async -> VolumeSummary
-    /// What the reclaim rules read besides the tree. `includeDocker` asks the Docker-compatible CLI for its image space.
-    public var context: @Sendable (_ includeDocker: Bool) async -> ReclaimContext
+    /// What the reclaim rules read besides the tree, for the helper's home folder. `includeDocker` asks the
+    /// Docker-compatible CLI for its image space.
+    public var context: @Sendable (_ home: String, _ includeDocker: Bool) async -> ReclaimContext
 
     public init(scan: @escaping @Sendable (String) async -> Result<DiskScanResult, DiskScanError>,
                 volume: @escaping @Sendable (String) async -> VolumeSummary,
-                context: @escaping @Sendable (Bool) async -> ReclaimContext) {
+                context: @escaping @Sendable (String, Bool) async -> ReclaimContext) {
         self.scan = scan
         self.volume = volume
         self.context = context
@@ -29,9 +30,9 @@ public struct DiskProbe: Sendable {
             }
         },
         volume: { root in await VolumeSummary.read(volumeOf: URL(fileURLWithPath: root)) },
-        context: { includeDocker in
+        context: { home, includeDocker in
             let docker = includeDocker ? await DockerCLI().imageUsage() : nil
-            return ReclaimContext.live(dockerImages: docker)
+            return ReclaimContext.live(home: home, dockerImages: docker)
         })
 }
 
@@ -119,7 +120,7 @@ enum DiskReports {
         }
         // Docker's images are in no folder, so, as in the app, they are asked for only when the home folder is scanned.
         let includeDocker = result.tree.rootPath == home
-        let context = await probe.context(includeDocker)
+        let context = await probe.context(home, includeDocker)
         let origins = DiskOrigins.entries(in: result.tree, home: context.home, apps: context.installedApps)
         let matches = ReclaimMatcher.matches(in: result.tree, origins: origins, context: context)
         var lines = ["\(matches.count) reclaim suggestions for \(paths(result.tree.rootPath)) (catalog version \(ReclaimRules.catalogVersion)):"]
@@ -162,7 +163,7 @@ enum DiskReports {
                             restricted: [("unreadablePaths", 0)], errors: [error],
                             fields: [("path", .string(paths(path))), ("outcome", .string(outcome)),
                                      ("timeoutSeconds", timeoutSeconds(timeout))] + fields,
-                            text: "Error: \(error.message)", exit: scan.timedOut ? .timeout : exit)
+                            text: visible("Error: \(error.message)"), exit: scan.timedOut ? .timeout : exit)
     }
 
     private static func finished(_ scan: Scan, result: DiskScanResult, command: String, path _: String, timeout: Duration,
@@ -194,7 +195,7 @@ enum DiskReports {
         ]
         return HelperReport(command: command, observedAt: now(), sources: [("sizes", sizeSource)] + sources,
                             restricted: [("unreadablePaths", unreadable)], errors: errors,
-                            fields: common + fields, text: text.joined(separator: "\n"),
+                            fields: common + fields, text: text.map(visible).joined(separator: "\n"),
                             exit: scan.timedOut ? .timeout : nil)
     }
 
@@ -276,6 +277,13 @@ enum DiskReports {
         .milliseconds(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
 
+    /// `text` with each control character (a newline, a carriage return, an escape) in a name or path shown as
+    /// `\u{…}`, so a name cannot add a row or change the terminal.
+    private static func visible(_ text: String) -> String {
+        text.unicodeScalars.map { $0.properties.generalCategory == .control ? "\\u{\(String($0.value, radix: 16))}" : String($0) }
+            .joined()
+    }
+
     /// A folder's largest children, largest first, then by name; children of unknown size come last.
     private static func topChildren(of index: Int, in tree: DiskTree) -> (shown: [DiskItem], omitted: [DiskItem]) {
         let sorted = tree.children(of: index).sorted {
@@ -302,7 +310,8 @@ enum DiskReports {
             (.countedElsewhere, "countedElsewhere"), (.sharesBlocks, "sharesBlocks"), (.incomplete, "incomplete"),
             (.firmlink, "firmlink"), (.allocatedUpperBound, "allocatedUpperBound"), (.containsDataless, "containsDataless")
         ]
-        let omittedAllocated = omitted.reduce(UInt64(0)) { $0 &+ ($1.sizes?.allocated ?? 0) }
+        // A hard-linked file counts once and clones' shared blocks may count more than once, as in a By origin group.
+        let omittedSum = tree.sum(omitted.map(\.index))
         return .object([
             ("name", .string(index == 0 ? paths(tree.rootPath) : item.name)),
             ("path", .string(paths(tree.path(of: index)))),
@@ -313,7 +322,8 @@ enum DiskReports {
             ("flags", .array(flags.filter { item.flags.contains($0.0) }.map { .string($0.1) })),
             ("children", .array(shown.map { node($0.index, in: tree, depth: depth - 1, paths: paths) })),
             ("omittedChildren", .count(omitted.count)),
-            ("omittedAllocatedBytes", .unsigned(omittedAllocated))
+            ("omittedAllocatedBytes", .unsigned(omittedSum.allocated)),
+            ("omittedAllocatedUpperBound", .bool(omittedSum.allocatedUpperBound))
         ])
     }
 

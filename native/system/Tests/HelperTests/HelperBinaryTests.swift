@@ -54,6 +54,18 @@ final class HelperBinaryTests: XCTestCase {
         XCTAssertGreaterThan((json["groups"] as? [Any])?.count ?? 0, 0)
     }
 
+    func testDiskJSONFromTheBuiltHelperValidates() throws {
+        let folder = try TemporaryFolder()
+        try folder.file("a/b.bin", bytes: 8192)
+        try folder.file("c.txt", bytes: 10)
+        let result = try execute(["disk", "--path", folder.path, "--json"])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        var validator = SchemaValidator()
+        XCTAssertEqual(try validator.errors(json: result.stdout, schemaFile: "disk.schema.json"), [])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual((json["tree"] as? [String: Any])?["kind"] as? String, "directory")
+    }
+
     func testTheBuiltHelperReportsUsageErrorsAndItsVersion() throws {
         let usage = try execute(["clean"])
         XCTAssertEqual(usage.status, 2)

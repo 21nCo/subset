@@ -60,7 +60,7 @@
       "type": "object",
       "description": "A scanned item and, to --depth, its 20 largest children; the rest are counted in omittedChildren.",
       "required": ["name", "path", "kind", "allocatedBytes", "logicalBytes", "privateBytes", "flags", "children",
-                   "omittedChildren", "omittedAllocatedBytes"],
+                   "omittedChildren", "omittedAllocatedBytes", "omittedAllocatedUpperBound"],
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
@@ -78,7 +78,14 @@
         },
         "children": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/node" } },
         "omittedChildren": { "$ref": "common.schema.json#/$defs/count" },
-        "omittedAllocatedBytes": { "$ref": "common.schema.json#/$defs/bytes" }
+        "omittedAllocatedBytes": {
+          "$ref": "common.schema.json#/$defs/bytes",
+          "description": "The omitted children's allocated bytes, a hard-linked file only at the link the totals count it at."
+        },
+        "omittedAllocatedUpperBound": {
+          "type": "boolean",
+          "description": "omittedAllocatedBytes may count blocks clones share more than once, so it may exceed the folder's allocatedBytes."
+        }
       }
     }
   }

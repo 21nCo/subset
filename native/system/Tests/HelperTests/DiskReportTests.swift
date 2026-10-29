@@ -37,7 +37,9 @@ final class DiskReportTests: XCTestCase {
         let many = try XCTUnwrap(((deeper["tree"] as? [String: Any])?["children"] as? [[String: Any]])?.first)
         XCTAssertEqual((many["children"] as? [Any])?.count, 20)
         XCTAssertEqual(many["omittedChildren"] as? Int, 2)
-        XCTAssertGreaterThan(many["omittedAllocatedBytes"] as? Int ?? 0, 0)
+        // The two smallest, f0 and f1.
+        XCTAssertEqual(many["omittedAllocatedBytes"] as? Int, 4096 + 8192)
+        XCTAssertEqual(many["omittedAllocatedUpperBound"] as? Bool, false)
 
         // The text lists the same tree to the same depth, each folder's children indented under it after the sizes.
         func listed(_ depth: String) async -> [String] {
@@ -51,6 +53,74 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual(Array(listedAtDepth2.suffix(4)), ["big", "  a.bin", "  inner", "small.txt"])
         XCTAssertEqual(listedAtDepth2.first, "many")
         XCTAssertEqual(listedAtDepth2.dropFirst().prefix(20).filter { $0.hasPrefix("  f") }.count, 20)
+    }
+
+    /// Children left out of the tree count a hard-linked file once, and say when clones may make their total exceed the
+    /// folder's, at depth 0 and past the 20 children listed.
+    func testOmittedChildrenCountAHardLinkOnceAndFlagClones() async throws {
+        let folder = try TemporaryFolder()
+        try folder.file("links/a.bin", bytes: 1 << 20)
+        try FileManager.default.linkItem(atPath: folder.path + "/links/a.bin", toPath: folder.path + "/links/b.bin")
+        try folder.file("clones/a.bin", bytes: 1 << 20)
+        XCTAssertEqual(clonefile(folder.path + "/clones/a.bin", folder.path + "/clones/c.bin", 0), 0, "APFS clone")
+        for index in 0..<20 { try folder.file("many/f\(index)", bytes: 64 << 10) }
+        try folder.file("many/s.bin", bytes: 4096)
+        try FileManager.default.linkItem(atPath: folder.path + "/many/s.bin", toPath: folder.path + "/many/t.bin")
+        func tree(_ path: String, depth: String) async throws -> [String: Any] {
+            let output = await run(["disk", "--path", folder.path + path, "--depth", depth, "--json"],
+                                   HelperFixtures.environment(home: folder.path))
+            try assertValid(output, "disk.schema.json")
+            return try XCTUnwrap(try object(output)["tree"] as? [String: Any])
+        }
+        let links = try await tree("/links", depth: "0")
+        XCTAssertEqual(links["allocatedBytes"] as? Int, 1 << 20)
+        XCTAssertEqual(links["omittedChildren"] as? Int, 2)
+        XCTAssertEqual(links["omittedAllocatedBytes"] as? Int, 1 << 20)
+        XCTAssertEqual(links["omittedAllocatedUpperBound"] as? Bool, false)
+
+        let clones = try await tree("/clones", depth: "0")
+        XCTAssertEqual(clones["allocatedBytes"] as? Int, 1 << 20)
+        XCTAssertEqual(clones["omittedAllocatedBytes"] as? Int, 2 << 20)
+        XCTAssertEqual(clones["omittedAllocatedUpperBound"] as? Bool, true)
+
+        // s.bin and t.bin are the smallest, so both are left out; one counts.
+        let many = try await tree("/many", depth: "1")
+        XCTAssertEqual((many["children"] as? [Any])?.count, 20)
+        XCTAssertEqual(many["omittedChildren"] as? Int, 2)
+        XCTAssertEqual(many["omittedAllocatedBytes"] as? Int, 4096)
+        XCTAssertEqual(many["omittedAllocatedUpperBound"] as? Bool, false)
+        XCTAssertEqual(clonefile(folder.path + "/many/s.bin", folder.path + "/many/u.bin", 0), 0, "APFS clone")
+        let cloned = try await tree("/many", depth: "1")
+        XCTAssertEqual(cloned["omittedChildren"] as? Int, 3)
+        XCTAssertEqual(cloned["omittedAllocatedBytes"] as? Int, 8192)
+        XCTAssertEqual(cloned["omittedAllocatedUpperBound"] as? Bool, true)
+    }
+
+    /// A name holding a newline, a carriage return, or an escape is one text row that shows them, not raw; the JSON
+    /// keeps the name as it is.
+    func testTextShowsControlCharactersInNames() async throws {
+        let home = try TemporaryFolder()
+        try home.file("two\nrows", bytes: 16384)
+        try home.file("back\rover", bytes: 8192)
+        try home.file("red\u{1B}[31m", bytes: 100)
+        try home.file("café", bytes: 10)
+        let environment = HelperFixtures.environment(home: home.path)
+        let text = await run(["disk", "--path", home.path], environment).stdout
+        XCTAssertFalse(text.unicodeScalars.contains { $0.value < 0x20 && $0 != "\n" || $0.value == 0x7F })
+        XCTAssertEqual(text.split(separator: "\n").dropFirst(2).map { String($0.dropFirst(13)) },
+                       ["two\\u{a}rows", "back\\u{d}over", "café", "red\\u{1b}[31m"])
+        let json = try object(await run(["disk", "--path", home.path, "--json"], environment))
+        XCTAssertEqual(((json["tree"] as? [String: Any])?["children"] as? [[String: Any]])?.map { $0["name"] as? String },
+                       ["two\nrows", "back\rover", "café", "red\u{1B}[31m"])
+
+        // An app's name in a suggestion row too.
+        try home.file("Library/Caches/com.example.odd/x", bytes: 4096)
+        let apps = InstalledApps([InstalledApp(path: "/Applications/Odd.app", bundleID: "com.example.odd",
+                                               name: "Odd\nApp\u{1B}[2J", signature: nil, appGroups: nil)])
+        let suggestions = await run(["disk", "--suggestions", "--path", home.path],
+                                    HelperFixtures.environment(disk: HelperFixtures.diskProbe(apps: apps), home: home.path))
+        XCTAssertFalse(suggestions.stdout.unicodeScalars.contains { $0.value < 0x20 && $0 != "\n" || $0.value == 0x7F })
+        XCTAssertTrue(suggestions.stdout.contains("(Odd\\u{a}App\\u{1b}[2J)"), suggestions.stdout)
     }
 
     func testAbsoluteKeepsTheHomeFolderInPaths() async throws {
@@ -87,7 +157,7 @@ final class DiskReportTests: XCTestCase {
     func testASlowScanStopsAtTheTimeoutWithWhatItRead() async throws {
         let folder = try TemporaryFolder()
         try folder.file("a.txt", bytes: 10)
-        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, home: folder.path),
+        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true),
                                                      home: folder.path)
         let started = ContinuousClock.now
         let output = await run(["disk", "--path", folder.path, "--timeout", "0.2", "--json"], environment)
@@ -106,7 +176,7 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual(suggestions.exit, .timeout)
 
         // A cancelled scan leaves the home folder not read in full, which the suggestions say without its path.
-        let cancelled = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, home: folder.path, edit: { tree, _ in
+        let cancelled = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, edit: { tree, _ in
             tree.nodes[0].flags.insert(.partial)
         }), home: folder.path)
         let home = await run(["disk", "--suggestions", "--path", folder.path, "--timeout", "0.2", "--json"], cancelled)
@@ -119,7 +189,7 @@ final class DiskReportTests: XCTestCase {
     func testTheSmallestTimeoutIsReportedExactly() async throws {
         let folder = try TemporaryFolder()
         try folder.file("a.txt", bytes: 10)
-        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true, home: folder.path),
+        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(slow: true),
                                                      home: folder.path)
         for timeout in ["0.001", "0.004"] {
             let disk = await run(["disk", "--path", folder.path, "--timeout", timeout, "--json"], environment)
@@ -140,7 +210,7 @@ final class DiskReportTests: XCTestCase {
         let volume = VolumeSummary(values: VolumeCapacityValues(mountPoint: "/", name: "Macintosh HD"),
                                    snapshots: .unavailable("tmutil did not answer within 5 seconds."))
         let output = await run(["disk", "--path", folder.path, "--json"],
-                               HelperFixtures.environment(disk: HelperFixtures.diskProbe(home: folder.path, volume: volume),
+                               HelperFixtures.environment(disk: HelperFixtures.diskProbe(volume: volume),
                                                           home: folder.path))
         try assertValid(output, "disk.schema.json")
         XCTAssertEqual(output.exit, .partial)
@@ -156,7 +226,7 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual(errors[1]["message"], "Could not count local snapshots: tmutil did not answer within 5 seconds.")
 
         let text = await run(["disk", "--path", folder.path],
-                             HelperFixtures.environment(disk: HelperFixtures.diskProbe(home: folder.path, volume: volume),
+                             HelperFixtures.environment(disk: HelperFixtures.diskProbe(volume: volume),
                                                         home: folder.path))
         XCTAssertEqual(text.exit, .partial)
         XCTAssertTrue(text.stdout.contains("Note: Could not count local snapshots"))
@@ -176,7 +246,7 @@ final class DiskReportTests: XCTestCase {
         let movedTo = moved.url.appendingPathComponent("b")
         let swapped = OSAllocatedUnfairLock(initialState: false)
         // One worker reports the root's only batch before it opens the folders listed in it.
-        let probe = HelperFixtures.diskProbe(home: HelperFixtures.home, onProgress: { progress in
+        let probe = HelperFixtures.diskProbe(onProgress: { progress in
             guard progress.currentPath == root, !swapped.withLock({ $0 }) else { return }
             swapped.withLock { $0 = true }
             let b = URL(fileURLWithPath: root).appendingPathComponent("b")
@@ -202,7 +272,7 @@ final class DiskReportTests: XCTestCase {
         func suggestions(_ docker: DockerImageUsage, apps: InstalledApps = InstalledApps([]),
                          path: String? = nil) async throws -> (HelperOutput, [String]) {
             let environment = HelperFixtures.environment(
-                disk: HelperFixtures.diskProbe(home: home.path, docker: docker, apps: apps), home: home.path)
+                disk: HelperFixtures.diskProbe(docker: docker, apps: apps), home: home.path)
             let output = await run(["disk", "--suggestions", "--path", path ?? home.path, "--json"], environment)
             try assertValid(output, "disk-suggestions.schema.json")
             let codes = (try object(output)["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String } ?? []
@@ -349,7 +419,7 @@ final class DiskReportTests: XCTestCase {
             try home.file("Documents/notes.txt", bytes: 10)
             try setUp(home)
             let environment = HelperFixtures.environment(
-                disk: HelperFixtures.diskProbe(home: home.path, apps: apps, edit: edit), home: home.path)
+                disk: HelperFixtures.diskProbe(apps: apps, edit: edit), home: home.path)
             let output = await run(["disk", "--suggestions", "--path", home.path, "--json"], environment)
             try assertValid(output, "disk-suggestions.schema.json")
             let json = try object(output)
@@ -505,7 +575,8 @@ final class DiskReportTests: XCTestCase {
         try home.file(".npm/_cacache/index", bytes: 16 << 10)
         try home.file("Documents/notes.txt", bytes: 10)
         let docker = DockerFlags()
-        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(includedDocker: docker, home: home.path),
+        // The rules read the helper's home folder, which the probe is not told of otherwise.
+        let environment = HelperFixtures.environment(disk: HelperFixtures.diskProbe(includedDocker: docker),
                                                      home: home.path)
 
         let output = await run(["disk", "--suggestions", "--path", home.path, "--json"], environment)

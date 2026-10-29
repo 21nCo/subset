@@ -116,7 +116,7 @@ enum HelperFixtures {
     }
 
     static func environment(processes: ProcessProbe? = nil, disk: DiskProbe? = nil, home: String = home) -> HelperEnvironment {
-        HelperEnvironment(home: home, processes: processes ?? probe(workload()), disk: disk ?? diskProbe(home: home),
+        HelperEnvironment(home: home, processes: processes ?? probe(workload()), disk: disk ?? diskProbe(),
                           now: { observedAt })
     }
 
@@ -125,11 +125,11 @@ enum HelperFixtures {
                                      availableForImportantUsage: 120_000_000_000, available: 100_000_000_000),
         snapshots: .count(2))
 
-    /// Scans with the real scanner, `volume`, and no installed apps, with `home` as the home folder. `slow` keeps the
+    /// Scans with the real scanner, `volume`, and no installed apps, with the helper's home folder. `slow` keeps the
     /// scan waiting until it is cancelled, then returns the real scan as cancelled. `onProgress` sees the scan's
     /// progress. `includedDocker` records each analysis's Docker flag; `docker` is what Docker answers when asked.
     /// `edit` changes the scanned tree, given its root, to place states a test folder cannot have.
-    static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil, home: String = home,
+    static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil,
                           volume: VolumeSummary = HelperFixtures.volume,
                           docker: DockerImageUsage = .unavailable(.cliNotFound), apps: InstalledApps = InstalledApps([]),
                           onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil,
@@ -156,7 +156,7 @@ enum HelperFixtures {
                                                entriesRead: result.entriesRead))
             },
             volume: { _ in volume },
-            context: { includeDocker in
+            context: { home, includeDocker in
                 includedDocker?.append(includeDocker)
                 let real = realpath(home, nil).map { pointer in
                     defer { free(pointer) }

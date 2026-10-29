@@ -609,21 +609,21 @@ extension DiskTree {
 
     /// Summed scanned sizes of distinct items, none inside another, with the bounds a match and a By origin group
     /// report.
-    struct SizeSum {
+    public struct SizeSum {
         var `private`: UInt64 = 0
-        var allocated: UInt64 = 0
+        public var allocated: UInt64 = 0
         /// An item's size is unknown or a lower bound, or another link counts an item's blocks.
         var lowerBound = false
         /// `allocated` may count blocks clones share more than once: an item is flagged `allocatedUpperBound`, or two
         /// or more items may hold clones (`mayHoldClones`), whose shared blocks each item's own total counts.
-        var allocatedUpperBound = false
+        public var allocatedUpperBound = false
         /// An item's sizes were read.
         var measured = false
     }
 
     /// Sums the items' sizes. Each item's total counts its own clones' blocks once, but the tree does not say which
     /// blocks two items share, so a sum over two items that may both hold clones is conservatively an upper bound.
-    func sum(_ indices: [Int]) -> SizeSum {
+    public func sum(_ indices: [Int]) -> SizeSum {
         var sum = SizeSum()
         var holdingClones = 0
         for index in indices {
