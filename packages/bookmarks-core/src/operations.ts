@@ -587,7 +587,14 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     const next = normalizeTagName(name);
     // In the same chain as tag creation, so on the memory adapter (no unique index) no other writer here can take
     // the name between the check and the write.
-    return serialized(executor, () => renameTagNow(tagId, next));
+    const renamed = await serialized(executor, () => renameTagNow(tagId, next));
+    // A merge recorded before the write (it may have deleted the tag, which the write then wrote again) is finished,
+    // into the end of its records, so a tag a merge reported as merged stays gone and a rename leaves no record.
+    const chain = [renamed.id];
+    for (let id = await mergedInto(renamed.id); id !== null && !chain.includes(id); id = await mergedInto(id)) chain.push(id);
+    if (chain.length === 1) return renamed;
+    await mergeTags([renamed.id], chain[chain.length - 1]);
+    throw new BookmarkError('not-found', `Tag ${renamed.id} was merged into another tag`);
   }
 
   async function renameTagNow(tagId: string, next: TagInput): Promise<Tag> {

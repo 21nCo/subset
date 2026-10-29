@@ -310,6 +310,49 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       if (renamed.status === 'rejected') assert.equal(renamed.reason.code, 'tag-conflict');
     });
 
+    for (const chained of [false, true]) {
+      test(`a rename landing after a merge deleted its tag finishes the merge and fails${chained ? ' (target merged on too)' : ''}`, async () => {
+        const prefix = chained ? 'rmc' : 'rm';
+        const { bookmark } = await ops.addBookmark(`https://${prefix}.example/`, { tags: [`${prefix}-source`, `${prefix}-target`] });
+        const [source, target] = bookmark.tags;
+        const point = pausePoint();
+        // Paused past datafn's guard read: the rename's write lands on whatever the merge leaves.
+        const renamer = await writer({
+          beforeMutate: (payload) => payload.resource === 'tags' && payload.operation === 'merge' && point.pause().then(() => delete payload.if)
+        });
+        const renaming = renamer.renameTag(source.id, `${prefix}-renamed`);
+        await point.reached;
+        assert.deepEqual(await ops.mergeTags([source.id], target.id), target);
+        let end = target;
+        if (chained) {
+          end = (await ops.addBookmark(`https://${prefix}.example/end`, { tags: [`${prefix}-end`] })).bookmark.tags[0];
+          await ops.mergeTags([target.id], end.id);
+        }
+        point.release();
+        await rejectsWith(renaming, 'not-found');
+        assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [end]);
+        const tags = (await ops.addBookmark(`https://${prefix}.example/again`, { tags: [`${prefix}-renamed`] })).bookmark.tags;
+        assert.deepEqual(tags.map((tag) => tag.name), [`${prefix}-renamed`]);
+        assert.notEqual(tags[0].id, source.id);
+      });
+    }
+
+    test('a rename landing before a merge records its tag keeps the new name, and the merge then completes', async () => {
+      const { bookmark } = await ops.addBookmark('https://rmb.example/', { tags: ['rmb-source', 'rmb-target'] });
+      const [source, target] = bookmark.tags;
+      const point = pausePoint();
+      const merger = await writer({ beforeMutate: (payload) => payload.resource === 'tag_merges' && point.pause() });
+      const merging = merger.mergeTags([source.id], target.id);
+      await point.reached;
+      assert.deepEqual(await ops.renameTag(source.id, 'rmb-renamed'), { id: source.id, name: 'rmb-renamed', nameKey: 'rmb-renamed' });
+      point.release();
+      assert.deepEqual(await merging, target);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
+      const tags = (await ops.addBookmark('https://rmb.example/again', { tags: ['rmb-renamed'] })).bookmark.tags;
+      assert.deepEqual(tags.map((tag) => tag.name), ['rmb-renamed']);
+      assert.notEqual(tags[0].id, source.id);
+    });
+
     test('a tag a concurrent merge removes before it is linked is followed to the merge target', async () => {
       const { bookmark } = await ops.addBookmark('https://addmerge.example/1');
       const tagged = (await ops.addBookmark('https://addmerge.example/2', { tags: ['am-source', 'am-target'] })).bookmark;
