@@ -141,8 +141,9 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       }
     });
 
-    /** Operations whose details request write pauses at `point` before it is sent. */
-    const pausedRetrier = (point) => writer({ beforeMutate: (payload) => payload.record?.detailsRequest !== undefined && point.pause() });
+    /** Operations whose details request write pauses at `point` before it is sent; `pastGuard` lets it through as if datafn's guard read had passed before the pause. */
+    const pausedRetrier = (point, pastGuard = false) =>
+      writer({ beforeMutate: (payload) => payload.record?.detailsRequest !== undefined && point.pause().then(() => pastGuard && delete payload.if) });
 
     test("a retry that read the old page does not let a URL write datafn let past a move keep that page's details", async () => {
       const { bookmark } = await ops.addBookmark('https://own.example/retried');
@@ -166,6 +167,31 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(edited.faviconKey, null);
       assert.notEqual(displayTitle(edited), 'Foreign page');
       assert.deepEqual(pendingJobs(queue, bookmark.id).map((entry) => entry.job.url), ['https://own.example/retried?utm_source=x']);
+    });
+
+    test("a retry that passed its guard read before a move does not leave that page's details on the old page", async () => {
+      const { bookmark } = await ops.addBookmark('https://own.example/guarded');
+      await storeDetails(host.server.executor, bookmark, { details: sampleDetails(bookmark.url, 'Own page'), faviconKey: 'favicons/own.ico' });
+      const [editPoint, retryPoint] = [pausePoint(), pausePoint()];
+      const queue = recordingQueue();
+      const editor = await writer({ beforeMutate: (payload) => payload.record?.url !== undefined && editPoint.pause().then(() => delete payload.if) }, queue);
+      const editing = editor.updateBookmark(bookmark.id, { url: 'https://own.example/guarded?utm_source=x' });
+      await editPoint.reached;
+      const retrying = (await pausedRetrier(retryPoint, true)).retryDetails(bookmark.id);
+      await retryPoint.reached;
+      const moved = await ops.updateBookmark(bookmark.id, { url: 'https://foreign.example/guarded' });
+      await storeDetails(host.server.executor, moved, { details: sampleDetails(moved.url, 'Foreign page'), faviconKey: 'favicons/foreign.ico' });
+      retryPoint.release();
+      await retrying;
+      editPoint.release();
+      const edited = await editing;
+      assert.deepEqual(edited, await ops.getBookmark(bookmark.id));
+      assert.equal(edited.canonicalUrl, bookmark.canonicalUrl);
+      assert.equal(edited.detailsState, 'pending');
+      assert.equal(edited.details, null);
+      assert.equal(edited.faviconKey, null);
+      assert.notEqual(displayTitle(edited), 'Foreign page');
+      assert.deepEqual(pendingJobs(queue, bookmark.id).map((entry) => entry.job.url), ['https://own.example/guarded?utm_source=x']);
     });
 
     test('a retry paused while the page changes decides again on the new page, so a later same-page edit keeps its details', async () => {

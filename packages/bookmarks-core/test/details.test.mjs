@@ -20,7 +20,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
     });
     after(() => host.close());
 
-    test('stored details read back unchanged, and a new page clears them', async () => {
+    test('stored details read back unchanged, and a retry or a new page clears them', async () => {
       const { bookmark } = await ops.addBookmark('https://read.example/article');
       const details = { ...sampleDetails(bookmark.url, 'An article'), description: 'About it', siteName: 'Read' };
       await storeDetails(host.server.executor, bookmark, { details, detailsFetchedAt: 1767225600123, faviconKey: 'favicons/read.ico' });
@@ -33,7 +33,9 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
 
       const retried = await ops.retryDetails(bookmark.id);
       assert.equal(retried.detailsState, 'pending');
-      assert.deepEqual(retried.details, details);
+      assert.equal(retried.details, null);
+      assert.equal(retried.detailsFetchedAt, null);
+      assert.equal(retried.faviconKey, null);
 
       const moved = await ops.updateBookmark(bookmark.id, { url: 'https://read.example/other' });
       assert.equal(moved.details, null);

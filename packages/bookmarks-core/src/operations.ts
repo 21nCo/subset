@@ -711,8 +711,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       const bookmark = await requireBookmark(id);
       // A bookmark already pending keeps its request, so retrying while its job is queued adds no job.
       if (bookmark.detailsState === 'pending' && bookmark.detailsError === null) return requestDetails(bookmark.id);
-      // The request names the page read here, so the write is guarded on that page: after a page change, decide again.
-      const record = { detailsState: 'pending', detailsError: null, detailsRequest: newRequest(bookmark.canonicalUrl) };
+      // The request names the page read here and comes with cleared details, so the write is guarded on that page: after a page change, decide again.
+      const record = { ...CLEARED_DETAILS, detailsRequest: newRequest(bookmark.canonicalUrl) };
       try {
         await mutate({ resource: 'bookmarks', operation: 'merge', id: bookmark.id, record, if: { id: bookmark.id, canonicalUrl: bookmark.canonicalUrl } });
         return requestDetails(bookmark.id);
