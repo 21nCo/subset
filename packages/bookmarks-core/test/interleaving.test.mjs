@@ -212,6 +212,24 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(await ops.getBookmark(bookmark.id), added);
     });
 
+    test('a requested tag deleted with no merge before it is linked is created again, and the other tags are linked', async () => {
+      const { bookmark } = await ops.addBookmark('https://add-deleted.example/1');
+      const other = (await ops.addBookmark('https://add-deleted.example/2', { tags: ['ad-gone', 'ad-kept'] })).bookmark;
+      const [gone, kept] = other.tags;
+      await ops.removeTags(other.id, ['ad-gone']);
+      const point = pausePoint();
+      const adder = await writer({ beforeMutate: (payload) => payload.operation === 'relate' && point.pause() });
+      const adding = adder.addTags(bookmark.id, ['ad-gone', 'ad-kept']);
+      await point.reached;
+      const removed = await host.server.executor.mutate({ version: 1, resource: 'tags', operation: 'delete', id: gone.id }, { userId: 'owner' });
+      assert.equal(removed.ok, true);
+      point.release();
+      const [again, keptAfter] = (await adding).tags;
+      assert.deepEqual(keptAfter, kept);
+      assert.equal(again.name, 'ad-gone');
+      assert.notEqual(again.id, gone.id);
+    });
+
     /** A bookmark tagged with a source and the target, a second bookmark to tag, and a merge writer. */
     async function mergeRace(prefix) {
       const first = (await ops.addBookmark(`https://${prefix}.example/1`, { tags: [`${prefix}-source`, `${prefix}-target`] })).bookmark;
@@ -404,6 +422,47 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       const record = { version: 1, resource: 'tag_merges', operation: 'insert', id: tag.id, record: { targetId: crypto.randomUUID() } };
       assert.equal((await host.server.executor.mutate(record, { userId: 'owner' }))?.ok, true);
       assert.deepEqual((await ops.addTags(bookmark.id, ['de-tag'])).tags, [tag]);
+    });
+
+    /** Records `tag` as merged into `targetId`, as an interrupted merge (or a withdrawn one's dead target) leaves it. */
+    const recordMerge = async (tag, targetId) => {
+      const record = { version: 1, resource: 'tag_merges', operation: 'insert', id: tag.id, record: { targetId } };
+      assert.equal((await host.server.executor.mutate(record, { userId: 'owner' }))?.ok, true);
+    };
+
+    // X's record leads to a deleted tag no merge recorded; S's record leads to the live tag T.
+    const deadAndLive = async (prefix) => {
+      const { bookmark } = await ops.addBookmark(`https://${prefix}.example/`, { tags: [`${prefix}-x`, `${prefix}-s`] });
+      const [s, x] = bookmark.tags;
+      const t = (await ops.addBookmark(`https://${prefix}.example/t`, { tags: [`${prefix}-t`] })).bookmark.tags[0];
+      await recordMerge(x, crypto.randomUUID());
+      await recordMerge(s, t.id);
+      return { bookmark, s, t, x };
+    };
+
+    for (const [label, add] of [
+      ['addTags', (bookmark, names) => ops.addTags(bookmark.id, names)],
+      ['a duplicate add', async (bookmark, names) => (await ops.addBookmark(bookmark.url, { tags: names })).bookmark]
+    ]) {
+      test(`${label} of a linked tag whose records end at a deleted tag still links a new tag`, async () => {
+        const prefix = label === 'addTags' ? 'dn' : 'dd';
+        const { bookmark } = await ops.addBookmark(`https://${prefix}.example/`, { tags: [`${prefix}-x`] });
+        const [x] = bookmark.tags;
+        await recordMerge(x, crypto.randomUUID());
+        const tags = (await add(bookmark, [`${prefix}-x`, `${prefix}-fresh`])).tags;
+        assert.deepEqual(tags.map((tag) => tag.name), [`${prefix}-fresh`, `${prefix}-x`]);
+        assert.deepEqual((await add(bookmark, [`${prefix}-x`, `${prefix}-fresh`])).tags, tags);
+      });
+    }
+
+    test('a dead end in one linked tag records does not stop another linked tag reaching its merge target', async () => {
+      const { bookmark, s, t, x } = await deadAndLive('dl');
+      assert.deepEqual((await ops.addTags(bookmark.id, ['dl-x', 'dl-s'])).tags, [s, t, x]);
+    });
+
+    test('a new bookmark given a dead-ended tag and a recorded tag gets the recorded tag merge target', async () => {
+      const { s, t, x } = await deadAndLive('dw');
+      assert.deepEqual((await ops.addBookmark('https://dw.example/new', { tags: ['dw-x', 'dw-s'] })).bookmark.tags, [s, t, x]);
     });
 
     if (backend === 'sqlite') {
