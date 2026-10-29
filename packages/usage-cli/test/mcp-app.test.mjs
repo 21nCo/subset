@@ -18,8 +18,11 @@ const REPO = join(PACKAGE_ROOT, '../..');
 const DASHBOARD_HTML = join(PACKAGE_ROOT, 'mcp-app/dashboard.html');
 const MIME = 'text/html;profile=mcp-app';
 const NO_DOMAINS = { connectDomains: [], resourceDomains: [], frameDomains: [] };
-const NOW = Date.parse('2026-10-28T12:00:00.000Z');
+// The dashboard reads the real clock (it drops trend points older than 48 hours), so every fixture time
+// derives from the clock the render uses, not a fixed date.
+const NOW = Date.now();
 const HOUR = 60 * 60_000;
+const at = (ms) => new Date(NOW + ms).toISOString();
 
 /** `entry` and everything it imports, bundled into one module for Node, with Svelte compiled for server rendering. */
 async function bundle(entry, plugins = []) {
@@ -65,10 +68,10 @@ const stubbed = await bundle(`export { default as McpApp } from ${source('apps/u
 
 const window = (usedPercent, overrides = {}) => ({
   limitId: 'five_hour', label: '5-hour', kind: 'provider-reported-quota', usedPercent, remainingPercent: 100 - usedPercent,
-  remainingKind: 'provider-reported-quota', durationMinutes: 300, resetsAt: '2026-10-28T15:00:00.000Z', ...overrides,
+  remainingKind: 'provider-reported-quota', durationMinutes: 300, resetsAt: at(3 * HOUR), ...overrides,
 });
 const account = (id, provider, overrides = {}) => ({
-  id, label: id, provider, source: 'Fixture', plan: null, observedAt: '2026-10-28T11:58:00.000Z', state: 'ok',
+  id, label: id, provider, source: 'Fixture', plan: null, observedAt: at(-2 * 60_000), state: 'ok',
   windows: [window(25)], resetCredits: null, errors: [], ...overrides,
 });
 const fixtureStatus = (used = 25) => createUsageStatus([
@@ -370,6 +373,18 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   await Promise.all([late, host.idle()]);
   assert.deepEqual(bridge.state().status, newer.structuredContent);
   assert.equal(bridge.state().refreshError, null);
+
+  // A malformed error envelope from the host gets the plain message, never a TypeError from reading it.
+  host.withhold = ({ name }) => name === 'usage_status';
+  for (const content of [{}, [null], 'text']) {
+    const malformed = bridge.refresh();
+    await host.idle();
+    const id = host.sent.findLast((message) => message.method === 'tools/call').id;
+    host.deliver({ jsonrpc: '2.0', id, result: { isError: true, content, structuredContent: { error: 'down' } } });
+    await Promise.all([malformed, host.idle()]);
+    assert.equal(bridge.state().refreshError, 'The usage tool failed.', JSON.stringify(content));
+    assert.deepEqual(bridge.state().status, newer.structuredContent);
+  }
 });
 
 test('an error or unreadable tool result shows in place of the dashboard until a later result succeeds', async (t) => {
@@ -377,6 +392,12 @@ test('an error or unreadable tool result shows in place of the dashboard until a
   host.notify('ui/notifications/tool-result', { isError: true, content: [{ type: 'text', text: 'usage_unavailable: Could not read the usage configuration.' }], structuredContent: { error: { code: 'usage_unavailable', message: 'Could not read the usage configuration.' } } });
   assert.equal(bridge.state().toolError, 'Could not read the usage configuration.');
   assert.match(rendered(bridge), /role="alert">Could not read the usage configuration\./);
+
+  // A malformed error envelope still shows an error, with the text blocks it can read.
+  for (const [content, message] of [[{}, 'The usage tool failed.'], [[null], 'The usage tool failed.'], [[null, 7, { type: 'text', text: 'Down.' }, { type: 'text', text: 3 }], 'Down.']]) {
+    host.notify('ui/notifications/tool-result', { isError: true, content, structuredContent: [] });
+    assert.deepEqual([bridge.state().status, bridge.state().toolError], [null, message], JSON.stringify(content));
+  }
 
   host.notify('ui/notifications/tool-result', { content: [], structuredContent: { schemaVersion: 1, accounts: 'none' } });
   assert.equal(bridge.state().status, null);

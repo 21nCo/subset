@@ -77,11 +77,14 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 
 const UNREADABLE = 'The usage_status result is not a usage status this view can show.';
 
-/** A tool error's message: `structuredContent.error.message`, else its text. */
+/** A tool error's message: `structuredContent.error.message`, else its text blocks; the host's payload is unchecked. */
 function failure(result: CallToolResult): string {
-  const error = result.structuredContent?.error;
+  const structured: unknown = result.structuredContent;
+  const error = isObject(structured) ? structured.error : undefined;
   if (isObject(error) && typeof error.message === 'string') return error.message;
-  const text = (result.content ?? []).map((block) => (block.type === 'text' ? block.text ?? '' : '')).join(' ').trim();
+  const content: unknown = result.content;
+  const blocks = Array.isArray(content) ? content : [];
+  const text = blocks.map((block) => (isObject(block) && block.type === 'text' && typeof block.text === 'string' ? block.text : '')).join(' ').trim();
   return text || 'The usage tool failed.';
 }
 
