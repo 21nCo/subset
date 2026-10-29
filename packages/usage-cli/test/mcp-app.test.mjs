@@ -143,6 +143,10 @@ function fakeHost(mcp, { theme = 'dark' } = {}) {
       const { id } = host.sent.findLast((message) => message.method === 'tools/call');
       host.deliver({ jsonrpc: '2.0', id, result });
     },
+    /** The ids of the view's `name` tool calls, oldest first. */
+    callIds: (name) => host.sent.filter((message) => message.method === 'tools/call' && message.params.name === name).map(({ id }) => id),
+    /** Answers the view's call `id` with `result`. */
+    answer: (id, result) => host.deliver({ jsonrpc: '2.0', id, result }),
     /** Waits until every request the view sent has its answer and the view has taken it. */
     async idle() {
       do {
@@ -380,7 +384,15 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   timeouts.advance(view.STATUS_TIMEOUT_MS - view.HISTORY_TIMEOUT_MS);
   await refreshed;
   assert.equal(bridge.state().busy, false);
-  assert.equal(bridge.state().refreshError, 'The host did not reply to usage_status.');
+  assert.equal(bridge.state().refreshError, view.STATUS_LATE);
+  assert.match(rendered(bridge), /Could not refresh: The host has not replied to usage_status yet/);
+  // Refresh and R work again at the deadline, though the first call never replies.
+  assert.equal(host.press('r'), true);
+  assert.equal(bridge.state().busy, true);
+  timeouts.advance(view.STATUS_TIMEOUT_MS);
+  await host.idle();
+  assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [false, view.STATUS_LATE]);
+  assert.equal(host.callIds('usage_status').length, 3);
 
   // A tool result the host passes while a Refresh is out is newer: the late reply does not replace it.
   const late = bridge.refresh();
@@ -406,31 +418,137 @@ test('a failed Refresh keeps the dashboard and says why; a reply that never come
   }
 });
 
-test('Refresh outlasts the server\'s slowest provider reads: a status that arrives after them is shown', async (t) => {
+/** A status read late: one account read and one that timed out, which the view shows side by side. */
+const slowStatus = (used) => createUsageStatus([
+  account('chatgpt_main', 'codex-chatgpt', { label: 'Main ChatGPT', windows: [window(used)] }),
+  account('amp_cli', 'amp', { label: 'Amp CLI', state: 'unavailable', windows: [], observedAt: null, errors: [{ code: 'amp_timeout', message: 'The amp usage command timed out.' }] }),
+], new Date(NOW));
+const toolResult = (status) => ({ content: [{ type: 'text', text: 'Usage' }], structuredContent: status });
+
+test('the usage_status deadline ends the busy state, not the call: a valid status that arrives later is shown', async (t) => {
   const { host, bridge, mcp, timeouts } = await connectedBridge(t);
   await passToolResult({ mcp, host });
   host.withhold = ({ name }) => name === 'usage_status';
-  const refreshed = bridge.refresh();
-  await host.idle();
-  // `amp usage` may run 20 s; a Claude Code read that waits for a Keychain prompt and then falls back through
-  // four other harnesses, one after another, about 150 s.
-  for (const ms of [21_000, 129_000]) {
-    timeouts.advance(ms);
+  // The server's read has no overall bound (a custom Claude config directory alone may wait for four 60 s
+  // Keychain prompts), so replies at 241 s and 400 s, well past the deadline, must still show.
+  for (const [ms, used] of [[241_000, 40], [400_000, 55]]) {
+    const refreshed = bridge.refresh();
+    await host.idle();
+    timeouts.advance(21_000);
     await host.idle();
     assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [true, null], `${ms} ms`);
+    timeouts.advance(view.STATUS_TIMEOUT_MS - 21_000);
+    await refreshed;
+    assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [false, view.STATUS_LATE], `${ms} ms`);
+    timeouts.advance(ms - view.STATUS_TIMEOUT_MS);
+    const historyReads = host.callIds('usage_history').length;
+    host.answerLast(toolResult(slowStatus(used)));
+    await host.idle();
+    assert.deepEqual([bridge.state().status, bridge.state().refreshError, bridge.state().busy], [slowStatus(used), null, false], `${ms} ms`);
+    // A late status reads history again, as a timely one does.
+    assert.equal(host.callIds('usage_history').length, historyReads + 1);
+    const markup = rendered(bridge);
+    for (const text of ['Main ChatGPT', 'Amp CLI', 'The amp usage command timed out.']) assert.ok(markup.includes(text), text);
+    assert.doesNotMatch(markup, /Could not refresh/);
   }
-  // One account read and one that timed out: the status is valid, and the view shows both.
-  const slow = createUsageStatus([
-    account('chatgpt_main', 'codex-chatgpt', { label: 'Main ChatGPT', windows: [window(40)] }),
-    account('amp_cli', 'amp', { label: 'Amp CLI', state: 'unavailable', windows: [], observedAt: null, errors: [{ code: 'amp_timeout', message: 'The amp usage command timed out.' }] }),
-  ], new Date(NOW));
-  host.withhold = null;
-  host.answerLast({ content: [{ type: 'text', text: 'Usage' }], structuredContent: slow });
-  await Promise.all([refreshed, host.idle()]);
-  assert.deepEqual([bridge.state().status, bridge.state().refreshError, bridge.state().busy], [slow, null, false]);
-  const markup = rendered(bridge);
-  for (const text of ['Main ChatGPT', 'Amp CLI', 'The amp usage command timed out.']) assert.ok(markup.includes(text), text);
-  assert.doesNotMatch(markup, /Could not refresh/);
+});
+
+test('late replies show in the order their calls began; teardown ends calls past their deadline', async (t) => {
+  const { host, bridge, mcp, timeouts } = await connectedBridge(t);
+  await passToolResult({ mcp, host });
+  host.withhold = ({ name }) => name === 'usage_status';
+  /** Presses Refresh and lets its call pass the deadline unanswered; returns the call's id. */
+  const expiredRefresh = async () => {
+    const refreshed = bridge.refresh();
+    await host.idle();
+    timeouts.advance(view.STATUS_TIMEOUT_MS);
+    await refreshed;
+    return host.callIds('usage_status').at(-1);
+  };
+
+  // An earlier Refresh's reply after a later one's was shown is dropped.
+  const first = await expiredRefresh();
+  void bridge.refresh();
+  await host.idle();
+  const second = host.callIds('usage_status').at(-1);
+  host.answer(second, toolResult(slowStatus(10)));
+  await host.idle();
+  host.answer(first, toolResult(slowStatus(90)));
+  await host.idle();
+  assert.deepEqual(bridge.state().status, slowStatus(10));
+  // An earlier Refresh's failure says nothing about the later one still running, nor about what it shows.
+  const third = await expiredRefresh();
+  void bridge.refresh();
+  await host.idle();
+  host.deliver({ jsonrpc: '2.0', id: third, error: { code: -32000, message: 'Too late.' } });
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().refreshError, bridge.state().busy], [slowStatus(10), view.STATUS_LATE, true]);
+  host.answer(host.callIds('usage_status').at(-1), toolResult(slowStatus(11)));
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().refreshError, bridge.state().busy], [slowStatus(11), null, false]);
+
+  // An earlier Refresh's reply before the later one's is shown, then replaced; the later one stays busy meanwhile.
+  const fourth = await expiredRefresh();
+  void bridge.refresh();
+  await host.idle();
+  const fifth = host.callIds('usage_status').at(-1);
+  host.answer(fourth, toolResult(slowStatus(20)));
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().busy, bridge.state().refreshError], [slowStatus(20), true, null]);
+  host.answer(fifth, toolResult(slowStatus(30)));
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().busy], [slowStatus(30), false]);
+
+  // A tool result the host passes after the call began is newer: the late reply is dropped.
+  const sixth = await expiredRefresh();
+  const newer = await passToolResult({ mcp, host });
+  assert.equal(bridge.state().refreshError, null);
+  host.answer(sixth, toolResult(slowStatus(40)));
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().refreshError], [newer.structuredContent, null]);
+
+  // Teardown ends every open call, past its deadline or not; a reply after it is not read.
+  const seventh = await expiredRefresh();
+  host.deliver({ jsonrpc: '2.0', id: 'teardown-1', method: 'ui/resource-teardown', params: {} });
+  const sent = host.sent.length;
+  host.answer(seventh, toolResult(slowStatus(50)));
+  await host.idle();
+  assert.deepEqual([bridge.state().status, bridge.state().closed, bridge.state().busy], [newer.structuredContent, true, false]);
+  assert.equal(host.sent.length, sent);
+  assert.equal(timeouts.size(), 0);
+});
+
+test('usage_history follows the same rule: its deadline ends the wait, a later reply is shown unless a newer read was', async (t) => {
+  const session = await mcpSession(t);
+  const host = fakeHost(session.mcp);
+  const timeouts = fakeTimeouts();
+  const bridge = view.createBridge({ host: host.window, view: host.view, appInfo: { name: 'subset-usage-dashboard', version: '1.0.0' }, ...timeouts });
+  t.after(() => bridge.close());
+  host.withhold = ({ name }) => name === 'usage_history';
+  const connected = bridge.connect();
+  await host.idle();
+  timeouts.advance(view.HISTORY_TIMEOUT_MS);
+  await connected;
+  assert.equal(bridge.state().history, undefined);
+  const history = (points) => ({ schemaVersion: 1, series: { chatgpt_main: { 'five_hour\u00005-hour': points } } });
+  host.answer(host.callIds('usage_history')[0], { content: [], structuredContent: history([[NOW - HOUR, 5]]) });
+  await host.idle();
+  assert.deepEqual(bridge.state().history, history([[NOW - HOUR, 5]]));
+
+  // Two Refreshes, each reading history; the later read's reply comes first, so the earlier one's is dropped.
+  await passToolResult({ mcp: session.mcp, host });
+  for (let i = 0; i < 2; i += 1) {
+    const refreshed = bridge.refresh();
+    await host.idle();
+    timeouts.advance(view.HISTORY_TIMEOUT_MS);
+    await refreshed;
+  }
+  const [, earlier, later] = host.callIds('usage_history');
+  host.answer(later, { content: [], structuredContent: history([[NOW - HOUR, 30]]) });
+  await host.idle();
+  host.answer(earlier, { content: [], structuredContent: history([[NOW - HOUR, 20]]) });
+  await host.idle();
+  assert.deepEqual(bridge.state().history, history([[NOW - HOUR, 30]]));
 });
 
 test('the R key the Refresh button advertises refreshes, only while Refresh is shown and never with a modifier or in a field', async (t) => {

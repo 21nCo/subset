@@ -4,24 +4,29 @@
 // sends `ui/initialize`, reads the theme from the host context, takes the `usage_status` result the host
 // passes as the dashboard's `status`, reads `usage_history` once connected, and calls `usage_status`
 // again only when the user presses Refresh or R: there is no polling. Every tool call has a deadline, so a
-// reply the host never sends cannot leave Refresh busy. It touches no DOM beyond the events it is given,
-// so it runs under `node --test` with a fake host.
+// reply the host never sends cannot leave Refresh busy, but a reply that comes later is still taken. It
+// touches no DOM beyond the events it is given, so it runs under `node --test` with a fake host.
 import { isUsageStatus, type UsageStatus } from '@subset.dev/usage-core';
 import { isUsageHistory, type UsageHistory } from '@subset.dev/usage-core/history';
 
 export const PROTOCOL_VERSION = '2026-01-26';
 /**
- * How long usage_status waits for the host's reply. It must outlast the server's slowest read, or a valid
- * status that arrives late is dropped. `subset-usage mcp` reads every account at once, and the slowest
- * account bounds the read. The worst is a Claude Code profile whose live read fails: the stored-login
- * lookup (5 s), `claude auth status` (10 s), a macOS Keychain prompt (60 s) and the usage read (15 s), then
- * one fallback read (one HTTPS read, 15 s) through each other harness signed in to the same account, one
- * after another: Pi, OpenCode, omp and Hermes, 60 s. That is about 150 s; three minutes leaves 30 s for
- * process start and the host's own relay.
+ * How long Refresh stays busy waiting for usage_status. The deadline bounds the busy state, not the
+ * server: at it, Refresh can be pressed again and a notice says the reply has not come, but the call stays
+ * open and a valid status that arrives later is still shown (unless something newer was shown first).
+ * The server's read has no overall bound. It reads every account at once and waits for the slowest, and
+ * some paths are open-ended: a custom Claude config directory tries two spellings with two Keychain
+ * lookups each (up to 60 s per prompt) before its credentials file; harnesses signed in to the same
+ * account are read one after another as fallbacks, for as many profiles as are configured (up to 20); and
+ * the host may hold the call for its own approval prompt. Three minutes covers a common slow read (a
+ * Claude Code account with a Keychain prompt and four fallbacks, about 150 s), so Refresh does not invite a
+ * second read, with a second Keychain prompt, while the first is still running.
  */
 export const STATUS_TIMEOUT_MS = 180_000;
-/** How long usage_history waits: the server reads one local file. */
+/** How long a usage_history read keeps the view waiting (the server reads one local file); a later reply is still taken. */
 export const HISTORY_TIMEOUT_MS = 15_000;
+/** The notice when usage_status has not replied by its deadline. */
+export const STATUS_LATE = 'The host has not replied to usage_status yet; the status shows here when it does.';
 /** The hours of history read: the dashboard's 7-day activity and trend ranges (usage_history's maximum). */
 export const HISTORY_HOURS = 168;
 
@@ -35,7 +40,7 @@ export interface BridgeState {
   history: UsageHistory | undefined;
   /** The tool result the host passed was an error, or the call was cancelled before any status. */
   toolError: string | null;
-  /** The latest Refresh failed; the dashboard keeps the last status. */
+  /** The latest Refresh failed or has not replied by its deadline; the dashboard keeps the last status. */
   refreshError: string | null;
   /** A Refresh is running. */
   busy: boolean;
@@ -78,6 +83,7 @@ export interface Bridge {
   /**
    * Calls usage_status, with the provider the agent's call named, then reads usage_history again. The
    * view's R key does the same once a status or tool error is shown, as the dashboard's Refresh advertises.
+   * Settles once the reply is shown and history read, or at the deadline; a later reply is still shown.
    */
   refresh(): Promise<void>;
   /** Tells the host the view's size, once connected and only when it changed. */
@@ -132,64 +138,100 @@ export function createBridge({
   let ready = false;
   // The provider the agent's usage_status call named, so Refresh shows the same accounts.
   let provider: string | undefined;
-  // Bumped by each tool result the host passes, so a Refresh issued before it cannot replace it.
-  let generation = 0;
-  let historyRead = 0;
+  // Every status source is numbered when it starts: a tool result the host passes when it arrives, a
+  // Refresh when it is pressed. A reply is shown only if nothing numbered later has been shown, so a late
+  // reply never replaces a newer status, and an earlier Refresh's reply never replaces a later one's.
+  let statusOrder = 0;
+  let statusShown = 0;
+  let latestRefresh = 0;
+  // The same order for usage_history reads.
+  let historyOrder = 0;
+  let historyShown = 0;
   let size: { width: number; height: number } | null = null;
   let sentSize: string | null = null;
 
   const send = (message: Record<string, unknown>) => host.postMessage({ jsonrpc: '2.0', ...message }, '*');
 
-  /** Sends a request and waits for its reply; with `timeoutMs`, no reply by then rejects and is forgotten. */
-  function request(method: string, params: Record<string, unknown>, timeout?: { ms: number; message: string }): Promise<unknown> {
+  /**
+   * Sends a request; the promise settles with the host's reply whenever it comes. With `timeout`, `expired`
+   * runs if no reply came by then, and the request stays open: only its reply or teardown ends it.
+   */
+  function request(method: string, params: Record<string, unknown>, timeout?: { ms: number; expired(): void }): Promise<unknown> {
     if (current.closed) return Promise.reject(new Error('The host closed the usage view.'));
     const id = ++nextId;
     return new Promise((resolve, reject) => {
-      const deadline = timeout
-        ? after(() => {
-            if (pending.delete(id)) reject(new Error(timeout.message));
-          }, timeout.ms)
-        : null;
-      pending.set(id, { resolve, reject, deadline });
+      const entry = { resolve, reject, deadline: null as unknown };
+      if (timeout) {
+        entry.deadline = after(() => {
+          entry.deadline = null;
+          if (pending.has(id)) timeout.expired();
+        }, timeout.ms);
+      }
+      pending.set(id, entry);
       send({ id, method, params });
     });
   }
 
-  async function callTool(name: string, args: Record<string, unknown>, ms: number): Promise<CallToolResult> {
-    const result = await request('tools/call', { name, arguments: args }, { ms, message: `The host did not reply to ${name}.` });
+  async function callTool(name: string, args: Record<string, unknown>, timeout: { ms: number; expired(): void }): Promise<CallToolResult> {
+    const result = await request('tools/call', { name, arguments: args }, timeout);
     if (!isObject(result)) throw new Error('The host returned no tool result.');
     return result as CallToolResult;
   }
 
-  /** Reads usage_history; trends are optional, so a failure keeps the history already shown. */
-  async function loadHistory() {
-    const read = ++historyRead;
-    try {
-      const result = await callTool('usage_history', { hours: HISTORY_HOURS }, HISTORY_TIMEOUT_MS);
-      if (read !== historyRead || current.closed || result.isError || !isUsageHistory(result.structuredContent)) return;
-      const { schemaVersion, series } = result.structuredContent;
-      update({ history: { schemaVersion, series } });
-    } catch {
-      // No history leaves the trends empty, as in the standalone dashboard.
-    }
+  /**
+   * Reads usage_history; trends are optional, so a failure keeps the history already shown. Settles at the
+   * reply or the deadline; a later reply is shown unless a read started after it was shown first.
+   */
+  function loadHistory(): Promise<void> {
+    const read = ++historyOrder;
+    return new Promise((done) => {
+      callTool('usage_history', { hours: HISTORY_HOURS }, { ms: HISTORY_TIMEOUT_MS, expired: done })
+        .then((result) => {
+          if (read < historyShown || current.closed || result.isError || !isUsageHistory(result.structuredContent)) return;
+          historyShown = read;
+          const { schemaVersion, series } = result.structuredContent;
+          update({ history: { schemaVersion, series } });
+        })
+        .catch(() => {
+          // No history leaves the trends empty, as in the standalone dashboard.
+        })
+        .finally(done);
+    });
   }
 
-  async function refresh() {
-    if (current.busy || current.closed || !ready) return;
-    const issued = generation;
-    update({ busy: true });
-    try {
-      const result = statusOf(await callTool('usage_status', provider === undefined ? {} : { provider }, STATUS_TIMEOUT_MS));
-      // A tool result the host passed meanwhile is newer than this read.
-      if (current.closed || issued !== generation) return;
-      if ('status' in result) update({ status: result.status, toolError: null, refreshError: null });
-      else update({ refreshError: result.error });
-    } catch (error) {
-      if (!current.closed && issued === generation) update({ refreshError: error instanceof Error ? error.message : String(error) });
-    } finally {
-      if (!current.closed) update({ busy: false });
+  /** A Refresh's reply: shown unless something newer was; returns whether it was taken. */
+  function takeRefresh(order: number, result: { status: UsageStatus } | { error: string }): boolean {
+    if (current.closed) return false;
+    const latest = order === latestRefresh;
+    if (latest && current.busy) update({ busy: false });
+    if (order < statusShown) return false;
+    if ('status' in result) {
+      statusShown = order;
+      update({ status: result.status, toolError: null, refreshError: null });
+      return true;
     }
-    await loadHistory();
+    // An earlier Refresh's failure says nothing about the one now running or shown.
+    if (!latest) return false;
+    update({ refreshError: result.error });
+    return true;
+  }
+
+  function refresh(): Promise<void> {
+    if (current.busy || current.closed || !ready) return Promise.resolve();
+    const order = ++statusOrder;
+    latestRefresh = order;
+    update({ busy: true });
+    return new Promise((done) => {
+      const expired = () => {
+        // Refresh works again; the call stays open, and its reply still shows if nothing newer has.
+        if (!current.closed && order === latestRefresh && current.busy) update({ busy: false, ...(order > statusShown ? { refreshError: STATUS_LATE } : {}) });
+        done();
+      };
+      callTool('usage_status', provider === undefined ? {} : { provider }, { ms: STATUS_TIMEOUT_MS, expired })
+        .then(statusOf, (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }))
+        .then((result) => (takeRefresh(order, result) ? loadHistory() : undefined))
+        .finally(done);
+    });
   }
 
   function readHostContext(context: unknown) {
@@ -200,7 +242,7 @@ export function createBridge({
   /** The usage_status result the host passed: the dashboard's `status`, or the error shown in its place. */
   function takeToolResult(params: unknown) {
     if (!isObject(params)) return;
-    generation += 1;
+    statusShown = ++statusOrder;
     const result = statusOf(params as CallToolResult);
     if ('status' in result) update({ status: result.status, toolError: null, refreshError: null });
     else update({ status: null, toolError: result.error, refreshError: null });
@@ -279,6 +321,7 @@ export function createBridge({
     view.removeEventListener('message', listener);
     view.removeEventListener('keydown', onKey);
     update({ closed: true, busy: false });
+    // Every call still open, past its deadline or not, ends here: a reply after teardown is never read.
     for (const waiting of pending.values()) {
       if (waiting.deadline !== null) cancel(waiting.deadline);
       waiting.reject(new Error('The host closed the usage view.'));
