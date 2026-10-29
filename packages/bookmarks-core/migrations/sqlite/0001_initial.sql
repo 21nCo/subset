@@ -39,7 +39,9 @@ CREATE TABLE "bookmark_tags" (
   "__ns" TEXT NOT NULL,
   "from" TEXT NOT NULL,
   "to" TEXT NOT NULL,
-  PRIMARY KEY ("__ns", "id")
+  PRIMARY KEY ("__ns", "id"),
+  FOREIGN KEY ("__ns", "from") REFERENCES "bookmarks" ("__ns", "id") ON DELETE CASCADE,
+  FOREIGN KEY ("__ns", "to") REFERENCES "tags" ("__ns", "id") ON DELETE CASCADE
 );
 CREATE INDEX "bookmark_tags_ns_from" ON "bookmark_tags" ("__ns", "from");
 CREATE INDEX "bookmark_tags_ns_to" ON "bookmark_tags" ("__ns", "to");

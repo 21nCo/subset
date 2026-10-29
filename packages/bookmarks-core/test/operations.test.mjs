@@ -37,7 +37,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(tagNames(bookmark), ['Docs']);
       assert.deepEqual(await ops.getBookmark(bookmark.id), bookmark);
       const job = host.queue.jobs.at(-1);
-      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url });
+      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url, detailsRequest: null });
       assert.deepEqual(job.options, { dedupeKey: bookmark.id });
     });
 
@@ -157,7 +157,9 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(moved.apiId, bookmark.apiId);
       assert.equal(moved.unread, true);
       assert.equal(moved.archived, true);
-      assert.deepEqual(host.queue.jobs.at(-1).job, { bookmarkId: bookmark.id, url: 'https://edit.example/new' });
+      const { detailsRequest, ...job } = host.queue.jobs.at(-1).job;
+      assert.deepEqual(job, { bookmarkId: bookmark.id, url: 'https://edit.example/new' });
+      assert.match(detailsRequest, / https:\/\/edit\.example\/new$/);
 
       assert.equal((await ops.setUnread(bookmark.id, false)).unread, false);
       assert.equal((await ops.setArchived(bookmark.id, false)).archived, false);
@@ -174,7 +176,9 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(retried.detailsState, 'pending');
       assert.equal(retried.detailsError, null);
       const job = host.queue.jobs.at(-1);
-      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url });
+      const { detailsRequest, ...fields } = job.job;
+      assert.deepEqual(fields, { bookmarkId: bookmark.id, url: bookmark.url });
+      assert.match(detailsRequest, / https:\/\/retry\.example\/$/);
       assert.equal(job.done, false);
       assert.ok(job.options.dedupeKey.startsWith(`${bookmark.id}:`), job.options.dedupeKey);
       await rejectsWith(ops.retryDetails('missing-id'), 'not-found');
@@ -234,6 +238,17 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         await rejectsWith(theirs.setUnread(mine.id, true), 'not-found');
         await rejectsWith(theirs.addTags(mine.id, ['x']), 'not-found');
         assert.ok(await ops.getBookmark(mine.id));
+      });
+
+      test('apiId goes past the last 32-bit value', async () => {
+        const seed = 'INSERT INTO bookmark_api_ids (id, __ns, value) VALUES (';
+        if (host.raw) host.raw.prepare(`${seed}?, ?, ?)`).run('2147483647', 'wide', 2147483647);
+        else await host.pglite.query(`${seed}$1, $2, $3)`, ['2147483647', 'wide', 2147483647]);
+        const wide = host.forUser('wide');
+        assert.equal((await wide.addBookmark('https://wide.example/a')).bookmark.apiId, 2147483648);
+        const { bookmark } = await wide.addBookmark('https://wide.example/b');
+        assert.equal(bookmark.apiId, 2147483649);
+        assert.deepEqual(await wide.getBookmark(bookmark.id), bookmark);
       });
 
       // Two servers on one database stand in for two processes: only the unique indexes coordinate them.

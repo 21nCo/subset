@@ -9,7 +9,7 @@ import { memoryAdapter } from '@superfunctions/db/adapters';
 import Database from 'better-sqlite3';
 import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
-import { bigint, boolean, integer as pgInteger, jsonb, pgTable, text as pgText } from 'drizzle-orm/pg-core';
+import { bigint, boolean, jsonb, pgTable, text as pgText } from 'drizzle-orm/pg-core';
 import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { bookmarksSchema, bookmarksTables, createBookmarkOperations } from '../dist/index.js';
 
@@ -35,9 +35,7 @@ const postgresColumn = (name, field) => {
         ? jsonb(name)
         : field.type === 'string'
           ? pgText(name)
-          : field.type === 'date'
-            ? bigint(name, { mode: 'number' })
-            : pgInteger(name);
+          : bigint(name, { mode: 'number' });
   return field.required ? column.notNull() : column;
 };
 
@@ -63,22 +61,40 @@ async function server(database) {
   });
 }
 
+/**
+ * `another(beforeUpsert)` is a second datafn server on the same database; `beforeUpsert(args)` runs before each
+ * adapter upsert (how datafn writes a join row, after it checked that both ends exist).
+ */
+function hostOn(db, extra) {
+  const another = (beforeUpsert) =>
+    server(
+      beforeUpsert
+        ? new Proxy(db, {
+            get: (target, key) =>
+              key === 'upsert' ? async (args) => (await beforeUpsert(args), target.upsert(args)) : typeof target[key] === 'function' ? target[key].bind(target) : target[key]
+          })
+        : db
+    );
+  return server(db).then((main) => ({ server: main, another, ...extra }));
+}
+
 export const BACKENDS = {
   async memory() {
-    const db = memoryAdapter();
-    return { server: await server(db), another: () => server(db), close: async () => {} };
+    return hostOn(memoryAdapter(), { close: async () => {} });
   },
   async sqlite() {
     const sqlite = new Database(':memory:');
+    // better-sqlite3 and D1 enforce foreign keys by default; set here so the tests do not depend on that.
+    sqlite.pragma('foreign_keys = ON');
     sqlite.exec(migrationSql('sqlite'));
     const db = drizzleAdapter({ db: drizzleSqlite(sqlite, { schema: drizzleTables(sqliteTable, sqliteColumn) }), dialect: 'sqlite' });
-    return { server: await server(db), another: () => server(db), raw: sqlite, close: async () => sqlite.close() };
+    return hostOn(db, { raw: sqlite, close: async () => sqlite.close() });
   },
   async postgres() {
     const pglite = new PGlite();
     await pglite.exec(migrationSql('postgres'));
     const db = drizzleAdapter({ db: drizzlePglite(pglite, { schema: drizzleTables(pgTable, postgresColumn) }), dialect: 'postgres' });
-    return { server: await server(db), another: () => server(db), pglite, close: async () => pglite.close() };
+    return hostOn(db, { pglite, close: async () => pglite.close() });
   }
 };
 
@@ -92,18 +108,23 @@ export const sampleDetails = (url, title) => ({
 });
 
 /**
- * Stores fetched details through the executor the way the details runner (SET-175) does: only while the bookmark
- * is still on the page that was fetched.
+ * Stores fetched details through the executor the way the details runner (SET-175) does: only while the bookmark's
+ * request is still the job's. Given a bookmark instead of a job, it stores for the request the bookmark has now.
  */
-export async function storeDetails(executor, bookmark, fields, userId = 'owner') {
+export async function storeDetails(executor, target, fields, userId = 'owner') {
+  let job = target;
+  if (!('bookmarkId' in target)) {
+    const { data } = await executor.query({ version: 1, resource: 'bookmarks', select: ['detailsRequest'], filters: { id: target.id }, limit: 1 }, { userId });
+    job = { bookmarkId: target.id, detailsRequest: data[0].detailsRequest };
+  }
   const result = await executor.mutate(
     {
       version: 1,
       resource: 'bookmarks',
       operation: 'merge',
-      id: bookmark.id,
+      id: job.bookmarkId,
       record: { detailsState: 'ready', detailsError: null, ...fields },
-      if: { id: bookmark.id, canonicalUrl: bookmark.canonicalUrl }
+      if: { id: job.bookmarkId, detailsRequest: job.detailsRequest }
     },
     { userId }
   );

@@ -16,8 +16,8 @@ function columnType(field, dialect, label) {
     case 'string':
       return 'TEXT';
     case 'number':
-      // Every Bookmarks number is an integer (apiId and the bookmark_api_ids value).
-      return 'INTEGER';
+      // Every Bookmarks number is an integer (apiId and the bookmark_api_ids value) that only grows, so 64-bit.
+      return postgres ? 'BIGINT' : 'INTEGER';
     case 'boolean':
       return postgres ? 'BOOLEAN' : 'INTEGER';
     case 'json':
@@ -48,12 +48,21 @@ export function renderMigration(tables, dialect) {
     }
     const definitions = Object.entries(table.fields).map(([name, field]) => {
       if (field.fieldName !== undefined && field.fieldName !== name) throw new Error(`${model}.${name}: renamed columns are not supported`);
-      if (field.unique || field.references || field.defaultValue !== undefined) {
-        throw new Error(`${model}.${name}: declare uniqueness as an index; references and defaults are not supported`);
+      if (field.unique || field.defaultValue !== undefined) {
+        throw new Error(`${model}.${name}: declare uniqueness as an index; defaults are not supported`);
       }
       return `  ${quote(name)} ${columnType(field, dialect, `${model}.${name}`)}${field.required ? ' NOT NULL' : ''}`;
     });
     definitions.push(`  PRIMARY KEY (${PRIMARY_KEY.map(quote).join(', ')})`);
+    // A reference is to another table's id in the same namespace, so the key includes `__ns` on both sides.
+    for (const [name, field] of Object.entries(table.fields)) {
+      const ref = field.references;
+      if (!ref) continue;
+      if (!tables[ref.model] || ref.field !== 'id' || ref.onDelete !== 'cascade' || ref.onUpdate !== undefined) {
+        throw new Error(`${model}.${name}: only references to another table's id with onDelete cascade are supported`);
+      }
+      definitions.push(`  FOREIGN KEY ("__ns", ${quote(name)}) REFERENCES ${quote(ref.model)} (${PRIMARY_KEY.map(quote).join(', ')}) ON DELETE CASCADE`);
+    }
     for (const constraint of table.constraints ?? []) {
       if (constraint.type !== 'check' || typeof constraint.check !== 'string')
         throw new Error(`${model}: only check constraints are supported`);

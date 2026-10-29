@@ -17,7 +17,7 @@
   },
   "files": ["dist", "migrations", "README.md"],
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "migrations": "npm run build && node scripts/generate-migrations.mjs",
     "test": "npm run build --workspace=@subset.dev/links && npm run build && node --test test/*.test.mjs"

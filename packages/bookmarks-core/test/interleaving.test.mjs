@@ -766,10 +766,132 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(again.bookmark.detailsState, 'pending');
       assert.equal(queue.jobs.length, 0);
       await adder.retryDetails(again.bookmark.id);
+      // The bookmark was still on its add-time request, so the retry's job is for that request.
       assert.deepEqual(
         queue.jobs.map((entry) => entry.job),
-        [{ bookmarkId: again.bookmark.id, url: again.bookmark.url }]
+        [{ bookmarkId: again.bookmark.id, url: again.bookmark.url, detailsRequest: null }]
       );
     });
+
+    const mergeRecord = async (sourceId) =>
+      (await host.server.executor.query({ version: 1, resource: 'tag_merges', select: ['targetId'], filters: { id: sourceId } }, { userId: 'owner' })).data[0]?.targetId ?? null;
+
+    test('two merges of one source into different targets: one succeeds, the other is a conflict, and the record names the winner', async () => {
+      const { bookmark } = await ops.addBookmark('https://claim.example/', { tags: ['claim-a'] });
+      const [a] = bookmark.tags;
+      const [b] = (await ops.addBookmark('https://claim.example/b', { tags: ['claim-b'] })).bookmark.tags;
+      const [c] = (await ops.addBookmark('https://claim.example/c', { tags: ['claim-c'] })).bookmark.tags;
+      const point = pausePoint();
+      // Paused at its first tag_merges write, after it read that the source has no record.
+      const hooks = { beforeMutate: (payload) => payload.resource === 'tag_merges' && payload.operation !== 'delete' && point.pause() };
+      let intoC;
+      let intoB;
+      if (backend === 'memory') {
+        // The memory adapter serves one executor per user, so both merges share it.
+        const shared = hookedExecutor((await host.another()).executor, hooks);
+        const merger = () => createBookmarkOperations({ executor: shared, detailsQueue: recordingQueue(), context: { userId: 'owner' } });
+        intoC = merger().mergeTags([a.id], c.id);
+        await point.reached;
+        intoB = merger().mergeTags([a.id], b.id);
+      } else {
+        intoC = (await writer(hooks)).mergeTags([a.id], c.id);
+        await point.reached;
+        intoB = ops.mergeTags([a.id], b.id);
+        await intoB.catch(() => {});
+      }
+      point.release();
+      const results = await Promise.allSettled([intoB, intoC]);
+      const won = results.filter((result) => result.status === 'fulfilled');
+      assert.equal(won.length, 1, JSON.stringify(results.map((result) => result.status)));
+      const lost = results.find((result) => result.status === 'rejected').reason;
+      assert.ok(lost instanceof BookmarkError && lost.code === 'conflict', String(lost));
+      const winner = won[0].value;
+      if (backend !== 'memory') assert.equal(winner.id, b.id);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags.map((tag) => tag.id), [winner.id]);
+      assert.equal(await mergeRecord(a.id), winner.id);
+      assert.equal((await ops.mergeTags([a.id], winner.id)).id, winner.id);
+    });
+
+    for (const sources of [1, 2]) {
+      test(`repeating an interrupted merge of ${sources} source(s) after its target was merged on finishes it`, async () => {
+        const names = Array.from({ length: sources }, (_, n) => `onward${sources}-s${n}`);
+        const { bookmark } = await ops.addBookmark(`https://onward.example/${sources}`, { tags: names });
+        const ids = bookmark.tags.map((tag) => tag.id);
+        const [t] = (await ops.addBookmark(`https://onward.example/${sources}/t`, { tags: [`onward${sources}-t`] })).bookmark.tags;
+        const [u] = (await ops.addBookmark(`https://onward.example/${sources}/u`, { tags: [`onward${sources}-u`] })).bookmark.tags;
+        const last = ids.at(-1);
+        const interrupted = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tags' && payload.operation === 'delete' && payload.id === last) });
+        await assert.rejects(interrupted.mergeTags(ids, t.id), /injected failure/);
+        await ops.mergeTags([t.id], u.id);
+        // Repeated into the merged-away target, and (with two sources) into the end of its records.
+        assert.equal((await ops.mergeTags(ids, t.id)).id, u.id);
+        if (sources === 2) assert.equal((await ops.mergeTags(ids, u.id)).id, u.id);
+        assert.deepEqual((await ops.getBookmark(bookmark.id)).tags.map((tag) => tag.id), [u.id]);
+        for (const name of names) {
+          const [fresh] = (await ops.addBookmark(`https://onward.example/${name}`, { tags: [name] })).bookmark.tags;
+          assert.ok(!ids.includes(fresh.id) && fresh.id !== u.id, name);
+        }
+        await rejectsWith(ops.mergeTags([u.id], 'no-such-tag'), 'not-found');
+      });
+    }
+
+    // On Postgres datafn writes the link inside one transaction, which PGlite's single connection cannot interleave
+    // (on a server the foreign key's row lock orders it); the migration test shows the key refusing such a row there.
+    if (backend === 'sqlite') {
+      test('a link datafn checked before its bookmark was deleted is refused, so no join row outlives it', async () => {
+        const { bookmark } = await ops.addBookmark('https://fk.example/', { tags: ['fk-a'] });
+        const point = pausePoint();
+        // Paused at the join-row write, after datafn checked that the bookmark and the tag exist.
+        const second = await host.another((args) => args.model === 'bookmark_tags' && point.pause());
+        const linker = createBookmarkOperations({ executor: second.executor, detailsQueue: recordingQueue(), context: { userId: 'owner' } });
+        const adding = linker.addTags(bookmark.id, ['fk-b']);
+        await point.reached;
+        assert.deepEqual(await ops.deleteBookmarks([bookmark.id]), { deleted: [bookmark.id] });
+        point.release();
+        await rejectsWith(adding, 'not-found');
+        assert.equal(await ops.getBookmark(bookmark.id), null);
+        assert.equal(host.raw.prepare('SELECT count(*) AS n FROM bookmark_tags WHERE "from" = ?').get(bookmark.id).n, 0);
+        const [kept] = (await ops.addBookmark('https://fk.example/other', { tags: ['FK-B'] })).bookmark.tags;
+        assert.equal(kept.name, 'fk-b');
+      });
+    }
+
+    test("a details result for an earlier request of the same page does not settle a later request", async () => {
+      const queue = recordingQueue();
+      const own = await writer({}, queue);
+      const { bookmark } = await own.addBookmark('https://again.example/a');
+      await own.updateBookmark(bookmark.id, { url: 'https://again.example/b' });
+      await own.updateBookmark(bookmark.id, { url: 'https://again.example/a' });
+      const [first, , latest] = queue.jobs.map((entry) => entry.job);
+      assert.equal(first.url, latest.url);
+      assert.notEqual(first.detailsRequest, latest.detailsRequest);
+      await assert.rejects(storeDetails(host.server.executor, first, { details: sampleDetails(first.url, 'Stale') }), /Guard condition not met/);
+      assert.equal((await ops.getBookmark(bookmark.id)).detailsState, 'pending');
+      await storeDetails(host.server.executor, latest, { details: sampleDetails(latest.url, 'Fresh') });
+      const stored = await ops.getBookmark(bookmark.id);
+      assert.equal(stored.detailsState, 'ready');
+      assert.equal(displayTitle(stored), 'Fresh');
+    });
+
+    const deletedMidway = [
+      ['setUnread', (o, id) => o.setUnread(id, true), (payload) => payload.resource === 'bookmarks' && payload.operation === 'merge'],
+      ['updateBookmark with a url', (o, id) => o.updateBookmark(id, { url: 'https://gone.example/moved' }), (payload) => payload.record?.url !== undefined],
+      ['retryDetails', (o, id) => o.retryDetails(id), (payload) => payload.resource === 'bookmarks' && payload.operation === 'merge'],
+      ['removeTags', (o, id) => o.removeTags(id, ['gone-tag']), (payload) => payload.operation === 'unrelate']
+    ];
+    for (const [label, run, matches] of deletedMidway) {
+      test(`${label} on a bookmark deleted after datafn's guard read fails with BookmarkError not-found`, async () => {
+        const { bookmark } = await ops.addBookmark(`https://gone.example/${label.replaceAll(' ', '-')}`, { tags: ['gone-tag'] });
+        await storeDetails(host.server.executor, bookmark, { detailsState: 'failed', detailsError: 'timeout' });
+        const point = pausePoint();
+        const late = await writer({ beforeMutate: (payload) => matches(payload) && point.pause().then(() => delete payload.if) });
+        const running = run(late, bookmark.id);
+        await point.reached;
+        await ops.deleteBookmarks([bookmark.id]);
+        point.release();
+        await rejectsWith(running, 'not-found');
+        assert.equal(await ops.getBookmark(bookmark.id), null);
+      });
+    }
   });
 }

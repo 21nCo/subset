@@ -4,7 +4,7 @@
 CREATE TABLE "bookmarks" (
   "id" TEXT NOT NULL,
   "__ns" TEXT NOT NULL,
-  "apiId" INTEGER NOT NULL,
+  "apiId" BIGINT NOT NULL,
   "url" TEXT NOT NULL,
   "canonicalUrl" TEXT NOT NULL,
   "userTitle" TEXT,
@@ -39,7 +39,9 @@ CREATE TABLE "bookmark_tags" (
   "__ns" TEXT NOT NULL,
   "from" TEXT NOT NULL,
   "to" TEXT NOT NULL,
-  PRIMARY KEY ("__ns", "id")
+  PRIMARY KEY ("__ns", "id"),
+  FOREIGN KEY ("__ns", "from") REFERENCES "bookmarks" ("__ns", "id") ON DELETE CASCADE,
+  FOREIGN KEY ("__ns", "to") REFERENCES "tags" ("__ns", "id") ON DELETE CASCADE
 );
 CREATE INDEX "bookmark_tags_ns_from" ON "bookmark_tags" ("__ns", "from");
 CREATE INDEX "bookmark_tags_ns_to" ON "bookmark_tags" ("__ns", "to");
@@ -47,7 +49,7 @@ CREATE INDEX "bookmark_tags_ns_to" ON "bookmark_tags" ("__ns", "to");
 CREATE TABLE "bookmark_api_ids" (
   "id" TEXT NOT NULL,
   "__ns" TEXT NOT NULL,
-  "value" INTEGER NOT NULL,
+  "value" BIGINT NOT NULL,
   PRIMARY KEY ("__ns", "id")
 );
 CREATE UNIQUE INDEX "bookmark_api_ids_ns_value" ON "bookmark_api_ids" ("__ns", "value");

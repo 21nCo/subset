@@ -116,14 +116,15 @@ export const bookmarksTables = {
     },
     indexes: [{ name: 'tags_ns_name_key', fields: [NAMESPACE_COLUMN, 'nameKey'], unique: true }]
   },
-  // datafn's many-to-many join rows: id is `<bookmark id>:<tag id>`.
+  // datafn's many-to-many join rows: id is `<bookmark id>:<tag id>`. Each end references its row in the same
+  // namespace, so the database refuses a link to a deleted bookmark or tag, and deleting either deletes its links.
   bookmark_tags: {
     modelName: 'bookmark_tags',
     fields: {
       id: { type: 'string', required: true },
       [NAMESPACE_COLUMN]: owner,
-      from: { type: 'string', required: true },
-      to: { type: 'string', required: true }
+      from: { type: 'string', required: true, references: { model: 'bookmarks', field: 'id', onDelete: 'cascade' } },
+      to: { type: 'string', required: true, references: { model: 'tags', field: 'id', onDelete: 'cascade' } }
     },
     indexes: [
       { name: 'bookmark_tags_ns_from', fields: [NAMESPACE_COLUMN, 'from'] },
