@@ -38,6 +38,19 @@ final class DiskReportTests: XCTestCase {
         XCTAssertEqual((many["children"] as? [Any])?.count, 20)
         XCTAssertEqual(many["omittedChildren"] as? Int, 2)
         XCTAssertGreaterThan(many["omittedAllocatedBytes"] as? Int ?? 0, 0)
+
+        // The text lists the same tree to the same depth, each folder's children indented under it after the sizes.
+        func listed(_ depth: String) async -> [String] {
+            await run(["disk", "--path", folder.path, "--depth", depth], HelperFixtures.environment(home: folder.path))
+                .stdout.split(separator: "\n").dropFirst(2).map { String($0.dropFirst(13)) }
+        }
+        let listedAtDepth0 = await listed("0"), listedAtDepth1 = await listed("1"), listedAtDepth2 = await listed("2")
+        XCTAssertEqual(listedAtDepth0, [])
+        XCTAssertEqual(listedAtDepth1, ["many", "big", "small.txt"])
+        XCTAssertEqual(listedAtDepth2.count, 1 + 20 + 1 + 2 + 1)
+        XCTAssertEqual(Array(listedAtDepth2.suffix(4)), ["big", "  a.bin", "  inner", "small.txt"])
+        XCTAssertEqual(listedAtDepth2.first, "many")
+        XCTAssertEqual(listedAtDepth2.dropFirst().prefix(20).filter { $0.hasPrefix("  f") }.count, 20)
     }
 
     func testAbsoluteKeepsTheHomeFolderInPaths() async throws {
@@ -271,6 +284,43 @@ final class DiskReportTests: XCTestCase {
             deadline = ContinuousClock.now + .milliseconds(500)
             while Self.isRunning(pid), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertFalse(Self.isRunning(pid), "signal \(signo): pid \(pid) is still running")
+            _ = await run.value
+        }
+    }
+
+    /// A helper started with `SIGHUP` or `SIGINT` ignored (under `nohup`, or in a background job) keeps it ignored:
+    /// the signal neither stops the helper nor its command.
+    func testASignalIgnoredAtLaunchStaysIgnored() async throws {
+        for signo in [SIGHUP, SIGINT] {
+            var original = sigaction()
+            sigaction(signo, nil, &original)
+            defer { sigaction(signo, &original, nil) }
+            signal(signo, SIG_IGN)
+            let folder = try TemporaryFolder()
+            let pidFile = folder.path + "/pid"
+            let registry = CommandRegistry()
+            let exitCode = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+            let cancel = HelperRunner.stopCommandsOnTermination(registry: registry) { code in exitCode.withLock { $0 = code } }
+            let run = Task {
+                await ProcessCommandRunner(registry: registry).run(
+                    "/bin/sh", arguments: ["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "sh", pidFile],
+                    environment: [:], timeout: .seconds(30))
+            }
+            let deadline = ContinuousClock.now + .seconds(10)
+            while (try? String(contentsOfFile: pidFile, encoding: .utf8))?.hasSuffix("\n") != true, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let pid = try XCTUnwrap(pid_t(String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+            kill(getpid(), signo)
+            try await Task.sleep(for: .milliseconds(500))
+            XCTAssertNil(exitCode.withLock { $0 }, "signal \(signo)")
+            XCTAssertTrue(Self.isRunning(pid), "signal \(signo): the command was stopped")
+            cancel()
+            var after = sigaction()
+            sigaction(signo, nil, &after)
+            XCTAssertEqual(unsafeBitCast(after.__sigaction_u.__sa_handler, to: Int.self), unsafeBitCast(SIG_IGN, to: Int.self),
+                           "signal \(signo)")
+            registry.shutDown()
             _ = await run.value
         }
     }

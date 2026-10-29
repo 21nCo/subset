@@ -99,7 +99,7 @@ enum DiskReports {
         var lines = ["\(paths(tree.rootPath)): \(bytes(result.totals?.allocated)) allocated, "
                         + "\(bytes(result.totals?.private)) private, \(result.entriesRead) items read"]
         lines.append(volumeLine(volume))
-        lines += topChildren(of: 0, in: tree).shown.map { "  \(bytes($0.sizes?.allocated).padded(9))  \($0.name)" }
+        lines += textTree(0, in: tree, depth: depth, indent: "")
         return finished(scan, result: result, command: "disk", path: path, timeout: timeout, paths: paths, now: now,
                         errors: volumeErrors(volume, paths: paths),
                         sources: [("volume", "URL resource values: volumeTotalCapacity, volumeAvailableCapacity, volumeAvailableCapacityForImportantUsage"),
@@ -283,6 +283,15 @@ enum DiskReports {
             return left != right ? (left ?? 0, left != nil ? 1 : 0) > (right ?? 0, right != nil ? 1 : 0) : $0.name < $1.name
         }
         return (Array(sorted.prefix(childLimit)), Array(sorted.dropFirst(childLimit)))
+    }
+
+    /// The tree to `depth`, as in the JSON tree: each folder's largest children, their names indented under it.
+    private static func textTree(_ index: Int, in tree: DiskTree, depth: Int, indent: String) -> [String] {
+        guard depth > 0 else { return [] }
+        return topChildren(of: index, in: tree).shown.flatMap { child in
+            ["  \(bytes(child.sizes?.allocated).padded(9))  \(indent)\(child.name)"]
+                + textTree(child.index, in: tree, depth: depth - 1, indent: indent + "  ")
+        }
     }
 
     private static func node(_ index: Int, in tree: DiskTree, depth: Int, paths: PathDisplay) -> JSONValue {
