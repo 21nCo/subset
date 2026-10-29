@@ -108,14 +108,15 @@ export const sampleDetails = (url, title) => ({
 });
 
 /**
- * Stores fetched details through the executor the way the details runner (SET-175) does: only while the bookmark's
- * request is still the job's. Given a bookmark instead of a job, it stores for the request the bookmark has now.
+ * Stores fetched details through the executor the way the details runner (SET-175) does: only while the bookmark is
+ * still on the job's page with the job's request. Given a bookmark instead of a job, it stores for that bookmark's
+ * page and the request the bookmark has now.
  */
 export async function storeDetails(executor, target, fields, userId = 'owner') {
   let job = target;
   if (!('bookmarkId' in target)) {
     const { data } = await executor.query({ version: 1, resource: 'bookmarks', select: ['detailsRequest'], filters: { id: target.id }, limit: 1 }, { userId });
-    job = { bookmarkId: target.id, detailsRequest: data[0].detailsRequest };
+    job = { bookmarkId: target.id, canonicalUrl: target.canonicalUrl, detailsRequest: data[0].detailsRequest };
   }
   const result = await executor.mutate(
     {
@@ -124,7 +125,7 @@ export async function storeDetails(executor, target, fields, userId = 'owner') {
       operation: 'merge',
       id: job.bookmarkId,
       record: { detailsState: 'ready', detailsError: null, ...fields },
-      if: { id: job.bookmarkId, detailsRequest: job.detailsRequest }
+      if: { id: job.bookmarkId, detailsRequest: job.detailsRequest, canonicalUrl: job.canonicalUrl }
     },
     { userId }
   );

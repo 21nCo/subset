@@ -37,7 +37,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(tagNames(bookmark), ['Docs']);
       assert.deepEqual(await ops.getBookmark(bookmark.id), bookmark);
       const job = host.queue.jobs.at(-1);
-      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url, detailsRequest: null });
+      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url, canonicalUrl: bookmark.canonicalUrl, detailsRequest: null });
       assert.deepEqual(job.options, { dedupeKey: bookmark.id });
     });
 
@@ -158,7 +158,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(moved.unread, true);
       assert.equal(moved.archived, true);
       const { detailsRequest, ...job } = host.queue.jobs.at(-1).job;
-      assert.deepEqual(job, { bookmarkId: bookmark.id, url: 'https://edit.example/new' });
+      assert.deepEqual(job, { bookmarkId: bookmark.id, url: 'https://edit.example/new', canonicalUrl: 'https://edit.example/new' });
       assert.match(detailsRequest, / https:\/\/edit\.example\/new$/);
 
       assert.equal((await ops.setUnread(bookmark.id, false)).unread, false);
@@ -177,7 +177,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(retried.detailsError, null);
       const job = host.queue.jobs.at(-1);
       const { detailsRequest, ...fields } = job.job;
-      assert.deepEqual(fields, { bookmarkId: bookmark.id, url: bookmark.url });
+      assert.deepEqual(fields, { bookmarkId: bookmark.id, url: bookmark.url, canonicalUrl: bookmark.canonicalUrl });
       assert.match(detailsRequest, / https:\/\/retry\.example\/$/);
       assert.equal(job.done, false);
       assert.ok(job.options.dedupeKey.startsWith(`${bookmark.id}:`), job.options.dedupeKey);

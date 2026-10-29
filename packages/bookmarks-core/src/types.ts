@@ -38,12 +38,15 @@ export interface Bookmark {
 /**
  * A request to fetch the details of `url` for a bookmark. By the time the job runs the bookmark may have been
  * deleted, or details asked for again (a page change, including back to this page, or a retry), which enqueued its
- * own job. So the runner stores a result only while the bookmark's request is still the job's (a datafn `if` guard
- * `{ id: bookmarkId, detailsRequest }`) and otherwise drops it.
+ * own job, or a URL write interrupted before it settled may have left the bookmark on another page with this
+ * request. So the runner stores a result only while the bookmark is still on the job's page with the job's request
+ * (a datafn `if` guard `{ id: bookmarkId, detailsRequest, canonicalUrl }`) and otherwise drops it.
  */
 export interface DetailsJob {
   bookmarkId: string;
   url: string;
+  /** `canonicalizeUrl(url)` as saved when the job was enqueued: the page the result is for. */
+  canonicalUrl: string;
   /** The request this job is for: null for the add-time request, which no later request goes back to. */
   detailsRequest: string | null;
 }

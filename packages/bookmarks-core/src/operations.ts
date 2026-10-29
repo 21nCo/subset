@@ -400,10 +400,10 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   /**
    * Reads the bookmark and, while its details are pending, enqueues a fetch of its current URL for the request it
-   * has, which the job carries. The add-time request (`detailsRequest` null) is keyed by the bookmark id, like the
-   * job `addBookmark` enqueues. A later request is keyed by the bookmark, the request id and the canonical URL, so a
-   * job still queued for an earlier request or page cannot absorb it, while repeating the call for the same request
-   * adds nothing.
+   * has, which the job carries with the page. The add-time request (`detailsRequest` null) is keyed by the bookmark
+   * id, like the job `addBookmark` enqueues. A later request is keyed by the bookmark, the request id and the
+   * canonical URL, so a job still queued for an earlier request or page cannot absorb it, while repeating the call for
+   * the same request adds nothing.
    */
   async function requestDetails(id: string): Promise<Bookmark> {
     const row = await getBookmarkRow(id);
@@ -412,7 +412,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     if (bookmark.detailsState !== 'pending') return bookmark;
     const request = toOptionalString(row.detailsRequest);
     const dedupeKey = request === null ? bookmark.id : `${bookmark.id}:${await sha256Hex(`${request}\n${bookmark.canonicalUrl}`)}`;
-    await detailsQueue.enqueue({ bookmarkId: bookmark.id, url: bookmark.url, detailsRequest: request }, { dedupeKey });
+    await detailsQueue.enqueue({ bookmarkId: bookmark.id, url: bookmark.url, canonicalUrl: bookmark.canonicalUrl, detailsRequest: request }, { dedupeKey });
     return bookmark;
   }
 
@@ -457,7 +457,9 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       if (!saved) continue;
       // Enqueued before tagging, so a failure while tagging leaves a bookmark whose details still arrive and a
       // repeated add (a duplicate) adds the tags.
-      if (!saved.duplicate) await detailsQueue.enqueue({ bookmarkId: saved.id, url: target.url, detailsRequest: null }, { dedupeKey: saved.id });
+      if (!saved.duplicate) {
+        await detailsQueue.enqueue({ bookmarkId: saved.id, url: target.url, canonicalUrl: target.canonicalUrl, detailsRequest: null }, { dedupeKey: saved.id });
+      }
       // A bookmark deleted before it was read is saved again.
       const bookmark = await getBookmark(saved.id);
       if (!bookmark) continue;
@@ -775,7 +777,12 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       }
       await mutate({ resource: 'tags', operation: 'delete', id });
     }
-    return into;
+    // The target may have been merged on meanwhile, the bookmarks following its records: return the tag they end at
+    // (the target itself while its records lead to no live tag).
+    const end = await mergeEnd(into.id);
+    const result = (end === null ? null : await findTag(end)) ?? (await findTag(into.id));
+    if (!result) throw new BookmarkError('not-found', `Tag ${into.id} was merged into a tag that no longer exists`);
+    return result;
   }
 
   async function retryDetails(id: string): Promise<Bookmark> {

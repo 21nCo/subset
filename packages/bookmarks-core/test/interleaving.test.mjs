@@ -584,7 +584,8 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       // T into U pauses after reading that T has no bookmarks, before deleting T; S into T then completes.
       const merging = (await writer({ afterQuery: afterEmptyMemberRead(t, point) })).mergeTags([t.id], u.id);
       await point.reached;
-      assert.deepEqual(await ops.mergeTags([s.id], t.id), t);
+      // The bookmarks followed T's record to U, so U is returned.
+      assert.deepEqual(await ops.mergeTags([s.id], t.id), u);
       point.release();
       assert.deepEqual(await merging, u);
       assert.deepEqual((await ops.getBookmark(tagged.id)).tags, [u]);
@@ -769,7 +770,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       // The bookmark was still on its add-time request, so the retry's job is for that request.
       assert.deepEqual(
         queue.jobs.map((entry) => entry.job),
-        [{ bookmarkId: again.bookmark.id, url: again.bookmark.url, detailsRequest: null }]
+        [{ bookmarkId: again.bookmark.id, url: again.bookmark.url, canonicalUrl: again.bookmark.canonicalUrl, detailsRequest: null }]
       );
     });
 
@@ -871,6 +872,54 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       const stored = await ops.getBookmark(bookmark.id);
       assert.equal(stored.detailsState, 'ready');
       assert.equal(displayTitle(stored), 'Fresh');
+    });
+
+    test("a URL write interrupted after datafn let it past a move does not let the move's job store on the old page", async () => {
+      const { bookmark } = await ops.addBookmark('https://own.example/wrong-page');
+      const point = pausePoint();
+      const late = await writer({
+        beforeMutate: (payload) => payload.record?.url !== undefined && point.pause().then(() => delete payload.if),
+        afterMutate: failOnce((payload) => payload.record?.url !== undefined)
+      });
+      const updating = late.updateBookmark(bookmark.id, { url: 'https://own.example/wrong-page?utm_source=x' });
+      await point.reached;
+      const moveQueue = recordingQueue();
+      await (await writer({}, moveQueue)).updateBookmark(bookmark.id, { url: 'https://foreign.example/wrong-page' });
+      const [{ job }] = pendingJobs(moveQueue, bookmark.id);
+      assert.equal(job.canonicalUrl, 'https://foreign.example/wrong-page');
+      point.release();
+      await assert.rejects(updating, /injected failure/);
+      // The bookmark is back on its own page, still with the move's request.
+      const interrupted = await ops.getBookmark(bookmark.id);
+      assert.equal(interrupted.canonicalUrl, bookmark.canonicalUrl);
+      await assert.rejects(storeDetails(host.server.executor, job, { details: sampleDetails(job.url, 'Foreign page') }), /Guard condition not met/);
+      const kept = await ops.getBookmark(bookmark.id);
+      assert.equal(kept.detailsState, 'pending');
+      assert.equal(kept.details, null);
+      assert.notEqual(displayTitle(kept), 'Foreign page');
+      // Repeating the update asks for the own page again, and that job's result is stored.
+      const queue = recordingQueue();
+      const repeated = await (await writer({}, queue)).updateBookmark(bookmark.id, { url: 'https://own.example/wrong-page?utm_source=x' });
+      assert.equal(repeated.detailsState, 'pending');
+      assert.equal(repeated.details, null);
+      const [{ job: own }] = pendingJobs(queue, bookmark.id);
+      assert.deepEqual([own.url, own.canonicalUrl], ['https://own.example/wrong-page?utm_source=x', bookmark.canonicalUrl]);
+      await storeDetails(host.server.executor, own, { details: sampleDetails(own.url, 'Own page') });
+      assert.equal(displayTitle(await ops.getBookmark(bookmark.id)), 'Own page');
+    });
+
+    test('a merge whose target is merged on while it runs returns the tag the bookmarks end on', async () => {
+      const { bookmark } = await ops.addBookmark('https://stale-target.example/', { tags: ['st-s', 'st-t', 'st-u'] });
+      await ops.removeTags(bookmark.id, ['st-t', 'st-u']);
+      const [s, t, u] = bookmark.tags;
+      const point = pausePoint();
+      // S into T pauses before its first link; T into U then completes.
+      const merging = (await writer({ beforeMutate: (payload) => payload.resource === 'tags' && payload.operation === 'relate' && point.pause() })).mergeTags([s.id], t.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([t.id], u.id), u);
+      point.release();
+      assert.deepEqual(await merging, u);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [u]);
     });
 
     const deletedMidway = [
