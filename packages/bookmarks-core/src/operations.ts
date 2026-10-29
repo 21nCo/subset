@@ -291,6 +291,52 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     for (const chunk of chunks(ids)) await mutate({ resource, operation, id, relations: { [relation]: chunk } });
   }
 
+  async function mergeTargets(tagIds: string[]): Promise<Map<string, string>> {
+    const targets = new Map<string, string>();
+    for (const chunk of chunks(tagIds)) {
+      for (const row of await query({ resource: 'tag_merges', select: ['id', 'targetId'], filters: { id: { $in: chunk } }, limit: PAGE_SIZE })) {
+        targets.set(String(row.id), String(row.targetId));
+      }
+    }
+    return targets;
+  }
+
+  async function countTags(tagIds: string[]): Promise<number> {
+    let count = 0;
+    for (const chunk of chunks(tagIds)) count += (await query({ resource: 'tags', select: ['id'], filters: { id: { $in: chunk } }, limit: PAGE_SIZE })).length;
+    return count;
+  }
+
+  /**
+   * Links the bookmark to the tags and, for each tag a merge has journaled, to the end of its merge journal too.
+   * A merge journals a source before its last read of the source's bookmarks, so a link that merge did not see was
+   * written after the journal, and reading the journal here finds it. False when a tag was removed without a
+   * merge, so the caller finds or creates it again.
+   */
+  async function linkTags(bookmarkId: string, tagIds: string[]): Promise<boolean> {
+    let link = tagIds;
+    // Each journal entry is followed once, so an interrupted merge of A into B and a later merge of B into A end.
+    const followed = new Set<string>();
+    for (let hop = 0; link.length > 0; hop++) {
+      if (hop === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not add the tags because of concurrent writes; try again');
+      let linked = true;
+      try {
+        await relate('relate', 'bookmarks', bookmarkId, link);
+      } catch (error) {
+        // datafn refuses to link a tag a concurrent merge deleted (or a deleted bookmark, which fails here).
+        if (!isNotFound(error)) throw error;
+        await requireBookmark(bookmarkId);
+        linked = false;
+      }
+      const merged = await mergeTargets(link.filter((id) => !followed.has(id)));
+      for (const id of merged.keys()) followed.add(id);
+      const unmerged = link.filter((id) => !merged.has(id) && !followed.has(id));
+      if ((await countTags(unmerged)) < unmerged.length) return false;
+      link = [...new Set([...(linked ? [] : unmerged), ...merged.values()])];
+    }
+    return true;
+  }
+
   async function addTagsTo(bookmark: Bookmark, inputs: TagInput[]): Promise<Bookmark> {
     let current = bookmark;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -298,20 +344,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       const missing = inputs.filter((tag) => !have.has(tag.nameKey));
       if (missing.length === 0) return current;
       const tags = await ensureTags(missing);
-      try {
-        await relate(
-          'relate',
-          'bookmarks',
-          current.id,
-          tags.map((tag) => tag.id)
-        );
-      } catch (error) {
-        // datafn refuses to link a tag that a concurrent merge or rename conflict removed: find or create it again.
-        if (!isNotFound(error)) throw error;
-        current = await requireBookmark(current.id);
-        continue;
-      }
-      return requireBookmark(current.id);
+      if (await linkTags(current.id, tags.map((tag) => tag.id))) return requireBookmark(current.id);
+      current = await requireBookmark(current.id);
     }
     throw new BookmarkError('conflict', 'Could not add the tags because of concurrent writes; try again');
   }
@@ -535,6 +569,9 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       else if ((await mergedInto(id)) !== target.id) throw new BookmarkError('not-found', `Tag ${id} does not exist`);
     }
     for (const id of remaining) {
+      // Recorded before the last read of the source's bookmarks, so a link written after that read is followed to
+      // the target by linkTags; `merge` creates the row or points it at this target.
+      await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
       // Moves the source's bookmarks until it has none, so one tagged while the merge runs is moved too.
       for (let attempt = 0; ; attempt++) {
         const bookmarkIds = await taggedBookmarkIds(id);
@@ -550,8 +587,6 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         }
         await relate('unrelate', 'tags', id, bookmarkIds);
       }
-      // Recorded before the delete; `merge` creates the row or points it at this target.
-      await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
       await mutate({ resource: 'tags', operation: 'delete', id });
     }
     return target;

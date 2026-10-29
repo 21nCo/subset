@@ -144,7 +144,8 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       const merger = await writer({ afterQuery: (payload) => payload.filters?.['tags.id'] === source.id && point.pause() });
       const merging = merger.mergeTags([source.id], target.id);
       await point.reached;
-      assert.deepEqual((await ops.addTags(late.id, ['mr-source'])).tags, [source]);
+      // The merge journaled the source before reading it, so the bookmark gets the target as well.
+      assert.deepEqual((await ops.addTags(late.id, ['mr-source'])).tags, [source, target]);
       point.release();
       assert.deepEqual(await merging, target);
       for (const bookmark of [first, late]) assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
@@ -172,7 +173,7 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       if (renamed.status === 'rejected') assert.equal(renamed.reason.code, 'tag-conflict');
     });
 
-    test('a tag a concurrent merge removes is created again with the spelling being added', async () => {
+    test('a tag a concurrent merge removes before it is linked is followed to the merge target', async () => {
       const { bookmark } = await ops.addBookmark('https://addmerge.example/1');
       const tagged = (await ops.addBookmark('https://addmerge.example/2', { tags: ['am-source', 'am-target'] })).bookmark;
       const [source, target] = ['am-source', 'am-target'].map((name) => tagged.tags.find((tag) => tag.name === name));
@@ -183,13 +184,82 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       await ops.mergeTags([source.id], target.id);
       point.release();
       const added = await adding;
-      assert.deepEqual(
-        added.tags.map((tag) => tag.name),
-        ['AM-SOURCE']
-      );
-      assert.notEqual(added.tags[0].id, source.id);
+      assert.deepEqual(added.tags, [target]);
       assert.deepEqual(await ops.getBookmark(bookmark.id), added);
     });
+
+    /** A bookmark tagged with a source and the target, a second bookmark to tag, and a merge writer. */
+    async function mergeRace(prefix) {
+      const first = (await ops.addBookmark(`https://${prefix}.example/1`, { tags: [`${prefix}-source`, `${prefix}-target`] })).bookmark;
+      const late = (await ops.addBookmark(`https://${prefix}.example/2`)).bookmark;
+      const [source, target] = ['source', 'target'].map((name) => first.tags.find((tag) => tag.name === `${prefix}-${name}`));
+      return { first, late, source, target };
+    }
+
+    // Pauses the merge after a read of the source's bookmarks that found none, just before it deletes the source.
+    const afterEmptyMemberRead = (source, point) => (payload, result) =>
+      payload.filters?.['tags.id'] === source.id && result.data.length === 0 && point.pause();
+
+    test('addTags completing after the merge last read the source leaves the bookmark with the target', async () => {
+      const { first, late, source, target } = await mergeRace('mf');
+      const point = pausePoint();
+      const merger = await writer({ afterQuery: afterEmptyMemberRead(source, point) });
+      const merging = merger.mergeTags([source.id], target.id);
+      await point.reached;
+      assert.ok((await ops.addTags(late.id, ['mf-source'])).tags.some((tag) => tag.id === source.id));
+      point.release();
+      assert.deepEqual(await merging, target);
+      for (const bookmark of [first, late]) assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
+      // Repeating the merge is a no-op and the source name is free again.
+      assert.deepEqual(await ops.mergeTags([source.id], target.id), target);
+    });
+
+    test('a merge completing while addTags is between its link and its journal read leaves the target', async () => {
+      const { late, source, target } = await mergeRace('ml');
+      const point = pausePoint();
+      const adder = await writer({ afterMutate: (payload) => payload.operation === 'relate' && payload.id === late.id && point.pause() });
+      const adding = adder.addTags(late.id, ['ml-source']);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([source.id], target.id), target);
+      point.release();
+      assert.deepEqual((await adding).tags, [target]);
+      assert.deepEqual((await ops.getBookmark(late.id)).tags, [target]);
+    });
+
+    test('a source tagged after an interrupted merge journaled it ends on the target when the merge is repeated', async () => {
+      const { first, late, source, target } = await mergeRace('mj');
+      const broken = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tags' && payload.operation === 'delete') });
+      await assert.rejects(broken.mergeTags([source.id], target.id), /injected failure/);
+      assert.deepEqual((await ops.addTags(late.id, ['mj-source'])).tags, [source, target]);
+      assert.deepEqual(await ops.mergeTags([source.id], target.id), target);
+      for (const bookmark of [first, late]) assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
+    });
+
+    test('merge records that point at each other are followed once', async () => {
+      const { bookmark } = await ops.addBookmark('https://mergecycle.example/', { tags: ['mc-a', 'mc-b'] });
+      const [a, b] = bookmark.tags;
+      // A is recorded as merged into B but the merge stops before deleting A; B is then merged into A.
+      const broken = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tags' && payload.operation === 'delete') });
+      await assert.rejects(broken.mergeTags([a.id], b.id), /injected failure/);
+      assert.deepEqual(await ops.mergeTags([b.id], a.id), a);
+      const other = (await ops.addBookmark('https://mergecycle.example/2', { tags: ['MC-A'] })).bookmark;
+      assert.deepEqual(other.tags, [a]);
+    });
+
+    if (backend === 'sqlite') {
+      test("a duplicate add's tags completing after the merge last read the source leave the target", async () => {
+        const { late, source, target } = await mergeRace('md');
+        const point = pausePoint();
+        const merger = await writer({ afterQuery: afterEmptyMemberRead(source, point) });
+        const merging = merger.mergeTags([source.id], target.id);
+        await point.reached;
+        const again = await ops.addBookmark(late.url, { tags: ['MD-SOURCE'] });
+        assert.equal(again.duplicate, true);
+        point.release();
+        await merging;
+        assert.deepEqual((await ops.getBookmark(late.id)).tags, [target]);
+      });
+    }
 
     test('an interrupted delete finishes when run again and keeps the tags', async () => {
       const one = (await ops.addBookmark('https://del.example/1', { tags: ['d-tag'] })).bookmark;

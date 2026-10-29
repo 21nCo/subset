@@ -134,9 +134,10 @@ export async function setup(backend, userId = 'owner') {
 
 /**
  * Wraps an executor so a test can pause or fail chosen calls. `beforeQuery` and `beforeMutate` run before the call
- * and `afterQuery` after it; a hook that throws fails the call as a broken database or network would.
+ * and `afterQuery` and `afterMutate` after it; a hook that throws fails the call as a broken database or network
+ * would.
  */
-export function hookedExecutor(executor, { beforeQuery, afterQuery, beforeMutate } = {}) {
+export function hookedExecutor(executor, { beforeQuery, afterQuery, beforeMutate, afterMutate } = {}) {
   return {
     async query(payload, context) {
       await beforeQuery?.(payload);
@@ -146,7 +147,9 @@ export function hookedExecutor(executor, { beforeQuery, afterQuery, beforeMutate
     },
     async mutate(payload, context) {
       await beforeMutate?.(payload);
-      return executor.mutate(payload, context);
+      const result = await executor.mutate(payload, context);
+      await afterMutate?.(payload, result);
+      return result;
     }
   };
 }
