@@ -76,7 +76,8 @@ export function normalizeTagNames(input: unknown): { name: string; nameKey: stri
 
 export function normalizeIds(input: unknown, field: string): string[] {
   if (!Array.isArray(input)) throw new BookmarkError('invalid-input', `${field} must be an array of ids`);
-  return [...new Set(input.map((id) => normalizeId(id, field)))];
+  // Array.from visits holes too, so a sparse array is rejected before anything is written.
+  return [...new Set(Array.from(input, (id) => normalizeId(id, field)))];
 }
 
 export function normalizeId(input: unknown, field: string): string {

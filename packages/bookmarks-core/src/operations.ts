@@ -707,17 +707,20 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   async function retryDetails(id: string): Promise<Bookmark> {
-    const bookmark = await requireBookmark(id);
-    // A bookmark already pending keeps its request, so retrying while its job is queued adds no job.
-    if (bookmark.detailsState !== 'pending' || bookmark.detailsError !== null) {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const bookmark = await requireBookmark(id);
+      // A bookmark already pending keeps its request, so retrying while its job is queued adds no job.
+      if (bookmark.detailsState === 'pending' && bookmark.detailsError === null) return requestDetails(bookmark.id);
+      // The request names the page read here, so the write is guarded on that page: after a page change, decide again.
+      const record = { detailsState: 'pending', detailsError: null, detailsRequest: newRequest(bookmark.canonicalUrl) };
       try {
-        await mergeExisting('bookmarks', bookmark.id, { detailsState: 'pending', detailsError: null, detailsRequest: newRequest(bookmark.canonicalUrl) });
+        await mutate({ resource: 'bookmarks', operation: 'merge', id: bookmark.id, record, if: { id: bookmark.id, canonicalUrl: bookmark.canonicalUrl } });
+        return requestDetails(bookmark.id);
       } catch (error) {
-        if (isGuardConflict(error)) throw new BookmarkError('not-found', `Bookmark ${bookmark.id} does not exist`, { cause: error });
-        throw error;
+        if (!isGuardConflict(error)) throw error;
       }
     }
-    return requestDetails(bookmark.id);
+    throw new BookmarkError('conflict', 'Could not retry the details because of concurrent writes; try again');
   }
 
   return {

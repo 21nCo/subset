@@ -97,6 +97,13 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(again.bookmark.tags, bookmark.tags);
     });
 
+    test('a sparse id list is rejected before anything is deleted', async () => {
+      const { bookmark } = await ops.addBookmark('https://sparse.example/');
+      // The second entry is a hole, which Array.map skips.
+      await rejectsWith(ops.deleteBookmarks([bookmark.id, ,]), 'invalid-input');
+      assert.equal((await ops.getBookmark(bookmark.id))?.id, bookmark.id);
+    });
+
     test('rename changes the name everywhere and refuses a name another tag has', async () => {
       const a = (await ops.addBookmark('https://rename.example/a', { tags: ['js'] })).bookmark;
       const b = (await ops.addBookmark('https://rename.example/b', { tags: ['js', 'web'] })).bookmark;
