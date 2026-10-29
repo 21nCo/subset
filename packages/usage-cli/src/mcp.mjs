@@ -1,11 +1,15 @@
 // The read-only usage MCP server (SET-104) over stdio. It answers from the same reads as `status` and
 // the dashboard's history, and writes nothing: no identities, no default Claude account, no history,
-// and never the local sign-ins preference. Stdout carries only protocol frames.
+// and never the local sign-ins preference. Stdout carries only protocol frames. In hosts with MCP Apps,
+// usage_status also renders the dashboard view (SET-105, mcp-app.mjs).
 import diagnostics from 'node:diagnostics_channel';
 import { basename } from 'node:path';
 import { defineMcpFnServer } from '@mcpfn/core';
 import { USAGE_PROVIDERS, agentUsageResult } from '@subset.dev/usage-core';
 import { providerMeta } from '@subset.dev/usage-core/present';
+import { dashboardResource, dashboardToolMetadata } from './mcp-app.mjs';
+
+export { dashboardHtmlFile } from './mcp-app.mjs';
 
 const HOUR_MS = 60 * 60_000;
 const DEFAULT_HOURS = 48;
@@ -190,6 +194,8 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
       }),
       // A read may call a provider's usage endpoint when local sign-ins are on.
       annotations: { readOnlyHint: true, openWorldHint: true },
+      // The dashboard view; hosts without MCP Apps ignore it. usage_history returns no view.
+      metadata: dashboardToolMetadata(),
       async handler({ provider }) {
         const status = await readStatus();
         const accounts = provider === undefined ? status.accounts
@@ -240,14 +246,17 @@ export function usageTools({ readStatus, readHistory, providers, now = Date.now,
 }
 
 /**
- * The server declaration: name `subset-usage`, the package version, and the two read-only tools.
- * @param {Parameters<typeof usageTools>[0] & { version: string }} options
+ * The server declaration: name `subset-usage`, the package version, the two read-only tools and the
+ * dashboard view (`ui://subset-usage/dashboard@1`).
+ * @param {Parameters<typeof usageTools>[0] & { version: string, dashboardHtml?: () => string | Promise<string> }} options
+ * `dashboardHtml` is the built view's HTML, for `resources/read`.
  */
-export function defineUsageMcpServer({ version, ...options }) {
+export function defineUsageMcpServer({ version, dashboardHtml, ...options }) {
   return defineMcpFnServer({
     info: { name: 'subset-usage', version, instructions: INSTRUCTIONS },
     transports: ['stdio'],
     tools: usageTools(options),
+    resources: [dashboardResource(dashboardHtml)],
   });
 }
 

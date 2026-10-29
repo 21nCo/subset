@@ -271,7 +271,23 @@ function startMcp(env, entry = 'src/server.mjs') {
   return { child, frames, exited, send, request, rest: () => stdout, stderr: () => stderr };
 }
 
-test('subset-usage mcp serves on stdio, writes nothing, keeps stdout to protocol frames, and exits 0 when stdin closes', async (t) => {
+/**
+ * The dashboard view as the running server serves it: usage_status links it, and resources/list and
+ * resources/read return the built `mcp-app/dashboard.html` from the package, the file the server reads.
+ */
+async function assertDashboardServed(mcp, tools) {
+  assert.equal(tools.find((tool) => tool.name === 'usage_status')._meta?.ui?.resourceUri, 'ui://subset-usage/dashboard@1');
+  const html = await readFile(join(hostDirectory, 'mcp-app', 'dashboard.html'), 'utf8').catch(() => assert.fail('mcp-app/dashboard.html is missing: run npm run build first'));
+  const listed = (await mcp.request('resources/list', {})).result.resources;
+  assert.deepEqual(listed.map((resource) => [resource.uri, resource.mimeType]), [['ui://subset-usage/dashboard@1', 'text/html;profile=mcp-app']]);
+  const read = await mcp.request('resources/read', { uri: 'ui://subset-usage/dashboard@1' });
+  assert.equal(read.error, undefined, JSON.stringify(read.error));
+  const [content] = read.result.contents;
+  assert.deepEqual({ uri: content.uri, mimeType: content.mimeType, csp: content._meta?.ui?.csp }, { uri: 'ui://subset-usage/dashboard@1', mimeType: 'text/html;profile=mcp-app', csp: { connectDomains: [], resourceDomains: [], frameDomains: [] } });
+  assert.ok(content.text === html, 'resources/read returned text other than mcp-app/dashboard.html');
+}
+
+test('subset-usage mcp serves on stdio and the dashboard view, writes nothing, keeps stdout to protocol frames, and exits 0 when stdin closes', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
@@ -312,6 +328,7 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   const listed = await mcp.request('tools/list', {});
   assert.deepEqual(listed.result.tools.map((tool) => tool.name).sort(), ['usage_history', 'usage_status']);
   assert.match(listed.result.tools.find((tool) => tool.name === 'usage_status').description, /Claude \(claude-code\), Antigravity \(antigravity\)\./);
+  await assertDashboardServed(mcp, listed.result.tools);
 
   const status = (await mcp.request('tools/call', { name: 'usage_status', arguments: {} })).result;
   assert.equal(status.isError, undefined, JSON.stringify(status));
@@ -336,13 +353,13 @@ printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"ma
   assert.equal((await lastHistory).result.structuredContent.series.claude_work[key].length, 2);
   // stdout held only complete JSON-RPC replies; the log line went to stderr.
   assert.equal(mcp.rest(), '');
-  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]).sort((a, b) => a[1] - b[1]), [1, 2, 3, 4, 5, 6, 7, 8].map((id) => ['2.0', id, true]));
+  assert.deepEqual(mcp.frames.map((frame) => [frame.jsonrpc, frame.id, 'result' in frame]).sort((a, b) => a[1] - b[1]), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((id) => ['2.0', id, true]));
   assert.match(mcp.stderr(), new RegExp(`^subset-usage mcp: ${manifest.version.replaceAll('.', '\\.')} serving on stdio$`, 'm'));
   // No file or directory was added, removed or modified: no profile, identity, preference or history write.
   assert.deepEqual(await tree(root), before);
 });
 
-test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exits 0 when stdin closes', async (t) => {
+test('the built dist/cli.mjs mcp loads the bundled MCP server, serves the dashboard view, answers, and exits 0 when stdin closes', async (t) => {
   const built = await Promise.all(['cli.mjs', 'mcp-server.mjs'].map((name) => stat(join(hostDirectory, 'dist', name)).then(() => true, () => false)));
   assert.deepEqual(built, [true, true], 'dist/ is missing: run npm run build first');
   const root = await mkdtemp(join(tmpdir(), 'subset-usage-mcp-dist-'));
@@ -358,7 +375,9 @@ test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exit
   const init = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } });
   assert.deepEqual(init.result.serverInfo, { name: 'subset-usage', version: manifest.version });
   mcp.send({ method: 'notifications/initialized' });
-  assert.deepEqual((await mcp.request('tools/list', {})).result.tools.map((tool) => tool.name).sort(), ['usage_history', 'usage_status']);
+  const { tools } = (await mcp.request('tools/list', {})).result;
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['usage_history', 'usage_status']);
+  await assertDashboardServed(mcp, tools);
   const status = (await mcp.request('tools/call', { name: 'usage_status', arguments: {} })).result;
   assert.ok(isUsageStatus(status.structuredContent), JSON.stringify(status));
   assert.deepEqual(status.structuredContent.accounts, []);
@@ -367,7 +386,7 @@ test('the built dist/cli.mjs mcp loads the bundled MCP server, answers, and exit
   const [code, signal] = await mcp.exited;
   assert.deepEqual({ code, signal }, { code: 0, signal: null }, mcp.stderr());
   assert.equal(mcp.rest(), '');
-  assert.deepEqual(mcp.frames.map((frame) => [frame.id, 'result' in frame]), [[1, true], [2, true], [3, true]]);
+  assert.deepEqual(mcp.frames.map((frame) => [frame.id, 'result' in frame]), [[1, true], [2, true], [3, true], [4, true], [5, true]]);
   assert.deepEqual(await tree(root), before);
 });
 

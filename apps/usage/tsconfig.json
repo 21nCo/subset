@@ -4,6 +4,7 @@
     "src/**/*.ts",
     "src/**/*.svelte",
     "../../packages/usage/src/**/*.svelte",
-    "vite.config.ts"
+    "vite.config.ts",
+    "vite.mcp-app.config.ts"
   ]
 }
