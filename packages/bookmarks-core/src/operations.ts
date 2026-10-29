@@ -190,8 +190,13 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     }
   }
 
-  async function getBookmark(id: string): Promise<Bookmark | null> {
+  async function getBookmarkRow(id: string): Promise<Row | null> {
     const [row] = await query({ resource: 'bookmarks', select: BOOKMARK_SELECT, filters: { id: normalizeId(id, 'id') }, limit: 1 });
+    return row ?? null;
+  }
+
+  async function getBookmark(id: string): Promise<Bookmark | null> {
+    const row = await getBookmarkRow(id);
     return row ? toBookmark(row) : null;
   }
 
@@ -312,12 +317,20 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   /**
-   * The add-time job is keyed by the bookmark id. Later jobs (a new page, a retry) are keyed by the bookmark and
-   * its canonical URL, so a job still queued for an older URL cannot absorb the job for the current one.
+   * Reads the bookmark and, while its details are pending, enqueues a fetch of its current URL. The add-time
+   * request (`detailsRequest` null) is keyed by the bookmark id, like the job `addBookmark` enqueues. A later
+   * request is keyed by the bookmark, the request id and the canonical URL, so a job still queued for an earlier
+   * request or page cannot absorb it, while repeating the call for the same request adds nothing.
    */
-  async function enqueueDetails(bookmarkId: string, url: string, canonicalUrl?: string): Promise<void> {
-    const dedupeKey = canonicalUrl === undefined ? bookmarkId : `${bookmarkId}:${await sha256Hex(canonicalUrl)}`;
-    await detailsQueue.enqueue({ bookmarkId, url }, { dedupeKey });
+  async function requestDetails(id: string): Promise<Bookmark> {
+    const row = await getBookmarkRow(id);
+    if (!row) throw new BookmarkError('not-found', `Bookmark ${id} does not exist`);
+    const bookmark = toBookmark(row);
+    if (bookmark.detailsState !== 'pending') return bookmark;
+    const request = toOptionalString(row.detailsRequest);
+    const dedupeKey = request === null ? bookmark.id : `${bookmark.id}:${await sha256Hex(`${request}\n${bookmark.canonicalUrl}`)}`;
+    await detailsQueue.enqueue({ bookmarkId: bookmark.id, url: bookmark.url }, { dedupeKey });
+    return bookmark;
   }
 
   async function addBookmark(url: string, options: AddBookmarkOptions = {}): Promise<AddBookmarkResult> {
@@ -346,7 +359,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           detailsState: 'pending',
           detailsError: null,
           detailsFetchedAt: null,
-          faviconKey: null
+          faviconKey: null,
+          detailsRequest: null
         };
         try {
           await mutate({ resource: 'bookmarks', operation: 'insert', id, record });
@@ -363,7 +377,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       if (!saved) continue;
       // Enqueued before tagging, so a failure while tagging leaves a bookmark whose details still arrive and a
       // repeated add (a duplicate) adds the tags.
-      if (!saved.duplicate) await enqueueDetails(saved.id, target.url);
+      if (!saved.duplicate) await detailsQueue.enqueue({ bookmarkId: saved.id, url: target.url }, { dedupeKey: saved.id });
       // A bookmark deleted before it was read is saved again.
       const bookmark = await getBookmark(saved.id);
       if (!bookmark) continue;
@@ -403,8 +417,15 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       if (target && moved) {
         const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
         if (otherId && otherId !== current.id) throw duplicateUrl(otherId);
-        // A different page: the old details no longer apply.
-        Object.assign(record, { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null });
+        // A different page: the old details no longer apply, and this is a new request for them.
+        Object.assign(record, {
+          details: null,
+          detailsState: 'pending',
+          detailsError: null,
+          detailsFetchedAt: null,
+          faviconKey: null,
+          detailsRequest: crypto.randomUUID()
+        });
       }
       if (Object.keys(record).length === 0) return current;
 
@@ -419,9 +440,9 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         if (isGuardConflict(error)) continue;
         throw error;
       }
-      const updated = await requireBookmark(current.id);
-      if (target && moved) await enqueueDetails(current.id, target.url, target.canonicalUrl);
-      return updated;
+      // After any URL write, moved or not, a pending bookmark gets a job for the page it is on now: so repeating an
+      // update whose enqueue failed recovers, and so does a write that datafn let past a concurrent move.
+      return target ? requestDetails(current.id) : requireBookmark(current.id);
     }
     throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
   }
@@ -455,6 +476,12 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   async function renameTag(tagId: string, name: string): Promise<Tag> {
     const next = normalizeTagName(name);
+    // In the same chain as tag creation, so on the memory adapter (no unique index) no other writer here can take
+    // the name between the check and the write.
+    return serialized(executor, () => renameTagNow(tagId, next));
+  }
+
+  async function renameTagNow(tagId: string, next: TagInput): Promise<Tag> {
     const tag = await requireTag(tagId);
     if (next.name === tag.name) return tag;
     const otherTag = async () => {
@@ -508,9 +535,21 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       else if ((await mergedInto(id)) !== target.id) throw new BookmarkError('not-found', `Tag ${id} does not exist`);
     }
     for (const id of remaining) {
-      const bookmarkIds = await taggedBookmarkIds(id);
-      await relate('relate', 'tags', target.id, bookmarkIds);
-      await relate('unrelate', 'tags', id, bookmarkIds);
+      // Moves the source's bookmarks until it has none, so one tagged while the merge runs is moved too.
+      for (let attempt = 0; ; attempt++) {
+        const bookmarkIds = await taggedBookmarkIds(id);
+        if (bookmarkIds.length === 0) break;
+        if (attempt === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not merge the tags because of concurrent writes; try again');
+        try {
+          await relate('relate', 'tags', target.id, bookmarkIds);
+        } catch (error) {
+          // A bookmark deleted since the read: read the members again (the target is checked so this cannot spin).
+          if (!isNotFound(error)) throw error;
+          await requireTag(target.id);
+          continue;
+        }
+        await relate('unrelate', 'tags', id, bookmarkIds);
+      }
       // Recorded before the delete; `merge` creates the row or points it at this target.
       await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
       await mutate({ resource: 'tags', operation: 'delete', id });
@@ -520,17 +559,16 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   async function retryDetails(id: string): Promise<Bookmark> {
     const bookmark = await requireBookmark(id);
+    // A bookmark already pending keeps its request, so retrying while its job is queued adds no job.
     if (bookmark.detailsState !== 'pending' || bookmark.detailsError !== null) {
       try {
-        await mergeExisting('bookmarks', bookmark.id, { detailsState: 'pending', detailsError: null });
+        await mergeExisting('bookmarks', bookmark.id, { detailsState: 'pending', detailsError: null, detailsRequest: crypto.randomUUID() });
       } catch (error) {
         if (isGuardConflict(error)) throw new BookmarkError('not-found', `Bookmark ${bookmark.id} does not exist`, { cause: error });
         throw error;
       }
     }
-    const updated = await requireBookmark(bookmark.id);
-    await enqueueDetails(updated.id, updated.url, updated.canonicalUrl);
-    return updated;
+    return requestDetails(bookmark.id);
   }
 
   return {

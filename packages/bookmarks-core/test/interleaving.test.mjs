@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { canonicalizeUrl } from '@subset.dev/links';
 import { BookmarkError, createBookmarkOperations } from '../dist/index.js';
-import { hookedExecutor, pausePoint, recordingQueue, setup, urlJobKey } from './support.mjs';
+import { hookedExecutor, pausePoint, recordingQueue, setup } from './support.mjs';
 
 const rejectsWith = (promise, code) => assert.rejects(promise, (error) => error instanceof BookmarkError && error.code === code);
 
@@ -97,7 +97,8 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         jobs.map((entry) => entry.job.url),
         ['https://first.example/', 'https://second.example/']
       );
-      assert.equal(jobs[1].options.dedupeKey, urlJobKey(bookmark.id, moved.canonicalUrl));
+      assert.equal(moved.canonicalUrl, 'https://second.example/');
+      assert.ok(jobs[1].options.dedupeKey.startsWith(`${bookmark.id}:`), jobs[1].options.dedupeKey);
 
       // The new page's job failed; a retry while the stale add-time job is still queued asks for the current URL.
       jobs[1].done = true;
@@ -132,6 +133,43 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         (await ops.getBookmark(three.id)).tags.map((tag) => tag.id),
         [four.id, target.id]
       );
+    });
+
+    test('a bookmark tagged with the source while a merge runs is moved to the target', async () => {
+      const first = (await ops.addBookmark('https://mergerace.example/1', { tags: ['mr-source', 'mr-target'] })).bookmark;
+      const late = (await ops.addBookmark('https://mergerace.example/2')).bookmark;
+      const [source, target] = ['mr-source', 'mr-target'].map((name) => first.tags.find((tag) => tag.name === name));
+      const point = pausePoint();
+      // Pauses the merge right after it read the source's bookmarks.
+      const merger = await writer({ afterQuery: (payload) => payload.filters?.['tags.id'] === source.id && point.pause() });
+      const merging = merger.mergeTags([source.id], target.id);
+      await point.reached;
+      assert.deepEqual((await ops.addTags(late.id, ['mr-source'])).tags, [source]);
+      point.release();
+      assert.deepEqual(await merging, target);
+      for (const bookmark of [first, late]) assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [target]);
+    });
+
+    test('concurrent renames to one name: one wins and the other is a tag conflict', async () => {
+      const { bookmark } = await ops.addBookmark('https://renamerace.example/', { tags: ['rr-one', 'rr-two'] });
+      const results = await Promise.allSettled(bookmark.tags.map((tag) => ops.renameTag(tag.id, 'rr-same')));
+      assert.deepEqual(results.map((result) => result.status).sort(), ['fulfilled', 'rejected']);
+      const winner = results.find((result) => result.status === 'fulfilled').value;
+      const rejected = results.find((result) => result.status === 'rejected').reason;
+      assert.ok(rejected instanceof BookmarkError && rejected.code === 'tag-conflict', String(rejected));
+      assert.equal(rejected.existingId, winner.id);
+      const loser = bookmark.tags.find((tag) => tag.id !== winner.id);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [loser, winner].sort((a, b) => (a.nameKey < b.nameKey ? -1 : 1)));
+    });
+
+    test('a rename and a tag creation with one name leave one tag for it', async () => {
+      const { bookmark } = await ops.addBookmark('https://renamecreate.example/', { tags: ['rc-old'] });
+      const [renamed, tagged] = await Promise.allSettled([ops.renameTag(bookmark.tags[0].id, 'rc-fresh'), ops.addTags(bookmark.id, ['RC-FRESH'])]);
+      assert.equal(tagged.status, 'fulfilled');
+      const keys = (await ops.getBookmark(bookmark.id)).tags.map((tag) => tag.nameKey);
+      assert.equal(new Set(keys).size, keys.length, keys.join());
+      assert.equal(keys.filter((key) => key === 'rc-fresh').length, 1);
+      if (renamed.status === 'rejected') assert.equal(renamed.reason.code, 'tag-conflict');
     });
 
     test('a tag a concurrent merge removes is created again with the spelling being added', async () => {

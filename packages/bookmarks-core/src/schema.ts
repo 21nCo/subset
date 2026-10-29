@@ -14,7 +14,8 @@ export type DetailsState = (typeof DETAILS_STATES)[number];
  * The datafn schema. `createdAt` and `updatedAt` come from the `timestamps` capability (epoch milliseconds set by
  * the server). `bookmark_api_ids` records every `apiId` ever handed out (row id = the number), so a primary-key
  * conflict settles concurrent allocations and an id is never handed out twice, even after its bookmark is deleted.
- * `tag_merges` records each merged-away tag (row id = the source tag id) so an interrupted merge can be run again.
+ * `bookmarks.detailsRequest` is internal: a new id whenever details are requested after the add (a page change or a
+ * retry), so each request gets its own details job. `tag_merges` records each merged-away tag (row id = the source tag id) so an interrupted merge can be run again.
  * datafn does not enforce `unique`; the migrations' unique indexes do.
  */
 export const bookmarksSchema = defineSchema({
@@ -35,7 +36,8 @@ export const bookmarksSchema = defineSchema({
         { name: 'detailsState', type: 'string', required: true, nullable: false, enum: [...DETAILS_STATES] },
         { name: 'detailsError', type: 'string', required: false, nullable: true },
         { name: 'detailsFetchedAt', type: 'date', required: false, nullable: true },
-        { name: 'faviconKey', type: 'string', required: false, nullable: true }
+        { name: 'faviconKey', type: 'string', required: false, nullable: true },
+        { name: 'detailsRequest', type: 'string', required: false, nullable: true }
       ]
     },
     {
@@ -86,6 +88,8 @@ export const bookmarksTables = {
       detailsError: { type: 'string' },
       detailsFetchedAt: epochMs,
       faviconKey: { type: 'string' },
+      // A fresh id each time the details are asked for again after the add; null until then.
+      detailsRequest: { type: 'string' },
       createdAt: { ...epochMs, required: true },
       updatedAt: { ...epochMs, required: true }
     },

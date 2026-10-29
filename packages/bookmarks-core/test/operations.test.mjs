@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { BookmarkError, createBookmarkOperations } from '../dist/index.js';
-import { recordingQueue, setup, urlJobKey } from './support.mjs';
+import { recordingQueue, sampleDetails, setup, storeDetails } from './support.mjs';
 
 const rejectsWith = (promise, code) => assert.rejects(promise, (error) => error instanceof BookmarkError && error.code === code);
 const tagNames = (bookmark) => bookmark.tags.map((tag) => tag.name);
@@ -128,12 +128,16 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       const { bookmark } = await ops.addBookmark('https://edit.example/old', { title: 'Old', notes: 'n' });
       const taken = (await ops.addBookmark('https://edit.example/taken')).bookmark;
       host.queue.jobs.forEach((entry) => (entry.done = true));
+      await storeDetails(host.server.executor, bookmark, { details: sampleDetails(bookmark.url, 'Old page'), detailsFetchedAt: 1700000000000 });
       const jobs = host.queue.jobs.length;
 
       const sameCanonical = await ops.updateBookmark(bookmark.id, { url: 'https://edit.example/old?utm_medium=x', title: '', notes: null });
       assert.equal(sameCanonical.url, 'https://edit.example/old?utm_medium=x');
       assert.equal(sameCanonical.userTitle, null);
       assert.equal(sameCanonical.notes, null);
+      // The same page: its details stay and nothing is fetched.
+      assert.equal(sameCanonical.detailsState, 'ready');
+      assert.equal(sameCanonical.details.title, 'Old page');
       assert.equal(host.queue.jobs.length, jobs);
 
       await assert.rejects(
@@ -155,16 +159,17 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       await rejectsWith(ops.updateBookmark(bookmark.id, { url: 'ftp://edit.example/' }), 'invalid-url');
     });
 
-    test('retryDetails marks the bookmark pending again and enqueues it under its URL key', async () => {
+    test('retryDetails marks the bookmark pending again and enqueues a new request for its URL', async () => {
       const { bookmark } = await ops.addBookmark('https://retry.example/');
       host.queue.jobs.forEach((entry) => (entry.done = true));
+      await storeDetails(host.server.executor, bookmark, { detailsState: 'failed', detailsError: 'timeout' });
       const retried = await ops.retryDetails(bookmark.id);
       assert.equal(retried.detailsState, 'pending');
-      assert.deepEqual(host.queue.jobs.at(-1), {
-        job: { bookmarkId: bookmark.id, url: bookmark.url },
-        options: { dedupeKey: urlJobKey(bookmark.id, bookmark.canonicalUrl) },
-        done: false
-      });
+      assert.equal(retried.detailsError, null);
+      const job = host.queue.jobs.at(-1);
+      assert.deepEqual(job.job, { bookmarkId: bookmark.id, url: bookmark.url });
+      assert.equal(job.done, false);
+      assert.ok(job.options.dedupeKey.startsWith(`${bookmark.id}:`), job.options.dedupeKey);
       await rejectsWith(ops.retryDetails('missing-id'), 'not-found');
     });
 

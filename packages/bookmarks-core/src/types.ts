@@ -53,7 +53,8 @@ export interface DetailsJob {
 export interface DetailsQueue {
   /**
    * A second job with the same `dedupeKey` while one is queued or running is a no-op. The add-time key is the
-   * bookmark id; a later page change or retry uses `<bookmark id>:<SHA-256 of the canonical URL>`.
+   * bookmark id; a later page change or retry uses `<bookmark id>:<SHA-256 of a new request id and the canonical
+   * URL>`, so each such request gets its own job and repeating one while its job is queued adds nothing.
    */
   enqueue(job: DetailsJob, options: { dedupeKey: string }): Promise<unknown>;
 }

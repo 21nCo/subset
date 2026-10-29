@@ -16,6 +16,7 @@ CREATE TABLE "bookmarks" (
   "detailsError" TEXT,
   "detailsFetchedAt" BIGINT,
   "faviconKey" TEXT,
+  "detailsRequest" TEXT,
   "createdAt" BIGINT NOT NULL,
   "updatedAt" BIGINT NOT NULL,
   PRIMARY KEY ("__ns", "id"),

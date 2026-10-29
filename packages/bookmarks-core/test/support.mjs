@@ -1,7 +1,6 @@
 // Test hosts for the operations: datafn's server executor over the @superfunctions/db memory adapter, and over
 // the drizzle adapter on better-sqlite3 and on PGlite (Postgres in WebAssembly), each with the checked-in
 // migration applied. The drizzle tables are built from bookmarksTables, so they cannot drift from the migrations.
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { createDatafnServer } from '@datafn/server';
@@ -83,8 +82,33 @@ export const BACKENDS = {
   }
 };
 
-/** The dedupeKey of a details job enqueued after the add (a new page or a retry). */
-export const urlJobKey = (bookmarkId, canonicalUrl) => `${bookmarkId}:${createHash('sha256').update(canonicalUrl).digest('hex')}`;
+/** Minimal `LinkDetailsV1` for `url`. */
+export const sampleDetails = (url, title) => ({
+  version: 1,
+  url,
+  title,
+  icons: [{ url: new URL('/favicon.ico', url).href, rel: 'icon' }],
+  contentType: 'text/html'
+});
+
+/**
+ * Stores fetched details through the executor the way the details runner (SET-175) does: only while the bookmark
+ * is still on the page that was fetched.
+ */
+export async function storeDetails(executor, bookmark, fields, userId = 'owner') {
+  const result = await executor.mutate(
+    {
+      version: 1,
+      resource: 'bookmarks',
+      operation: 'merge',
+      id: bookmark.id,
+      record: { detailsState: 'ready', detailsError: null, ...fields },
+      if: { id: bookmark.id, canonicalUrl: bookmark.canonicalUrl }
+    },
+    { userId }
+  );
+  if (result?.ok !== true) throw new Error(`storing details failed: ${JSON.stringify(result?.errors)}`);
+}
 
 /** A DetailsQueue that records jobs and, like @superfunctions/queue, ignores the dedupeKey of a job not yet done. */
 export function recordingQueue() {
