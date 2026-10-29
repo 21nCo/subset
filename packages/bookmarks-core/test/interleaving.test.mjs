@@ -922,6 +922,43 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [u]);
     });
 
+    test('a merge whose target is merged on between reading its records and reading the tag returns the new end', async () => {
+      const { bookmark } = await ops.addBookmark('https://result-end.example/', { tags: ['re-s', 're-t', 're-u'] });
+      await ops.removeTags(bookmark.id, ['re-t', 're-u']);
+      const [s, t, u] = bookmark.tags;
+      const point = pausePoint();
+      let sourceDeleted = false;
+      // S into T pauses after deleting S, at its first read of T's (empty) merge record; T into U then completes.
+      const merging = (
+        await writer({
+          afterMutate: (payload) => (sourceDeleted ||= payload.resource === 'tags' && payload.operation === 'delete' && payload.id === s.id),
+          afterQuery: (payload) => sourceDeleted && payload.resource === 'tag_merges' && point.pause()
+        })
+      ).mergeTags([s.id], t.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([t.id], u.id), u);
+      point.release();
+      assert.deepEqual(await merging, u);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [u]);
+    });
+
+    test('a repeated merge whose merged-away target is merged on while it is resolved goes to the new end', async () => {
+      const { bookmark } = await ops.addBookmark('https://resolve-end.example/', { tags: ['rv-s', 'rv-t', 'rv-u', 'rv-v'] });
+      await ops.removeTags(bookmark.id, ['rv-t', 'rv-u', 'rv-v']);
+      const [s, t, u, v] = bookmark.tags;
+      await ops.mergeTags([t.id], u.id);
+      const point = pausePoint();
+      // S into T follows T's record to U and pauses after reading U's (empty) record; U into V then completes.
+      const merging = (
+        await writer({ afterQuery: (payload, result) => payload.resource === 'tag_merges' && payload.filters?.id === u.id && result.data.length === 0 && point.pause() })
+      ).mergeTags([s.id], t.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([u.id], v.id), v);
+      point.release();
+      assert.deepEqual(await merging, v);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [v]);
+    });
+
     const deletedMidway = [
       ['setUnread', (o, id) => o.setUnread(id, true), (payload) => payload.resource === 'bookmarks' && payload.operation === 'merge'],
       ['updateBookmark with a url', (o, id) => o.updateBookmark(id, { url: 'https://gone.example/moved' }), (payload) => payload.record?.url !== undefined],

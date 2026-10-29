@@ -661,6 +661,22 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   /**
+   * The live tag at the end of `tagId`'s merge records. An end found deleted but recorded since (merged on between
+   * the walk and the read) is walked again; null when the records lead back to a tag passed or end at a tag deleted
+   * with no record.
+   */
+  async function liveEnd(tagId: string): Promise<Tag | null> {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const end = await mergeEnd(tagId);
+      if (end === null) return null;
+      const tag = await findTag(end);
+      if (tag) return tag;
+      if ((await mergedInto(end)) === null) return null;
+    }
+    throw new BookmarkError('conflict', 'Could not merge the tags because of concurrent writes; try again');
+  }
+
+  /**
    * Claims the source for a merge into `targetId`: its `tag_merges` record is inserted only when it has none (the
    * primary key refuses a second on SQL; the memory adapter, which overwrites, gets the read and insert in the
    * per-executor chain), so one merge decision holds at a time. Returns the record and whether this call wrote it,
@@ -714,12 +730,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   async function mergeTags(sourceTagIds: string[], targetTagId: string): Promise<Tag> {
     // A target merged on since an interrupted merge into it is followed to the end of its records.
-    let target = await findTag(targetTagId);
-    if (!target) {
-      const end = await mergeEnd(targetTagId);
-      target = end === null ? null : await findTag(end);
-      if (!target) throw new BookmarkError('not-found', `Tag ${targetTagId} does not exist`);
-    }
+    const target = (await findTag(targetTagId)) ?? (await liveEnd(targetTagId));
+    if (!target) throw new BookmarkError('not-found', `Tag ${targetTagId} does not exist`);
     const into = target;
     // A record is this merge's when it names the target or its records end where the target's do.
     const isOurs = async (recorded: string) => {
@@ -779,8 +791,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     }
     // The target may have been merged on meanwhile, the bookmarks following its records: return the tag they end at
     // (the target itself while its records lead to no live tag).
-    const end = await mergeEnd(into.id);
-    const result = (end === null ? null : await findTag(end)) ?? (await findTag(into.id));
+    const result = (await liveEnd(into.id)) ?? (await findTag(into.id));
     if (!result) throw new BookmarkError('not-found', `Tag ${into.id} was merged into a tag that no longer exists`);
     return result;
   }
