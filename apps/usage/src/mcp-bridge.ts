@@ -13,10 +13,11 @@ export const PROTOCOL_VERSION = '2026-01-26';
 /**
  * How long usage_status waits for the host's reply. It must outlast the server's slowest read, or a valid
  * status that arrives late is dropped. `subset-usage mcp` reads every account at once, and the slowest
- * account bounds the read: the stored-login lookup (5 s), then a Cursor sign-in that waits for a macOS
- * Keychain prompt (60 s) and two HTTPS reads (15 s each), or Claude Code's `claude auth status` (10 s),
- * Keychain (60 s) and usage read (15 s); then a harness login read through another harness (two HTTPS reads,
- * 15 s each): about 125 s. Three minutes leaves room for process start and the host's own relay.
+ * account bounds the read. The worst is a Claude Code profile whose live read fails: the stored-login
+ * lookup (5 s), `claude auth status` (10 s), a macOS Keychain prompt (60 s) and the usage read (15 s), then
+ * one fallback read (one HTTPS read, 15 s) through each other harness signed in to the same account, one
+ * after another: Pi, OpenCode, omp and Hermes, 60 s. That is about 150 s; three minutes leaves 30 s for
+ * process start and the host's own relay.
  */
 export const STATUS_TIMEOUT_MS = 180_000;
 /** How long usage_history waits: the server reads one local file. */

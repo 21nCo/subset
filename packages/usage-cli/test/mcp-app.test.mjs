@@ -412,8 +412,9 @@ test('Refresh outlasts the server\'s slowest provider reads: a status that arriv
   host.withhold = ({ name }) => name === 'usage_status';
   const refreshed = bridge.refresh();
   await host.idle();
-  // `amp usage` may run 20 s; a Keychain prompt with two HTTPS reads after it, and a harness fallback, about 125 s.
-  for (const ms of [21_000, 104_000]) {
+  // `amp usage` may run 20 s; a Claude Code read that waits for a Keychain prompt and then falls back through
+  // four other harnesses, one after another, about 150 s.
+  for (const ms of [21_000, 129_000]) {
     timeouts.advance(ms);
     await host.idle();
     assert.deepEqual([bridge.state().busy, bridge.state().refreshError], [true, null], `${ms} ms`);
@@ -526,8 +527,12 @@ test('the view renders no write control: the page passes the dashboard none of i
   void stubbed.render(stubbed.McpApp, { props: { bridge } }).body;
   const [props] = globalThis.dashboardProps;
   for (const name of ['redeemReset', 'manageAccounts', 'openAccount', 'togglePin', 'toolbar', 'emptyAction', 'accountHint']) assert.equal(props[name], undefined, name);
-  assert.equal(typeof props.refresh, 'function');
   assert.deepEqual([props.sortMode, props.showTrends, props.percentMode], ['default', true, undefined]);
+  // The dashboard's Refresh button runs the handler the page passes it: usage_status, then usage_history.
+  const before = host.calls.length;
+  props.refresh();
+  await host.idle();
+  assert.deepEqual(host.calls.slice(before).map(({ name }) => name), ['usage_status', 'usage_history']);
 });
 
 test('ui/resource-teardown ends the view: it answers, stops listening and sends nothing more', async (t) => {
