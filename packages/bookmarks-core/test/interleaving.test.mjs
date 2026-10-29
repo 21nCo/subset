@@ -100,6 +100,47 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       );
     });
 
+    test("repeating a URL write that datafn let past a move, interrupted before it settled, clears that page's details", async () => {
+      const { bookmark } = await ops.addBookmark('https://own.example/interrupted');
+      const point = pausePoint();
+      const crash = failOnce((payload) => payload.record?.url !== undefined);
+      const late = await writer({
+        beforeMutate: (payload) => payload.record?.url !== undefined && point.pause().then(() => delete payload.if),
+        afterMutate: crash
+      });
+      const updating = late.updateBookmark(bookmark.id, { url: 'https://own.example/interrupted?utm_source=x' });
+      await point.reached;
+      const moved = await ops.updateBookmark(bookmark.id, { url: 'https://foreign.example/interrupted' });
+      await storeDetails(host.server.executor, moved, { details: sampleDetails(moved.url, 'Foreign page'), faviconKey: 'favicons/foreign.ico' });
+      point.release();
+      await assert.rejects(updating, /injected failure/);
+      const queue = recordingQueue();
+      const repeated = await (await writer({}, queue)).updateBookmark(bookmark.id, { url: 'https://own.example/interrupted?utm_source=x' });
+      assert.deepEqual(repeated, await ops.getBookmark(bookmark.id));
+      assert.equal(repeated.detailsState, 'pending');
+      assert.equal(repeated.details, null);
+      assert.equal(repeated.faviconKey, null);
+      assert.notEqual(displayTitle(repeated), 'Foreign page');
+      assert.deepEqual(pendingJobs(queue, bookmark.id).map((entry) => entry.job.url), ['https://own.example/interrupted?utm_source=x']);
+    });
+
+    test('a same-page URL edit with nothing in between writes only the URL and keeps the details', async () => {
+      // One bookmark still has its add-time request; the other's request is the one its page change wrote.
+      const added = (await ops.addBookmark('https://kept.example/added')).bookmark;
+      const moved = await ops.updateBookmark((await ops.addBookmark('https://kept.example/old')).bookmark.id, { url: 'https://kept.example/moved' });
+      for (const current of [added, moved]) {
+        await storeDetails(host.server.executor, current, { details: sampleDetails(current.url, `Title of ${current.url}`) });
+        const writes = [];
+        const queue = recordingQueue();
+        const editor = await writer({ beforeMutate: (payload) => void writes.push(payload.record) }, queue);
+        const edited = await editor.updateBookmark(current.id, { url: `${current.url}?utm_source=x` });
+        assert.deepEqual(writes, [{ url: `${current.url}?utm_source=x`, canonicalUrl: current.canonicalUrl }]);
+        assert.equal(edited.detailsState, 'ready');
+        assert.equal(displayTitle(edited), `Title of ${current.url}`);
+        assert.equal(queue.jobs.length, 0);
+      }
+    });
+
     test('a field that looked unchanged in a stale read is still written', async () => {
       const { bookmark } = await ops.addBookmark('https://unread.example/', { unread: true });
       const point = pausePoint();

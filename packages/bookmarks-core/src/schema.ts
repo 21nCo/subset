@@ -14,8 +14,8 @@ export type DetailsState = (typeof DETAILS_STATES)[number];
  * The datafn schema. `createdAt` and `updatedAt` come from the `timestamps` capability (epoch milliseconds set by
  * the server). `bookmark_api_ids` records every `apiId` ever handed out (row id = the number), so a primary-key
  * conflict settles concurrent allocations and an id is never handed out twice, even after its bookmark is deleted.
- * `bookmarks.detailsRequest` is internal: a new id whenever details are requested after the add (a page change or a
- * retry), so each request gets its own details job. `tag_merges` records each merged-away tag (row id = the source tag id) so an interrupted merge can be run again.
+ * `bookmarks.detailsRequest` is internal: a new id and the canonical URL it is for whenever details are requested after
+ * the add (a page change or a retry), so each request gets its own details job. `tag_merges` records each merged-away tag (row id = the source tag id) so an interrupted merge can be run again.
  * datafn does not enforce `unique`; the migrations' unique indexes do.
  */
 export const bookmarksSchema = defineSchema({

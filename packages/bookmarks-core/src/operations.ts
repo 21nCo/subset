@@ -73,6 +73,8 @@ type TagInput = { name: string; nameKey: string };
 
 /** The details of a bookmark whose page changed: none yet, and a fetch pending. */
 const CLEARED_DETAILS = { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null };
+/** A details request names the canonical URL it was made for, so a row whose request names another page shows it. */
+const newRequest = (canonicalUrl: string) => `${crypto.randomUUID()} ${canonicalUrl}`;
 
 function requireBoolean(value: unknown, field: string): boolean {
   if (typeof value !== 'boolean') throw new BookmarkError('invalid-input', `${field} must be a boolean`);
@@ -479,11 +481,10 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     // One read, check and write: the bookmark when there is nothing to write, the details request the row has
     // once written, `false` to decide again. With a `url` it runs in the per-executor chain, like an add, so on the
     // memory adapter (no unique index) no other writer here can take the canonical URL between the check and the write.
-    const writeOnce = async (): Promise<Bookmark | false | { request: string | null }> => {
+    const writeOnce = async (): Promise<Bookmark | boolean> => {
       const row = await getBookmarkRow(id);
       if (!row) throw new BookmarkError('not-found', `Bookmark ${id} does not exist`);
       const current = toBookmark(row);
-      let request = toOptionalString(row.detailsRequest);
       const record: Row = { ...fields };
       // Without a URL only existence is guarded (so `merge` cannot recreate a deleted row). With one, `url`,
       // `canonicalUrl` and the details are written together and only while the URL is still the one read here.
@@ -498,8 +499,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
         if (otherId && otherId !== current.id) throw duplicateUrl(otherId);
         // A different page: the old details no longer apply, and this is a new request for them.
-        request = crypto.randomUUID();
-        Object.assign(record, { ...CLEARED_DETAILS, detailsRequest: request });
+        Object.assign(record, { ...CLEARED_DETAILS, detailsRequest: newRequest(target.canonicalUrl) });
       }
       if (Object.keys(record).length === 0) return current;
 
@@ -514,14 +514,14 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         if (isGuardConflict(error)) return false;
         throw error;
       }
-      return { request };
+      return true;
     };
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const written = await (target ? serialized(executor, writeOnce) : writeOnce());
       if (written === false) continue;
-      if (!('request' in written)) return written;
-      return target ? settleUrlWrite(id, target, written.request) : requireBookmark(id);
+      if (written !== true) return written;
+      return target ? settleUrlWrite(id) : requireBookmark(id);
     }
     throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
   }
@@ -529,24 +529,24 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   /**
    * Runs after a URL write. datafn checks an `if` guard by reading the row before it writes, so the write can land
    * after another writer moved the bookmark to another page and that page's details were stored. That move wrote a
-   * new details request, so when the bookmark is still on the written URL but its request is not the one this write
-   * left, its details may be another page's: they are cleared and asked for again. Then, moved or not, a pending
-   * bookmark gets a job for the page it is on now, so repeating an update whose enqueue failed recovers.
+   * request naming its page, so a bookmark whose request names another page than its own (null is the add-time
+   * request) may show that page's details: they are cleared and asked for again. The row alone decides, so repeating
+   * an interrupted update repairs it too. Then a pending bookmark gets a job for the page it is on now.
    */
-  async function settleUrlWrite(id: string, target: { url: string; canonicalUrl: string }, request: string | null): Promise<Bookmark> {
+  async function settleUrlWrite(id: string): Promise<Bookmark> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const row = await getBookmarkRow(id);
       if (!row) throw new BookmarkError('not-found', `Bookmark ${id} does not exist`);
       const found = toOptionalString(row.detailsRequest);
-      // Moved again since (that write asked for its own page's details), or no other write in between.
-      if (row.url !== target.url || row.canonicalUrl !== target.canonicalUrl || found === request) return requestDetails(id);
+      const canonicalUrl = String(row.canonicalUrl);
+      if (found === null || found.slice(found.indexOf(' ') + 1) === canonicalUrl) return requestDetails(id);
       try {
         await mutate({
           resource: 'bookmarks',
           operation: 'merge',
           id,
-          record: { ...CLEARED_DETAILS, detailsRequest: crypto.randomUUID() },
-          if: { id, url: target.url, canonicalUrl: target.canonicalUrl, detailsRequest: found }
+          record: { ...CLEARED_DETAILS, detailsRequest: newRequest(canonicalUrl) },
+          if: { id, canonicalUrl, detailsRequest: found }
         });
         return requestDetails(id);
       } catch (error) {
@@ -711,7 +711,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     // A bookmark already pending keeps its request, so retrying while its job is queued adds no job.
     if (bookmark.detailsState !== 'pending' || bookmark.detailsError !== null) {
       try {
-        await mergeExisting('bookmarks', bookmark.id, { detailsState: 'pending', detailsError: null, detailsRequest: crypto.randomUUID() });
+        await mergeExisting('bookmarks', bookmark.id, { detailsState: 'pending', detailsError: null, detailsRequest: newRequest(bookmark.canonicalUrl) });
       } catch (error) {
         if (isGuardConflict(error)) throw new BookmarkError('not-found', `Bookmark ${bookmark.id} does not exist`, { cause: error });
         throw error;
