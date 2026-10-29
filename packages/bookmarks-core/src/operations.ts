@@ -314,12 +314,13 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
    * Links the bookmark to the tags and, for each tag a merge has journaled, to the end of its merge journal too.
    * A merge journals a source before its last read of the source's bookmarks, so a link that merge did not see was
    * written after the journal, and reading the journal here finds it. False when a tag was removed without a
-   * merge, so the caller finds or creates it again.
+   * merge, so the caller finds or creates it again. `recorded` holds the records of tags already linked, which are
+   * followed without linking those tags again.
    */
-  async function linkTags(bookmarkId: string, tagIds: string[]): Promise<boolean> {
-    let link = tagIds;
+  async function linkTags(bookmarkId: string, tagIds: string[], recorded = new Map<string, string>()): Promise<boolean> {
+    let link = [...new Set([...tagIds, ...recorded.values()])];
     // Each journal entry is followed once, so an interrupted merge of A into B and a later merge of B into A end.
-    const followed = new Set<string>();
+    const followed = new Set(recorded.keys());
     for (let hop = 0; link.length > 0; hop++) {
       if (hop === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not add the tags because of concurrent writes; try again');
       let linked = true;
@@ -342,12 +343,18 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   async function addTagsTo(bookmark: Bookmark, inputs: TagInput[]): Promise<Bookmark> {
     let current = bookmark;
+    // Set when the records led to a deleted tag no merge recorded: a requested tag still linked then stays as is.
+    let deadEnd = false;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const have = new Set(current.tags.map((tag) => tag.nameKey));
+      const have = new Map(current.tags.map((tag) => [tag.nameKey, tag.id]));
       const missing = inputs.filter((tag) => !have.has(tag.nameKey));
-      if (missing.length === 0) return current;
+      // A requested tag already linked may be a merge source whose last read missed the link (an earlier call
+      // failed after linking it), so its records are followed as for a new link.
+      const recorded = await mergeTargets(inputs.flatMap((tag) => have.get(tag.nameKey) ?? []));
+      if (missing.length === 0 && (recorded.size === 0 || deadEnd)) return current;
       const tags = await ensureTags(missing);
-      if (await linkTags(current.id, tags.map((tag) => tag.id))) return requireBookmark(current.id);
+      if (await linkTags(current.id, tags.map((tag) => tag.id), recorded)) return requireBookmark(current.id);
+      deadEnd = true;
       current = await requireBookmark(current.id);
     }
     throw new BookmarkError('conflict', 'Could not add the tags because of concurrent writes; try again');

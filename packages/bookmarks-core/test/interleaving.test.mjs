@@ -366,6 +366,46 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual((await ops.getBookmark(tagged.id)).tags, [u]);
     });
 
+    // An add that failed right after linking the source, while the merge waited after its last (empty) read, is
+    // repeated with the same tag: the repeat finds the source linked and must still follow its merge record.
+    for (const [label, repeat] of [
+      ['addTags', (bookmark, name) => ops.addTags(bookmark.id, [name])],
+      ['a duplicate add', async (bookmark, name) => (await ops.addBookmark(bookmark.url, { tags: [name] })).bookmark]
+    ]) {
+      test(`${label} repeated after it failed past linking a source the merge last read empty leaves the target`, async () => {
+        const prefix = label === 'addTags' ? 'rt' : 'rd';
+        const { late, source, target } = await mergeRace(prefix);
+        const point = pausePoint();
+        const merging = (await writer({ afterQuery: afterEmptyMemberRead(source, point) })).mergeTags([source.id], target.id);
+        await point.reached;
+        const failing = await writer({ afterMutate: failOnce((payload) => payload.operation === 'relate' && payload.id === late.id) });
+        const tagging = label === 'addTags' ? failing.addTags(late.id, [`${prefix}-source`]) : failing.addBookmark(late.url, { tags: [`${prefix}-source`] });
+        await assert.rejects(tagging, /injected failure/);
+        assert.deepEqual((await repeat(late, `${prefix}-source`)).tags, [source, target]);
+        point.release();
+        assert.deepEqual(await merging, target);
+        assert.deepEqual((await ops.getBookmark(late.id)).tags, [target]);
+      });
+    }
+
+    test('repeating addTags of a linked tag no merge recorded writes nothing', async () => {
+      const { bookmark } = await ops.addBookmark('https://linked-tag.example/', { tags: ['lt-tag'] });
+      const mutations = [];
+      const counting = await writer({ beforeMutate: (payload) => mutations.push(payload) });
+      assert.deepEqual(await counting.addTags(bookmark.id, ['LT-TAG']), bookmark);
+      assert.deepEqual(await counting.addBookmark(bookmark.url, { tags: ['lt-tag'] }), { bookmark, duplicate: true });
+      assert.deepEqual(mutations, []);
+    });
+
+    test('a linked tag whose merge record leads to a deleted tag no merge recorded stays linked', async () => {
+      const { bookmark } = await ops.addBookmark('https://dead-end.example/', { tags: ['de-tag'] });
+      const [tag] = bookmark.tags;
+      // What a withdrawn record of a deleted target leaves (see the README's merge windows).
+      const record = { version: 1, resource: 'tag_merges', operation: 'insert', id: tag.id, record: { targetId: crypto.randomUUID() } };
+      assert.equal((await host.server.executor.mutate(record, { userId: 'owner' }))?.ok, true);
+      assert.deepEqual((await ops.addTags(bookmark.id, ['de-tag'])).tags, [tag]);
+    });
+
     if (backend === 'sqlite') {
       test('crossed merges of a tag with no bookmarks and a tag with some: at most one succeeds and the bookmarks keep a live tag', async () => {
         const { bookmark } = await ops.addBookmark('https://crossed-mixed.example/', { tags: ['cm-a', 'cm-b'] });
