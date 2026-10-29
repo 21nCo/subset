@@ -470,7 +470,10 @@ private struct Matching {
             guard tree.unlisted(index) == nil,
                   item.kind != .package || item.flags.isDisjoint(with: [.incomplete, .containsDataless]) else { return .notReadInFull }
             guard let touched = tree.newestTouch(index) else {
-                return item.flags.contains(.unreadable) ? .notReadInFull : .noTime(tree.path(of: index))
+                if item.flags.contains(.unreadable) { return .notReadInFull }
+                // A package with a time of its own lacks one for an entry inside it.
+                let path = tree.path(of: index)
+                return .noTime(item.touched == nil ? path : "An item inside \(path)")
             }
             newest = max(newest, touched)
             for child in item.children where !(tree[child].name == "node_modules" && tree[child].kind == .directory) {
@@ -484,7 +487,8 @@ private struct Matching {
         case touched(Date)
         /// Part of the project was not read: the scan's flags say why.
         case notReadInFull
-        /// An item that was read has no modification time.
+        /// An item that was read has no modification time: its path, or for a package whose own time is known, where
+        /// inside it the item is.
         case noTime(String)
     }
 

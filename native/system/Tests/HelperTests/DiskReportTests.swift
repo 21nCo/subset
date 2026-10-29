@@ -220,12 +220,48 @@ final class DiskReportTests: XCTestCase {
     /// Every suggestion left incomplete or unavailable by something the scan's flags do not explain makes the result
     /// partial, with that cause's code, and keeps what was measured. What the flags explain as no failure (an iCloud
     /// placeholder) or what nothing reported depends on (an unread app no entry may belong to) leaves it complete.
+    /// `tmutil` stopped at its timeout gets `SIGKILL` only a second after `SIGTERM`, which never fires once the helper
+    /// exits, so the helper's exit path kills it first.
+    func testHelperExitKillsACommandThatIgnoredSIGTERMAtItsTimeout() async throws {
+        let folder = try TemporaryFolder()
+        let pidFile = folder.path + "/pid"
+        let registry = CommandRegistry()
+        let runner = ProcessCommandRunner(registry: registry)
+        var environment = HelperFixtures.environment(home: folder.path)
+        environment.disk.volume = { _ in
+            // Long enough for the shell to set the trap and record its pid under load.
+            _ = await runner.run("/bin/sh", arguments: ["-c", "trap '' TERM; echo $$ > \"$1\"; exec /bin/sleep 30", "sh", pidFile],
+                                 environment: [:], timeout: .seconds(2))
+            return HelperFixtures.volume
+        }
+        let output = await HelperRunner.runToExit(["disk", "--path", folder.path, "--json"], environment: environment,
+                                                  registry: registry)
+        let pid = try XCTUnwrap(pid_t(String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        defer { kill(pid, SIGKILL) }
+        XCTAssertEqual(output.exit, .ok)
+        // Well before the delayed `SIGKILL`, the command is gone: not running, and reaped or about to be.
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while Self.isRunning(pid), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(Self.isRunning(pid), "pid \(pid) is still running")
+    }
+
+    private static func isRunning(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 && !isZombie(pid) }
+
+    private static func isZombie(_ pid: pid_t) -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
+        return info.kp_proc.p_stat == SZOMB
+    }
+
     func testEveryValueARuleCouldNotJudgeMakesSuggestionsPartial() async throws {
         let devices = "Library/Developer/CoreSimulator/Devices"
         let runtime = try PropertyListSerialization.data(fromPropertyList: ["runtime": "com.apple.CoreSimulator.SimRuntime.iOS-1-0"],
                                                          format: .xml, options: 0)
         func suggestions(apps: InstalledApps = InstalledApps([]), edit: (@Sendable (inout DiskTree, String) -> Void)? = nil,
-                         _ setUp: (TemporaryFolder) throws -> Void) async throws -> (exit: HelperExit, codes: [String], rules: [String: [String: Any]]) {
+                         _ setUp: (TemporaryFolder) throws -> Void) async throws
+            -> (exit: HelperExit, codes: [String], messages: [String], rules: [String: [String: Any]]) {
             let home = try TemporaryFolder()
             try home.file("Documents/notes.txt", bytes: 10)
             try setUp(home)
@@ -235,7 +271,8 @@ final class DiskReportTests: XCTestCase {
             try assertValid(output, "disk-suggestions.schema.json")
             let json = try object(output)
             XCTAssertEqual(json["complete"] as? Bool, output.exit == .ok)
-            let codes = (json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String } ?? []
+            let errors = json["errors"] as? [[String: Any]] ?? []
+            let codes = errors.compactMap { $0["code"] as? String }
             let suggestions = json["suggestions"] as? [[String: Any]] ?? []
             let bytes = suggestions.reduce(into: [String: [String: Any]]()) { $0[$1["ruleId"] as? String ?? ""] = $1["bytes"] as? [String: Any] }
             // A complete result owes every unknown amount to a non-failure: a placeholder, another volume, a link, an
@@ -246,7 +283,7 @@ final class DiskReportTests: XCTestCase {
                 let reason = amount["unavailableReason"] as? String ?? ""
                 XCTAssertTrue(nonFailures.contains { reason.contains($0) }, "\(rule): \(reason)")
             }
-            return (output.exit, codes, bytes)
+            return (output.exit, codes, errors.compactMap { $0["message"] as? String }, bytes)
         }
         // The scanner reports the real path, which `edit` gets as the root.
         func touchUnknown(_ relative: String) -> @Sendable (inout DiskTree, String) -> Void {
@@ -303,6 +340,20 @@ final class DiskReportTests: XCTestCase {
         }
         XCTAssertEqual(project.exit, .partial)
         XCTAssertEqual(project.codes, ["modificationTimeUnknown"])
+        XCTAssertEqual(project.messages, ["~/dev/app/package.json has no modification time, so the last change to ~/dev/app is unknown."])
+
+        // A package with a time of its own is not the item without one; an entry inside it is.
+        let inPackage = try await suggestions(edit: { tree, root in
+            if let index = tree.index(atPath: root + "/dev/app/Tool.app") { tree.newestInPackages[Int32(index)] = DiskTree.Node.unknownTime }
+        }) { home in
+            try home.file("dev/app/package.json", bytes: 10)
+            try home.file("dev/app/Tool.app/Contents/Info.plist", bytes: 10)
+            try home.file("dev/app/node_modules/x/index.js", bytes: 10)
+        }
+        XCTAssertEqual(inPackage.exit, .partial)
+        XCTAssertEqual(inPackage.codes, ["modificationTimeUnknown"])
+        XCTAssertEqual(inPackage.messages,
+                       ["An item inside ~/dev/app/Tool.app has no modification time, so the last change to ~/dev/app is unknown."])
 
         // A folder or a special file in place of a device's plist is the device's failure; a link is not followed.
         let makers: [@Sendable (String) throws -> Void] = [

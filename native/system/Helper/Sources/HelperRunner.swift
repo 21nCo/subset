@@ -62,4 +62,15 @@ public enum HelperRunner {
         }
         return HelperOutput(stdout: (invocation.json ? report.json.pretty : report.text) + "\n", stderr: "", exit: report.exit)
     }
+
+    /// Runs one command line for a helper about to exit, then sends `SIGKILL` at once to every command the run left
+    /// running (`CommandRegistry.shutDown()`): a `tmutil` or `docker` command stopped at its timeout gets `SIGTERM`, and
+    /// the `SIGKILL` a second later would never fire once the helper has exited, so one ignoring `SIGTERM` would
+    /// outlive it.
+    public static func runToExit(_ arguments: [String], environment: HelperEnvironment,
+                                 registry: CommandRegistry = .shared) async -> HelperOutput {
+        let output = await run(arguments, environment: environment)
+        registry.shutDown()
+        return output
+    }
 }
