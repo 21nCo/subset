@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { BookmarkError, createBookmarkOperations } from '../dist/index.js';
-import { recordingQueue, setup } from './support.mjs';
+import { recordingQueue, setup, urlJobKey } from './support.mjs';
 
 const rejectsWith = (promise, code) => assert.rejects(promise, (error) => error instanceof BookmarkError && error.code === code);
 const tagNames = (bookmark) => bookmark.tags.map((tag) => tag.name);
@@ -155,14 +155,14 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       await rejectsWith(ops.updateBookmark(bookmark.id, { url: 'ftp://edit.example/' }), 'invalid-url');
     });
 
-    test('retryDetails marks the bookmark pending again and enqueues it', async () => {
+    test('retryDetails marks the bookmark pending again and enqueues it under its URL key', async () => {
       const { bookmark } = await ops.addBookmark('https://retry.example/');
       host.queue.jobs.forEach((entry) => (entry.done = true));
       const retried = await ops.retryDetails(bookmark.id);
       assert.equal(retried.detailsState, 'pending');
       assert.deepEqual(host.queue.jobs.at(-1), {
         job: { bookmarkId: bookmark.id, url: bookmark.url },
-        options: { dedupeKey: bookmark.id },
+        options: { dedupeKey: urlJobKey(bookmark.id, bookmark.canonicalUrl) },
         done: false
       });
       await rejectsWith(ops.retryDetails('missing-id'), 'not-found');

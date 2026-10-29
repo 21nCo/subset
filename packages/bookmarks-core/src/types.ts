@@ -35,6 +35,12 @@ export interface Bookmark {
   tags: Tag[];
 }
 
+/**
+ * A request to fetch the details of `url` for a bookmark. The bookmark may have moved to another page or been
+ * deleted by the time the job runs; that change enqueued its own job. So the runner stores a result only while
+ * the bookmark's `canonicalUrl` is still `canonicalizeUrl(job.url)` (a datafn `if` guard on `id` and
+ * `canonicalUrl`) and otherwise drops it.
+ */
 export interface DetailsJob {
   bookmarkId: string;
   url: string;
@@ -45,7 +51,10 @@ export interface DetailsJob {
  * `{ enqueue: (job, options) => queue.enqueue('bookmark-details', job, options) }`.
  */
 export interface DetailsQueue {
-  /** A second job with the same `dedupeKey` while one is pending is a no-op. */
+  /**
+   * A second job with the same `dedupeKey` while one is queued or running is a no-op. The add-time key is the
+   * bookmark id; a later page change or retry uses `<bookmark id>:<SHA-256 of the canonical URL>`.
+   */
   enqueue(job: DetailsJob, options: { dedupeKey: string }): Promise<unknown>;
 }
 

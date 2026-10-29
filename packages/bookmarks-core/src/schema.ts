@@ -12,8 +12,10 @@ export type DetailsState = (typeof DETAILS_STATES)[number];
 
 /**
  * The datafn schema. `createdAt` and `updatedAt` come from the `timestamps` capability (epoch milliseconds set by
- * the server). `bookmark_sequences` holds the `apiId` high-water mark, so an id is never handed out twice, even
- * after the newest bookmark is deleted. datafn does not enforce `unique`; the migrations' unique indexes do.
+ * the server). `bookmark_api_ids` records every `apiId` ever handed out (row id = the number), so a primary-key
+ * conflict settles concurrent allocations and an id is never handed out twice, even after its bookmark is deleted.
+ * `tag_merges` records each merged-away tag (row id = the source tag id) so an interrupted merge can be run again.
+ * datafn does not enforce `unique`; the migrations' unique indexes do.
  */
 export const bookmarksSchema = defineSchema({
   resources: [
@@ -45,9 +47,14 @@ export const bookmarksSchema = defineSchema({
       ]
     },
     {
-      name: 'bookmark_sequences',
+      name: 'bookmark_api_ids',
       version: BOOKMARKS_RESOURCE_VERSION,
       fields: [{ name: 'value', type: 'number', required: true, nullable: false }]
+    },
+    {
+      name: 'tag_merges',
+      version: BOOKMARKS_RESOURCE_VERSION,
+      fields: [{ name: 'targetId', type: 'string', required: true, nullable: false }]
     }
   ],
   relations: [{ from: 'bookmarks', to: 'tags', type: 'many-many', relation: 'tags', inverse: 'bookmarks', joinTable: 'bookmark_tags' }]
@@ -119,12 +126,23 @@ export const bookmarksTables = {
       { name: 'bookmark_tags_ns_to', fields: [NAMESPACE_COLUMN, 'to'] }
     ]
   },
-  bookmark_sequences: {
-    modelName: 'bookmark_sequences',
+  // One row per apiId ever assigned; id is the number as a string.
+  bookmark_api_ids: {
+    modelName: 'bookmark_api_ids',
     fields: {
       id: { type: 'string', required: true },
       [NAMESPACE_COLUMN]: owner,
       value: { type: 'number', required: true }
+    },
+    indexes: [{ name: 'bookmark_api_ids_ns_value', fields: [NAMESPACE_COLUMN, 'value'], unique: true }]
+  },
+  // One row per merged-away tag; id is the source tag id.
+  tag_merges: {
+    modelName: 'tag_merges',
+    fields: {
+      id: { type: 'string', required: true },
+      [NAMESPACE_COLUMN]: owner,
+      targetId: { type: 'string', required: true }
     }
   }
 } satisfies TableSchemaMap;

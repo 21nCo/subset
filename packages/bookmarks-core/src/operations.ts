@@ -64,9 +64,8 @@ export interface BookmarkOperationsOptions<TContext> {
 const version = BOOKMARKS_RESOURCE_VERSION;
 /** datafn's default query limit. */
 const PAGE_SIZE = 100;
-/** Rounds of optimistic retries (duplicate checks and `apiId` compare-and-set) before giving up. */
+/** Rounds of optimistic retries (duplicate checks, `apiId` claims and guarded updates) before giving up. */
 const MAX_ATTEMPTS = 64;
-const SEQUENCE_ID = 'apiId';
 const BOOKMARK_SELECT = ['*', 'tags.*'];
 
 type Row = Record<string, unknown>;
@@ -90,6 +89,10 @@ function requireArray<T>(value: T[], field: string): T[] {
 const isGuardConflict = (error: unknown) =>
   typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'CONFLICT';
 
+/** datafn's executor throws `NOT_FOUND` when a relation names a record that does not exist. */
+const isNotFound = (error: unknown) =>
+  typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'NOT_FOUND';
+
 /**
  * One chain of uniqueness-sensitive writes (check, allocate, insert) per executor in this process. The memory
  * adapter has no unique indexes and its transactions do not detect conflicts, so without this two concurrent
@@ -101,6 +104,12 @@ function serialized<T>(key: object, task: () => Promise<T>): Promise<T> {
   const run = (writeChains.get(key) ?? Promise.resolve()).then(task);
   writeChains.set(key, run.catch(() => undefined));
   return run;
+}
+
+/** SHA-256 of `text` in hex, so a details job key stays short for any URL. */
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function chunks<T>(items: T[], size = PAGE_SIZE): T[][] {
@@ -157,7 +166,7 @@ function toBookmark(row: Row): Bookmark {
 /**
  * The Bookmarks write operations over a datafn executor. Uniqueness of `canonicalUrl`, `apiId` and tag names per
  * user is enforced by the migrations' unique indexes; these operations check first and turn an index conflict
- * from a concurrent writer into the same result as the check (a duplicate, or a retry with a new `apiId`).
+ * from a concurrent writer into the same result as the check (a duplicate, or a claim of the next `apiId`).
  */
 export function createBookmarkOperations<TContext = unknown>(options: BookmarkOperationsOptions<TContext>): BookmarkOperations {
   const { executor, detailsQueue, context } = options;
@@ -197,10 +206,15 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     return row ? String(row.id) : null;
   }
 
-  async function requireTag(id: string): Promise<Tag> {
+  async function findTag(id: string): Promise<Tag | null> {
     const [row] = await query({ resource: 'tags', select: ['*'], filters: { id: normalizeId(id, 'tag id') }, limit: 1 });
-    if (!row) throw new BookmarkError('not-found', `Tag ${id} does not exist`);
-    return toTag(row);
+    return row ? toTag(row) : null;
+  }
+
+  async function requireTag(id: string): Promise<Tag> {
+    const tag = await findTag(id);
+    if (!tag) throw new BookmarkError('not-found', `Tag ${id} does not exist`);
+    return tag;
   }
 
   async function findTagsByKey(keys: string[]): Promise<Map<string, Tag>> {
@@ -219,38 +233,26 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     await mutate({ resource, operation: 'merge', id, record, if: { id } });
   }
 
-  async function sequenceRow(): Promise<Row | undefined> {
-    const [row] = await query({ resource: 'bookmark_sequences', select: ['id', 'value'], filters: { id: SEQUENCE_ID }, limit: 1 });
-    return row;
+  async function isApiIdClaimed(apiId: number): Promise<boolean> {
+    return (await query({ resource: 'bookmark_api_ids', select: ['id'], filters: { id: String(apiId) }, limit: 1 })).length > 0;
   }
 
-  async function isApiIdTaken(apiId: number): Promise<boolean> {
-    return (await query({ resource: 'bookmarks', select: ['id'], filters: { apiId }, limit: 1 })).length > 0;
-  }
-
-  /** The next `apiId`: a compare-and-set on the per-user high-water mark, so ids only grow and are never reused. */
+  /**
+   * Claims the next `apiId` by inserting it into `bookmark_api_ids`. Claims are never deleted, so the primary key
+   * settles concurrent claims of one number, ids only grow and a deleted bookmark's id is not handed out again.
+   */
   async function allocateApiId(): Promise<number> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const row = await sequenceRow();
-      if (!row) {
-        try {
-          await mutate({ resource: 'bookmark_sequences', operation: 'insert', id: SEQUENCE_ID, record: { value: 0 } });
-        } catch (error) {
-          // Another writer created it first.
-          if (!(await sequenceRow())) throw error;
-        }
-        continue;
-      }
-      const current = toNumber(row.value);
-      if (!Number.isSafeInteger(current) || current < 0) throw new Error(`The apiId sequence holds ${String(row.value)}`);
+      const [last] = await query({ resource: 'bookmark_api_ids', select: ['value'], sort: ['-value'], limit: 1 });
+      const next = (last ? toNumber(last.value) : 0) + 1;
+      if (!Number.isSafeInteger(next) || next < 1) throw new Error(`The last apiId is ${String(last?.value)}`);
       try {
-        await mergeExisting('bookmark_sequences', SEQUENCE_ID, { value: current + 1 });
+        await mutate({ resource: 'bookmark_api_ids', operation: 'insert', id: String(next), record: { value: next } });
+        return next;
       } catch (error) {
-        // The guard failed: another writer moved the sequence on.
-        if (!isGuardConflict(error)) throw error;
-        continue;
+        // Another writer claimed the number first: read the new last one.
+        if (!(await isApiIdClaimed(next))) throw error;
       }
-      return current + 1;
     }
     throw new BookmarkError('conflict', 'Could not assign an API id because of concurrent writes; try again');
   }
@@ -285,21 +287,37 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   async function addTagsTo(bookmark: Bookmark, inputs: TagInput[]): Promise<Bookmark> {
-    const have = new Set(bookmark.tags.map((tag) => tag.nameKey));
-    const missing = inputs.filter((tag) => !have.has(tag.nameKey));
-    if (missing.length === 0) return bookmark;
-    const tags = await ensureTags(missing);
-    await relate(
-      'relate',
-      'bookmarks',
-      bookmark.id,
-      tags.map((tag) => tag.id)
-    );
-    return requireBookmark(bookmark.id);
+    let current = bookmark;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const have = new Set(current.tags.map((tag) => tag.nameKey));
+      const missing = inputs.filter((tag) => !have.has(tag.nameKey));
+      if (missing.length === 0) return current;
+      const tags = await ensureTags(missing);
+      try {
+        await relate(
+          'relate',
+          'bookmarks',
+          current.id,
+          tags.map((tag) => tag.id)
+        );
+      } catch (error) {
+        // datafn refuses to link a tag that a concurrent merge or rename conflict removed: find or create it again.
+        if (!isNotFound(error)) throw error;
+        current = await requireBookmark(current.id);
+        continue;
+      }
+      return requireBookmark(current.id);
+    }
+    throw new BookmarkError('conflict', 'Could not add the tags because of concurrent writes; try again');
   }
 
-  async function enqueueDetails(bookmark: { id: string; url: string }): Promise<void> {
-    await detailsQueue.enqueue({ bookmarkId: bookmark.id, url: bookmark.url }, { dedupeKey: bookmark.id });
+  /**
+   * The add-time job is keyed by the bookmark id. Later jobs (a new page, a retry) are keyed by the bookmark and
+   * its canonical URL, so a job still queued for an older URL cannot absorb the job for the current one.
+   */
+  async function enqueueDetails(bookmarkId: string, url: string, canonicalUrl?: string): Promise<void> {
+    const dedupeKey = canonicalUrl === undefined ? bookmarkId : `${bookmarkId}:${await sha256Hex(canonicalUrl)}`;
+    await detailsQueue.enqueue({ bookmarkId, url }, { dedupeKey });
   }
 
   async function addBookmark(url: string, options: AddBookmarkOptions = {}): Promise<AddBookmarkResult> {
@@ -333,9 +351,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         try {
           await mutate({ resource: 'bookmarks', operation: 'insert', id, record });
         } catch (error) {
-          // A unique index rejected the row: another process saved the URL (a duplicate on the next pass) or got
-          // the same apiId (a new one is allocated). Anything else is a failure.
-          if ((await findBookmarkIdByCanonicalUrl(target.canonicalUrl)) || (await isApiIdTaken(apiId))) return null;
+          // The canonical URL index rejected the row: another process saved the URL, a duplicate on the next pass.
+          if (await findBookmarkIdByCanonicalUrl(target.canonicalUrl)) return null;
           throw error;
         }
         return { id, duplicate: false };
@@ -343,70 +360,70 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const saved = await saveOnce();
-      // A duplicate deleted before it was read is retried too.
-      const bookmark = saved && (await getBookmark(saved.id));
-      if (!saved || !bookmark) continue;
-      const tagged = await addTagsTo(bookmark, tags);
-      if (!saved.duplicate) await enqueueDetails(tagged);
-      return { bookmark: tagged, duplicate: saved.duplicate };
+      if (!saved) continue;
+      // Enqueued before tagging, so a failure while tagging leaves a bookmark whose details still arrive and a
+      // repeated add (a duplicate) adds the tags.
+      if (!saved.duplicate) await enqueueDetails(saved.id, target.url);
+      // A bookmark deleted before it was read is saved again.
+      const bookmark = await getBookmark(saved.id);
+      if (!bookmark) continue;
+      return { bookmark: await addTagsTo(bookmark, tags), duplicate: saved.duplicate };
     }
     throw new BookmarkError('conflict', 'Could not save the bookmark because of concurrent writes; try again');
   }
 
   async function updateBookmark(id: string, patch: BookmarkPatch): Promise<Bookmark> {
     if (typeof patch !== 'object' || patch === null) throw new BookmarkError('invalid-input', 'The update must be an object');
-    const record: Row = {};
+    // Every requested field is written, even one that already looks equal, so a stale read cannot drop it.
+    const fields: Row = {};
     const userTitle = normalizeText(patch.title, 'title', MAX_TITLE_LENGTH);
     const notes = normalizeText(patch.notes, 'notes', MAX_NOTES_LENGTH);
     const unread = normalizeBoolean(patch.unread, 'unread');
     const archived = normalizeBoolean(patch.archived, 'archived');
     const target = patch.url === undefined ? undefined : normalizeUrl(patch.url);
-    const current = await requireBookmark(id);
+    if (userTitle !== undefined) fields.userTitle = userTitle;
+    if (notes !== undefined) fields.notes = notes;
+    if (unread !== undefined) fields.unread = unread;
+    if (archived !== undefined) fields.archived = archived;
+    const duplicateUrl = (existingId: string, cause?: unknown) =>
+      new BookmarkError('duplicate-url', `Another bookmark already has ${target?.canonicalUrl}`, { existingId, cause });
 
-    if (userTitle !== undefined && userTitle !== current.userTitle) record.userTitle = userTitle;
-    if (notes !== undefined && notes !== current.notes) record.notes = notes;
-    if (unread !== undefined && unread !== current.unread) record.unread = unread;
-    if (archived !== undefined && archived !== current.archived) record.archived = archived;
-    let refetch = false;
-    if (target && target.canonicalUrl !== current.canonicalUrl) {
-      const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
-      if (otherId && otherId !== current.id) {
-        throw new BookmarkError('duplicate-url', `Another bookmark already has ${target.canonicalUrl}`, { existingId: otherId });
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const current = await requireBookmark(id);
+      const record: Row = { ...fields };
+      // Without a URL only existence is guarded (so `merge` cannot recreate a deleted row). With one, `url`,
+      // `canonicalUrl` and the details are written together and only while the URL is still the one read here.
+      let guard: Row = { id: current.id };
+      let moved = false;
+      if (target) {
+        guard = { id: current.id, url: current.url, canonicalUrl: current.canonicalUrl };
+        Object.assign(record, { url: target.url, canonicalUrl: target.canonicalUrl });
+        moved = target.canonicalUrl !== current.canonicalUrl;
       }
-      // A different page: the old details no longer apply.
-      Object.assign(record, {
-        url: target.url,
-        canonicalUrl: target.canonicalUrl,
-        details: null,
-        detailsState: 'pending',
-        detailsError: null,
-        detailsFetchedAt: null,
-        faviconKey: null
-      });
-      refetch = true;
-    } else if (target && target.url !== current.url) {
-      record.url = target.url;
-    }
-    if (Object.keys(record).length === 0) return current;
-
-    try {
-      await mergeExisting('bookmarks', current.id, record);
-    } catch (error) {
-      if (target && refetch) {
+      if (target && moved) {
         const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
-        if (otherId && otherId !== current.id) {
-          throw new BookmarkError('duplicate-url', `Another bookmark already has ${target.canonicalUrl}`, {
-            existingId: otherId,
-            cause: error
-          });
-        }
+        if (otherId && otherId !== current.id) throw duplicateUrl(otherId);
+        // A different page: the old details no longer apply.
+        Object.assign(record, { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null });
       }
-      if (!(await getBookmark(current.id))) throw new BookmarkError('not-found', `Bookmark ${current.id} does not exist`, { cause: error });
-      throw error;
+      if (Object.keys(record).length === 0) return current;
+
+      try {
+        await mutate({ resource: 'bookmarks', operation: 'merge', id: current.id, record, if: guard });
+      } catch (error) {
+        if (target && moved) {
+          const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
+          if (otherId && otherId !== current.id) throw duplicateUrl(otherId, error);
+        }
+        // The bookmark was deleted (not-found on the next read) or its URL changed since it was read: decide again.
+        if (isGuardConflict(error)) continue;
+        throw error;
+      }
+      const updated = await requireBookmark(current.id);
+      if (target && moved) await enqueueDetails(current.id, target.url, target.canonicalUrl);
+      return updated;
     }
-    const updated = await requireBookmark(current.id);
-    if (refetch) await enqueueDetails(updated);
-    return updated;
+    throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
   }
 
   async function deleteBookmarks(ids: string[]): Promise<{ deleted: string[] }> {
@@ -475,15 +492,27 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     }
   }
 
+  async function mergedInto(sourceId: string): Promise<string | null> {
+    const [row] = await query({ resource: 'tag_merges', select: ['targetId'], filters: { id: sourceId }, limit: 1 });
+    return row ? String(row.targetId) : null;
+  }
+
   async function mergeTags(sourceTagIds: string[], targetTagId: string): Promise<Tag> {
     const target = await requireTag(targetTagId);
     const sources = normalizeIds(sourceTagIds, 'sourceTagIds').filter((id) => id !== target.id);
-    // Every source must exist before anything moves.
-    for (const id of sources) await requireTag(id);
+    // Every source must exist, or have been merged into this target by an earlier run, before anything moves; so
+    // an interrupted merge is finished by repeating it.
+    const remaining: string[] = [];
     for (const id of sources) {
+      if (await findTag(id)) remaining.push(id);
+      else if ((await mergedInto(id)) !== target.id) throw new BookmarkError('not-found', `Tag ${id} does not exist`);
+    }
+    for (const id of remaining) {
       const bookmarkIds = await taggedBookmarkIds(id);
       await relate('relate', 'tags', target.id, bookmarkIds);
       await relate('unrelate', 'tags', id, bookmarkIds);
+      // Recorded before the delete; `merge` creates the row or points it at this target.
+      await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
       await mutate({ resource: 'tags', operation: 'delete', id });
     }
     return target;
@@ -500,7 +529,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       }
     }
     const updated = await requireBookmark(bookmark.id);
-    await enqueueDetails(updated);
+    await enqueueDetails(updated.id, updated.url, updated.canonicalUrl);
     return updated;
   }
 

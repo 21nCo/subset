@@ -16,7 +16,7 @@ function columnType(field, dialect, label) {
     case 'string':
       return 'TEXT';
     case 'number':
-      // Every Bookmarks number is an integer (apiId and the sequence value).
+      // Every Bookmarks number is an integer (apiId and the bookmark_api_ids value).
       return 'INTEGER';
     case 'boolean':
       return postgres ? 'BOOLEAN' : 'INTEGER';

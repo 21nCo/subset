@@ -1,6 +1,7 @@
 // Test hosts for the operations: datafn's server executor over the @superfunctions/db memory adapter, and over
 // the drizzle adapter on better-sqlite3 and on PGlite (Postgres in WebAssembly), each with the checked-in
 // migration applied. The drizzle tables are built from bookmarksTables, so they cannot drift from the migrations.
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { createDatafnServer } from '@datafn/server';
@@ -66,7 +67,7 @@ async function server(database) {
 export const BACKENDS = {
   async memory() {
     const db = memoryAdapter();
-    return { server: await server(db), close: async () => {} };
+    return { server: await server(db), another: () => server(db), close: async () => {} };
   },
   async sqlite() {
     const sqlite = new Database(':memory:');
@@ -82,7 +83,10 @@ export const BACKENDS = {
   }
 };
 
-/** A DetailsQueue that records jobs and, like @superfunctions/queue, ignores a pending job's dedupeKey. */
+/** The dedupeKey of a details job enqueued after the add (a new page or a retry). */
+export const urlJobKey = (bookmarkId, canonicalUrl) => `${bookmarkId}:${createHash('sha256').update(canonicalUrl).digest('hex')}`;
+
+/** A DetailsQueue that records jobs and, like @superfunctions/queue, ignores the dedupeKey of a job not yet done. */
 export function recordingQueue() {
   const jobs = [];
   return {
@@ -102,4 +106,42 @@ export async function setup(backend, userId = 'owner') {
   const forUser = (otherUserId, detailsQueue = recordingQueue()) =>
     createBookmarkOperations({ executor: host.server.executor, detailsQueue, context: { userId: otherUserId } });
   return { ...host, ops, queue, forUser };
+}
+
+/**
+ * Wraps an executor so a test can pause or fail chosen calls. `beforeQuery` and `beforeMutate` run before the call
+ * and `afterQuery` after it; a hook that throws fails the call as a broken database or network would.
+ */
+export function hookedExecutor(executor, { beforeQuery, afterQuery, beforeMutate } = {}) {
+  return {
+    async query(payload, context) {
+      await beforeQuery?.(payload);
+      const result = await executor.query(payload, context);
+      await afterQuery?.(payload, result);
+      return result;
+    },
+    async mutate(payload, context) {
+      await beforeMutate?.(payload);
+      return executor.mutate(payload, context);
+    }
+  };
+}
+
+/** Holds the first caller of `pause()` until `release()`; `reached` resolves once it is held. Later callers pass. */
+export function pausePoint() {
+  let release;
+  let reach;
+  const released = new Promise((resolve) => (release = resolve));
+  const reached = new Promise((resolve) => (reach = resolve));
+  let used = false;
+  return {
+    reached,
+    release,
+    async pause() {
+      if (used) return;
+      used = true;
+      reach();
+      await released;
+    }
+  };
 }

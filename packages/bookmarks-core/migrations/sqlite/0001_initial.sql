@@ -43,9 +43,17 @@ CREATE TABLE "bookmark_tags" (
 CREATE INDEX "bookmark_tags_ns_from" ON "bookmark_tags" ("__ns", "from");
 CREATE INDEX "bookmark_tags_ns_to" ON "bookmark_tags" ("__ns", "to");
 
-CREATE TABLE "bookmark_sequences" (
+CREATE TABLE "bookmark_api_ids" (
   "id" TEXT NOT NULL,
   "__ns" TEXT NOT NULL,
   "value" INTEGER NOT NULL,
+  PRIMARY KEY ("__ns", "id")
+);
+CREATE UNIQUE INDEX "bookmark_api_ids_ns_value" ON "bookmark_api_ids" ("__ns", "value");
+
+CREATE TABLE "tag_merges" (
+  "id" TEXT NOT NULL,
+  "__ns" TEXT NOT NULL,
+  "targetId" TEXT NOT NULL,
   PRIMARY KEY ("__ns", "id")
 );
