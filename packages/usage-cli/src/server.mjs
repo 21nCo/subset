@@ -32,14 +32,17 @@ const dataDirectory = process.env.SUBSET_USAGE_DATA_DIR ? resolve(process.env.SU
 // `claude auth status` can take seconds; reuse each directory's answer briefly. The live Claude
 // read is throttled to five minutes anyway, so a token refresh by the CLI is never far behind.
 const authCache = new Map();
-function claudeAuth(configDir) {
+/** The directory's sign-in answer, with `at`, when its query started. */
+function claudeAuthEntry(configDir) {
   const entry = authCache.get(configDir);
-  if (entry && Date.now() - entry.at < 60_000) return entry.value;
+  if (entry && Date.now() - entry.at < 60_000) return entry;
   const value = readClaudeAuthStatus(configDir);
-  authCache.set(configDir, { at: Date.now(), value });
+  const fresh = { at: Date.now(), value };
+  authCache.set(configDir, fresh);
   value.catch(() => authCache.delete(configDir));
-  return value;
+  return fresh;
 }
+const claudeAuth = (configDir) => claudeAuthEntry(configDir).value;
 const accounts = createAccounts({ profilesFile, readClaudeAuth: claudeAuth, ...(dataDirectory ? {
   managedRoot: resolve(dataDirectory, 'codex-accounts'),
   snapshotRoot: resolve(dataDirectory, 'usage-snapshots'),
@@ -49,10 +52,17 @@ const dataRoot = dataDirectory ?? resolve(homedir(), '.local/share/subset');
 // Usage history holds only observation times and percentages for trend charts.
 const historyFile = resolve(dataRoot, 'usage-history.json');
 let historyQueue = Promise.resolve();
-async function loadHistory() {
-  try { const value = JSON.parse(await readFile(historyFile, 'utf8')); return isUsageHistory(value) ? value : emptyUsageHistory(); }
-  catch { return emptyUsageHistory(); }
+/** The stored history; no file is an empty history, and an unreadable or invalid file is an error. */
+async function readStoredHistory() {
+  let text;
+  try { text = await readFile(historyFile, 'utf8'); }
+  catch (error) { if (error?.code === 'ENOENT') return emptyUsageHistory(); throw error; }
+  const value = JSON.parse(text);
+  if (!isUsageHistory(value)) throw new Error('The usage history file is not valid.');
+  return value;
 }
+// The dashboard starts over from an empty history when the file cannot be read.
+const loadHistory = () => readStoredHistory().catch(() => emptyUsageHistory());
 function recordHistory(current) { return updateHistory((history) => recordUsageHistory(history, current)); }
 function updateHistory(change) {
   historyQueue = historyQueue.then(async () => {
@@ -110,12 +120,22 @@ async function claudeIdentities() {
   try { const value = JSON.parse(await readFile(identitiesFile, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
   catch { return {}; }
 }
+/** For an MCP session: the file's entries, `{}` when there is no file, or null when it cannot be read or is not an object. */
+async function claudeIdentityRecord() {
+  let text;
+  try { text = await readFile(identitiesFile, 'utf8'); } catch (error) { return error?.code === 'ENOENT' ? {} : null; }
+  try { const value = JSON.parse(text); return value && typeof value === 'object' && !Array.isArray(value) ? value : null; } catch { return null; }
+}
 
 /**
  * Reads every account. `persist: false` (the `status` command) writes nothing: the default
  * Claude account is shown without being saved, and sign-in changes are tracked in memory only.
+ * A long-lived reader that does not persist (`mcp`) passes `identitySession`, which keeps the
+ * identity periods it observed across reads and decides, when each account is bound, which
+ * snapshots show (see `claudeIdentityPeriod` in mcp.mjs).
+ * @param {{ persist?: boolean, identitySession?: ReturnType<typeof import('./mcp.mjs').identitySession> }} [options]
  */
-async function status({ persist = true } = {}) {
+async function status({ persist = true, identitySession } = {}) {
   // A missing or failed Claude CLI must not hide the other accounts.
   let configured;
   if (persist) {
@@ -125,22 +145,38 @@ async function status({ persist = true } = {}) {
     const candidate = await accounts.defaultClaudeCandidate().catch(() => null);
     configured = [...await accounts.profiles(), ...(candidate ? [candidate] : [])];
   }
-  const identities = await claudeIdentities();
+  // A session reads the file as it binds each account, below.
+  const identities = identitySession ? {} : await claudeIdentities();
   // Only the entries this read changed are written back; others may have been updated concurrently.
   const changedIdentities = new Set();
-  const boundToIdentity = (profile, snapshot, auth) => {
+  const boundToIdentity = async (profile, snapshot, auth, queriedAt) => {
     const email = auth?.email?.toLowerCase();
     if (!email) return snapshot;
-    const known = identities[profile.id];
-    if (!known || known.email !== email) {
-      // First sighting adopts existing snapshots; a change starts a new identity period.
-      identities[profile.id] = { email, since: known ? Date.now() : 0 };
-      changedIdentities.add(profile.id);
+    let since;
+    let current = true;
+    let unknown = false;
+    if (identitySession) {
+      // The file is read now, not at the start of the read, so a period the dashboard recorded
+      // meanwhile applies; the session applies it and this answer in one synchronous step. A file
+      // that cannot be read is unknown, not empty (null), so it never adopts earlier snapshots.
+      const record = await claudeIdentityRecord();
+      const stored = record && (Object.hasOwn(record, profile.id) ? record[profile.id] : undefined);
+      ({ since, current, unknown } = identitySession.bind(profile.id, stored, { email, observedAt: queriedAt }));
+    } else {
+      const known = identities[profile.id];
+      if (!known || known.email !== email) {
+        // First sighting adopts existing snapshots; a change starts a new identity period.
+        identities[profile.id] = { email, since: known ? Date.now() : 0 };
+        changedIdentities.add(profile.id);
+      }
+      ({ since } = identities[profile.id]);
     }
-    const since = identities[profile.id].since;
-    if (!snapshot.observedAt || Date.parse(snapshot.observedAt) >= since) return snapshot;
-    return { ...snapshot, observedAt: null, state: 'unavailable', windows: [],
-      errors: [{ code: 'claude_identity_changed', message: 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.' }] };
+    if (!snapshot.observedAt || (current && Date.parse(snapshot.observedAt) >= since)) return snapshot;
+    // An MCP session that could not use the recorded sign-ins when it first saw the account cannot tell whose earlier snapshot it is.
+    const message = current && unknown
+      ? 'The record of this Claude account\'s sign-ins (claude-identities.json) cannot be read or starts later than now, so it is unknown whose snapshot this is. Quota appears after the next response in a CLI session.'
+      : 'This Claude account signed in as someone else since the last snapshot. Quota appears after the next response in a CLI session.';
+    return { ...snapshot, observedAt: null, state: 'unavailable', windows: [], errors: [{ code: 'claude_identity_changed', message }] };
   };
   const { localCredentials } = await accounts.usagePreferences();
   // Each tool's login store is read once per status read.
@@ -168,8 +204,9 @@ async function status({ persist = true } = {}) {
     }
     if (profile.provider === 'claude-code' && profile.claudeConfigDir) {
       // `claude auth status` runs first so Claude Code can refresh its own token before a live read.
-      const auth = await claudeAuth(profile.claudeConfigDir);
-      const snapshot = boundToIdentity(profile, await readSnapshotProfile(profile), auth);
+      const { value, at } = claudeAuthEntry(profile.claudeConfigDir);
+      const auth = await value;
+      const snapshot = await boundToIdentity(profile, await readSnapshotProfile(profile), auth, at);
       // The sign-in wrapper rewrites a missing snapshot's message; keep the identity-change reason.
       const identityError = snapshot.errors.find((error) => error.code === 'claude_identity_changed');
       const authed = withClaudeAuth(snapshot, auth);
@@ -360,13 +397,14 @@ const publicErrors = new Set([
   'Could not restore the CLI status line for this account. Fix its settings.json, then remove the account again.',
 ]);
 
-const usage = `Usage: subset-usage [serve|status|collect] [options]
+const usage = `Usage: subset-usage [serve|status|mcp|collect] [options]
 
   serve                 Open the local usage dashboard (default)
     --port <number>     Port on 127.0.0.1 (default 4174, or the next free one)
     --no-open           Do not open a browser
     --web-dir <path>    Serve the dashboard from another build (development)
   status                Print current usage as JSON
+  mcp                   Run a read-only MCP server on stdin and stdout until stdin closes
   collect --account <id>
                         Save a quota snapshot from a CLI status line (used by installed collectors)
   --help, --version
@@ -375,14 +413,28 @@ const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const option = (name) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
 const command = args[0] && !args[0].startsWith('-') ? args[0] : 'serve';
+const packageVersion = async () => JSON.parse(await readFile(resolve(packageRoot, 'package.json'), 'utf8').catch(() => '{}')).version ?? 'unknown';
 if (flag('--help') || flag('-h')) {
   process.stdout.write(usage);
 } else if (flag('--version') || flag('-v')) {
-  const manifest = JSON.parse(await readFile(resolve(packageRoot, 'package.json'), 'utf8').catch(() => '{}'));
-  process.stdout.write(`${manifest.version ?? 'unknown'}\n`);
+  process.stdout.write(`${await packageVersion()}\n`);
 } else if (command === 'status') {
   try { process.stdout.write(`${JSON.stringify(await status({ persist: false }))}\n`); }
   catch { process.stderr.write('Could not read usage configuration.\n'); process.exitCode = 1; }
+} else if (command === 'mcp') {
+  if (args.length > 1) { process.stderr.write(usage); process.exit(2); }
+  // Loaded only here, so the other commands (collect runs on every status-line update) skip the MCP code.
+  const { identitySession, serveStdio } = await import('./mcp.mjs');
+  // Reads as `status` does, so it writes nothing, but keeps Claude sign-in changes for the session:
+  // snapshots from before a change stay hidden, and those collected after it show. History is the
+  // stored file as `/api/history` returns it, except that an unreadable file is an error, not empty.
+  const providers = await accounts.profiles().then((profiles) => profiles.map((profile) => profile.provider), () => null);
+  const session = identitySession();
+  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identitySession: session }), readHistory: readStoredHistory, providers });
+  // serveStdio ended every provider subprocess; a read still waiting on anything else would keep the
+  // process alive after the host closed stdin or signalled, and nothing here waits to be written, so exit once stdout has drained.
+  await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));
+  process.exit(0);
 } else if (command === 'collect') {
   const id = args.length === 3 && args[1] === '--account' ? args[2] : null;
   const chunks = [];
