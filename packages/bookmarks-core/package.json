@@ -1,0 +1,37 @@
+{
+  "name": "@subset.dev/bookmarks-core",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The Bookmarks data model (datafn schema and SQL migrations) and the only operations that write bookmark data.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./migrations/*": "./migrations/*"
+  },
+  "files": ["dist", "migrations", "README.md"],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "migrations": "npm run build && node scripts/generate-migrations.mjs",
+    "test": "npm run build --workspace=@subset.dev/links && npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@datafn/core": "0.1.1",
+    "@subset.dev/links": "*",
+    "@superfunctions/db": "0.3.0"
+  },
+  "devDependencies": {
+    "@datafn/server": "0.2.0",
+    "@electric-sql/pglite": "0.5.13",
+    "better-sqlite3": "13.0.3",
+    "drizzle-orm": "0.45.4",
+    "typescript": "^5.9.3"
+  }
+}
