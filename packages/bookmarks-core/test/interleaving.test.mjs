@@ -959,6 +959,49 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [v]);
     });
 
+    test('a repeated merge whose target is merged on between the ownership reads still finds its record ours', async () => {
+      const { bookmark } = await ops.addBookmark('https://own-end.example/', { tags: ['oe-s', 'oe-t', 'oe-u', 'oe-v'] });
+      await ops.removeTags(bookmark.id, ['oe-t', 'oe-u', 'oe-v']);
+      const [s, t, u, v] = bookmark.tags;
+      await ops.mergeTags([s.id], t.id);
+      await ops.mergeTags([t.id], u.id);
+      const point = pausePoint();
+      let uReads = 0;
+      // Repeating S into T resolves T to U, then decides whether S's record (T) is this merge's: it pauses at the
+      // third read of U's record, between the two walks before the fix; U into V then completes.
+      const merging = (
+        await writer({ beforeQuery: (payload) => payload.resource === 'tag_merges' && payload.filters?.id === u.id && ++uReads === 3 && point.pause() })
+      ).mergeTags([s.id], t.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([u.id], v.id), v);
+      point.release();
+      assert.deepEqual(await merging, v);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [v]);
+    });
+
+    test('a repeat of a merge interrupted after its claim, whose target is merged on while it claims, finishes it', async () => {
+      const { bookmark } = await ops.addBookmark('https://own-claim.example/', { tags: ['oc-s', 'oc-t', 'oc-u', 'oc-v'] });
+      await ops.removeTags(bookmark.id, ['oc-t', 'oc-u', 'oc-v']);
+      const [s, t, u, v] = bookmark.tags;
+      const broken = await writer({ beforeMutate: failOnce((payload) => payload.resource === 'tags' && payload.operation === 'relate') });
+      await assert.rejects(broken.mergeTags([s.id], t.id), /injected failure/);
+      await ops.mergeTags([t.id], u.id);
+      const point = pausePoint();
+      let uReads = 0;
+      // The repeat resolves T to U and claims S, whose record names T: it pauses at the third read of U's record,
+      // inside the claim's ownership check before the fix; U into V then completes.
+      const merging = (
+        await writer({ beforeQuery: (payload) => payload.resource === 'tag_merges' && payload.filters?.id === u.id && ++uReads === 3 && point.pause() })
+      ).mergeTags([s.id], t.id);
+      await point.reached;
+      assert.deepEqual(await ops.mergeTags([u.id], v.id), v);
+      point.release();
+      assert.deepEqual(await merging, v);
+      assert.deepEqual((await ops.getBookmark(bookmark.id)).tags, [v]);
+      const [fresh] = (await ops.addBookmark('https://own-claim.example/fresh', { tags: ['oc-s'] })).bookmark.tags;
+      assert.notEqual(fresh.id, s.id);
+    });
+
     const deletedMidway = [
       ['setUnread', (o, id) => o.setUnread(id, true), (payload) => payload.resource === 'bookmarks' && payload.operation === 'merge'],
       ['updateBookmark with a url', (o, id) => o.updateBookmark(id, { url: 'https://gone.example/moved' }), (payload) => payload.record?.url !== undefined],

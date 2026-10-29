@@ -648,16 +648,37 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     return row ? String(row.targetId) : null;
   }
 
-  /** Follows the merge records from `tagId` to the tag they end at, each passed once; null when they lead back to one passed. */
-  async function mergeEnd(tagId: string): Promise<string | null> {
+  /**
+   * Follows the merge records from `tagId` to the tag they end at, each passed once: the tags passed and that end,
+   * null when they lead back to one passed.
+   */
+  async function mergeWalk(tagId: string): Promise<{ passed: Set<string>; end: string | null }> {
     const passed = new Set<string>();
     for (let id = tagId; ; ) {
       passed.add(id);
       const next = await mergedInto(id);
-      if (next === null) return id;
-      if (passed.has(next)) return null;
+      if (next === null) return { passed, end: id };
+      if (passed.has(next)) return { passed, end: null };
       id = next;
     }
+  }
+
+  /**
+   * Whether `tagId`'s merge records lead to where `targetId`'s end: one walk passes the target, or the target's walk
+   * meets it. Ends found apart but merged on since (between the two walks) are walked again; false when the records
+   * lead back to a tag passed or settle at another end.
+   */
+  async function sameMergeEnd(tagId: string, targetId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const from = await mergeWalk(tagId);
+      if (from.end === null) return false;
+      if (from.passed.has(targetId)) return true;
+      const to = await mergeWalk(targetId);
+      if (to.end === null) return false;
+      if ([...to.passed].some((id) => from.passed.has(id))) return true;
+      if ((await mergedInto(from.end)) === null && (await mergedInto(to.end)) === null) return false;
+    }
+    throw new BookmarkError('conflict', 'Could not merge the tags because of concurrent writes; try again');
   }
 
   /**
@@ -667,7 +688,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
    */
   async function liveEnd(tagId: string): Promise<Tag | null> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const end = await mergeEnd(tagId);
+      const { end } = await mergeWalk(tagId);
       if (end === null) return null;
       const tag = await findTag(end);
       if (tag) return tag;
@@ -734,11 +755,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     if (!target) throw new BookmarkError('not-found', `Tag ${targetTagId} does not exist`);
     const into = target;
     // A record is this merge's when it names the target or its records end where the target's do.
-    const isOurs = async (recorded: string) => {
-      if (recorded === into.id) return true;
-      const end = await mergeEnd(recorded);
-      return end !== null && end === (await mergeEnd(into.id));
-    };
+    const isOurs = async (recorded: string) => recorded === into.id || (await sameMergeEnd(recorded, into.id));
     const sources = normalizeIds(sourceTagIds, 'sourceTagIds').filter((id) => id !== into.id && id !== targetTagId);
     // Every source must exist, or have been merged into this target by an earlier run, before anything moves; so
     // an interrupted merge is finished by repeating it.
