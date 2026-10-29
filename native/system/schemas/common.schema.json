@@ -24,7 +24,7 @@
             "enum": ["processListFailed", "cpuUnavailable", "memoryUnavailable", "usageUnavailable", "originSignalsNotRead",
                      "cannotResolve", "notADirectory", "notLocal", "timedOut", "scanIncomplete", "volumeUnavailable",
                      "snapshotsUnavailable", "installedAppsUnread", "simulatorRuntimesUnknown", "dockerUnavailable",
-                     "devicePlistUnread", "modificationTimeUnknown"]
+                     "devicePlistUnread", "modificationTimeUnknown", "ruleFolderNotAFolder"]
           },
           "message": { "type": "string" }
         }

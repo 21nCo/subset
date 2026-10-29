@@ -238,6 +238,14 @@ final class DiskReportTests: XCTestCase {
             let codes = (json["errors"] as? [[String: Any]])?.compactMap { $0["code"] as? String } ?? []
             let suggestions = json["suggestions"] as? [[String: Any]] ?? []
             let bytes = suggestions.reduce(into: [String: [String: Any]]()) { $0[$1["ruleId"] as? String ?? ""] = $1["bytes"] as? [String: Any] }
+            // A complete result owes every unknown amount to a non-failure: a placeholder, another volume, a link, an
+            // item read at another path, a plist one of those left unread, or no Docker command.
+            let nonFailures = ["is not downloaded", "is another volume", "is a link", "was read at another path",
+                               "device.plist was not read", "No docker command"]
+            for (rule, amount) in bytes where output.exit == .ok && amount["kind"] as? String == "unavailable" {
+                let reason = amount["unavailableReason"] as? String ?? ""
+                XCTAssertTrue(nonFailures.contains { reason.contains($0) }, "\(rule): \(reason)")
+            }
             return (output.exit, codes, bytes)
         }
         // The scanner reports the real path, which `edit` gets as the root.
@@ -295,6 +303,36 @@ final class DiskReportTests: XCTestCase {
         }
         XCTAssertEqual(project.exit, .partial)
         XCTAssertEqual(project.codes, ["modificationTimeUnknown"])
+
+        // A folder or a special file in place of a device's plist is the device's failure; a link is not followed.
+        let makers: [@Sendable (String) throws -> Void] = [
+            { try FileManager.default.createDirectory(atPath: $0, withIntermediateDirectories: false) },
+            { XCTAssertEqual(mkfifo($0, 0o644), 0) }
+        ]
+        for make in makers {
+            let other = try await suggestions { home in try make(home.folder("\(devices)/D").path + "/device.plist") }
+            XCTAssertEqual(other.exit, .partial)
+            XCTAssertEqual(other.codes, ["devicePlistUnread"])
+        }
+        let linked = try await suggestions { home in
+            try runtime.write(to: home.url.appendingPathComponent("device.plist"))
+            try FileManager.default.createSymbolicLink(atPath: home.folder("\(devices)/D").path + "/device.plist",
+                                                       withDestinationPath: home.path + "/device.plist")
+        }
+        XCTAssertEqual(linked.exit, .ok)
+        XCTAssertEqual(linked.codes, [])
+        XCTAssertEqual(linked.rules["unavailableSimulators"]?["kind"] as? String, "unavailable")
+
+        // A file in place of a rule's own folder is that rule's failure, whichever rule searches it.
+        let searched = ReclaimRules.all.filter { ![.staleNodeModules, .dockerImages, .appCaches, .appLeftovers].contains($0.id) }
+        for rule in searched {
+            for relative in rule.homePaths + (rule.id == .xcodeDeviceSupport ? ["Library/Developer/Xcode/iOS DeviceSupport"] : []) {
+                let file = try await suggestions { home in try home.file(relative, bytes: 10) }
+                XCTAssertEqual(file.exit, .partial, relative)
+                XCTAssertEqual(file.codes, ["ruleFolderNotAFolder"], relative)
+                XCTAssertEqual(file.rules[rule.id.rawValue]?["kind"] as? String, "unavailable", relative)
+            }
+        }
 
         // A placeholder folder is never downloaded, so the match is incomplete, and that is not a failure.
         let placeholder = try await suggestions(edit: { tree, root in

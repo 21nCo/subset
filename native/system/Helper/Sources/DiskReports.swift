@@ -257,7 +257,7 @@ enum DiskReports {
         let codes: [(ReclaimFailure.Kind, String)] = [
             (.devicePlist, "devicePlistUnread"), (.simulatorRuntimes, "simulatorRuntimesUnknown"),
             (.modificationTime, "modificationTimeUnknown"), (.installedApps, "installedAppsUnread"),
-            (.dockerImages, "dockerUnavailable")
+            (.dockerImages, "dockerUnavailable"), (.ruleFolder, "ruleFolderNotAFolder")
         ]
         var seen = Set<String>()
         let failures = matches.flatMap(\.failures).filter { seen.insert("\($0.kind.rawValue) \($0.reason)").inserted }
