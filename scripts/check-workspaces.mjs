@@ -46,6 +46,28 @@ for (const entry of readdirSync(new URL('packages/links/src/', root))) {
   assert.doesNotMatch(source, /\bfrom\s+['"]@subset\.dev\//, `packages/links/src/${entry} imports another workspace`);
 }
 
+// @subset.dev/bookmarks-core owns the Bookmarks data and its operations for every host, so it depends on and imports
+// only @subset.dev/links, datafn's core and @superfunctions/db: no app, no host runtime (such as @datafn/server or a
+// database driver) and no other workspace (SET-173).
+const bookmarksCore = workspaces.find((manifest) => manifest.name === '@subset.dev/bookmarks-core');
+assert.ok(bookmarksCore, 'Missing workspace @subset.dev/bookmarks-core');
+const bookmarksCoreDependencies = ['@datafn/core', '@subset.dev/links', '@superfunctions/db'];
+assert.deepEqual(
+  Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort(),
+  bookmarksCoreDependencies,
+  '@subset.dev/bookmarks-core may depend only on @datafn/core, @subset.dev/links and @superfunctions/db'
+);
+for (const entry of readdirSync(new URL('packages/bookmarks-core/src/', root))) {
+  const source = readFileSync(new URL(`packages/bookmarks-core/src/${entry}`, root), 'utf8');
+  // Static imports and re-exports (`import ... from`, `export ... from`, `import '...'`) and dynamic `import('...')`.
+  const imports = /^\s*(?:import|export)\b[^'";]*?\bfrom\s*['"]([^'"\n]+)['"]|^\s*import\s*['"]([^'"\n]+)['"]|\bimport\s*\(\s*['"]([^'"\n]+)['"]/gm;
+  for (const match of source.matchAll(imports)) {
+    const specifier = match[1] ?? match[2] ?? match[3];
+    const allowed = specifier.startsWith('./') || bookmarksCoreDependencies.some((name) => specifier === name || specifier.startsWith(`${name}/`));
+    assert.ok(allowed, `packages/bookmarks-core/src/${entry} imports ${specifier}`);
+  }
+}
+
 // Publishable packages are listed for the tag workflow, bundle private workspaces instead of
 // depending on them at runtime, and declare which files they ship.
 const releaseTargets = readJson('release-packages.json');
@@ -149,7 +171,7 @@ for (const capability of capabilities) {
 }
 
 // Private domain packages that share a name with a published CLI take the -core suffix (AGENTS.md).
-for (const name of ['catalog', 'directory', 'mgraph-contracts', 'mgraph-store', 'minutes-core', 'usage-core', 'timer-core', 'usage-web', 'timer-web']) {
+for (const name of ['bookmarks-core', 'catalog', 'directory', 'mgraph-contracts', 'mgraph-store', 'minutes-core', 'usage-core', 'timer-core', 'usage-web', 'timer-web']) {
   assert.equal(names.has(`@subset.dev/${name}`), true, `Missing workspace @subset.dev/${name}`);
 }
 console.log(`Validated ${names.size} Subset workspaces.`);
