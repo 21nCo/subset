@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { canonicalizeUrl } from '@subset.dev/links';
-import { BookmarkError, createBookmarkOperations } from '../dist/index.js';
-import { hookedExecutor, pausePoint, recordingQueue, setup } from './support.mjs';
+import { BookmarkError, createBookmarkOperations, displayTitle } from '../dist/index.js';
+import { hookedExecutor, pausePoint, recordingQueue, sampleDetails, setup, storeDetails } from './support.mjs';
 
 const rejectsWith = (promise, code) => assert.rejects(promise, (error) => error instanceof BookmarkError && error.code === code);
 
@@ -73,6 +73,30 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(
         pendingJobs(queue, bookmark.id).map((entry) => entry.job.url),
         ['https://coherent.example/?utm_source=x']
+      );
+    });
+
+    test("a URL write datafn lets past a move whose page details were stored does not keep that page's details", async () => {
+      const { bookmark } = await ops.addBookmark('https://own.example/page');
+      const point = pausePoint();
+      const queue = recordingQueue();
+      // datafn reads the guard and then writes; the write pauses as if its guard read happened before the move.
+      const late = await writer({ beforeMutate: (payload) => payload.record?.url !== undefined && point.pause().then(() => delete payload.if) }, queue);
+      const updating = late.updateBookmark(bookmark.id, { url: 'https://own.example/page?utm_source=x' });
+      await point.reached;
+      const moved = await ops.updateBookmark(bookmark.id, { url: 'https://foreign.example/' });
+      await storeDetails(host.server.executor, moved, { details: sampleDetails(moved.url, 'Foreign page'), faviconKey: 'favicons/foreign.ico' });
+      point.release();
+      const updated = await updating;
+      assert.deepEqual(updated, await ops.getBookmark(bookmark.id));
+      assert.equal(updated.canonicalUrl, bookmark.canonicalUrl);
+      assert.equal(updated.detailsState, 'pending');
+      assert.equal(updated.details, null);
+      assert.equal(updated.faviconKey, null);
+      assert.notEqual(displayTitle(updated), 'Foreign page');
+      assert.deepEqual(
+        pendingJobs(queue, bookmark.id).map((entry) => entry.job.url),
+        ['https://own.example/page?utm_source=x']
       );
     });
 
@@ -283,6 +307,49 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       }
     });
 
+    test('crossed merges of two tags with no bookmarks: at most one succeeds and a bookmark tagged meanwhile keeps a live tag', async () => {
+      const seed = (await ops.addBookmark('https://crossed-empty.example/1', { tags: ['ce-a', 'ce-b'] })).bookmark;
+      const [a, b] = seed.tags;
+      await ops.removeTags(seed.id, ['ce-a', 'ce-b']);
+      const [pointA, pointB] = [pausePoint(), pausePoint()];
+      const intoB = (await writer({ afterQuery: afterEmptyMemberRead(a, pointA) })).mergeTags([a.id], b.id);
+      await pointA.reached;
+      const intoA = (await writer({ afterQuery: afterEmptyMemberRead(b, pointB) })).mergeTags([b.id], a.id);
+      await pointB.reached;
+      // Both are recorded, so tagging with A follows both records.
+      const tagged = await ops.addTags(seed.id, ['ce-a']);
+      assert.deepEqual(tagged.tags, [a, b]);
+      pointA.release();
+      pointB.release();
+      const results = await Promise.allSettled([intoB, intoA]);
+      for (const result of results) if (result.status === 'rejected') assert.equal(result.reason.code, 'conflict', String(result.reason));
+      const won = results.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+      assert.ok(won.length <= 1, 'both merges succeeded');
+      const tags = (await ops.getBookmark(seed.id)).tags;
+      if (won.length === 1) {
+        assert.deepEqual(tags, won);
+      } else {
+        assert.deepEqual(tags, [a, b]);
+        assert.deepEqual(await ops.mergeTags([a.id], b.id), b);
+        assert.deepEqual((await ops.getBookmark(seed.id)).tags, [b]);
+      }
+    });
+
+    test('a merge whose target is gone with no merge record keeps its source and fails with conflict', async () => {
+      const seed = (await ops.addBookmark('https://gone-target.example/', { tags: ['gt-s', 'gt-t'] })).bookmark;
+      const [s, t] = seed.tags;
+      await ops.removeTags(seed.id, ['gt-s']);
+      const point = pausePoint();
+      const merging = (await writer({ afterQuery: afterEmptyMemberRead(s, point) })).mergeTags([s.id], t.id);
+      await point.reached;
+      await ops.removeTags(seed.id, ['gt-t']);
+      const removed = await host.server.executor.mutate({ version: 1, resource: 'tags', operation: 'delete', id: t.id }, { userId: 'owner' });
+      assert.equal(removed.ok, true);
+      point.release();
+      await rejectsWith(merging, 'conflict');
+      assert.deepEqual((await ops.addTags(seed.id, ['GT-S'])).tags, [s]);
+    });
+
     test('a merge into a tag whose own merge is finishing ends on the last target', async () => {
       const tagged = (await ops.addBookmark('https://chained.example/1', { tags: ['ch-s'] })).bookmark;
       const other = (await ops.addBookmark('https://chained.example/2', { tags: ['ch-t', 'ch-u'] })).bookmark;
@@ -300,6 +367,27 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
     });
 
     if (backend === 'sqlite') {
+      test('crossed merges of a tag with no bookmarks and a tag with some: at most one succeeds and the bookmarks keep a live tag', async () => {
+        const { bookmark } = await ops.addBookmark('https://crossed-mixed.example/', { tags: ['cm-a', 'cm-b'] });
+        const [a, b] = bookmark.tags;
+        await ops.removeTags(bookmark.id, ['cm-a']);
+        const [pointA, pointB] = [pausePoint(), pausePoint()];
+        const intoB = (await writer({ afterQuery: afterEmptyMemberRead(a, pointA) })).mergeTags([a.id], b.id);
+        await pointA.reached;
+        const intoA = (await writer({ afterQuery: afterMemberRead(b, pointB) })).mergeTags([b.id], a.id);
+        await pointB.reached;
+        pointA.release();
+        pointB.release();
+        const results = await Promise.allSettled([intoB, intoA]);
+        for (const result of results) if (result.status === 'rejected') assert.equal(result.reason.code, 'conflict', String(result.reason));
+        const won = results.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+        assert.ok(won.length <= 1, 'both merges succeeded');
+        // Reads skip deleted tags, so the bookmark has a live tag: the winner, or B (and A, linked by the loser).
+        const tags = (await ops.getBookmark(bookmark.id)).tags;
+        if (won.length === 1) assert.deepEqual(tags, won);
+        else assert.ok(tags.some((tag) => tag.id === b.id), JSON.stringify(tags));
+      });
+
       test("a duplicate add's tags completing after the merge last read the source leave the target", async () => {
         const { late, source, target } = await mergeRace('md');
         const point = pausePoint();

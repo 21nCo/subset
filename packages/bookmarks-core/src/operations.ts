@@ -71,6 +71,9 @@ const BOOKMARK_SELECT = ['*', 'tags.*'];
 type Row = Record<string, unknown>;
 type TagInput = { name: string; nameKey: string };
 
+/** The details of a bookmark whose page changed: none yet, and a fetch pending. */
+const CLEARED_DETAILS = { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null };
+
 function requireBoolean(value: unknown, field: string): boolean {
   if (typeof value !== 'boolean') throw new BookmarkError('invalid-input', `${field} must be a boolean`);
   return value;
@@ -368,6 +371,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   async function addBookmark(url: string, options: AddBookmarkOptions = {}): Promise<AddBookmarkResult> {
+    if (typeof options !== 'object' || options === null) throw new BookmarkError('invalid-input', 'The options must be an object');
     const target = normalizeUrl(url);
     const userTitle = normalizeText(options.title, 'title', MAX_TITLE_LENGTH) ?? null;
     const notes = normalizeText(options.notes, 'notes', MAX_NOTES_LENGTH) ?? null;
@@ -389,11 +393,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           notes,
           unread,
           archived: false,
-          details: null,
-          detailsState: 'pending',
-          detailsError: null,
-          detailsFetchedAt: null,
-          faviconKey: null,
+          ...CLEARED_DETAILS,
           detailsRequest: null
         };
         try {
@@ -436,11 +436,14 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     const duplicateUrl = (existingId: string, cause?: unknown) =>
       new BookmarkError('duplicate-url', `Another bookmark already has ${target?.canonicalUrl}`, { existingId, cause });
 
-    // One read, check and write: the bookmark when there is nothing to write, `true` once written, `false` to decide
-    // again. With a `url` it runs in the per-executor chain, like an add, so on the memory adapter (no unique index)
-    // no other writer here can take the canonical URL between the check and the write.
-    const writeOnce = async (): Promise<Bookmark | boolean> => {
-      const current = await requireBookmark(id);
+    // One read, check and write: the bookmark when there is nothing to write, the details request the row has
+    // once written, `false` to decide again. With a `url` it runs in the per-executor chain, like an add, so on the
+    // memory adapter (no unique index) no other writer here can take the canonical URL between the check and the write.
+    const writeOnce = async (): Promise<Bookmark | false | { request: string | null }> => {
+      const row = await getBookmarkRow(id);
+      if (!row) throw new BookmarkError('not-found', `Bookmark ${id} does not exist`);
+      const current = toBookmark(row);
+      let request = toOptionalString(row.detailsRequest);
       const record: Row = { ...fields };
       // Without a URL only existence is guarded (so `merge` cannot recreate a deleted row). With one, `url`,
       // `canonicalUrl` and the details are written together and only while the URL is still the one read here.
@@ -455,14 +458,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         const otherId = await findBookmarkIdByCanonicalUrl(target.canonicalUrl);
         if (otherId && otherId !== current.id) throw duplicateUrl(otherId);
         // A different page: the old details no longer apply, and this is a new request for them.
-        Object.assign(record, {
-          details: null,
-          detailsState: 'pending',
-          detailsError: null,
-          detailsFetchedAt: null,
-          faviconKey: null,
-          detailsRequest: crypto.randomUUID()
-        });
+        request = crypto.randomUUID();
+        Object.assign(record, { ...CLEARED_DETAILS, detailsRequest: request });
       }
       if (Object.keys(record).length === 0) return current;
 
@@ -477,16 +474,44 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         if (isGuardConflict(error)) return false;
         throw error;
       }
-      return true;
+      return { request };
     };
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const written = await (target ? serialized(executor, writeOnce) : writeOnce());
       if (written === false) continue;
-      if (written !== true) return written;
-      // After any URL write, moved or not, a pending bookmark gets a job for the page it is on now: so repeating an
-      // update whose enqueue failed recovers, and so does a write that datafn let past a concurrent move.
-      return target ? requestDetails(id) : requireBookmark(id);
+      if (!('request' in written)) return written;
+      return target ? settleUrlWrite(id, target, written.request) : requireBookmark(id);
+    }
+    throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
+  }
+
+  /**
+   * Runs after a URL write. datafn checks an `if` guard by reading the row before it writes, so the write can land
+   * after another writer moved the bookmark to another page and that page's details were stored. That move wrote a
+   * new details request, so when the bookmark is still on the written URL but its request is not the one this write
+   * left, its details may be another page's: they are cleared and asked for again. Then, moved or not, a pending
+   * bookmark gets a job for the page it is on now, so repeating an update whose enqueue failed recovers.
+   */
+  async function settleUrlWrite(id: string, target: { url: string; canonicalUrl: string }, request: string | null): Promise<Bookmark> {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const row = await getBookmarkRow(id);
+      if (!row) throw new BookmarkError('not-found', `Bookmark ${id} does not exist`);
+      const found = toOptionalString(row.detailsRequest);
+      // Moved again since (that write asked for its own page's details), or no other write in between.
+      if (row.url !== target.url || row.canonicalUrl !== target.canonicalUrl || found === request) return requestDetails(id);
+      try {
+        await mutate({
+          resource: 'bookmarks',
+          operation: 'merge',
+          id,
+          record: { ...CLEARED_DETAILS, detailsRequest: crypto.randomUUID() },
+          if: { id, url: target.url, canonicalUrl: target.canonicalUrl, detailsRequest: found }
+        });
+        return requestDetails(id);
+      } catch (error) {
+        if (!isGuardConflict(error)) throw error;
+      }
     }
     throw new BookmarkError('conflict', 'Could not update the bookmark because of concurrent writes; try again');
   }
@@ -569,9 +594,10 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
   }
 
   /**
-   * Links the bookmarks to the tag and, like linkTags, on along its merge records. `moved` when they reached a live
-   * tag no merge has recorded, `retry` when one of the bookmarks was deleted, and `conflict` when the records lead
-   * back to a tag already passed (merges into each other, one of them `sourceId`'s) or end at a deleted tag.
+   * Links the bookmarks (none on a merge's last read) to the tag and, like linkTags, on along its merge records.
+   * `moved` when they reached a live tag no merge has recorded, `retry` when one of the bookmarks was deleted, and
+   * `conflict` when the records lead back to a tag already passed (merges into each other, one of them
+   * `sourceId`'s) or end at a deleted tag.
    */
   async function attachAlongMerges(bookmarkIds: string[], tagId: string, sourceId: string): Promise<'moved' | 'retry' | 'conflict'> {
     const passed = new Set([sourceId]);
@@ -586,7 +612,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         linked = false;
       }
       const next = await mergedInto(tag);
-      if (next === null) return linked ? 'moved' : 'conflict';
+      // With nothing to link, the relate did not show whether the tag exists.
+      if (next === null) return linked && (bookmarkIds.length > 0 || (await findTag(tag)) !== null) ? 'moved' : 'conflict';
       tag = next;
     }
     return 'conflict';
@@ -608,11 +635,11 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       await mutate({ resource: 'tag_merges', operation: 'merge', id, record: { targetId: target.id } });
       // Moves the source's bookmarks until it has none, so one tagged while the merge runs is moved too. They are
       // unlinked from the source only once linked to the end of the target's merges, which a later merge of that
-      // tag reads after recording it, so a merge of the target running meanwhile carries them on.
+      // tag reads after recording it, so a merge of the target running meanwhile carries them on. The records are
+      // walked after the last, empty read too, so a source is deleted only while they lead to a live tag.
       for (let attempt = 0; ; attempt++) {
-        const bookmarkIds = await taggedBookmarkIds(id);
-        if (bookmarkIds.length === 0) break;
         if (attempt === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not merge the tags because of concurrent writes; try again');
+        const bookmarkIds = await taggedBookmarkIds(id);
         const moved = await attachAlongMerges(bookmarkIds, target.id, id);
         if (moved === 'retry') continue;
         if (moved === 'conflict') {
@@ -625,6 +652,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           }
           throw new BookmarkError('conflict', `Tag ${target.name} is being merged into another tag; finish that merge first`);
         }
+        if (bookmarkIds.length === 0) break;
         await relate('unrelate', 'tags', id, bookmarkIds);
       }
       await mutate({ resource: 'tags', operation: 'delete', id });

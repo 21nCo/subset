@@ -183,6 +183,8 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       await rejectsWith(ops.addBookmark('https://bad-tag.example/', { tags: ['x'.repeat(65)] }), 'invalid-input');
       await rejectsWith(ops.addBookmark('https://bad-tag.example/', { title: 7 }), 'invalid-input');
       await rejectsWith(ops.addBookmark('https://bad-tag.example/', { unread: 'yes' }), 'invalid-input');
+      await rejectsWith(ops.addBookmark('https://bad-tag.example/', null), 'invalid-input');
+      await rejectsWith(ops.addBookmark('https://bad-tag.example/', 'tags'), 'invalid-input');
       assert.equal(host.queue.jobs.length, jobs);
       assert.equal((await ops.addBookmark('https://bad-tag.example/')).duplicate, false);
     });
