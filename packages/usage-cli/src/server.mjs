@@ -424,13 +424,13 @@ if (flag('--help') || flag('-h')) {
 } else if (command === 'mcp') {
   if (args.length > 1) { process.stderr.write(usage); process.exit(2); }
   // Loaded only here, so the other commands (collect runs on every status-line update) skip the MCP code.
-  const { identitySession, serveStdio } = await import('./mcp.mjs');
+  const { dashboardHtmlFile, identitySession, serveStdio } = await import('./mcp.mjs');
   // Reads as `status` does, so it writes nothing, but keeps Claude sign-in changes for the session:
   // snapshots from before a change stay hidden, and those collected after it show. History is the
   // stored file as `/api/history` returns it, except that an unreadable file is an error, not empty.
   const providers = await accounts.profiles().then((profiles) => profiles.map((profile) => profile.provider), () => null);
   const session = identitySession();
-  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identitySession: session }), readHistory: readStoredHistory, providers });
+  await serveStdio({ version: await packageVersion(), readStatus: () => status({ persist: false, identitySession: session }), readHistory: readStoredHistory, providers, dashboardHtml: dashboardHtmlFile(packageRoot) });
   // serveStdio ended every provider subprocess; a read still waiting on anything else would keep the
   // process alive after the host closed stdin or signalled, and nothing here waits to be written, so exit once stdout has drained.
   await new Promise((resolveDrain) => process.stdout.write('', resolveDrain));
