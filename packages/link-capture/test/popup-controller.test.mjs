@@ -128,6 +128,16 @@ describe('createCapturePopupController', () => {
     }
   });
 
+  it('treats a save that resolves no result object as a refusal, not a TypeError', async () => {
+    for (const result of [undefined, null, 'ok', 1]) {
+      const { controller } = await started(fakeTarget({ save: () => result }));
+      await controller.save();
+      assert.deepEqual(controller.state.error, { stage: 'save', message: 'The link was not saved.' }, String(result));
+      controller.back();
+      assert.equal(controller.state.name, 'editing');
+    }
+  });
+
   it('stops before editing when the target needs setup, even though the page was read', async () => {
     const { controller, names } = await started(fakeTarget({ status: { state: 'needs-setup', message: 'Add your server in Options.' } }));
     assert.deepEqual(names, ['capturing', 'error']);
@@ -205,6 +215,33 @@ describe('createCapturePopupController', () => {
       throw new Error('offline');
     };
     assert.deepEqual(await (await started(fakeTarget({ suggest: failing }))).controller.suggestTags('re'), []);
+  });
+
+  it('drops a suggestion answer once a newer request or a tags edit has superseded it', async () => {
+    const pending = [];
+    const suggest = (prefix) => new Promise((resolve) => pending.push(() => resolve([`${prefix}-tag`])));
+    const { controller } = await started(fakeTarget({ suggest }));
+
+    // Typing on: the first, slower answer is stale when it arrives after the second.
+    const first = controller.suggestTags('re');
+    const second = controller.suggestTags('rea');
+    pending[1]();
+    pending[0]();
+    assert.deepEqual(await second, ['rea-tag']);
+    assert.equal(await first, undefined);
+
+    // Accepting a suggestion edits the tags: an answer still pending for the replaced prefix is not shown again.
+    const replaced = controller.suggestTags('rea');
+    controller.edit({ tags: 'reading, ' });
+    pending[2]();
+    assert.equal(await replaced, undefined);
+    assert.equal(controller.state.draft.tags, 'reading, ');
+
+    // Editing the title or notes leaves a pending answer current.
+    const current = controller.suggestTags('d');
+    controller.edit({ title: 'Edited', notes: '' });
+    pending[3]();
+    assert.deepEqual(await current, ['d-tag']);
   });
 
   it('stops notifying after unsubscribe', async () => {

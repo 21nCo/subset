@@ -132,6 +132,32 @@ describe('captureActiveTab', () => {
     assert.equal(long.selectionText, '𝒜'.repeat(MAX_SELECTION_LENGTH));
   });
 
+  it('never splits a character in the title or selection, even after leading whitespace is trimmed', async () => {
+    // The page cuts at twice the character limit in UTF-16 units; one leading space puts that cut inside a pair.
+    const selection = ` ${'😀'.repeat(MAX_SELECTION_LENGTH)}`;
+    const snapshot = runInPage(fakePage({ url: 'https://example.com/', selection }), readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    assert.ok(snapshot.selectionText.isWellFormed());
+    const title = ` ${'😀'.repeat(MAX_TITLE_LENGTH)}`;
+    const capture = await captureActiveTab(articleBrowser({ selection, title }).browser, { now });
+    assert.equal(capture.selectionText, '😀'.repeat(MAX_SELECTION_LENGTH - 1));
+    assert.equal(capture.title, '😀'.repeat(MAX_TITLE_LENGTH));
+
+    // A page that sends half a pair itself, at the cut or anywhere else, has it dropped in the extension.
+    const { browser } = createFakeBrowser({ tabs: [{ id: 3, url: 'https://example.com/' }] });
+    const result = {
+      url: 'https://example.com/',
+      title: ` a\uDC00b${'😀'.repeat(MAX_TITLE_LENGTH - 2)}\uD83D`,
+      selectionText: ` \uD83D${'😀'.repeat(MAX_SELECTION_LENGTH)}`,
+      html: '<head></head>',
+      lang: '',
+      contentType: 'text/html'
+    };
+    browser.raw.scripting.executeScript = async () => [{ frameId: 0, result }];
+    const raw = await captureActiveTab(browser, { now });
+    assert.equal(raw.title, `ab${'😀'.repeat(MAX_TITLE_LENGTH - 2)}`);
+    assert.equal(raw.selectionText, '😀'.repeat(MAX_SELECTION_LENGTH));
+  });
+
   it('reads a document without <head> and does not parse a non-HTML one', async () => {
     const headless = await captureActiveTab(articleBrowser({ head: null, title: 'Feed' }).browser, { now });
     assert.equal(headless.title, 'Feed');

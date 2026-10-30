@@ -1,6 +1,6 @@
 import type { Capture, LinkCaptureErrorCode } from './capture.js';
 import { draftEdits, initialPopupState, popupTransition, type Draft, type PopupEvent, type PopupState } from './popup-state.js';
-import type { SaveTarget, SaveTargetStatus } from './target.js';
+import type { SaveResult, SaveTarget, SaveTargetStatus } from './target.js';
 
 export interface CapturePopupControllerOptions {
   target: SaveTarget;
@@ -19,8 +19,11 @@ export interface CapturePopupController {
   save(): Promise<void>;
   retry(): Promise<void>;
   back(): void;
-  /** The target's suggestions, trimmed and without repeats, or none when it has no `suggestTags` or it fails. */
-  suggestTags(prefix: string): Promise<string[]>;
+  /**
+   * The target's suggestions, trimmed and without repeats, or none when it has no `suggestTags` or it fails. Resolves
+   * `undefined` when the answer is stale: a later `suggestTags` call or an edit of the tags came first.
+   */
+  suggestTags(prefix: string): Promise<string[] | undefined>;
 }
 
 const CAPTURE_MESSAGES: Record<LinkCaptureErrorCode, string> = {
@@ -32,6 +35,8 @@ const CAPTURE_MESSAGES: Record<LinkCaptureErrorCode, string> = {
 /** Runs the popup state machine against a target: the effects of `popupTransition`, kept out of the view. */
 export function createCapturePopupController(options: CapturePopupControllerOptions): CapturePopupController {
   let state = initialPopupState;
+  // Counts suggestion requests and tag edits: an answer is shown only if nothing changed the tags since it was asked.
+  let suggestionRequest = 0;
   const listeners = new Set<(state: PopupState) => void>();
 
   function dispatch(event: PopupEvent): boolean {
@@ -65,12 +70,14 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
     const { capture, draft } = state;
     let message: string;
     try {
-      const result = await options.target.save(capture, draftEdits(draft));
-      if (result.ok) {
-        dispatch({ type: 'saved', result });
+      const result: unknown = await options.target.save(capture, draftEdits(draft));
+      // A target that resolves nothing or a non-object has not saved: a refusal, not a TypeError shown to the user.
+      const { ok, error } = (typeof result === 'object' && result !== null ? result : {}) as { ok?: unknown; error?: unknown };
+      if (ok === true) {
+        dispatch({ type: 'saved', result: result as SaveResult & { ok: true } });
         return;
       }
-      message = typeof result.error === 'string' && result.error ? result.error : 'The link was not saved.';
+      message = typeof error === 'string' && error ? error : 'The link was not saved.';
     } catch (error) {
       message = errorMessage(error, 'The link was not saved.');
     }
@@ -89,6 +96,7 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       if (dispatch({ type: 'start' })) await captureAndCheck();
     },
     edit(draft) {
+      if (draft.tags !== undefined) suggestionRequest++;
       dispatch({ type: 'edit', draft });
     },
     async save() {
@@ -103,16 +111,18 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       dispatch({ type: 'back' });
     },
     async suggestTags(prefix) {
-      if (!options.target.suggestTags) return [];
+      const request = ++suggestionRequest;
+      let tags: unknown = [];
       try {
-        const tags = await options.target.suggestTags(prefix);
-        if (!Array.isArray(tags)) return [];
-        // Trimmed and each once, in the target's order: the popup keys its list by tag.
-        const found = tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
-        return [...new Set(found)].filter((tag) => tag !== '');
+        if (options.target.suggestTags) tags = await options.target.suggestTags(prefix);
       } catch {
-        return [];
+        // A failing suggester offers nothing.
       }
+      if (request !== suggestionRequest) return undefined;
+      if (!Array.isArray(tags)) return [];
+      // Trimmed and each once, in the target's order: the popup keys its list by tag.
+      const found = tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
+      return [...new Set(found)].filter((tag) => tag !== '');
     }
   };
 }

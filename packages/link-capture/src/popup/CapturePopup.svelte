@@ -22,7 +22,6 @@
   const controller = untrack(() => createCapturePopupController({ target, capture }));
   let view = $state<PopupState>(controller.state);
   let suggestions = $state<string[]>([]);
-  let suggestionRequest = 0;
 
   onMount(() => {
     const unsubscribe = controller.subscribe((next) => (view = next));
@@ -35,12 +34,14 @@
     void controller.save();
   }
 
-  /** Suggestions for the tag being typed, the text after the last comma. A slower, older answer is dropped. */
+  /**
+   * Suggestions for the tag being typed, the text after the last comma. The controller drops an answer that a newer
+   * request or a tags edit (typing, or accepting a suggestion) has superseded.
+   */
   async function suggest(tags: string) {
-    const request = ++suggestionRequest;
     const prefix = tags.slice(tags.lastIndexOf(',') + 1).trim();
     const found = prefix ? await controller.suggestTags(prefix) : [];
-    if (request === suggestionRequest) suggestions = found.slice(0, 8);
+    if (found) suggestions = found.slice(0, 8);
   }
 
   // One status and one alert region stay in the page for its whole life: a screen reader announces a change to a live

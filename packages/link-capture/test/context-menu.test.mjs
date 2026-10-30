@@ -48,6 +48,12 @@ describe('the link context menu', () => {
     assert.equal(capture.title, 'https://example.com/a');
   });
 
+  it('drops half a surrogate pair from the link text', () => {
+    const capture = captureLink('https://example.com/a', ` \uDC00A\uD83D post 😀\uD83D`);
+    assert.equal(capture.title, 'A post 😀');
+    assert.ok(capture.title.isWellFormed());
+  });
+
   it('ignores another menu item and honours a custom id', () => {
     assert.equal(captureFromContextMenu({ menuItemId: 'host:other', linkUrl: 'https://example.com/' }), undefined);
     const capture = captureFromContextMenu({ menuItemId: 'memotron:save', linkUrl: 'https://example.com/' }, { id: 'memotron:save' });

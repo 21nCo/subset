@@ -10,6 +10,9 @@ export const MAX_LANG_LENGTH = 64;
 // The shape of a BCP 47 tag, as `parseLinkDetails` checks it; anything else is dropped before it reaches the parser.
 const LANGUAGE_TAG = /^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
 
+// Half of a surrogate pair without its other half: not a character, and invalid once the text is sent as UTF-8.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /** Fields every capture has. */
 interface CaptureBase {
   /** The page or link URL, without any `user:password@`. */
@@ -80,7 +83,12 @@ export interface PageSnapshot {
 export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLength: number): PageSnapshot {
   // An SVG or XML document (an image, a feed, a sitemap) has no <head> and its root is not an HTMLElement, so it has no
   // `lang` property: every read is checked rather than assumed, and such a page still gives its URL and type.
-  const text = (value: unknown, max: number) => (typeof value === 'string' ? value.slice(0, max) : '');
+  // A cut that would end in the first half of a surrogate pair drops that half, so no character is split.
+  const text = (value: unknown, max: number) => {
+    if (typeof value !== 'string') return '';
+    const cut = value.slice(0, max);
+    return cut.length < value.length && /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+  };
   const head = document.head ? text(document.head.outerHTML, Infinity) : '';
   // encodeInto stops before a character that does not fit, so the cut never splits one; `read` counts UTF-16 units.
   const { read } = new TextEncoder().encodeInto(head, new Uint8Array(maxHeadBytes));
@@ -137,7 +145,7 @@ export async function captureActiveTab(browser: BrowserFacade, options: CaptureO
   const head = cutUtf8(snapshot.html, MAX_DOCUMENT_BYTES - open.length - close.length);
   const html = `${open}${head}${close}`;
   const details = parseLinkDetails(html, { url, contentType: snapshot.contentType || undefined });
-  const selectionText = truncate(snapshot.selectionText.trim(), MAX_SELECTION_LENGTH).trim();
+  const selectionText = truncate(wellFormed(snapshot.selectionText).trim(), MAX_SELECTION_LENGTH).trim();
   return {
     source: 'tab',
     url,
@@ -189,10 +197,15 @@ function toSnapshot(value: unknown): PageSnapshot | undefined {
 }
 
 function cleanTitle(value: string): string {
-  return truncate(value.replace(/\s+/g, ' ').trim(), MAX_TITLE_LENGTH).trim();
+  return truncate(wellFormed(value).replace(/\s+/g, ' ').trim(), MAX_TITLE_LENGTH).trim();
 }
 
-/** The first `max` code points of `value`. */
+/** `value` without lone surrogates, which a page may send (or a cut may leave), so every later cut is between characters. */
+function wellFormed(value: string): string {
+  return value.replace(LONE_SURROGATE, '');
+}
+
+/** The first `max` code points of a well-formed `value`. */
 function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
   let end = 0;
