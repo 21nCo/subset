@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, describe, test } from 'node:test';
 import { BookmarkError, MAX_IMPORT_ITEMS, MAX_IMPORT_TAG_REFERENCES, MAX_IMPORT_WARNINGS, createBookmarkOperations, parseImport } from '../dist/index.js';
-import { hookedExecutor, pausePoint, recordingQueue, setup } from './support.mjs';
+import { hookedExecutor, pausePoint, recordingQueue, sampleDetails, setup, storeDetails } from './support.mjs';
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const FIXTURES = [
@@ -60,6 +60,18 @@ async function byUrl(host, url) {
   );
   return data[0] ? host.ops.getBookmark(data[0].id) : null;
 }
+
+/** The add-time jobs (`dedupeKey` = bookmark id) `queue` holds for the bookmark at each URL, by its last path segment. */
+async function addTimeJobs(host, queue, urls) {
+  const counts = {};
+  for (const url of urls) {
+    const { id } = await byUrl(host, url);
+    counts[url.split('/').pop()] = queue.jobs.filter(({ job, options }) => job.bookmarkId === id && job.detailsRequest === null && options.dedupeKey === id).length;
+  }
+  return counts;
+}
+
+const OWNER = { userId: 'owner' };
 
 for (const backend of ['memory', 'sqlite', 'postgres']) {
   describe(`import and export on ${backend}`, () => {
@@ -467,6 +479,79 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(exported.filter((item) => item.url.startsWith('https://pages.example/')).map((item) => item.url), items.map((item) => item.url));
     });
 
+    // datafn runs a batch's inserts one by one without a transaction, so a batch can reject after writing some of them.
+    for (const [written, write] of [
+      ['all of it', (payload) => host.server.executor.mutate(payload, OWNER)],
+      ['its first insert', (payload) => host.server.executor.mutate([payload[0]], OWNER)]
+    ]) {
+      test(`a batch datafn rejects after writing ${written} enqueues the details of the untitled bookmarks written, and importing again the rest`, async () => {
+        const prefix = `https://rejected-${written.split(' ').pop()}.example`;
+        const queue = recordingQueue();
+        const failing = createBookmarkOperations({
+          executor: {
+            query: (payload, context) => host.server.executor.query(payload, context),
+            async mutate(payload, context) {
+              if (!Array.isArray(payload)) return host.server.executor.mutate(payload, context);
+              await write(payload);
+              throw new Error('datafn batch rejected');
+            }
+          },
+          detailsQueue: queue,
+          context: OWNER
+        });
+        const items = [{ url: `${prefix}/a` }, { url: `${prefix}/b`, title: 'B' }, { url: `${prefix}/c` }];
+        const urls = items.map((item) => item.url);
+        await assert.rejects(failing.importBookmarks(items), /datafn batch rejected/);
+        if (written === 'all of it') assert.deepEqual(await addTimeJobs(host, queue, urls), { a: 1, b: 0, c: 1 });
+        else assert.deepEqual(await addTimeJobs(host, queue, urls.slice(0, 1)), { a: 1 });
+        const again = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: OWNER });
+        const result = await again.importBookmarks(items);
+        assert.deepEqual(result, written === 'all of it' ? { added: 0, merged: 3, skipped: 0, warnings: [] } : { added: 2, merged: 1, skipped: 0, warnings: [] });
+        assert.deepEqual(await addTimeJobs(host, queue, urls), { a: 1, b: 0, c: 1 });
+        assert.deepEqual(await Promise.all(urls.map(async (url) => (await byUrl(host, url)).detailsState)), ['pending', 'ready', 'pending']);
+      });
+    }
+
+    test('an import whose enqueue fails part way enqueues the rest, once each, when repeated', async () => {
+      const urls = ['a', 'b', 'c'].map((name) => `https://enqueue-fails.example/${name}`);
+      const items = urls.map((url) => ({ url }));
+      const queue = recordingQueue();
+      let calls = 0;
+      const flaky = {
+        enqueue(job, options) {
+          if (++calls === 2) throw new Error('queue unavailable');
+          return queue.enqueue(job, options);
+        }
+      };
+      await assert.rejects(createBookmarkOperations({ executor: host.server.executor, detailsQueue: flaky, context: OWNER }).importBookmarks(items), /queue unavailable/);
+      assert.deepEqual(await addTimeJobs(host, queue, urls), { a: 1, b: 0, c: 0 });
+      const again = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: OWNER });
+      assert.deepEqual(await again.importBookmarks(items), { added: 0, merged: 3, skipped: 0, warnings: [] });
+      assert.deepEqual(await again.importBookmarks(items), { added: 0, merged: 3, skipped: 0, warnings: [] });
+      assert.deepEqual(await addTimeJobs(host, queue, urls), { a: 1, b: 1, c: 1 });
+    });
+
+    test('importing again gives the add-time job only to a bookmark pending with no title and no later request', async () => {
+      const url = (name) => `https://heal.example/${name}?utm_source=x`;
+      await host.ops.importBookmarks(['waiting', 'ready', 'failed', 'requested'].map((name) => ({ url: url(name) })));
+      await host.ops.addBookmark(url('titled'), { title: 'Titled' });
+      await storeDetails(host.server.executor, await byUrl(host, url('ready')), { details: sampleDetails(url('ready'), 'Ready') });
+      for (const name of ['failed', 'requested']) {
+        await storeDetails(host.server.executor, await byUrl(host, url(name)), { detailsState: 'failed', detailsError: 'HTTP 500' });
+      }
+      await host.ops.retryDetails((await byUrl(host, url('requested'))).id);
+      // A queue that has none of their jobs, as after the earlier jobs ran or were lost.
+      const queue = recordingQueue();
+      const again = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: OWNER });
+      const items = ['waiting', 'ready', 'failed', 'requested', 'titled'].map((name) => ({ url: url(name) }));
+      assert.deepEqual(await again.importBookmarks(items), { added: 0, merged: 5, skipped: 0, warnings: [] });
+      const waiting = await byUrl(host, url('waiting'));
+      assert.deepEqual(
+        queue.jobs.map(({ job, options }) => ({ job, options })),
+        [{ job: { bookmarkId: waiting.id, url: waiting.url, canonicalUrl: 'https://heal.example/waiting', detailsRequest: null }, options: { dedupeKey: waiting.id } }]
+      );
+    });
+
     if (backend !== 'memory') {
       // The memory adapter has no unique index, so it supports one executor per user only.
       test('an import whose apiId range another import claimed first claims the next range', async () => {
@@ -521,8 +606,9 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         });
         const items = ['a', 'b', 'c'].map((name) => ({ url: `https://partial-details.example/${name}` }));
         await assert.rejects(failing.importBookmarks(items), /Saving the bookmark for https:\/\/partial-details\.example\/b failed/);
-        assert.deepEqual(await host.ops.importBookmarks(items), { added: 1, merged: 2, skipped: 0, warnings: [] });
-        const jobs = [...queue.jobs, ...host.queue.jobs].map(({ job }) => job.bookmarkId);
+        const again = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: OWNER });
+        assert.deepEqual(await again.importBookmarks(items), { added: 1, merged: 2, skipped: 0, warnings: [] });
+        const jobs = queue.jobs.map(({ job }) => job.bookmarkId);
         for (const { url } of items) {
           const bookmark = await byUrl(host, url);
           assert.equal(bookmark.detailsState, 'pending', url);

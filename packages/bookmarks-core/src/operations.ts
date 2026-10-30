@@ -22,7 +22,7 @@ import {
 } from './input.js';
 import { MAX_FOLDER_TAG_REFERENCES, netscapeWriter } from './netscape.js';
 import { BOOKMARKS_RESOURCE_VERSION, DETAILS_STATES, type DetailsState } from './schema.js';
-import { BookmarkError, type Bookmark, type BookmarksExecutor, type DetailsQueue, type Tag } from './types.js';
+import { BookmarkError, type Bookmark, type BookmarksExecutor, type DetailsJob, type DetailsQueue, type Tag } from './types.js';
 
 export interface AddBookmarkOptions {
   /** The user's title; empty means none, so the page title is shown. */
@@ -112,6 +112,8 @@ interface ImportEntry {
 type SavedEntry = { id: string; entry: ImportEntry };
 /** A saved bookmark's id and stored dates (epoch milliseconds; `addedAt` null when it has none). */
 type SavedDates = { id: string; addedAt: number | null; createdAt: number };
+/** A saved bookmark found by its URL: its dates and, while it still waits for it, its add-time details job. */
+type FoundBookmark = SavedDates & { addTimeJob: DetailsJob | null };
 
 /** Trims optional import text and cuts it to `max` characters with a warning, where `addBookmark` would refuse it. */
 function clampText(value: unknown, field: string, max: number, warn: (message: string) => void): string | null {
@@ -943,13 +945,19 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
   const toSavedDates = (row: Row): SavedDates => ({ id: String(row.id), addedAt: toOptionalNumber(row.addedAt), createdAt: toNumber(row.createdAt) });
 
-  /** The saved bookmarks with these canonical URLs: their ids and stored dates. */
-  async function bookmarksByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, SavedDates>> {
-    const found = new Map<string, SavedDates>();
+  /**
+   * The saved bookmarks with these canonical URLs: their ids, stored dates and, for one that is pending with no title
+   * and no later request (as an import or add saves it), the add-time job, which an interrupted import may not have
+   * enqueued.
+   */
+  async function bookmarksByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, FoundBookmark>> {
+    const found = new Map<string, FoundBookmark>();
     for (const chunk of chunks(canonicalUrls)) {
-      const select = ['id', 'canonicalUrl', 'addedAt', 'createdAt'];
+      const select = ['id', 'url', 'canonicalUrl', 'userTitle', 'detailsState', 'detailsRequest', 'addedAt', 'createdAt'];
       for (const row of await query({ resource: 'bookmarks', select, filters: { canonicalUrl: { $in: chunk } }, limit: PAGE_SIZE })) {
-        found.set(String(row.canonicalUrl), toSavedDates(row));
+        const waiting = row.detailsState === 'pending' && toOptionalString(row.detailsRequest) === null && toOptionalString(row.userTitle) === null;
+        const addTimeJob = waiting ? { bookmarkId: String(row.id), url: String(row.url), canonicalUrl: String(row.canonicalUrl), detailsRequest: null } : null;
+        found.set(String(row.canonicalUrl), { ...toSavedDates(row), addTimeJob });
       }
     }
     return found;
@@ -987,46 +995,64 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
    * Saves one batch of import entries, as `addBookmark` saves one URL: in the per-executor chain, entries already
    * saved are found, and the rest get one claimed range of apiIds and are inserted in one datafn batch. An insert
    * that fails because another process saved the URL meanwhile makes that entry an existing one. An existing
-   * bookmark takes the entry's date when that is earlier. An error after the inserts comes back as `failure` with the
-   * bookmarks they created, so those still get their details jobs before the import rejects.
+   * bookmark takes the entry's date when that is earlier, and one still waiting for its add-time details job comes
+   * back in `jobs`, so importing again enqueues what an interrupted import did not. An error after the inserts,
+   * also a datafn batch that rejects after some of them were written, comes back as `failure` with the bookmarks they
+   * created (read back by id when the batch rejected), so those still get their details jobs before the import rejects.
    */
   function saveImportBatch(batch: ImportEntry[]) {
-    return serialized(executor, async (): Promise<{ created: SavedEntry[]; existing: SavedEntry[]; failure?: { error: unknown } }> => {
+    type Saved = { created: SavedEntry[]; existing: SavedEntry[]; jobs: DetailsJob[]; failure?: { error: unknown } };
+    return serialized(executor, async (): Promise<Saved> => {
       const found = await bookmarksByCanonicalUrl(batch.map((entry) => entry.canonicalUrl));
       const existing: SavedEntry[] = [];
+      const jobs: DetailsJob[] = [];
+      const merge = async (saved: FoundBookmark, entry: ImportEntry) => {
+        await keepEarliestAdded(saved, entry);
+        existing.push({ id: saved.id, entry });
+        if (saved.addTimeJob) jobs.push(saved.addTimeJob);
+      };
       const fresh: ImportEntry[] = [];
       for (const entry of batch) {
         const saved = found.get(entry.canonicalUrl);
         if (saved === undefined) fresh.push(entry);
-        else {
-          await keepEarliestAdded(saved, entry);
-          existing.push({ id: saved.id, entry });
-        }
+        else await merge(saved, entry);
       }
-      if (fresh.length === 0) return { created: [], existing };
+      if (fresh.length === 0) return { created: [], existing, jobs };
       const first = await allocateApiIds(fresh.length);
       const rows = fresh.map((entry, index) => ({ id: crypto.randomUUID(), entry, apiId: first + index }));
-      const inserted = await mutateEach(
-        rows.map(({ id, entry, apiId }) => ({
-          resource: 'bookmarks',
-          operation: 'insert',
-          id,
-          record: {
-            apiId,
-            url: entry.url,
-            canonicalUrl: entry.canonicalUrl,
-            userTitle: entry.title,
-            notes: entry.notes,
-            unread: entry.unread,
-            archived: entry.archived,
-            addedAt: entry.addedAt,
-            ...CLEARED_DETAILS,
-            // Only an untitled bookmark needs its details for a title; one with a title is not fetched.
-            detailsState: entry.title === null ? 'pending' : 'ready',
-            detailsRequest: null
-          }
-        }))
-      );
+      let inserted: boolean[];
+      try {
+        inserted = await mutateEach(
+          rows.map(({ id, entry, apiId }) => ({
+            resource: 'bookmarks',
+            operation: 'insert',
+            id,
+            record: {
+              apiId,
+              url: entry.url,
+              canonicalUrl: entry.canonicalUrl,
+              userTitle: entry.title,
+              notes: entry.notes,
+              unread: entry.unread,
+              archived: entry.archived,
+              addedAt: entry.addedAt,
+              ...CLEARED_DETAILS,
+              // Only an untitled bookmark needs its details for a title; one with a title is not fetched.
+              detailsState: entry.title === null ? 'pending' : 'ready',
+              detailsRequest: null
+            }
+          }))
+        );
+      } catch (error) {
+        // datafn writes a batch's inserts one by one, outside a transaction, so some may be saved: they are the created.
+        try {
+          const saved = await existingIds('bookmarks', rows.map(({ id }) => id));
+          return { created: rows.filter(({ id }) => saved.has(id)).map(({ id, entry }) => ({ id, entry })), existing, jobs, failure: { error } };
+        } catch {
+          // Unreadable too: importing again finds them and enqueues their jobs.
+          return { created: [], existing, jobs, failure: { error } };
+        }
+      }
       const created = rows.filter((_, index) => inserted[index]).map(({ id, entry }) => ({ id, entry }));
       const failed = rows.filter((_, index) => !inserted[index]);
       try {
@@ -1035,14 +1061,13 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           for (const { entry } of failed) {
             const saved = now.get(entry.canonicalUrl);
             if (saved === undefined) throw new Error(`Saving the bookmark for ${entry.url} failed`);
-            await keepEarliestAdded(saved, entry);
-            existing.push({ id: saved.id, entry });
+            await merge(saved, entry);
           }
         }
       } catch (error) {
-        return { created, existing, failure: { error } };
+        return { created, existing, jobs, failure: { error } };
       }
-      return { created, existing };
+      return { created, existing, jobs };
     });
   }
 
@@ -1171,16 +1196,16 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
 
     let added = 0;
     for (const batch of chunks([...entries.values()].map(({ entry }) => entry), IMPORT_BATCH)) {
-      const { created, existing, failure } = await saveImportBatch(batch);
+      const { created, existing, jobs, failure } = await saveImportBatch(batch);
       added += created.length;
       merged += existing.length;
-      // As in an add, the details are enqueued before tagging, also for the bookmarks of a batch that then failed, as
-      // importing again merges them and enqueues nothing.
+      // As in an add, the details are enqueued before tagging, also for the bookmarks of a batch that then failed. A
+      // merged bookmark still waiting for its add-time job (an earlier import stopped first) gets it too; the
+      // dedupeKey makes that a no-op while the job is queued.
       for (const { id, entry } of created) {
-        if (entry.title === null) {
-          await detailsQueue.enqueue({ bookmarkId: id, url: entry.url, canonicalUrl: entry.canonicalUrl, detailsRequest: null }, { dedupeKey: id });
-        }
+        if (entry.title === null) jobs.push({ bookmarkId: id, url: entry.url, canonicalUrl: entry.canonicalUrl, detailsRequest: null });
       }
+      for (const job of jobs) await detailsQueue.enqueue(job, { dedupeKey: job.bookmarkId });
       if (failure) throw failure.error;
       await tagImported(created, existing, tagsByKey, warnings.add);
     }
