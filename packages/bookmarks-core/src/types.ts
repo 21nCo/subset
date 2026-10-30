@@ -27,6 +27,11 @@ export interface Bookmark {
   /** Epoch milliseconds. */
   detailsFetchedAt: number | null;
   faviconKey: string | null;
+  /**
+   * When an imported bookmark was added where it came from (its exporter's `ADD_DATE` or `time_added`), in epoch
+   * milliseconds; null for one added here, which was added at `createdAt`.
+   */
+  addedAt: number | null;
   /** Epoch milliseconds. */
   createdAt: number;
   /** Epoch milliseconds. */
@@ -73,7 +78,7 @@ export interface BookmarksExecutor<TContext = unknown> {
   mutate<TResult = unknown>(payload: unknown, context?: TContext): Promise<TResult>;
 }
 
-export type BookmarkErrorCode = 'invalid-input' | 'invalid-url' | 'not-found' | 'duplicate-url' | 'tag-conflict' | 'conflict';
+export type BookmarkErrorCode = 'invalid-input' | 'invalid-url' | 'not-found' | 'duplicate-url' | 'tag-conflict' | 'conflict' | 'too-large';
 
 export class BookmarkError extends Error {
   readonly code: BookmarkErrorCode;

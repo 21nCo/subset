@@ -12,8 +12,11 @@ import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { bigint, boolean, jsonb, pgTable, text as pgText } from 'drizzle-orm/pg-core';
 import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { bookmarksSchema, bookmarksTables, createBookmarkOperations } from '../dist/index.js';
+import { MIGRATIONS } from '../scripts/generate-migrations.mjs';
 
-export const migrationSql = (dialect) => readFileSync(new URL(`../migrations/${dialect}/0001_initial.sql`, import.meta.url), 'utf8');
+/** The checked-in migrations, each `name` of `MIGRATIONS` (default: all of them, in order), as one script. */
+export const migrationSql = (dialect, names = MIGRATIONS) =>
+  names.map((name) => readFileSync(new URL(`../migrations/${dialect}/${name}`, import.meta.url), 'utf8')).join('\n');
 
 const sqliteColumn = (name, field) => {
   const column =

@@ -20,12 +20,14 @@
     "check": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "migrations": "npm run build && node scripts/generate-migrations.mjs",
-    "test": "npm run build --workspace=@subset.dev/links && npm run build && node --test test/*.test.mjs"
+    "test": "npm run build --workspace=@subset.dev/links && npm run build && node --test test/*.test.mjs",
+    "test:scale": "npm run build --workspace=@subset.dev/links && npm run build && node --test test/scale/*.test.mjs"
   },
   "dependencies": {
     "@datafn/core": "0.1.1",
     "@subset.dev/links": "*",
-    "@superfunctions/db": "0.3.0"
+    "@superfunctions/db": "0.3.0",
+    "entities": "8.1.0"
   },
   "devDependencies": {
     "@datafn/server": "0.2.0",

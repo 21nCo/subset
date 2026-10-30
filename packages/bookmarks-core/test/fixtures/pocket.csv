@@ -1,0 +1,6 @@
+title,url,time_added,tags,status
+How to Do Nothing,https://example.com/nothing?utm_medium=social,1700000000,books|long form,unread
+"Quotes, ""commas"" and
+line breaks",https://example.org/q,1700000100,,archive
+https://example.net/untitled,https://example.net/untitled,1700000200,reading|,unread
+Not a web link,ftp://example.com/file.txt,1700000300,,unread

@@ -48,14 +48,15 @@ for (const entry of readdirSync(new URL('packages/links/src/', root))) {
 
 // @subset.dev/bookmarks-core owns the Bookmarks data and its operations for every host, so it depends on and imports
 // only @subset.dev/links, datafn's core and @superfunctions/db: no app, no host runtime (such as @datafn/server or a
-// database driver) and no other workspace (SET-173).
+// database driver) and no other workspace (SET-173), plus `entities`, which decodes HTML character references in
+// imported bookmark files and has no dependencies (SET-174).
 const bookmarksCore = workspaces.find((manifest) => manifest.name === '@subset.dev/bookmarks-core');
 assert.ok(bookmarksCore, 'Missing workspace @subset.dev/bookmarks-core');
-const bookmarksCoreDependencies = ['@datafn/core', '@subset.dev/links', '@superfunctions/db'];
+const bookmarksCoreDependencies = ['@datafn/core', '@subset.dev/links', '@superfunctions/db', 'entities'];
 assert.deepEqual(
   Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort(),
   bookmarksCoreDependencies,
-  '@subset.dev/bookmarks-core may depend only on @datafn/core, @subset.dev/links and @superfunctions/db'
+  '@subset.dev/bookmarks-core may depend only on @datafn/core, @subset.dev/links, @superfunctions/db and entities'
 );
 for (const entry of readdirSync(new URL('packages/bookmarks-core/src/', root))) {
   const source = readFileSync(new URL(`packages/bookmarks-core/src/${entry}`, root), 'utf8');
