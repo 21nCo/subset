@@ -1,4 +1,4 @@
-import { defaultSpawn, notificationFor, playInOrder, runProcess } from './process.mjs';
+import { defaultSpawn, notificationFor, playParts, runProcess } from './process.mjs';
 
 const STEREO = '/usr/share/sounds/freedesktop/stereo';
 /** Only these freedesktop sound theme files are played; no path comes from a timer or a user. */
@@ -15,20 +15,22 @@ export function notifySendArgs(title, body) {
 /**
  * The Linux sink, given the absolute paths of the tools found on `PATH` (either may be null):
  * `paplay` plays a freedesktop sound when the timer's `sound` is on and the file exists, and
- * `notify-send` posts a notification for the finish and for alerts missed while away.
+ * `notify-send` posts a notification for the finish and for alerts missed while away. It plays
+ * only the parts not in `progress.played`.
  */
 export function createLinuxSink({ notifySend = null, paplay = null, spawn = defaultSpawn, soundExists = () => true } = {}) {
-  const play = (path) => runProcess(spawn, paplay, [path]);
   return {
     name: `linux (${[notifySend && 'notify-send', paplay && 'paplay'].filter(Boolean).join(', ')})`,
-    async alert(alert, timer) {
-      const tasks = [];
-      const sounds = LINUX_SOUNDS[alert.kind]?.filter((path) => soundExists(path));
-      if (paplay && sounds?.length && timer.sound !== false) tasks.push(playInOrder(play, sounds));
-      const notification = notificationFor(alert, timer);
-      if (notifySend && notification) tasks.push(runProcess(spawn, notifySend, notifySendArgs(notification.title, notification.body)));
-      const failed = (await Promise.allSettled(tasks)).find((outcome) => outcome.status === 'rejected');
-      if (failed) throw failed.reason;
+    async alert(alert, timer, progress) {
+      const notification = notifySend && notificationFor(alert, timer);
+      await playParts(
+        {
+          sounds: paplay && timer.sound !== false ? (LINUX_SOUNDS[alert.kind]?.filter((path) => soundExists(path)) ?? []) : [],
+          playSound: (path, onStart) => runProcess(spawn, paplay, [path], onStart),
+          notify: notification && ((onStart) => runProcess(spawn, notifySend, notifySendArgs(notification.title, notification.body), onStart))
+        },
+        progress
+      );
     }
   };
 }

@@ -9,6 +9,12 @@ import { daemonPaths, ensureDataDir, resolveDataDir } from './paths.mjs';
 
 /** How long a client waits for a daemon it started to open its socket. */
 export const START_TIMEOUT_MS = 3_000;
+/**
+ * How much longer it waits while a live process holds `daemon.lock`: a daemon shutting down keeps
+ * it until requests already being handled answer (1 s) and its sink finishes what it is playing
+ * (`SINK_DRAIN_MS`, 5 s).
+ */
+export const LOCKED_START_EXTRA_MS = 6_000;
 const POLL_MS = 50;
 /** A daemon that exits without opening its socket is spawned again at most this often per start. */
 const MAX_SPAWNS = 3;
@@ -153,7 +159,8 @@ function openDaemonLog(logPath) {
 /**
  * A client of the per-user daemon. Each call connects to `daemon.sock`; when the socket is missing
  * or refuses, the client spawns `node <cliPath> daemon run` detached and unreferenced, waits up to
- * `START_TIMEOUT_MS` for the socket, and otherwise rejects with `DaemonUnavailableError`
+ * `START_TIMEOUT_MS` for the socket (and up to `LOCKED_START_EXTRA_MS` more while a live process
+ * still holds `daemon.lock`, such as a daemon shutting down), and otherwise rejects with `DaemonUnavailableError`
  * (`code: 'daemon_unavailable'`). `monotonic` (milliseconds, `performance.now` by default) times that wait.
  */
 export function createClient({
@@ -221,7 +228,8 @@ export function createClient({
     let child = spawnOrFail();
     let spawns = 1;
     // Measured on a monotonic clock, so setting the wall clock neither cuts the wait short nor stretches it.
-    const deadline = monotonic() + startTimeoutMs;
+    let deadline = monotonic() + startTimeoutMs;
+    const latest = deadline + LOCKED_START_EXTRA_MS;
     let lastError;
     while (monotonic() < deadline) {
       await sleep(POLL_MS);
@@ -237,6 +245,11 @@ export function createClient({
       if (child.exited && spawns < MAX_SPAWNS && !lockHeld()) {
         child = spawnOrFail();
         spawns++;
+        // A daemon spawned once the one shutting down let go of the lock gets the whole budget.
+        deadline = Math.max(deadline, Math.min(latest, monotonic() + startTimeoutMs));
+      } else if (deadline - monotonic() <= POLL_MS && lockHeld()) {
+        // A live process still holds the lock, such as a daemon finishing its sink: keep waiting.
+        deadline = Math.min(latest, monotonic() + 2 * POLL_MS);
       }
     }
     throw new DaemonUnavailableError(`The Timer daemon did not start within ${startTimeoutMs / 1000} s.`, lastError);

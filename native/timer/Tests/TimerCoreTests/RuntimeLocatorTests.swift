@@ -165,9 +165,9 @@ private final class FakeDaemons: @unchecked Sendable {
         return launched.last!
     }
 
-    func run(_ client: DaemonClient, timeout: TimeInterval) async throws {
-        try await client.ensureRunning(timeout: timeout, maxLaunches: 3, probe: { try self.probe($0) }, lockHeld: { self.lockHeld },
-                                       launch: { self.launch() })
+    func run(_ client: DaemonClient, timeout: TimeInterval, lockedExtra: TimeInterval = 0.5) async throws {
+        try await client.ensureRunning(timeout: timeout, lockedExtra: lockedExtra, maxLaunches: 3, probe: { try self.probe($0) },
+                                       lockHeld: { self.lockHeld }, launch: { self.launch() })
     }
 }
 
@@ -204,6 +204,27 @@ private final class FakeDaemons: @unchecked Sendable {
     locked.onProbe = { fake, _ in fake.launched.forEach { $0.markExited() } }
     await #expect(throws: DaemonError.notListening) { try await locked.run(client, timeout: 0.3) }
     #expect(locked.launched.count == 1)
+}
+
+/// A daemon shutting down holds the lock until its sink has finished what it is playing (up to 6 s), so the wait goes on
+/// past `timeout` while a live process holds the lock, and the daemon launched once it lets go gets the whole timeout.
+@Test func ensureRunningWaitsPastItsTimeoutWhileALiveProcessHoldsTheLock() async throws {
+    let client = DaemonClient(paths: DaemonPaths(dataDir: "/nonexistent"))
+    let fake = FakeDaemons(probes: [])
+    let start = ContinuousClock.now
+    fake.onProbe = { fake, _ in
+        fake.launched.forEach { $0.markExited() }
+        if ContinuousClock.now - start > .milliseconds(600) { fake.lockHeld = false }
+        if fake.launched.count == 2 { fake.probes = [.success(())] }
+    }
+    try await fake.run(client, timeout: 0.3, lockedExtra: 2)
+    #expect(fake.launched.count == 2)
+    #expect(ContinuousClock.now - start >= .milliseconds(600))
+    // Never past `lockedExtra`, however long the lock is held.
+    let held = FakeDaemons(probes: [])
+    let heldStart = ContinuousClock.now
+    await #expect(throws: DaemonError.notListening) { try await held.run(client, timeout: 0.2, lockedExtra: 0.3) }
+    #expect(ContinuousClock.now - heldStart >= .milliseconds(500) && ContinuousClock.now - heldStart < .seconds(2))
 }
 
 @Test func aProbeReturnsItsOutput() async {

@@ -5,13 +5,45 @@ import { emptyStore, parseStore } from '@subset.dev/timer-core';
 
 const TEMP_SUFFIX = /\.\d+\.[0-9a-f]{8}\.tmp$/;
 const MARKS_VERSION = 1;
+const PLAYS_VERSION = 1;
+/** The parts of an alert a sink or a handler plays (alerts/process.mjs `playParts`). */
+export const ALERT_PART = /^(notification|sound:[0-9]{1,2})$/;
 
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const isMark = (mark) => typeof mark?.timerId === 'string' && isTime(mark.startedAt) && isTime(mark.base) && isTime(mark.through);
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
-const isHandoff = (handoff) =>
-  typeof handoff?.alertId === 'string' && isObject(handoff.alert) && typeof handoff.alert.timerId === 'string' && typeof handoff.alert.kind === 'string' && isObject(handoff.timer);
-const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string';
+const isParts = (value) => Array.isArray(value) && value.every((part) => typeof part === 'string' && ALERT_PART.test(part));
+const isAlert = (entry) =>
+  typeof entry?.alertId === 'string' && isObject(entry.alert) && typeof entry.alert.timerId === 'string' && typeof entry.alert.kind === 'string' && isObject(entry.timer);
+const isNameOrNull = (value) => value === null || (typeof value === 'string' && value.length <= 128);
+/** `part → { pid, birth, boot, app? }`: the process playing each part (see `createPlayJournal`). */
+const isRunning = (value) =>
+  value === undefined ||
+  (isObject(value) &&
+    Object.entries(value).every(
+      ([part, child]) =>
+        ALERT_PART.test(part) &&
+        isObject(child) &&
+        Number.isSafeInteger(child.pid) &&
+        child.pid > 0 &&
+        isNameOrNull(child.birth) &&
+        isNameOrNull(child.boot) &&
+        (child.app === undefined || child.app === true)
+    ));
+/** The revision of a copy of an acknowledgement, its progress or a play (see `createPlayJournal`). */
+const isRev = (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0);
+const isHandoff = (handoff) => isAlert(handoff) && (handoff.played === undefined || isParts(handoff.played)) && isRunning(handoff.started);
+const isAcknowledged = (entry) => isHandoff(entry) && typeof entry.subscriberId === 'string' && isRev(entry.rev);
+const isProgress = (entry) => typeof entry?.alertId === 'string' && isParts(entry.played) && isRunning(entry.started) && isRev(entry.rev);
+const isPlay = (entry) =>
+  isAlert(entry) &&
+  isRev(entry.rev) &&
+  (entry.subscriberId === undefined || typeof entry.subscriberId === 'string') &&
+  Array.isArray(entry.keys) &&
+  entry.keys.every((key) => typeof key === 'string') &&
+  isParts(entry.played) &&
+  isRunning(entry.running) &&
+  typeof entry.finished === 'boolean';
 
 function isCode(error, ...codes) {
   return error && codes.includes(error.code);
@@ -77,10 +109,11 @@ function syncDirectory(directory, fs) {
 
 /**
  * The daemon's persistent state in its data directory: `state.json` (the SET-74 store, schema
- * version 1) and `scheduler.json` (for each running stretch, the time through which its alerts were
+ * version 1), `scheduler.json` (for each running stretch, the time through which its alerts were
  * handled, the alerts handed to the alert handler that it has not yet acknowledged, and those it
- * acknowledged whose answer it may not have received). Only the daemon holding `daemon.lock` creates
- * one.
+ * acknowledged whose answer it may not have received, with the parts it started playing) and
+ * `plays.json` (the play journal, see `createPlayJournal`). Only the daemon holding `daemon.lock`
+ * creates one.
  */
 export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Date.now } = {}) {
   /** Removes temp files a crash left between a write and its rename. */
@@ -88,7 +121,7 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
     for (const name of fs.readdirSync(paths.dataDir)) {
       if (!TEMP_SUFFIX.test(name)) continue;
       const target = name.replace(TEMP_SUFFIX, '');
-      if (target !== basename(paths.state) && target !== basename(paths.scheduler)) continue;
+      if (![paths.state, paths.scheduler, paths.plays].some((path) => target === basename(path))) continue;
       try {
         fs.unlinkSync(join(paths.dataDir, name));
       } catch (error) {
@@ -152,8 +185,8 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
   }
 
   /**
-   * The alert checkpoint `saveMarks` recorded (see `createAlertHandlers`): `{ handoffs, acknowledged }`,
-   * each empty when unknown.
+   * The alert checkpoint `saveMarks` recorded (see `createAlertHandlers`): `{ handoffs, acknowledged,
+   * plays }`, each empty when unknown; `plays` is the copy of the play journal it carried.
    */
   function loadAlerts() {
     let value;
@@ -161,19 +194,46 @@ export function createStateStore(paths, { fs = nodeFs, log = () => {}, now = Dat
       value = JSON.parse(fs.readFileSync(paths.scheduler, 'utf8'));
     } catch (error) {
       if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
-      return { handoffs: [], acknowledged: [] };
+      return { handoffs: [], acknowledged: [], plays: [] };
     }
     const list = (key, valid) => (value?.version === MARKS_VERSION && Array.isArray(value[key]) ? value[key].filter((item) => valid(item)) : []);
-    return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged) };
+    return { handoffs: list('handoffs', isHandoff), acknowledged: list('acknowledged', isAcknowledged), plays: list('plays', isPlay) };
   }
 
-  /** Saves the marks and, in the same write, the alert checkpoint: handoffs and remembered acknowledgements. */
-  function saveMarks(marks, { handoffs = [], acknowledged = [] } = {}) {
+  /**
+   * Saves the marks and, in the same write, the alert checkpoint: handoffs, remembered
+   * acknowledgements and the play journal while `plays.json` cannot be written.
+   */
+  function saveMarks(marks, { handoffs = [], acknowledged = [], plays = [] } = {}) {
     const value = { version: MARKS_VERSION, marks };
     if (handoffs.length) value.handoffs = handoffs;
     if (acknowledged.length) value.acknowledged = acknowledged;
+    if (plays.length) value.plays = plays;
     writeFileAtomic(paths.scheduler, `${JSON.stringify(value)}\n`, { fs, log });
   }
 
-  return { load, save, loadMarks, loadAlerts, saveMarks };
+  /**
+   * The play journal (see `createPlayJournal`): `{ plays, progress }`, each empty when the file is
+   * missing or unreadable.
+   */
+  function loadPlays() {
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(paths.plays, 'utf8'));
+    } catch (error) {
+      if (!isCode(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
+      if (error instanceof SyntaxError) log(`plays.json could not be read (${error.message}); no play is resumed.`);
+      return { plays: [], progress: [] };
+    }
+    const list = (key, valid) => (value?.version === PLAYS_VERSION && Array.isArray(value[key]) ? value[key].filter((item) => valid(item)) : []);
+    return { plays: list('plays', isPlay), progress: list('progress', isProgress) };
+  }
+
+  function savePlays(plays, progress = []) {
+    const value = { version: PLAYS_VERSION, plays };
+    if (progress.length) value.progress = progress;
+    writeFileAtomic(paths.plays, `${JSON.stringify(value)}\n`, { fs, log });
+  }
+
+  return { load, save, loadMarks, loadAlerts, saveMarks, loadPlays, savePlays };
 }

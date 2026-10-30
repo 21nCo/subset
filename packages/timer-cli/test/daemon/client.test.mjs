@@ -179,6 +179,28 @@ test('a request that meets a daemon shutting down is run by the daemon started a
   assert.deepEqual((await client.timers()).body.structuredContent.timers.map((timer) => timer.definition.name), ['After']);
 });
 
+test('a start keeps waiting past its budget while a daemon finishing its sink still holds the lock, then starts the next one', async (t) => {
+  const dataDir = tempDataDir(t);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const lock = join(dataDir, 'daemon.lock');
+  // A daemon that has closed its socket and is finishing its sink's plays: it holds the lock a few seconds more.
+  writeFileSync(lock, `${process.pid}\n`);
+  const spawner = countingSpawn(dataDir);
+  const client = createClient({ dataDir, spawn: spawner.spawn, startTimeoutMs: 2_000 });
+  t.after(() => stopDaemon(client));
+  const started = performance.now();
+  const pending = client.op('create', { timer: { kind: 'stopwatch', name: 'Later' } });
+  await eventually(() => spawner.children.length === 1 && spawner.children[0].child.exitCode !== null);
+  assert.equal(spawner.children[0].child.exitCode, 3);
+  // It lets go after the client's 2 s budget has passed.
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, started + 3_000 - performance.now())));
+  rmSync(lock);
+  const reply = await pending;
+  assert.equal(reply.status, 200);
+  assert.ok(performance.now() - started > 3_000);
+  assert.equal(spawner.children.length, 2);
+});
+
 test('a request that meets a real daemon which lost its lock is run by the daemon started after it', async (t) => {
   const dataDir = tempDataDir(t);
   const first = await startDaemon({ dataDir, log: () => {} });

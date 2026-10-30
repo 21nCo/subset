@@ -184,22 +184,28 @@ public struct DaemonClient: Sendable {
 
     /// Makes sure a daemon answers, as client.mjs `startDaemon` does: when none listens, or the one there is shutting
     /// down, calls `launch`, again once it has exited while no live process holds the lock, and waits for its socket.
-    public func ensureRunning(timeout: TimeInterval = 3, maxLaunches: Int = 3, launch: @Sendable () throws -> LaunchedDaemon) async throws {
-        try await ensureRunning(timeout: timeout, maxLaunches: maxLaunches, probe: { _ = try await info(timeout: $0) },
+    /// While a live process still holds the lock, such as a daemon finishing its sink's plays, it waits up to
+    /// `lockedExtra` longer (client.mjs `LOCKED_START_EXTRA_MS`), and a daemon launched once it lets go gets the whole
+    /// `timeout`.
+    public func ensureRunning(timeout: TimeInterval = 3, lockedExtra: TimeInterval = 6, maxLaunches: Int = 3,
+                              launch: @Sendable () throws -> LaunchedDaemon) async throws {
+        try await ensureRunning(timeout: timeout, lockedExtra: lockedExtra, maxLaunches: maxLaunches, probe: { _ = try await info(timeout: $0) },
                                 lockHeld: { DaemonLock.held(at: paths.lock) }, launch: launch)
     }
 
-    func ensureRunning(timeout: TimeInterval, maxLaunches: Int, probe: (TimeInterval) async throws -> Void,
+    func ensureRunning(timeout: TimeInterval, lockedExtra: TimeInterval = 6, maxLaunches: Int, probe: (TimeInterval) async throws -> Void,
                        lockHeld: () -> Bool, launch: () throws -> LaunchedDaemon) async throws {
         do {
             return try await probe(10)
         } catch DaemonError.notListening, DaemonError.shuttingDown {}
         var child = try launch()
         var launches = 1
-        let deadline = ContinuousClock.now + .seconds(timeout)
+        let poll = Duration.milliseconds(50)
+        var deadline = ContinuousClock.now + .seconds(timeout)
+        let latest = deadline + .seconds(lockedExtra)
         var lastError: Error = DaemonError.notListening
         while ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
+            try await Task.sleep(for: poll)
             do {
                 // Each probe gets only what is left of the wait.
                 return try await probe(max(0.001, Double((deadline - ContinuousClock.now) / .milliseconds(1)) / 1000))
@@ -209,6 +215,9 @@ public struct DaemonClient: Sendable {
             if child.hasExited, launches < maxLaunches, !lockHeld() {
                 child = try launch()
                 launches += 1
+                deadline = max(deadline, min(latest, ContinuousClock.now + .seconds(timeout)))
+            } else if deadline - ContinuousClock.now <= poll, lockHeld() {
+                deadline = min(latest, ContinuousClock.now + poll * 2)
             }
         }
         throw lastError is DaemonError ? lastError : DaemonError.connectionFailed(String(describing: lastError))

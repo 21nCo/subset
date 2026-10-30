@@ -18,6 +18,7 @@ export function daemonPaths(dataDir) {
     dataDir,
     state: join(dataDir, 'state.json'),
     scheduler: join(dataDir, 'scheduler.json'),
+    plays: join(dataDir, 'plays.json'),
     lock: join(dataDir, 'daemon.lock'),
     socket: join(dataDir, 'daemon.sock'),
     log: join(dataDir, 'daemon.log')

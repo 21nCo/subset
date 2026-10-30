@@ -1,4 +1,4 @@
-import { defaultSpawn, notificationFor, playInOrder, runProcess } from './process.mjs';
+import { defaultSpawn, notificationFor, playParts, runProcess } from './process.mjs';
 
 export const AFPLAY = '/usr/bin/afplay';
 export const OSASCRIPT = '/usr/bin/osascript';
@@ -23,20 +23,21 @@ export function osascriptArgs(title, body) {
 /**
  * The macOS sink: `afplay` plays a built-in sound for ticks (Tink), steps (Pop) and the finish
  * (Glass three times) when the timer's `sound` is on, and `osascript` posts a notification for the
- * finish and for alerts missed while away.
+ * finish and for alerts missed while away. It plays only the parts not in `progress.played`.
  */
 export function createMacosSink({ spawn = defaultSpawn } = {}) {
-  const play = (path) => runProcess(spawn, AFPLAY, [path]);
   return {
     name: 'macos',
-    async alert(alert, timer) {
-      const tasks = [];
-      const sounds = MACOS_SOUNDS[alert.kind];
-      if (sounds && timer.sound !== false) tasks.push(playInOrder(play, sounds));
+    async alert(alert, timer, progress) {
       const notification = notificationFor(alert, timer);
-      if (notification) tasks.push(runProcess(spawn, OSASCRIPT, osascriptArgs(notification.title, notification.body)));
-      const failed = (await Promise.allSettled(tasks)).find((outcome) => outcome.status === 'rejected');
-      if (failed) throw failed.reason;
+      await playParts(
+        {
+          sounds: timer.sound === false ? [] : (MACOS_SOUNDS[alert.kind] ?? []),
+          playSound: (path, onStart) => runProcess(spawn, AFPLAY, [path], onStart),
+          notify: notification && ((onStart) => runProcess(spawn, OSASCRIPT, osascriptArgs(notification.title, notification.body), onStart))
+        },
+        progress
+      );
     }
   };
 }
