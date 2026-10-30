@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { after, before, describe, test } from 'node:test';
-import { BookmarkError, MAX_IMPORT_ITEMS, MAX_IMPORT_WARNINGS, createBookmarkOperations, parseImport } from '../dist/index.js';
+import { BookmarkError, MAX_IMPORT_ITEMS, MAX_IMPORT_TAG_REFERENCES, MAX_IMPORT_WARNINGS, createBookmarkOperations, parseImport } from '../dist/index.js';
 import { hookedExecutor, pausePoint, recordingQueue, setup } from './support.mjs';
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
@@ -41,6 +41,17 @@ async function saved(host) {
     added: addedAt ?? Math.floor(createdAt / 1000) * 1000
   }));
 }
+
+/** The stored `addedAt` of the bookmark with `url`, as the row holds it. */
+async function rawAddedAt(host, url) {
+  const { data } = await host.server.executor.query(
+    { version: 1, resource: 'bookmarks', select: ['addedAt'], filters: { url }, limit: 1 },
+    { userId: 'owner' }
+  );
+  return data[0].addedAt ?? null;
+}
+
+const dated = (url, seconds) => `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DT><A HREF="${url}" ADD_DATE="${seconds}">x</A>\n`;
 
 async function byUrl(host, url) {
   const { data } = await host.server.executor.query(
@@ -229,6 +240,71 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal((await host.ops.getBookmark(bookmark.id)).addedAt, 1_300_000_000_000);
     });
 
+    test("importing a bookmark's own export leaves its stored date as it is", async () => {
+      await host.ops.addBookmark('https://own.example/added', { title: 'Added' });
+      await host.ops.importBookmarks([{ url: 'https://own.example/dated', title: 'Dated', addedAt: 1_500_000_000_123 }]);
+      const exported = await host.ops.exportNetscape();
+      await host.ops.importBookmarks(parseImport(exported, 'netscape-html'));
+      assert.equal(await rawAddedAt(host, 'https://own.example/added'), null);
+      assert.equal(Number(await rawAddedAt(host, 'https://own.example/dated')), 1_500_000_000_123);
+    });
+
+    for (const [order, savedDate, pausedDate, otherDate] of [
+      ['an earlier date saved by another import while one is paused is kept', 1_700_000_000, 1_500_000_000, 1_400_000_000],
+      ['a paused import still lowers a date another import lowered less', 1_700_000_000, 1_400_000_000, 1_500_000_000],
+      ['an earlier date saved while one is paused is kept on a bookmark that had none', null, 1_500_000_000, 1_400_000_000]
+    ]) {
+      test(order, async () => {
+        const url = `https://race.example/${savedDate}-${pausedDate}-${otherDate}`;
+        if (savedDate === null) await host.ops.addBookmark(url, { title: 'Race' });
+        else await host.ops.importBookmarks(parseImport(dated(url, savedDate), 'netscape-html'));
+        const point = pausePoint();
+        const paused = createBookmarkOperations({
+          executor: hookedExecutor((await host.another()).executor, {
+            beforeMutate: async (payload) => {
+              if (payload.resource === 'bookmarks' && payload.operation === 'merge') await point.pause();
+            }
+          }),
+          detailsQueue: recordingQueue(),
+          context: { userId: 'owner' }
+        });
+        const importing = paused.importBookmarks(parseImport(dated(url, pausedDate), 'netscape-html'));
+        await point.reached;
+        await host.ops.importBookmarks(parseImport(dated(url, otherDate), 'netscape-html'));
+        point.release();
+        assert.deepEqual(await importing, { added: 0, merged: 1, skipped: 0, warnings: [] });
+        assert.equal(Number(await rawAddedAt(host, url)), 1_400_000_000_000);
+        assert.match(await host.ops.exportNetscape(), new RegExp(`HREF="${url}" ADD_DATE="1400000000"`));
+      });
+    }
+
+    if (backend !== 'memory') {
+      // The memory adapter has no unique index, so an insert of a saved URL does not fail there.
+      test('an import whose insert lost the URL to another writer keeps the earliest date under a later race', async () => {
+        const url = 'https://race.example/insert';
+        const [insertPoint, mergePoint] = [pausePoint(), pausePoint()];
+        const paused = createBookmarkOperations({
+          executor: hookedExecutor((await host.another()).executor, {
+            beforeMutate: async (payload) => {
+              if (Array.isArray(payload)) await insertPoint.pause();
+              else if (payload.resource === 'bookmarks' && payload.operation === 'merge') await mergePoint.pause();
+            }
+          }),
+          detailsQueue: recordingQueue(),
+          context: { userId: 'owner' }
+        });
+        const importing = paused.importBookmarks(parseImport(dated(url, 1_500_000_000), 'netscape-html'));
+        await insertPoint.reached;
+        await host.ops.importBookmarks(parseImport(dated(url, 1_700_000_000), 'netscape-html'));
+        insertPoint.release();
+        await mergePoint.reached;
+        await host.ops.importBookmarks(parseImport(dated(url, 1_400_000_000), 'netscape-html'));
+        mergePoint.release();
+        assert.deepEqual(await importing, { added: 0, merged: 1, skipped: 0, warnings: [] });
+        assert.equal(Number(await rawAddedAt(host, url)), 1_400_000_000_000);
+      });
+    }
+
     test('a tag deleted without a merge after the import linked it is given again', async () => {
       const doomed = (await host.ops.addBookmark('https://doomed.example/seed', { tags: ['Doomed'] })).bookmark.tags[0];
       const importer = createBookmarkOperations({
@@ -286,6 +362,19 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       await rejectsWith(host.ops.importBookmarks({ items: 'nope' }), 'invalid-input');
       await rejectsWith(host.ops.importBookmarks(null), 'invalid-input');
       assert.equal((await saved(host)).length, before);
+    });
+
+    test(`items listing more than ${MAX_IMPORT_TAG_REFERENCES.toLocaleString('en-US')} tags in all fail before anything is saved`, async () => {
+      const before = (await saved(host)).length;
+      // As many tags as any parsed file can give, listed by one item: the count is of the items as given.
+      const tags = new Array(MAX_IMPORT_TAG_REFERENCES).fill('cap');
+      const over = [{ url: 'https://cap.example/a', tags }, { url: 'https://cap.example/b', tags: ['one-more'] }];
+      await assert.rejects(host.ops.importBookmarks(over), (error) => error instanceof BookmarkError && error.code === 'too-large' && /MAX_IMPORT_TAG_REFERENCES/.test(error.message));
+      assert.equal((await saved(host)).length, before);
+      if (backend === 'memory') {
+        assert.deepEqual(await host.ops.importBookmarks([{ url: 'https://cap.example/a', tags }]), { added: 1, merged: 0, skipped: 0, warnings: [] });
+        assert.deepEqual((await byUrl(host, 'https://cap.example/a')).tags.map((tag) => tag.name), ['cap']);
+      }
     });
 
     test('a tag a merge has recorded also gives its merge target, as an add does', async () => {

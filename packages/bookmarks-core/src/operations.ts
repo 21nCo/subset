@@ -1,5 +1,6 @@
 import { isLinkDetailsV1, type LinkDetailsV1 } from '@subset.dev/links';
 import {
+  MAX_IMPORT_BYTES,
   MAX_IMPORT_ITEMS,
   tooManyItems,
   warningList,
@@ -19,7 +20,7 @@ import {
   normalizeText,
   normalizeUrl
 } from './input.js';
-import { renderNetscape } from './netscape.js';
+import { MAX_FOLDER_TAG_REFERENCES, renderNetscape } from './netscape.js';
 import { BOOKMARKS_RESOURCE_VERSION, DETAILS_STATES, type DetailsState } from './schema.js';
 import { BookmarkError, type Bookmark, type BookmarksExecutor, type DetailsQueue, type Tag } from './types.js';
 
@@ -84,6 +85,13 @@ const BOOKMARK_SELECT = ['*', 'tags.*'];
 /** Import items saved per step: one apiId claim and one batch of datafn inserts (under datafn's default 500). */
 const IMPORT_BATCH = 100;
 
+/**
+ * Most tags the items given to `importBookmarks` may list in all, counted before they are checked. It is more than any
+ * file `parseImport` reads can give: its folders give at most `MAX_FOLDER_TAG_REFERENCES`, and each of its own tags
+ * takes at least two of its `MAX_IMPORT_BYTES` (a character and a separator).
+ */
+export const MAX_IMPORT_TAG_REFERENCES = MAX_FOLDER_TAG_REFERENCES + MAX_IMPORT_BYTES / 2;
+
 type Row = Record<string, unknown>;
 type TagInput = { name: string; nameKey: string };
 
@@ -102,6 +110,8 @@ interface ImportEntry {
 
 /** An import entry and the bookmark that has its URL. */
 type SavedEntry = { id: string; entry: ImportEntry };
+/** A saved bookmark's id and stored dates (epoch milliseconds; `addedAt` null when it has none). */
+type SavedDates = { id: string; addedAt: number | null; createdAt: number };
 
 /** Trims optional import text and cuts it to `max` characters with a warning, where `addBookmark` would refuse it. */
 function clampText(value: unknown, field: string, max: number, warn: (message: string) => void): string | null {
@@ -538,6 +548,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
           notes,
           unread,
           archived: false,
+          // Written, not left out, so every adapter stores null: an import's date guard matches it.
+          addedAt: null,
           ...CLEARED_DETAILS,
           detailsRequest: null
         };
@@ -929,28 +941,43 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     throw new BookmarkError('conflict', 'Could not retry the details because of concurrent writes; try again');
   }
 
-  /** The saved bookmarks with these canonical URLs: their ids and when they were added (`addedAt`, else `createdAt`). */
-  async function bookmarksByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, { id: string; added: number }>> {
-    const found = new Map<string, { id: string; added: number }>();
+  const toSavedDates = (row: Row): SavedDates => ({ id: String(row.id), addedAt: toOptionalNumber(row.addedAt), createdAt: toNumber(row.createdAt) });
+
+  /** The saved bookmarks with these canonical URLs: their ids and stored dates. */
+  async function bookmarksByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, SavedDates>> {
+    const found = new Map<string, SavedDates>();
     for (const chunk of chunks(canonicalUrls)) {
       const select = ['id', 'canonicalUrl', 'addedAt', 'createdAt'];
       for (const row of await query({ resource: 'bookmarks', select, filters: { canonicalUrl: { $in: chunk } }, limit: PAGE_SIZE })) {
-        found.set(String(row.canonicalUrl), { id: String(row.id), added: toOptionalNumber(row.addedAt) ?? toNumber(row.createdAt) });
+        found.set(String(row.canonicalUrl), toSavedDates(row));
       }
     }
     return found;
   }
 
   /**
-   * Gives a saved bookmark an import entry's date when the entry says it was added earlier: a URL saved twice keeps
-   * the earliest date. One deleted meanwhile is left to the tagging, which reports it.
+   * Gives a saved bookmark an import entry's date when the entry says it was added earlier, at the whole seconds an
+   * export carries: a URL saved twice keeps the earliest date, and importing a bookmark's own export changes nothing.
+   * The write is guarded on the date it replaces still being at least a second later (`addedAt`, or a null `addedAt`
+   * and `createdAt`), so an earlier date another import saved meanwhile is never raised; on a conflict the date is read
+   * again. One deleted meanwhile is left to the tagging, which reports it.
    */
-  async function keepEarliestAdded(saved: { id: string; added: number }, entry: ImportEntry): Promise<void> {
-    if (entry.addedAt === null || entry.addedAt >= saved.added) return;
-    try {
-      await mergeExisting('bookmarks', saved.id, { addedAt: entry.addedAt });
-    } catch (error) {
-      if (!isGuardConflict(error)) throw error;
+  async function keepEarliestAdded(saved: SavedDates, entry: ImportEntry): Promise<void> {
+    if (entry.addedAt === null) return;
+    const { id } = saved;
+    const later = (Math.floor(entry.addedAt / 1000) + 1) * 1000;
+    for (let attempt = 0, dates: SavedDates | null = saved; dates !== null; attempt++) {
+      if ((dates.addedAt ?? dates.createdAt) < later) return;
+      if (attempt === MAX_ATTEMPTS) throw new BookmarkError('conflict', 'Could not save the date a bookmark was added because of concurrent writes; try again');
+      const guard = dates.addedAt === null ? { id, addedAt: null, createdAt: { $gte: later } } : { id, addedAt: { $gte: later } };
+      try {
+        await mutate({ resource: 'bookmarks', operation: 'merge', id, record: { addedAt: entry.addedAt }, if: guard });
+        return;
+      } catch (error) {
+        if (!isGuardConflict(error)) throw error;
+      }
+      const [row] = await query({ resource: 'bookmarks', select: ['id', 'addedAt', 'createdAt'], filters: { id }, limit: 1 });
+      dates = row ? toSavedDates(row) : null;
     }
   }
 
@@ -1091,6 +1118,17 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     const parsed: { items?: unknown; warnings?: unknown } = Array.isArray(input) ? { items: input } : ((input ?? {}) as object);
     if (!Array.isArray(parsed.items)) throw new BookmarkError('invalid-input', 'The import must be an array of items or the result of parseImport');
     if (parsed.items.length > MAX_IMPORT_ITEMS) throw tooManyItems();
+    let tagReferences = 0;
+    for (const item of parsed.items as unknown[]) {
+      const tags = typeof item === 'object' && item !== null ? (item as { tags?: unknown }).tags : undefined;
+      if (Array.isArray(tags)) tagReferences += tags.length;
+    }
+    if (tagReferences > MAX_IMPORT_TAG_REFERENCES) {
+      throw new BookmarkError(
+        'too-large',
+        `The import lists more than ${MAX_IMPORT_TAG_REFERENCES.toLocaleString('en-US')} tags in all (MAX_IMPORT_TAG_REFERENCES)`
+      );
+    }
     const warnings = warningList(Array.isArray(parsed.warnings) ? (parsed.warnings as ImportWarning[]) : []);
     // One entry per canonical URL: a later item with the same URL is merged into it, as a duplicate add would be.
     const entries = new Map<string, { entry: ImportEntry; keys: Set<string> }>();

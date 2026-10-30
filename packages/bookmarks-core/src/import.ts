@@ -84,7 +84,11 @@ export function toTagName(raw: string): string | null {
   return chars.length > MAX_TAG_LENGTH ? chars.slice(0, MAX_TAG_LENGTH).join('') : name;
 }
 
-/** Reads `ADD_DATE`-style times: seconds, milliseconds or microseconds since the epoch, as exporters differ. */
+/**
+ * Reads `ADD_DATE`-style times: seconds, milliseconds or microseconds since the epoch, as exporters differ, told apart
+ * by size: up to 1e11 is seconds (to the year 5138), up to 1e14 milliseconds and above that microseconds. So a date in
+ * milliseconds or microseconds before 1973-03-03 is misread; exporters do not write those.
+ */
 export function toEpochMs(value: string | undefined | null): number | null {
   if (value === undefined || value === null || !/^\s*\d{1,20}\s*$/.test(value)) return null;
   const number = Number(value);

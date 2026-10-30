@@ -292,6 +292,28 @@ test('ADD_DATE in seconds, milliseconds or microseconds is read as epoch millise
     (date) => parseImport(`<!DOCTYPE NETSCAPE-Bookmark-file-1><DT><A HREF="https://example.com/" ADD_DATE="${date}">x</A>`, 'netscape-html').items[0].addedAt
   );
   assert.deepEqual(dates, [1_700_000_000_000, 1_700_000_000_123, 1_700_000_000_123, null, null]);
+  // The unit is told by size: up to 1e11 is seconds, up to 1e14 milliseconds, above that microseconds.
+  const edges = ['100000000000', '100000000001', '100000000000000', '100000000000001'].map(
+    (date) => parseImport(`<!DOCTYPE NETSCAPE-Bookmark-file-1><DT><A HREF="https://example.com/" ADD_DATE="${date}">x</A>`, 'netscape-html').items[0].addedAt
+  );
+  assert.deepEqual(edges, [1e14, 100_000_000_001, 1e14, 100_000_000_000]);
+});
+
+test('Netscape text and attributes decode every HTML named reference, as a browser does', () => {
+  const html = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>',
+    '<DT><H3>Caf&eacute; &amp; more</H3>\n<DL><p>',
+    '<DT><A HREF="https://a.example/?a=1&copy=2&amp;b=&lt;" TAGS="Na&iuml;ve,&hearts;">M&mdash;M &hellip; &NotANamedReference; &copy</A>',
+    '<DD>Notes &ndash; with &laquo;quotes&raquo; &amp; &rarr; arrows',
+    '</DL><p>\n</DL><p>'
+  ].join('\n');
+  assert.deepEqual(parseImport(html, 'netscape-html').items.map(brief), [
+    link('https://a.example/?a=1&copy=2&b=<', {
+      title: 'M\u2014M \u2026 &NotANamedReference; \u00a9',
+      notes: 'Notes \u2013 with \u00abquotes\u00bb & \u2192 arrows',
+      tags: ['Caf\u00e9-&-more', 'Na\u00efve', '\u2665']
+    })
+  ]);
 });
 
 test('renderNetscape escapes markup and parses back to the same items', () => {
@@ -332,15 +354,18 @@ test('renderNetscape keeps notes with linkding markers, titles with spacing and 
     }
   ];
   const html = renderNetscape(bookmarks);
-  // The notes are one linkding notes part with no other marker in it.
-  assert.match(ddText(html), /^\[linkding-notes\][^[]*\[\/linkding-notes\]$/);
+  // The notes are one linkding notes part with no other marker in it, also once its references are decoded.
+  assert.match(decodeEntities(ddText(html)), /^\[linkding-notes\](?:(?!\[\/?linkding-notes\])[\s\S])*\[\/linkding-notes\]$/);
   const { items } = parseImport(html, 'netscape-html');
   assert.deepEqual(items.map(brief), bookmarks.map(({ url, title, notes, tags, unread, archived }) => ({ url, title, notes, tags, unread, archived })));
   // A tag of that name cannot be saved, so a bookmark tagged with the marker is never exported as archived.
   throwsWith(() => normalizeTagName('Linkding:Bookmarks.Archived'), 'invalid-input');
 });
 
-/** The description and notes linkding's importer reads from a `<DD>` (bookmarks/services/parser.py, handle_dd_data). */
+/**
+ * The description and notes linkding's importer reads from a `<DD>` (bookmarks/services/parser.py, handle_dd_data):
+ * its `HTMLParser` decodes character references first, then it splits on the markers.
+ */
 function linkdingDd(html) {
   const desc = decodeEntities(ddText(html)).trim();
   return {
@@ -348,6 +373,23 @@ function linkdingDd(html) {
     notes: desc.includes('[linkding-notes]') ? desc.split('[linkding-notes]')[1].split('[/linkding-notes]')[0] : ''
   };
 }
+
+test('renderNetscape keeps notes with literal linkding markers whole for linkding and for this import', () => {
+  const bookmark = { url: 'https://a.example/', title: 'A', tags: [], unread: false, archived: false, createdAt: 0, updatedAt: 0 };
+  const visible = (text) => text.replaceAll('\u2060', '');
+  for (const notes of [
+    'keep [/linkding-notes] tail',
+    'keep [linkding-notes] tail',
+    'keep [/linkding-notes] tail and [linkding-notes] more',
+    '[linkding-notes][linkding-notes]x[/linkding-notes][/linkding-notes] &#91;/linkding-notes] end',
+    'joined [\u2060/linkding-notes] and [\u2060\u2060linkding-notes] stay'
+  ]) {
+    const html = renderNetscape([{ ...bookmark, notes }]);
+    const read = linkdingDd(html);
+    assert.deepEqual({ ...read, notes: visible(read.notes) }, { description: '', notes: visible(notes) }, notes);
+    assert.equal(parseImport(html, 'netscape-html').items[0].notes, notes);
+  }
+});
 
 test('renderNetscape writes notes where linkding reads notes, not the description', () => {
   const bookmark = { url: 'https://a.example/', title: 'A', tags: [], unread: false, archived: false, createdAt: 0, updatedAt: 0 };

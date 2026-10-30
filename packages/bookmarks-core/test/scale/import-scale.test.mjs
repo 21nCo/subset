@@ -39,6 +39,7 @@ test(
       const elapsed = performance.now() - started;
       console.log(`imported ${result.added} bookmarks from ${(file.length / 1e6).toFixed(1)} MB in ${(elapsed / 1000).toFixed(1)} s`);
       assert.deepEqual(result, { added: MAX_IMPORT_ITEMS, merged: 0, skipped: 0, warnings: [] });
+      assert.equal(host.raw.prepare('select count(*) as count from bookmarks').get().count, MAX_IMPORT_ITEMS);
       assert.equal(host.queue.jobs.length, MAX_IMPORT_ITEMS / 5);
       assert.ok(elapsed < BUDGET_MS, `took ${(elapsed / 1000).toFixed(1)} s`);
     } finally {

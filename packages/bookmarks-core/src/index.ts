@@ -16,6 +16,7 @@ export { parseImport } from './parse-import.js';
 export { LINKDING_ARCHIVED_TAG, MAX_NOTES_LENGTH, MAX_TAG_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH, normalizeTagName } from './input.js';
 export {
   createBookmarkOperations,
+  MAX_IMPORT_TAG_REFERENCES,
   type AddBookmarkOptions,
   type AddBookmarkResult,
   type BookmarkOperations,

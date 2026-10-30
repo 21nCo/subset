@@ -1,3 +1,4 @@
+import { decodeHTML, decodeHTMLAttribute } from 'entities/decode';
 import { MAX_IMPORT_ITEMS, toEpochMs, toTagName, tooManyItems, type ImportItem, type ImportWarning, type ParsedImport } from './import.js';
 import { LINKDING_ARCHIVED_TAG } from './input.js';
 import { BookmarkError } from './types.js';
@@ -33,17 +34,11 @@ const tooManyFolderTags = () =>
     `The file's folders give its bookmarks more than ${MAX_FOLDER_TAG_REFERENCES.toLocaleString('en-US')} tags in all (MAX_FOLDER_TAG_REFERENCES)`
   );
 
-const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
-
-/** Decodes HTML character references: the named ones exporters write and every numeric one. */
-export function decodeEntities(text: string): string {
-  if (!text.includes('&')) return text;
-  return text.replace(/&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,6});/g, (whole, ref: string) => {
-    if (ref[0] !== '#') return NAMED_ENTITIES[ref.toLowerCase()] ?? whole;
-    const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
-    return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : '�';
-  });
-}
+/**
+ * Decodes HTML character references in element text as a browser does: every named one (`&mdash;`, `&hellip;`, the
+ * legacy ones without `;`) and every numeric one.
+ */
+export const decodeEntities = (text: string): string => (text.includes('&') ? decodeHTML(text) : text);
 
 /** Escapes text for an HTML attribute value or element content. */
 export function escapeHtml(text: string): string {
@@ -54,7 +49,8 @@ function parseAttributes(source: string): Map<string, string> {
   const attributes = new Map<string, string>();
   for (const match of source.matchAll(/([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
     const name = match[1].toUpperCase();
-    if (!attributes.has(name)) attributes.set(name, decodeEntities(match[2] ?? match[3] ?? match[4] ?? ''));
+    // In an attribute a legacy reference followed by `=` or a letter or digit is text, as in `?a=1&copy=2`.
+    if (!attributes.has(name)) attributes.set(name, decodeHTMLAttribute(match[2] ?? match[3] ?? match[4] ?? ''));
   }
   return attributes;
 }
@@ -282,11 +278,15 @@ function addLink(items: ImportItem[], attributes: Map<string, string>, title: st
   return item;
 }
 
-/** Sets the notes a `<DD>` gives: its text, with linkding's notes part (and any text after it) as further paragraphs. */
+/**
+ * Sets the notes a `<DD>` gives: its text, with linkding's notes part (and any text after it) as further paragraphs.
+ * The notes part loses the word joiner `escapeNotes` puts in each marker-shaped text.
+ */
 function setNotes(item: ImportItem, raw: string): void {
   const notes = LINKDING_NOTES.exec(raw);
   const parts = notes ? [raw.slice(0, notes.index), notes[1], raw.slice(notes.index + notes[0].length)] : [raw];
-  const joined = parts.map((part) => decodeEntities(part).trim()).filter((part) => part !== '').join('\n\n');
+  const decoded = parts.map((part, at) => (at === 1 ? decodeEntities(part).replace(JOINED_MARKER, '[') : decodeEntities(part)));
+  const joined = decoded.map((part) => part.trim()).filter((part) => part !== '').join('\n\n');
   item.notes = joined === '' ? null : joined;
 }
 
@@ -320,12 +320,18 @@ function escapeTitle(title: string): string {
   );
 }
 
+/** A `[` that starts a linkding marker, after any word joiners (U+2060). */
+const MARKER = /\[(?=\u2060*\/?linkding-notes\])/g;
+/** A `[` and the word joiner `escapeNotes` put after it. */
+const JOINED_MARKER = /\[\u2060(?=\u2060*\/?linkding-notes\])/g;
+
 /**
  * Escapes notes as the text of linkding's `[linkding-notes]` marker in a `<DD>`, so linkding reads them as notes, not
- * as the page description, and they read back the same here: `[` is a character reference, so no text in them is a
- * marker to this parser.
+ * as the page description. linkding decodes character references before it looks for the markers, so a marker in the
+ * notes gets a word joiner (U+2060, invisible) after its `[` instead, and is text to linkding and to this parser,
+ * which removes that joiner again; one already there gets another, so the notes read back exactly.
  */
-const escapeNotes = (notes: string) => `[linkding-notes]${escapeHtml(notes).replace(/\[/g, '&#91;')}[/linkding-notes]`;
+const escapeNotes = (notes: string) => `[linkding-notes]${escapeHtml(notes).replace(MARKER, '[\u2060')}[/linkding-notes]`;
 
 /**
  * Writes bookmarks as a Netscape bookmark file, in linkding's form: one flat list of `<DT><A>` with `ADD_DATE`,
