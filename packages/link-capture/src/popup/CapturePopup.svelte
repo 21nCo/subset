@@ -88,7 +88,8 @@
   }
 </script>
 
-<main class="capture" aria-busy={view.name === 'capturing' || view.name === 'saving'}>
+<!-- No aria-busy here or on any ancestor of the live regions, which assistive technology may hold back while busy. -->
+<main class="capture">
   <h1 id="{uid}-heading" tabindex="-1">{target.label}</h1>
   <div class="messages">
     <p class="status" role="status">{status}</p>
@@ -98,7 +99,7 @@
   {#if view.name === 'editing' || view.name === 'saving'}
     {@const draft = view.draft}
     {@const busy = view.name === 'saving'}
-    <form onsubmit={submit}>
+    <form onsubmit={submit} aria-busy={busy}>
       <p class="url" title={view.capture.url}>{view.capture.url}</p>
       <label for="{uid}-title">Title</label>
       <input id="{uid}-title" value={draft.title} disabled={busy}
