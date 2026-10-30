@@ -1,0 +1,67 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { captureFromContextMenu, captureLink, LINK_CONTEXT_MENU_ID, LinkCaptureError, registerLinkContextMenu } from '../dist/index.js';
+import { createFakeBrowser } from './fake-browser.mjs';
+
+const now = () => new Date('2026-10-31T12:00:00.000Z');
+
+describe('the link context menu', () => {
+  it('adds one item on http(s) links, and can be registered again on every start', async () => {
+    const { browser, calls, menus } = createFakeBrowser();
+    await registerLinkContextMenu(browser, { title: 'Save link to Bookmarks' });
+    await registerLinkContextMenu(browser, { title: 'Save link to Bookmarks' });
+    const item = { id: LINK_CONTEXT_MENU_ID, title: 'Save link to Bookmarks', contexts: ['link'], targetUrlPatterns: ['http://*/*', 'https://*/*'] };
+    assert.deepEqual(calls, [
+      ['contextMenus.remove', LINK_CONTEXT_MENU_ID],
+      ['contextMenus.create', item],
+      ['contextMenus.remove', LINK_CONTEXT_MENU_ID],
+      ['contextMenus.create', item]
+    ]);
+    assert.deepEqual([...menus], [LINK_CONTEXT_MENU_ID]);
+  });
+
+  it('keeps an item that survived a service worker restart and leaves other items alone', async () => {
+    const { browser, menus } = createFakeBrowser({ menuItems: ['host:other', 'memotron:save'] });
+    await registerLinkContextMenu(browser, { id: 'memotron:save', title: 'Save to Memotron' });
+    assert.deepEqual([...menus].sort(), ['host:other', 'memotron:save']);
+  });
+
+  it('captures the clicked link from the click data alone: no tab query, no injection', () => {
+    const { calls } = createFakeBrowser();
+    const capture = captureFromContextMenu(
+      { menuItemId: LINK_CONTEXT_MENU_ID, linkUrl: 'https://Example.com:443/post?fbclid=1#comments', linkText: '  A\n post ' },
+      { now }
+    );
+    assert.deepEqual(capture, {
+      source: 'link',
+      url: 'https://example.com/post?fbclid=1#comments',
+      canonicalUrl: 'https://example.com/post',
+      title: 'A post',
+      capturedAt: '2026-10-31T12:00:00.000Z'
+    });
+    assert.equal('details' in capture, false);
+    assert.deepEqual(calls, []);
+  });
+
+  it('titles a link by its URL when the browser gives no link text (Chromium)', () => {
+    const capture = captureFromContextMenu({ menuItemId: LINK_CONTEXT_MENU_ID, linkUrl: 'https://example.com/a' }, { now });
+    assert.equal(capture.title, 'https://example.com/a');
+  });
+
+  it('ignores another menu item and honours a custom id', () => {
+    assert.equal(captureFromContextMenu({ menuItemId: 'host:other', linkUrl: 'https://example.com/' }), undefined);
+    const capture = captureFromContextMenu({ menuItemId: 'memotron:save', linkUrl: 'https://example.com/' }, { id: 'memotron:save' });
+    assert.equal(capture.url, 'https://example.com/');
+  });
+
+  it('refuses a link that is not http(s), and drops credentials from one that is', () => {
+    for (const url of ['javascript:alert(1)', 'mailto:a@example.com', 'ftp://example.com/f', 'not a url', '', undefined]) {
+      assert.throws(
+        () => captureFromContextMenu({ menuItemId: LINK_CONTEXT_MENU_ID, linkUrl: url }),
+        (error) => error instanceof LinkCaptureError && error.code === 'unsupported-page',
+        String(url)
+      );
+    }
+    assert.equal(captureLink('https://me:pw@example.com/x').url, 'https://example.com/x');
+  });
+});

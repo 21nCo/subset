@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["svelte"],
+    "verbatimModuleSyntax": true
+  },
+  // The reference extension's sources too; its vite.config.ts runs in Node and is checked by the build.
+  "include": ["src/**/*.ts", "src/**/*.svelte", "extension/extfn.config.ts", "extension/src/**/*.ts"]
+}
