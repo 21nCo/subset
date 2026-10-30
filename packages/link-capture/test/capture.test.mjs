@@ -146,6 +146,28 @@ describe('captureActiveTab', () => {
     });
   });
 
+  it('captures an SVG or XML document, whose root has no lang property, with its URL and type', async () => {
+    const pages = [
+      { url: 'https://example.com/logo.svg', root: 'svg', contentType: 'image/svg+xml', title: 'Logo' },
+      { url: 'https://example.com/feed.xml', root: 'xml', contentType: 'application/rss+xml', title: '' },
+      { url: 'https://example.com/sitemap.xml', root: 'xml', contentType: 'text/xml', title: '', lang: 'en' }
+    ];
+    for (const page of pages) {
+      const capture = await captureActiveTab(articleBrowser({ head: null, selection: '', ...page }).browser, { now });
+      assert.equal(capture.url, page.url);
+      assert.equal(capture.title, page.title || page.url);
+      assert.deepEqual(capture.details, {
+        version: 1,
+        url: page.url,
+        icons: [{ url: 'https://example.com/favicon.ico', rel: 'icon' }],
+        contentType: page.contentType
+      });
+    }
+    // A root missing altogether is read as an empty lang as well.
+    const rootless = runInPage(fakePage({ url: 'https://example.com/', head: null, root: null }), readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    assert.equal(rootless.lang, '');
+  });
+
   it('refuses a browser or file tab without injecting into it', async () => {
     for (const url of ['chrome://newtab/', 'about:addons', 'file:///Users/me/notes.html', 'view-source:https://example.com/']) {
       const { browser, paths } = createFakeBrowser({ tabs: [{ id: 1, url }], page: fakePage({ url }) });

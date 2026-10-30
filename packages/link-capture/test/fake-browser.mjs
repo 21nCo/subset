@@ -82,9 +82,19 @@ export function createFakeBrowser({ target = 'chromium-mv3', tabs = [], page, in
   return { browser: createBrowserFacade({ raw, target }), calls, local, menus, paths: () => calls.map(([path]) => path) };
 }
 
-/** A page for `executeScript`: `head` is the `<head>` outerHTML, or null for a document without one. */
-export function fakePage({ url, title = '', head = '<head></head>', lang = '', contentType = 'text/html', selection = '' }) {
-  return { url, title, head, lang, contentType, selection };
+/**
+ * A page for `executeScript`: `head` is the `<head>` outerHTML, or null for a document without one. `root` is the
+ * document element: `html` (an HTMLElement, with `lang`), `svg` or `xml` (an Element with no `lang` property), or null.
+ */
+export function fakePage({ url, title = '', head = '<head></head>', lang = '', contentType = 'text/html', selection = '', root = 'html' }) {
+  return { url, title, head, lang, contentType, selection, root };
+}
+
+function documentElement(page) {
+  if (page.root === null) return null;
+  // `lang` is an HTMLElement attribute: an SVG or XML root has only the content attribute.
+  if (page.root === 'svg' || page.root === 'xml') return { getAttribute: (name) => (name === 'lang' ? page.lang || null : null) };
+  return { lang: page.lang };
 }
 
 /** Runs `func` as a browser injects it: rebuilt from its source in a fresh scope, with `page` as the globals. */
@@ -100,7 +110,7 @@ function withPage(page, run) {
     document: {
       head: page.head === null ? null : { outerHTML: page.head },
       title: page.title,
-      documentElement: { lang: page.lang },
+      documentElement: documentElement(page),
       contentType: page.contentType
     },
     window: { getSelection: () => (page.selection === null ? null : { toString: () => page.selection }) },

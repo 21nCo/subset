@@ -198,6 +198,9 @@ describe('createCapturePopupController', () => {
     const suggest = async (prefix) => [`${prefix}one`, '', 3, ' ', `${prefix}two`];
     assert.deepEqual(await (await started(fakeTarget({ suggest }))).controller.suggestTags('re'), ['reone', 'retwo']);
     assert.deepEqual(await (await started(fakeTarget())).controller.suggestTags('re'), []);
+    // The popup keys its list by tag, so a repeat (also one that differs only in spaces) is returned once.
+    const repeating = async () => ['reading', ' reading ', 'research', 'reading'];
+    assert.deepEqual(await (await started(fakeTarget({ suggest: repeating }))).controller.suggestTags('re'), ['reading', 'research']);
     const failing = async () => {
       throw new Error('offline');
     };

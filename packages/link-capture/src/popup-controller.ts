@@ -19,7 +19,7 @@ export interface CapturePopupController {
   save(): Promise<void>;
   retry(): Promise<void>;
   back(): void;
-  /** The target's suggestions, or none when it has no `suggestTags` or it fails. */
+  /** The target's suggestions, trimmed and without repeats, or none when it has no `suggestTags` or it fails. */
   suggestTags(prefix: string): Promise<string[]>;
 }
 
@@ -106,7 +106,10 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       if (!options.target.suggestTags) return [];
       try {
         const tags = await options.target.suggestTags(prefix);
-        return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '') : [];
+        if (!Array.isArray(tags)) return [];
+        // Trimmed and each once, in the target's order: the popup keys its list by tag.
+        const found = tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
+        return [...new Set(found)].filter((tag) => tag !== '');
       } catch {
         return [];
       }

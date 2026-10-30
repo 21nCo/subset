@@ -78,19 +78,23 @@ export interface PageSnapshot {
  * its arguments and the page's globals, never this module's imports or constants.
  */
 export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLength: number): PageSnapshot {
-  const head = document.head ? document.head.outerHTML : '';
+  // An SVG or XML document (an image, a feed, a sitemap) has no <head> and its root is not an HTMLElement, so it has no
+  // `lang` property: every read is checked rather than assumed, and such a page still gives its URL and type.
+  const text = (value: unknown, max: number) => (typeof value === 'string' ? value.slice(0, max) : '');
+  const head = document.head ? text(document.head.outerHTML, Infinity) : '';
   // encodeInto stops before a character that does not fit, so the cut never splits one; `read` counts UTF-16 units.
   const { read } = new TextEncoder().encodeInto(head, new Uint8Array(maxHeadBytes));
-  // A code point is at most two UTF-16 units, so this keeps every character the extension may keep, and no more.
-  const selection = window.getSelection();
+  const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
+  const root = document.documentElement as { lang?: unknown } | null;
   return {
     url: location.href,
-    title: document.title.slice(0, maxTextLength * 2),
-    selectionText: (selection ? selection.toString() : '').slice(0, maxTextLength * 2),
+    // A code point is at most two UTF-16 units, so this keeps every character the extension may keep, and no more.
+    title: text(document.title, maxTextLength * 2),
+    selectionText: text(selection ? selection.toString() : '', maxTextLength * 2),
     html: head.slice(0, read),
     // One character past the limit, so the extension can tell a value that was too long from one that fit.
-    lang: document.documentElement ? document.documentElement.lang.slice(0, maxLangLength + 1) : '',
-    contentType: document.contentType
+    lang: root ? text(root.lang, maxLangLength + 1) : '',
+    contentType: text(document.contentType, Infinity)
   };
 }
 
