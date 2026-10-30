@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { BookmarkError, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, parseImport, renderNetscape } from '../dist/index.js';
+import { BookmarkError, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
 
 export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const throwsWith = (fn, code) => assert.throws(fn, (error) => error instanceof BookmarkError && error.code === code);
@@ -50,6 +50,37 @@ test('Safari: no top-level list, and the unmarked Favorites folder is the toolba
     link('https://www.example.net/long-read', { title: 'A Long Read', tags: ['Reading-List'] })
   ]);
   assert.equal(items[0].addedAt, null);
+});
+
+test('a top-level Favorites folder is a tag outside Safari, which alone writes folders outside a <DL>', () => {
+  const firefox = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<TITLE>Bookmarks</TITLE>',
+    '<H1>Bookmarks Menu</H1>',
+    '<DL><p>',
+    '    <DT><H3 ADD_DATE="1700000000" LAST_MODIFIED="1700000100">Favorites</H3>',
+    '    <DL><p>',
+    '        <DT><A HREF="https://firefox.example/" ADD_DATE="1700000001">Firefox favorite</A>',
+    '    </DL><p>',
+    '</DL>'
+  ].join('\n');
+  const raindrop = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<TITLE>Raindrop.io Bookmarks</TITLE>',
+    '<H1>Raindrop.io Bookmarks</H1>',
+    '<DL><p>',
+    '<DT><H3 ADD_DATE="1700000000" LAST_MODIFIED="1700000000">Favourites bar</H3>',
+    '<DL><p>',
+    '<DT><A HREF="https://raindrop.example/" ADD_DATE="1700000100" TAGS="ui">Raindrop favourite</A>',
+    '</DL><p>',
+    '</DL><p>'
+  ].join('\n');
+  assert.deepEqual(parseImport(firefox, 'netscape-html').items.map(brief), [
+    link('https://firefox.example/', { title: 'Firefox favorite', tags: ['Favorites'] })
+  ]);
+  assert.deepEqual(parseImport(raindrop, 'netscape-html').items.map(brief), [
+    link('https://raindrop.example/', { title: 'Raindrop favourite', tags: ['Favourites-bar', 'ui'] })
+  ]);
 });
 
 test('linkding: TOREAD, the archived marker tag and [linkding-notes]', () => {
@@ -163,4 +194,30 @@ test('renderNetscape escapes markup and parses back to the same items', () => {
     items.map((item) => ({ ...brief(item), addedAt: item.addedAt })),
     bookmarks.map(({ url, title, notes, tags, unread, archived, createdAt }) => ({ url, title, notes, tags, unread, archived, addedAt: Math.floor(createdAt / 1000) * 1000 }))
   );
+});
+
+test('renderNetscape keeps notes with linkding markers, titles with spacing and the archived marker apart', () => {
+  const bookmarks = [
+    {
+      url: 'https://lossless.example/',
+      title: ' Two  spaces,\ta tab,\nline\u00a0break and no-break space ',
+      notes: 'see [linkding-notes]x[/linkding-notes] here\n[/linkding-notes] and &#91; stays',
+      tags: ['linkding'],
+      unread: false,
+      archived: false,
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_000_000
+    }
+  ];
+  const html = renderNetscape(bookmarks);
+  assert.ok(!html.includes('[linkding-notes]'));
+  const { items } = parseImport(html, 'netscape-html');
+  assert.deepEqual(items.map(brief), bookmarks.map(({ url, title, notes, tags, unread, archived }) => ({ url, title, notes, tags, unread, archived })));
+  // A tag of that name cannot be saved, so a bookmark tagged with the marker is never exported as archived.
+  throwsWith(() => normalizeTagName('Linkding:Bookmarks.Archived'), 'invalid-input');
+});
+
+test('Netscape titles read like a browser: markup whitespace collapses, encoded whitespace stays', () => {
+  const html = '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n<DT><A HREF="https://a.example/">\n  Wrapped\n  title&nbsp;&nbsp;here&#10;</A>\n</DL><p>';
+  assert.equal(parseImport(html, 'netscape-html').items[0].title, 'Wrapped title\u00a0\u00a0here\n');
 });

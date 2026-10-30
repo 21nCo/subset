@@ -431,10 +431,10 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
    * records a source before its last read of the source's bookmarks, so a link that merge did not see was written
    * after the record, and reading the records here finds it. `recorded` holds the records of tags already linked,
    * which are followed without linking those tags again. Each tag's records are a chain of their own: a tag that
-   * is gone ends only its chain. False when a requested tag's chain linked nothing that still exists (it was
-   * removed without a merge), so the caller finds or creates it again by name.
+   * is gone ends only its chain. Returns the requested tags whose chain linked nothing that still exists (each was
+   * removed without a merge), so the caller finds or creates them again by name.
    */
-  async function linkTags(bookmarkId: string, tagIds: string[], recorded = new Map<string, string>()): Promise<boolean> {
+  async function linkTagChains(bookmarkId: string, tagIds: string[], recorded = new Map<string, string>()): Promise<string[]> {
     // The requested or already linked tags each tag was reached from.
     const origins = new Map<string, Set<string>>();
     const reach = (id: string, from: Iterable<string>) => {
@@ -466,8 +466,12 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       }
       link = [...next];
     }
-    return tagIds.every((id) => kept.has(id));
+    return tagIds.filter((id) => !kept.has(id));
   }
+
+  /** linkTagChains: true when every requested tag's chain linked a tag that still exists. */
+  const linkTags = async (bookmarkId: string, tagIds: string[], recorded?: Map<string, string>) =>
+    (await linkTagChains(bookmarkId, tagIds, recorded)).length === 0;
 
   async function addTagsTo(bookmark: Bookmark, inputs: TagInput[]): Promise<Bookmark> {
     let current = bookmark;
@@ -983,8 +987,8 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
    * Gives saved import entries their tags. New bookmarks are linked a tag at a time, up to a page of bookmarks per
    * datafn relate. Then the merge records of every requested tag a bookmark has are read: a merge records its source
    * before its last read of the source's bookmarks, so one that missed these links is found, and those bookmarks
-   * follow its records through `addTagsTo`, as `addBookmark` does. So do bookmarks a relate refused (a tag deleted
-   * meanwhile) and saved bookmarks that lack a requested tag.
+   * follow its records, as `addBookmark` does. So do bookmarks a relate refused (a tag deleted meanwhile) and saved
+   * bookmarks that lack a requested tag.
    */
   async function tagImported(created: SavedEntry[], existing: SavedEntry[], tagsByKey: Map<string, Tag>, warn: (warning: ImportWarning) => void): Promise<void> {
     const entries = new Map([...created, ...existing].map(({ id, entry }) => [id, entry]));
@@ -1030,9 +1034,24 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     for (const id of oneByOne) {
       const entry = entries.get(id) as ImportEntry;
       const bookmark = await getBookmark(id);
-      if (bookmark) await addTagsTo(bookmark, entry.tags);
+      if (bookmark) await tagOneImported(bookmark, entry.tags, tagsByKey);
       else warn({ url: entry.url, message: 'The bookmark was deleted while it was being imported, so it has no tags' });
     }
+  }
+
+  /**
+   * Gives one imported bookmark its tags as `addTagsTo` would, starting from the tags the import resolved: a tag the
+   * bookmark lacks is linked by the id the import found or created, so one merged away (and deleted) since is
+   * followed along its records to the tag it went into, and the records of those it has are followed too. Only a tag
+   * whose chain linked nothing (it was deleted without a merge) is found or created again by name.
+   */
+  async function tagOneImported(bookmark: Bookmark, inputs: TagInput[], tagsByKey: Map<string, Tag>): Promise<void> {
+    const have = new Map(bookmark.tags.map((tag) => [tag.nameKey, tag.id]));
+    const recorded = await mergeTargets(inputs.flatMap((input) => have.get(input.nameKey) ?? []));
+    const missing = inputs.filter((input) => !have.has(input.nameKey));
+    const lost = new Set(await linkTagChains(bookmark.id, missing.map((input) => (tagsByKey.get(input.nameKey) as Tag).id), recorded));
+    const byName = missing.filter((input) => lost.has((tagsByKey.get(input.nameKey) as Tag).id));
+    if (byName.length > 0) await addTagsTo(await requireBookmark(bookmark.id), byName);
   }
 
   async function importBookmarks(input: ParsedImport | readonly ImportItem[]): Promise<ImportResult> {

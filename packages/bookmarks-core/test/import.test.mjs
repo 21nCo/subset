@@ -221,7 +221,78 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual((await host.ops.getBookmark(imported.id)).tags.map((tag) => tag.name), ['After']);
     });
 
+    test('a tag merged away while the import links it is followed to its target, not created again', async () => {
+      const source = (await host.ops.addBookmark('https://paused-merge.example/seed', { tags: ['PausedSource'] })).bookmark.tags[0];
+      const target = (await host.ops.addBookmark('https://paused-merge.example/seed2', { tags: ['PausedTarget'] })).bookmark.tags[0];
+      const point = pausePoint();
+      const importer = createBookmarkOperations({
+        executor: hookedExecutor(host.server.executor, { beforeMutate: (payload) => payload.operation === 'relate' && point.pause() }),
+        detailsQueue: recordingQueue(),
+        context: { userId: 'owner' }
+      });
+      // The import has found the source tag and pauses before linking it; the merge then deletes it.
+      const importing = importer.importBookmarks([{ url: 'https://paused-merge.example/imported', title: 'Imported', tags: ['pausedsource'] }]);
+      await point.reached;
+      await host.ops.mergeTags([source.id], target.id);
+      point.release();
+      assert.deepEqual(await importing, { added: 1, merged: 0, skipped: 0, warnings: [] });
+      const imported = await byUrl(host, 'https://paused-merge.example/imported');
+      assert.deepEqual(imported.tags.map((tag) => tag.id), [target.id]);
+      const { data } = await host.server.executor.query(
+        { version: 1, resource: 'tags', select: ['id'], filters: { nameKey: 'pausedsource' }, limit: 1 },
+        { userId: 'owner' }
+      );
+      assert.deepEqual(data, []);
+    });
+
+    test('the export pages through every bookmark', async () => {
+      const items = Array.from({ length: 250 }, (_, index) => ({ url: `https://pages.example/${index}`, title: `Page ${index}` }));
+      await host.ops.importBookmarks(items);
+      const exported = parseImport(await host.ops.exportNetscape(), 'netscape-html').items;
+      assert.equal(exported.length, (await saved(host)).length);
+      assert.deepEqual(exported.filter((item) => item.url.startsWith('https://pages.example/')).map((item) => item.url), items.map((item) => item.url));
+    });
+
     if (backend !== 'memory') {
+      // The memory adapter has no unique index, so it supports one executor per user only.
+      test('an import whose apiId range another import claimed first claims the next range', async () => {
+        const second = await host.another();
+        const point = pausePoint();
+        const stale = createBookmarkOperations({
+          executor: hookedExecutor(second.executor, { beforeMutate: (payload) => payload.resource === 'bookmark_api_ids' && point.pause() }),
+          detailsQueue: recordingQueue(),
+          context: { userId: 'owner' }
+        });
+        const urls = (prefix) => ['a', 'b', 'c'].map((name) => `https://ranges.example/${prefix}/${name}`);
+        const importing = stale.importBookmarks(urls('stale').map((url) => ({ url, title: url })));
+        await point.reached;
+        await host.ops.importBookmarks(urls('first').map((url) => ({ url, title: url })));
+        point.release();
+        assert.deepEqual(await importing, { added: 3, merged: 0, skipped: 0, warnings: [] });
+        const first = await Promise.all(urls('first').map((url) => byUrl(host, url)));
+        const late = await Promise.all(urls('stale').map((url) => byUrl(host, url)));
+        const firstIds = first.map((bookmark) => bookmark.apiId);
+        assert.deepEqual(late.map((bookmark) => bookmark.apiId), firstIds.map((id) => id + 3));
+      });
+
+      test('an import that fails part way saves the rest when repeated', async () => {
+        const { bookmark: taken } = await host.ops.addBookmark('https://partial.example/taken');
+        const failing = createBookmarkOperations({
+          executor: hookedExecutor(host.server.executor, {
+            // The second insert of the batch reuses a saved bookmark's id, so the database refuses that one alone.
+            beforeMutate: (payload) => {
+              if (Array.isArray(payload)) payload[1].id = taken.id;
+            }
+          }),
+          detailsQueue: recordingQueue(),
+          context: { userId: 'owner' }
+        });
+        const items = ['a', 'b', 'c'].map((name) => ({ url: `https://partial.example/${name}`, title: name, tags: ['partial'] }));
+        await assert.rejects(failing.importBookmarks(items), /Saving the bookmark for https:\/\/partial\.example\/b failed/);
+        assert.deepEqual(await host.ops.importBookmarks(items), { added: 1, merged: 2, skipped: 0, warnings: [] });
+        for (const { url } of items) assert.deepEqual((await byUrl(host, url)).tags.map((tag) => tag.name), ['partial'], url);
+      });
+
       // The memory adapter has no unique index, so it supports one executor per user only.
       test('a URL another process saves while the import inserts it is merged, not failed', async () => {
         const second = await host.another();

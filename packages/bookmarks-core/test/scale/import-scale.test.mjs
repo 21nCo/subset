@@ -2,7 +2,8 @@
 // budget of 2026-10-30). Every bookmark is one datafn insert and every tag link one join-row write, which with
 // @datafn/server 0.2.0 over the @superfunctions/db 0.3.0 drizzle adapter take about 0.35 ms and 0.2 ms each on an
 // Apple M-series laptop and about twice that on CI (see the README); SFNS-52 tracks a datafn bulk write.
-// It runs after the other suites (see package.json), not beside them, so their work does not count against the budget.
+// It is opt-in: it runs only with BOOKMARKS_IMPORT_SCALE=1, through `npm run test:scale`, which CI runs in a step of its
+// own on Linux and Node 22 (.github/workflows/verify.yml), so no other suite competes with it for the CPU.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MAX_IMPORT_ITEMS, parseImport } from '../../dist/index.js';
@@ -28,7 +29,7 @@ function syntheticFile() {
 
 test(
   `a ${MAX_IMPORT_ITEMS.toLocaleString('en-US')}-item file imports on SQLite within ${BUDGET_MS / 1000} s`,
-  { timeout: 10 * 60_000 },
+  { timeout: 10 * 60_000, skip: process.env.BOOKMARKS_IMPORT_SCALE === '1' ? false : 'set BOOKMARKS_IMPORT_SCALE=1 to run it' },
   async () => {
     const file = syntheticFile();
     const host = await setup('sqlite');

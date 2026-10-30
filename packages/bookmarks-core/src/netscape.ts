@@ -1,13 +1,14 @@
 import { MAX_IMPORT_ITEMS, toEpochMs, toTagName, tooManyItems, type ImportItem, type ImportWarning, type ParsedImport } from './import.js';
+import { LINKDING_ARCHIVED_TAG } from './input.js';
 import { BookmarkError } from './types.js';
 
-/** linkding's export marks an archived bookmark with this tag, which is not a tag of the bookmark. */
-export const LINKDING_ARCHIVED_TAG = 'linkding:bookmarks.archived';
+/** linkding's notes in its `<DD>`, matched before character references are decoded, so an encoded `[` is text. */
 const LINKDING_NOTES = /\[linkding-notes\]([\s\S]*?)(?:\[\/linkding-notes\]|$)/;
 
 /**
- * Safari does not mark its toolbar folder, so a top-level folder with one of its names is taken to be it. Other
- * browsers mark theirs with `PERSONAL_TOOLBAR_FOLDER="true"`.
+ * Safari does not mark its toolbar folder, so a folder with one of its names is taken to be it when it is outside
+ * any `<DL>`, as only Safari writes its top-level folders. Other browsers mark theirs with
+ * `PERSONAL_TOOLBAR_FOLDER="true"`.
  */
 const SAFARI_TOOLBAR_NAMES = new Set(['favorites', 'favourites', 'favorites bar', 'favourites bar']);
 
@@ -86,7 +87,12 @@ function* scanTags(text: string): Generator<TagToken> {
 const ENDS_NOTE = new Set(['DT', 'DD', 'DL', 'H1', 'H3', 'HR', 'A']);
 const ENDS_NOTE_CLOSING = new Set(['DL', 'BODY', 'HTML']);
 
-const collapse = (text: string) => decodeEntities(text).replace(/\s+/g, ' ').trim();
+/**
+ * Element text as a browser shows it: each run of HTML whitespace (space, tab, line feed, form feed, carriage return)
+ * in the markup is one space, trimmed, and then character references are decoded, so an encoded space, line break or
+ * a no-break space is kept.
+ */
+const collapse = (text: string) => decodeEntities(text.replace(/[ \t\n\f\r]+/g, ' ').replace(/^ | $/g, ''));
 
 /**
  * Reads a Netscape bookmark file. Each `<DT><A>` is an item: `HREF`, the link text as title, `TAGS` (comma
@@ -103,8 +109,6 @@ export function parseNetscape(text: string): ParsedImport {
   const warnings: ImportWarning[] = [];
   // One entry per open <DL>: the tag its folder gives, or null (the top level, the toolbar, a nameless folder).
   const folders: (string | null)[] = [];
-  // One entry per open <DL>: whether a folder opened it (a top-level <DL> has no folder).
-  const inFolder: boolean[] = [];
   // The folder whose <DL> comes next: undefined when none is waiting.
   let nextFolder: string | null | undefined;
   let mode: 'text' | 'folder' | 'link' | 'note' = 'text';
@@ -128,8 +132,8 @@ export function parseNetscape(text: string): ParsedImport {
     if (mode === 'folder') {
       if (closing && name === 'H3') {
         const title = collapse(buffer);
-        const topLevel = !inFolder.includes(true);
-        const toolbar = attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' || (topLevel && SAFARI_TOOLBAR_NAMES.has(title.toLowerCase()));
+        const safariTopLevel = folders.length === 0;
+        const toolbar = attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' || (safariTopLevel && SAFARI_TOOLBAR_NAMES.has(title.toLowerCase()));
         nextFolder = toolbar ? null : toTagName(title);
         if (!toolbar && nextFolder === null && title !== '') warnings.push({ message: `Folder ${JSON.stringify(title)} gives no tag name` });
         mode = 'text';
@@ -153,7 +157,6 @@ export function parseNetscape(text: string): ParsedImport {
     if (closing) {
       if (name === 'DL') {
         folders.pop();
-        inFolder.pop();
         nextFolder = undefined;
       }
       continue;
@@ -161,7 +164,6 @@ export function parseNetscape(text: string): ParsedImport {
     switch (name) {
       case 'DL':
         folders.push(nextFolder ?? null);
-        inFolder.push(nextFolder !== undefined);
         nextFolder = undefined;
         break;
       case 'H3':
@@ -220,10 +222,9 @@ function addLink(items: ImportItem[], attributes: Map<string, string>, title: st
 }
 
 function setNotes(item: ImportItem, raw: string): void {
-  const text = decodeEntities(raw);
-  const notes = LINKDING_NOTES.exec(text);
-  const parts = notes ? [text.slice(0, notes.index), notes[1]] : [text];
-  const joined = parts.map((part) => part.trim()).filter((part) => part !== '').join('\n\n');
+  const notes = LINKDING_NOTES.exec(raw);
+  const parts = notes ? [raw.slice(0, notes.index), notes[1]] : [raw];
+  const joined = parts.map((part) => decodeEntities(part).trim()).filter((part) => part !== '').join('\n\n');
   item.notes = joined === '' ? null : joined;
 }
 
@@ -242,6 +243,21 @@ export interface NetscapeBookmark {
 }
 
 const seconds = (ms: number) => String(Math.floor(ms / 1000));
+
+const HTML_SPACE = /[ \t\n\f\r]/;
+
+/**
+ * Escapes a title as element text that reads back the same: every HTML whitespace character is a character
+ * reference, except a single space between two other characters, which the reader keeps as it is.
+ */
+function escapeTitle(title: string): string {
+  return escapeHtml(title).replace(/[ \t\n\f\r]/g, (char, at: number, text: string) =>
+    char === ' ' && at > 0 && at < text.length - 1 && !HTML_SPACE.test(text[at - 1]) && !HTML_SPACE.test(text[at + 1]) ? ' ' : `&#${char.charCodeAt(0)};`
+  );
+}
+
+/** Escapes notes as `<DD>` text that reads back the same: `[` is a character reference, so no text is a linkding marker. */
+const escapeNotes = (notes: string) => escapeHtml(notes).replace(/\[/g, '&#91;');
 
 /**
  * Writes bookmarks as a Netscape bookmark file, in linkding's form: one flat list of `<DT><A>` with `ADD_DATE`,
@@ -265,8 +281,8 @@ export function renderNetscape(bookmarks: Iterable<NetscapeBookmark>): string {
       `TOREAD="${bookmark.unread ? '1' : '0'}"`,
       ...(tags.length > 0 ? [`TAGS="${escapeHtml(tags.join(','))}"`] : [])
     ];
-    lines.push(`<DT><A ${attributes.join(' ')}>${escapeHtml(bookmark.title ?? '')}</A>`);
-    if (bookmark.notes) lines.push(`<DD>${escapeHtml(bookmark.notes)}`);
+    lines.push(`<DT><A ${attributes.join(' ')}>${escapeTitle(bookmark.title ?? '')}</A>`);
+    if (bookmark.notes) lines.push(`<DD>${escapeNotes(bookmark.notes)}`);
   }
   lines.push('</DL><p>', '');
   return lines.join('\n');

@@ -16,6 +16,11 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+      # SET-174's opt-in scale check: a 50,000-item import on SQLite within 120 s, alone so nothing competes with it.
+      - run: npm run test:scale --workspace=@subset.dev/bookmarks-core
+        env:
+          BOOKMARKS_IMPORT_SCALE: '1'
+        timeout-minutes: 10
       # The CLI tests run the built dist/cli.mjs, so they follow the build.
       - run: npm test --workspace=@subset.dev/minutes
       - run: npm test --workspace=@subset.dev/usage-core
