@@ -722,6 +722,80 @@ test('a handback after the app asked to show a part and did not (the notificatio
   assert.deepEqual(spawner.started, ['notification']);
 });
 
+/** Starts an interval (a 1 s Work, then a long Rest) and a 1 s countdown, and runs both to their first transition, in one scheduler run. */
+async function twoAlertsInOneRun(context) {
+  const segments = [{ label: 'Work', phase: 'work', durationMs: 1_000 }, { label: 'Rest', phase: 'rest', durationMs: 200_000 }];
+  assert.equal((await context.op('start', { timer: { kind: 'interval', rounds: 2, segments, countdownTicks: false, name: 'Laps' } })).status, 200);
+  await finishCountdown(context);
+}
+
+/** Every part of the two alerts of `twoAlertsInOneRun`, once: the countdown's finish and the interval's segment (a Pop). */
+const BOTH_ALERTS = ['Glass', 'Glass', 'Glass', 'Pop', 'notification'];
+
+/**
+ * A daemon on `dataDir` at `now`, with the macOS sink on `spawner`; `heard` are the kinds of the
+ * alerts it hands that sink. With `breakingPlays`, plays.json cannot be written once it was read.
+ */
+async function hearing(t, dataDir, now, spawner = partSpawn(), { breakingPlays = false } = {}) {
+  const sink = createMacosSink({ spawn: spawner.spawn });
+  const heard = [];
+  const alert = sink.alert.bind(sink);
+  sink.alert = (what, ...rest) => {
+    heard.push(what.kind);
+    return alert(what, ...rest);
+  };
+  const processes = appProcesses();
+  const startupHook = async (stage) => {
+    if (breakingPlays && stage === 'locked') breakPlays({ dataDir });
+  };
+  const next = await startTestDaemon(t, { dataDir, clock: createFakeClock(now), sink, processes, startupHook });
+  return { next, spawner, heard };
+}
+
+test('while plays.json cannot be written, a daemon killed as its sink spawns the first of several handoffs it replays leaves every one, and the marks it loaded, to the next daemon: each plays once and none is reported missed', async (t) => {
+  // The first daemon hands two alerts to the app, which never acknowledges them, and is killed.
+  const { context, stream } = await daemonWithSink(t, partSpawn(), { handler: true });
+  await twoAlertsInOneRun(context);
+  await stream.waitFor(() => alertsOf(stream).length === 2);
+  const first = filesLeftByKill(t, context);
+  const { handoffs, marks } = scheduler(first);
+  assert.equal(handoffs.length, 2);
+  assert.ok(marks.length);
+
+  // Seconds later the next one replays them, and is killed as its sink spawns the first process.
+  const at = context.clock.now() + 5_000;
+  let left;
+  const replaying = partSpawn({ hold: (started) => started.length === 1 && ((left = filesLeftByKill(t, { dataDir: first })), true) });
+  await hearing(t, first, at, replaying, { breakingPlays: true });
+  assert.ok(left);
+  assert.deepEqual(scheduler(left).plays.map(({ alert }) => alert.kind).sort(), ['finish', 'segment']);
+  assert.deepEqual(scheduler(left).marks, marks);
+
+  const { spawner: after, heard } = await hearing(t, left, at);
+  await eventually(() => after.started.length === BOTH_ALERTS.length);
+  await settle();
+  assert.deepEqual([heard.sort(), after.started.sort()], [['finish', 'segment'], BOTH_ALERTS]);
+  replaying.release();
+});
+
+test('while plays.json cannot be written, a daemon killed as its sink spawns the first of several alerts a scheduler run plays with no handler leaves every one to the next daemon: each plays once', async (t) => {
+  let context;
+  let left;
+  const spawner = partSpawn({ hold: (started) => started.length === 1 && ((left = filesLeftByKill(t, context)), true) });
+  ({ context } = await daemonWithSink(t, spawner));
+  breakPlays(context);
+  await twoAlertsInOneRun(context);
+  assert.ok(left);
+  // The marks it saved are past both transitions, so the plays are all that hold them.
+  assert.deepEqual(scheduler(left).plays.map(({ alert }) => alert.kind).sort(), ['finish', 'segment']);
+
+  const { spawner: after, heard } = await hearing(t, left, context.clock.now());
+  await eventually(() => after.started.length === BOTH_ALERTS.length);
+  await settle();
+  assert.deepEqual([heard.sort(), after.started.sort()], [['finish', 'segment'], BOTH_ALERTS]);
+  spawner.release();
+});
+
 test('a handback after the app finished some parts, then a crash as the sink is called while plays.json cannot be written, has the next daemon play only the rest: scheduler.json already carries the play', async (t) => {
   const spawner = partSpawn();
   const { context, stream } = await daemonWithSink(t, spawner, { handler: true });

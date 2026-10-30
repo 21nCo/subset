@@ -81,7 +81,8 @@ const withoutParts = (started, parts) => Object.fromEntries(Object.entries(start
  * and answers 410 for it. While the journal cannot be written, every save carries it, and a failed
  * write is followed by a save at once, so no handoff is retired without a record of its play; a
  * failed write of a play's start is followed by that save before the sink is called, so a daemon
- * that ends as the sink spawns its first process has left the play in `scheduler.json`.
+ * that ends as the sink spawns its first process has left the play in `scheduler.json`; plays
+ * started together (`replay`, `deliverAll`) are all journaled before that save and the sink (`stage`).
  * `delivered(key)` says whether a journaled play stands for a transition, for the scheduler.
  *
  * Every sink path of a pending alert (the acknowledgement timeout, unregistering, disconnecting,
@@ -136,6 +137,8 @@ export function createAlertHandlers({
   const heldDone = new Map();
   let stopped = false;
   let saveRequested = false;
+  /** While `stage` runs: whether a journal write failed, and the plays it starts once that is saved. */
+  let staged = null;
   const monotonic = () => (clock.monotonic ?? clock.now)();
 
   /** Forgets the fallbacks last asked about more than `SETTLED_RETENTION_MS` ago. */
@@ -244,7 +247,7 @@ export function createAlertHandlers({
   /**
    * Plays `alertId` through the sink unless stopped, journaled first, skipping the parts already
    * `played` (by a handler, or by an earlier play the journal holds). `stop()` waits for each play
-   * this starts.
+   * this starts. Within `stage`, the sink is called only once every play it begins is journaled.
    */
   function play(alertId, alert, timer, { subscriberId = null, keys = [], played = [], started = {} } = {}) {
     if (stopped) return;
@@ -254,8 +257,33 @@ export function createAlertHandlers({
       if (isLockLost(error)) return;
       // scheduler.json carries the play before the sink spawns anything; when it cannot be saved
       // either, the sink still plays it while this daemon runs, and every later save carries it.
-      if (error) saveAfterFallback();
+      if (error && staged) staged.carry = true;
+      else if (error) saveAfterFallback();
     }
+    if (staged) staged.plays.push(() => startPlay(alertId, alert, timer));
+    else startPlay(alertId, alert, timer);
+  }
+
+  /**
+   * Runs `begin`, which plays several alerts, journaling each first, then saves `scheduler.json`
+   * once if a journal write failed, so it carries all of them, and only then calls the sink for
+   * them. A save after the first play would hold none of the alerts not yet journaled, while it
+   * saves marks past them (a scheduler run) or drops them as handoffs (`replay`), and a daemon that
+   * ends as the sink spawns would lose them.
+   */
+  function stage(begin) {
+    const batch = { carry: false, plays: [] };
+    staged = batch;
+    try {
+      begin();
+    } finally {
+      staged = null;
+      if (batch.carry) saveAfterFallback();
+      for (const start of batch.plays) start();
+    }
+  }
+
+  function startPlay(alertId, alert, timer) {
     const running = playRest(alertId, alert, timer);
     playing.add(running);
     // Neither settle's, awaitHandler's nor deliverToSink's promise rejects.
@@ -466,6 +494,13 @@ export function createAlertHandlers({
       publish({ ...alert, alertId, ackRequired: true, timerName: timer.name, sound: timer.sound });
     },
 
+    /** Delivers each `{ alert, timer, keys }` of a scheduler run (`deliver`), its sink plays staged (`stage`). */
+    deliverAll(alerts) {
+      stage(() => {
+        for (const { alert, timer, keys } of alerts) this.deliver(alert, timer, keys);
+      });
+    },
+
     /**
      * The handler `subscriberId` takes `alertId`, once that is saved; a failed save throws and
      * leaves the alert pending. Acknowledging an alert it already took is a no-op, so a retried
@@ -660,19 +695,22 @@ export function createAlertHandlers({
     replay(saved) {
       // scheduler.json may hold the only copy of these, and the next save of it drops that copy.
       journal.recover();
-      for (const { alertId, alert, timer, played = [], started = {} } of saved) {
-        if (journal.has(alertId)) continue;
-        const rest = played.length ? ` the parts its handler did not finish (${played.join(', ')} finished)` : ' it';
-        log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was unacknowledged when the last daemon ended; the ${sink.name} sink plays${rest}.`);
-        play(alertId, alert, timer, { played, started });
-      }
-      const resumed = leftUnfinished;
-      leftUnfinished = [];
-      for (const { alertId, alert, timer } of resumed) {
-        const played = [...journal.played(alertId)];
-        log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was playing when the last daemon ended${played.length ? ` (${played.join(', ')} done)` : ''}; the ${sink.name} sink plays the rest.`);
-        play(alertId, alert, timer);
-      }
+      // Every one is journaled before a save or the sink: such a save keeps no handoff of `saved`.
+      stage(() => {
+        for (const { alertId, alert, timer, played = [], started = {} } of saved) {
+          if (journal.has(alertId)) continue;
+          const rest = played.length ? ` the parts its handler did not finish (${played.join(', ')} finished)` : ' it';
+          log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was unacknowledged when the last daemon ended; the ${sink.name} sink plays${rest}.`);
+          play(alertId, alert, timer, { played, started });
+        }
+        const resumed = leftUnfinished;
+        leftUnfinished = [];
+        for (const { alertId, alert, timer } of resumed) {
+          const played = [...journal.played(alertId)];
+          log(`alert ${alertId} (${alert.kind} of ${alert.timerId}) was playing when the last daemon ended${played.length ? ` (${played.join(', ')} done)` : ''}; the ${sink.name} sink plays the rest.`);
+          play(alertId, alert, timer);
+        }
+      });
     },
 
     /**

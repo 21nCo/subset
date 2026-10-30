@@ -139,9 +139,12 @@ export function createScheduler({ clock = systemClock, getTimers, onRun, initial
   return {
     run,
     stop,
-    /** The marks of the running stretches, as `initialMarks` takes them. */
+    /**
+     * The marks of the running stretches, as `initialMarks` takes them: before the first run, the
+     * `initialMarks`, so a save then keeps them.
+     */
     get marks() {
-      return [...marks.values()];
+      return firstRun ? [...persisted] : [...marks.values()];
     },
     /**
      * The marks the next run at `now` would give `timers`' running stretches, so they can be saved

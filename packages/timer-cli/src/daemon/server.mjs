@@ -270,7 +270,7 @@ export async function startDaemon({
       if (!stillHeld()) return;
       // An alert handed to the handler is saved below with the marks that pass it, so a daemon that
       // ends before it is acknowledged leaves it for the next daemon to play.
-      for (const { alert, timer, keys } of alerts) alertHandlers.deliver(alert, timer, keys);
+      alertHandlers.deliverAll(alerts);
       const current = scheduler.marks;
       const stretchesChanged = current.length !== savedStretches.size || current.some((mark) => !savedStretches.has(stretchKey(mark)));
       // A save that failed is retried at every later run, so a restart never reports as missed
