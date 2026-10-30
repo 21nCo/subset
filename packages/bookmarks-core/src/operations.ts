@@ -64,7 +64,7 @@ export interface BookmarkOperations {
   retryDetails(id: string): Promise<Bookmark>;
   /** Saves parsed import items the way `addBookmark` saves a URL, many at a time. */
   importBookmarks(input: ParsedImport | readonly ImportItem[]): Promise<ImportResult>;
-  /** Every bookmark as a Netscape bookmark file, oldest first. */
+  /** Every bookmark as a Netscape bookmark file, by apiId; `ADD_DATE` is its `addedAt`, else its `createdAt`. */
   exportNetscape(): Promise<string>;
 }
 
@@ -96,6 +96,8 @@ interface ImportEntry {
   tags: TagInput[];
   unread: boolean;
   archived: boolean;
+  /** Epoch milliseconds, or null when the exporter gave no date. */
+  addedAt: number | null;
 }
 
 /** An import entry and the bookmark that has its URL. */
@@ -139,9 +141,14 @@ function toImportEntry(item: unknown, position: number, add: (warning: ImportWar
     notes: clampText(record.notes, 'notes', MAX_NOTES_LENGTH, warn),
     tags: [...tags.values()],
     unread: record.unread === true,
-    archived: record.archived === true
+    archived: record.archived === true,
+    // An exporter writes 0 for a date it does not know.
+    addedAt: typeof record.addedAt === 'number' && Number.isSafeInteger(record.addedAt) && record.addedAt > 0 ? record.addedAt : null
   };
 }
+
+/** The earlier of two dates either of which may be unknown. */
+const earliest = (a: number | null, b: number | null) => (a === null ? b : b === null ? a : Math.min(a, b));
 
 /** The details of a bookmark whose page changed: none yet, and a fetch pending. */
 const CLEARED_DETAILS = { details: null, detailsState: 'pending', detailsError: null, detailsFetchedAt: null, faviconKey: null };
@@ -234,6 +241,7 @@ function toBookmark(row: Row): Bookmark {
     detailsError: toOptionalString(row.detailsError),
     detailsFetchedAt: toOptionalNumber(row.detailsFetchedAt),
     faviconKey: toOptionalString(row.faviconKey),
+    addedAt: toOptionalNumber(row.addedAt),
     createdAt: toNumber(row.createdAt),
     updatedAt: toNumber(row.updatedAt),
     tags: tags.sort((a, b) => (a.nameKey < b.nameKey ? -1 : a.nameKey > b.nameKey ? 1 : 0))
@@ -921,30 +929,49 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     throw new BookmarkError('conflict', 'Could not retry the details because of concurrent writes; try again');
   }
 
-  /** The ids of the saved bookmarks with these canonical URLs. */
-  async function bookmarkIdsByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, string>> {
-    const found = new Map<string, string>();
+  /** The saved bookmarks with these canonical URLs: their ids and when they were added (`addedAt`, else `createdAt`). */
+  async function bookmarksByCanonicalUrl(canonicalUrls: string[]): Promise<Map<string, { id: string; added: number }>> {
+    const found = new Map<string, { id: string; added: number }>();
     for (const chunk of chunks(canonicalUrls)) {
-      const rows = await query({ resource: 'bookmarks', select: ['id', 'canonicalUrl'], filters: { canonicalUrl: { $in: chunk } }, limit: PAGE_SIZE });
-      for (const row of rows) found.set(String(row.canonicalUrl), String(row.id));
+      const select = ['id', 'canonicalUrl', 'addedAt', 'createdAt'];
+      for (const row of await query({ resource: 'bookmarks', select, filters: { canonicalUrl: { $in: chunk } }, limit: PAGE_SIZE })) {
+        found.set(String(row.canonicalUrl), { id: String(row.id), added: toOptionalNumber(row.addedAt) ?? toNumber(row.createdAt) });
+      }
     }
     return found;
   }
 
   /**
+   * Gives a saved bookmark an import entry's date when the entry says it was added earlier: a URL saved twice keeps
+   * the earliest date. One deleted meanwhile is left to the tagging, which reports it.
+   */
+  async function keepEarliestAdded(saved: { id: string; added: number }, entry: ImportEntry): Promise<void> {
+    if (entry.addedAt === null || entry.addedAt >= saved.added) return;
+    try {
+      await mergeExisting('bookmarks', saved.id, { addedAt: entry.addedAt });
+    } catch (error) {
+      if (!isGuardConflict(error)) throw error;
+    }
+  }
+
+  /**
    * Saves one batch of import entries, as `addBookmark` saves one URL: in the per-executor chain, entries already
    * saved are found, and the rest get one claimed range of apiIds and are inserted in one datafn batch. An insert
-   * that fails because another process saved the URL meanwhile makes that entry an existing one.
+   * that fails because another process saved the URL meanwhile makes that entry an existing one. An existing
+   * bookmark takes the entry's date when that is earlier.
    */
   function saveImportBatch(batch: ImportEntry[]) {
     return serialized(executor, async (): Promise<{ created: SavedEntry[]; existing: SavedEntry[] }> => {
-      const found = await bookmarkIdsByCanonicalUrl(batch.map((entry) => entry.canonicalUrl));
+      const found = await bookmarksByCanonicalUrl(batch.map((entry) => entry.canonicalUrl));
       const existing: SavedEntry[] = [];
       const fresh: ImportEntry[] = [];
       for (const entry of batch) {
-        const id = found.get(entry.canonicalUrl);
-        if (id === undefined) fresh.push(entry);
-        else existing.push({ id, entry });
+        const saved = found.get(entry.canonicalUrl);
+        if (saved === undefined) fresh.push(entry);
+        else {
+          await keepEarliestAdded(saved, entry);
+          existing.push({ id: saved.id, entry });
+        }
       }
       if (fresh.length === 0) return { created: [], existing };
       const first = await allocateApiIds(fresh.length);
@@ -962,6 +989,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
             notes: entry.notes,
             unread: entry.unread,
             archived: entry.archived,
+            addedAt: entry.addedAt,
             ...CLEARED_DETAILS,
             // Only an untitled bookmark needs its details for a title; one with a title is not fetched.
             detailsState: entry.title === null ? 'pending' : 'ready',
@@ -972,11 +1000,12 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       const created = rows.filter((_, index) => inserted[index]);
       const failed = rows.filter((_, index) => !inserted[index]);
       if (failed.length > 0) {
-        const now = await bookmarkIdsByCanonicalUrl(failed.map(({ entry }) => entry.canonicalUrl));
+        const now = await bookmarksByCanonicalUrl(failed.map(({ entry }) => entry.canonicalUrl));
         for (const { entry } of failed) {
-          const id = now.get(entry.canonicalUrl);
-          if (id === undefined) throw new Error(`Saving the bookmark for ${entry.url} failed`);
-          existing.push({ id, entry });
+          const saved = now.get(entry.canonicalUrl);
+          if (saved === undefined) throw new Error(`Saving the bookmark for ${entry.url} failed`);
+          await keepEarliestAdded(saved, entry);
+          existing.push({ id: saved.id, entry });
         }
       }
       return { created: created.map(({ id, entry }) => ({ id, entry })), existing };
@@ -1030,7 +1059,11 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
       }
     }
 
-    for (const tagId of (await mergeTargets([...holders.keys()])).keys()) for (const id of holders.get(tagId) ?? []) oneByOne.add(id);
+    // A held tag merged away, or deleted without a merge since it was linked (taking its links), is given again.
+    const held = [...holders.keys()];
+    const recorded = await mergeTargets(held);
+    const live = await existingTagIds(held);
+    for (const tagId of held) if (recorded.has(tagId) || !live.has(tagId)) for (const id of holders.get(tagId) ?? []) oneByOne.add(id);
     for (const id of oneByOne) {
       const entry = entries.get(id) as ImportEntry;
       const bookmark = await getBookmark(id);
@@ -1078,6 +1111,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         return;
       }
       merged++;
+      earlier.entry.addedAt = earliest(earlier.entry.addedAt, entry.addedAt);
       for (const tag of entry.tags) {
         if (earlier.keys.has(tag.nameKey)) continue;
         earlier.keys.add(tag.nameKey);
@@ -1118,6 +1152,7 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         tags: bookmark.tags.map((tag) => tag.name),
         unread: bookmark.unread,
         archived: bookmark.archived,
+        addedAt: bookmark.addedAt,
         createdAt: bookmark.createdAt,
         updatedAt: bookmark.updatedAt
       }))

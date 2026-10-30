@@ -38,7 +38,8 @@ export const bookmarksSchema = defineSchema({
         { name: 'detailsError', type: 'string', required: false, nullable: true },
         { name: 'detailsFetchedAt', type: 'date', required: false, nullable: true },
         { name: 'faviconKey', type: 'string', required: false, nullable: true },
-        { name: 'detailsRequest', type: 'string', required: false, nullable: true }
+        { name: 'detailsRequest', type: 'string', required: false, nullable: true },
+        { name: 'addedAt', type: 'date', required: false, nullable: true }
       ]
     },
     {
@@ -92,7 +93,9 @@ export const bookmarksTables = {
       // A fresh id each time the details are asked for again after the add; null until then.
       detailsRequest: { type: 'string' },
       createdAt: { ...epochMs, required: true },
-      updatedAt: { ...epochMs, required: true }
+      updatedAt: { ...epochMs, required: true },
+      // When an imported bookmark was added where it came from; added by migration 0002.
+      addedAt: epochMs
     },
     indexes: [
       { name: 'bookmarks_ns_canonical_url', fields: [NAMESPACE_COLUMN, 'canonicalUrl'], unique: true },

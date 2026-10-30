@@ -30,7 +30,16 @@ async function saved(host) {
     after = Number(data.at(-1).apiId);
   }
   const bookmarks = await Promise.all(ids.map((id) => host.ops.getBookmark(id)));
-  return bookmarks.map(({ url, userTitle, notes, unread, archived, tags }) => ({ url, userTitle, notes, unread, archived, tags: tags.map((tag) => tag.name) }));
+  // The date an export writes: addedAt, else createdAt, in whole seconds.
+  return bookmarks.map(({ url, userTitle, notes, unread, archived, tags, addedAt, createdAt }) => ({
+    url,
+    userTitle,
+    notes,
+    unread,
+    archived,
+    tags: tags.map((tag) => tag.name),
+    added: addedAt ?? Math.floor(createdAt / 1000) * 1000
+  }));
 }
 
 async function byUrl(host, url) {
@@ -85,7 +94,16 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(linkding.unread, true);
       const quotes = await byUrl(host, 'https://example.org/q');
       assert.equal(quotes.archived, true);
+      assert.equal(quotes.unread, false);
       assert.equal(quotes.userTitle, 'Quotes, "commas" and line breaks');
+      // Pocket's status=unread stays unread, and its time_added is kept apart from the import time.
+      const pocket = await byUrl(host, 'https://example.com/nothing?utm_medium=social');
+      assert.equal(pocket.unread, true);
+      assert.equal(pocket.addedAt, 1_700_000_000_000);
+      assert.equal(rust.addedAt, 1_700_000_240_000);
+      assert.ok(rust.createdAt > rust.addedAt + 1_000_000);
+      // Safari writes no ADD_DATE.
+      assert.equal((await byUrl(host, 'https://www.apple.com/')).addedAt, null);
     });
 
     test('a link in 40 nested folders is saved with every folder as a tag', async () => {
@@ -171,6 +189,12 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         const original = await saved(source);
         assert.deepEqual(result, { added: original.length, merged: 0, skipped: 0, warnings: [] });
         assert.deepEqual(await saved(target), original);
+        // The date travels as the exporter's, not the time of either import.
+        const rust = await byUrl(target, 'https://doc.rust-lang.org/book/');
+        assert.equal(rust.addedAt, 1_700_000_240_000);
+        assert.ok(rust.createdAt > rust.addedAt + 1_000_000);
+        const added = await byUrl(target, 'https://notes.example/');
+        assert.equal(added.addedAt, Math.floor(bookmark.createdAt / 1000) * 1000);
         // The archived marker is not a tag, and importing the export where it came from changes nothing.
         assert.ok(!original.some((entry) => entry.tags.includes('linkding:bookmarks.archived')));
         assert.deepEqual(await source.ops.importBookmarks(parseImport(exported, 'netscape-html')), { added: 0, merged: original.length, skipped: 0, warnings: [] });
@@ -179,6 +203,50 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         await source.close();
         await target.close();
       }
+    });
+
+    test('a URL saved twice keeps the earliest date it was added', async () => {
+      const result = await host.ops.importBookmarks([
+        { url: 'https://dates.example/a', title: 'A', addedAt: 1_600_000_000_000 },
+        { url: 'https://dates.example/a#again', addedAt: 1_500_000_000_000 },
+        { url: 'https://dates.example/a?utm_source=x', addedAt: 1_550_000_000_000 },
+        { url: 'https://dates.example/b', title: 'B', addedAt: 0 }
+      ]);
+      assert.deepEqual(result, { added: 2, merged: 2, skipped: 0, warnings: [] });
+      const a = await byUrl(host, 'https://dates.example/a');
+      assert.equal(a.addedAt, 1_500_000_000_000);
+      assert.equal((await byUrl(host, 'https://dates.example/b')).addedAt, null);
+      // A later date leaves a saved bookmark as it is; an earlier one, also than an added bookmark's createdAt, is kept.
+      await host.ops.importBookmarks([{ url: 'https://dates.example/a', addedAt: 1_700_000_000_000 }]);
+      assert.equal((await host.ops.getBookmark(a.id)).addedAt, 1_500_000_000_000);
+      await host.ops.importBookmarks([{ url: 'https://dates.example/a', addedAt: 1_400_000_000_000 }]);
+      assert.equal((await host.ops.getBookmark(a.id)).addedAt, 1_400_000_000_000);
+      const { bookmark } = await host.ops.addBookmark('https://dates.example/added', { title: 'Added' });
+      assert.equal(bookmark.addedAt, null);
+      await host.ops.importBookmarks([{ url: 'https://dates.example/added', addedAt: bookmark.createdAt + 60_000 }]);
+      assert.equal((await host.ops.getBookmark(bookmark.id)).addedAt, null);
+      await host.ops.importBookmarks([{ url: 'https://dates.example/added', addedAt: 1_300_000_000_000 }]);
+      assert.equal((await host.ops.getBookmark(bookmark.id)).addedAt, 1_300_000_000_000);
+    });
+
+    test('a tag deleted without a merge after the import linked it is given again', async () => {
+      const doomed = (await host.ops.addBookmark('https://doomed.example/seed', { tags: ['Doomed'] })).bookmark.tags[0];
+      const importer = createBookmarkOperations({
+        executor: hookedExecutor(host.server.executor, {
+          afterMutate: async (payload) => {
+            if (payload.resource === 'tags' && payload.operation === 'relate' && payload.id === doomed.id) {
+              await host.server.executor.mutate({ version: 1, resource: 'tags', operation: 'delete', id: doomed.id }, { userId: 'owner' });
+            }
+          }
+        }),
+        detailsQueue: recordingQueue(),
+        context: { userId: 'owner' }
+      });
+      const result = await importer.importBookmarks([{ url: 'https://doomed.example/imported', title: 'Imported', tags: ['doomed'] }]);
+      assert.deepEqual(result, { added: 1, merged: 0, skipped: 0, warnings: [] });
+      const imported = await byUrl(host, 'https://doomed.example/imported');
+      assert.deepEqual(imported.tags.map((tag) => tag.name), ['doomed']);
+      assert.notEqual(imported.tags[0].id, doomed.id);
     });
 
     test('an import claims consecutive apiIds after the last one, which later adds continue', async () => {

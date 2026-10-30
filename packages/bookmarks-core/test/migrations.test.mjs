@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import Database from 'better-sqlite3';
 import { bookmarksTables } from '../dist/index.js';
-import { DIALECTS, INITIAL_MIGRATION, renderMigration } from '../scripts/generate-migrations.mjs';
+import { DIALECTS, INITIAL_MIGRATION, MIGRATIONS, renderMigration, renderMigrations } from '../scripts/generate-migrations.mjs';
 import { migrationSql } from './support.mjs';
 
 const tableNames = Object.keys(bookmarksTables).sort();
@@ -14,8 +14,31 @@ const uniqueIndexes = Object.values(bookmarksTables).flatMap((table) =>
 
 test('the checked-in migrations are the generator output', () => {
   assert.equal(INITIAL_MIGRATION, '0001_initial.sql');
+  assert.deepEqual(MIGRATIONS, ['0001_initial.sql', '0002_bookmarks_added_at.sql']);
   for (const dialect of DIALECTS) {
-    assert.equal(migrationSql(dialect), renderMigration(bookmarksTables, dialect), `migrations/${dialect} is stale: run npm run migrations`);
+    const rendered = renderMigrations(bookmarksTables, dialect);
+    assert.deepEqual([...rendered.keys()], MIGRATIONS);
+    for (const [name, sql] of rendered) assert.equal(migrationSql(dialect, [name]), sql, `migrations/${dialect}/${name} is stale: run npm run migrations`);
+  }
+});
+
+test('a database made by 0001 keeps its bookmarks through 0002, which adds addedAt', async () => {
+  const row = `INSERT INTO bookmarks (id, __ns, "apiId", url, "canonicalUrl", unread, archived, "detailsState", "createdAt", "updatedAt")
+    VALUES ('b1', 'u1', 1, 'https://a.example/', 'https://a.example/', false, false, 'ready', 5, 5)`;
+  const db = new Database(':memory:');
+  db.exec(migrationSql('sqlite', ['0001_initial.sql']));
+  db.exec(row.replace(/false/g, '0'));
+  db.exec(migrationSql('sqlite', ['0002_bookmarks_added_at.sql']));
+  assert.deepEqual({ ...db.prepare('SELECT id, "createdAt", "addedAt" FROM bookmarks').get() }, { id: 'b1', createdAt: 5, addedAt: null });
+  db.close();
+  const pg = new PGlite();
+  try {
+    await pg.exec(migrationSql('postgres', ['0001_initial.sql']));
+    await pg.exec(row);
+    await pg.exec(migrationSql('postgres', ['0002_bookmarks_added_at.sql']));
+    assert.deepEqual((await pg.query('SELECT id, "createdAt"::int AS "createdAt", "addedAt" FROM bookmarks')).rows, [{ id: 'b1', createdAt: 5, addedAt: null }]);
+  } finally {
+    await pg.close();
   }
 });
 

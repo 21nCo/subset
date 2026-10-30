@@ -34,7 +34,8 @@ function* csvRows(text: string): Generator<string[]> {
 
 /**
  * Reads Pocket's CSV export (`title,url,time_added,tags,status`, columns found by their header). Tags are separated
- * by `|`, `status` `archive` makes the item archived, and a title that is just the URL (Pocket's placeholder) is none.
+ * by `|`, `status` `unread` makes the item unread and `archive` archived, and a title that is just the URL (Pocket's
+ * placeholder) is none.
  */
 export function parsePocketCsv(text: string): ParsedImport {
   const rows = csvRows(text);
@@ -54,6 +55,7 @@ export function parsePocketCsv(text: string): ParsedImport {
     const field = (index: number) => (index === -1 ? '' : (row[index] ?? '').trim());
     const link = field(url);
     const name = field(title).replace(/\s+/g, ' ');
+    const state = field(status).toLowerCase();
     items.push({
       url: link,
       title: name === '' || name === link ? null : name,
@@ -62,8 +64,8 @@ export function parsePocketCsv(text: string): ParsedImport {
         .split('|')
         .map(toTagName)
         .filter((tag): tag is string => tag !== null),
-      unread: false,
-      archived: field(status).toLowerCase() === 'archive',
+      unread: state === 'unread',
+      archived: state === 'archive',
       addedAt: toEpochMs(field(timeAdded))
     });
   }

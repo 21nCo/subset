@@ -23,8 +23,8 @@ export interface ImportItem {
   unread?: boolean;
   archived?: boolean;
   /**
-   * When the exporter says the bookmark was added, in epoch milliseconds. datafn sets `createdAt` itself on insert,
-   * so an import does not keep it yet.
+   * When the exporter says the bookmark was added, in epoch milliseconds: saved as the bookmark's `addedAt`, which
+   * the export writes as `ADD_DATE`. datafn sets `createdAt` itself, to the time of the import.
    */
   addedAt?: number | null;
 }

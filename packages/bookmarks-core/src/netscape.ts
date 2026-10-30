@@ -7,10 +7,18 @@ const LINKDING_NOTES = /\[linkding-notes\]([\s\S]*?)(?:\[\/linkding-notes\]|$)/;
 
 /**
  * Safari does not mark its toolbar folder, so a folder with one of its names is taken to be it when it is outside
- * any `<DL>`, as only Safari writes its top-level folders. Other browsers mark theirs with
+ * any `<DL>`, as only Safari writes its top-level folders. Safari writes the name in the Mac's language, so the
+ * names are those of its Favorites in the languages it ships in, lowercased. Other browsers mark theirs with
  * `PERSONAL_TOOLBAR_FOLDER="true"`.
  */
-const SAFARI_TOOLBAR_NAMES = new Set(['favorites', 'favourites', 'favorites bar', 'favourites bar']);
+const SAFARI_TOOLBAR_NAMES = new Set([
+  ...['favorites', 'favourites', 'favorites bar', 'favourites bar'],
+  // German, French, Spanish and Portuguese, Italian, Dutch, Swedish, Danish and Norwegian, Finnish, Polish, Czech,
+  // Hungarian, Turkish, Russian, Ukrainian, Greek, Japanese, Chinese (simplified, traditional), Korean, Arabic, Hebrew.
+  ...['favoriten', 'favoris', 'favoritos', 'preferiti', 'favorieten', 'favoriter', 'favoritter', 'suosikit', 'ulubione'],
+  ...['oblíbené', 'kedvencek', 'favoriler', 'избранное', 'вибране', 'αγαπημένα', 'お気に入り', '个人收藏', '個人收藏'],
+  ...['즐겨찾기', 'المفضلة', 'מועדפים']
+]);
 
 /**
  * Most folder tags a file may give its items in all: each item counts one per distinct enclosing folder. A file over
@@ -20,7 +28,10 @@ const SAFARI_TOOLBAR_NAMES = new Set(['favorites', 'favourites', 'favorites bar'
 export const MAX_FOLDER_TAG_REFERENCES = 2_000_000;
 
 const tooManyFolderTags = () =>
-  new BookmarkError('too-large', `The file's folders give its bookmarks more than ${MAX_FOLDER_TAG_REFERENCES.toLocaleString('en-US')} tags in all`);
+  new BookmarkError(
+    'too-large',
+    `The file's folders give its bookmarks more than ${MAX_FOLDER_TAG_REFERENCES.toLocaleString('en-US')} tags in all (MAX_FOLDER_TAG_REFERENCES)`
+  );
 
 const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
@@ -59,15 +70,18 @@ interface TagToken {
 }
 
 /**
- * The start and end tags of `text`, skipping comments. A quoted value runs to its closing quote, also past `>`, as
- * in HTML; a quote that is never closed runs to the end. Each character is read once, so a malformed file of any size
- * is read in linear time.
+ * The start and end tags of `text`, and its comments (named `!--`), so their text is not read as element text. A
+ * comment that is never closed runs to the end, as in HTML. A quoted value runs to its closing quote, also past `>`,
+ * as in HTML; a quote that is never closed runs to the end. Each character is read once, so a malformed file of any
+ * size is read in linear time.
  */
 function* scanTags(text: string): Generator<TagToken> {
   for (let at = text.indexOf('<'); at !== -1; ) {
     if (text.startsWith('<!--', at)) {
       const close = text.indexOf('-->', at + 4);
-      at = close === -1 ? -1 : text.indexOf('<', close + 3);
+      const end = close === -1 ? text.length : close + 3;
+      yield { start: at, end, closing: false, name: '!--', attributes: '' };
+      at = text.indexOf('<', end);
       continue;
     }
     const closing = text[at + 1] === '/';
@@ -93,10 +107,14 @@ function* scanTags(text: string): Generator<TagToken> {
   }
 }
 
-/** Tags that end a `<DD>` note, or a link or folder whose end tag is missing: the next entry or list. */
-const ENDS_ENTRY = new Set(['DT', 'DD', 'DL', 'H1', 'H3', 'HR', 'A']);
+/**
+ * Tags that end a `<DD>` note, or a link or folder whose end tag is missing: the next entry or list. A link in a note
+ * is part of the note, so only a link or folder ends at an `<A>`.
+ */
+const ENDS_NOTE = new Set(['DT', 'DD', 'DL', 'H1', 'H3', 'HR']);
+const ENDS_ENTRY = new Set([...ENDS_NOTE, 'A']);
 const ENDS_ENTRY_CLOSING = new Set(['DL', 'BODY', 'HTML']);
-const endsEntry = (tag: TagToken) => (tag.closing ? ENDS_ENTRY_CLOSING : ENDS_ENTRY).has(tag.name);
+const endsEntry = (tag: TagToken, ends = ENDS_ENTRY) => (tag.closing ? ENDS_ENTRY_CLOSING : ends).has(tag.name);
 
 /**
  * Element text as a browser shows it: each run of HTML whitespace (space, tab, line feed, form feed, carriage return)
@@ -110,6 +128,7 @@ const collapse = (text: string) => decodeEntities(text.replace(/[ \t\n\f\r]+/g, 
  * separated), `ADD_DATE` and `TOREAD="1"` as unread, and the `<DD>` right after it as notes. The name of each
  * enclosing `<H3>` folder becomes a tag, except the browser toolbar folder. linkding's `linkding:bookmarks.archived`
  * tag makes the item archived, and the `[linkding-notes]` part of its `<DD>` follows the description in the notes.
+ * Comments are not text, and the text of a link inside a note is part of the note.
  */
 export function parseNetscape(text: string): ParsedImport {
   const head = text.replace(/^(?:\s|<!--[\s\S]*?-->)*/, '');
@@ -143,7 +162,9 @@ export function parseNetscape(text: string): ParsedImport {
   const finishFolder = () => {
     const title = collapse(buffer);
     const safariTopLevel = folders.length === 0;
-    const toolbar = attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' || (safariTopLevel && SAFARI_TOOLBAR_NAMES.has(title.toLowerCase()));
+    const toolbar =
+      attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' ||
+      (safariTopLevel && SAFARI_TOOLBAR_NAMES.has(title.normalize('NFC').toLowerCase()));
     nextFolder = toolbar ? null : toTagName(title);
     if (!toolbar && nextFolder === null && title !== '') warnings.push({ message: `Folder ${JSON.stringify(title)} gives no tag name` });
     mode = 'text';
@@ -159,6 +180,7 @@ export function parseNetscape(text: string): ParsedImport {
     if (mode !== 'text') buffer += text.slice(last, tag.start);
     last = tag.end;
     const { closing, name } = tag;
+    if (name === '!--') continue;
 
     // A folder name or link text ends at its end tag or, when that is missing, at the next entry or the end of its
     // list, which is then read as usual; other markup in it is dropped.
@@ -176,8 +198,8 @@ export function parseNetscape(text: string): ParsedImport {
     }
     if (mode === 'note') {
       if (name === 'BR' && !closing) buffer += '\n';
-      // A note ends at the next entry or at the end of its list; other markup in it is dropped.
-      if (!endsEntry(tag)) continue;
+      // A note ends at the next entry or at the end of its list; other markup in it, a link too, is dropped.
+      if (!endsEntry(tag, ENDS_NOTE)) continue;
       finishNote();
     }
 
@@ -276,7 +298,9 @@ export interface NetscapeBookmark {
   tags: string[];
   unread: boolean;
   archived: boolean;
-  /** Epoch milliseconds. */
+  /** When the exporter that the bookmark was imported from says it was added, in epoch milliseconds: its `ADD_DATE`. */
+  addedAt?: number | null;
+  /** Epoch milliseconds: the `ADD_DATE` of a bookmark with no `addedAt`. */
   createdAt: number;
   /** Epoch milliseconds. */
   updatedAt: number;
@@ -296,12 +320,17 @@ function escapeTitle(title: string): string {
   );
 }
 
-/** Escapes notes as `<DD>` text that reads back the same: `[` is a character reference, so no text is a linkding marker. */
-const escapeNotes = (notes: string) => escapeHtml(notes).replace(/\[/g, '&#91;');
+/**
+ * Escapes notes as the text of linkding's `[linkding-notes]` marker in a `<DD>`, so linkding reads them as notes, not
+ * as the page description, and they read back the same here: `[` is a character reference, so no text in them is a
+ * marker to this parser.
+ */
+const escapeNotes = (notes: string) => `[linkding-notes]${escapeHtml(notes).replace(/\[/g, '&#91;')}[/linkding-notes]`;
 
 /**
  * Writes bookmarks as a Netscape bookmark file, in linkding's form: one flat list of `<DT><A>` with `ADD_DATE`,
- * `LAST_MODIFIED`, `TOREAD`, `TAGS` (with `linkding:bookmarks.archived` for an archived bookmark) and a `<DD>` note.
+ * `LAST_MODIFIED`, `TOREAD`, `TAGS` (with `linkding:bookmarks.archived` for an archived bookmark) and a `<DD>` with
+ * the notes in linkding's notes marker.
  */
 export function renderNetscape(bookmarks: Iterable<NetscapeBookmark>): string {
   const lines = [
@@ -316,7 +345,7 @@ export function renderNetscape(bookmarks: Iterable<NetscapeBookmark>): string {
     const tags = bookmark.archived ? [...bookmark.tags, LINKDING_ARCHIVED_TAG] : bookmark.tags;
     const attributes = [
       `HREF="${escapeHtml(bookmark.url)}"`,
-      `ADD_DATE="${seconds(bookmark.createdAt)}"`,
+      `ADD_DATE="${seconds(bookmark.addedAt ?? bookmark.createdAt)}"`,
       `LAST_MODIFIED="${seconds(bookmark.updatedAt)}"`,
       `TOREAD="${bookmark.unread ? '1' : '0'}"`,
       ...(tags.length > 0 ? [`TAGS="${escapeHtml(tags.join(','))}"`] : [])

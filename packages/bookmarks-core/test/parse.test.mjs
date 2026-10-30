@@ -2,13 +2,25 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { BookmarkError, MAX_FOLDER_TAG_REFERENCES, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
+import {
+  BookmarkError,
+  MAX_FOLDER_TAG_REFERENCES,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_ITEMS,
+  normalizeTagName,
+  parseImport,
+  renderNetscape
+} from '../dist/index.js';
+import { decodeEntities } from '../dist/netscape.js';
 
 export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const throwsWith = (fn, code) => assert.throws(fn, (error) => error instanceof BookmarkError && error.code === code);
 /** The fields a test states, in a stable shape. */
 const brief = ({ url, title, notes, tags, unread, archived }) => ({ url, title, notes, tags, unread, archived });
 const link = (url, fields = {}) => ({ url, title: null, notes: null, tags: [], unread: false, archived: false, ...fields });
+
+/** The markup of the first `<DD>` in an export, up to the next entry or the end of the list. */
+const ddText = (html) => /<DD>([\s\S]*?)\n(?=<DT>|<\/DL>)/.exec(html)[1];
 
 test('Chrome: folders become tags, the bookmarks bar does not, and entities are decoded', () => {
   const { items, warnings } = parseImport(fixture('chrome.html'), 'netscape-html');
@@ -50,6 +62,30 @@ test('Safari: no top-level list, and the unmarked Favorites folder is the toolba
     link('https://www.example.net/long-read', { title: 'A Long Read', tags: ['Reading-List'] })
   ]);
   assert.equal(items[0].addedAt, null);
+});
+
+test("Safari's Favorites folder in another language is the toolbar at the top level and a tag when nested", () => {
+  for (const name of ['Favoriten', 'Favoris', 'お気に入り', '个人收藏', 'Избранное']) {
+    const html = [
+      '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+      `<DT><H3 FOLDED>${name}</H3>`,
+      '<DL><p>',
+      '<DT><A HREF="https://bar.example/">Bar</A>',
+      '<DT><H3 FOLDED>Mine</H3>',
+      '<DL><p>',
+      `<DT><H3 FOLDED>${name}</H3>`,
+      '<DL><p>',
+      '<DT><A HREF="https://nested.example/">Nested</A>',
+      '</DL><p>',
+      '</DL><p>',
+      '</DL><p>'
+    ].join('\n');
+    assert.deepEqual(
+      parseImport(html, 'netscape-html').items.map(brief),
+      [link('https://bar.example/', { title: 'Bar' }), link('https://nested.example/', { title: 'Nested', tags: ['Mine', name] })],
+      name
+    );
+  }
 });
 
 test('a top-level Favorites folder is a tag outside Safari, which alone writes folders outside a <DL>', () => {
@@ -103,6 +139,40 @@ test('linkding: TOREAD, the archived marker tag and [linkding-notes]', () => {
   assert.equal(trailing.items[0].notes, 'Before\n\ninside\n\nafter & more');
 });
 
+test('comments are not text in titles, notes or folder names', () => {
+  const html = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<DL><p>',
+    '<DT><H3>Fold<!-- <DT><A HREF="https://hidden.example/">no</A> -->er</H3>',
+    '<DL><p>',
+    '<DT><A HREF="https://a.example/">Hello<!-- hidden --> world</A>',
+    '<DD>Note <!-- secret -->kept',
+    '</DL><p>',
+    '<DT><A HREF="https://b.example/">B</A>',
+    '<DD>Open <!-- comment to the end',
+    '<DT><A HREF="https://never.example/">never</A>'
+  ].join('\n');
+  assert.deepEqual(parseImport(html, 'netscape-html').items.map(brief), [
+    link('https://a.example/', { title: 'Hello world', notes: 'Note kept', tags: ['Folder'] }),
+    link('https://b.example/', { title: 'B', notes: 'Open' })
+  ]);
+});
+
+test('a link inside a note is note text, not a bookmark', () => {
+  const html = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<DL><p>',
+    '<DT><A HREF="https://a.example/">A</A>',
+    '<DD>See <a href="https://f.example/">this</a> page<br>and <A HREF="https://g.example/">that',
+    '<DT><A HREF="https://b.example/">B</A>',
+    '</DL><p>'
+  ].join('\n');
+  assert.deepEqual(parseImport(html, 'netscape-html').items.map(brief), [
+    link('https://a.example/', { title: 'A', notes: 'See this page\nand that' }),
+    link('https://b.example/', { title: 'B' })
+  ]);
+});
+
 test('Raindrop: collections become tags along with TAGS', () => {
   const { items } = parseImport(fixture('raindrop.html'), 'netscape-html');
   assert.deepEqual(items.map(brief), [
@@ -119,16 +189,20 @@ test('Raindrop: collections become tags along with TAGS', () => {
 test('Pocket CSV: quoted fields, | tags, status=archive, and a title that is only the URL is none', () => {
   const { items, warnings } = parseImport(fixture('pocket.csv'), 'pocket-csv');
   assert.deepEqual(items.map(brief), [
-    link('https://example.com/nothing?utm_medium=social', { title: 'How to Do Nothing', tags: ['books', 'long-form'] }),
+    link('https://example.com/nothing?utm_medium=social', { title: 'How to Do Nothing', tags: ['books', 'long-form'], unread: true }),
     link('https://example.org/q', { title: 'Quotes, "commas" and line breaks', archived: true }),
-    link('https://example.net/untitled', { tags: ['reading'] }),
-    link('ftp://example.com/file.txt', { title: 'Not a web link' })
+    link('https://example.net/untitled', { tags: ['reading'], unread: true }),
+    link('ftp://example.com/file.txt', { title: 'Not a web link', unread: true })
   ]);
   assert.equal(items[0].addedAt, 1_700_000_000_000);
   assert.deepEqual(warnings, []);
   // Columns are found by name, so their order does not matter; a short row is read and reported.
-  const reordered = parseImport('url,status,title\nhttps://a.example/,archive,A\nhttps://b.example/\n', 'pocket-csv');
-  assert.deepEqual(reordered.items.map(brief), [link('https://a.example/', { title: 'A', archived: true }), link('https://b.example/')]);
+  const reordered = parseImport('url,status,title\nhttps://a.example/,archive,A\nhttps://b.example/\nhttps://c.example/,UNREAD,C\n', 'pocket-csv');
+  assert.deepEqual(reordered.items.map(brief), [
+    link('https://a.example/', { title: 'A', archived: true }),
+    link('https://b.example/'),
+    link('https://c.example/', { title: 'C', unread: true })
+  ]);
   assert.deepEqual(reordered.warnings, [{ item: 2, message: 'The row has 1 fields where the header has 3' }]);
 });
 
@@ -258,11 +332,38 @@ test('renderNetscape keeps notes with linkding markers, titles with spacing and 
     }
   ];
   const html = renderNetscape(bookmarks);
-  assert.ok(!html.includes('[linkding-notes]'));
+  // The notes are one linkding notes part with no other marker in it.
+  assert.match(ddText(html), /^\[linkding-notes\][^[]*\[\/linkding-notes\]$/);
   const { items } = parseImport(html, 'netscape-html');
   assert.deepEqual(items.map(brief), bookmarks.map(({ url, title, notes, tags, unread, archived }) => ({ url, title, notes, tags, unread, archived })));
   // A tag of that name cannot be saved, so a bookmark tagged with the marker is never exported as archived.
   throwsWith(() => normalizeTagName('Linkding:Bookmarks.Archived'), 'invalid-input');
+});
+
+/** The description and notes linkding's importer reads from a `<DD>` (bookmarks/services/parser.py, handle_dd_data). */
+function linkdingDd(html) {
+  const desc = decodeEntities(ddText(html)).trim();
+  return {
+    description: desc.split('[linkding-notes]')[0],
+    notes: desc.includes('[linkding-notes]') ? desc.split('[linkding-notes]')[1].split('[/linkding-notes]')[0] : ''
+  };
+}
+
+test('renderNetscape writes notes where linkding reads notes, not the description', () => {
+  const bookmark = { url: 'https://a.example/', title: 'A', tags: [], unread: false, archived: false, createdAt: 0, updatedAt: 0 };
+  const notes = 'Remember to follow up\non <this> & [that]';
+  const html = renderNetscape([{ ...bookmark, notes }]);
+  assert.deepEqual(linkdingDd(html), { description: '', notes });
+  assert.equal(parseImport(html, 'netscape-html').items[0].notes, notes);
+});
+
+test('renderNetscape writes addedAt as ADD_DATE, else createdAt', () => {
+  const bookmark = { url: 'https://a.example/', title: 'A', notes: null, tags: [], unread: false, archived: false, createdAt: 1_800_000_000_000, updatedAt: 1_800_000_000_000 };
+  const html = renderNetscape([{ ...bookmark, addedAt: 1_500_000_000_000 }, { ...bookmark, url: 'https://b.example/', addedAt: null }]);
+  assert.deepEqual(
+    parseImport(html, 'netscape-html').items.map((item) => item.addedAt),
+    [1_500_000_000_000, 1_800_000_000_000]
+  );
 });
 
 test('Netscape titles read like a browser: markup whitespace collapses, encoded whitespace stays', () => {

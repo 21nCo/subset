@@ -27,6 +27,11 @@ export interface Bookmark {
   /** Epoch milliseconds. */
   detailsFetchedAt: number | null;
   faviconKey: string | null;
+  /**
+   * When an imported bookmark was added where it came from (its exporter's `ADD_DATE` or `time_added`), in epoch
+   * milliseconds; null for one added here, which was added at `createdAt`.
+   */
+  addedAt: number | null;
   /** Epoch milliseconds. */
   createdAt: number;
   /** Epoch milliseconds. */
