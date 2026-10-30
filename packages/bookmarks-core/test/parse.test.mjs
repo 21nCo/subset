@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { BookmarkError, MAX_FOLDER_TAGS, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
+import { BookmarkError, MAX_FOLDER_TAG_REFERENCES, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
 
 export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const throwsWith = (fn, code) => assert.throws(fn, (error) => error instanceof BookmarkError && error.code === code);
@@ -95,6 +95,12 @@ test('linkding: TOREAD, the archived marker tag and [linkding-notes]', () => {
     link('https://www.djangoproject.com/', { title: 'Django', tags: ['python'], archived: true }),
     link('https://news.ycombinator.com/item?id=1', { title: 'Ask HN: Untitled thread', notes: 'Only a note' })
   ]);
+  // Text after linkding's notes part is kept as a further paragraph.
+  const trailing = parseImport(
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DT><A HREF="https://a.example/">a</A>\n<DD>Before [linkding-notes]inside[/linkding-notes] after &amp; more',
+    'netscape-html'
+  );
+  assert.equal(trailing.items[0].notes, 'Before\n\ninside\n\nafter & more');
 });
 
 test('Raindrop: collections become tags along with TAGS', () => {
@@ -165,7 +171,7 @@ test('malformed markup is read in linear time', () => {
   assert.deepEqual(items.map((item) => item.url), ['https://example.com/', '']);
 });
 
-test('deeply nested folders give each link a bounded set of distinct tags', () => {
+test('every distinct enclosing folder is a tag, and a file whose folders give too many tags fails', () => {
   const nest = (names) => names.map((name) => `<DT><H3>${name}</H3>\n<DL><p>\n`).join('');
   // Nested folders of one name are one tag, also in another spelling, and a link's own TAGS repeat neither.
   const same = parseImport(
@@ -175,17 +181,36 @@ test('deeply nested folders give each link a bounded set of distinct tags', () =
   assert.deepEqual(same.items.map((item) => item.tags), [['Folder', 'Other', 'x'], ['Folder']]);
   assert.deepEqual(same.warnings, []);
 
-  // 20,000 nested folders around 20,000 links: each link has the outermost MAX_FOLDER_TAGS folders, with one warning.
+  // Deep nesting loses no folder.
+  const deep = Array.from({ length: 100 }, (_, at) => `d${at}`);
+  const nested = parseImport(`<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(deep)}<DT><A HREF="https://deep.example/">d</A>\n`, 'netscape-html');
+  assert.deepEqual(nested.items.map((item) => item.tags), [deep]);
+  assert.deepEqual(nested.warnings, []);
+
+  // 20,000 nested folders around 20,000 links (1.5 MB) would hold 400 million tags: it fails as soon as it passes the
+  // budget, while every link at the budget's depth is read.
   const depth = 20_000;
-  const names = Array.from({ length: depth }, (_, at) => `f${at}`);
-  const file = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(names)}${'<DT><A HREF="https://deep.example/">d</A>\n'.repeat(20_000)}${'</DL><p>\n'.repeat(depth)}<DT><A HREF="https://after.example/">after</A>\n`;
+  const file = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(Array.from({ length: depth }, (_, at) => `f${at}`))}${'<DT><A HREF="https://deep.example/">d</A>\n'.repeat(20_000)}`;
   const started = performance.now();
-  const { items, warnings } = parseImport(file, 'netscape-html');
+  throwsWith(() => parseImport(file, 'netscape-html'), 'too-large');
   assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
-  assert.equal(items.length, 20_001);
-  assert.deepEqual(items[0].tags, names.slice(0, MAX_FOLDER_TAGS));
-  assert.ok(items.every((item, at) => item.tags.length === (at === 20_000 ? 0 : MAX_FOLDER_TAGS)));
-  assert.deepEqual(warnings, [{ message: `Folders nested more than ${MAX_FOLDER_TAGS} deep give no tags` }]);
+  const atBudget = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(Array.from({ length: 40 }, (_, at) => `f${at}`))}${'<DT><A HREF="https://deep.example/">d</A>\n'.repeat(MAX_FOLDER_TAG_REFERENCES / 40)}`;
+  assert.equal(parseImport(atBudget, 'netscape-html').items.length, MAX_IMPORT_ITEMS);
+});
+
+test('a link or folder whose end tag is missing ends at the next entry', () => {
+  const { items, warnings } = parseImport(
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n<DT><A HREF="https://a.example/">A\n<DT><A HREF="https://b.example/">B</A>\n<DT><A HREF="https://c.example/">C\n<DD>note\n<DT><H3>Open\n<DL><p>\n<DT><A HREF="https://d.example/">D\n</DL><p>\n<DT><A HREF="https://e.example/">E',
+    'netscape-html'
+  );
+  assert.deepEqual(items.map(brief), [
+    link('https://a.example/', { title: 'A' }),
+    link('https://b.example/', { title: 'B' }),
+    link('https://c.example/', { title: 'C', notes: 'note' }),
+    link('https://d.example/', { title: 'D', tags: ['Open'] }),
+    link('https://e.example/', { title: 'E' })
+  ]);
+  assert.deepEqual(warnings, []);
 });
 
 test('ADD_DATE in seconds, milliseconds or microseconds is read as epoch milliseconds', () => {

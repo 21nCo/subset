@@ -13,10 +13,14 @@ const LINKDING_NOTES = /\[linkding-notes\]([\s\S]*?)(?:\[\/linkding-notes\]|$)/;
 const SAFARI_TOOLBAR_NAMES = new Set(['favorites', 'favourites', 'favorites bar', 'favourites bar']);
 
 /**
- * Most enclosing folders that give an item tags. Deeper folders give none, with one warning, so the tags the parser
- * keeps grow with the file, not with its depth times its links.
+ * Most folder tags a file may give its items in all: each item counts one per distinct enclosing folder. A file over
+ * it fails with `too-large`, so the tags the parser keeps grow with the file, not with its depth times its links. It
+ * allows every one of 50,000 items 40 enclosing folders.
  */
-export const MAX_FOLDER_TAGS = 32;
+export const MAX_FOLDER_TAG_REFERENCES = 2_000_000;
+
+const tooManyFolderTags = () =>
+  new BookmarkError('too-large', `The file's folders give its bookmarks more than ${MAX_FOLDER_TAG_REFERENCES.toLocaleString('en-US')} tags in all`);
 
 const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
@@ -89,9 +93,10 @@ function* scanTags(text: string): Generator<TagToken> {
   }
 }
 
-/** Tags that end a `<DD>` note: the next entry or list. */
-const ENDS_NOTE = new Set(['DT', 'DD', 'DL', 'H1', 'H3', 'HR', 'A']);
-const ENDS_NOTE_CLOSING = new Set(['DL', 'BODY', 'HTML']);
+/** Tags that end a `<DD>` note, or a link or folder whose end tag is missing: the next entry or list. */
+const ENDS_ENTRY = new Set(['DT', 'DD', 'DL', 'H1', 'H3', 'HR', 'A']);
+const ENDS_ENTRY_CLOSING = new Set(['DL', 'BODY', 'HTML']);
+const endsEntry = (tag: TagToken) => (tag.closing ? ENDS_ENTRY_CLOSING : ENDS_ENTRY).has(tag.name);
 
 /**
  * Element text as a browser shows it: each run of HTML whitespace (space, tab, line feed, form feed, carriage return)
@@ -114,12 +119,13 @@ export function parseNetscape(text: string): ParsedImport {
   const items: ImportItem[] = [];
   const warnings: ImportWarning[] = [];
   // One entry per open <DL>: whether its folder added a tag to folderTags (not the top level, the toolbar, a nameless
-  // folder, one already open under another spelling or one past MAX_FOLDER_TAGS).
+  // folder or one already open under another spelling).
   const folders: boolean[] = [];
   // The distinct tags of the open folders, outermost first, and their keys.
   const folderTags: string[] = [];
   const folderKeys = new Set<string>();
-  let tooDeep = false;
+  // The folder tags the items so far have, counted against MAX_FOLDER_TAG_REFERENCES.
+  let folderTagReferences = 0;
   // The folder whose <DL> comes next: undefined when none is waiting.
   let nextFolder: string | null | undefined;
   let mode: 'text' | 'folder' | 'link' | 'note' = 'text';
@@ -134,34 +140,44 @@ export function parseNetscape(text: string): ParsedImport {
     noteTarget = null;
     mode = 'text';
   };
+  const finishFolder = () => {
+    const title = collapse(buffer);
+    const safariTopLevel = folders.length === 0;
+    const toolbar = attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' || (safariTopLevel && SAFARI_TOOLBAR_NAMES.has(title.toLowerCase()));
+    nextFolder = toolbar ? null : toTagName(title);
+    if (!toolbar && nextFolder === null && title !== '') warnings.push({ message: `Folder ${JSON.stringify(title)} gives no tag name` });
+    mode = 'text';
+  };
+  const finishLink = (title: string) => {
+    folderTagReferences += folderTags.length;
+    if (folderTagReferences > MAX_FOLDER_TAG_REFERENCES) throw tooManyFolderTags();
+    noteTarget = addLink(items, attributes, collapse(title), folderTags);
+    mode = 'text';
+  };
 
   for (const tag of scanTags(text)) {
     if (mode !== 'text') buffer += text.slice(last, tag.start);
     last = tag.end;
     const { closing, name } = tag;
 
+    // A folder name or link text ends at its end tag or, when that is missing, at the next entry or the end of its
+    // list, which is then read as usual; other markup in it is dropped.
     if (mode === 'folder') {
-      if (closing && name === 'H3') {
-        const title = collapse(buffer);
-        const safariTopLevel = folders.length === 0;
-        const toolbar = attributes.get('PERSONAL_TOOLBAR_FOLDER')?.toLowerCase() === 'true' || (safariTopLevel && SAFARI_TOOLBAR_NAMES.has(title.toLowerCase()));
-        nextFolder = toolbar ? null : toTagName(title);
-        if (!toolbar && nextFolder === null && title !== '') warnings.push({ message: `Folder ${JSON.stringify(title)} gives no tag name` });
-        mode = 'text';
-      }
-      continue;
+      const ended = closing && name === 'H3';
+      if (!ended && !endsEntry(tag)) continue;
+      finishFolder();
+      if (ended) continue;
     }
     if (mode === 'link') {
-      if (closing && name === 'A') {
-        noteTarget = addLink(items, attributes, collapse(buffer), folderTags);
-        mode = 'text';
-      }
-      continue;
+      const ended = closing && name === 'A';
+      if (!ended && !endsEntry(tag)) continue;
+      finishLink(buffer);
+      if (ended) continue;
     }
     if (mode === 'note') {
       if (name === 'BR' && !closing) buffer += '\n';
       // A note ends at the next entry or at the end of its list; other markup in it is dropped.
-      if (closing ? !ENDS_NOTE_CLOSING.has(name) : !ENDS_NOTE.has(name)) continue;
+      if (!endsEntry(tag)) continue;
       finishNote();
     }
 
@@ -175,13 +191,10 @@ export function parseNetscape(text: string): ParsedImport {
     switch (name) {
       case 'DL': {
         const key = nextFolder?.toLowerCase();
-        const counted = key !== undefined && !folderKeys.has(key) && folderTags.length < MAX_FOLDER_TAGS;
+        const counted = key !== undefined && !folderKeys.has(key);
         if (counted) {
           folderTags.push(nextFolder!);
           folderKeys.add(key);
-        } else if (key !== undefined && !folderKeys.has(key) && !tooDeep) {
-          tooDeep = true;
-          warnings.push({ message: `Folders nested more than ${MAX_FOLDER_TAGS} deep give no tags` });
         }
         folders.push(counted);
         nextFolder = undefined;
@@ -211,7 +224,7 @@ export function parseNetscape(text: string): ParsedImport {
         break;
     }
   }
-  if (mode === 'link') addLink(items, attributes, collapse(buffer + text.slice(last)), folderTags);
+  if (mode === 'link') finishLink(buffer + text.slice(last));
   else if (mode === 'note') {
     buffer += text.slice(last);
     finishNote();
@@ -247,9 +260,10 @@ function addLink(items: ImportItem[], attributes: Map<string, string>, title: st
   return item;
 }
 
+/** Sets the notes a `<DD>` gives: its text, with linkding's notes part (and any text after it) as further paragraphs. */
 function setNotes(item: ImportItem, raw: string): void {
   const notes = LINKDING_NOTES.exec(raw);
-  const parts = notes ? [raw.slice(0, notes.index), notes[1]] : [raw];
+  const parts = notes ? [raw.slice(0, notes.index), notes[1], raw.slice(notes.index + notes[0].length)] : [raw];
   const joined = parts.map((part) => decodeEntities(part).trim()).filter((part) => part !== '').join('\n\n');
   item.notes = joined === '' ? null : joined;
 }

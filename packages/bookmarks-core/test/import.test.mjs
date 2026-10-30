@@ -88,6 +88,15 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.equal(quotes.userTitle, 'Quotes, "commas" and line breaks');
     });
 
+    test('a link in 40 nested folders is saved with every folder as a tag', async () => {
+      const names = Array.from({ length: 40 }, (_, at) => `nested-${String(at).padStart(2, '0')}`);
+      const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${names.map((name) => `<DT><H3>${name}</H3>\n<DL><p>\n`).join('')}<DT><A HREF="https://nested.example/">n</A>\n`;
+      const result = await host.ops.importBookmarks(parseImport(html, 'netscape-html'));
+      assert.deepEqual(result, { added: 1, merged: 0, skipped: 0, warnings: [] });
+      const nested = await byUrl(host, 'https://nested.example/');
+      assert.deepEqual(nested.tags.map((tag) => tag.name).sort(), names);
+    });
+
     test('only an untitled import is pending details, with the job an add enqueues', async () => {
       const queue = recordingQueue();
       const ops = createBookmarkOperations({ executor: host.server.executor, detailsQueue: queue, context: { userId: 'owner' } });
