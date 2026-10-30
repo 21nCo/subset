@@ -29,11 +29,11 @@ void registerLinkContextMenu(browser, { title: 'Save link to My App' });
 export default defineExtension({ /* name, targets, background, popup */ manifest: linkCaptureManifest() });
 ```
 
-`extension/` is a complete reference host that saves to `storage.local`. `npm run build` builds it for both targets into `dist-extension/` and `scripts/check-extension-build.mjs` checks the result.
+`extension/` is a complete reference host that saves to `storage.local`. Its popup and background both write, so every save adds its own key and never rewrites another; clean-up keeps the newest entry of each of the 100 newest links. `npm run build` builds it for both targets into `dist-extension/` and `scripts/check-extension-build.mjs` checks the result.
 
 ## Capture
 
-`captureActiveTab(browser, { now? })` takes extfn's `BrowserFacade` (`getRuntime().browser`). It queries the active tab of the current window and runs `readPage` in it with `scripting.executeScript`. The page returns `{ url, title, selectionText, html, lang, contentType }`, where `html` is `document.head.outerHTML` cut at 512 KB (`MAX_DOCUMENT_BYTES`) of UTF-8 between characters, and `lang` is `<html lang>`, which sits outside `<head>`. The extension, not the page, runs `parseLinkDetails` from `@subset.dev/links` and returns a `TabCapture`:
+`captureActiveTab(browser, { now? })` takes extfn's `BrowserFacade` (`getRuntime().browser`). It queries the active tab of the current window and runs `readPage` in it with `scripting.executeScript`. The page returns `{ url, title, selectionText, html, lang, contentType }`, where `html` is `document.head.outerHTML` cut at 512 KB (`MAX_DOCUMENT_BYTES`) of UTF-8 between characters, and `lang` is `<html lang>`, which sits outside `<head>`, cut at 65 characters (`MAX_LANG_LENGTH` + 1). The extension keeps `lang` only when it is a language tag of at most 64 characters and cuts the head so that `<html lang="…">`, the head and `</html>` together stay within the 512 KB `parseLinkDetails` reads. The extension, not the page, runs `parseLinkDetails` from `@subset.dev/links` and returns a `TabCapture`:
 
 ```ts
 type Capture = TabCapture | LinkCapture;
@@ -66,7 +66,7 @@ interface SaveTarget {
 }
 ```
 
-Link capture owns reading the page and the popup; the target owns its server, credentials and validation (for example Bookmarks' own length limits). `existing` means the link was already saved; `openUrl` must be http(s) or the popup drops it. A thrown `save`, `status` or `suggestTags` is handled like a refusal.
+Link capture owns reading the page and the popup; the target owns its server, credentials and validation (for example Bookmarks' own length limits). Each edit is the user's whole value, never merged with the capture: an omitted `title` keeps `capture.title`; omitted or empty `notes` and `tags` mean none. A target never fills notes from `capture.selectionText`: the popup offers the selection as the starting notes, so empty notes mean the user removed it. `existing` means the link was already saved; `openUrl` must be http(s) or the popup drops it. A thrown `save`, `status` or `suggestTags` is handled like a refusal.
 
 ## Popup flow
 
@@ -84,13 +84,13 @@ Link capture owns reading the page and the popup; the target owns its server, cr
 | `error` (`save`) | `retry` / `back` | `saving` / `editing` |
 | `error` (`capture`, `target`) | `retry` | `capturing` |
 
-Any other event returns the same state object, so a second `save` while saving or a late result does nothing. `createCapturePopupController({ target, capture })` runs the effects: it checks the target and captures at once, and a target that is not connected wins over a successful capture. `draftEdits` trims fields, omits empty ones and splits tags on commas (whitespace collapsed, repeats ignoring case dropped). `@subset.dev/link-capture/popup` is a Svelte 5 view of the controller with labelled fields, status and alert regions, and tag suggestions from the target.
+Any other event returns the same state object, so a second `save` while saving or a late result does nothing. `createCapturePopupController({ target, capture })` runs the effects: it checks the target and captures at once, and a target that is not connected wins over a successful capture. `draftEdits` trims fields, always sends `notes` and `tags` (empty when cleared), omits an empty title and splits tags on commas (whitespace collapsed, repeats ignoring case dropped). `@subset.dev/link-capture/popup` is a Svelte 5 view of the controller with labelled fields, status and alert regions, and tag suggestions from the target.
 
 ## Permissions and tokens
 
-**Decision:** the manifest asks for `activeTab`, `contextMenus`, `scripting` and `storage` only (`LINK_CAPTURE_PERMISSIONS`). There are no host permissions. `optional_host_permissions` lists `http://*/*` and `https://*/*` because a self-hosted server can be anywhere; `requestServerAccess(browser, serverUrl)` asks for just that server's origin when a target connects (during a click, as browsers require), and `hasServerAccess` and `removeServerAccess` check and give it back. Match patterns have no port, so access covers every port of the host.
+**Decision:** the manifest asks for `activeTab`, `contextMenus`, `scripting` and `storage` only (`LINK_CAPTURE_PERMISSIONS`). There are no host permissions. `optional_host_permissions` lists `http://*/*` and `https://*/*` because a self-hosted server can be anywhere; `requestServerAccess(browser, serverUrl)` asks for just that server's origin when a target connects (during a click, as browsers require), and `hasServerAccess` and `removeServerAccess` check and give it back. Match patterns have no port, so access covers every port of the host. A server URL must have a literal host: `https://*/` or `https://*.example.com/`, which `URL` accepts but a match pattern reads as a wildcard, is refused by `serverUrl`, the token store and all three access functions.
 
-`createTokenStore(browser, targetId)` keeps `{ serverUrl, token }` in `storage.local` under `link-capture:token:<targetId>`. It never uses `storage.sync`, which would copy the token to every browser on the same account. A URL with credentials or another scheme, or an empty token, is refused; a malformed stored value reads as no token.
+`createTokenStore(browser, targetId)` keeps `{ serverUrl, token }` in `storage.local` under `link-capture:token:<targetId>`. It never uses `storage.sync`, which would copy the token to every browser on the same account. A URL with credentials, another scheme or a wildcard host, or an empty token, is refused; a malformed stored value reads as no token.
 
 ## extfn prerequisite check
 
@@ -107,13 +107,14 @@ Any other event returns the same state object, so a second `save` while saving o
 
 | Boundary | Failure mode | Evidence |
 | --- | --- | --- |
-| Reading the tab | Wrong page, oversized message, a character split at the cut, `<html lang>` used to inject markup | `test/capture.test.mjs`: the injected function rebuilt from its source in a fresh scope (as a browser does), the exact facade calls, the 512 KB cut between four-byte characters, a tag past the cut not read, a hostile `lang`, credentials removed, title and selection fallbacks and caps, headless and non-HTML documents, on both targets |
+| Reading the tab | Wrong page, oversized message, a character split at the cut, `<html lang>` used to inject markup | `test/capture.test.mjs`: the injected function rebuilt from its source in a fresh scope (as a browser does), the exact facade calls, the 512 KB cut between four-byte characters, a tag past the cut not read, a hostile or 600 KB `lang`, credentials removed, title and selection fallbacks and caps, headless and non-HTML documents, on both targets |
 | Refusals | Injecting into browser pages, unclear errors | Browser, file and view-source tabs refused without injection; a hidden tab URL with a `data:` document; no tab; an injection refusal kept as the cause; malformed results |
 | Context menu | Page access or a duplicate item on restart | `test/context-menu.test.mjs`: no facade call at all for a click, repeated registration, other items kept, non-http links refused |
-| Popup flow | Double save, lost draft, an unsafe link, a stuck state | `test/popup-state.test.mjs`: every transition, every other (state, event) pair unchanged, an existing bookmark, `openUrl` schemes. `test/popup-controller.test.mjs`: the full flow from a tab, one save under a double press, refused and thrown saves with retry and back, target needs-setup, failing or malformed `status`, each capture error (including from another copy of the package), suggestions |
-| Tokens | A token synced or stored malformed | `test/storage.test.mjs`: `storage.sync` throws if touched; only `storage.local` calls are made; invalid values refused before writing |
-| Permissions | A host permission or content script slips in | `test/manifest.test.mjs`: each target's manifest built by `@extfn/vite` equals the reviewed snapshot (`test/manifest.*.json`) with no host permissions; server access uses only the origin |
+| Popup flow | Double save, lost draft, an unsafe link, a stuck state | `test/popup-state.test.mjs`: every transition, every other (state, event) pair unchanged, an existing bookmark, `openUrl` schemes. `test/popup-controller.test.mjs`: the full flow from a tab, cleared notes reaching the target empty, one save under a double press, refused and thrown saves with retry and back, target needs-setup, failing or malformed `status`, each capture error (including from another copy of the package), suggestions |
+| Tokens | A token synced or stored malformed | `test/storage.test.mjs`: `storage.sync` throws if touched; only `storage.local` calls are made; invalid values, including wildcard hosts, refused before writing |
+| Permissions | A host permission or content script slips in | `test/manifest.test.mjs`: each target's manifest built by `@extfn/vite` equals the reviewed snapshot (`test/manifest.*.json`) with no host permissions; server access uses only the origin and refuses wildcard hosts |
 | Build | A target does not build, or misses a file | `npm run build` builds both targets; `scripts/check-extension-build.mjs` compares each built manifest to its snapshot, checks every named file exists, checks the package is bundled once, and starts the background in a bare worker scope (no `window`) with that target's global, which must add the click listener synchronously and register the menu |
+| Reference target | Overlapping popup and background saves losing one | `test/local-target.test.mjs`: two instances saving different links at once both kept, a repeat save reported as existing with one entry, the 100-link cap under overlapping saves, tag suggestions |
 | Popup view | Type or accessibility regressions | `svelte-check --fail-on-warnings`, including Svelte's accessibility warnings |
 
 Run `npm run check`, `npm test` and `npm run build` with `--workspace=@subset.dev/link-capture`; the root `npm run check` and `npm run build` run them. Live browsers, the popup in a real browser, Firefox's handling of `optional_host_permissions` (Firefox 128 and later) and both browsers' acceptance of `background.scripts` next to `service_worker` are deferred to SET-191 and not claimed here. No server, Railway Postgres, Cloudflare Preview or provider sandbox is involved.

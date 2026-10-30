@@ -34,6 +34,9 @@ describe('createTokenStore', () => {
       { serverUrl: 'https://user:pw@example.com', token: 't' },
       { serverUrl: 'ftp://example.com', token: 't' },
       { serverUrl: 'example.com', token: 't' },
+      { serverUrl: 'https://*/', token: 't' },
+      { serverUrl: 'https://*.example.com/', token: 't' },
+      { serverUrl: 'http://*:8080/', token: 't' },
       { serverUrl: 'https://example.com', token: ' ' },
       { serverUrl: 'https://example.com' },
       null
@@ -46,7 +49,7 @@ describe('createTokenStore', () => {
   it('reads a malformed stored value as no token', async () => {
     const { browser, local } = createFakeBrowser();
     const store = createTokenStore(browser, 'bookmarks');
-    for (const value of ['secret', { token: 'secret' }, { serverUrl: 'javascript:alert(1)', token: 'secret' }, { serverUrl: 'https://example.com', token: 5 }]) {
+    for (const value of ['secret', { token: 'secret' }, { serverUrl: 'javascript:alert(1)', token: 'secret' }, { serverUrl: 'https://*.example.com/', token: 'secret' }, { serverUrl: 'https://example.com', token: 5 }]) {
       local.set('link-capture:token:bookmarks', value);
       assert.equal(await store.get(), undefined, JSON.stringify(value));
     }

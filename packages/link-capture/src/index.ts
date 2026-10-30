@@ -2,6 +2,7 @@ export {
   captureActiveTab,
   captureLink,
   LinkCaptureError,
+  MAX_LANG_LENGTH,
   MAX_SELECTION_LENGTH,
   readPage,
   type Capture,

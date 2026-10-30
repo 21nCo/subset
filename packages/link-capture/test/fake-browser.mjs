@@ -34,15 +34,17 @@ export function createFakeBrowser({ target = 'chromium-mv3', tabs = [], page, in
       local: {
         async get(key) {
           record('storage.local.get', key);
+          // `null` reads everything, as in the browsers.
+          if (key === null) return structuredClone(Object.fromEntries(local));
           return local.has(key) ? { [key]: structuredClone(local.get(key)) } : {};
         },
         async set(items) {
           record('storage.local.set', structuredClone(items));
           for (const [key, value] of Object.entries(items)) local.set(key, structuredClone(value));
         },
-        async remove(key) {
-          record('storage.local.remove', key);
-          local.delete(key);
+        async remove(keys) {
+          record('storage.local.remove', keys);
+          for (const key of [keys].flat()) local.delete(key);
         }
       },
       sync: { get: forbidden('storage.sync.get'), set: forbidden('storage.sync.set'), remove: forbidden('storage.sync.remove') }

@@ -57,6 +57,24 @@ describe('createCapturePopupController', () => {
     assert.deepEqual(controller.state, { name: 'saved', capture: savedCapture, draft: { title: 'A page', notes: 'A quote', tags: 'reading, dev' }, existing: false, openUrl: 'https://bookmarks.example.com/b/1' });
   });
 
+  it('saves cleared notes as cleared, so a target never restores the selected text', async () => {
+    // Even a target that wrongly falls back to the selection for omitted notes keeps them cleared: they are sent empty.
+    const stored = [];
+    const target = fakeTarget({
+      save: (count) => {
+        const [saved, edits] = target.saves[count - 1];
+        stored.push({ title: edits.title ?? saved.title, notes: edits.notes ?? saved.selectionText, tags: edits.tags ?? [] });
+        return { ok: true };
+      }
+    });
+    const { controller } = await started(target);
+    assert.equal(controller.state.draft.notes, 'A quote');
+    controller.edit({ title: ' ', notes: '' });
+    await controller.save();
+    assert.deepEqual(target.saves[0][1], { notes: '', tags: [] });
+    assert.deepEqual(stored, [{ title: 'A page', notes: '', tags: [] }]);
+  });
+
   it('shows an existing bookmark as already saved', async () => {
     const { controller } = await started(fakeTarget({ save: { ok: true, existing: true } }));
     await controller.save();

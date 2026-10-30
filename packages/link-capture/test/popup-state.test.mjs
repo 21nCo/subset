@@ -105,13 +105,13 @@ describe('popupTransition', () => {
 });
 
 describe('draftEdits and parseTags', () => {
-  it('trims fields and omits empty ones', () => {
+  it('trims fields, sends cleared notes and tags as empty, and omits only an empty title', () => {
     assert.deepEqual(draftEdits({ title: '  A \n title ', notes: '\n note \n', tags: ' read later, Dev ,, dev ' }), {
       title: 'A title',
       notes: 'note',
       tags: ['read later', 'Dev']
     });
-    assert.deepEqual(draftEdits({ title: ' ', notes: '', tags: ' , ' }), {});
+    assert.deepEqual(draftEdits({ title: ' ', notes: ' \n ', tags: ' , ' }), { notes: '', tags: [] });
   });
 
   it('splits on commas, collapses whitespace and keeps the first spelling of a repeated tag', () => {

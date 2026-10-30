@@ -66,4 +66,15 @@ describe('server access', () => {
     }
     assert.deepEqual(calls, []);
   });
+
+  it('refuses a wildcard host, which would grant more than the server', async () => {
+    const { browser, calls } = createFakeBrowser();
+    for (const url of ['https://*/', 'https://*.example.com/', 'http://*:8080/', 'https://%2A.example.com/', 'https://bookmarks*.example.com/']) {
+      assert.throws(() => serverOriginPattern(url), TypeError, url);
+      await assert.rejects(requestServerAccess(browser, url), TypeError, url);
+      await assert.rejects(hasServerAccess(browser, url), TypeError, url);
+      await assert.rejects(removeServerAccess(browser, url), TypeError, url);
+    }
+    assert.deepEqual(calls, []);
+  });
 });

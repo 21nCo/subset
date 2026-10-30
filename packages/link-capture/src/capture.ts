@@ -4,6 +4,12 @@ import { canonicalizeUrl, MAX_DOCUMENT_BYTES, MAX_TITLE_LENGTH, parseLinkDetails
 /** Most characters (Unicode code points) of selected text kept in a capture. */
 export const MAX_SELECTION_LENGTH = 10_000;
 
+/** Most characters of `<html lang>` read from the page; a language tag is far shorter, so a longer value is dropped. */
+export const MAX_LANG_LENGTH = 64;
+
+// The shape of a BCP 47 tag, as `parseLinkDetails` checks it; anything else is dropped before it reaches the parser.
+const LANGUAGE_TAG = /^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
+
 /** Fields every capture has. */
 interface CaptureBase {
   /** The page or link URL, without any `user:password@`. */
@@ -61,7 +67,7 @@ export interface PageSnapshot {
   selectionText: string;
   /** `document.head.outerHTML`, cut at `MAX_DOCUMENT_BYTES` of UTF-8 without splitting a character. */
   html: string;
-  /** `<html lang>`, which `parseLinkDetails` reads but which is outside `<head>`. */
+  /** `<html lang>`, which `parseLinkDetails` reads but which is outside `<head>`; at most `MAX_LANG_LENGTH` + 1 characters. */
   lang: string;
   /** `document.contentType`, for example `text/html` or `image/png`. */
   contentType: string;
@@ -71,7 +77,7 @@ export interface PageSnapshot {
  * Runs inside the tab through `scripting.executeScript`. The browser serializes the function's source, so it uses only
  * its arguments and the page's globals, never this module's imports or constants.
  */
-export function readPage(maxHeadBytes: number, maxTextLength: number): PageSnapshot {
+export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLength: number): PageSnapshot {
   const head = document.head ? document.head.outerHTML : '';
   // encodeInto stops before a character that does not fit, so the cut never splits one; `read` counts UTF-16 units.
   const { read } = new TextEncoder().encodeInto(head, new Uint8Array(maxHeadBytes));
@@ -82,7 +88,8 @@ export function readPage(maxHeadBytes: number, maxTextLength: number): PageSnaps
     title: document.title.slice(0, maxTextLength * 2),
     selectionText: (selection ? selection.toString() : '').slice(0, maxTextLength * 2),
     html: head.slice(0, read),
-    lang: document.documentElement ? document.documentElement.lang : '',
+    // One character past the limit, so the extension can tell a value that was too long from one that fit.
+    lang: document.documentElement ? document.documentElement.lang.slice(0, maxLangLength + 1) : '',
     contentType: document.contentType
   };
 }
@@ -109,7 +116,7 @@ export async function captureActiveTab(browser: BrowserFacade, options: CaptureO
     results = await browser.call('scripting.executeScript', {
       target: { tabId: tab.id },
       func: readPage,
-      args: [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH]
+      args: [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]
     });
   } catch (error) {
     throw new LinkCaptureError('page-unavailable', { cause: error });
@@ -120,7 +127,11 @@ export async function captureActiveTab(browser: BrowserFacade, options: CaptureO
   const url = pageUrl(snapshot.url);
   if (url === undefined) throw new LinkCaptureError('unsupported-page');
 
-  const html = `<html lang="${escapeAttribute(snapshot.lang)}">${cutUtf8(snapshot.html, MAX_DOCUMENT_BYTES)}</html>`;
+  // `parseLinkDetails` reads the first MAX_DOCUMENT_BYTES, so the (ASCII) wrapper comes out of the head's share.
+  const open = `<html lang="${languageTag(snapshot.lang)}">`;
+  const close = '</html>';
+  const head = cutUtf8(snapshot.html, MAX_DOCUMENT_BYTES - open.length - close.length);
+  const html = `${open}${head}${close}`;
   const details = parseLinkDetails(html, { url, contentType: snapshot.contentType || undefined });
   const selectionText = truncate(snapshot.selectionText.trim(), MAX_SELECTION_LENGTH).trim();
   return {
@@ -192,6 +203,8 @@ function cutUtf8(value: string, maxBytes: number): string {
   return value.slice(0, read);
 }
 
-function escapeAttribute(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+/** The page's `lang` when it is a language tag, otherwise empty: a long or odd value (markup, quotes) is dropped. */
+function languageTag(value: string): string {
+  const tag = value.trim();
+  return tag.length <= MAX_LANG_LENGTH && LANGUAGE_TAG.test(tag) ? tag : '';
 }

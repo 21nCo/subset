@@ -47,9 +47,14 @@ function toStoredToken(value: unknown): StoredToken | undefined {
   return normalized ? { serverUrl: normalized, token } : undefined;
 }
 
+// A literal host as `URL` normalizes it: a lowercase name or IPv4 address, or a bracketed IPv6 address. `URL` keeps
+// `*` in a name, which a match pattern reads as a wildcard, so it and any other character are refused.
+const LITERAL_HOST = /^(?:[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.?|\[[0-9a-f:.]+\])$/;
+
 /**
- * An http(s) server URL without its query and fragment, or undefined for another scheme or a URL with credentials
- * (which would end up in storage and in every request's address).
+ * An http(s) server URL without its query and fragment, or undefined for another scheme, a URL with credentials
+ * (which would end up in storage and in every request's address) or a host that is not literal, such as `*` or
+ * `*.example.com` (which would grant access to more than the server).
  */
 export function serverUrl(value: string): string | undefined {
   let url: URL;
@@ -59,6 +64,7 @@ export function serverUrl(value: string): string | undefined {
     return undefined;
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return undefined;
+  if (!LITERAL_HOST.test(url.hostname)) return undefined;
   url.search = '';
   url.hash = '';
   return url.href;

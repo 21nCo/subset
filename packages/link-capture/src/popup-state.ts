@@ -87,12 +87,14 @@ export function popupTransition(state: PopupState, event: PopupEvent): PopupStat
   }
 }
 
-/** The edits a draft sends to `SaveTarget.save`: trimmed, empty fields omitted, tags split on commas and deduplicated. */
-export function draftEdits(draft: Draft): SaveEdits {
+/**
+ * The edits a draft sends to `SaveTarget.save`, trimmed, with tags split on commas and deduplicated. `notes` and `tags`
+ * are always sent, empty when the user cleared them, so cleared notes stay cleared; an empty title is omitted, which
+ * keeps the capture's title.
+ */
+export function draftEdits(draft: Draft): SaveEdits & { notes: string; tags: string[] } {
   const title = draft.title.replace(/\s+/g, ' ').trim();
-  const notes = draft.notes.trim();
-  const tags = parseTags(draft.tags);
-  return { ...(title ? { title } : {}), ...(notes ? { notes } : {}), ...(tags.length ? { tags } : {}) };
+  return { ...(title ? { title } : {}), notes: draft.notes.trim(), tags: parseTags(draft.tags) };
 }
 
 /** Comma-separated tags, trimmed with inner whitespace collapsed; empty ones dropped and repeats (ignoring case) kept once. */

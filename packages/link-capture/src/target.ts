@@ -7,10 +7,18 @@ export type SaveTargetStatus =
   | { state: 'needs-setup'; message?: string }
   | { state: 'error'; message: string };
 
-/** What the user edited in the popup. Omitted fields keep the capture's own values. */
+/**
+ * What the user chose in the popup. Each field is the user's whole value, never merged with the capture's.
+ */
 export interface SaveEdits {
+  /** The title; omitted keeps `capture.title`. */
   title?: string;
+  /**
+   * The notes; omitted or empty means no notes. A target never fills notes from `capture.selectionText`: the popup
+   * offers the selection as the starting notes, so empty notes mean the user removed it.
+   */
   notes?: string;
+  /** The tags; omitted or empty means none. */
   tags?: string[];
 }
 
