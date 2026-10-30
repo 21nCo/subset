@@ -67,18 +67,22 @@ export function warningList(initial: readonly ImportWarning[] = []) {
 }
 
 const CONTROL = /\p{Cc}/gu;
+/** Whitespace or a comma; every whitespace character is one UTF-16 unit. */
+const SEPARATOR = /[\s,]/u;
 
 /**
  * Makes a folder name or an exporter's tag into a tag name: NFC-normalized, control characters removed, leading and
  * trailing whitespace and commas trimmed, each inner run of whitespace and commas replaced by `-`, and cut to 64
- * characters. `Reading list` becomes `Reading-list`. Null when nothing is left.
+ * characters. `Reading list` becomes `Reading-list`. Null when nothing is left. It takes time linear in `raw`, as the
+ * trim scans from each end instead of using a regular expression that would retry each inner run.
  */
 export function toTagName(raw: string): string | null {
-  const name = raw
-    .normalize('NFC')
-    .replace(CONTROL, '')
-    .replace(/^[\s,]+|[\s,]+$/gu, '')
-    .replace(/[\s,]+/gu, '-');
+  const text = raw.normalize('NFC').replace(CONTROL, '');
+  let start = 0;
+  let end = text.length;
+  while (start < end && SEPARATOR.test(text[start])) start++;
+  while (end > start && SEPARATOR.test(text[end - 1])) end--;
+  const name = text.slice(start, end).replace(/[\s,]+/gu, '-');
   if (name === '') return null;
   const chars = [...name];
   return chars.length > MAX_TAG_LENGTH ? chars.slice(0, MAX_TAG_LENGTH).join('') : name;

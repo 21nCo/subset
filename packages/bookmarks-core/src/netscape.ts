@@ -3,6 +3,12 @@ import { MAX_IMPORT_ITEMS, toEpochMs, toTagName, tooManyItems, type ImportItem, 
 import { LINKDING_ARCHIVED_TAG } from './input.js';
 import { BookmarkError } from './types.js';
 
+/**
+ * `renderNetscape` names itself in a `<META NAME="generator">` before the first list, which browsers and linkding
+ * ignore, so the parser knows the word joiners in the notes markers are its own (see `escapeNotes`).
+ */
+const GENERATOR = 'subset.dev Bookmarks';
+
 /** linkding's notes in its `<DD>`, matched before character references are decoded, so an encoded `[` is text. */
 const LINKDING_NOTES = /\[linkding-notes\]([\s\S]*?)(?:\[\/linkding-notes\]|$)/;
 
@@ -148,10 +154,13 @@ export function parseNetscape(text: string): ParsedImport {
   let attributes = new Map<string, string>();
   // The item a <DD> right after it describes.
   let noteTarget: ImportItem | null = null;
+  // Whether renderNetscape wrote the file: its generator <META> comes before the first list.
+  let ownExport = false;
+  let listSeen = false;
   let last = 0;
 
   const finishNote = () => {
-    if (noteTarget) setNotes(noteTarget, buffer);
+    if (noteTarget) setNotes(noteTarget, buffer, ownExport);
     noteTarget = null;
     mode = 'text';
   };
@@ -207,7 +216,13 @@ export function parseNetscape(text: string): ParsedImport {
       continue;
     }
     switch (name) {
+      case 'META': {
+        const meta = parseAttributes(tag.attributes);
+        if (!listSeen && meta.get('NAME')?.toLowerCase() === 'generator' && meta.get('CONTENT') === GENERATOR) ownExport = true;
+        break;
+      }
       case 'DL': {
+        listSeen = true;
         const key = nextFolder?.toLowerCase();
         const counted = key !== undefined && !folderKeys.has(key);
         if (counted) {
@@ -280,12 +295,13 @@ function addLink(items: ImportItem[], attributes: Map<string, string>, title: st
 
 /**
  * Sets the notes a `<DD>` gives: its text, with linkding's notes part (and any text after it) as further paragraphs.
- * The notes part loses the word joiner `escapeNotes` puts in each marker-shaped text.
+ * In a file `renderNetscape` wrote (`ownExport`), the notes part loses the word joiner `escapeNotes` put in each
+ * marker-shaped text; the notes of any other file are kept as they are.
  */
-function setNotes(item: ImportItem, raw: string): void {
+function setNotes(item: ImportItem, raw: string, ownExport: boolean): void {
   const notes = LINKDING_NOTES.exec(raw);
   const parts = notes ? [raw.slice(0, notes.index), notes[1], raw.slice(notes.index + notes[0].length)] : [raw];
-  const decoded = parts.map((part, at) => (at === 1 ? decodeEntities(part).replace(JOINED_MARKER, '[') : decodeEntities(part)));
+  const decoded = parts.map((part, at) => (at === 1 && ownExport ? decodeEntities(part).replace(JOINED_MARKER, '[') : decodeEntities(part)));
   const joined = decoded.map((part) => part.trim()).filter((part) => part !== '').join('\n\n');
   item.notes = joined === '' ? null : joined;
 }
@@ -329,36 +345,71 @@ const JOINED_MARKER = /\[\u2060(?=\u2060*\/?linkding-notes\])/g;
  * Escapes notes as the text of linkding's `[linkding-notes]` marker in a `<DD>`, so linkding reads them as notes, not
  * as the page description. linkding decodes character references before it looks for the markers, so a marker in the
  * notes gets a word joiner (U+2060, invisible) after its `[` instead, and is text to linkding and to this parser,
- * which removes that joiner again; one already there gets another, so the notes read back exactly.
+ * which removes that joiner again in a file with this exporter's generator `<META>`; one already there gets another,
+ * so the notes read back exactly.
  */
 const escapeNotes = (notes: string) => `[linkding-notes]${escapeHtml(notes).replace(MARKER, '[\u2060')}[/linkding-notes]`;
 
 /**
+ * Longest file the export writes, in characters (UTF-16 code units): 128 Mi, a quarter of the longest string V8 holds.
+ * A larger export fails with `too-large` as soon as it would pass it, before the file is put together.
+ */
+export const MAX_EXPORT_LENGTH = 128 * 1024 * 1024;
+
+const tooLargeExport = () =>
+  new BookmarkError('too-large', `The export would be longer than ${MAX_EXPORT_LENGTH.toLocaleString('en-US')} characters (MAX_EXPORT_LENGTH)`);
+
+const HEADER = [
+  '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+  '<!-- This is an automatically generated file. It will be read and overwritten. DO NOT EDIT! -->',
+  '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
+  `<META NAME="generator" CONTENT="${GENERATOR}">`,
+  '<TITLE>Bookmarks</TITLE>',
+  '<H1>Bookmarks</H1>',
+  '<DL><p>',
+  ''
+].join('\n');
+const FOOTER = '</DL><p>\n';
+
+/** The `<DT><A>` line of a bookmark, and its `<DD>` line when it has notes, each ending in a line break. */
+function renderEntry(bookmark: NetscapeBookmark): string {
+  const tags = bookmark.archived ? [...bookmark.tags, LINKDING_ARCHIVED_TAG] : bookmark.tags;
+  const attributes = [
+    `HREF="${escapeHtml(bookmark.url)}"`,
+    `ADD_DATE="${seconds(bookmark.addedAt ?? bookmark.createdAt)}"`,
+    `LAST_MODIFIED="${seconds(bookmark.updatedAt)}"`,
+    `TOREAD="${bookmark.unread ? '1' : '0'}"`,
+    ...(tags.length > 0 ? [`TAGS="${escapeHtml(tags.join(','))}"`] : [])
+  ];
+  const link = `<DT><A ${attributes.join(' ')}>${escapeTitle(bookmark.title ?? '')}</A>\n`;
+  return bookmark.notes ? `${link}<DD>${escapeNotes(bookmark.notes)}\n` : link;
+}
+
+/**
+ * Writes a Netscape bookmark file a bookmark at a time, so a caller reading pages keeps only the text written so far.
+ * `add` fails with `too-large` when the file would pass `MAX_EXPORT_LENGTH`.
+ */
+export function netscapeWriter(): { add(bookmark: NetscapeBookmark): void; finish(): string } {
+  const parts = [HEADER];
+  let length = HEADER.length + FOOTER.length;
+  return {
+    add(bookmark) {
+      const entry = renderEntry(bookmark);
+      length += entry.length;
+      if (length > MAX_EXPORT_LENGTH) throw tooLargeExport();
+      parts.push(entry);
+    },
+    finish: () => [...parts, FOOTER].join('')
+  };
+}
+
+/**
  * Writes bookmarks as a Netscape bookmark file, in linkding's form: one flat list of `<DT><A>` with `ADD_DATE`,
  * `LAST_MODIFIED`, `TOREAD`, `TAGS` (with `linkding:bookmarks.archived` for an archived bookmark) and a `<DD>` with
- * the notes in linkding's notes marker.
+ * the notes in linkding's notes marker. A file longer than `MAX_EXPORT_LENGTH` fails with `too-large`.
  */
 export function renderNetscape(bookmarks: Iterable<NetscapeBookmark>): string {
-  const lines = [
-    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
-    '<!-- This is an automatically generated file. It will be read and overwritten. DO NOT EDIT! -->',
-    '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
-    '<TITLE>Bookmarks</TITLE>',
-    '<H1>Bookmarks</H1>',
-    '<DL><p>'
-  ];
-  for (const bookmark of bookmarks) {
-    const tags = bookmark.archived ? [...bookmark.tags, LINKDING_ARCHIVED_TAG] : bookmark.tags;
-    const attributes = [
-      `HREF="${escapeHtml(bookmark.url)}"`,
-      `ADD_DATE="${seconds(bookmark.addedAt ?? bookmark.createdAt)}"`,
-      `LAST_MODIFIED="${seconds(bookmark.updatedAt)}"`,
-      `TOREAD="${bookmark.unread ? '1' : '0'}"`,
-      ...(tags.length > 0 ? [`TAGS="${escapeHtml(tags.join(','))}"`] : [])
-    ];
-    lines.push(`<DT><A ${attributes.join(' ')}>${escapeTitle(bookmark.title ?? '')}</A>`);
-    if (bookmark.notes) lines.push(`<DD>${escapeNotes(bookmark.notes)}`);
-  }
-  lines.push('</DL><p>', '');
-  return lines.join('\n');
+  const writer = netscapeWriter();
+  for (const bookmark of bookmarks) writer.add(bookmark);
+  return writer.finish();
 }

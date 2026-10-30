@@ -195,6 +195,8 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         for (const [name, kind] of FIXTURES) await source.ops.importBookmarks(parseImport(fixture(name), kind));
         const { bookmark } = await source.ops.addBookmark('https://notes.example/', { notes: 'Multi-line\n  notes <b>&amp;</b>', tags: ['Café'], unread: true });
         await source.ops.setArchived(bookmark.id, true);
+        // linkding's markers in notes, also with a word joiner already in them, come back as they were.
+        await source.ops.addBookmark('https://markers.example/', { notes: 'keep [/linkding-notes] tail, [linkding-notes] and [\u2060/linkding-notes] joined' });
         const exported = await source.ops.exportNetscape();
         const result = await target.ops.importBookmarks(parseImport(exported, 'netscape-html'));
         const original = await saved(source);
@@ -304,6 +306,40 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         assert.equal(Number(await rawAddedAt(host, url)), 1_400_000_000_000);
       });
     }
+
+    test('a bookmark deleted inside the guard window of its date write does not stop the import', async () => {
+      const url = 'https://gone.example/dated';
+      await host.ops.importBookmarks([{ url, title: 'Gone', addedAt: 1_700_000_000_000 }]);
+      const { id } = await byUrl(host, url);
+      // The delete lands after datafn's guard read, which then reports the row as not found.
+      const base = host.server.executor;
+      const importer = createBookmarkOperations({
+        executor: {
+          query: (payload, context) => base.query(payload, context),
+          async mutate(payload, context) {
+            if (!Array.isArray(payload) && payload.resource === 'bookmarks' && payload.operation === 'merge' && payload.id === id) {
+              await host.ops.deleteBookmarks([id]);
+              return { ok: false, errors: [{ code: 'NOT_FOUND', message: 'not found' }] };
+            }
+            return base.mutate(payload, context);
+          }
+        },
+        detailsQueue: recordingQueue(),
+        context: { userId: 'owner' }
+      });
+      // The first batch holds the deleted bookmark; the last item is in the next batch.
+      const items = [{ url, addedAt: 1_500_000_000_000, tags: ['gone-in-window'] }];
+      for (let at = 0; at < 100; at++) items.push({ url: `https://gone.example/${at}`, title: `${at}`, tags: ['next-batch'] });
+      const result = await importer.importBookmarks(items);
+      assert.deepEqual(result, {
+        added: 100,
+        merged: 1,
+        skipped: 0,
+        warnings: [{ url, message: 'The bookmark was deleted while it was being imported, so it has no tags' }]
+      });
+      assert.equal(await byUrl(host, url), null);
+      for (const at of [0, 99]) assert.deepEqual((await byUrl(host, `https://gone.example/${at}`)).tags.map((tag) => tag.name), ['next-batch']);
+    });
 
     test('a tag deleted without a merge after the import linked it is given again', async () => {
       const doomed = (await host.ops.addBookmark('https://doomed.example/seed', { tags: ['Doomed'] })).bookmark.tags[0];
@@ -469,6 +505,29 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
         await assert.rejects(failing.importBookmarks(items), /Saving the bookmark for https:\/\/partial\.example\/b failed/);
         assert.deepEqual(await host.ops.importBookmarks(items), { added: 1, merged: 2, skipped: 0, warnings: [] });
         for (const { url } of items) assert.deepEqual((await byUrl(host, url)).tags.map((tag) => tag.name), ['partial'], url);
+      });
+
+      test('the untitled bookmarks of a batch that fails part way get their details jobs', async () => {
+        const { bookmark: taken } = await host.ops.addBookmark('https://partial-details.example/taken', { title: 'Taken' });
+        const queue = recordingQueue();
+        const failing = createBookmarkOperations({
+          executor: hookedExecutor(host.server.executor, {
+            beforeMutate: (payload) => {
+              if (Array.isArray(payload)) payload[1].id = taken.id;
+            }
+          }),
+          detailsQueue: queue,
+          context: { userId: 'owner' }
+        });
+        const items = ['a', 'b', 'c'].map((name) => ({ url: `https://partial-details.example/${name}` }));
+        await assert.rejects(failing.importBookmarks(items), /Saving the bookmark for https:\/\/partial-details\.example\/b failed/);
+        assert.deepEqual(await host.ops.importBookmarks(items), { added: 1, merged: 2, skipped: 0, warnings: [] });
+        const jobs = [...queue.jobs, ...host.queue.jobs].map(({ job }) => job.bookmarkId);
+        for (const { url } of items) {
+          const bookmark = await byUrl(host, url);
+          assert.equal(bookmark.detailsState, 'pending', url);
+          assert.equal(jobs.filter((id) => id === bookmark.id).length, 1, url);
+        }
       });
 
       // The memory adapter has no unique index, so it supports one executor per user only.

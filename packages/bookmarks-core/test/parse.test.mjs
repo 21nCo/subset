@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   BookmarkError,
+  MAX_EXPORT_LENGTH,
   MAX_FOLDER_TAG_REFERENCES,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_ITEMS,
@@ -245,6 +246,23 @@ test('malformed markup is read in linear time', () => {
   assert.deepEqual(items.map((item) => item.url), ['https://example.com/', '']);
 });
 
+test('tag names are made in linear time from TAGS, encoded folder whitespace and Pocket tags', () => {
+  // A long inner run of whitespace: a trim that retries from each of its characters takes quadratic time.
+  const spaces = 200_000;
+  const timed = (file, kind) => {
+    const started = performance.now();
+    const { items } = parseImport(file, kind);
+    const ms = performance.now() - started;
+    assert.ok(ms < 2000, `${kind} took ${Math.round(ms)} ms`);
+    return items[0].tags;
+  };
+  const doctype = '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n';
+  assert.deepEqual(timed(`${doctype}<DT><A HREF="https://a.example/" TAGS="a${' '.repeat(spaces)}b">x</A>\n`, 'netscape-html'), ['a-b']);
+  const folder = `<DT><H3>a${'&nbsp;'.repeat(spaces)}b</H3>\n<DL><p>\n<DT><A HREF="https://a.example/">x</A>\n</DL><p>\n`;
+  assert.deepEqual(timed(`${doctype}<DL><p>\n${folder}</DL><p>\n`, 'netscape-html'), ['a-b']);
+  assert.deepEqual(timed(`title,url,tags\nx,https://a.example/,a${' '.repeat(spaces)}b|${' '.repeat(spaces)}c \n`, 'pocket-csv'), ['a-b', 'c']);
+});
+
 test('every distinct enclosing folder is a tag, and a file whose folders give too many tags fails', () => {
   const nest = (names) => names.map((name) => `<DT><H3>${name}</H3>\n<DL><p>\n`).join('');
   // Nested folders of one name are one tag, also in another spelling, and a link's own TAGS repeat neither.
@@ -389,6 +407,38 @@ test('renderNetscape keeps notes with literal linkding markers whole for linkdin
     assert.deepEqual({ ...read, notes: visible(read.notes) }, { description: '', notes: visible(notes) }, notes);
     assert.equal(parseImport(html, 'netscape-html').items[0].notes, notes);
   }
+});
+
+test("a word joiner in another file's linkding notes is kept: only this export's own joiners are removed", () => {
+  const dd = (notes, header = '') =>
+    `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n${header}<DL><p>\n<DT><A HREF="https://a.example/">A</A>\n<DD>[linkding-notes]${notes}[/linkding-notes]\n</DL><p>\n`;
+  for (const [written, notes] of [
+    ['joined [\u2060/linkding-notes] stays', 'joined [\u2060/linkding-notes] stays'],
+    ['joined [&#8288;/linkding-notes] stays', 'joined [\u2060/linkding-notes] stays'],
+    ['a [\u2060linkding-notes] b [&#x2060;\u2060/linkding-notes] c [\u2060/linkding-notes]', 'a [\u2060linkding-notes] b [\u2060\u2060/linkding-notes] c [\u2060/linkding-notes]']
+  ]) {
+    assert.equal(parseImport(dd(written), 'netscape-html').items[0].notes, notes, written);
+    // The export's generator only counts in the header, before the first list.
+    const late = dd(written).replace('<DT>', '<META NAME="generator" CONTENT="subset.dev Bookmarks">\n<DT>');
+    assert.equal(parseImport(late, 'netscape-html').items[0].notes, notes, written);
+  }
+  const own = renderNetscape([{ url: 'https://a.example/', title: 'A', notes: 'x', tags: [], unread: false, archived: false, createdAt: 0, updatedAt: 0 }]);
+  assert.match(own, /^<META NAME="generator" CONTENT="subset\.dev Bookmarks">$/m);
+  assert.ok(own.indexOf('<META NAME="generator"') < own.indexOf('<DL>'));
+});
+
+test('renderNetscape fails with too-large past MAX_EXPORT_LENGTH, before it puts the file together', () => {
+  const frame = renderNetscape([]).length;
+  // Long notes (renderNetscape does not check their length), with characters escaped to six.
+  const heavy = { url: 'https://a.example/', title: 'A', notes: `${'"'.repeat(1_000)}${'x'.repeat(1_000_000)}`, tags: [], unread: false, archived: false, createdAt: 0, updatedAt: 0 };
+  const entry = renderNetscape([heavy]).length - frame;
+  const count = Math.floor((MAX_EXPORT_LENGTH - frame) / entry) - 1;
+  const last = { ...heavy, notes: null, title: '' };
+  const pad = MAX_EXPORT_LENGTH - frame - count * entry - (renderNetscape([last]).length - frame);
+  const exact = [...new Array(count).fill(heavy), { ...last, title: 'x'.repeat(pad) }];
+  assert.equal(renderNetscape(exact).length, MAX_EXPORT_LENGTH);
+  exact[count] = { ...last, title: 'x'.repeat(pad + 1) };
+  throwsWith(() => renderNetscape(exact), 'too-large');
 });
 
 test('renderNetscape writes notes where linkding reads notes, not the description', () => {
