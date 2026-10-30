@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { BookmarkError, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
+import { BookmarkError, MAX_FOLDER_TAGS, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, normalizeTagName, parseImport, renderNetscape } from '../dist/index.js';
 
 export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const throwsWith = (fn, code) => assert.throws(fn, (error) => error instanceof BookmarkError && error.code === code);
@@ -163,6 +163,29 @@ test('malformed markup is read in linear time', () => {
   assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
   // The unclosed tail is one link with no URL, which an import skips.
   assert.deepEqual(items.map((item) => item.url), ['https://example.com/', '']);
+});
+
+test('deeply nested folders give each link a bounded set of distinct tags', () => {
+  const nest = (names) => names.map((name) => `<DT><H3>${name}</H3>\n<DL><p>\n`).join('');
+  // Nested folders of one name are one tag, also in another spelling, and a link's own TAGS repeat neither.
+  const same = parseImport(
+    `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(['Folder', 'FOLDER', 'Other', 'folder'])}<DT><A HREF="https://a.example/" TAGS="folder,x,X">a</A>\n</DL><p>\n</DL><p>\n<DT><A HREF="https://b.example/">b</A>`,
+    'netscape-html'
+  );
+  assert.deepEqual(same.items.map((item) => item.tags), [['Folder', 'Other', 'x'], ['Folder']]);
+  assert.deepEqual(same.warnings, []);
+
+  // 20,000 nested folders around 20,000 links: each link has the outermost MAX_FOLDER_TAGS folders, with one warning.
+  const depth = 20_000;
+  const names = Array.from({ length: depth }, (_, at) => `f${at}`);
+  const file = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${nest(names)}${'<DT><A HREF="https://deep.example/">d</A>\n'.repeat(20_000)}${'</DL><p>\n'.repeat(depth)}<DT><A HREF="https://after.example/">after</A>\n`;
+  const started = performance.now();
+  const { items, warnings } = parseImport(file, 'netscape-html');
+  assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
+  assert.equal(items.length, 20_001);
+  assert.deepEqual(items[0].tags, names.slice(0, MAX_FOLDER_TAGS));
+  assert.ok(items.every((item, at) => item.tags.length === (at === 20_000 ? 0 : MAX_FOLDER_TAGS)));
+  assert.deepEqual(warnings, [{ message: `Folders nested more than ${MAX_FOLDER_TAGS} deep give no tags` }]);
 });
 
 test('ADD_DATE in seconds, milliseconds or microseconds is read as epoch milliseconds', () => {

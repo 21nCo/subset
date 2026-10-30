@@ -123,11 +123,11 @@ function toImportEntry(item: unknown, position: number, add: (warning: ImportWar
     warn(`Skipped: ${error.message}`);
     return null;
   }
-  const tags: TagInput[] = [];
+  const tags = new Map<string, TagInput>();
   for (const name of Array.isArray(record.tags) ? (record.tags as unknown[]) : []) {
     try {
       const tag = normalizeTagName(name);
-      if (!tags.some((other) => other.nameKey === tag.nameKey)) tags.push(tag);
+      if (!tags.has(tag.nameKey)) tags.set(tag.nameKey, tag);
     } catch (error) {
       if (!(error instanceof BookmarkError)) throw error;
       warn(`Tag dropped: ${error.message}`);
@@ -137,7 +137,7 @@ function toImportEntry(item: unknown, position: number, add: (warning: ImportWar
     ...target,
     title: clampText(record.title, 'title', MAX_TITLE_LENGTH, warn),
     notes: clampText(record.notes, 'notes', MAX_NOTES_LENGTH, warn),
-    tags,
+    tags: [...tags.values()],
     unread: record.unread === true,
     archived: record.archived === true
   };
@@ -1060,7 +1060,9 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
     if (parsed.items.length > MAX_IMPORT_ITEMS) throw tooManyItems();
     const warnings = warningList(Array.isArray(parsed.warnings) ? (parsed.warnings as ImportWarning[]) : []);
     // One entry per canonical URL: a later item with the same URL is merged into it, as a duplicate add would be.
-    const entries = new Map<string, ImportEntry>();
+    const entries = new Map<string, { entry: ImportEntry; keys: Set<string> }>();
+    // Each tag in the first spelling the file gives it, as one add after another would create it.
+    const allTags = new Map<string, TagInput>();
     let skipped = 0;
     let merged = 0;
     parsed.items.forEach((item: unknown, index) => {
@@ -1069,20 +1071,23 @@ export function createBookmarkOperations<TContext = unknown>(options: BookmarkOp
         skipped++;
         return;
       }
+      for (const tag of entry.tags) if (!allTags.has(tag.nameKey)) allTags.set(tag.nameKey, tag);
       const earlier = entries.get(entry.canonicalUrl);
       if (!earlier) {
-        entries.set(entry.canonicalUrl, entry);
+        entries.set(entry.canonicalUrl, { entry, keys: new Set(entry.tags.map((tag) => tag.nameKey)) });
         return;
       }
       merged++;
-      for (const tag of entry.tags) if (!earlier.tags.some((other) => other.nameKey === tag.nameKey)) earlier.tags.push(tag);
+      for (const tag of entry.tags) {
+        if (earlier.keys.has(tag.nameKey)) continue;
+        earlier.keys.add(tag.nameKey);
+        earlier.entry.tags.push(tag);
+      }
     });
-    const allTags = new Map<string, TagInput>();
-    for (const entry of entries.values()) for (const tag of entry.tags) if (!allTags.has(tag.nameKey)) allTags.set(tag.nameKey, tag);
     const tagsByKey = new Map((await ensureTags([...allTags.values()])).map((tag) => [tag.nameKey, tag]));
 
     let added = 0;
-    for (const batch of chunks([...entries.values()], IMPORT_BATCH)) {
+    for (const batch of chunks([...entries.values()].map(({ entry }) => entry), IMPORT_BATCH)) {
       const { created, existing } = await saveImportBatch(batch);
       added += created.length;
       merged += existing.length;

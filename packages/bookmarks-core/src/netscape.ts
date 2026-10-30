@@ -12,6 +12,12 @@ const LINKDING_NOTES = /\[linkding-notes\]([\s\S]*?)(?:\[\/linkding-notes\]|$)/;
  */
 const SAFARI_TOOLBAR_NAMES = new Set(['favorites', 'favourites', 'favorites bar', 'favourites bar']);
 
+/**
+ * Most enclosing folders that give an item tags. Deeper folders give none, with one warning, so the tags the parser
+ * keeps grow with the file, not with its depth times its links.
+ */
+export const MAX_FOLDER_TAGS = 32;
+
 const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
 /** Decodes HTML character references: the named ones exporters write and every numeric one. */
@@ -107,8 +113,13 @@ export function parseNetscape(text: string): ParsedImport {
   }
   const items: ImportItem[] = [];
   const warnings: ImportWarning[] = [];
-  // One entry per open <DL>: the tag its folder gives, or null (the top level, the toolbar, a nameless folder).
-  const folders: (string | null)[] = [];
+  // One entry per open <DL>: whether its folder added a tag to folderTags (not the top level, the toolbar, a nameless
+  // folder, one already open under another spelling or one past MAX_FOLDER_TAGS).
+  const folders: boolean[] = [];
+  // The distinct tags of the open folders, outermost first, and their keys.
+  const folderTags: string[] = [];
+  const folderKeys = new Set<string>();
+  let tooDeep = false;
   // The folder whose <DL> comes next: undefined when none is waiting.
   let nextFolder: string | null | undefined;
   let mode: 'text' | 'folder' | 'link' | 'note' = 'text';
@@ -142,7 +153,7 @@ export function parseNetscape(text: string): ParsedImport {
     }
     if (mode === 'link') {
       if (closing && name === 'A') {
-        noteTarget = addLink(items, attributes, collapse(buffer), folders);
+        noteTarget = addLink(items, attributes, collapse(buffer), folderTags);
         mode = 'text';
       }
       continue;
@@ -156,16 +167,26 @@ export function parseNetscape(text: string): ParsedImport {
 
     if (closing) {
       if (name === 'DL') {
-        folders.pop();
+        if (folders.pop()) folderKeys.delete(folderTags.pop()!.toLowerCase());
         nextFolder = undefined;
       }
       continue;
     }
     switch (name) {
-      case 'DL':
-        folders.push(nextFolder ?? null);
+      case 'DL': {
+        const key = nextFolder?.toLowerCase();
+        const counted = key !== undefined && !folderKeys.has(key) && folderTags.length < MAX_FOLDER_TAGS;
+        if (counted) {
+          folderTags.push(nextFolder!);
+          folderKeys.add(key);
+        } else if (key !== undefined && !folderKeys.has(key) && !tooDeep) {
+          tooDeep = true;
+          warnings.push({ message: `Folders nested more than ${MAX_FOLDER_TAGS} deep give no tags` });
+        }
+        folders.push(counted);
         nextFolder = undefined;
         break;
+      }
       case 'H3':
         noteTarget = null;
         mode = 'folder';
@@ -190,7 +211,7 @@ export function parseNetscape(text: string): ParsedImport {
         break;
     }
   }
-  if (mode === 'link') addLink(items, attributes, collapse(buffer + text.slice(last)), folders);
+  if (mode === 'link') addLink(items, attributes, collapse(buffer + text.slice(last)), folderTags);
   else if (mode === 'note') {
     buffer += text.slice(last);
     finishNote();
@@ -198,14 +219,19 @@ export function parseNetscape(text: string): ParsedImport {
   return { items, warnings };
 }
 
-function addLink(items: ImportItem[], attributes: Map<string, string>, title: string, folders: (string | null)[]): ImportItem {
-  const tags: string[] = folders.filter((folder): folder is string => folder !== null);
+/** Adds the item a `<DT><A>` describes; its tags are the enclosing folders' and then its own, one per key. */
+function addLink(items: ImportItem[], attributes: Map<string, string>, title: string, folderTags: readonly string[]): ImportItem {
+  const tags = [...folderTags];
+  const keys = new Set(tags.map((tag) => tag.toLowerCase()));
   let archived = false;
   for (const raw of (attributes.get('TAGS') ?? '').split(',')) {
     if (raw.trim().toLowerCase() === LINKDING_ARCHIVED_TAG) archived = true;
     else {
       const tag = toTagName(raw);
-      if (tag !== null) tags.push(tag);
+      if (tag !== null && !keys.has(tag.toLowerCase())) {
+        keys.add(tag.toLowerCase());
+        tags.push(tag);
+      }
     }
   }
   const item: ImportItem = {

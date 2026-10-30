@@ -11,7 +11,7 @@ export {
   type ImportWarning,
   type ParsedImport
 } from './import.js';
-export { renderNetscape, type NetscapeBookmark } from './netscape.js';
+export { MAX_FOLDER_TAGS, renderNetscape, type NetscapeBookmark } from './netscape.js';
 export { parseImport } from './parse-import.js';
 export { LINKDING_ARCHIVED_TAG, MAX_NOTES_LENGTH, MAX_TAG_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH, normalizeTagName } from './input.js';
 export {

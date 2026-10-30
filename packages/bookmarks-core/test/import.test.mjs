@@ -138,6 +138,18 @@ for (const backend of ['memory', 'sqlite', 'postgres']) {
       assert.deepEqual(again, { added: 0, merged: 1, skipped: 0, warnings: [] });
     });
 
+    test('a new tag takes its first spelling in the file, also when a later item repeats an earlier URL', async () => {
+      const result = await host.ops.importBookmarks([
+        { url: 'https://spelling.example/a' },
+        { url: 'https://spelling.example/b', tags: ['Spelled'] },
+        { url: 'https://spelling.example/a', tags: ['SPELLED'] }
+      ]);
+      assert.deepEqual(result, { added: 2, merged: 1, skipped: 0, warnings: [] });
+      for (const url of ['https://spelling.example/a', 'https://spelling.example/b']) {
+        assert.deepEqual((await byUrl(host, url)).tags.map((tag) => tag.name), ['Spelled'], url);
+      }
+    });
+
     test('export then import reproduces the same bookmarks and tags', async () => {
       const source = await setup(backend);
       const target = await setup(backend);
