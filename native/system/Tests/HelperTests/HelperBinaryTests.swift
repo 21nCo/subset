@@ -59,11 +59,24 @@ final class HelperBinaryTests: XCTestCase {
         try folder.file("a/b.bin", bytes: 8192)
         try folder.file("c.txt", bytes: 10)
         let result = try execute(["disk", "--path", folder.path, "--json"])
-        XCTAssertEqual(result.status, 0, result.stderr)
+        // Volume or snapshot details can be unavailable on the machine, which makes the result partial.
+        XCTAssertTrue([0, 3].contains(result.status), "exit \(result.status): \(result.stderr)")
         var validator = SchemaValidator()
         XCTAssertEqual(try validator.errors(json: result.stdout, schemaFile: "disk.schema.json"), [])
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
-        XCTAssertEqual((json["tree"] as? [String: Any])?["kind"] as? String, "directory")
+        let codes = (json["errors"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+        if result.status == 3 {
+            // The fixture itself is readable, so only the machine's volume details can be missing.
+            XCTAssertFalse(codes.isEmpty)
+            XCTAssertEqual(codes.filter { !["volumeUnavailable", "snapshotsUnavailable"].contains($0) }, [], "\(codes)")
+        } else {
+            XCTAssertEqual(codes, [])
+        }
+        let tree = try XCTUnwrap(json["tree"] as? [String: Any])
+        XCTAssertEqual(tree["kind"] as? String, "directory")
+        XCTAssertGreaterThan(tree["allocatedBytes"] as? Int ?? 0, 0)
+        let children = (tree["children"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        XCTAssertEqual(Set(children), ["a", "c.txt"])
     }
 
     func testTheBuiltHelperReportsUsageErrorsAndItsVersion() throws {
