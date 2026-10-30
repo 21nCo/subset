@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/system/v1/disk.schema.json",
+  "title": "subset-system disk --path <dir> --json",
+  "type": "object",
+  "required": ["schemaVersion", "command", "helperVersion", "observedAt", "complete", "sources", "restricted", "errors",
+               "path", "outcome", "timeoutSeconds", "totals", "entriesRead", "unreadablePaths", "depth", "tree",
+               "largestFiles", "volume"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "command": { "const": "disk" },
+    "helperVersion": { "$ref": "common.schema.json#/$defs/helperVersion" },
+    "observedAt": { "$ref": "common.schema.json#/$defs/observedAt" },
+    "complete": { "$ref": "common.schema.json#/$defs/complete" },
+    "sources": { "allOf": [{ "$ref": "common.schema.json#/$defs/sources" }], "required": ["sizes"] },
+    "restricted": { "$ref": "common.schema.json#/$defs/diskRestricted" },
+    "errors": { "$ref": "common.schema.json#/$defs/errors" },
+    "path": { "type": "string" },
+    "outcome": { "$ref": "common.schema.json#/$defs/scanOutcome" },
+    "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+    "totals": { "$ref": "common.schema.json#/$defs/diskTotals" },
+    "entriesRead": { "type": ["integer", "null"], "minimum": 0 },
+    "unreadablePaths": { "$ref": "common.schema.json#/$defs/unreadablePaths" },
+    "depth": { "type": "integer", "minimum": 0 },
+    "tree": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/node" }] },
+    "largestFiles": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["path", "allocatedBytes", "privateBytes"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "allocatedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+          "privateBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" }
+        }
+      }
+    },
+    "volume": {
+      "type": ["object", "null"],
+      "required": ["mountPoint", "name", "capacityBytes", "availableBytes", "availableForImportantUsageBytes",
+                   "purgeableBytes", "localSnapshotCount", "localSnapshotsUnavailableReason"],
+      "additionalProperties": false,
+      "properties": {
+        "mountPoint": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "capacityBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "availableBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "availableForImportantUsageBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "purgeableBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "localSnapshotCount": { "type": ["integer", "null"], "minimum": 0 },
+        "localSnapshotsUnavailableReason": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "description": "A scanned item and, to --depth, its 20 largest children; the rest are counted in omittedChildren.",
+      "required": ["name", "path", "kind", "allocatedBytes", "logicalBytes", "privateBytes", "flags", "children",
+                   "omittedChildren", "omittedAllocatedBytes", "omittedAllocatedUpperBound"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "kind": { "enum": ["file", "directory", "package", "symlink", "other", "mountPoint"] },
+        "allocatedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "logicalBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "privateBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "flags": {
+          "type": "array",
+          "items": {
+            "enum": ["dataless", "unreadable", "partial", "hardLinked", "countedElsewhere", "sharesBlocks", "incomplete",
+                     "firmlink", "allocatedUpperBound", "containsDataless"]
+          }
+        },
+        "children": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/node" } },
+        "omittedChildren": { "$ref": "common.schema.json#/$defs/count" },
+        "omittedAllocatedBytes": {
+          "$ref": "common.schema.json#/$defs/bytes",
+          "description": "The omitted children's allocated bytes, a hard-linked file only at the link the totals count it at."
+        },
+        "omittedAllocatedUpperBound": {
+          "type": "boolean",
+          "description": "omittedAllocatedBytes may count blocks clones share more than once, so it may exceed the folder's allocatedBytes."
+        }
+      }
+    }
+  }
+}

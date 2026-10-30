@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subset.dev/schemas/system/v1/disk-suggestions.schema.json",
+  "title": "subset-system disk --suggestions --path <dir> --json",
+  "description": "Reclaim rule matches over a scan. The helper only reports them: it never moves, deletes, or runs anything.",
+  "type": "object",
+  "required": ["schemaVersion", "command", "helperVersion", "observedAt", "complete", "sources", "restricted", "errors",
+               "path", "outcome", "timeoutSeconds", "totals", "entriesRead", "unreadablePaths", "catalogVersion",
+               "suggestions"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "command": { "const": "disk-suggestions" },
+    "helperVersion": { "$ref": "common.schema.json#/$defs/helperVersion" },
+    "observedAt": { "$ref": "common.schema.json#/$defs/observedAt" },
+    "complete": { "$ref": "common.schema.json#/$defs/complete" },
+    "sources": { "allOf": [{ "$ref": "common.schema.json#/$defs/sources" }], "required": ["sizes"] },
+    "restricted": { "$ref": "common.schema.json#/$defs/diskRestricted" },
+    "errors": { "$ref": "common.schema.json#/$defs/errors" },
+    "path": { "type": "string" },
+    "outcome": { "$ref": "common.schema.json#/$defs/scanOutcome" },
+    "timeoutSeconds": { "type": "number", "exclusiveMinimum": 0 },
+    "totals": { "$ref": "common.schema.json#/$defs/diskTotals" },
+    "entriesRead": { "type": ["integer", "null"], "minimum": 0 },
+    "unreadablePaths": { "$ref": "common.schema.json#/$defs/unreadablePaths" },
+    "catalogVersion": { "type": "integer", "minimum": 1, "description": "Raised whenever a rule's meaning changes." },
+    "suggestions": { "type": "array", "items": { "$ref": "#/$defs/suggestion" } }
+  },
+  "$defs": {
+    "suggestion": {
+      "type": "object",
+      "required": ["ruleId", "name", "location", "risk", "yield", "cleanup", "explanation", "rebuild", "developerTool", "app",
+                   "identifier", "bytes", "movedToTrashBytes", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "ruleId": {
+          "enum": ["xcodeDerivedData", "xcodeDeviceSupport", "unavailableSimulators", "simulatorCaches", "xcodeArchives",
+                   "staleNodeModules", "npmCache", "pnpmStore", "yarnCache", "homebrewCache", "dockerImages",
+                   "cargoRegistryCache", "gradleCaches", "pipCache", "appCaches", "deviceBackups", "oldInstallers",
+                   "appLeftovers", "trash"]
+        },
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "risk": { "enum": ["safe", "review", "info"] },
+        "yield": { "enum": ["movesAllMeasuredToTrash", "partOfMeasured", "estimated", "reportedUpperBound", "noCleanup"] },
+        "cleanup": {
+          "type": "object",
+          "description": "What Subset System's Disk section would do after the user confirms it; the helper does none of it.",
+          "required": ["kind", "command"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["trash", "trashEachItem", "trashPerApp", "command", "none"] },
+            "command": { "type": ["array", "null"], "items": { "type": "string" } }
+          }
+        },
+        "explanation": { "type": "string" },
+        "rebuild": { "type": "string" },
+        "developerTool": { "type": ["string", "null"] },
+        "app": {
+          "type": ["object", "null"],
+          "required": ["name", "bundleID", "path"],
+          "additionalProperties": false,
+          "properties": { "name": { "type": "string" }, "bundleID": { "type": "string" }, "path": { "type": "string" } }
+        },
+        "identifier": { "type": ["string", "null"] },
+        "bytes": {
+          "type": "object",
+          "required": ["kind", "privateBytes", "allocatedBytes", "complete", "allocatedUpperBound", "upToBytes", "totalBytes",
+                       "unavailableReason"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["scanned", "dockerReclaimable", "unavailable"] },
+            "privateBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+            "allocatedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+            "complete": { "type": ["boolean", "null"] },
+            "allocatedUpperBound": { "type": ["boolean", "null"] },
+            "upToBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+            "totalBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+            "unavailableReason": { "type": ["string", "null"] }
+          }
+        },
+        "movedToTrashBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "allocatedBytes", "privateBytes", "touched"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "allocatedBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+              "privateBytes": { "$ref": "common.schema.json#/$defs/optionalBytes" },
+              "touched": { "type": ["string", "null"], "format": "date-time" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

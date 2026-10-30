@@ -115,15 +115,104 @@ enum HelperFixtures {
                             launchdJobs: { [] }, interval: .zero, now: { observedAt })
     }
 
-    static func environment(processes: ProcessProbe? = nil) -> HelperEnvironment {
-        HelperEnvironment(home: home, processes: processes ?? probe(workload()))
+    static func environment(processes: ProcessProbe? = nil, disk: DiskProbe? = nil, home: String = home) -> HelperEnvironment {
+        HelperEnvironment(home: home, processes: processes ?? probe(workload()), disk: disk ?? diskProbe(),
+                          now: { observedAt })
     }
+
+    static let volume = VolumeSummary(
+        values: VolumeCapacityValues(mountPoint: "/", name: "Macintosh HD", capacity: 500_000_000_000,
+                                     availableForImportantUsage: 120_000_000_000, available: 100_000_000_000),
+        snapshots: .count(2))
+
+    /// Scans with the real scanner, `volume`, and no installed apps, with the helper's home folder. `slow` keeps the
+    /// scan waiting until it is cancelled, then returns the real scan as cancelled. `onProgress` sees the scan's
+    /// progress. `includedDocker` records each analysis's Docker flag; `docker` is what Docker answers when asked.
+    /// `edit` changes the scanned tree, given its root, to place states a test folder cannot have.
+    static func diskProbe(slow: Bool = false, includedDocker: DockerFlags? = nil,
+                          volume: VolumeSummary = HelperFixtures.volume,
+                          docker: DockerImageUsage = .unavailable(.cliNotFound), apps: InstalledApps = InstalledApps([]),
+                          onProgress: (@Sendable (DiskScanProgress) -> Void)? = nil,
+                          edit: (@Sendable (inout DiskTree, String) -> Void)? = nil) -> DiskProbe {
+        DiskProbe(
+            scan: { root in
+                let scanned: Result<DiskScanResult, DiskScanError>
+                do throws(DiskScanError) {
+                    let scanner = DiskScanner(workers: 1, progressInterval: onProgress == nil ? .milliseconds(100) : .zero)
+                    var result = try await scanner.scan(URL(fileURLWithPath: root), onProgress: onProgress)
+                    if let edit {
+                        var tree = result.tree
+                        edit(&tree, tree.rootPath)
+                        result = DiskScanResult(tree: tree, outcome: result.outcome, unreadablePaths: result.unreadablePaths,
+                                                entriesRead: result.entriesRead)
+                    }
+                    scanned = .success(result)
+                } catch {
+                    scanned = .failure(error)
+                }
+                guard slow, case let .success(result) = scanned else { return scanned }
+                while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(10)) }
+                return .success(DiskScanResult(tree: result.tree, outcome: .cancelled, unreadablePaths: result.unreadablePaths,
+                                               entriesRead: result.entriesRead))
+            },
+            volume: { _ in volume },
+            context: { home, includeDocker in
+                includedDocker?.append(includeDocker)
+                let real = realpath(home, nil).map { pointer in
+                    defer { free(pointer) }
+                    return String(cString: pointer)
+                }
+                return ReclaimContext(home: real ?? home, now: observedAt, installedApps: apps,
+                                      simulatorRuntimes: .installed([]), dockerImages: includeDocker ? docker : nil)
+            })
+    }
+}
+
+final class DockerFlags: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flags: [Bool] = []
+
+    func append(_ flag: Bool) { lock.withLock { flags.append(flag) } }
+    var values: [Bool] { lock.withLock { flags } }
 }
 
 struct FixtureMemorySource: SystemMemorySource {
     let raw: RawSystemMemory
 
     func read() -> RawSystemMemory { raw }
+}
+
+/// A temporary folder removed when the test ends.
+final class TemporaryFolder {
+    let url: URL
+    var path: String { url.path }
+
+    init() throws {
+        url = FileManager.default.temporaryDirectory.appendingPathComponent("subset-system-helper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    func file(_ relative: String, bytes: Int) throws {
+        let target = url.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 7, count: bytes).write(to: target)
+    }
+
+    func folder(_ relative: String) throws -> URL {
+        let target = url.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        return target
+    }
+
+    deinit {
+        // A folder made unreadable by a test is opened again so it can be removed.
+        if let enumerator = FileManager.default.enumerator(atPath: url.path) {
+            for case let relative as String in enumerator {
+                chmod(url.appendingPathComponent(relative).path, 0o755)
+            }
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
 }
 
 extension XCTestCase {

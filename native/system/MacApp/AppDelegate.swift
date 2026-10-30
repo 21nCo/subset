@@ -131,8 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let command = CommandLineHelper.linkCommand(helperPath: helper)
         alert.informativeText = """
-            \(CommandLineHelper.name) prints this Mac's CPU and memory by origin as text or JSON, for you or \
-            an agent that runs shell commands. It only reads: it never cleans up, changes, or sends anything.
+            \(CommandLineHelper.name) prints this Mac's CPU and memory by origin and disk usage by folder as text or JSON, \
+            for you or an agent that runs shell commands. It only reads: it never cleans up, changes, or sends anything.
 
             To run it from Terminal, link it into a folder on your PATH, for example:
 

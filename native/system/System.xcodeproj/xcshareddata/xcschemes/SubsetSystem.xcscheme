@@ -85,7 +85,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "637B3B9A34964BB822D73FC4D4D3044F"
+               BlueprintIdentifier = "B565B25990533E1F0E7C140749744E6E"
                BuildableName = "SystemHelperTests.xctest"
                BlueprintName = "SystemHelperTests"
                ReferencedContainer = "container:System.xcodeproj">
