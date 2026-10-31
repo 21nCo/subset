@@ -14,6 +14,8 @@ export function workspaceManifestProblems(kind, manifest) {
 
 const REPOSITORY_URL = 'git+https://github.com/21nCo/subset.git';
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+// The versions a <slug>-v<version> release tag can name (scripts/resolve-release-tag.mjs).
+const RELEASE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
  * Problems with a public workspace's manifest for npm: what it ships, where it came from, and how it depends on
@@ -26,6 +28,9 @@ export function publishedManifestProblems(manifest, path, workspaces) {
   const name = manifest.name;
   const problems = [];
   if (manifest.private !== false) problems.push(`${name} must set "private": false`);
+  if (typeof manifest.version !== 'string' || !RELEASE_VERSION.test(manifest.version)) {
+    problems.push(`${name} must have a release version x.y.z (found ${manifest.version})`);
+  }
   if (typeof manifest.license !== 'string' || !manifest.license) problems.push(`${name} must declare a license`);
   if (manifest.repository?.url !== REPOSITORY_URL || manifest.repository?.directory !== path) {
     problems.push(`${name} must name its repository ${REPOSITORY_URL} and directory ${path}`);

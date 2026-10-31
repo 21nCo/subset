@@ -200,15 +200,25 @@ console.log(JSON.stringify({ imports, warnings: warnings.map((warning) => warnin
   assert.deepEqual(result.warnings, []);
 });
 
-test('the packed type declarations type-check in a strict TypeScript consumer', () => {
+test('the packed type declarations, ./popup included, type-check in a strict TypeScript consumer', () => {
   writeFileSync(join(consumer, 'types.ts'), `
 import { canonicalizeUrl, isLinkDetailsV1, parseLinkDetails, type LinkDetailsV1 } from '@subset.dev/links';
 import { captureLink, type Capture, type SaveTarget, type TabCapture } from '@subset.dev/link-capture';
+import CapturePopup from '@subset.dev/link-capture/popup';
+import { mount, type ComponentProps } from 'svelte';
 const details: LinkDetailsV1 = parseLinkDetails('<title>x</title>', { url: canonicalizeUrl('https://example.com/') });
 const capture: Capture = captureLink('https://example.com/');
 const sameRecord = (tab: TabCapture): LinkDetailsV1 => tab.details;
 const target: Pick<SaveTarget, 'status'> | undefined = undefined;
-export const used = [details, capture, sameRecord, target, isLinkDetailsV1(details)];
+// The popup as the README wires it: its declaration gives these props their types.
+declare const saveTarget: SaveTarget;
+const props: ComponentProps<typeof CapturePopup> = { target: saveTarget, capture: async () => captureLink('https://example.com/'), onsetup: () => {} };
+export const mountPopup = (element: HTMLElement) => mount(CapturePopup, { target: element, props });
+// @ts-expect-error capture is a required prop
+const missingCapture: ComponentProps<typeof CapturePopup> = { target: saveTarget };
+// @ts-expect-error capture returns a Promise<Capture>
+const wrongCapture: ComponentProps<typeof CapturePopup> = { target: saveTarget, capture: () => 'https://example.com/' };
+export const used = [details, capture, sameRecord, target, isLinkDetailsV1(details), missingCapture, wrongCapture];
 `);
   writeFileSync(join(consumer, 'tsconfig.json'), JSON.stringify({
     compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', lib: ['ES2022', 'DOM'], types: [], strict: true, noEmit: true, skipLibCheck: false },

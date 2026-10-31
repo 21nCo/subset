@@ -12,8 +12,10 @@ import { fileURLToPath } from 'node:url';
 const caretPattern = /^\^(\d+)\.(\d+)\.(\d+)$/;
 const releasePattern = /^(\d+)\.(\d+)\.(\d+)$/;
 
-// Whether release `version` (x.y.z, no prerelease) satisfies `^a.b.c`, as npm reads it: the left-most non-zero part is
-// fixed (^1.2.3 is <2.0.0, ^0.1.0 is <0.2.0 and ^0.0.3 is only 0.0.3).
+/**
+ * Whether release `version` (x.y.z, no prerelease) satisfies `^a.b.c`, as npm reads it: the left-most non-zero part is
+ * fixed (^1.2.3 is <2.0.0, ^0.1.0 is <0.2.0 and ^0.0.3 is only 0.0.3).
+ */
 export function satisfiesCaret(version, range) {
   const wanted = caretPattern.exec(range)?.slice(1).map(Number);
   if (!wanted) throw new Error(`${range} is not a ^x.y.z range`);
@@ -25,8 +27,10 @@ export function satisfiesCaret(version, range) {
   return index === -1 || (index >= fixed && found[index] > wanted[index]);
 }
 
-// The runtime dependencies on @subset.dev packages that `packuments` (name to registry document, or null when the
-// registry has no such package) cannot install, as messages.
+/**
+ * The runtime dependencies on @subset.dev packages that `packuments` (name to registry document, or null when the
+ * registry has no such package) cannot install, as messages.
+ */
 export function missingDependencies(manifest, packuments) {
   const missing = [];
   for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
@@ -39,6 +43,15 @@ export function missingDependencies(manifest, packuments) {
   return missing;
 }
 
+/**
+ * The registry document URL for package `name`, encoded as one path segment (`@scope/name` becomes
+ * `%40scope%2Fname`), so nothing in the name can reach another registry path.
+ */
+export function packumentUrl(name) {
+  return `https://registry.npmjs.org/${encodeURIComponent(name)}`;
+}
+
+/** Reads the tarball's manifest, fetches each @subset.dev dependency's registry document and refuses what is missing. */
 async function main() {
   const [tarball] = process.argv.slice(2);
   if (!tarball?.endsWith('.tgz')) throw new Error('Usage: npm-dependency-guard.mjs <package.tgz>');
@@ -47,7 +60,7 @@ async function main() {
   for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
     for (const name of Object.keys(manifest[field] ?? {})) {
       if (!name.startsWith('@subset.dev/') || packuments.has(name)) continue;
-      const response = await fetch(`https://registry.npmjs.org/${name.replace('/', '%2f')}`, {
+      const response = await fetch(packumentUrl(name), {
         headers: { Accept: 'application/json' },
         signal: AbortSignal.timeout(30_000),
       });

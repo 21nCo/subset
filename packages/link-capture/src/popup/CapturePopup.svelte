@@ -5,17 +5,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   // The package's own entry, so the host and the popup share one copy of the capture code.
-  import { createCapturePopupController, type Capture, type PopupState, type SaveTarget } from '@subset.dev/link-capture';
+  import { createCapturePopupController, type CapturePopupProps, type PopupState } from '@subset.dev/link-capture';
 
-  interface Props {
-    target: SaveTarget;
-    /** Reads what to save, for example `() => captureActiveTab(getRuntime().browser)`. */
-    capture: () => Promise<Capture>;
-    /** Opens the target's setup, for example the options page; shown when the target needs setup. */
-    onsetup?: () => void;
-  }
-
-  let { target, capture, onsetup }: Props = $props();
+  // The same props type as the published declaration, CapturePopup.svelte.d.ts, so the two cannot drift apart.
+  let { target, capture, onsetup }: CapturePopupProps = $props();
   const uid = $props.id();
 
   // The target and capture function are fixed for the popup's life.

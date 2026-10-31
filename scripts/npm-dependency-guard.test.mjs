@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { missingDependencies, satisfiesCaret } from './npm-dependency-guard.mjs';
+import { missingDependencies, packumentUrl, satisfiesCaret } from './npm-dependency-guard.mjs';
 
 test('reads ^x.y.z ranges as npm does, without prereleases', () => {
   const cases = {
@@ -23,4 +23,10 @@ test('refuses a package whose @subset.dev dependency npm cannot install', () => 
   assert.deepEqual(missingDependencies(manifest, new Map([['@subset.dev/links', packument('0.1.0')]])), []);
   // Packages outside the scope come from the registry as usual and are not checked.
   assert.deepEqual(missingDependencies({ dependencies: { htmlparser2: '12.0.0' } }, new Map()), []);
+});
+
+test('asks the registry for the whole package name as one encoded path segment', () => {
+  assert.equal(packumentUrl('@subset.dev/links'), 'https://registry.npmjs.org/%40subset.dev%2Flinks');
+  // Every slash is encoded, not only the first, so a malformed name cannot name another registry path.
+  assert.equal(packumentUrl('@subset.dev/links/../-/user'), 'https://registry.npmjs.org/%40subset.dev%2Flinks%2F..%2F-%2Fuser');
 });

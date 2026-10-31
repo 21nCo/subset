@@ -66,6 +66,10 @@ test('refuses a published workspace dependency that npm could not resolve after 
 test('requires the publication metadata npm shows and installs from', () => {
   const problems = (overrides) => publishedManifestProblems(published(overrides), 'packages/link-capture', workspaces);
   assert.deepEqual(problems({ private: true }), ['@subset.dev/link-capture must set "private": false']);
+  for (const version of [undefined, '', '0.1', 'v0.1.0', '0.1.0 ', 1]) {
+    assert.deepEqual(problems({ version }), [`@subset.dev/link-capture must have a release version x.y.z (found ${version})`]);
+  }
+  for (const version of ['0.1.0-beta.2', '1.0.0+build.5', '1.0.0-rc.1+sha.abc']) assert.deepEqual(problems({ version }), []);
   assert.deepEqual(problems({ license: undefined }), ['@subset.dev/link-capture must declare a license']);
   assert.deepEqual(problems({ publishConfig: undefined }), ['@subset.dev/link-capture must set publishConfig.access to public']);
   assert.deepEqual(problems({ files: [] }), ['@subset.dev/link-capture must list its published files']);

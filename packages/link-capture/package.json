@@ -22,7 +22,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./popup": "./src/popup/CapturePopup.svelte"
+    "./popup": {
+      "types": "./src/popup/CapturePopup.svelte.d.ts",
+      "svelte": "./src/popup/CapturePopup.svelte",
+      "default": "./src/popup/CapturePopup.svelte"
+    }
   },
   "files": ["dist", "src/popup", "src/*.ts", "README.md", "LICENSE"],
   "publishConfig": {
