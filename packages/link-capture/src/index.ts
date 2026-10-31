@@ -16,8 +16,10 @@ export {
   captureFromContextMenu,
   LINK_CONTEXT_MENU_ID,
   registerLinkContextMenu,
+  saveFromContextMenu,
   type LinkContextMenuOptions,
-  type LinkMenuClick
+  type LinkMenuClick,
+  type LinkMenuOutcome
 } from './context-menu.js';
 export {
   hasServerAccess,

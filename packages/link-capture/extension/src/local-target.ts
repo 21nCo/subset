@@ -1,8 +1,11 @@
 import type { BrowserFacade } from '@extfn/core';
-import type { Capture, SaveTarget } from '@subset.dev/link-capture';
+import type { Capture, SaveResult, SaveTarget } from '@subset.dev/link-capture';
 
 const PREFIX = 'reference:capture:';
 const MAX_SAVED = 100;
+const MAX_SUGGESTIONS = 8;
+const LOCK = 'link-capture:reference-local';
+const NO_ROOM = 'There is no room on this device to save the link.';
 
 interface SavedCapture {
   capture: Capture;
@@ -16,24 +19,30 @@ interface Entry {
   value: SavedCapture;
 }
 
+/** The part of the Web Locks `LockManager` the target uses; tests pass a fake. */
+export interface ExclusiveLocks {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+}
+
 /**
  * Saves captures in this browser's `storage.local`, newest first, at most 100 links; a link saved again replaces its
  * entry.
  *
- * The popup and the background are separate instances writing the same storage, which has no transactions. So every
- * save writes a new key (`reference:capture:<time>:<random>`, ordered by time) and never rewrites another: two saves at
- * once both land. Clean-up afterwards removes only entries that are not the newest of their link or not among the 100
- * newest links, so whatever runs concurrently, it never removes a link's newest entry while that link is among the
- * 100 newest.
+ * The popup and the background are separate instances writing the same storage, which has no transactions. Every
+ * save, its clean-up and its quota recovery run inside one exclusive Web Lock shared by every extension page and the
+ * background (same origin), so saves are ordered by when they took the lock: the save that took it last is the one
+ * kept for its link, whatever the instances' clocks say. Inside the lock the key's time is at least one past the newest
+ * stored key, so it sorts after everything already saved. `locks` defaults to `navigator.locks`; without Web Locks,
+ * saves are serialized within this instance only.
  */
-export function createLocalTarget(browser: BrowserFacade): SaveTarget {
-  let last = 0;
-
-  /** Microseconds since the epoch, strictly increasing within this instance, so a later save sorts newer. */
-  function stamp(): string {
-    last = Math.max(Math.floor((performance.timeOrigin + performance.now()) * 1000), last + 1);
-    return last.toString(36).padStart(12, '0');
-  }
+export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks | undefined = defaultLocks()): SaveTarget {
+  let queue: Promise<unknown> = Promise.resolve();
+  const exclusive = <T>(run: () => Promise<T>): Promise<T> => {
+    if (locks) return locks.request(LOCK, run);
+    const result = queue.then(run, run);
+    queue = result.catch(() => undefined);
+    return result;
+  };
 
   async function entries(): Promise<Entry[]> {
     const items = (await browser.call<Record<string, unknown> | undefined>('storage.local.get', null)) ?? {};
@@ -57,26 +66,76 @@ export function createLocalTarget(browser: BrowserFacade): SaveTarget {
     return { kept, stale };
   }
 
+  /** Runs under the lock. A failure before the write resolves `ok: false`; once written, the capture is saved. */
+  async function saveLocked(capture: Capture, value: SavedCapture): Promise<SaveResult> {
+    let all: Entry[];
+    try {
+      all = await entries();
+    } catch (error) {
+      return { ok: false, error: message(error) };
+    }
+    const existing = all.some((entry) => entry.value.capture.canonicalUrl === capture.canonicalUrl);
+    const newest = all.length ? parseInt(all[0].key.slice(PREFIX.length), 36) || 0 : 0;
+    const time = Math.max(Math.floor((performance.timeOrigin + performance.now()) * 1000), newest + 1);
+    const key = `${PREFIX}${time.toString(36).padStart(12, '0')}:${crypto.randomUUID()}`;
+    const { stale } = sorted([{ key, value }, ...all]);
+    try {
+      await browser.call('storage.local.set', { [key]: value });
+    } catch (error) {
+      if (!isQuotaError(error)) return { ok: false, error: message(error) };
+      // Room held by entries this save replaces (the link's older entry, the 101st link): free it and write again. If
+      // the capture still does not fit, they are written back, so a failed save loses no saved link.
+      const reclaimed = all.filter((entry) => stale.includes(entry.key));
+      if (!reclaimed.length) return { ok: false, error: NO_ROOM };
+      try {
+        await browser.call('storage.local.remove', stale);
+      } catch {
+        return { ok: false, error: NO_ROOM };
+      }
+      try {
+        await browser.call('storage.local.set', { [key]: value });
+      } catch {
+        await browser.call('storage.local.set', Object.fromEntries(reclaimed.map((entry) => [entry.key, entry.value])));
+        return { ok: false, error: NO_ROOM };
+      }
+      return { ok: true, existing };
+    }
+    // Saved. A failed clean-up leaves only stale entries, which the next save removes.
+    if (stale.length) await browser.call('storage.local.remove', stale).catch(() => undefined);
+    return { ok: true, existing };
+  }
+
   return {
     id: 'reference-local',
     label: 'This device',
     async status() {
       return { state: 'connected' };
     },
-    async save(capture, edits) {
-      const existing = (await entries()).some((entry) => entry.value.capture.canonicalUrl === capture.canonicalUrl);
-      const key = `${PREFIX}${stamp()}:${crypto.randomUUID()}`;
-      await browser.call('storage.local.set', { [key]: { capture, ...edits } satisfies SavedCapture });
-      const { stale } = sorted(await entries());
-      if (stale.length) await browser.call('storage.local.remove', stale);
-      return { ok: true, existing };
+    save(capture, edits) {
+      return exclusive(() => saveLocked(capture, { capture, ...edits }));
     },
     async suggestTags(prefix) {
       const key = prefix.toLowerCase();
       const tags = new Set(sorted(await entries()).kept.flatMap((entry) => entry.value.tags ?? []));
-      return [...tags].filter((tag) => tag.toLowerCase().startsWith(key));
+      return [...tags].filter((tag) => tag.toLowerCase().startsWith(key)).slice(0, MAX_SUGGESTIONS);
     }
   };
+}
+
+function defaultLocks(): ExclusiveLocks | undefined {
+  const locks = (globalThis as { navigator?: { locks?: LockManager } }).navigator?.locks;
+  // The lock's promise settles with the callback's own result; the DOM types leave that promise unwrapped.
+  return locks ? { request: <T>(name: string, callback: () => Promise<T>) => locks.request(name, { mode: 'exclusive' }, callback) as unknown as Promise<T> } : undefined;
+}
+
+/** Chromium rejects with `QUOTA_BYTES quota exceeded`, Firefox with a `QuotaExceededError`. */
+function isQuotaError(error: unknown): boolean {
+  const { name, message } = (error ?? {}) as { name?: unknown; message?: unknown };
+  return name === 'QuotaExceededError' || (typeof message === 'string' && /quota/i.test(message));
+}
+
+function message(error: unknown): string {
+  return error instanceof Error && error.message ? `The link was not saved: ${error.message}` : 'The link was not saved.';
 }
 
 function isSaved(value: unknown): value is SavedCapture {

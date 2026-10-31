@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { captureFromContextMenu, captureLink, LINK_CONTEXT_MENU_ID, LinkCaptureError, registerLinkContextMenu } from '../dist/index.js';
+import { captureFromContextMenu, captureLink, LINK_CONTEXT_MENU_ID, LinkCaptureError, registerLinkContextMenu, saveFromContextMenu } from '../dist/index.js';
 import { createFakeBrowser } from './fake-browser.mjs';
 
 const now = () => new Date('2026-10-31T12:00:00.000Z');
@@ -69,5 +69,35 @@ describe('the link context menu', () => {
       );
     }
     assert.equal(captureLink('https://me:pw@example.com/x').url, 'https://example.com/x');
+  });
+
+  describe('saving a clicked link', () => {
+    const click = { menuItemId: LINK_CONTEXT_MENU_ID, linkUrl: 'https://example.com/a', linkText: 'A' };
+    const target = (save) => ({ id: 't', label: 'Bookmarks', status: async () => ({ state: 'connected' }), save });
+    const reported = (calls) => calls.filter(([path]) => path.startsWith('action.')).map(([, details]) => details.text ?? details.title);
+
+    for (const [name, save, outcome] of [
+      ['saved', async () => ({ ok: true }), { state: 'saved', existing: false, message: 'Saved to Bookmarks.' }],
+      ['already saved', async () => ({ ok: true, existing: true }), { state: 'saved', existing: true, message: 'Already in Bookmarks.' }],
+      ['refused before writing', async () => ({ ok: false, error: 'No room.' }), { state: 'not-saved', message: 'No room.' }],
+      ['a malformed result', async () => undefined, { state: 'not-saved', message: 'The link was not saved.' }],
+      ['a rejected save', async () => { throw new Error('connection reset'); }, { state: 'unknown', message: 'The link may not have been saved to Bookmarks: connection reset' }],
+      ['a save that throws', () => { throw new Error('boom'); }, { state: 'unknown', message: 'The link may not have been saved to Bookmarks: boom' }]
+    ]) {
+      it(`reports ${name} on the toolbar button and never rejects`, async () => {
+        const { browser, calls } = createFakeBrowser();
+        assert.deepEqual(await saveFromContextMenu(browser, target(save), click), outcome);
+        assert.deepEqual(reported(calls), [{ saved: '✓', 'not-saved': '!', unknown: '?' }[outcome.state], outcome.message]);
+      });
+    }
+
+    it('reports a non-http link as not saved without calling the target, and ignores other items', async () => {
+      const { browser, calls } = createFakeBrowser();
+      const saves = [];
+      const outcome = await saveFromContextMenu(browser, target(async (capture) => saves.push(capture)), { ...click, linkUrl: 'javascript:x' });
+      assert.equal(outcome.state, 'not-saved');
+      assert.equal(await saveFromContextMenu(browser, target(async (capture) => saves.push(capture)), { ...click, menuItemId: 'other' }), undefined);
+      assert.deepEqual([saves, reported(calls)], [[], ['!', 'Only web pages (http and https) can be saved.']]);
+    });
   });
 });

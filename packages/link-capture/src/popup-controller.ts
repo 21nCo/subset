@@ -24,6 +24,12 @@ export interface CapturePopupController {
    * `undefined` when the answer is stale: a later `suggestTags` call or an edit of the tags came first.
    */
   suggestTags(prefix: string): Promise<string[] | undefined>;
+  /**
+   * From `editing`: replaces the tag being typed (after the last comma) with `tag`, if `tag` is in the latest current
+   * `suggestTags` answer. Returns false and changes nothing for a suggestion that a newer request or a tags edit made
+   * stale, so a click on a list still on screen cannot apply an answer for an older prefix.
+   */
+  acceptTag(tag: string): boolean;
 }
 
 const CAPTURE_MESSAGES: Record<LinkCaptureErrorCode, string> = {
@@ -37,13 +43,22 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
   let state = initialPopupState;
   // Counts suggestion requests and tag edits: an answer is shown only if nothing changed the tags since it was asked.
   let suggestionRequest = 0;
+  // The latest answer still current, with the request it answered.
+  let offered: { request: number; tags: string[] } | undefined;
   const listeners = new Set<(state: PopupState) => void>();
 
   function dispatch(event: PopupEvent): boolean {
     const next = popupTransition(state, event);
     if (next === state) return false;
     state = next;
-    for (const listener of listeners) listener(state);
+    // A throwing listener must not stop the others or the transition's effect (the save after `saving`).
+    for (const listener of listeners) {
+      try {
+        listener(state);
+      } catch (error) {
+        report(error);
+      }
+    }
     return true;
   }
 
@@ -96,7 +111,10 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       if (dispatch({ type: 'start' })) await captureAndCheck();
     },
     edit(draft) {
-      if (draft.tags !== undefined) suggestionRequest++;
+      if (draft.tags !== undefined) {
+        suggestionRequest++;
+        offered = undefined;
+      }
       dispatch({ type: 'edit', draft });
     },
     async save() {
@@ -112,6 +130,7 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
     },
     async suggestTags(prefix) {
       const request = ++suggestionRequest;
+      offered = undefined;
       let tags: unknown = [];
       try {
         if (options.target.suggestTags) tags = await options.target.suggestTags(prefix);
@@ -119,12 +138,26 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
         // A failing suggester offers nothing.
       }
       if (request !== suggestionRequest) return undefined;
-      if (!Array.isArray(tags)) return [];
       // Trimmed and each once, in the target's order: the popup keys its list by tag.
-      const found = tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
-      return [...new Set(found)].filter((tag) => tag !== '');
+      const found = (Array.isArray(tags) ? tags : []).filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
+      offered = { request, tags: [...new Set(found)].filter((tag) => tag !== '') };
+      return offered.tags;
+    },
+    acceptTag(tag) {
+      if (state.name !== 'editing' || offered?.request !== suggestionRequest || !offered.tags.includes(tag)) return false;
+      const tags = state.draft.tags;
+      const kept = tags.slice(0, tags.lastIndexOf(',') + 1);
+      this.edit({ tags: `${kept}${kept ? ' ' : ''}${tag}, ` });
+      return true;
     }
   };
+}
+
+/** Hands a listener's error to the page's error reporting (an `error` event), or the console where there is none. */
+function report(error: unknown): void {
+  const reportError = (globalThis as { reportError?: (error: unknown) => void }).reportError;
+  if (typeof reportError === 'function') reportError(error);
+  else console.error(error);
 }
 
 function checkedStatus(value: SaveTargetStatus, label: string): SaveTargetStatus {

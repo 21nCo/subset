@@ -38,6 +38,7 @@ export interface SaveTarget {
   /** Name shown to the user, for example `Bookmarks`. */
   readonly label: string;
   status(): Promise<SaveTargetStatus>;
+  /** Resolves `ok: false` only when nothing was saved; a rejection means the outcome is unknown. */
   save(capture: Capture, edits: SaveEdits): Promise<SaveResult>;
   /** Up to a few existing tags starting with `prefix`, for the tag field. */
   suggestTags?(prefix: string): Promise<string[]>;

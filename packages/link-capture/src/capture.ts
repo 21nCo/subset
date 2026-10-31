@@ -68,7 +68,10 @@ export interface PageSnapshot {
   url: string;
   title: string;
   selectionText: string;
-  /** `document.head.outerHTML`, cut at `MAX_DOCUMENT_BYTES` of UTF-8 without splitting a character. */
+  /**
+   * `<head>` with each child element that fits (`outerHTML`), at most `MAX_DOCUMENT_BYTES` of UTF-8, cut without
+   * splitting a character. A child too large for what is left (a big inline script) is skipped unserialized.
+   */
   html: string;
   /** `<html lang>`, which `parseLinkDetails` reads but which is outside `<head>`; at most `MAX_LANG_LENGTH` + 1 characters. */
   lang: string;
@@ -89,7 +92,47 @@ export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLen
     const cut = value.slice(0, max);
     return cut.length < value.length && /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
   };
-  const head = document.head ? text(document.head.outerHTML, Infinity) : '';
+  // The head is never serialized whole. Each child element's size is first estimated from its tag, attribute and text
+  // lengths, stopping as soon as it passes the room left, and only a child that fits is serialized; `work` caps the
+  // nodes and characters looked at across all children. So time and memory stay near maxHeadBytes however large the
+  // head is, and tags after a skipped child are still read.
+  let work = 2 * maxHeadBytes;
+  const size = (root: Node, limit: number): number => {
+    let total = 0;
+    for (let node: Node | null = root; node; ) {
+      let cost = 1;
+      if (node.nodeType === 1) {
+        const { localName, attributes } = node as Element;
+        cost += 2 * localName.length + 5;
+        // A template's content is serialized but is not among its child nodes, so its size is unknown.
+        if (localName === 'template') return Infinity;
+        for (let index = 0; index < attributes.length && cost <= limit; index++) {
+          cost += attributes[index].name.length + attributes[index].value.length + 4;
+        }
+      } else if (node.nodeType === 3 || node.nodeType === 4 || node.nodeType === 8) {
+        cost += (node as CharacterData).length + 11;
+      }
+      // A length is read in constant time, so only the part within the limit counts as work.
+      work -= Math.min(cost, limit - total + 1);
+      total += cost;
+      if (total > limit || work < 0) return Infinity;
+      // Depth first, never leaving `root`.
+      let next: Node | null = node.firstChild;
+      for (let at: Node | null = node; !next && at && at !== root; at = at.parentNode) next = at.nextSibling;
+      node = next;
+    }
+    return total;
+  };
+  const parts: string[] = [];
+  let left = maxHeadBytes - '<head></head>'.length;
+  for (let child = document.head?.firstElementChild ?? null; child && left > 0 && work > 0; child = child.nextElementSibling) {
+    work--;
+    if (size(child, left) > left) continue;
+    const html = text(child.outerHTML, Infinity);
+    parts.push(html);
+    left -= html.length;
+  }
+  const head = document.head ? `<head>${parts.join('')}</head>` : '';
   // encodeInto stops before a character that does not fit, so the cut never splits one; `read` counts UTF-16 units.
   const { read } = new TextEncoder().encodeInto(head, new Uint8Array(maxHeadBytes));
   const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;

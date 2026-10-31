@@ -35,10 +35,11 @@
   }
 
   /**
-   * Suggestions for the tag being typed, the text after the last comma. The controller drops an answer that a newer
-   * request or a tags edit (typing, or accepting a suggestion) has superseded.
+   * Suggestions for the tag being typed, the text after the last comma. The list for the old prefix goes at once; the
+   * controller drops an answer that a newer request or a tags edit (typing, or accepting a suggestion) has superseded.
    */
   async function suggest(tags: string) {
+    suggestions = [];
     const prefix = tags.slice(tags.lastIndexOf(',') + 1).trim();
     const found = prefix ? await controller.suggestTags(prefix) : [];
     if (found) suggestions = found.slice(0, 8);
@@ -79,10 +80,8 @@
   });
 
   function addTag(tag: string) {
-    if (view.name !== 'editing') return;
-    const tags = view.draft.tags;
-    const kept = tags.slice(0, tags.lastIndexOf(',') + 1);
-    controller.edit({ tags: `${kept}${kept ? ' ' : ''}${tag}, ` });
+    // The controller refuses a suggestion that is no longer current; either way the list is spent.
+    controller.acceptTag(tag);
     suggestions = [];
     document.getElementById(`${uid}-tags`)?.focus();
   }

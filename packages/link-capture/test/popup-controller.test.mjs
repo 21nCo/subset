@@ -244,6 +244,53 @@ describe('createCapturePopupController', () => {
     assert.deepEqual(await current, ['d-tag']);
   });
 
+  it('applies only a current suggestion: one still on screen during a newer request is refused', async () => {
+    const pending = [];
+    const suggest = (prefix) => new Promise((resolve) => pending.push(() => resolve([`${prefix}-tag`])));
+    const { controller } = await started(fakeTarget({ suggest }));
+    controller.edit({ tags: 'a, re' });
+    const shown = controller.suggestTags('re');
+    pending[0]();
+    assert.deepEqual(await shown, ['re-tag']);
+
+    // Typing on while the list for 're' is still displayed: clicking it must not replace 'rus'.
+    controller.edit({ tags: 'a, rus' });
+    const delayed = controller.suggestTags('rus');
+    assert.equal(controller.acceptTag('re-tag'), false);
+    assert.equal(controller.state.draft.tags, 'a, rus');
+    pending[1]();
+    assert.deepEqual(await delayed, ['rus-tag']);
+    assert.equal(controller.acceptTag('not-offered'), false);
+    assert.equal(controller.acceptTag('rus-tag'), true);
+    assert.equal(controller.state.draft.tags, 'a, rus-tag, ');
+    // Spent: accepting edited the tags.
+    assert.equal(controller.acceptTag('rus-tag'), false);
+  });
+
+  it('keeps saving and notifying healthy listeners when a listener throws', async () => {
+    const reported = [];
+    const { error } = console;
+    console.error = (value) => reported.push(value);
+    try {
+      const target = fakeTarget({ save: (count) => (count === 1 ? { ok: false, error: 'Refused.' } : { ok: true }) });
+      const controller = createCapturePopupController({ target, capture: async () => capture });
+      const healthy = [];
+      controller.subscribe((state) => {
+        if (state.name === 'saving') throw new Error('view broke');
+      });
+      controller.subscribe((state) => healthy.push(state.name));
+      await controller.start();
+      await controller.save();
+      assert.deepEqual([controller.state.name, target.saves.length], ['error', 1]);
+      await controller.retry();
+      assert.deepEqual([controller.state.name, target.saves.length], ['saved', 2]);
+      assert.deepEqual(healthy, ['capturing', 'editing', 'saving', 'error', 'saving', 'saved']);
+      assert.deepEqual(reported.map((value) => value.message), ['view broke', 'view broke']);
+    } finally {
+      console.error = error;
+    }
+  });
+
   it('stops notifying after unsubscribe', async () => {
     const controller = createCapturePopupController({ target: fakeTarget(), capture: async () => capture });
     const seen = [];

@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('.', import.meta.url));
  * `@extfn/core` 0.1.0 exports its build-time config loader from the same entry as the runtime, and that loader imports
  * `node:fs/promises`, `node:path` and `node:url`, so a browser bundle of `getRuntime` fails. The extension never calls
  * the loader: inside `@extfn/core` those three imports resolve to stubs, and the loader is tree-shaken away.
- * Reported on SFO-44 (extfn 0.2.0); remove once `@extfn/core` has a browser-only entry.
+ * TEMPORARY until extfn 0.2.0 (SFO-44); remove once `@extfn/core` has a browser-only entry.
  */
 function extfnCoreNodeStubs(): Plugin {
   const stubs: Record<string, string> = {

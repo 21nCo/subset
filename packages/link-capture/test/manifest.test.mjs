@@ -53,6 +53,14 @@ describe('server access', () => {
     ]);
   });
 
+  it('reports a denied request as no access, also when the browser answers something other than true', async () => {
+    for (const grant of [false, null, 'yes']) {
+      const { browser } = createFakeBrowser({ grant });
+      assert.equal(await requestServerAccess(browser, 'https://bookmarks.example.com/'), false, String(grant));
+      assert.equal(await hasServerAccess(browser, 'https://bookmarks.example.com/'), false, String(grant));
+    }
+  });
+
   it('builds match patterns for http, IP and IPv6 servers', () => {
     assert.equal(serverOriginPattern('http://localhost:3000/'), 'http://localhost/*');
     assert.equal(serverOriginPattern('http://192.168.1.5:8080'), 'http://192.168.1.5/*');

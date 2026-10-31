@@ -70,15 +70,28 @@ describe('captureActiveTab', () => {
     assert.ok(head.startsWith(snapshot.html));
     assert.ok(snapshot.html.isWellFormed());
 
+    // Each child element as the browser serializes it, without the whitespace between them.
     const small = runInPage(fakePage({ url: 'https://example.com/', head: HEAD }), readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
-    assert.equal(small.html, HEAD);
+    assert.equal(small.html, HEAD.replace(/>\s+</g, '><'));
   });
 
-  it('does not read a tag past 512 KB of <head>', async () => {
-    const head = `<head><meta name="description" content="${'x'.repeat(MAX_DOCUMENT_BYTES)}"><meta property="og:title" content="Too late"></head>`;
-    const capture = await captureActiveTab(articleBrowser({ head, title: '' }).browser, { now });
-    assert.equal(capture.details.title, undefined);
-    assert.equal(capture.title, capture.url);
+  it('never serializes the whole <head> or a child too large for 512 KB, and still reads the tags after it', async () => {
+    const head = `<head><script>${'x'.repeat(4 * MAX_DOCUMENT_BYTES)}</script><meta property="og:title" content="After the script"></head>`;
+    const page = fakePage({ url: 'https://example.com/', head });
+    const snapshot = runInPage(page, readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    assert.equal(snapshot.html, '<head><meta property="og:title" content="After the script"></head>');
+    // Only the meta was serialized; the script's text was measured by its length, not copied.
+    assert.equal(page.stats.serialized, snapshot.html.length - '<head></head>'.length);
+    const browser = createFakeBrowser({ tabs: [{ id: 7, url: 'https://example.com/' }], page: fakePage({ url: 'https://example.com/', head }) }).browser;
+    assert.equal((await captureActiveTab(browser, { now })).details.title, 'After the script');
+  });
+
+  it('bounds the nodes it visits in a <head> with very many children', () => {
+    const page = fakePage({ url: 'https://example.com/', head: `<head>${'<i></i>'.repeat(200_000)}</head>` });
+    const snapshot = runInPage(page, readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    assert.ok(Buffer.byteLength(snapshot.html) <= MAX_DOCUMENT_BYTES);
+    // Stopped by the work cap (twice the byte limit, at least 4 per child here) before visiting every child.
+    assert.ok(page.stats.visits <= (2 * MAX_DOCUMENT_BYTES) / 4 && page.stats.visits < 200_000, `${page.stats.visits} nodes visited`);
   });
 
   it('bounds <html lang>, so a long one cannot push the head out of the parsed 512 KB', async () => {
