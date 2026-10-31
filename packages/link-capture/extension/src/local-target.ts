@@ -7,7 +7,7 @@ const MAX_SUGGESTIONS = 8;
 const LOCK = 'link-capture:reference-local';
 const NO_ROOM = 'There is no room on this device to save the link.';
 const NO_LOCKS = 'This browser has no Web Locks (navigator.locks), so links cannot be saved on this device.';
-/** Saves stop once this many replaced entries are left behind by failed removals, so they cannot fill the storage. */
+/** Saving stops once this many replaced entries are left behind by failed removals, so they cannot fill the storage. */
 const MAX_STALE = 10;
 const NOT_REMOVED = 'Links replaced on this device could not be removed from its storage.';
 
@@ -41,8 +41,10 @@ export interface ExclusiveLocks {
  *
  * Entries already replaced (by a newer entry of the same link, or past the 100 newest links) are removed again before
  * each write and on each `status()`, under the same lock, so a removal that failed once is retried and their room is
- * freed before a full storage refuses the save. While a failed removal leaves any behind, `status()` reports an error;
- * once 10 are left, saves are refused (`ok: false`, nothing written) until a removal works again.
+ * freed before a full storage refuses the save. Fewer than 10 left behind change nothing: saves succeed and `status()`
+ * is connected. Once 10 are left, `status()` reports an error and saves are refused (`ok: false`, nothing written)
+ * until a removal works again. Both decide from the same check (`available`), so `status()` says whether a save can
+ * succeed now.
  *
  * `locks` defaults to `navigator.locks`, which Chromium MV3 and Firefox MV3 provide to extension pages and the
  * background. Web Locks are required: without them nothing can order the instances' saves, so `status()` reports an
@@ -87,13 +89,22 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     return { all: all.filter((entry) => !removed.has(entry.key)), stale: 0 };
   }
 
+  /**
+   * Runs under the lock; the one availability check of both `status()` and `save()`. Reclaims what it can, then a save
+   * is refused only when the replaced entries left behind reached the bound.
+   */
+  async function available(): Promise<{ all: Entry[]; refused: boolean }> {
+    const { all, stale } = await reclaim(await entries());
+    return { all, refused: stale >= MAX_STALE };
+  }
+
   /** Runs under the lock. A failure before the write resolves `ok: false`; once written, the capture is saved. */
   async function saveLocked(capture: Capture, value: SavedCapture): Promise<SaveResult> {
     let all: Entry[];
     try {
-      const reclaimed = await reclaim(await entries());
-      if (reclaimed.stale >= MAX_STALE) return { ok: false, error: `The link was not saved. ${NOT_REMOVED}` };
-      all = reclaimed.all;
+      const checked = await available();
+      if (checked.refused) return { ok: false, error: `The link was not saved. ${NOT_REMOVED}` };
+      all = checked.all;
     } catch (error) {
       return { ok: false, error: message(error) };
     }
@@ -109,7 +120,7 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
       // included) is removed to make room, because a removal before the new entry is written could not be undone.
       return { ok: false, error: isQuotaError(error) ? NO_ROOM : message(error) };
     }
-    // Saved. A failed clean-up leaves only replaced entries, which the next save or status() removes or reports.
+    // Saved. A failed clean-up leaves only replaced entries, which the next save or status() removes again.
     if (stale.length) await browser.call('storage.local.remove', stale).catch(() => undefined);
     return { ok: true, existing };
   }
@@ -121,7 +132,7 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
       if (!locks) return { state: 'error', message: NO_LOCKS };
       return locks.request(LOCK, async () => {
         try {
-          return (await reclaim(await entries())).stale ? { state: 'error', message: NOT_REMOVED } : { state: 'connected' };
+          return (await available()).refused ? { state: 'error', message: NOT_REMOVED } : { state: 'connected' };
         } catch (error) {
           return { state: 'error', message: `This device's storage is unavailable${error instanceof Error && error.message ? `: ${error.message}` : '.'}` };
         }

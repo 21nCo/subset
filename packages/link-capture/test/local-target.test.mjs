@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { transformWithEsbuild } from 'vite';
-import { captureLink } from '../dist/index.js';
+import { captureLink, createCapturePopupController } from '../dist/index.js';
 import { createFakeBrowser } from './fake-browser.mjs';
 
 // The reference host's target is extension source, built only by Vite; it imports types alone, so stripping them is enough.
@@ -166,7 +166,7 @@ describe('the reference local target', () => {
   }
 
   for (const instances of [1, 2]) {
-    it(`bounds the replaced entries a failing removal leaves, and says so (${instances} instance${instances > 1 ? 's' : ''})`, async () => {
+    it(`bounds the replaced entries a failing removal leaves; status() and save() agree (${instances} instance${instances > 1 ? 's' : ''})`, async () => {
       const failing = {};
       const { browser, local, calls } = createFakeBrowser({ storage: { before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } } });
       const locks = fakeLocks();
@@ -176,11 +176,13 @@ describe('the reference local target', () => {
       for (let n = 0; n < 11; n++) {
         results.push(await targets[n % instances].save(link('a'), { notes: `edit ${n}` }));
         assert.ok(local.size <= 11);
+        // n replaced entries are left: below the bound a save still works, so status() is connected on every instance.
+        const expected = n < 10 ? { state: 'connected' } : { state: 'error', message: NOT_REMOVED };
+        for (const target of targets) assert.deepEqual(await target.status(), expected, `after ${n} left`);
       }
-      // Each write is committed (ok), and the replaced entries it leaves are reported.
+      // Each write is committed (ok).
       assert.deepEqual(results, [{ ok: true, existing: false }, ...Array(10).fill({ ok: true, existing: true })]);
       assert.equal(local.size, 11);
-      for (const target of targets) assert.deepEqual(await target.status(), { state: 'error', message: NOT_REMOVED });
       // At the bound: refused, nothing written, whichever instance saves.
       const before = structuredClone(Object.fromEntries(local));
       const from = calls.length;
@@ -191,21 +193,46 @@ describe('the reference local target', () => {
       assert.deepEqual(Object.fromEntries(local), before);
       assert.equal(ops(calls, from).filter((op) => op === 'storage.local.set').length, 0);
       assert.equal(stored(local).filter(({ notes }) => notes === 'edit 10').length, 1);
+      // Once removal works, status() on the instance that did not save last frees them: one entry per link.
+      failing.remove = false;
+      assert.deepEqual(await targets.at(-1).status(), { state: 'connected' });
+      assert.deepEqual(stored(local), [{ link: 'https://example.com/a', notes: 'edit 10' }]);
+      for (const target of targets) assert.deepEqual(await target.status(), { state: 'connected' });
     });
   }
 
-  it('reports the error after one failed removal, and connected once status() can remove the replaced entry', async () => {
+  it('stays connected after one failed removal: the popup reaches editing and saves', async () => {
+    const failing = {};
+    const { browser, local } = createFakeBrowser({ storage: { before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } } });
+    const locks = fakeLocks();
+    const [popupTarget, background] = [createLocalTarget(browser, locks), createLocalTarget(browser, locks)];
+    await background.save(link('a'), { notes: 'one' });
+    failing.remove = true;
+    assert.deepEqual(await background.save(link('a'), { notes: 'two' }), { ok: true, existing: true });
+    assert.deepEqual(await popupTarget.status(), { state: 'connected' });
+    const controller = createCapturePopupController({ target: popupTarget, capture: async () => link('b') });
+    await controller.start();
+    assert.equal(controller.state.name, 'editing');
+    await controller.save();
+    assert.equal(controller.state.name, 'saved');
+    failing.remove = false;
+    assert.deepEqual(await background.status(), { state: 'connected' });
+    assert.deepEqual(storedLinks(local), ['https://example.com/b', 'https://example.com/a']);
+    assert.equal(stored(local).find((entry) => entry.link.endsWith('/a')).notes, 'two');
+  });
+
+  it('a removal that failed past the 100-link cap leaves the target connected, and status() frees it later', async () => {
     const failing = {};
     const { browser, local } = createFakeBrowser({ storage: { before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } } });
     const target = createLocalTarget(browser, fakeLocks());
-    assert.deepEqual(await target.status(), { state: 'connected' });
-    await target.save(link('a'), { notes: 'one' });
+    for (let n = 0; n < 100; n++) await target.save(link(n), {});
     failing.remove = true;
-    assert.deepEqual(await target.save(link('a'), { notes: 'two' }), { ok: true, existing: true });
-    assert.deepEqual(await target.status(), { state: 'error', message: NOT_REMOVED });
+    assert.deepEqual(await target.save(link(100), {}), { ok: true, existing: false });
+    assert.equal(storedLinks(local).length, 101);
+    assert.deepEqual(await target.status(), { state: 'connected' });
     failing.remove = false;
     assert.deepEqual(await target.status(), { state: 'connected' });
-    assert.deepEqual(stored(local), [{ link: 'https://example.com/a', notes: 'two' }]);
+    assert.deepEqual(storedLinks(local), Array.from({ length: 100 }, (_, i) => `https://example.com/${100 - i}`));
   });
 
   it('once removal works again, frees the replaced entries before writing into a full storage', async () => {
