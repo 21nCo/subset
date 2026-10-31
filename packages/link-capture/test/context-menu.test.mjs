@@ -91,6 +91,23 @@ describe('the link context menu', () => {
       });
     }
 
+    for (const failing of ['setBadgeText', 'setTitle']) {
+      it(`still reports each outcome when action.${failing} is refused`, async () => {
+        for (const [save, badge, message] of [
+          [async () => ({ ok: true }), '✓', 'Saved to Bookmarks.'],
+          [async () => ({ ok: false, error: 'No room.' }), '!', 'No room.'],
+          [async () => { throw new Error('reset'); }, '?', 'The link may not have been saved to Bookmarks: reset']
+        ]) {
+          const { browser, calls } = createFakeBrowser();
+          browser.raw.action[failing] = async () => { throw new Error('No tab with id'); };
+          const outcome = await saveFromContextMenu(browser, target(save), click);
+          assert.equal(outcome.message, message);
+          // The facade records only the call that went through: the other channel was still set.
+          assert.deepEqual(reported(calls), failing === 'setBadgeText' ? [message] : [badge]);
+        }
+      });
+    }
+
     it('reports a non-http link as not saved without calling the target, and ignores other items', async () => {
       const { browser, calls } = createFakeBrowser();
       const saves = [];

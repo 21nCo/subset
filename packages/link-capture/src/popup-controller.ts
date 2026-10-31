@@ -80,6 +80,15 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
     else dispatch({ type: 'captured', capture: captured.capture });
   }
 
+  // A closure, like every operation, so a method taken off the controller (`const { acceptTag } = controller`) works.
+  function edit(draft: Partial<Draft>): void {
+    if (draft.tags !== undefined) {
+      suggestionRequest++;
+      offered = undefined;
+    }
+    dispatch({ type: 'edit', draft });
+  }
+
   async function runSave(): Promise<void> {
     if (state.name !== 'saving') return;
     const { capture, draft } = state;
@@ -94,7 +103,10 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       }
       message = typeof error === 'string' && error ? error : 'The link was not saved.';
     } catch (error) {
-      message = errorMessage(error, 'The link was not saved.');
+      // A rejection leaves the outcome unknown: the target may have saved before failing. Retrying is safe because
+      // `save` is idempotent for the same capture and edits (the `SaveTarget` contract).
+      const reason = error instanceof Error && error.message ? `: ${error.message}` : '.';
+      message = `The link may not have been saved to ${options.target.label}${reason}`;
     }
     dispatch({ type: 'saveFailed', message });
   }
@@ -110,13 +122,7 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
     async start() {
       if (dispatch({ type: 'start' })) await captureAndCheck();
     },
-    edit(draft) {
-      if (draft.tags !== undefined) {
-        suggestionRequest++;
-        offered = undefined;
-      }
-      dispatch({ type: 'edit', draft });
-    },
+    edit,
     async save() {
       if (dispatch({ type: 'save' })) await runSave();
     },
@@ -147,7 +153,7 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
       if (state.name !== 'editing' || offered?.request !== suggestionRequest || !offered.tags.includes(tag)) return false;
       const tags = state.draft.tags;
       const kept = tags.slice(0, tags.lastIndexOf(',') + 1);
-      this.edit({ tags: `${kept}${kept ? ' ' : ''}${tag}, ` });
+      edit({ tags: `${kept}${kept ? ' ' : ''}${tag}, ` });
       return true;
     }
   };

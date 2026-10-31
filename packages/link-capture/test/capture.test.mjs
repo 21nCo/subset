@@ -28,6 +28,9 @@ function articleBrowser(overrides = {}, target) {
   });
 }
 
+// The head's share of the 512 KB: room is left for `<html lang="…">` and `</html>` around it.
+const MAX_HEAD_BYTES = MAX_DOCUMENT_BYTES - '<html lang="">'.length - MAX_LANG_LENGTH - '</html>'.length;
+
 const rejectsWith = (code) => (error) => error instanceof LinkCaptureError && error.code === code;
 
 describe('captureActiveTab', () => {
@@ -57,21 +60,37 @@ describe('captureActiveTab', () => {
       // Only the active tab of this window, one injection into it, and nothing else.
       assert.deepEqual(calls, [
         ['tabs.query', { active: true, currentWindow: true }],
-        ['scripting.executeScript', { target: { tabId: 7 }, args: [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH] }]
+        ['scripting.executeScript', { target: { tabId: 7 }, args: [MAX_HEAD_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH] }]
       ]);
     });
   }
 
-  it('sends at most 512 KB of <head> from the page, cut between characters', () => {
-    // 'a' then four-byte characters, so the byte limit falls inside one unless the cut respects them.
-    const head = `<head><meta name="description" content="a${'😀'.repeat(140_000)}"></head>`;
-    const snapshot = runInPage(fakePage({ url: 'https://example.com/', head }), readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
-    assert.equal(Buffer.byteLength(snapshot.html), MAX_DOCUMENT_BYTES - 3);
-    assert.ok(head.startsWith(snapshot.html));
-    assert.ok(snapshot.html.isWellFormed());
+  it('sends only whole <head> children that fit in UTF-8, so a child is never cut and the tags after it are read', async () => {
+    const after = '<meta property="og:title" content="After the big one">';
+    for (const [name, big] of [
+      // Shorter than the limit in UTF-16 units, longer in UTF-8 bytes.
+      ['multibyte', `<meta name="description" content="a${'😀'.repeat(140_000)}${'€'.repeat(30_000)}">`],
+      // Shorter than the limit as typed, longer once & and " are escaped.
+      ['escaped', `<meta name="description" content="${'&amp;&quot;'.repeat(150_000)}">`]
+    ]) {
+      const head = `<head><meta name="keywords" content="kept">${big}${after}</head>`;
+      const page = fakePage({ url: 'https://example.com/', head });
+      const snapshot = runInPage(page, readPage, [MAX_HEAD_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+      assert.equal(snapshot.html, `<head><meta name="keywords" content="kept">${after}</head>`, name);
+      // Escaping grows a child at most 6 times its estimate, so what is serialized stays bounded too.
+      assert.ok(page.stats.serialized <= 6 * MAX_HEAD_BYTES, `${page.stats.serialized} characters serialized`);
+      const browser = createFakeBrowser({ tabs: [{ id: 7, url: 'https://example.com/' }], page: fakePage({ url: 'https://example.com/', head }) }).browser;
+      assert.equal((await captureActiveTab(browser, { now })).details.title, 'After the big one', name);
+    }
+
+    // Children that fit one by one are kept until the next would pass the limit: whole, and within it.
+    const chunk = `<meta name="x" content="${'€'.repeat(60_000)}">`;
+    const many = runInPage(fakePage({ url: 'https://example.com/', head: `<head>${chunk.repeat(3)}${after}</head>` }), readPage, [MAX_HEAD_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    assert.equal(many.html, `<head>${chunk.repeat(2)}${after}</head>`);
+    assert.ok(Buffer.byteLength(many.html) <= MAX_HEAD_BYTES);
 
     // Each child element as the browser serializes it, without the whitespace between them.
-    const small = runInPage(fakePage({ url: 'https://example.com/', head: HEAD }), readPage, [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
+    const small = runInPage(fakePage({ url: 'https://example.com/', head: HEAD }), readPage, [MAX_HEAD_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]);
     assert.equal(small.html, HEAD.replace(/>\s+</g, '><'));
   });
 

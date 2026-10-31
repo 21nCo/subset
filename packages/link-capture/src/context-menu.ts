@@ -78,12 +78,10 @@ export async function saveFromContextMenu(
   } catch {
     outcome = { state: 'not-saved', message: 'Only web pages (http and https) can be saved.' };
   }
-  try {
-    await browser.call('action.setBadgeText', { text: BADGES[outcome.state] });
-    await browser.call('action.setTitle', { title: outcome.message });
-  } catch {
-    // The outcome is still returned to the caller.
-  }
+  // Each channel on its own, so a badge the browser refuses still leaves the tooltip, and the reverse; through then(),
+  // so a call that throws instead of rejecting is contained too. The outcome is returned to the caller either way.
+  const update = (path: string, details: object) => Promise.resolve().then(() => browser.call(path, details));
+  await Promise.allSettled([update('action.setBadgeText', { text: BADGES[outcome.state] }), update('action.setTitle', { title: outcome.message })]);
   return outcome;
 }
 

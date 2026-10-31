@@ -29,11 +29,12 @@ export interface ExclusiveLocks {
  * entry.
  *
  * The popup and the background are separate instances writing the same storage, which has no transactions. Every
- * save, its clean-up and its quota recovery run inside one exclusive Web Lock shared by every extension page and the
- * background (same origin), so saves are ordered by when they took the lock: the save that took it last is the one
- * kept for its link, whatever the instances' clocks say. Inside the lock the key's time is at least one past the newest
- * stored key, so it sorts after everything already saved. `locks` defaults to `navigator.locks`; without Web Locks,
- * saves are serialized within this instance only.
+ * save and its clean-up run inside one exclusive Web Lock shared by every extension page and the background (same
+ * origin), so saves are ordered by when they took the lock: the save that took it last is the one kept for its link,
+ * whatever the instances' clocks say. Inside the lock the key's time is at least one past the newest stored key, so it
+ * sorts after everything already saved. A saved entry is removed only after the entry replacing it is written: when
+ * storage is full the save is refused (`ok: false`) and every saved capture is kept. `locks` defaults to
+ * `navigator.locks`; without Web Locks, saves are serialized within this instance only.
  */
 export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks | undefined = defaultLocks()): SaveTarget {
   let queue: Promise<unknown> = Promise.resolve();
@@ -82,23 +83,9 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     try {
       await browser.call('storage.local.set', { [key]: value });
     } catch (error) {
-      if (!isQuotaError(error)) return { ok: false, error: message(error) };
-      // Room held by entries this save replaces (the link's older entry, the 101st link): free it and write again. If
-      // the capture still does not fit, they are written back, so a failed save loses no saved link.
-      const reclaimed = all.filter((entry) => stale.includes(entry.key));
-      if (!reclaimed.length) return { ok: false, error: NO_ROOM };
-      try {
-        await browser.call('storage.local.remove', stale);
-      } catch {
-        return { ok: false, error: NO_ROOM };
-      }
-      try {
-        await browser.call('storage.local.set', { [key]: value });
-      } catch {
-        await browser.call('storage.local.set', Object.fromEntries(reclaimed.map((entry) => [entry.key, entry.value])));
-        return { ok: false, error: NO_ROOM };
-      }
-      return { ok: true, existing };
+      // A failed set wrote nothing. Storage full is a refusal too: nothing saved is removed to make room, because a
+      // removal before the new entry is written could not be undone if the popup closed or the write-back failed.
+      return { ok: false, error: isQuotaError(error) ? NO_ROOM : message(error) };
     }
     // Saved. A failed clean-up leaves only stale entries, which the next save removes.
     if (stale.length) await browser.call('storage.local.remove', stale).catch(() => undefined);

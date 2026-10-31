@@ -114,18 +114,41 @@ describe('createCapturePopupController', () => {
     const target = fakeTarget({ save: (count) => (count === 1 ? Promise.reject(new TypeError('Failed to fetch')) : { ok: true }) });
     const { controller } = await started(target);
     await controller.save();
-    assert.deepEqual(controller.state.error, { stage: 'save', message: 'Failed to fetch' });
+    assert.deepEqual(controller.state.error, { stage: 'save', message: 'The link may not have been saved to Test target: Failed to fetch' });
     await controller.retry();
     assert.equal(controller.state.name, 'saved');
     assert.equal(target.saves.length, 2);
   });
 
+  it('says a save that committed and then rejected may have been saved, and retries the same edits', async () => {
+    // The server stored the link, then the response was lost: never "not saved".
+    const stored = [];
+    const target = fakeTarget({
+      save: (count) => {
+        stored.push(target.saves[count - 1][1]);
+        if (count === 1) return Promise.reject(new Error('connection reset'));
+        return { ok: true, existing: true };
+      }
+    });
+    const { controller } = await started(target);
+    controller.edit({ tags: 'one' });
+    await controller.save();
+    assert.equal(stored.length, 1);
+    assert.deepEqual(controller.state.error, { stage: 'save', message: 'The link may not have been saved to Test target: connection reset' });
+    assert.doesNotMatch(controller.state.error.message, /was not saved/);
+    await controller.retry();
+    // The retry repeats the same capture and edits, which the idempotent target reports as already saved.
+    assert.deepEqual(target.saves[1], target.saves[0]);
+    assert.deepEqual([controller.state.name, controller.state.existing], ['saved', true]);
+  });
+
   it('uses a default message for a save error without one', async () => {
-    for (const save of [{ ok: false, error: '' }, () => Promise.reject('no Error')]) {
-      const { controller } = await started(fakeTarget({ save }));
-      await controller.save();
-      assert.equal(controller.state.error.message, 'The link was not saved.');
-    }
+    const { controller } = await started(fakeTarget({ save: { ok: false, error: '' } }));
+    await controller.save();
+    assert.equal(controller.state.error.message, 'The link was not saved.');
+    const rejected = await started(fakeTarget({ save: () => Promise.reject('no Error') }));
+    await rejected.controller.save();
+    assert.equal(rejected.controller.state.error.message, 'The link may not have been saved to Test target.');
   });
 
   it('treats a save that resolves no result object as a refusal, not a TypeError', async () => {
@@ -265,6 +288,18 @@ describe('createCapturePopupController', () => {
     assert.equal(controller.state.draft.tags, 'a, rus-tag, ');
     // Spent: accepting edited the tags.
     assert.equal(controller.acceptTag('rus-tag'), false);
+  });
+
+  it('accepts a tag through a detached acceptTag, and still refuses a stale one', async () => {
+    const { controller } = await started(fakeTarget({ suggest: async (prefix) => [`${prefix}-tag`] }));
+    const { acceptTag, edit, suggestTags } = controller;
+    edit({ tags: 'a, re' });
+    assert.deepEqual(await suggestTags('re'), ['re-tag']);
+    edit({ tags: 'a, rus' });
+    assert.equal(acceptTag('re-tag'), false);
+    assert.deepEqual(await suggestTags('rus'), ['rus-tag']);
+    assert.equal(acceptTag('rus-tag'), true);
+    assert.equal(controller.state.draft.tags, 'a, rus-tag, ');
   });
 
   it('keeps saving and notifying healthy listeners when a listener throws', async () => {

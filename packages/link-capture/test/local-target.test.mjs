@@ -103,25 +103,37 @@ describe('the reference local target', () => {
     assert.deepEqual(['late-0', 'late-1', 'late-2', 'late-3', '0', '2', '3'].map(kept), [true, true, true, true, false, false, true]);
   });
 
-  it('frees the room of the entry a save replaces when storage is full, and keeps it when the save still does not fit', async () => {
-    const quota = { quotaBytes: Infinity };
-    const { browser, local } = createFakeBrowser({ storage: quota });
+  it('refuses a save when storage is full and removes nothing, so every saved capture is kept', async () => {
+    const NO_ROOM = { ok: false, error: 'There is no room on this device to save the link.' };
+    const full = { error: undefined };
+    const { browser, local, calls } = createFakeBrowser({ storage: { before: (op) => { if (op === 'set' && full.error) throw full.error; } } });
     const target = createLocalTarget(browser, fakeLocks());
-    await target.save(link('a'), { notes: 'x'.repeat(1_000) });
-    await target.save(link('b'), {});
-    quota.quotaBytes = JSON.stringify(Object.fromEntries(local)).length + 200;
-    // Fits only once a's old entry is gone.
-    assert.deepEqual(await target.save(link('a'), { notes: 'y'.repeat(900) }), { ok: true, existing: true });
-    assert.deepEqual(stored(local).map(({ link: url, notes }) => [url, notes?.[0]]).sort(), [['https://example.com/a', 'y'], ['https://example.com/b', undefined]]);
-
-    // Too large even after freeing a's entry: a is written back, nothing is lost.
+    await target.save(link('a'), { notes: 'kept' });
     const before = structuredClone(Object.fromEntries(local));
-    const result = await target.save(link('a'), { notes: 'z'.repeat(10_000) });
-    assert.deepEqual(result, { ok: false, error: 'There is no room on this device to save the link.' });
+    // Every set fails, as Chromium and Firefox report a full storage: refused, never rejected, nothing removed.
+    for (const error of [new Error('QUOTA_BYTES quota exceeded'), Object.assign(new Error('full'), { name: 'QuotaExceededError' })]) {
+      full.error = error;
+      const from = calls.length;
+      assert.deepEqual(await target.save(link('a'), { notes: 'replacement' }), NO_ROOM);
+      assert.deepEqual(await target.save(link('b'), {}), NO_ROOM);
+      assert.deepEqual(Object.fromEntries(local), before);
+      assert.deepEqual(calls.slice(from).map(([op]) => op).filter((op) => op === 'storage.local.remove'), []);
+    }
+  });
+
+  it('at the quota refuses both a link saved again and a 101st link, keeping all 100', async () => {
+    const quota = { quotaBytes: Infinity };
+    const { browser, local, calls } = createFakeBrowser({ storage: quota });
+    const target = createLocalTarget(browser, fakeLocks());
+    for (let n = 0; n < 100; n++) await target.save(link(n), { notes: 'x'.repeat(100) });
+    const before = structuredClone(Object.fromEntries(local));
+    // Room for less than one more entry, though removing the entry each save replaces would make room.
+    quota.quotaBytes = JSON.stringify(before).length + 100;
+    const from = calls.length;
+    assert.deepEqual(await target.save(link(0), { notes: 'y' }), { ok: false, error: 'There is no room on this device to save the link.' });
+    assert.deepEqual(await target.save(link(100), {}), { ok: false, error: 'There is no room on this device to save the link.' });
     assert.deepEqual(Object.fromEntries(local), before);
-    // A capture too large for an empty slot frees nothing it does not replace.
-    assert.deepEqual(await target.save(link('c'), { notes: 'z'.repeat(10_000) }), { ok: false, error: 'There is no room on this device to save the link.' });
-    assert.deepEqual(Object.fromEntries(local), before);
+    assert.equal(calls.slice(from).filter(([op]) => op === 'storage.local.remove').length, 0);
   });
 
   it('tells a failure before the write (not saved) from one after it (saved)', async () => {
@@ -139,6 +151,20 @@ describe('the reference local target', () => {
     fail.remove = false;
     await target.save(link('b'), {});
     assert.deepEqual(stored(local).filter((entry) => entry.link.endsWith('/a')), [{ link: 'https://example.com/a', notes: 'three' }]);
+  });
+
+  it('uses one exclusive navigator.locks lock for every instance by default', async () => {
+    const requests = [];
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const locks = { request: (name, options, callback) => (requests.push([name, options]), callback()) };
+    Object.defineProperty(globalThis, 'navigator', { value: { locks }, configurable: true, writable: true });
+    restore.push(() => (descriptor ? Object.defineProperty(globalThis, 'navigator', descriptor) : delete globalThis.navigator));
+    const { browser } = createFakeBrowser();
+    assert.deepEqual(await createLocalTarget(browser).save(link('a'), {}), { ok: true, existing: false });
+    assert.deepEqual(await createLocalTarget(browser).save(link('b'), {}), { ok: true, existing: false });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1], requests[0]);
+    assert.deepEqual(requests[0][1], { mode: 'exclusive' });
   });
 
   it('suggests at most eight saved tags by prefix, ignoring case', async () => {

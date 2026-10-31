@@ -10,6 +10,9 @@ export const MAX_LANG_LENGTH = 64;
 // The shape of a BCP 47 tag, as `parseLinkDetails` checks it; anything else is dropped before it reaches the parser.
 const LANGUAGE_TAG = /^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
 
+// The head's share of what `parseLinkDetails` reads: the rest is room for `<html lang="…">` and `</html>` around it.
+const MAX_HEAD_BYTES = MAX_DOCUMENT_BYTES - '<html lang="">'.length - MAX_LANG_LENGTH - '</html>'.length;
+
 // Half of a surrogate pair without its other half: not a character, and invalid once the text is sent as UTF-8.
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
@@ -69,8 +72,8 @@ export interface PageSnapshot {
   title: string;
   selectionText: string;
   /**
-   * `<head>` with each child element that fits (`outerHTML`), at most `MAX_DOCUMENT_BYTES` of UTF-8, cut without
-   * splitting a character. A child too large for what is left (a big inline script) is skipped unserialized.
+   * `<head>` with each whole child element (`outerHTML`) that fits in the byte limit's UTF-8, never a part of one. A
+   * child too large for what is left (a big inline script) is skipped, unserialized when its length already shows it.
    */
   html: string;
   /** `<html lang>`, which `parseLinkDetails` reads but which is outside `<head>`; at most `MAX_LANG_LENGTH` + 1 characters. */
@@ -93,9 +96,9 @@ export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLen
     return cut.length < value.length && /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
   };
   // The head is never serialized whole. Each child element's size is first estimated from its tag, attribute and text
-  // lengths, stopping as soon as it passes the room left, and only a child that fits is serialized; `work` caps the
-  // nodes and characters looked at across all children. So time and memory stay near maxHeadBytes however large the
-  // head is, and tags after a skipped child are still read.
+  // lengths, stopping as soon as it passes the room left, and only a child within the estimate is serialized; `work`
+  // caps the nodes and characters looked at across all children, and escaping makes a child at most 6 times its
+  // estimate (`"` is `&quot;`). So time and memory stay a small multiple of maxHeadBytes however large the head is.
   let work = 2 * maxHeadBytes;
   const size = (root: Node, limit: number): number => {
     let total = 0;
@@ -123,18 +126,23 @@ export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLen
     }
     return total;
   };
+  // The estimate counts UTF-16 units of unescaped text, so it only rules out a child cheaply. A child is kept only when
+  // its serialized UTF-8 bytes (multibyte characters, `&amp;` and `&quot;` included) fit the room left, so the head is
+  // never cut inside a child and the tags after a skipped one are still read.
+  const encoder = new TextEncoder();
+  const room = new Uint8Array(Math.max(maxHeadBytes, 0));
   const parts: string[] = [];
   let left = maxHeadBytes - '<head></head>'.length;
   for (let child = document.head?.firstElementChild ?? null; child && left > 0 && work > 0; child = child.nextElementSibling) {
     work--;
     if (size(child, left) > left) continue;
     const html = text(child.outerHTML, Infinity);
+    // encodeInto stops at the first character that does not fit: `read` short of the length means the child does not.
+    const { read, written } = encoder.encodeInto(html, room.subarray(0, left));
+    if (read < html.length) continue;
     parts.push(html);
-    left -= html.length;
+    left -= written;
   }
-  const head = document.head ? `<head>${parts.join('')}</head>` : '';
-  // encodeInto stops before a character that does not fit, so the cut never splits one; `read` counts UTF-16 units.
-  const { read } = new TextEncoder().encodeInto(head, new Uint8Array(maxHeadBytes));
   const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
   const root = document.documentElement as { lang?: unknown } | null;
   return {
@@ -142,7 +150,7 @@ export function readPage(maxHeadBytes: number, maxTextLength: number, maxLangLen
     // A code point is at most two UTF-16 units, so this keeps every character the extension may keep, and no more.
     title: text(document.title, maxTextLength * 2),
     selectionText: text(selection ? selection.toString() : '', maxTextLength * 2),
-    html: head.slice(0, read),
+    html: document.head ? `<head>${parts.join('')}</head>` : '',
     // One character past the limit, so the extension can tell a value that was too long from one that fit.
     lang: root ? text(root.lang, maxLangLength + 1) : '',
     contentType: text(document.contentType, Infinity)
@@ -171,7 +179,7 @@ export async function captureActiveTab(browser: BrowserFacade, options: CaptureO
     results = await browser.call('scripting.executeScript', {
       target: { tabId: tab.id },
       func: readPage,
-      args: [MAX_DOCUMENT_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]
+      args: [MAX_HEAD_BYTES, MAX_SELECTION_LENGTH, MAX_LANG_LENGTH]
     });
   } catch (error) {
     throw new LinkCaptureError('page-unavailable', { cause: error });
@@ -182,7 +190,8 @@ export async function captureActiveTab(browser: BrowserFacade, options: CaptureO
   const url = pageUrl(snapshot.url);
   if (url === undefined) throw new LinkCaptureError('unsupported-page');
 
-  // `parseLinkDetails` reads the first MAX_DOCUMENT_BYTES, so the (ASCII) wrapper comes out of the head's share.
+  // `parseLinkDetails` reads the first MAX_DOCUMENT_BYTES, so the (ASCII) wrapper comes out of the head's share. The
+  // page already left room for it; the cut only bounds a page that ignored the limit.
   const open = `<html lang="${languageTag(snapshot.lang)}">`;
   const close = '</html>';
   const head = cutUtf8(snapshot.html, MAX_DOCUMENT_BYTES - open.length - close.length);
