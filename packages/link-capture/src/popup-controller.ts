@@ -20,8 +20,9 @@ export interface CapturePopupController {
   retry(): Promise<void>;
   back(): void;
   /**
-   * The target's suggestions, trimmed and without repeats, or none when it has no `suggestTags` or it fails. Resolves
-   * `undefined` when the answer is stale: a later `suggestTags` call or an edit of the tags came first.
+   * The target's suggestions, trimmed, each once, and without empty ones or ones containing a comma (the tag
+   * separator); none when it has no `suggestTags` or it fails. Resolves `undefined` when the answer is stale: a later
+   * `suggestTags` call or an edit of the tags came first.
    */
   suggestTags(prefix: string): Promise<string[] | undefined>;
   /**
@@ -144,9 +145,10 @@ export function createCapturePopupController(options: CapturePopupControllerOpti
         // A failing suggester offers nothing.
       }
       if (request !== suggestionRequest) return undefined;
-      // Trimmed and each once, in the target's order: the popup keys its list by tag.
+      // Trimmed and each once, in the target's order: the popup keys its list by tag. A tag with a comma is dropped:
+      // the tags field is comma-separated, so accepting it would save it split into several tags.
       const found = (Array.isArray(tags) ? tags : []).filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim());
-      offered = { request, tags: [...new Set(found)].filter((tag) => tag !== '') };
+      offered = { request, tags: [...new Set(found)].filter((tag) => tag !== '' && !tag.includes(',')) };
       return offered.tags;
     },
     acceptTag(tag) {

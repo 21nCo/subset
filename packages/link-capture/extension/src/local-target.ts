@@ -6,6 +6,7 @@ const MAX_SAVED = 100;
 const MAX_SUGGESTIONS = 8;
 const LOCK = 'link-capture:reference-local';
 const NO_ROOM = 'There is no room on this device to save the link.';
+const NO_LOCKS = 'This browser has no Web Locks (navigator.locks), so links cannot be saved on this device.';
 
 interface SavedCapture {
   capture: Capture;
@@ -33,18 +34,13 @@ export interface ExclusiveLocks {
  * origin), so saves are ordered by when they took the lock: the save that took it last is the one kept for its link,
  * whatever the instances' clocks say. Inside the lock the key's time is at least one past the newest stored key, so it
  * sorts after everything already saved. A saved entry is removed only after the entry replacing it is written: when
- * storage is full the save is refused (`ok: false`) and every saved capture is kept. `locks` defaults to
- * `navigator.locks`; without Web Locks, saves are serialized within this instance only.
+ * storage is full the save is refused (`ok: false`) and every saved capture is kept.
+ *
+ * `locks` defaults to `navigator.locks`, which Chromium MV3 and Firefox MV3 provide to extension pages and the
+ * background. Web Locks are required: without them nothing can order the instances' saves, so `status()` reports an
+ * error and `save()` refuses without touching storage.
  */
 export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks | undefined = defaultLocks()): SaveTarget {
-  let queue: Promise<unknown> = Promise.resolve();
-  const exclusive = <T>(run: () => Promise<T>): Promise<T> => {
-    if (locks) return locks.request(LOCK, run);
-    const result = queue.then(run, run);
-    queue = result.catch(() => undefined);
-    return result;
-  };
-
   async function entries(): Promise<Entry[]> {
     const items = (await browser.call<Record<string, unknown> | undefined>('storage.local.get', null)) ?? {};
     return Object.entries(items)
@@ -96,10 +92,11 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     id: 'reference-local',
     label: 'This device',
     async status() {
-      return { state: 'connected' };
+      return locks ? { state: 'connected' } : { state: 'error', message: NO_LOCKS };
     },
-    save(capture, edits) {
-      return exclusive(() => saveLocked(capture, { capture, ...edits }));
+    async save(capture, edits) {
+      if (!locks) return { ok: false, error: NO_LOCKS };
+      return locks.request(LOCK, () => saveLocked(capture, { capture, ...edits }));
     },
     async suggestTags(prefix) {
       const key = prefix.toLowerCase();

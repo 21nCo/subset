@@ -43,6 +43,9 @@ export interface SaveTarget {
    * repeated save of the same capture and edits (the popup's retry after a rejection) must not create a duplicate.
    */
   save(capture: Capture, edits: SaveEdits): Promise<SaveResult>;
-  /** Up to a few existing tags starting with `prefix`, for the tag field. */
+  /**
+   * Up to a few existing tags starting with `prefix`, for the tag field. The popup's tags field is comma-separated, so
+   * it never offers a suggestion that contains a comma or is empty after trimming.
+   */
   suggestTags?(prefix: string): Promise<string[]>;
 }

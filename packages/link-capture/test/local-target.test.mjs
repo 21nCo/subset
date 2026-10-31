@@ -153,18 +153,50 @@ describe('the reference local target', () => {
     assert.deepEqual(stored(local).filter((entry) => entry.link.endsWith('/a')), [{ link: 'https://example.com/a', notes: 'three' }]);
   });
 
-  it('uses one exclusive navigator.locks lock for every instance by default', async () => {
-    const requests = [];
+  /** Replaces `globalThis.navigator` for one test. */
+  function setNavigator(value) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-    const locks = { request: (name, options, callback) => (requests.push([name, options]), callback()) };
-    Object.defineProperty(globalThis, 'navigator', { value: { locks }, configurable: true, writable: true });
+    Object.defineProperty(globalThis, 'navigator', { value, configurable: true, writable: true });
     restore.push(() => (descriptor ? Object.defineProperty(globalThis, 'navigator', descriptor) : delete globalThis.navigator));
-    const { browser } = createFakeBrowser();
-    assert.deepEqual(await createLocalTarget(browser).save(link('a'), {}), { ok: true, existing: false });
-    assert.deepEqual(await createLocalTarget(browser).save(link('b'), {}), { ok: true, existing: false });
-    assert.equal(requests.length, 2);
-    assert.deepEqual(requests[1], requests[0]);
-    assert.deepEqual(requests[0][1], { mode: 'exclusive' });
+  }
+
+  it('holds one exclusive navigator.locks lock by default: a second instance waits for it before touching storage', async () => {
+    const requests = [];
+    const held = fakeLocks();
+    setNavigator({ locks: { request: (name, options, callback) => (requests.push([name, options]), held.request(name, callback)) } });
+    const { browser, calls } = createFakeBrowser();
+    let release;
+    const holder = held.request('link-capture:reference-local', () => new Promise((resolve) => (release = resolve)));
+    const first = createLocalTarget(browser).save(link('a'), {});
+    const second = createLocalTarget(browser).save(link('b'), {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(calls.filter(([op]) => op.startsWith('storage.')), []);
+    release();
+    await holder;
+    assert.deepEqual(await Promise.all([first, second]), [{ ok: true, existing: false }, { ok: true, existing: false }]);
+    assert.deepEqual(requests, [
+      ['link-capture:reference-local', { mode: 'exclusive' }],
+      ['link-capture:reference-local', { mode: 'exclusive' }]
+    ]);
+  });
+
+  it('without Web Locks reports an error and refuses every save without touching storage', async () => {
+    const NO_LOCKS = 'This browser has no Web Locks (navigator.locks), so links cannot be saved on this device.';
+    setNavigator({});
+    freezeClockAndReverseUuids();
+    const { browser, local, calls } = createFakeBrowser();
+    local.set('reference:capture:kept', { capture: link('kept') });
+    const before = structuredClone(Object.fromEntries(local));
+    // Explicitly without a lock manager, and through the default where navigator.locks is absent.
+    for (const make of [() => createLocalTarget(browser, undefined), () => createLocalTarget(browser)]) {
+      const [background, popup] = [make(), make()];
+      assert.deepEqual(await background.status(), { state: 'error', message: NO_LOCKS });
+      const results = await Promise.all([background.save(link('a'), { notes: 'earlier' }), popup.save(link('a'), { notes: 'later' })]);
+      assert.deepEqual(results, [{ ok: false, error: NO_LOCKS }, { ok: false, error: NO_LOCKS }]);
+    }
+    assert.deepEqual(Object.fromEntries(local), before);
+    assert.deepEqual(calls.filter(([op]) => op.startsWith('storage.')), []);
+    assert.deepEqual(await createLocalTarget(browser, fakeLocks()).status(), { state: 'connected' });
   });
 
   it('suggests at most eight saved tags by prefix, ignoring case', async () => {

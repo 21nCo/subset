@@ -121,25 +121,29 @@ describe('createCapturePopupController', () => {
   });
 
   it('says a save that committed and then rejected may have been saved, and retries the same edits', async () => {
-    // The server stored the link, then the response was lost: never "not saved".
-    const stored = [];
+    // The server stored the link, then the response was lost: never "not saved". Like a real target, it is idempotent:
+    // the same capture saved again is reported as existing and stored once.
+    const stored = new Map();
     const target = fakeTarget({
       save: (count) => {
-        stored.push(target.saves[count - 1][1]);
+        const [saved, edits] = target.saves[count - 1];
+        const existing = stored.has(saved.canonicalUrl);
+        stored.set(saved.canonicalUrl, edits);
         if (count === 1) return Promise.reject(new Error('connection reset'));
-        return { ok: true, existing: true };
+        return { ok: true, existing };
       }
     });
     const { controller } = await started(target);
     controller.edit({ tags: 'one' });
     await controller.save();
-    assert.equal(stored.length, 1);
+    assert.equal(stored.size, 1);
     assert.deepEqual(controller.state.error, { stage: 'save', message: 'The link may not have been saved to Test target: connection reset' });
     assert.doesNotMatch(controller.state.error.message, /was not saved/);
     await controller.retry();
     // The retry repeats the same capture and edits, which the idempotent target reports as already saved.
     assert.deepEqual(target.saves[1], target.saves[0]);
     assert.deepEqual([controller.state.name, controller.state.existing], ['saved', true]);
+    assert.deepEqual([...stored.values()], [{ title: 'A page', notes: 'A quote', tags: ['one'] }]);
   });
 
   it('uses a default message for a save error without one', async () => {
@@ -300,6 +304,19 @@ describe('createCapturePopupController', () => {
     assert.deepEqual(await suggestTags('rus'), ['rus-tag']);
     assert.equal(acceptTag('rus-tag'), true);
     assert.equal(controller.state.draft.tags, 'a, rus-tag, ');
+  });
+
+  it('never offers or accepts a suggestion containing the comma separator, so saved tags stay whole', async () => {
+    const suggest = async () => ['research, development', 'research', ' , ', ','];
+    const target = fakeTarget({ suggest });
+    const { controller } = await started(target);
+    controller.edit({ tags: 're' });
+    assert.deepEqual(await controller.suggestTags('re'), ['research']);
+    assert.equal(controller.acceptTag('research, development'), false);
+    assert.equal(controller.state.draft.tags, 're');
+    assert.equal(controller.acceptTag('research'), true);
+    await controller.save();
+    assert.deepEqual(target.saves[0][1].tags, ['research']);
   });
 
   it('keeps saving and notifying healthy listeners when a listener throws', async () => {
