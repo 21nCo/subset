@@ -1,0 +1,41 @@
+{
+  "name": "@subset.dev/link-capture",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-extension link capture: reads the current tab or a link and hands it to a pluggable save target.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./popup": "./src/popup/CapturePopup.svelte"
+  },
+  "files": ["dist", "src/popup", "src/*.ts", "README.md"],
+  "scripts": {
+    "check": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./tsconfig.view.json --fail-on-warnings",
+    "build": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json && vite build --config extension/vite.config.ts && node scripts/check-extension-build.mjs",
+    "test": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@extfn/core": "0.1.0",
+    "@subset.dev/links": "*"
+  },
+  "peerDependencies": {
+    "svelte": "^5.57.1"
+  },
+  "devDependencies": {
+    "@extfn/svelte": "0.1.0",
+    "@extfn/vite": "0.1.2",
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "htmlparser2": "12.0.0",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vite": "7.3.7"
+  }
+}

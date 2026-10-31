@@ -69,6 +69,32 @@ for (const entry of readdirSync(new URL('packages/bookmarks-core/src/', root))) 
   }
 }
 
+// @subset.dev/link-capture is the browser-extension capture core that the Bookmarks extension and Memotron plug their
+// save targets into, so it depends on and imports only @subset.dev/links, extfn's core and Svelte: no Bookmarks or
+// product code and no other workspace (SET-182). Its reference extension (extension/) is a build check, not a source.
+const linkCapture = workspaces.find((manifest) => manifest.name === '@subset.dev/link-capture');
+assert.ok(linkCapture, 'Missing workspace @subset.dev/link-capture');
+const linkCaptureDependencies = ['@extfn/core', '@subset.dev/links', 'svelte'];
+assert.deepEqual(
+  Object.keys({ ...linkCapture.dependencies, ...linkCapture.optionalDependencies, ...linkCapture.peerDependencies }).sort(),
+  linkCaptureDependencies,
+  '@subset.dev/link-capture may depend only on @extfn/core, @subset.dev/links and svelte'
+);
+for (const entry of readdirSync(new URL('packages/link-capture/src/', root), { recursive: true })) {
+  if (!/\.(?:ts|svelte)$/.test(entry)) continue;
+  const source = readFileSync(new URL(`packages/link-capture/src/${entry}`, root), 'utf8');
+  const imports = /^\s*(?:import|export)\b[^'";]*?\bfrom\s*['"]([^'"\n]+)['"]|^\s*import\s*['"]([^'"\n]+)['"]|\bimport\s*\(\s*['"]([^'"\n]+)['"]/gm;
+  for (const match of source.matchAll(imports)) {
+    const specifier = match[1] ?? match[2] ?? match[3];
+    const allowed =
+      specifier.startsWith('./') ||
+      specifier.startsWith('../') ||
+      specifier === '@subset.dev/link-capture' ||
+      linkCaptureDependencies.some((name) => specifier === name || specifier.startsWith(`${name}/`));
+    assert.ok(allowed, `packages/link-capture/src/${entry} imports ${specifier}`);
+  }
+}
+
 // Publishable packages are listed for the tag workflow, bundle private workspaces instead of
 // depending on them at runtime, and declare which files they ship.
 const releaseTargets = readJson('release-packages.json');
