@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { isRepoRelativePath, prereleaseProblems } from './release-macos.mjs';
-import { WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
+import { publishedManifestProblems, WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
 
 const root = new URL('../', import.meta.url);
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, root), 'utf8'));
@@ -28,9 +28,16 @@ for (const kind of ['packages', 'apps']) {
   }
 }
 
+const workspacesByName = new Map(workspaces.map((manifest) => [manifest.name, manifest]));
+const isPublic = (name) => workspacesByName.get(name)?.private === false;
 for (const manifest of workspaces) {
-  for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
-    if (names.has(dependency)) assert.equal(version, '*', `${manifest.name} must use an npm workspace dependency for ${dependency}`);
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    for (const [dependency, version] of Object.entries(manifest[field] ?? {})) {
+      if (!names.has(dependency)) continue;
+      // A published package's runtime dependency on another published package is a semver range, checked below.
+      if (manifest.private === false && field !== 'devDependencies' && isPublic(dependency)) continue;
+      assert.equal(version, '*', `${manifest.name} must use an npm workspace dependency for ${dependency}`);
+    }
   }
 }
 
@@ -95,24 +102,20 @@ for (const entry of readdirSync(new URL('packages/link-capture/src/', root), { r
   }
 }
 
-// Publishable packages are listed for the tag workflow, bundle private workspaces instead of
-// depending on them at runtime, and declare which files they ship.
+// Publishable packages are listed for the tag workflow, ship a declared set of files with their license and source
+// repository, and bundle private workspaces instead of depending on them at runtime. A published package may depend on
+// another published one (@subset.dev/link-capture on @subset.dev/links) as ^<its version> (SET-186).
 const releaseTargets = readJson('release-packages.json');
 const publicPackages = workspaces.filter((manifest) => manifest.private === false);
 for (const manifest of publicPackages) {
   const target = releaseTargets.find((entry) => entry.name === manifest.name);
   assert.ok(target, `${manifest.name} is public but missing from release-packages.json`);
   assert.equal(readJson(join(target.path, 'package.json')).name, manifest.name, `release-packages.json points ${target.slug} at the wrong path`);
-  assert.ok(Array.isArray(manifest.files) && manifest.files.length, `${manifest.name} must list its published files`);
-  // Any installed dependency field counts. A workspace dependency is pinned to "*", which npm would
-  // publish unchanged, so public packages bundle workspaces instead of depending on them.
-  for (const dependency of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
-    assert.ok(!names.has(dependency), `${manifest.name} cannot depend at runtime on workspace ${dependency}; bundle it instead`);
-  }
-  // External runtime dependencies of a published package are pinned, so a release installs what was tested.
-  for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
-    assert.match(String(version), /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `${manifest.name} must pin ${dependency} to an exact version (found ${version})`);
-  }
+  assert.deepEqual(publishedManifestProblems(manifest, target.path, workspacesByName), [], `${manifest.name} is not ready to publish`);
+}
+// The libraries Memotron in Nucleum installs from npm (SET-186).
+for (const name of ['@subset.dev/links', '@subset.dev/link-capture']) {
+  assert.ok(isPublic(name), `${name} must be a published package`);
 }
 
 // Native targets reuse capability packages (for example by running their CLI); they do not carry a

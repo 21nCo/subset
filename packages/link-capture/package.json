@@ -1,9 +1,18 @@
 {
   "name": "@subset.dev/link-capture",
-  "private": true,
+  "private": false,
   "version": "0.1.0",
   "description": "Browser-extension link capture: reads the current tab or a link and hands it to a pluggable save target.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/21nCo/subset.git",
+    "directory": "packages/link-capture"
+  },
+  "homepage": "https://github.com/21nCo/subset/tree/main/packages/link-capture#readme",
+  "bugs": {
+    "url": "https://github.com/21nCo/subset/issues"
+  },
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -15,15 +24,19 @@
     },
     "./popup": "./src/popup/CapturePopup.svelte"
   },
-  "files": ["dist", "src/popup", "src/*.ts", "README.md"],
+  "files": ["dist", "src/popup", "src/*.ts", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "check": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./tsconfig.view.json --fail-on-warnings",
     "build": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json && vite build --config extension/vite.config.ts && node scripts/check-extension-build.mjs",
-    "test": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json && node --test test/*.test.mjs"
+    "test": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json && node --test test/*.test.mjs",
+    "prepack": "npm run build --workspace=@subset.dev/links && tsc -p tsconfig.json"
   },
   "dependencies": {
     "@extfn/core": "0.1.0",
-    "@subset.dev/links": "*"
+    "@subset.dev/links": "^0.1.0"
   },
   "peerDependencies": {
     "svelte": "^5.57.1"

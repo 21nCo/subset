@@ -2,9 +2,25 @@
 
 `@subset.dev/link-capture` is the browser-extension half of saving a link. It reads the current tab (URL, title, selected text and the link details in its `<head>`) or a link from the context menu, runs the popup flow, and hands the result to a pluggable **save target**. Bookmarks plugs in its target (SET-183) and Memotron can plug in its own (TIDY-469) instead of writing capture again. It imports no Bookmarks or product code; `scripts/check-workspaces.mjs` enforces that it depends only on `@subset.dev/links`, `@extfn/core` and `svelte`.
 
-It targets `chromium-mv3` and `firefox-mv3` through extfn (`@extfn/core` 0.1.0, `@extfn/svelte` 0.1.0, `@extfn/vite` 0.1.2). The package is private (`0.1.0`) until SET-186. Social-post, video and page-region clipping, screenshots and Safari are out of scope.
+It targets `chromium-mv3` and `firefox-mv3` through extfn (`@extfn/core` 0.1.0, `@extfn/svelte` 0.1.0, `@extfn/vite` 0.1.2). Social-post, video and page-region clipping, screenshots and Safari are out of scope.
 
-## Wiring a host
+## Install
+
+```sh
+npm install @subset.dev/link-capture svelte
+# for the wiring below
+npm install -D @extfn/svelte @extfn/vite @sveltejs/vite-plugin-svelte
+```
+
+The package is ES modules only, with TypeScript declarations. It depends on `@extfn/core` 0.1.0 and `@subset.dev/links` `^0.1.0`, so a host that also imports `@subset.dev/links` shares one copy and one `LinkDetailsV1`. `svelte` 5 is a peer dependency for `@subset.dev/link-capture/popup`, which ships as a Svelte component (`.svelte` source with `<script lang="ts">`) for the host's bundler to compile; the main entry does not import Svelte. Bundling for a browser also needs the `@extfn/core` stub described under [extfn prerequisite check](#extfn-prerequisite-check).
+
+It is published from this repository by a `link-capture-v<version>` tag (`.github/workflows/publish-tag.yml`), always after the `@subset.dev/links` version it depends on: the publish job runs `scripts/npm-dependency-guard.mjs`, which refuses to publish while npm has no `@subset.dev/links` release in that range (rerun the job once it does). Until the owner's first release (SET-194) neither is on npm.
+
+## Versioning
+
+`TabCapture.details` is a `LinkDetailsV1` from `@subset.dev/links`, which is stable within 0.x minor versions: no release changes its fields or what `isLinkDetailsV1` accepts, and a breaking change bumps the record version (`LinkDetailsV2`, `version: 2`) instead of editing `LinkDetailsV1`. A version of this package that moves to a new record version is a minor release (`0.2.0`). The rest of the API follows semver for 0.x: a patch release (`0.1.x`) only fixes bugs, and a minor release may change exports, the `SaveTarget` contract or the popup's props and says how in its release notes. Depend on `^0.1.0`.
+
+## Usage: wiring a host
 
 ```ts
 // popup.ts
@@ -117,6 +133,7 @@ Each workaround below is temporary, until extfn 0.2.0 (SFO-44), as the SET-182 o
 | Build | A target does not build, or misses a file | `npm run build` builds both targets; `scripts/check-extension-build.mjs` compares each built manifest to its snapshot, checks every named file exists, checks the package is bundled once, and starts the background in a bare worker scope (no `window`) with that target's global, which must add the click listener synchronously and register the menu |
 | Reference target | Overlapping popup and background saves keeping the wrong one or losing one, a full storage | `test/local-target.test.mjs`: with a frozen clock and reversed UUIDs, the later of two same-link saves from two instances kept; a new instance with an earlier clock; interleaved get, set and remove across three saves; the 100-link cap under overlapping saves; a full storage refusing a save, a re-saved link and a 101st link with no removal and every entry kept; the default lock shared and exclusive; failures before and after the write; a removal failing on every call, from one or two instances: below 10 replaced entries `status()` is connected and saves are ok, at 10 `status()` reports the error and saves are refused with nothing written; one failed removal leaves the popup able to save; a failed removal past the 100-link cap recovered by `status()`; after it recovers, a full storage freed of replaced entries before the write and `status()` connected; a write failing after the freeing kept every link's newest entry; at most eight tag suggestions |
 | Popup view | Type or accessibility regressions, a view checked against a stale or missing `dist` | `svelte-check --fail-on-warnings`, including Svelte's accessibility warnings, with the package name mapped to `src` so it passes on a fresh checkout. Announcements and focus in a live browser and screen reader are SET-191 and SET-193 |
+| Packaging (SET-186) | The published tarball misses a file, export, type or dependency, or resolves a second copy of `@subset.dev/links` | `scripts/check-workspaces.mjs` requires `@subset.dev/links` as `^<its version>` (`publishedManifestProblems`, unit-tested in `scripts/workspace-names.test.mjs`). `scripts/packed-packages.test.mjs` (`npm run test:packed`, CI) checks the `npm pack --dry-run` listing, installs both packed tarballs outside the repository with one shared `@subset.dev/links`, imports the main entry on Node, compiles `./popup` with the installed `svelte` peer and resolves its imports, and type-checks a strict TypeScript consumer. The extension runtime is not run from the tarball |
 
 Run `npm run check`, `npm test` and `npm run build` with `--workspace=@subset.dev/link-capture`; the root `npm run check` and `npm run build` run them. Live browsers, the popup in a real browser, Firefox's handling of `optional_host_permissions` (Firefox 128 and later) and both browsers' acceptance of `background.scripts` next to `service_worker` are deferred to SET-191 and not claimed here. No server, Railway Postgres, Cloudflare Preview or provider sandbox is involved.
 
