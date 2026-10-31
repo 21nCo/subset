@@ -9,3 +9,4 @@ packages/minutes-cli/app-runtime/
 packages/minutes-cli/.app-runtime-*/
 native/timer/.build/
 native/timer/.swiftpm/
+packages/link-capture/dist-extension/
