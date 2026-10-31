@@ -33,7 +33,8 @@ export {
 export {
   createCapturePopupController,
   type CapturePopupController,
-  type CapturePopupControllerOptions
+  type CapturePopupControllerOptions,
+  type CapturePopupProps
 } from './popup-controller.js';
 export {
   draftEdits,

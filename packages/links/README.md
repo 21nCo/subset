@@ -2,7 +2,17 @@
 
 `@subset.dev/links` turns a URL into its canonical form, reads a versioned `LinkDetails` record (title, description, preview image, icons and a few more fields) from an HTML document, and fetches untrusted URLs without reaching private addresses or hanging the host. It uses only web-standard APIs (`URL`, `TextDecoder`, `fetch`, streams and timers) and the portable [htmlparser2](https://github.com/fb55/htmlparser2) tokenizer, so the same code runs on Node, Bun, Cloudflare Workers and in a browser extension. Bookmarks, the Bookmarks browser extension and Memotron in Nucleum share it. It imports no Bookmarks or product code; `scripts/check-workspaces.mjs` enforces that it depends on no other workspace.
 
-The package is private (`0.1.0`) until its npm release in SET-186. oEmbed, site-specific or social-post parsers, readable full text, JSON-LD, robots.txt, caching and JavaScript rendering are out of scope.
+oEmbed, site-specific or social-post parsers, readable full text, JSON-LD, robots.txt, caching and JavaScript rendering are out of scope.
+
+## Install
+
+```sh
+npm install @subset.dev/links
+```
+
+The package is ES modules only (no CommonJS build) with TypeScript declarations, and its one dependency is `htmlparser2`. It is tested on Node 22 and in workerd, the Cloudflare Workers runtime; any runtime with `URL`, `TextDecoder`, `fetch`, web streams and timers should work. It is published from this repository by a `links-v<version>` tag (`.github/workflows/publish-tag.yml`); until the owner's first release (SET-194) it is not on npm.
+
+## Usage
 
 ```ts
 import { canonicalizeUrl, isLinkDetailsV1, parseLinkDetails } from '@subset.dev/links';
@@ -73,6 +83,10 @@ interface LinkDetailsV1 {
 ```
 
 `isLinkDetailsV1` checks an untrusted value (from storage, a queue or another process) against this shape: no unknown keys, http(s) URLs, non-empty strings, the length and icon caps, a language-tag shape, an ISO 8601 `publishedTime` and a parameter-free media type. A later incompatible change gets a new `version`.
+
+## Versioning
+
+`LinkDetailsV1` is stable within 0.x minor versions: no release changes its fields, what they hold or what `isLinkDetailsV1` accepts, because records are stored and read back by other versions of this package, and `isLinkDetailsV1` rejects unknown keys. A breaking change to the record, adding a field included, bumps the record version: a `LinkDetailsV2` with `version: 2`, never an edit to `LinkDetailsV1`. Parser fixes that read a better value from the same document are not breaking. Everything else follows semver for 0.x: a patch release (`0.1.x`) only fixes bugs, and a minor release (`0.2.0`) may change other exports and says how in its release notes. Depend on `^0.1.0`.
 
 ## `fetchLinkDetails(url, options)` and `fetchResource(url, options)`
 
@@ -148,6 +162,7 @@ Content handling in `fetchLinkDetails`: a `2xx` response with `text/html`, `appl
 | Fetching untrusted URLs | A request reaches a private address, directly, by redirect or by resolution | One vector per blocked hostname pattern, IPv4 range and IPv6 form, with public neighbours outside each prefix; public-to-private redirects; private `resolveHost` results on the first hop and a redirect hop, and for `fetchResource`; malformed results (a hole, a non-string, `127.0.0.1::`) blocked; a `fetch` that requires no receiver called correctly on every hop; a response the `fetch` reached by following a redirect itself refused unread, for both operations. The fake `fetch` serves only listed URLs and every case asserts the exact requests made (`test/fetch-cases.mjs`) |
 | Fetch limits | The host hangs, or reads or holds unbounded data | Memory held while reading stays flat over 15,000 always-ready empty or 1-byte reads, for both operations (Node, in a child process with `--expose-gc`); a body of about 200 KB in small and empty chunks kept byte for byte and in order, by two reads at once, at exactly `maxBytes` and cut one byte short; timeouts with a `fetch` that ignores the signal, one that honours it, a stalled `resolveHost`, a stalled body and a slow redirect chain; endless always-ready empty and 1-byte bodies and an instant endless redirect chain, for both operations, ending at the limit and cancelled while other timers still run; reads that each take 10 ms stopped by the clock (Node); a request, resolution, last read or limit-filling read that finishes after the limit ends with `timeout` and its response or body cancelled, and one that fails after it leaves no unhandled rejection, for both operations (Node, in a child process with default rejection handling); a hostname with 200,000 dots checked in linear time; an endless body cut at `maxBytes` and cancelled; an endless HTML body read only to `MAX_DOCUMENT_BYTES` (8 chunks of 64 KiB) with the default and a larger `maxBytes`; a body filling `maxBytes` parsed without another read when the next read stalls; a response arriving after the timeout cancelled; `timeoutMs` above 2^31 - 1 refused; the redirect limit at 5, 6 and 0 |
 | Fetch results | Wrong type handling, charset or error code | Each content type, header and meta charset and their order, every error code, the default and custom user agent, credential removal and `fetchResource` type and size checks |
+| Packaging (SET-186) | The published tarball misses a file, export, type or dependency, or ships tests or sources | `scripts/check-workspaces.mjs` checks the publication metadata (`publishedManifestProblems`, unit-tested in `scripts/workspace-names.test.mjs`). `scripts/packed-packages.test.mjs` (`npm run test:packed`, after `npm run build`; CI runs it) checks the `npm pack --dry-run` listing, installs the local packed tarball (`.tgz`, not a registry release; only its dependencies come from npm's registry) into a project outside the repository, imports it on Node, bundles it from there into workerd with the same results, and type-checks a strict TypeScript consumer. The tag workflow runs the same suite before it packs `links` or `link-capture`. Installing a release from the registry is SET-194 |
 
 Run `npm test --workspace=@subset.dev/links`; the root `npm run check` runs it too. The fetcher cases run under Node (`test/fetch.test.mjs`) and unchanged inside workerd (`test/workerd.test.mjs`). Live sites and live fetching are not tested here: they are deferred to SET-190. Railway Postgres, Cloudflare Preview, connected provider sandboxes and Aside Browser have no runtime boundary in this package; the workerd test runs the Workers runtime locally and is not a Cloudflare deployment.
 

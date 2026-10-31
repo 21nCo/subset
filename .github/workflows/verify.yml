@@ -16,6 +16,9 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+      # SET-186: packs @subset.dev/links and @subset.dev/link-capture as the tag workflow would (npm pack --dry-run and
+      # npm pack), installs the tarballs outside the repository and imports them on Node, and links in workerd.
+      - run: npm run test:packed
       # SET-174's opt-in scale check: a 50,000-item import on SQLite within 120 s, alone so nothing competes with it.
       - run: npm run test:scale --workspace=@subset.dev/bookmarks-core
         env:

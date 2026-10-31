@@ -81,6 +81,12 @@ jobs:
       - name: Test package
         run: npm test --workspace=${{ steps.resolve.outputs.pkg_name }}
 
+      # The libraries are installed from their tarballs: pack, install outside the repository and import them on Node,
+      # in workerd and from strict TypeScript (as Verify does) before a release of either is packed.
+      - name: Test the packed libraries
+        if: steps.resolve.outputs.pkg_slug == 'links' || steps.resolve.outputs.pkg_slug == 'link-capture'
+        run: npm run test:packed
+
       - name: Set the beta version
         if: steps.resolve.outputs.npm_tag == 'beta'
         working-directory: ${{ steps.resolve.outputs.pkg_path }}
@@ -142,6 +148,11 @@ jobs:
         with:
           name: npm-package
           path: ${{ runner.temp }}/package
+
+      # A package that depends on another @subset.dev package (link-capture on links) is published only once npm has a
+      # version of that package it accepts, so it never publishes a release that cannot be installed.
+      - name: Check its @subset.dev dependencies on the registry
+        run: node scripts/npm-dependency-guard.mjs "$RUNNER_TEMP"/package/*.tgz
 
       # A beta must come before its live release, npm would make a package's first version `latest`, and an older
       # beta must not replace a newer one under `beta`. Registry errors fail the run.

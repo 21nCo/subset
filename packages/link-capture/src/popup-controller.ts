@@ -8,6 +8,12 @@ export interface CapturePopupControllerOptions {
   capture: () => Promise<Capture>;
 }
 
+/** The props of `@subset.dev/link-capture/popup`, which its component and its published declaration both use. */
+export interface CapturePopupProps extends CapturePopupControllerOptions {
+  /** Opens the target's setup, for example the options page; shown when the target needs setup. */
+  onsetup?: () => void;
+}
+
 export interface CapturePopupController {
   readonly state: PopupState;
   /** Calls `listener` with every new state; returns the unsubscribe function. */
