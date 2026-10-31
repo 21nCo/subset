@@ -153,6 +153,97 @@ describe('the reference local target', () => {
     assert.deepEqual(stored(local).filter((entry) => entry.link.endsWith('/a')), [{ link: 'https://example.com/a', notes: 'three' }]);
   });
 
+  const NOT_REMOVED = 'Links replaced on this device could not be removed from its storage.';
+  const REFUSED = { ok: false, error: `The link was not saved. ${NOT_REMOVED}` };
+  const ops = (calls, from = 0) => calls.slice(from).map(([op]) => op).filter((op) => op.startsWith('storage.local.'));
+
+  /** Saves link a 12 times through `targets` in turn while every removal fails: 1 kept entry and 10 replaced ones. */
+  async function failRemovals(targets, failing) {
+    failing.remove = true;
+    const results = [];
+    for (let n = 0; n < 12; n++) results.push(await targets[n % targets.length].save(link('a'), { notes: `edit ${n}` }));
+    return results;
+  }
+
+  for (const instances of [1, 2]) {
+    it(`bounds the replaced entries a failing removal leaves, and says so (${instances} instance${instances > 1 ? 's' : ''})`, async () => {
+      const failing = {};
+      const { browser, local, calls } = createFakeBrowser({ storage: { before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } } });
+      const locks = fakeLocks();
+      const targets = Array.from({ length: instances }, () => createLocalTarget(browser, locks));
+      failing.remove = true;
+      const results = [];
+      for (let n = 0; n < 11; n++) {
+        results.push(await targets[n % instances].save(link('a'), { notes: `edit ${n}` }));
+        assert.ok(local.size <= 11);
+      }
+      // Each write is committed (ok), and the replaced entries it leaves are reported.
+      assert.deepEqual(results, [{ ok: true, existing: false }, ...Array(10).fill({ ok: true, existing: true })]);
+      assert.equal(local.size, 11);
+      for (const target of targets) assert.deepEqual(await target.status(), { state: 'error', message: NOT_REMOVED });
+      // At the bound: refused, nothing written, whichever instance saves.
+      const before = structuredClone(Object.fromEntries(local));
+      const from = calls.length;
+      for (const target of targets) {
+        assert.deepEqual(await target.save(link('a'), { notes: 'refused' }), REFUSED);
+        assert.deepEqual(await target.save(link('b'), {}), REFUSED);
+      }
+      assert.deepEqual(Object.fromEntries(local), before);
+      assert.equal(ops(calls, from).filter((op) => op === 'storage.local.set').length, 0);
+      assert.equal(stored(local).filter(({ notes }) => notes === 'edit 10').length, 1);
+    });
+  }
+
+  it('reports the error after one failed removal, and connected once status() can remove the replaced entry', async () => {
+    const failing = {};
+    const { browser, local } = createFakeBrowser({ storage: { before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } } });
+    const target = createLocalTarget(browser, fakeLocks());
+    assert.deepEqual(await target.status(), { state: 'connected' });
+    await target.save(link('a'), { notes: 'one' });
+    failing.remove = true;
+    assert.deepEqual(await target.save(link('a'), { notes: 'two' }), { ok: true, existing: true });
+    assert.deepEqual(await target.status(), { state: 'error', message: NOT_REMOVED });
+    failing.remove = false;
+    assert.deepEqual(await target.status(), { state: 'connected' });
+    assert.deepEqual(stored(local), [{ link: 'https://example.com/a', notes: 'two' }]);
+  });
+
+  it('once removal works again, frees the replaced entries before writing into a full storage', async () => {
+    const failing = {};
+    const quota = { quotaBytes: Infinity, before: (op) => { if (failing[op]) throw new Error(`${op} failed`); } };
+    const { browser, local } = createFakeBrowser({ storage: quota });
+    const locks = fakeLocks();
+    const [popup, background] = [createLocalTarget(browser, locks), createLocalTarget(browser, locks)];
+    await background.save(link('b'), { notes: 'b' });
+    assert.deepEqual((await failRemovals([popup, background], failing)).at(-1), REFUSED);
+    // Full: the next entry fits only once the 10 replaced copies of a are gone.
+    quota.quotaBytes = JSON.stringify(Object.fromEntries(local)).length + 10;
+    failing.remove = false;
+    assert.deepEqual(await popup.save(link('a'), { notes: 'after recovery' }), { ok: true, existing: true });
+    assert.deepEqual(stored(local).sort((x, y) => (x.link < y.link ? -1 : 1)), [
+      { link: 'https://example.com/a', notes: 'after recovery' },
+      { link: 'https://example.com/b', notes: 'b' }
+    ]);
+    assert.deepEqual(await background.status(), { state: 'connected' });
+  });
+
+  it('frees only replaced entries: never the newest of a link, nor the one this save replaces, even when the write then fails', async () => {
+    const quota = {};
+    const { browser, local, calls } = createFakeBrowser({ storage: quota });
+    const entry = (time, name, notes) => [`reference:capture:${time.toString(36).padStart(12, '0')}:${name}`, { capture: link(name.slice(0, 1)), notes }];
+    const seeded = [entry(1, 'a1', 'old a'), entry(2, 'a2', 'old a 2'), entry(3, 'b3', 'only b'), entry(4, 'a4', 'newest a')];
+    for (const [key, value] of seeded) local.set(key, value);
+    const kept = Object.fromEntries([seeded[2], seeded[3]]);
+    quota.quotaBytes = JSON.stringify(kept).length + 10;
+    const from = calls.length;
+    assert.deepEqual(await createLocalTarget(browser, fakeLocks()).save(link('a'), { notes: 'replacement' }), {
+      ok: false,
+      error: 'There is no room on this device to save the link.'
+    });
+    assert.deepEqual(Object.fromEntries(local), kept);
+    assert.deepEqual(calls.slice(from).filter(([op]) => op === 'storage.local.remove').map(([, keys]) => keys), [[seeded[1][0], seeded[0][0]]]);
+  });
+
   /** Replaces `globalThis.navigator` for one test. */
   function setNavigator(value) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');

@@ -7,6 +7,9 @@ const MAX_SUGGESTIONS = 8;
 const LOCK = 'link-capture:reference-local';
 const NO_ROOM = 'There is no room on this device to save the link.';
 const NO_LOCKS = 'This browser has no Web Locks (navigator.locks), so links cannot be saved on this device.';
+/** Saves stop once this many replaced entries are left behind by failed removals, so they cannot fill the storage. */
+const MAX_STALE = 10;
+const NOT_REMOVED = 'Links replaced on this device could not be removed from its storage.';
 
 interface SavedCapture {
   capture: Capture;
@@ -36,6 +39,11 @@ export interface ExclusiveLocks {
  * sorts after everything already saved. A saved entry is removed only after the entry replacing it is written: when
  * storage is full the save is refused (`ok: false`) and every saved capture is kept.
  *
+ * Entries already replaced (by a newer entry of the same link, or past the 100 newest links) are removed again before
+ * each write and on each `status()`, under the same lock, so a removal that failed once is retried and their room is
+ * freed before a full storage refuses the save. While a failed removal leaves any behind, `status()` reports an error;
+ * once 10 are left, saves are refused (`ok: false`, nothing written) until a removal works again.
+ *
  * `locks` defaults to `navigator.locks`, which Chromium MV3 and Firefox MV3 provide to extension pages and the
  * background. Web Locks are required: without them nothing can order the instances' saves, so `status()` reports an
  * error and `save()` refuses without touching storage.
@@ -63,11 +71,29 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     return { kept, stale };
   }
 
+  /**
+   * Runs under the lock. Removes the entries already replaced, never a link's newest entry. Resolves the entries left
+   * and how many replaced ones a failed removal left behind.
+   */
+  async function reclaim(all: Entry[]): Promise<{ all: Entry[]; stale: number }> {
+    const { stale } = sorted(all);
+    if (!stale.length) return { all, stale: 0 };
+    try {
+      await browser.call('storage.local.remove', stale);
+    } catch {
+      return { all, stale: stale.length };
+    }
+    const removed = new Set(stale);
+    return { all: all.filter((entry) => !removed.has(entry.key)), stale: 0 };
+  }
+
   /** Runs under the lock. A failure before the write resolves `ok: false`; once written, the capture is saved. */
   async function saveLocked(capture: Capture, value: SavedCapture): Promise<SaveResult> {
     let all: Entry[];
     try {
-      all = await entries();
+      const reclaimed = await reclaim(await entries());
+      if (reclaimed.stale >= MAX_STALE) return { ok: false, error: `The link was not saved. ${NOT_REMOVED}` };
+      all = reclaimed.all;
     } catch (error) {
       return { ok: false, error: message(error) };
     }
@@ -79,11 +105,11 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     try {
       await browser.call('storage.local.set', { [key]: value });
     } catch (error) {
-      // A failed set wrote nothing. Storage full is a refusal too: nothing saved is removed to make room, because a
-      // removal before the new entry is written could not be undone if the popup closed or the write-back failed.
+      // A failed set wrote nothing. Storage full is a refusal too: no entry still kept (the one this save replaces
+      // included) is removed to make room, because a removal before the new entry is written could not be undone.
       return { ok: false, error: isQuotaError(error) ? NO_ROOM : message(error) };
     }
-    // Saved. A failed clean-up leaves only stale entries, which the next save removes.
+    // Saved. A failed clean-up leaves only replaced entries, which the next save or status() removes or reports.
     if (stale.length) await browser.call('storage.local.remove', stale).catch(() => undefined);
     return { ok: true, existing };
   }
@@ -92,7 +118,14 @@ export function createLocalTarget(browser: BrowserFacade, locks: ExclusiveLocks 
     id: 'reference-local',
     label: 'This device',
     async status() {
-      return locks ? { state: 'connected' } : { state: 'error', message: NO_LOCKS };
+      if (!locks) return { state: 'error', message: NO_LOCKS };
+      return locks.request(LOCK, async () => {
+        try {
+          return (await reclaim(await entries())).stale ? { state: 'error', message: NOT_REMOVED } : { state: 'connected' };
+        } catch (error) {
+          return { state: 'error', message: `This device's storage is unavailable${error instanceof Error && error.message ? `: ${error.message}` : '.'}` };
+        }
+      });
     },
     async save(capture, edits) {
       if (!locks) return { ok: false, error: NO_LOCKS };
