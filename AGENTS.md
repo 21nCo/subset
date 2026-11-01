@@ -99,3 +99,9 @@ Branches: `dev` is the default branch and takes all pull requests (its ruleset a
 ## Definition of done for a capability
 
 The standalone flow works; its reusable operations and view contracts are documented; claimed embedding and agent surfaces have been tested in their actual hosts; data source and permissions are accurate; accessibility and keyboard use are checked; failure and offline states are usable; releases and links are verified; and the directory describes only the available forms. Report any unverified surface explicitly.
+
+## Codex hooks (Entire)
+
+- Entire's Codex hooks live in the global Codex config (`~/.codex/hooks.json`). Do not add or commit a repo-level `.codex/hooks.json`.
+- `entire enable` and `entire agent add codex` write `.codex/hooks.json` into the repo. If you run either one, delete that file afterwards; it is gitignored so it should never reach a commit.
+- If the Entire hooks are missing on your machine, add them to `~/.codex/hooks.json`, not to this repo.
