@@ -10,3 +10,6 @@ packages/minutes-cli/.app-runtime-*/
 native/timer/.build/
 native/timer/.swiftpm/
 packages/link-capture/dist-extension/
+
+# Codex hooks are global (~/.codex/hooks.json); never commit repo-level ones
+.codex/hooks.json
