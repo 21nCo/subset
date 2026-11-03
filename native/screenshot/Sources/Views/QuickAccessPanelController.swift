@@ -8,6 +8,10 @@ final class QuickAccessPanelController: ObservableObject {
     @Published private(set) var record: CaptureRecord?
     @Published private(set) var image: NSImage?
     @Published private(set) var uploadedURL: URL?
+    /// When the running auto-close countdown ends; nil when it is off or paused.
+    @Published private(set) var autoCloseDeadline: Date?
+    /// Length of the countdown in seconds; 0 when auto-close is off.
+    @Published private(set) var autoCloseDuration: TimeInterval = 0
     private var autoCloseWork: DispatchWorkItem?
 
     init(appState: AppState) {
@@ -40,6 +44,7 @@ final class QuickAccessPanelController: ObservableObject {
     func hide() {
         autoCloseWork?.cancel()
         autoCloseWork = nil
+        autoCloseDeadline = nil
         panel?.orderOut(nil)
         panel = nil
     }
@@ -49,6 +54,7 @@ final class QuickAccessPanelController: ObservableObject {
         if hovering {
             autoCloseWork?.cancel()
             autoCloseWork = nil
+            autoCloseDeadline = nil
         } else {
             scheduleAutoClose()
         }
@@ -56,16 +62,54 @@ final class QuickAccessPanelController: ObservableObject {
 
     private func scheduleAutoClose() {
         autoCloseWork?.cancel()
+        autoCloseWork = nil
+        autoCloseDeadline = nil
         let seconds = appState.preferences.quickAccessAutoCloseSeconds
+        autoCloseDuration = TimeInterval(max(0, seconds))
         guard seconds > 0, panel != nil else { return }
         let work = DispatchWorkItem { [weak self] in self?.hide() }
         autoCloseWork = work
+        autoCloseDeadline = Date().addingTimeInterval(TimeInterval(seconds))
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: work)
     }
 
     func markUploaded(recordID: UUID, url: URL) {
         guard record?.id == recordID else { return }
         uploadedURL = url
+    }
+}
+
+/// A bar that shrinks from full to empty as the auto-close countdown runs. While the
+/// countdown is paused (pointer over the overlay) it stays full, because leaving restarts it.
+struct AutoCloseCountdownBar: View {
+    let deadline: Date?
+    let duration: TimeInterval
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        // With Reduce Motion the bar steps once per second instead of animating continuously.
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : nil, paused: deadline == nil)) { context in
+            let remaining = Self.remaining(until: deadline, at: context.date, duration: duration)
+            let fraction = duration > 0 ? remaining / duration : 0
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.black.opacity(0.35))
+                    Capsule().fill(.white.opacity(0.9))
+                        .frame(width: proxy.size.width * fraction)
+                }
+            }
+            .frame(height: 4)
+            .accessibilityElement()
+            .accessibilityLabel("Closes automatically")
+            .accessibilityValue(deadline == nil ? "Paused" : "\(Int(remaining.rounded(.up))) seconds left")
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Seconds left in the countdown; the full duration while paused.
+    static func remaining(until deadline: Date?, at date: Date, duration: TimeInterval) -> TimeInterval {
+        guard let deadline else { return duration }
+        return min(duration, max(0, deadline.timeIntervalSince(date)))
     }
 }
 
@@ -96,6 +140,13 @@ private struct QuickAccessView: View {
                 .help("Close")
                 .accessibilityLabel("Close Quick Access")
                 .padding(8)
+            }
+            .overlay(alignment: .bottom) {
+                if controller.autoCloseDuration > 0 {
+                    AutoCloseCountdownBar(deadline: controller.autoCloseDeadline, duration: controller.autoCloseDuration)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 8)
+                }
             }
             HStack(spacing: 8) {
                 quickButton("folder", "Show", help: "Show the saved file in Finder") { reveal() }

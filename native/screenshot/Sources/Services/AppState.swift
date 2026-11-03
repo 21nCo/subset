@@ -27,9 +27,47 @@ final class AppState: ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var lastError: String?
     @Published var uploadProgress: Double?
-    /// Global shortcuts that macOS refused to register at launch.
-    @Published var unavailableShortcuts: [String] = []
+    /// Global shortcuts that macOS refused to register, usually because another app owns them.
+    @Published var unavailableShortcuts: Set<GlobalShortcutAction> = []
+    /// True while Settings records a new shortcut; global shortcuts are unregistered meanwhile
+    /// so the keys being recorded don't trigger a capture.
+    private(set) var globalShortcutsSuspended = false
     var presentsErrors = true
+
+    /// Registers the current global shortcut bindings, replacing earlier registrations, and
+    /// returns the actions macOS refused.
+    @discardableResult
+    func registerGlobalShortcuts() -> Set<GlobalShortcutAction> {
+        globalShortcutsSuspended = false
+        let registrations = GlobalShortcutAction.allCases.compactMap { action -> ShortcutRegistration? in
+            guard let shortcut = preferences.globalShortcuts.shortcut(for: action) else { return nil }
+            return ShortcutRegistration(
+                id: action.hotKeyID,
+                name: "\(action.title) (\(shortcut.displayString))",
+                keyCode: shortcut.keyCode,
+                modifiers: shortcut.carbonModifiers,
+                handler: { [weak self] in self?.perform(action) }
+            )
+        }
+        let failedIDs = Set(GlobalShortcutMonitor.shared.start(registrations))
+        unavailableShortcuts = Set(GlobalShortcutAction.allCases.filter { failedIDs.contains($0.hotKeyID) })
+        return unavailableShortcuts
+    }
+
+    func suspendGlobalShortcuts() {
+        globalShortcutsSuspended = true
+        GlobalShortcutMonitor.shared.stop()
+    }
+
+    func perform(_ action: GlobalShortcutAction) {
+        switch action {
+        case .captureArea: captureArea()
+        case .captureWindow: captureWindow()
+        case .recordScreen: startRecording()
+        case .captureText: captureText()
+        case .captureHistory: openHistory()
+        }
+    }
 
     func captureArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
         // Read the source app before the selection overlay activates Screenshot.

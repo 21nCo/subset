@@ -12,7 +12,7 @@ Screenshot is a native macOS menu-bar app for capturing, annotating, and sharing
 
 | Operation | Kind | Entry points |
 | --- | --- | --- |
-| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts (⌃⌥S, ⌃⌥⇧S), `subset-screenshot://` URLs |
+| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts (⌃⌥S, ⌃⌥⇧S by default; rebindable in Settings > Shortcuts), `subset-screenshot://` URLs |
 | Record screen (MP4) or GIF | read (screen, optional mic/camera) + local write | menu bar, ⌃⌥⇧R, URLs |
 | Capture text (OCR via Vision) | read + clipboard write | ⌃⌥⇧O, URL |
 | Annotate (arrow, line, rectangle, ellipse, pencil, highlighter, text, pixelate, blur, spotlight, counter, crop, background) | local edit | Quick Access, History, menu |

@@ -23,19 +23,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appState.settingsOpener = { [weak self] tab in self?.showSettings(tab: tab) }
         statusMenuController = StatusMenuController(appState: appState)
 
-        // macOS 15 rejects hot keys whose only modifiers are Option or Option-Shift, so every
-        // default includes Control. Failures are reported instead of silently dropped.
-        let failedShortcuts = GlobalShortcutMonitor.shared.start([
-            ShortcutRegistration(id: 1, name: "Capture Area (⌃⌥S)", keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey), handler: { [weak self] in self?.appState.captureArea() }),
-            ShortcutRegistration(id: 2, name: "Capture Window (⌃⌥⇧S)", keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.captureWindow() }),
-            ShortcutRegistration(id: 3, name: "Record Screen (⌃⌥⇧R)", keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.startRecording() }),
-            ShortcutRegistration(id: 4, name: "Capture Text (⌃⌥⇧O)", keyCode: UInt32(kVK_ANSI_O), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.captureText() }),
-            ShortcutRegistration(id: 5, name: "Capture History (⌃⌥⇧H)", keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(controlKey | optionKey | shiftKey), handler: { [weak self] in self?.appState.openHistory() })
-        ])
-        appState.unavailableShortcuts = failedShortcuts
+        let failedShortcuts = appState.registerGlobalShortcuts()
         if !failedShortcuts.isEmpty, ProcessInfo.processInfo.arguments.count <= 1 {
+            let names = GlobalShortcutAction.allCases.filter(failedShortcuts.contains).compactMap { action in
+                appState.preferences.globalShortcuts.shortcut(for: action).map { "\(action.title) (\($0.displayString))" }
+            }
             DispatchQueue.main.async { [weak self] in
-                self?.appState.showError("These global shortcuts could not be registered, usually because another app already uses them: \(failedShortcuts.joined(separator: ", ")). Use the menu bar icon instead.")
+                self?.appState.showError("These global shortcuts could not be registered, usually because another app already uses them: \(names.joined(separator: ", ")). Change them in Settings > Shortcuts, or use the menu bar icon.")
             }
         }
 

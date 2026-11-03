@@ -75,6 +75,7 @@ final class AppPreferences: ObservableObject {
         static let cloudBaseURL = "cloudBaseURL"
         static let uploadToken = "uploadToken"
         static let selectedSettingsTab = "selectedSettingsTab"
+        static let globalShortcuts = "globalShortcuts"
     }
 
     @Published var afterCaptureActions: Set<AfterCaptureAction> { didSet { persistActions() } }
@@ -105,6 +106,13 @@ final class AppPreferences: ObservableObject {
         }
     }
     @Published var selectedSettingsTab: SettingsTab { didSet { defaults.set(selectedSettingsTab.rawValue, forKey: Key.selectedSettingsTab) } }
+    /// Global shortcut choices; unchanged actions keep their defaults.
+    @Published var globalShortcuts: GlobalShortcutBindings {
+        didSet {
+            guard globalShortcuts != oldValue, let data = try? JSONEncoder().encode(globalShortcuts) else { return }
+            defaults.set(data, forKey: Key.globalShortcuts)
+        }
+    }
 
     private let defaults: UserDefaults
 
@@ -138,6 +146,8 @@ final class AppPreferences: ObservableObject {
             defaults.removeObject(forKey: Key.uploadToken)
         }
         selectedSettingsTab = SettingsTab(rawValue: defaults.string(forKey: Key.selectedSettingsTab) ?? "general") ?? .general
+        globalShortcuts = defaults.data(forKey: Key.globalShortcuts)
+            .flatMap { try? JSONDecoder().decode(GlobalShortcutBindings.self, from: $0) } ?? GlobalShortcutBindings()
 
         if let raw = defaults.array(forKey: Key.afterCaptureActions) as? [String] {
             afterCaptureActions = Set(raw.compactMap(AfterCaptureAction.init(rawValue:)))

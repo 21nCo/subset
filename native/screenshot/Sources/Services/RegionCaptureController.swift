@@ -34,13 +34,7 @@ final class RegionCaptureController {
         self.completion = completion
 
         for screen in NSScreen.screens {
-            let panel = SelectionPanel(
-                contentRect: screen.frame,
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false,
-                screen: screen
-            )
+            let panel = Self.makeOverlayPanel(for: screen)
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.level = .screenSaver
@@ -68,6 +62,21 @@ final class RegionCaptureController {
         // Make the panel under the pointer key so Escape reaches its view.
         let pointer = NSEvent.mouseLocation
         (panels.first(where: { $0.frame.contains(pointer) }) ?? panels.first)?.makeKey()
+    }
+
+    /// An overlay panel covering exactly `screen`. The panel is created without the `screen:`
+    /// initializer argument: with it, AppKit treats the content rect as relative to that
+    /// screen's origin, so the global `screen.frame` would be offset a second time and the
+    /// overlay would miss every display except the one at the global origin.
+    static func makeOverlayPanel(for screen: NSScreen) -> NSPanel {
+        let panel = SelectionPanel(
+            contentRect: screen.frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.setFrame(screen.frame, display: false)
+        return panel
     }
 
     func cancel() {
@@ -113,6 +122,9 @@ private final class RegionSelectionView: NSView {
 
     required init?(coder: NSCoder) { nil }
     override var acceptsFirstResponder: Bool { true }
+    /// Only the overlay under the pointer starts as key; the first click on another display's
+    /// overlay must start a selection rather than only making that panel key.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
