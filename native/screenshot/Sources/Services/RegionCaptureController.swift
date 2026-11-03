@@ -111,6 +111,9 @@ private final class RegionSelectionView: NSView {
     private var dragStart: CGPoint?
     private var currentPoint: CGPoint?
     private var snappedGlobalRect: CGRect?
+    /// Pointer position for the crosshair, in view coordinates; nil while the pointer is on
+    /// another display.
+    private var crosshairPoint: CGPoint?
     private var tracking: NSTrackingArea?
 
     init(mode: RegionCaptureController.Mode, instruction: String) {
@@ -129,12 +132,38 @@ private final class RegionSelectionView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let next = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self)
+        let next = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect], owner: self)
         addTrackingArea(next)
         tracking = next
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Start the crosshair at the pointer, on the display the pointer is on.
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        crosshairPoint = bounds.contains(point) ? point : nil
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        moveCrosshair(to: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        moveCrosshair(to: nil)
+    }
+
+    /// Redraws only the old and new crosshair lines, not the whole display.
+    private func moveCrosshair(to point: CGPoint?) {
+        for old in [crosshairPoint, point].compactMap({ $0 }) {
+            setNeedsDisplay(CGRect(x: bounds.minX, y: old.y - 2, width: bounds.width, height: 4))
+            setNeedsDisplay(CGRect(x: old.x - 2, y: bounds.minY, width: 4, height: bounds.height))
+        }
+        crosshairPoint = point
+    }
+
     override func mouseMoved(with event: NSEvent) {
+        moveCrosshair(to: convert(event.locationInWindow, from: nil))
         guard mode == .window else { return }
         let global = window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
         snappedGlobalRect = resolveWindow?(global)
@@ -159,6 +188,7 @@ private final class RegionSelectionView: NSView {
         // selection on the display where the drag started.
         let point = event.locationInWindow
         currentPoint = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX), y: min(max(point.y, bounds.minY), bounds.maxY))
+        crosshairPoint = currentPoint
         needsDisplay = true
     }
 
@@ -198,7 +228,7 @@ private final class RegionSelectionView: NSView {
         }
 
         drawInstruction(selection: selection)
-        if let mouse = window?.mouseLocationOutsideOfEventStream { drawCrosshair(at: mouse) }
+        if let crosshairPoint { drawCrosshair(at: crosshairPoint) }
     }
 
     private var normalizedSelection: CGRect? {
