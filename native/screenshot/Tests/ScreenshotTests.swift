@@ -408,4 +408,18 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now.addingTimeInterval(-1), at: now, duration: 10), 0)
         XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now.addingTimeInterval(30), at: now, duration: 10), 10)
     }
+
+    func testQuickAccessOpensOnTheCapturedDisplay() {
+        let main = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let external = CGRect(x: -450, y: 982, width: 2560, height: 1440)
+        let frames = [main, external]
+        let pointerOnMain = CGPoint(x: 100, y: 100)
+        // A capture on the external display wins over the pointer position.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: CGRect(x: 0, y: 1500, width: 300, height: 200), pointer: pointerOnMain, frames: frames), 1)
+        // An area spanning both displays goes to the one holding most of it.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: CGRect(x: 0, y: 900, width: 200, height: 300), pointer: pointerOnMain, frames: frames), 1)
+        // No area: the display under the pointer.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: nil, pointer: CGPoint(x: 0, y: 2000), frames: frames), 1)
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: nil, pointer: pointerOnMain, frames: frames), 0)
+    }
 }

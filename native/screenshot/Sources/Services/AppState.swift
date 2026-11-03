@@ -32,6 +32,8 @@ final class AppState: ObservableObject {
     /// True while Settings records a new shortcut; global shortcuts are unregistered meanwhile
     /// so the keys being recorded don't trigger a capture.
     private(set) var globalShortcutsSuspended = false
+    /// The area being recorded, so Quick Access opens on that display when recording stops.
+    private var recordingArea: CGRect?
     var presentsErrors = true
 
     /// Registers the current global shortcut bindings, replacing earlier registrations, and
@@ -79,7 +81,7 @@ final class AppState: ObservableObject {
                     self.showError(Self.captureFailedMessage)
                     return
                 }
-                self.finishImage(image, kind: .area, forcedAction: action, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .area, forcedAction: action, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
@@ -93,7 +95,7 @@ final class AppState: ObservableObject {
                     self.showError(Self.captureFailedMessage)
                     return
                 }
-                self.finishImage(image, kind: .window, forcedAction: action, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .window, forcedAction: action, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
@@ -116,7 +118,7 @@ final class AppState: ObservableObject {
                 showError("Capture an area first, then use Capture Previous Area.")
                 return
             }
-            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source)
+            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source, area: captureService.previousArea)
         }
     }
 
@@ -131,7 +133,7 @@ final class AppState: ObservableObject {
                         self.showError(Self.captureFailedMessage)
                         return
                     }
-                    self.finishImage(image, kind: .area, forcedAction: nil, source: source)
+                    self.finishImage(image, kind: .area, forcedAction: nil, source: source, area: rect)
                 }
             }
         }
@@ -146,7 +148,7 @@ final class AppState: ObservableObject {
                     self.showError("Automatic scrolling needs Accessibility and Screen Recording permission.")
                     return
                 }
-                self.finishImage(image, kind: .scrolling, forcedAction: nil, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .scrolling, forcedAction: nil, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
@@ -189,7 +191,7 @@ final class AppState: ObservableObject {
                 tearDownRecordingUI()
                 guard let result else { return }
                 let record = try history.saveRecording(at: result.url, kind: result.format == .gif ? .gif : .recording, pixelSize: result.pixelSize)
-                quickAccessController?.show(record: record, image: result.thumbnail)
+                quickAccessController?.show(record: record, image: result.thumbnail, near: recordingArea)
                 if preferences.openVideoEditor, result.format == .mp4 {
                     videoEditorController?.show(url: result.url)
                 }
@@ -342,6 +344,7 @@ final class AppState: ObservableObject {
             )
             recordingService.onUnexpectedStop = { [weak self] in self?.stopRecording() }
             try await recordingService.start(area: area, destination: destination, format: format, preferences: preferences)
+            recordingArea = area
             isRecording = true
             if preferences.showRecordingControls { recordingControlsController?.show(area: area) }
             if preferences.showCamera { cameraController?.show() }
@@ -363,7 +366,8 @@ final class AppState: ObservableObject {
         forcedAction: AfterCaptureAction?,
         preferredDirectory: URL? = nil,
         allowsUpload: Bool = true,
-        source: (application: String?, window: String?)
+        source: (application: String?, window: String?),
+        area: CGRect? = nil
     ) {
         do {
             var actions = forcedAction.map { Set([$0]) } ?? preferences.afterCaptureActions
@@ -381,7 +385,7 @@ final class AppState: ObservableObject {
             if actions.contains(.annotate) { openEditor(image: image, record: record) }
             if actions.contains(.upload) { upload(record: record) }
             if actions.contains(.pin) { pinController?.pin(image: image, title: record.displayName) }
-            if actions.contains(.quickAccess) { quickAccessController?.show(record: record, image: image) }
+            if actions.contains(.quickAccess) { quickAccessController?.show(record: record, image: image, near: area) }
             reportHistoryPersistenceError()
         } catch {
             showError(error.localizedDescription)

@@ -18,7 +18,9 @@ final class QuickAccessPanelController: ObservableObject {
         self.appState = appState
     }
 
-    func show(record: CaptureRecord, image: NSImage?) {
+    /// Shows the overlay on the display that holds most of `area` (the captured region, in
+    /// Cocoa global coordinates). Without an area it uses the display under the pointer.
+    func show(record: CaptureRecord, image: NSImage?, near area: CGRect? = nil) {
         self.record = record
         self.image = image
         uploadedURL = record.cloudShareURL
@@ -27,7 +29,7 @@ final class QuickAccessPanelController: ObservableObject {
         let scale = appState.preferences.quickAccessSize
         let width = 250 + (scale - 1) * 34
         let height = 210 + (scale - 1) * 28
-        let visible = NSScreen.main?.visibleFrame ?? .zero
+        let visible = (Self.screen(for: area, pointer: NSEvent.mouseLocation, screens: NSScreen.screens) ?? NSScreen.main)?.visibleFrame ?? .zero
         let frame = CGRect(x: visible.maxX - width - 22, y: visible.minY + 22, width: width, height: height)
         let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
@@ -39,6 +41,24 @@ final class QuickAccessPanelController: ObservableObject {
         panel.orderFrontRegardless()
         self.panel = panel
         scheduleAutoClose()
+    }
+
+    /// The screen with the largest share of `area`; the screen under `pointer` when there is no
+    /// area or it lies off every screen.
+    static func screen(for area: CGRect?, pointer: CGPoint, screens: [NSScreen]) -> NSScreen? {
+        let frames = screens.map(\.frame)
+        return screenIndex(for: area, pointer: pointer, frames: frames).map { screens[$0] }
+    }
+
+    static func screenIndex(for area: CGRect?, pointer: CGPoint, frames: [CGRect]) -> Int? {
+        if let area {
+            let overlaps = frames.enumerated().map { index, frame -> (Int, CGFloat) in
+                let shared = frame.intersection(area)
+                return (index, shared.isNull ? 0 : shared.width * shared.height)
+            }
+            if let best = overlaps.max(by: { $0.1 < $1.1 }), best.1 > 0 { return best.0 }
+        }
+        return frames.firstIndex { $0.contains(pointer) }
     }
 
     func hide() {
