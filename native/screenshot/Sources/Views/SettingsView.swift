@@ -428,6 +428,7 @@ struct SettingsView: View {
                 .foregroundStyle(granted ? .green : .orange)
             if !granted {
                 Button("Open System Settings…") {
+                    requestPermission(pane: pane)
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
                         NSWorkspace.shared.open(url)
                     }
@@ -435,6 +436,21 @@ struct SettingsView: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// macOS lists an app under Screen Recording or Accessibility only after the app has asked
+    /// for that access, so ask before opening the pane; otherwise the user has to find and add
+    /// the app with the + button.
+    private func requestPermission(pane: String) {
+        switch pane {
+        case "Privacy_ScreenCapture":
+            appState.captureService.requestScreenCaptureAccess()
+        case "Privacy_Accessibility":
+            _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        default:
+            break
+        }
+        permissionRefresh += 1
     }
 
     private func chooseExportDirectory() {
