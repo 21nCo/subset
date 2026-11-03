@@ -122,6 +122,7 @@ struct SettingsView: View {
                         Spacer()
                         Button("Reset All") {
                             shortcutRecorder.stop()
+                            shortcutRecorder.clearMessage()
                             preferences.globalShortcuts = GlobalShortcutBindings()
                             appState.registerGlobalShortcuts()
                         }
@@ -178,6 +179,8 @@ struct SettingsView: View {
                 .accessibilityHint(isRecording ? "Press the new shortcut, or Escape to cancel" : "Records a new shortcut")
                 Button {
                     shortcutRecorder.stop()
+                    // Clearing can resolve a conflict reported on another row.
+                    shortcutRecorder.clearMessage()
                     preferences.globalShortcuts.clear(action)
                     appState.registerGlobalShortcuts()
                 } label: { Image(systemName: "xmark.circle") }
