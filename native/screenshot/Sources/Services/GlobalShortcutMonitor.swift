@@ -183,9 +183,19 @@ struct GlobalShortcutBindings: Codable, Equatable {
         cleared.insert(action)
     }
 
-    mutating func reset(_ action: GlobalShortcutAction) {
+    /// The action that would collide with `action` if it were reset to its default.
+    func resetConflict(for action: GlobalShortcutAction) -> GlobalShortcutAction? {
+        self.action(using: action.defaultShortcut, except: action)
+    }
+
+    /// Restores the default unless another action now uses it; returns that action instead of
+    /// creating a duplicate binding (only one of two identical hot keys can register).
+    @discardableResult
+    mutating func reset(_ action: GlobalShortcutAction) -> GlobalShortcutAction? {
+        if let conflict = resetConflict(for: action) { return conflict }
         overrides[action] = nil
         cleared.remove(action)
+        return nil
     }
 
     /// Two shortcuts collide when they use the same physical key and modifiers, whatever label

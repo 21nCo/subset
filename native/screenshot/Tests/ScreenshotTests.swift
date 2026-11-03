@@ -351,6 +351,21 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(AppPreferences(defaults: suite).globalShortcuts, GlobalShortcutBindings())
     }
 
+    func testResetRefusesToDuplicateAnotherActionsShortcut() {
+        var bindings = GlobalShortcutBindings()
+        bindings.clear(.captureWindow)
+        bindings.set(GlobalShortcutAction.captureWindow.defaultShortcut, for: .recordScreen)
+
+        XCTAssertEqual(bindings.resetConflict(for: .captureWindow), .recordScreen)
+        XCTAssertEqual(bindings.reset(.captureWindow), .recordScreen)
+        XCTAssertNil(bindings.shortcut(for: .captureWindow))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen), GlobalShortcutAction.captureWindow.defaultShortcut)
+
+        bindings.reset(.recordScreen)
+        XCTAssertNil(bindings.reset(.captureWindow))
+        XCTAssertEqual(bindings, GlobalShortcutBindings())
+    }
+
     func testGlobalShortcutBindingsIgnoreUnknownStoredActions() throws {
         let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":262144,"key":"S"},"removedAction":{"keyCode":2,"modifierFlags":262144,"key":"D"}},"cleared":["removedAction","captureText"]}"#
         let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
@@ -386,13 +401,16 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(shortcut.menuKeyEquivalent, "s")
         XCTAssertEqual(KeyShortcut(keyCode: UInt32(kVK_F5), modifiers: [.control], key: "F5").menuKeyEquivalent?.unicodeScalars.first?.value, UInt32(NSF5FunctionKey))
 
+        // A function key, so the label doesn't depend on the active keyboard layout.
+        let f5 = String(Character(UnicodeScalar(UInt16(NSF5FunctionKey))!))
         let event = NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: [.control, .option], timestamp: 0, windowNumber: 0,
-            context: nil, characters: "\u{13}", charactersIgnoringModifiers: "s", isARepeat: false, keyCode: UInt16(kVK_ANSI_S)
+            with: .keyDown, location: .zero, modifierFlags: [.control, .option, .capsLock], timestamp: 0, windowNumber: 0,
+            context: nil, characters: f5, charactersIgnoringModifiers: f5, isARepeat: false, keyCode: UInt16(kVK_F5)
         )!
         let recorded = KeyShortcut(event: event)
-        XCTAssertEqual(recorded?.keyCode, UInt32(kVK_ANSI_S))
-        XCTAssertEqual(recorded?.displayString, "⌃⌥S")
+        XCTAssertEqual(recorded?.keyCode, UInt32(kVK_F5))
+        XCTAssertEqual(recorded?.modifiers, [.control, .option])
+        XCTAssertEqual(recorded?.displayString, "⌃⌥F5")
     }
 
     func testOverlayPanelsCoverTheirOwnScreen() {

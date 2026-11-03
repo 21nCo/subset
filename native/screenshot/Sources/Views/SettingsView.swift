@@ -187,8 +187,12 @@ struct SettingsView: View {
                 .accessibilityLabel("Remove \(action.title) shortcut")
                 Button {
                     shortcutRecorder.stop()
-                    preferences.globalShortcuts.reset(action)
-                    appState.registerGlobalShortcuts()
+                    if let conflict = preferences.globalShortcuts.reset(action) {
+                        shortcutRecorder.show("\(action.defaultShortcut.displayString) is already used by \(conflict.title). Change that shortcut first.", for: action)
+                    } else {
+                        shortcutRecorder.clearMessage()
+                        appState.registerGlobalShortcuts()
+                    }
                 } label: { Image(systemName: "arrow.counterclockwise") }
                 .buttonStyle(.borderless)
                 .disabled(preferences.globalShortcuts.isDefault(action))
@@ -501,6 +505,14 @@ final class ShortcutRecorder: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.stop() }
         }
+    }
+
+    func show(_ text: String, for action: GlobalShortcutAction) {
+        message = Message(action: action, text: text)
+    }
+
+    func clearMessage() {
+        message = nil
     }
 
     func stop() {
