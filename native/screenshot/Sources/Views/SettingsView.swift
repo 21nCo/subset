@@ -33,6 +33,9 @@ struct SettingsView: View {
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .onChange(of: preferences.selectedSettingsTab) { _, _ in shortcutRecorder.stop() }
+        // Permissions are usually granted in System Settings; re-read them on returning here.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in permissionRefresh += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in permissionRefresh += 1 }
         .onDisappear { shortcutRecorder.stop() }
     }
 
