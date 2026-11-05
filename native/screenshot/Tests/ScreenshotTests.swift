@@ -440,6 +440,40 @@ final class ScreenshotTests: XCTestCase {
         }
     }
 
+    func testStoredNumbersThisVersionDoesNotUseKeepTheirExactValue() throws {
+        // Numbers a newer version could write with Decimal or Int128 (beyond 64 bits, or more
+        // digits than a Double holds) and a Double only a Double can hold, in an unknown
+        // action, an unused field of a known one, a cleared entry and a top-level field.
+        let big = "18446744073709551617", pi = "3.14159265358979323846264338327950288"
+        let huge = "1.2345678901234567e+300"
+        let extra = #""big":\#(big),"pi":\#(pi),"huge":\#(huge)"#
+        let json = """
+        {"overrides":{"newAction":{"keyCode":2,"modifierFlags":262144,"key":"D",\(extra)},
+        "recordScreen":{"keyCode":15,"modifierFlags":393216,"key":"R",\(extra)}},
+        "cleared":["laterAction",{\(extra)},\(big)],\(extra)}
+        """
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen)?.displayString, "⌃⇧R")
+
+        let edits: [(String, (inout GlobalShortcutBindings) -> Void)] = [
+            ("unchanged", { _ in }),
+            ("set", { $0.set(KeyShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: [.control], key: "K"), for: .captureArea) }),
+            ("clear", { $0.clear(.captureText) }),
+            ("reset", { $0.clear(.captureWindow); $0.reset(.captureWindow) }),
+            ("resetAll", { $0.resetAll() }),
+        ]
+        for (name, edit) in edits {
+            var edited = bindings
+            edit(&edited)
+            // Compare the saved text, so a value rounded through Double can't match.
+            let saved = String(decoding: try JSONEncoder().encode(edited), as: UTF8.self)
+            let entries = name == "resetAll" ? 3 : 4
+            XCTAssertEqual(saved.components(separatedBy: big).count - 1, entries + 1, "\(name): \(saved)")
+            XCTAssertEqual(saved.components(separatedBy: pi).count - 1, entries, "\(name): \(saved)")
+            XCTAssertEqual(saved.components(separatedBy: huge).count - 1, entries, "\(name): \(saved)")
+        }
+    }
+
     func testStoredShortcutWithUnsupportedModifiersFallsBackToTheDefault() throws {
         // ⌃ plus Caps Lock (65536) and Fn (8388608): Carbon would register only ⌃, so the
         // entry can't be represented faithfully and Capture Area keeps its default.

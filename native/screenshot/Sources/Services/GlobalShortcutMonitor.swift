@@ -324,7 +324,7 @@ struct GlobalShortcutBindings: Codable, Equatable {
 
     /// A JSON value kept as read, so it can be written back without losing anything.
     private indirect enum StoredJSON: Codable, Equatable {
-        case null, bool(Bool), integer(Int64), unsigned(UInt64), number(Double), string(String)
+        case null, bool(Bool), integer(Int64), unsigned(UInt64), decimal(Decimal), number(Double), string(String)
         case array([StoredJSON]), object([String: StoredJSON])
 
         init(encoding value: some Encodable) throws {
@@ -346,7 +346,17 @@ struct GlobalShortcutBindings: Codable, Equatable {
                 else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
                 else if let integer = try? value.decode(Int64.self) { self = .integer(integer) }
                 else if let unsigned = try? value.decode(UInt64.self) { self = .unsigned(unsigned) }
-                else if let number = try? value.decode(Double.self) { self = .number(number) }
+                else if let number = try? value.decode(Double.self) {
+                    // A Decimal keeps digits a Double would round (more than 64 bits or about
+                    // 17 significant digits); a value only a Double can hold, such as 1e300,
+                    // stays a Double, as does any Decimal reading that disagrees with it.
+                    if let decimal = try? value.decode(Decimal.self),
+                       (NSDecimalNumber(decimal: decimal).doubleValue - number).magnitude <= number.magnitude * 1e-12 {
+                        self = .decimal(decimal)
+                    } else {
+                        self = .number(number)
+                    }
+                }
                 else { self = .string(try value.decode(String.self)) }
             }
         }
@@ -366,6 +376,7 @@ struct GlobalShortcutBindings: Codable, Equatable {
                 case let .bool(value): try container.encode(value)
                 case let .integer(value): try container.encode(value)
                 case let .unsigned(value): try container.encode(value)
+                case let .decimal(value): try container.encode(value)
                 case let .number(value): try container.encode(value)
                 case let .string(value): try container.encode(value)
                 case .array, .object: break
