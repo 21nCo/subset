@@ -65,7 +65,8 @@ final class AppState: ObservableObject {
         switch action {
         case .captureArea: captureArea()
         case .captureWindow: captureWindow()
-        case .recordScreen: startRecording()
+        // Like the menu item, the shortcut stops a recording that is running.
+        case .recordScreen: isRecording ? stopRecording() : startRecording()
         case .captureText: captureText()
         case .captureHistory: openHistory()
         }
@@ -102,23 +103,32 @@ final class AppState: ObservableObject {
 
     func captureFullscreen(action: AfterCaptureAction? = nil, preferredDirectory: URL? = nil, allowsUpload: Bool = true) {
         let source = captureService.activeApplicationMetadata()
+        // Pick the display now, so moving the pointer during the capture changes neither the
+        // captured display nor where Quick Access opens.
+        let screen = ScreenCaptureService.screenUnderPointer()
+        let displayID = screen.flatMap(ScreenCaptureService.displayID(of:))
         Task {
-            guard let image = await captureService.captureFullscreen() else {
+            guard let image = await captureService.captureFullscreen(displayID: displayID) else {
                 showError("Screen access is required before Screenshot can capture the display.")
                 return
             }
-            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory, allowsUpload: allowsUpload, source: source)
+            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory, allowsUpload: allowsUpload, source: source, area: screen?.frame)
         }
     }
 
     func capturePreviousArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
         let source = captureService.activeApplicationMetadata()
+        // Read the area once: a capture finishing meanwhile replaces previousArea.
+        guard let area = captureService.previousArea else {
+            showError("Capture an area first, then use Capture Previous Area.")
+            return
+        }
         Task {
-            guard let image = await captureService.capturePreviousArea() else {
-                showError("Capture an area first, then use Capture Previous Area.")
+            guard let image = await captureService.capture(area: area, remember: false) else {
+                showError(Self.captureFailedMessage)
                 return
             }
-            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source, area: captureService.previousArea)
+            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source, area: area)
         }
     }
 
@@ -185,13 +195,15 @@ final class AppState: ObservableObject {
     }
 
     func stopRecording() {
+        // Read before awaiting: a new recording may start before this one is saved.
+        let area = recordingArea
         Task {
             do {
                 let result = try await recordingService.stop()
                 tearDownRecordingUI()
                 guard let result else { return }
                 let record = try history.saveRecording(at: result.url, kind: result.format == .gif ? .gif : .recording, pixelSize: result.pixelSize)
-                quickAccessController?.show(record: record, image: result.thumbnail, near: recordingArea)
+                quickAccessController?.show(record: record, image: result.thumbnail, near: area)
                 if preferences.openVideoEditor, result.format == .mp4 {
                     videoEditorController?.show(url: result.url)
                 }

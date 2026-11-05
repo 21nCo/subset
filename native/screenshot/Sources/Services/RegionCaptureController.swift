@@ -69,13 +69,19 @@ final class RegionCaptureController {
     /// screen's origin, so the global `screen.frame` would be offset a second time and the
     /// overlay would miss every display except the one at the global origin.
     static func makeOverlayPanel(for screen: NSScreen) -> NSPanel {
+        makeOverlayPanel(frame: screen.frame)
+    }
+
+    /// `frame` is in global Cocoa coordinates, so it is applied as is rather than through
+    /// `init(..., screen:)`, which treats the rect as relative to that screen.
+    static func makeOverlayPanel(frame: CGRect) -> NSPanel {
         let panel = SelectionPanel(
-            contentRect: screen.frame,
+            contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.setFrame(screen.frame, display: false)
+        panel.setFrame(frame, display: false)
         return panel
     }
 

@@ -371,6 +371,48 @@ final class ScreenshotTests: XCTestCase {
         let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
         XCTAssertEqual(bindings.overrides.keys.map(\.rawValue), ["captureArea"])
         XCTAssertEqual(bindings.cleared, [.captureText])
+
+        // Entries for actions this version doesn't know survive a change and a save.
+        var edited = bindings
+        edited.clear(.captureHistory)
+        let saved = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? [String: Any]
+        XCTAssertNotNil((saved?["overrides"] as? [String: Any])?["removedAction"])
+        XCTAssertEqual(saved?["cleared"] as? [String], ["captureHistory", "captureText", "removedAction"])
+        edited.resetAll()
+        XCTAssertTrue(edited.isAllDefault)
+        let afterReset = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? [String: Any]
+        XCTAssertNotNil((afterReset?["overrides"] as? [String: Any])?["removedAction"])
+    }
+
+    func testOneBadStoredShortcutKeepsTheOtherBindings() throws {
+        // captureWindow is malformed and captureText uses ⌘ alone, which a global shortcut may not.
+        let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":262144,"key":"S"},"captureWindow":{"keyCode":"x"},"captureText":{"keyCode":8,"modifierFlags":1048576,"key":"C"}},"cleared":["recordScreen",7]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .captureArea), KeyShortcut(keyCode: 1, modifiers: [.control], key: "S"))
+        XCTAssertTrue(bindings.isDefault(.captureWindow))
+        XCTAssertTrue(bindings.isDefault(.captureText))
+        XCTAssertNil(bindings.shortcut(for: .recordScreen))
+
+        let suiteName = "ScreenshotTests.badShortcut"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        suite.set(Data(json.utf8), forKey: "globalShortcuts")
+        XCTAssertEqual(AppPreferences(defaults: suite).globalShortcuts, bindings)
+    }
+
+    func testRecordingTheDefaultKeysUnderAnotherLabelKeepsTheDefault() {
+        var bindings = GlobalShortcutBindings()
+        let areaDefault = GlobalShortcutAction.captureArea.defaultShortcut
+        bindings.set(KeyShortcut(keyCode: areaDefault.keyCode, modifiers: areaDefault.modifiers, key: "Ś"), for: .captureArea)
+        XCTAssertTrue(bindings.isDefault(.captureArea))
+        XCTAssertTrue(bindings.isAllDefault)
+    }
+
+    func testShortcutLabelKeepsCharactersThatUppercaseToSeveral() {
+        XCTAssertEqual(KeyShortcut.uppercasedLabel("a"), "A")
+        XCTAssertEqual(KeyShortcut.uppercasedLabel("ß"), "ß")
+        XCTAssertEqual(KeyShortcut(keyCode: 27, modifiers: [.control], key: "ß").menuKeyEquivalent, "ß")
     }
 
     func testGlobalShortcutConflictsAndValidation() {
@@ -413,18 +455,54 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(recorded?.displayString, "⌃⌥F5")
     }
 
-    func testOverlayPanelsCoverTheirOwnScreen() {
+    func testOverlayPanelsCoverTheirOwnScreen() throws {
+        // Displays left of, above and right of a 1440×900 main display: each overlay must sit
+        // exactly on its display's global frame, with the origin applied once.
+        let secondaryFrames = [
+            CGRect(x: -1920, y: -180, width: 1920, height: 1080),
+            CGRect(x: 0, y: 900, width: 2560, height: 1440),
+            CGRect(x: 1440, y: 120, width: 1680, height: 1050),
+        ]
+        for frame in secondaryFrames {
+            XCTAssertEqual(RegionCaptureController.makeOverlayPanel(frame: frame).frame, frame)
+        }
+        try XCTSkipIf(NSScreen.screens.isEmpty, "The connected-display check needs at least one display.")
         for screen in NSScreen.screens {
             XCTAssertEqual(RegionCaptureController.makeOverlayPanel(for: screen).frame, screen.frame)
         }
     }
 
     func testAutoCloseCountdownShrinksAndStaysFullWhilePaused() {
-        let now = Date()
+        let now: TimeInterval = 5_000
         XCTAssertEqual(AutoCloseCountdownBar.remaining(until: nil, at: now, duration: 10), 10)
-        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now.addingTimeInterval(4), at: now, duration: 10), 4, accuracy: 0.001)
-        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now.addingTimeInterval(-1), at: now, duration: 10), 0)
-        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now.addingTimeInterval(30), at: now, duration: 10), 10)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now + 4, at: now, duration: 10), 4, accuracy: 0.001)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now - 1, at: now, duration: 10), 0)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now + 30, at: now, duration: 10), 10)
+    }
+
+    func testHoveringPausesAndLeavingRestartsTheAutoCloseCountdown() {
+        let controller = QuickAccessPanelController(appState: AppState(), autoCloseSeconds: { 5 })
+        let record = CaptureRecord(
+            id: UUID(), kind: .area, createdAt: Date(), fileURL: URL(fileURLWithPath: "/tmp/quick-access-test.png"),
+            projectURL: nil, thumbnailURL: nil, width: 10, height: 10, sourceApplication: nil, sourceWindow: nil,
+            cloudShareURL: nil, cloudID: nil, tags: [], isFavorite: false
+        )
+        defer { controller.hide() }
+        let before = ProcessInfo.processInfo.systemUptime
+        controller.show(record: record, image: nil)
+        XCTAssertEqual(controller.autoCloseDuration, 5)
+        let deadline = try? XCTUnwrap(controller.autoCloseDeadline)
+        XCTAssertEqual(deadline ?? 0, before + 5, accuracy: 1)
+
+        controller.setHovering(true)
+        XCTAssertNil(controller.autoCloseDeadline)
+
+        controller.setHovering(false)
+        XCTAssertNotNil(controller.autoCloseDeadline)
+        XCTAssertGreaterThanOrEqual(controller.autoCloseDeadline ?? 0, deadline ?? .infinity)
+
+        controller.hide()
+        XCTAssertNil(controller.autoCloseDeadline)
     }
 
     func testQuickAccessOpensOnTheCapturedDisplay() {

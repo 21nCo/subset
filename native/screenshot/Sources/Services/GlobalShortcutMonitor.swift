@@ -68,9 +68,16 @@ struct KeyShortcut: Codable, Hashable {
         // The unmodified character, so ⇧/ is labelled "/" rather than "?".
         let typed = event.characters(byApplyingModifiers: []) ?? event.charactersIgnoringModifiers
         let label = Self.specialKeyLabels[keyCode]
-            ?? typed?.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters)).uppercased()
+            ?? typed.map { Self.uppercasedLabel($0.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))) }
         guard let label, !label.isEmpty else { return nil }
         self.init(keyCode: keyCode, modifiers: event.modifierFlags, key: label)
+    }
+
+    /// Upper case for display, unless that changes the character count (ß becomes SS), which
+    /// would leave the key without a menu key equivalent.
+    static func uppercasedLabel(_ typed: String) -> String {
+        let upper = typed.uppercased()
+        return upper.count == typed.count ? upper : typed
     }
 
     var modifiers: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifierFlags) }
@@ -156,6 +163,13 @@ struct KeyShortcut: Codable, Hashable {
 struct GlobalShortcutBindings: Codable, Equatable {
     var overrides: [GlobalShortcutAction: KeyShortcut] = [:]
     var cleared: Set<GlobalShortcutAction> = []
+    /// Stored entries for actions this version doesn't know (saved by a newer version). They
+    /// are written back unchanged so editing a shortcut here doesn't erase them.
+    private var unknownOverrides: [String: KeyShortcut] = [:]
+    private var unknownCleared: Set<String> = []
+
+    /// True when every action this version knows uses its default shortcut.
+    var isAllDefault: Bool { overrides.isEmpty && cleared.isEmpty }
 
     func shortcut(for action: GlobalShortcutAction) -> KeyShortcut? {
         if cleared.contains(action) { return nil }
@@ -175,12 +189,18 @@ struct GlobalShortcutBindings: Codable, Equatable {
 
     mutating func set(_ shortcut: KeyShortcut, for action: GlobalShortcutAction) {
         cleared.remove(action)
-        overrides[action] = shortcut == action.defaultShortcut ? nil : shortcut
+        overrides[action] = Self.sameKeys(shortcut)(action.defaultShortcut) ? nil : shortcut
     }
 
     mutating func clear(_ action: GlobalShortcutAction) {
         overrides[action] = nil
         cleared.insert(action)
+    }
+
+    /// Restores every known action's default shortcut.
+    mutating func resetAll() {
+        overrides = [:]
+        cleared = []
     }
 
     /// The action that would collide with `action` if it were reset to its default.
@@ -212,20 +232,47 @@ struct GlobalShortcutBindings: Codable, Equatable {
         self.cleared = cleared
     }
 
+    /// Decodes each entry on its own: an unreadable entry, or a stored shortcut that a global
+    /// shortcut may not use, falls back to that action's default without touching the others.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let rawOverrides = try container.decodeIfPresent([String: KeyShortcut].self, forKey: .overrides) ?? [:]
-        overrides = Dictionary(uniqueKeysWithValues: rawOverrides.compactMap { key, value in
-            GlobalShortcutAction(rawValue: key).map { ($0, value) }
-        })
-        let rawCleared = try container.decodeIfPresent([String].self, forKey: .cleared) ?? []
-        cleared = Set(rawCleared.compactMap(GlobalShortcutAction.init(rawValue:)))
+        let rawOverrides = (try? container.decodeIfPresent([String: StoredShortcut].self, forKey: .overrides)) ?? [:]
+        for (key, stored) in rawOverrides {
+            guard let shortcut = stored.shortcut else { continue }
+            if let action = GlobalShortcutAction(rawValue: key) {
+                if shortcut.isAllowedAsGlobalShortcut { overrides[action] = shortcut }
+            } else {
+                unknownOverrides[key] = shortcut
+            }
+        }
+        let rawCleared = (try? container.decodeIfPresent([StoredString].self, forKey: .cleared)) ?? []
+        for key in rawCleared.compactMap(\.value) {
+            if let action = GlobalShortcutAction(rawValue: key) {
+                cleared.insert(action)
+                overrides[action] = nil
+            } else {
+                unknownCleared.insert(key)
+            }
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(Dictionary(uniqueKeysWithValues: overrides.map { ($0.key.rawValue, $0.value) }), forKey: .overrides)
-        try container.encode(cleared.map(\.rawValue).sorted(), forKey: .cleared)
+        var stored = unknownOverrides
+        for (action, shortcut) in overrides { stored[action.rawValue] = shortcut }
+        try container.encode(stored, forKey: .overrides)
+        try container.encode((cleared.map(\.rawValue) + unknownCleared).sorted(), forKey: .cleared)
+    }
+
+    /// A stored shortcut that decodes to nil instead of failing the whole value.
+    private struct StoredShortcut: Decodable {
+        let shortcut: KeyShortcut?
+        init(from decoder: Decoder) throws { shortcut = try? KeyShortcut(from: decoder) }
+    }
+
+    private struct StoredString: Decodable {
+        let value: String?
+        init(from decoder: Decoder) throws { value = try? decoder.singleValueContainer().decode(String.self) }
     }
 }
 
@@ -243,6 +290,9 @@ final class GlobalShortcutMonitor {
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var handlers: [UInt32: () -> Void] = [:]
     private var eventHandler: EventHandlerRef?
+    /// Changes whenever the registrations change, so a hot-key press queued before a rebind
+    /// doesn't run the action now bound to that ID.
+    private var generation = 0
 
     /// Registers the shortcuts, replacing any registered earlier, and returns the IDs of any
     /// that could not be registered.
@@ -267,7 +317,12 @@ final class GlobalShortcutMonitor {
                 )
                 guard result == noErr else { return result }
                 let monitor = Unmanaged<GlobalShortcutMonitor>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async { monitor.handlers[identifier.id]?() }
+                // Hot-key events arrive on the main thread; the action runs on the next turn.
+                let generation = monitor.generation
+                DispatchQueue.main.async {
+                    guard monitor.generation == generation else { return }
+                    monitor.handlers[identifier.id]?()
+                }
                 return noErr
             },
             1,
@@ -303,6 +358,7 @@ final class GlobalShortcutMonitor {
         hotKeyRefs.forEach { _ = UnregisterEventHotKey($0) }
         hotKeyRefs = []
         handlers = [:]
+        generation &+= 1
         if let eventHandler { RemoveEventHandler(eventHandler) }
         eventHandler = nil
     }

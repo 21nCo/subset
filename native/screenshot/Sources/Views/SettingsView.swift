@@ -64,7 +64,7 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         permissionRow("Screen Recording", granted: screenRecordingGranted, pane: "Privacy_ScreenCapture")
                         permissionRow("Accessibility (scrolling capture and keystrokes only)", granted: accessibilityGranted, pane: "Privacy_Accessibility")
-                        Text("Try it: press ⌃⌥S to capture an area, or open the menu bar icon.")
+                        Text(captureAreaHint)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -123,10 +123,10 @@ struct SettingsView: View {
                         Button("Reset All") {
                             shortcutRecorder.stop()
                             shortcutRecorder.clearMessage()
-                            preferences.globalShortcuts = GlobalShortcutBindings()
+                            preferences.globalShortcuts.resetAll()
                             appState.registerGlobalShortcuts()
                         }
-                        .disabled(preferences.globalShortcuts == GlobalShortcutBindings())
+                        .disabled(preferences.globalShortcuts.isAllDefault)
                     }
                     .padding(.top, 8)
                 }
@@ -164,7 +164,12 @@ struct SettingsView: View {
                 Text(action.title)
                 Spacer()
                 Button {
-                    if isRecording { shortcutRecorder.stop() } else { shortcutRecorder.start(action, appState: appState) }
+                    if isRecording {
+                        shortcutRecorder.stop()
+                        shortcutRecorder.clearMessage()
+                    } else {
+                        shortcutRecorder.start(action, appState: appState)
+                    }
                 } label: {
                     Text(label)
                         .font(.system(.body, design: .rounded))
@@ -418,6 +423,13 @@ struct SettingsView: View {
     private func shortcutRow(_ title: String, _ keys: String) -> some View {
         HStack { Text(title); Spacer(); Text(keys).font(.system(.body, design: .rounded)).padding(.horizontal, 8).padding(.vertical, 4).background(.quaternary, in: RoundedRectangle(cornerRadius: 6)) }
             .padding(.vertical, 9)
+    }
+
+    private var captureAreaHint: String {
+        if let shortcut = preferences.globalShortcuts.shortcut(for: .captureArea) {
+            return "Try it: press \(shortcut.displayString) to capture an area, or open the menu bar icon."
+        }
+        return "Try it: open the menu bar icon and choose Capture Area."
     }
 
     private var screenRecordingGranted: Bool {

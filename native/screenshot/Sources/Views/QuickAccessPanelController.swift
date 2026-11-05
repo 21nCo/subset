@@ -8,14 +8,18 @@ final class QuickAccessPanelController: ObservableObject {
     @Published private(set) var record: CaptureRecord?
     @Published private(set) var image: NSImage?
     @Published private(set) var uploadedURL: URL?
-    /// When the running auto-close countdown ends; nil when it is off or paused.
-    @Published private(set) var autoCloseDeadline: Date?
+    /// When the running auto-close countdown ends, in `ProcessInfo.systemUptime` seconds (the
+    /// clock the hide timer uses, which wall-clock changes don't move); nil when off or paused.
+    @Published private(set) var autoCloseDeadline: TimeInterval?
     /// Length of the countdown in seconds; 0 when auto-close is off.
     @Published private(set) var autoCloseDuration: TimeInterval = 0
     private var autoCloseWork: DispatchWorkItem?
+    private let autoCloseSeconds: () -> Int
 
-    init(appState: AppState) {
+    /// `autoCloseSeconds` defaults to the Quick Access auto-close setting.
+    init(appState: AppState, autoCloseSeconds: (() -> Int)? = nil) {
         self.appState = appState
+        self.autoCloseSeconds = autoCloseSeconds ?? { [unowned appState] in appState.preferences.quickAccessAutoCloseSeconds }
     }
 
     /// Shows the overlay on the display that holds most of `area` (the captured region, in
@@ -84,12 +88,12 @@ final class QuickAccessPanelController: ObservableObject {
         autoCloseWork?.cancel()
         autoCloseWork = nil
         autoCloseDeadline = nil
-        let seconds = appState.preferences.quickAccessAutoCloseSeconds
+        let seconds = autoCloseSeconds()
         autoCloseDuration = TimeInterval(max(0, seconds))
         guard seconds > 0, panel != nil else { return }
         let work = DispatchWorkItem { [weak self] in self?.hide() }
         autoCloseWork = work
-        autoCloseDeadline = Date().addingTimeInterval(TimeInterval(seconds))
+        autoCloseDeadline = ProcessInfo.processInfo.systemUptime + TimeInterval(seconds)
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: work)
     }
 
@@ -102,14 +106,15 @@ final class QuickAccessPanelController: ObservableObject {
 /// A bar that shrinks from full to empty as the auto-close countdown runs. While the
 /// countdown is paused (pointer over the overlay) it stays full, because leaving restarts it.
 struct AutoCloseCountdownBar: View {
-    let deadline: Date?
+    let deadline: TimeInterval?
     let duration: TimeInterval
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // With Reduce Motion the bar steps once per second instead of animating continuously.
-        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : nil, paused: deadline == nil)) { context in
-            let remaining = Self.remaining(until: deadline, at: context.date, duration: duration)
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : nil, paused: deadline == nil)) { _ in
+            // The timeline only drives redraws; time is read from the same clock as the deadline.
+            let remaining = Self.remaining(until: deadline, at: ProcessInfo.processInfo.systemUptime, duration: duration)
             let fraction = duration > 0 ? remaining / duration : 0
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -127,9 +132,9 @@ struct AutoCloseCountdownBar: View {
     }
 
     /// Seconds left in the countdown; the full duration while paused.
-    static func remaining(until deadline: Date?, at date: Date, duration: TimeInterval) -> TimeInterval {
+    static func remaining(until deadline: TimeInterval?, at uptime: TimeInterval, duration: TimeInterval) -> TimeInterval {
         guard let deadline else { return duration }
-        return min(duration, max(0, deadline.timeIntervalSince(date)))
+        return min(duration, max(0, deadline - uptime))
     }
 }
 
