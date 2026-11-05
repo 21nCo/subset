@@ -55,6 +55,15 @@ jobs:
             exit 1
           fi
 
+      - name: Require a publishing dispatch to run on its release tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/tags/${RELEASE_TAG}" || "${GITHUB_SHA}" != "$(git rev-parse HEAD)" ]]; then
+            echo "Dispatch this workflow on the release tag (gh workflow run publish-tag.yml --ref ${RELEASE_TAG} ...) so npm provenance records the commit that is published." >&2
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
