@@ -401,6 +401,71 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertEqual(AppPreferences(defaults: suite).globalShortcuts, bindings)
     }
 
+    func testStoredEntriesThisVersionDoesNotKnowAreWrittenBackUnchanged() throws {
+        // As a newer version might save them: an unknown action with an extra field, one in
+        // another format, a known action with an extra field, a non-string cleared entry and
+        // an unknown top-level field.
+        let json = #"""
+        {"overrides":{"newAction":{"keyCode":2,"modifierFlags":262144,"key":"D","scope":"global"},
+        "otherAction":["⌃","D"],"recordScreen":{"keyCode":15,"modifierFlags":393216,"key":"R","note":"kept"}},
+        "cleared":["laterAction",{"action":"x"}],"version":2}
+        """#
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+        let storedOverrides = try XCTUnwrap(stored["overrides"] as? NSDictionary)
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen)?.displayString, "⌃⇧R")
+
+        let edits: [(String, (inout GlobalShortcutBindings) -> Void)] = [
+            ("unchanged", { _ in }),
+            ("set", { $0.set(KeyShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: [.control], key: "K"), for: .captureArea) }),
+            ("clear", { $0.clear(.captureText) }),
+            ("reset", { $0.clear(.captureWindow); $0.reset(.captureWindow) }),
+            ("resetAll", { $0.resetAll() }),
+        ]
+        for (name, edit) in edits {
+            var edited = bindings
+            edit(&edited)
+            let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? NSDictionary, name)
+            let overrides = try XCTUnwrap(saved["overrides"] as? NSDictionary, name)
+            XCTAssertEqual(overrides["newAction"] as? NSDictionary, storedOverrides["newAction"] as? NSDictionary, name)
+            XCTAssertEqual(overrides["otherAction"] as? NSArray, storedOverrides["otherAction"] as? NSArray, name)
+            XCTAssertEqual(saved["version"] as? Int, 2, name)
+            let cleared = try XCTUnwrap(saved["cleared"] as? NSArray, name)
+            XCTAssertTrue(cleared.contains("laterAction"), name)
+            XCTAssertTrue(cleared.contains(["action": "x"] as NSDictionary), name)
+            if name != "resetAll" {
+                // A known entry this version didn't change keeps the fields it doesn't use.
+                XCTAssertEqual(overrides["recordScreen"] as? NSDictionary, storedOverrides["recordScreen"] as? NSDictionary, name)
+            }
+        }
+    }
+
+    func testStoredShortcutWithUnsupportedModifiersFallsBackToTheDefault() throws {
+        // ⌃ plus Caps Lock (65536) and Fn (8388608): Carbon would register only ⌃, so the
+        // entry can't be represented faithfully and Capture Area keeps its default.
+        let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":8716288,"key":"S"},"captureText":{"keyCode":31,"modifierFlags":262144,"key":"O"}},"cleared":[]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertTrue(bindings.isDefault(.captureArea))
+        XCTAssertEqual(bindings.shortcut(for: .captureArea), GlobalShortcutAction.captureArea.defaultShortcut)
+        XCTAssertEqual(bindings.shortcut(for: .captureText)?.displayString, "⌃O")
+    }
+
+    func testEscapeAndKeypadEnterShortcutsHaveMenuKeyEquivalents() {
+        let escape = KeyShortcut(keyCode: UInt32(kVK_Escape), modifiers: [.control, .option], key: "⎋")
+        XCTAssertEqual(escape.menuKeyEquivalent, "\u{1B}")
+        let enter = KeyShortcut(keyCode: UInt32(kVK_ANSI_KeypadEnter), modifiers: [.control], key: "⌤")
+        XCTAssertEqual(enter.menuKeyEquivalent?.unicodeScalars.first?.value, UInt32(NSEnterCharacter))
+    }
+
+    func testRecordRequestWhileRecordingReportsTheRecordingInProgress() {
+        let appState = AppState()
+        appState.presentsErrors = false
+        appState.isRecording = true
+        defer { appState.isRecording = false }
+        appState.startRecording(format: .gif)
+        XCTAssertEqual(appState.lastError, "A recording is already in progress.")
+    }
+
     func testRecordingTheDefaultKeysUnderAnotherLabelKeepsTheDefault() {
         var bindings = GlobalShortcutBindings()
         let areaDefault = GlobalShortcutAction.captureArea.defaultShortcut

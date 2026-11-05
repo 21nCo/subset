@@ -143,7 +143,8 @@ struct KeyShortcut: Codable, Hashable {
     private static let specialMenuKeys: [UInt32: String] = {
         func character(_ value: Int) -> String { String(Character(UnicodeScalar(UInt16(value))!)) }
         var keys: [Int: String] = [
-            kVK_Space: " ", kVK_Return: "\r", kVK_Tab: "\t",
+            kVK_Space: " ", kVK_Return: "\r", kVK_ANSI_KeypadEnter: character(NSEnterCharacter), kVK_Tab: "\t",
+            kVK_Escape: "\u{1B}",
             kVK_Delete: character(NSBackspaceCharacter), kVK_ForwardDelete: character(NSDeleteFunctionKey),
             kVK_LeftArrow: character(NSLeftArrowFunctionKey), kVK_RightArrow: character(NSRightArrowFunctionKey),
             kVK_UpArrow: character(NSUpArrowFunctionKey), kVK_DownArrow: character(NSDownArrowFunctionKey),
@@ -161,12 +162,17 @@ struct KeyShortcut: Codable, Hashable {
 
 /// The user's global shortcut choices: overrides of the defaults plus actions turned off.
 struct GlobalShortcutBindings: Codable, Equatable {
-    var overrides: [GlobalShortcutAction: KeyShortcut] = [:]
+    var overrides: [GlobalShortcutAction: KeyShortcut] = [:] { didSet { dropChangedStoredOverrides() } }
     var cleared: Set<GlobalShortcutAction> = []
-    /// Stored entries for actions this version doesn't know (saved by a newer version). They
-    /// are written back unchanged so editing a shortcut here doesn't erase them.
-    private var unknownOverrides: [String: KeyShortcut] = [:]
-    private var unknownCleared: Set<String> = []
+    /// Stored data this version doesn't use (a newer version may have saved it): entries for
+    /// unknown actions, cleared entries that aren't known action names and other top-level
+    /// fields. They are written back as read, so editing a shortcut here doesn't erase them.
+    private var unknownOverrides: [String: StoredJSON] = [:]
+    private var unknownCleared: [StoredJSON] = []
+    private var unknownFields: [String: StoredJSON] = [:]
+    /// Each known override as stored, written back while the action keeps that shortcut so
+    /// fields this version doesn't use survive.
+    private var storedOverrides: [GlobalShortcutAction: StoredOverride] = [:]
 
     /// True when every action this version knows uses its default keys.
     var isAllDefault: Bool { cleared.isEmpty && GlobalShortcutAction.allCases.allSatisfy(isDefault) }
@@ -227,34 +233,42 @@ struct GlobalShortcutBindings: Codable, Equatable {
         { rhs in lhs.keyCode == rhs.keyCode && lhs.modifierFlags == rhs.modifierFlags }
     }
 
-    // Encode with string keys so the stored JSON stays readable and forward compatible.
-    private enum CodingKeys: String, CodingKey { case overrides, cleared }
-
     init(overrides: [GlobalShortcutAction: KeyShortcut] = [:], cleared: Set<GlobalShortcutAction> = []) {
         self.overrides = overrides
         self.cleared = cleared
     }
 
     /// Decodes each entry on its own: an unreadable entry, or a stored shortcut that a global
-    /// shortcut may not use, falls back to that action's default without touching the others.
+    /// shortcut may not use or that has modifiers beyond ⌃ ⌥ ⇧ ⌘ (hot key registration would
+    /// drop them), falls back to that action's default without touching the others.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let rawOverrides = (try? container.decodeIfPresent([String: StoredShortcut].self, forKey: .overrides)) ?? [:]
-        for (key, stored) in rawOverrides {
-            guard let shortcut = stored.shortcut else { continue }
-            if let action = GlobalShortcutAction(rawValue: key) {
-                if shortcut.isAllowedAsGlobalShortcut { overrides[action] = shortcut }
-            } else {
-                unknownOverrides[key] = shortcut
+        let container = try decoder.container(keyedBy: StoredKey.self)
+        for key in container.allKeys where key != .overrides && key != .cleared {
+            unknownFields[key.stringValue] = try? container.decode(StoredJSON.self, forKey: key)
+        }
+        if let rawOverrides = try? container.nestedContainer(keyedBy: StoredKey.self, forKey: .overrides) {
+            for key in rawOverrides.allKeys {
+                guard let action = GlobalShortcutAction(rawValue: key.stringValue) else {
+                    unknownOverrides[key.stringValue] = try? rawOverrides.decode(StoredJSON.self, forKey: key)
+                    continue
+                }
+                guard let shortcut = try? rawOverrides.decode(KeyShortcut.self, forKey: key),
+                      shortcut.isAllowedAsGlobalShortcut,
+                      shortcut.modifiers.isSubset(of: KeyShortcut.relevantModifiers) else { continue }
+                overrides[action] = shortcut
+                if let raw = try? rawOverrides.decode(StoredJSON.self, forKey: key) {
+                    storedOverrides[action] = StoredOverride(shortcut: shortcut, raw: raw)
+                }
             }
         }
-        let rawCleared = (try? container.decodeIfPresent([StoredString].self, forKey: .cleared)) ?? []
-        for key in rawCleared.compactMap(\.value) {
-            if let action = GlobalShortcutAction(rawValue: key) {
-                cleared.insert(action)
-                overrides[action] = nil
-            } else {
-                unknownCleared.insert(key)
+        if var rawCleared = try? container.nestedUnkeyedContainer(forKey: .cleared) {
+            while !rawCleared.isAtEnd, let entry = try? rawCleared.decode(StoredJSON.self) {
+                if case let .string(name) = entry, let action = GlobalShortcutAction(rawValue: name) {
+                    cleared.insert(action)
+                    overrides[action] = nil
+                } else {
+                    unknownCleared.append(entry)
+                }
             }
         }
         // An action that fell back to its default must not take keys another action now
@@ -265,25 +279,99 @@ struct GlobalShortcutBindings: Codable, Equatable {
             }
             if collides { cleared.insert(action) }
         }
+        dropChangedStoredOverrides()
+    }
+
+    private mutating func dropChangedStoredOverrides() {
+        storedOverrides = storedOverrides.filter { overrides[$0.key] == $0.value.shortcut }
     }
 
     func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
+        var container = encoder.container(keyedBy: StoredKey.self)
+        for (key, value) in unknownFields { try container.encode(value, forKey: StoredKey(key)) }
         var stored = unknownOverrides
-        for (action, shortcut) in overrides { stored[action.rawValue] = shortcut }
+        for (action, shortcut) in overrides {
+            if let original = storedOverrides[action], original.shortcut == shortcut {
+                stored[action.rawValue] = original.raw
+            } else {
+                stored[action.rawValue] = try StoredJSON(encoding: shortcut)
+            }
+        }
         try container.encode(stored, forKey: .overrides)
-        try container.encode((cleared.map(\.rawValue) + unknownCleared).sorted(), forKey: .cleared)
+        // Names stay sorted as before; stored entries that aren't names follow unchanged.
+        let names = cleared.map(\.rawValue) + unknownCleared.compactMap {
+            if case let .string(name) = $0 { name } else { nil }
+        }
+        let others = unknownCleared.filter { if case .string = $0 { false } else { true } }
+        try container.encode(names.sorted().map(StoredJSON.string) + others, forKey: .cleared)
     }
 
-    /// A stored shortcut that decodes to nil instead of failing the whole value.
-    private struct StoredShortcut: Decodable {
-        let shortcut: KeyShortcut?
-        init(from decoder: Decoder) throws { shortcut = try? KeyShortcut(from: decoder) }
+    private struct StoredOverride: Equatable {
+        let shortcut: KeyShortcut
+        let raw: StoredJSON
     }
 
-    private struct StoredString: Decodable {
-        let value: String?
-        init(from decoder: Decoder) throws { value = try? decoder.singleValueContainer().decode(String.self) }
+    /// Any JSON key, so fields this version doesn't know can be read and written back.
+    private struct StoredKey: CodingKey, Equatable {
+        static let overrides = StoredKey("overrides")
+        static let cleared = StoredKey("cleared")
+        let stringValue: String
+        init(_ string: String) { stringValue = string }
+        init?(stringValue: String) { self.init(stringValue) }
+        var intValue: Int? { nil }
+        init?(intValue: Int) { nil }
+    }
+
+    /// A JSON value kept as read, so it can be written back without losing anything.
+    private indirect enum StoredJSON: Codable, Equatable {
+        case null, bool(Bool), integer(Int64), unsigned(UInt64), number(Double), string(String)
+        case array([StoredJSON]), object([String: StoredJSON])
+
+        init(encoding value: some Encodable) throws {
+            self = try JSONDecoder().decode(StoredJSON.self, from: JSONEncoder().encode(value))
+        }
+
+        init(from decoder: Decoder) throws {
+            if let object = try? decoder.container(keyedBy: StoredKey.self) {
+                self = .object(try Dictionary(uniqueKeysWithValues: object.allKeys.map {
+                    ($0.stringValue, try object.decode(StoredJSON.self, forKey: $0))
+                }))
+            } else if var array = try? decoder.unkeyedContainer() {
+                var values: [StoredJSON] = []
+                while !array.isAtEnd { values.append(try array.decode(StoredJSON.self)) }
+                self = .array(values)
+            } else {
+                let value = try decoder.singleValueContainer()
+                if value.decodeNil() { self = .null }
+                else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
+                else if let integer = try? value.decode(Int64.self) { self = .integer(integer) }
+                else if let unsigned = try? value.decode(UInt64.self) { self = .unsigned(unsigned) }
+                else if let number = try? value.decode(Double.self) { self = .number(number) }
+                else { self = .string(try value.decode(String.self)) }
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            switch self {
+            case let .object(object):
+                var container = encoder.container(keyedBy: StoredKey.self)
+                for (key, value) in object { try container.encode(value, forKey: StoredKey(key)) }
+            case let .array(values):
+                var container = encoder.unkeyedContainer()
+                for value in values { try container.encode(value) }
+            default:
+                var container = encoder.singleValueContainer()
+                switch self {
+                case .null: try container.encodeNil()
+                case let .bool(value): try container.encode(value)
+                case let .integer(value): try container.encode(value)
+                case let .unsigned(value): try container.encode(value)
+                case let .number(value): try container.encode(value)
+                case let .string(value): try container.encode(value)
+                case .array, .object: break
+                }
+            }
+        }
     }
 }
 

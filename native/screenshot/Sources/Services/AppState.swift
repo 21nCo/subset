@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     private var isStartingRecording = false
     /// From a stop request until the recording is saved; a second stop is ignored.
     private var isStoppingRecording = false
+    private var isRecordingBusy: Bool { isRecording || isStartingRecording || isStoppingRecording }
     var presentsErrors = true
 
     /// Registers the current global shortcut bindings, replacing earlier registrations, and
@@ -192,10 +193,18 @@ final class AppState: ObservableObject {
     }
 
     func startRecording(format: RecordingFormat = .mp4) {
-        // A recording already starting or stopping ignores another Record request.
-        guard !isRecording, !isStartingRecording, !isStoppingRecording else { return }
+        // While a recording runs, starts or stops, another Record request opens no selection
+        // and says why.
+        guard !isRecordingBusy else {
+            showError(ScreenRecordingError.alreadyRecording.localizedDescription)
+            return
+        }
         regionController.select(mode: .recording) { [weak self] rect in
-            guard let self, let rect, !self.isRecording, !self.isStartingRecording, !self.isStoppingRecording else { return }
+            guard let self, let rect else { return }
+            guard !self.isRecordingBusy else {
+                self.showError(ScreenRecordingError.alreadyRecording.localizedDescription)
+                return
+            }
             self.isStartingRecording = true
             Task {
                 await self.beginRecording(area: rect, format: format)
@@ -207,8 +216,10 @@ final class AppState: ObservableObject {
     func stopRecording() {
         guard !isStoppingRecording else { return }
         isStoppingRecording = true
-        // Read before awaiting: a new recording may start before this one is saved.
+        // Read before awaiting: a new recording may start before this one is saved. The area
+        // belongs to the recording being stopped, so a later stop can't reuse it.
         let area = recordingArea
+        recordingArea = nil
         Task {
             defer { isStoppingRecording = false }
             do {
@@ -252,9 +263,14 @@ final class AppState: ObservableObject {
             reservingExtensions: format == .gif ? ["gif"] : []
         )
 
+        let area = screen.frame
         Task {
+            // The Record Screen shortcut can stop this recording too; Quick Access then opens
+            // on the recorded display.
+            defer { if recordingArea == area { recordingArea = nil } }
             do {
-                try await recordingService.start(area: screen.frame, destination: destination, format: format, preferences: preferences)
+                try await recordingService.start(area: area, destination: destination, format: format, preferences: preferences)
+                recordingArea = area
                 isRecording = true
                 try await Task.sleep(for: .seconds(duration))
                 let result = try await recordingService.stop()
