@@ -93,9 +93,16 @@ final class ScreenCaptureService {
     }
 
     private func displayUnderPointer() -> CGDirectDisplayID? {
+        Self.screenUnderPointer().flatMap(Self.displayID(of:))
+    }
+
+    static func screenUnderPointer() -> NSScreen? {
         let point = NSEvent.mouseLocation
         return NSScreen.screens.first(where: { $0.frame.contains(point) })
-            .flatMap { $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber }
+    }
+
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
             .map { CGDirectDisplayID($0.uint32Value) }
     }
 

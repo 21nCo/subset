@@ -27,9 +27,55 @@ final class AppState: ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var lastError: String?
     @Published var uploadProgress: Double?
-    /// Global shortcuts that macOS refused to register at launch.
-    @Published var unavailableShortcuts: [String] = []
+    /// Global shortcuts that macOS refused to register, usually because another app owns them.
+    @Published var unavailableShortcuts: Set<GlobalShortcutAction> = []
+    /// True while Settings records a new shortcut; global shortcuts are unregistered meanwhile
+    /// so the keys being recorded don't trigger a capture.
+    private(set) var globalShortcutsSuspended = false
+    /// The area being recorded, so Quick Access opens on that display when recording stops.
+    private var recordingArea: CGRect?
+    /// From the chosen recording area until the recording has started (or failed).
+    private var isStartingRecording = false
+    /// From a stop request until the recording is saved; a second stop is ignored.
+    private var isStoppingRecording = false
+    private var isRecordingBusy: Bool { isRecording || isStartingRecording || isStoppingRecording }
     var presentsErrors = true
+
+    /// Registers the current global shortcut bindings, replacing earlier registrations, and
+    /// returns the actions macOS refused.
+    @discardableResult
+    func registerGlobalShortcuts() -> Set<GlobalShortcutAction> {
+        globalShortcutsSuspended = false
+        let registrations = GlobalShortcutAction.allCases.compactMap { action -> ShortcutRegistration? in
+            guard let shortcut = preferences.globalShortcuts.shortcut(for: action) else { return nil }
+            return ShortcutRegistration(
+                id: action.hotKeyID,
+                name: "\(action.title) (\(shortcut.displayString))",
+                keyCode: shortcut.keyCode,
+                modifiers: shortcut.carbonModifiers,
+                handler: { [weak self] in self?.perform(action) }
+            )
+        }
+        let failedIDs = Set(GlobalShortcutMonitor.shared.start(registrations))
+        unavailableShortcuts = Set(GlobalShortcutAction.allCases.filter { failedIDs.contains($0.hotKeyID) })
+        return unavailableShortcuts
+    }
+
+    func suspendGlobalShortcuts() {
+        globalShortcutsSuspended = true
+        GlobalShortcutMonitor.shared.stop()
+    }
+
+    func perform(_ action: GlobalShortcutAction) {
+        switch action {
+        case .captureArea: captureArea()
+        case .captureWindow: captureWindow()
+        // Like the menu item, the shortcut stops a recording that is running.
+        case .recordScreen: isRecording ? stopRecording() : startRecording()
+        case .captureText: captureText()
+        case .captureHistory: openHistory()
+        }
+    }
 
     func captureArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
         // Read the source app before the selection overlay activates Screenshot.
@@ -41,7 +87,7 @@ final class AppState: ObservableObject {
                     self.showError(Self.captureFailedMessage)
                     return
                 }
-                self.finishImage(image, kind: .area, forcedAction: action, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .area, forcedAction: action, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
@@ -55,30 +101,39 @@ final class AppState: ObservableObject {
                     self.showError(Self.captureFailedMessage)
                     return
                 }
-                self.finishImage(image, kind: .window, forcedAction: action, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .window, forcedAction: action, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
 
     func captureFullscreen(action: AfterCaptureAction? = nil, preferredDirectory: URL? = nil, allowsUpload: Bool = true) {
         let source = captureService.activeApplicationMetadata()
+        // Pick the display now, so moving the pointer during the capture changes neither the
+        // captured display nor where Quick Access opens.
+        let screen = ScreenCaptureService.screenUnderPointer()
+        let displayID = screen.flatMap(ScreenCaptureService.displayID(of:))
         Task {
-            guard let image = await captureService.captureFullscreen() else {
+            guard let image = await captureService.captureFullscreen(displayID: displayID) else {
                 showError("Screen access is required before Screenshot can capture the display.")
                 return
             }
-            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory, allowsUpload: allowsUpload, source: source)
+            finishImage(image, kind: .fullscreen, forcedAction: action, preferredDirectory: preferredDirectory, allowsUpload: allowsUpload, source: source, area: screen?.frame)
         }
     }
 
     func capturePreviousArea(action: AfterCaptureAction? = nil, allowsUpload: Bool = true) {
         let source = captureService.activeApplicationMetadata()
+        // Read the area once: a capture finishing meanwhile replaces previousArea.
+        guard let area = captureService.previousArea else {
+            showError("Capture an area first, then use Capture Previous Area.")
+            return
+        }
         Task {
-            guard let image = await captureService.capturePreviousArea() else {
-                showError("Capture an area first, then use Capture Previous Area.")
+            guard let image = await captureService.capture(area: area, remember: false) else {
+                showError(Self.captureFailedMessage)
                 return
             }
-            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source)
+            finishImage(image, kind: .previousArea, forcedAction: action, allowsUpload: allowsUpload, source: source, area: area)
         }
     }
 
@@ -93,7 +148,7 @@ final class AppState: ObservableObject {
                         self.showError(Self.captureFailedMessage)
                         return
                     }
-                    self.finishImage(image, kind: .area, forcedAction: nil, source: source)
+                    self.finishImage(image, kind: .area, forcedAction: nil, source: source, area: rect)
                 }
             }
         }
@@ -108,7 +163,7 @@ final class AppState: ObservableObject {
                     self.showError("Automatic scrolling needs Accessibility and Screen Recording permission.")
                     return
                 }
-                self.finishImage(image, kind: .scrolling, forcedAction: nil, allowsUpload: allowsUpload, source: source)
+                self.finishImage(image, kind: .scrolling, forcedAction: nil, allowsUpload: allowsUpload, source: source, area: rect)
             }
         }
     }
@@ -138,20 +193,41 @@ final class AppState: ObservableObject {
     }
 
     func startRecording(format: RecordingFormat = .mp4) {
+        // While a recording runs, starts or stops, another Record request opens no selection
+        // and says why.
+        guard !isRecordingBusy else {
+            showError(ScreenRecordingError.alreadyRecording.localizedDescription)
+            return
+        }
         regionController.select(mode: .recording) { [weak self] rect in
             guard let self, let rect else { return }
-            Task { await self.beginRecording(area: rect, format: format) }
+            guard !self.isRecordingBusy else {
+                self.showError(ScreenRecordingError.alreadyRecording.localizedDescription)
+                return
+            }
+            self.isStartingRecording = true
+            Task {
+                await self.beginRecording(area: rect, format: format)
+                self.isStartingRecording = false
+            }
         }
     }
 
     func stopRecording() {
+        guard !isStoppingRecording else { return }
+        isStoppingRecording = true
+        // Read before awaiting: a new recording may start before this one is saved. The area
+        // belongs to the recording being stopped, so a later stop can't reuse it.
+        let area = recordingArea
+        recordingArea = nil
         Task {
+            defer { isStoppingRecording = false }
             do {
                 let result = try await recordingService.stop()
                 tearDownRecordingUI()
                 guard let result else { return }
                 let record = try history.saveRecording(at: result.url, kind: result.format == .gif ? .gif : .recording, pixelSize: result.pixelSize)
-                quickAccessController?.show(record: record, image: result.thumbnail)
+                quickAccessController?.show(record: record, image: result.thumbnail, near: area)
                 if preferences.openVideoEditor, result.format == .mp4 {
                     videoEditorController?.show(url: result.url)
                 }
@@ -187,9 +263,14 @@ final class AppState: ObservableObject {
             reservingExtensions: format == .gif ? ["gif"] : []
         )
 
+        let area = screen.frame
         Task {
+            // The Record Screen shortcut can stop this recording too; Quick Access then opens
+            // on the recorded display.
+            defer { if recordingArea == area { recordingArea = nil } }
             do {
-                try await recordingService.start(area: screen.frame, destination: destination, format: format, preferences: preferences)
+                try await recordingService.start(area: area, destination: destination, format: format, preferences: preferences)
+                recordingArea = area
                 isRecording = true
                 try await Task.sleep(for: .seconds(duration))
                 let result = try await recordingService.stop()
@@ -304,6 +385,7 @@ final class AppState: ObservableObject {
             )
             recordingService.onUnexpectedStop = { [weak self] in self?.stopRecording() }
             try await recordingService.start(area: area, destination: destination, format: format, preferences: preferences)
+            recordingArea = area
             isRecording = true
             if preferences.showRecordingControls { recordingControlsController?.show(area: area) }
             if preferences.showCamera { cameraController?.show() }
@@ -325,7 +407,8 @@ final class AppState: ObservableObject {
         forcedAction: AfterCaptureAction?,
         preferredDirectory: URL? = nil,
         allowsUpload: Bool = true,
-        source: (application: String?, window: String?)
+        source: (application: String?, window: String?),
+        area: CGRect? = nil
     ) {
         do {
             var actions = forcedAction.map { Set([$0]) } ?? preferences.afterCaptureActions
@@ -343,7 +426,7 @@ final class AppState: ObservableObject {
             if actions.contains(.annotate) { openEditor(image: image, record: record) }
             if actions.contains(.upload) { upload(record: record) }
             if actions.contains(.pin) { pinController?.pin(image: image, title: record.displayName) }
-            if actions.contains(.quickAccess) { quickAccessController?.show(record: record, image: image) }
+            if actions.contains(.quickAccess) { quickAccessController?.show(record: record, image: image, near: area) }
             reportHistoryPersistenceError()
         } catch {
             showError(error.localizedDescription)

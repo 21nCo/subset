@@ -12,9 +12,9 @@ Screenshot is a native macOS menu-bar app for capturing, annotating, and sharing
 
 | Operation | Kind | Entry points |
 | --- | --- | --- |
-| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts (⌃⌥S, ⌃⌥⇧S), `subset-screenshot://` URLs |
-| Record screen (MP4) or GIF | read (screen, optional mic/camera) + local write | menu bar, ⌃⌥⇧R, URLs |
-| Capture text (OCR via Vision) | read + clipboard write | ⌃⌥⇧O, URL |
+| Capture area, window, fullscreen, previous area, scrolling, self-timer | read (screen) + local write | menu bar, global shortcuts (⌃⌥S, ⌃⌥⇧S by default; rebindable in Settings > Shortcuts), `subset-screenshot://` URLs |
+| Record screen (MP4) or GIF | read (screen, optional mic/camera) + local write | menu bar, ⌃⌥⇧R by default, URLs |
+| Capture text (OCR via Vision) | read + clipboard write | ⌃⌥⇧O by default, URL |
 | Annotate (arrow, line, rectangle, ellipse, pencil, highlighter, text, pixelate, blur, spotlight, counter, crop, background) | local edit | Quick Access, History, menu |
 | Copy, save, export, pin, restore last capture | local write | Quick Access, editor, History |
 | Upload, update share (password, expiry, tags), delete hosted copy | **mutation on a remote service**; needs a user-configured Worker URL and upload token | Quick Access, History |
@@ -80,12 +80,12 @@ Informed by CleanShot X (Quick Access overlay with configurable auto-close, filt
 2. **Hosted sharing is opt-in and honest.** The POC defaulted to a Nucleum-hosted URL. The default is now empty; Cloud settings show "Not set up" or "Ready to upload", explain self-hosting, and validate the URL (https, or http only for localhost). Quick Access and History offer "Set up hosted sharing" instead of an Upload button that would fail.
 3. **Quick Access auto-close.** New Quick Access setting: never, 5, 10, or 30 seconds; hovering pauses the countdown. Each overlay button now has a tooltip and VoiceOver label/hint. The ambiguous "Save" (which revealed the file) is labelled "Show", and "Dismiss" uses a close icon instead of a trash can, because it does not delete anything.
 4. **Editor keyboard shortcuts.** ⌘Z / ⇧⌘Z undo/redo, ⌘S save project, ⇧⌘C copy image, ⌘E export, ⌘⌫ delete the selected annotation, with tooltips and accessibility labels on icon-only controls and the selected-tool trait on the tool bar.
-5. **Shortcut discoverability.** Settings > Shortcuts lists global shortcuts, editor shortcuts, and the `subset-screenshot://` automation URLs, and states that rebinding is not implemented.
+5. **Shortcut discoverability and rebinding.** Settings > Shortcuts lists global shortcuts, editor shortcuts, and the `subset-screenshot://` automation URLs. Each global shortcut can be re-recorded, removed, or reset to its default there; the menu bar menu and the first-run and empty-history hints show the current bindings.
 6. **History empty states.** An empty history shows the capture shortcuts and a Capture Area button; a search or filter with no results offers "Clear Filters". Hover actions have labels and tooltips.
 
-Global shortcuts include Control because macOS 15 rejects hot keys whose only modifiers are Option or Option-Shift; shortcuts that fail to register are reported at launch and in Settings > Shortcuts. Captures started from a `subset-screenshot://` URL never run the Upload after-capture action, because any web page or app can open those URLs.
+The default global shortcuts include Control because macOS 15 rejects hot keys whose only modifiers are Option or Option-Shift, and a recorded shortcut needs ⌃, or ⌘ with ⌥ or ⇧; shortcuts that fail to register are reported at launch and in Settings > Shortcuts. Captures started from a `subset-screenshot://` URL never run the Upload after-capture action, because any web page or app can open those URLs.
 
-Global shortcut rebinding, a multi-display Quick Access position choice, and swipe gestures are competitor features that remain unimplemented.
+A user-chosen Quick Access position and swipe gestures are competitor features that remain unimplemented. Quick Access opens on the display that holds the capture.
 
 ## Superfunctions reuse review
 

@@ -23,6 +23,8 @@ final class RegionCaptureController {
 
     private var panels: [NSPanel] = []
     private var completion: ((CGRect?) -> Void)?
+    /// Changes on every cancel, so a finished selection's delayed callback can tell it is stale.
+    private var selectionGeneration = 0
     private let screenCaptureService: ScreenCaptureService
 
     init(screenCaptureService: ScreenCaptureService) {
@@ -34,13 +36,7 @@ final class RegionCaptureController {
         self.completion = completion
 
         for screen in NSScreen.screens {
-            let panel = SelectionPanel(
-                contentRect: screen.frame,
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false,
-                screen: screen
-            )
+            let panel = Self.makeOverlayPanel(for: screen)
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.level = .screenSaver
@@ -70,10 +66,32 @@ final class RegionCaptureController {
         (panels.first(where: { $0.frame.contains(pointer) }) ?? panels.first)?.makeKey()
     }
 
+    /// An overlay panel covering exactly `screen`. The panel is created without the `screen:`
+    /// initializer argument: with it, AppKit treats the content rect as relative to that
+    /// screen's origin, so the global `screen.frame` would be offset a second time and the
+    /// overlay would miss every display except the one at the global origin.
+    static func makeOverlayPanel(for screen: NSScreen) -> NSPanel {
+        makeOverlayPanel(frame: screen.frame)
+    }
+
+    /// `frame` is in global Cocoa coordinates, so it is applied as is rather than through
+    /// `init(..., screen:)`, which treats the rect as relative to that screen.
+    static func makeOverlayPanel(frame: CGRect) -> NSPanel {
+        let panel = SelectionPanel(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.setFrame(frame, display: false)
+        return panel
+    }
+
     func cancel() {
         panels.forEach { $0.orderOut(nil) }
         panels = []
         completion = nil
+        selectionGeneration &+= 1
     }
 
     private func finish(_ rect: CGRect?) {
@@ -81,7 +99,11 @@ final class RegionCaptureController {
         panels.forEach { $0.orderOut(nil) }
         panels = []
         completion = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        // A selection started in the meantime cancels this one, so its delayed result is dropped
+        // instead of capturing or recording under the new overlay.
+        let generation = selectionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, self.selectionGeneration == generation else { return }
             callback?(rect)
         }
     }
@@ -102,6 +124,9 @@ private final class RegionSelectionView: NSView {
     private var dragStart: CGPoint?
     private var currentPoint: CGPoint?
     private var snappedGlobalRect: CGRect?
+    /// Pointer position for the crosshair, in view coordinates; nil while the pointer is on
+    /// another display.
+    private var crosshairPoint: CGPoint?
     private var tracking: NSTrackingArea?
 
     init(mode: RegionCaptureController.Mode, instruction: String) {
@@ -113,16 +138,45 @@ private final class RegionSelectionView: NSView {
 
     required init?(coder: NSCoder) { nil }
     override var acceptsFirstResponder: Bool { true }
+    /// Only the overlay under the pointer starts as key; the first click on another display's
+    /// overlay must start a selection rather than only making that panel key.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let next = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self)
+        let next = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect], owner: self)
         addTrackingArea(next)
         tracking = next
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Start the crosshair at the pointer, on the display the pointer is on.
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        crosshairPoint = bounds.contains(point) ? point : nil
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        moveCrosshair(to: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        moveCrosshair(to: nil)
+    }
+
+    /// Redraws only the old and new crosshair lines, not the whole display.
+    private func moveCrosshair(to point: CGPoint?) {
+        for old in [crosshairPoint, point].compactMap({ $0 }) {
+            setNeedsDisplay(CGRect(x: bounds.minX, y: old.y - 2, width: bounds.width, height: 4))
+            setNeedsDisplay(CGRect(x: old.x - 2, y: bounds.minY, width: 4, height: bounds.height))
+        }
+        crosshairPoint = point
+    }
+
     override func mouseMoved(with event: NSEvent) {
+        moveCrosshair(to: convert(event.locationInWindow, from: nil))
         guard mode == .window else { return }
         let global = window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
         snappedGlobalRect = resolveWindow?(global)
@@ -147,6 +201,7 @@ private final class RegionSelectionView: NSView {
         // selection on the display where the drag started.
         let point = event.locationInWindow
         currentPoint = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX), y: min(max(point.y, bounds.minY), bounds.maxY))
+        crosshairPoint = currentPoint
         needsDisplay = true
     }
 
@@ -186,7 +241,7 @@ private final class RegionSelectionView: NSView {
         }
 
         drawInstruction(selection: selection)
-        if let mouse = window?.mouseLocationOutsideOfEventStream { drawCrosshair(at: mouse) }
+        if let crosshairPoint { drawCrosshair(at: crosshairPoint) }
     }
 
     private var normalizedSelection: CGRect? {

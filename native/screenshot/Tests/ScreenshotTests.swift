@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import Screenshot
 
@@ -325,5 +326,311 @@ final class ScreenshotTests: XCTestCase {
         ]
         let ordered = OCRService.readingOrder(boxes, box: { $0 })
         XCTAssertEqual(ordered.map(\.minX), [0.2, 0.1, 0.5, 0.3])
+    }
+
+    func testGlobalShortcutBindingsPersistClearAndReset() {
+        let suiteName = "ScreenshotTests.shortcuts"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let preferences = AppPreferences(defaults: suite)
+        XCTAssertEqual(preferences.globalShortcuts.shortcut(for: .captureArea)?.displayString, "⌃⌥S")
+        let custom = KeyShortcut(keyCode: UInt32(kVK_ANSI_4), modifiers: [.command, .shift, .control], key: "4")
+        preferences.globalShortcuts.set(custom, for: .captureArea)
+        preferences.globalShortcuts.clear(.captureText)
+
+        let reloaded = AppPreferences(defaults: suite)
+        XCTAssertEqual(reloaded.globalShortcuts.shortcut(for: .captureArea), custom)
+        XCTAssertNil(reloaded.globalShortcuts.shortcut(for: .captureText))
+        XCTAssertTrue(reloaded.globalShortcuts.isDefault(.captureWindow))
+
+        reloaded.globalShortcuts.reset(.captureArea)
+        reloaded.globalShortcuts.reset(.captureText)
+        XCTAssertEqual(reloaded.globalShortcuts, GlobalShortcutBindings())
+        XCTAssertEqual(AppPreferences(defaults: suite).globalShortcuts, GlobalShortcutBindings())
+    }
+
+    func testResetRefusesToDuplicateAnotherActionsShortcut() {
+        var bindings = GlobalShortcutBindings()
+        bindings.clear(.captureWindow)
+        bindings.set(GlobalShortcutAction.captureWindow.defaultShortcut, for: .recordScreen)
+
+        XCTAssertEqual(bindings.resetConflict(for: .captureWindow), .recordScreen)
+        XCTAssertEqual(bindings.reset(.captureWindow), .recordScreen)
+        XCTAssertNil(bindings.shortcut(for: .captureWindow))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen), GlobalShortcutAction.captureWindow.defaultShortcut)
+
+        bindings.reset(.recordScreen)
+        XCTAssertNil(bindings.reset(.captureWindow))
+        XCTAssertEqual(bindings, GlobalShortcutBindings())
+    }
+
+    func testGlobalShortcutBindingsIgnoreUnknownStoredActions() throws {
+        let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":262144,"key":"S"},"removedAction":{"keyCode":2,"modifierFlags":262144,"key":"D"}},"cleared":["removedAction","captureText"]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.overrides.keys.map(\.rawValue), ["captureArea"])
+        XCTAssertEqual(bindings.cleared, [.captureText])
+
+        // Entries for actions this version doesn't know survive a change and a save.
+        var edited = bindings
+        edited.clear(.captureHistory)
+        let saved = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? [String: Any]
+        XCTAssertNotNil((saved?["overrides"] as? [String: Any])?["removedAction"])
+        XCTAssertEqual(saved?["cleared"] as? [String], ["captureHistory", "captureText", "removedAction"])
+        edited.resetAll()
+        XCTAssertTrue(edited.isAllDefault)
+        let afterReset = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? [String: Any]
+        XCTAssertNotNil((afterReset?["overrides"] as? [String: Any])?["removedAction"])
+    }
+
+    func testOneBadStoredShortcutKeepsTheOtherBindings() throws {
+        // captureWindow is malformed and captureText uses ⌘ alone, which a global shortcut may not.
+        let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":262144,"key":"S"},"captureWindow":{"keyCode":"x"},"captureText":{"keyCode":8,"modifierFlags":1048576,"key":"C"}},"cleared":["recordScreen",7]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .captureArea), KeyShortcut(keyCode: 1, modifiers: [.control], key: "S"))
+        XCTAssertTrue(bindings.isDefault(.captureWindow))
+        XCTAssertTrue(bindings.isDefault(.captureText))
+        XCTAssertNil(bindings.shortcut(for: .recordScreen))
+
+        let suiteName = "ScreenshotTests.badShortcut"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        suite.set(Data(json.utf8), forKey: "globalShortcuts")
+        XCTAssertEqual(AppPreferences(defaults: suite).globalShortcuts, bindings)
+    }
+
+    func testStoredEntriesThisVersionDoesNotKnowAreWrittenBackUnchanged() throws {
+        // As a newer version might save them: an unknown action with an extra field, one in
+        // another format, a known action with an extra field, a non-string cleared entry and
+        // an unknown top-level field.
+        let json = #"""
+        {"overrides":{"newAction":{"keyCode":2,"modifierFlags":262144,"key":"D","scope":"global"},
+        "otherAction":["⌃","D"],"recordScreen":{"keyCode":15,"modifierFlags":393216,"key":"R","note":"kept"}},
+        "cleared":["laterAction",{"action":"x"}],"version":2}
+        """#
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+        let storedOverrides = try XCTUnwrap(stored["overrides"] as? NSDictionary)
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen)?.displayString, "⌃⇧R")
+
+        let edits: [(String, (inout GlobalShortcutBindings) -> Void)] = [
+            ("unchanged", { _ in }),
+            ("set", { $0.set(KeyShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: [.control], key: "K"), for: .captureArea) }),
+            ("clear", { $0.clear(.captureText) }),
+            ("reset", { $0.clear(.captureWindow); $0.reset(.captureWindow) }),
+            ("resetAll", { $0.resetAll() }),
+        ]
+        for (name, edit) in edits {
+            var edited = bindings
+            edit(&edited)
+            let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(edited)) as? NSDictionary, name)
+            let overrides = try XCTUnwrap(saved["overrides"] as? NSDictionary, name)
+            XCTAssertEqual(overrides["newAction"] as? NSDictionary, storedOverrides["newAction"] as? NSDictionary, name)
+            XCTAssertEqual(overrides["otherAction"] as? NSArray, storedOverrides["otherAction"] as? NSArray, name)
+            XCTAssertEqual(saved["version"] as? Int, 2, name)
+            let cleared = try XCTUnwrap(saved["cleared"] as? NSArray, name)
+            XCTAssertTrue(cleared.contains("laterAction"), name)
+            XCTAssertTrue(cleared.contains(["action": "x"] as NSDictionary), name)
+            if name != "resetAll" {
+                // A known entry this version didn't change keeps the fields it doesn't use.
+                XCTAssertEqual(overrides["recordScreen"] as? NSDictionary, storedOverrides["recordScreen"] as? NSDictionary, name)
+            }
+        }
+    }
+
+    func testStoredNumbersThisVersionDoesNotUseKeepTheirExactValue() throws {
+        // Numbers a newer version could write with Decimal or Int128 (beyond 64 bits, or more
+        // digits than a Double holds) and a Double only a Double can hold, in an unknown
+        // action, an unused field of a known one, a cleared entry and a top-level field.
+        let big = "18446744073709551617", pi = "3.14159265358979323846264338327950288"
+        let huge = "1.2345678901234567e+300"
+        let extra = #""big":\#(big),"pi":\#(pi),"huge":\#(huge)"#
+        let json = """
+        {"overrides":{"newAction":{"keyCode":2,"modifierFlags":262144,"key":"D",\(extra)},
+        "recordScreen":{"keyCode":15,"modifierFlags":393216,"key":"R",\(extra)}},
+        "cleared":["laterAction",{\(extra)},\(big)],\(extra)}
+        """
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .recordScreen)?.displayString, "⌃⇧R")
+
+        let edits: [(String, (inout GlobalShortcutBindings) -> Void)] = [
+            ("unchanged", { _ in }),
+            ("set", { $0.set(KeyShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: [.control], key: "K"), for: .captureArea) }),
+            ("clear", { $0.clear(.captureText) }),
+            ("reset", { $0.clear(.captureWindow); $0.reset(.captureWindow) }),
+            ("resetAll", { $0.resetAll() }),
+        ]
+        for (name, edit) in edits {
+            var edited = bindings
+            edit(&edited)
+            // Compare the saved text, so a value rounded through Double can't match.
+            let saved = String(decoding: try JSONEncoder().encode(edited), as: UTF8.self)
+            let entries = name == "resetAll" ? 3 : 4
+            XCTAssertEqual(saved.components(separatedBy: big).count - 1, entries + 1, "\(name): \(saved)")
+            XCTAssertEqual(saved.components(separatedBy: pi).count - 1, entries, "\(name): \(saved)")
+            XCTAssertEqual(saved.components(separatedBy: huge).count - 1, entries, "\(name): \(saved)")
+        }
+    }
+
+    func testStoredShortcutWithUnsupportedModifiersFallsBackToTheDefault() throws {
+        // ⌃ plus Caps Lock (65536) and Fn (8388608): Carbon would register only ⌃, so the
+        // entry can't be represented faithfully and Capture Area keeps its default.
+        let json = #"{"overrides":{"captureArea":{"keyCode":1,"modifierFlags":8716288,"key":"S"},"captureText":{"keyCode":31,"modifierFlags":262144,"key":"O"}},"cleared":[]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertTrue(bindings.isDefault(.captureArea))
+        XCTAssertEqual(bindings.shortcut(for: .captureArea), GlobalShortcutAction.captureArea.defaultShortcut)
+        XCTAssertEqual(bindings.shortcut(for: .captureText)?.displayString, "⌃O")
+    }
+
+    func testEscapeAndKeypadEnterShortcutsHaveMenuKeyEquivalents() {
+        let escape = KeyShortcut(keyCode: UInt32(kVK_Escape), modifiers: [.control, .option], key: "⎋")
+        XCTAssertEqual(escape.menuKeyEquivalent, "\u{1B}")
+        let enter = KeyShortcut(keyCode: UInt32(kVK_ANSI_KeypadEnter), modifiers: [.control], key: "⌤")
+        XCTAssertEqual(enter.menuKeyEquivalent?.unicodeScalars.first?.value, UInt32(NSEnterCharacter))
+    }
+
+    func testRecordRequestWhileRecordingReportsTheRecordingInProgress() {
+        let appState = AppState()
+        appState.presentsErrors = false
+        appState.isRecording = true
+        defer { appState.isRecording = false }
+        appState.startRecording(format: .gif)
+        XCTAssertEqual(appState.lastError, "A recording is already in progress.")
+    }
+
+    func testRecordingTheDefaultKeysUnderAnotherLabelKeepsTheDefault() {
+        var bindings = GlobalShortcutBindings()
+        let areaDefault = GlobalShortcutAction.captureArea.defaultShortcut
+        bindings.set(KeyShortcut(keyCode: areaDefault.keyCode, modifiers: areaDefault.modifiers, key: "Ś"), for: .captureArea)
+        XCTAssertTrue(bindings.isDefault(.captureArea))
+        XCTAssertTrue(bindings.isAllDefault)
+        // The label the layout produced is what Settings and the menu show.
+        XCTAssertEqual(bindings.shortcut(for: .captureArea)?.displayString, "⌃⌥Ś")
+    }
+
+    func testFallbackDefaultDoesNotTakeAnotherActionsStoredKeys() throws {
+        // Capture Area's stored override is unusable (⌘ alone) and Capture Window uses ⌃⌥S,
+        // Capture Area's default: Capture Window keeps it and Capture Area gets no shortcut.
+        let json = #"{"overrides":{"captureArea":{"keyCode":8,"modifierFlags":1048576,"key":"C"},"captureWindow":{"keyCode":1,"modifierFlags":786432,"key":"S"}},"cleared":[]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .captureWindow)?.displayString, "⌃⌥S")
+        XCTAssertNil(bindings.shortcut(for: .captureArea))
+        XCTAssertNil(bindings.action(using: GlobalShortcutAction.captureArea.defaultShortcut, except: .captureWindow))
+    }
+
+    func testShortcutLabelKeepsCharactersThatUppercaseToSeveral() {
+        XCTAssertEqual(KeyShortcut.uppercasedLabel("a"), "A")
+        XCTAssertEqual(KeyShortcut.uppercasedLabel("ß"), "ß")
+        XCTAssertEqual(KeyShortcut(keyCode: 27, modifiers: [.control], key: "ß").menuKeyEquivalent, "ß")
+    }
+
+    func testGlobalShortcutConflictsAndValidation() {
+        var bindings = GlobalShortcutBindings()
+        let windowDefault = GlobalShortcutAction.captureWindow.defaultShortcut
+        // Same physical keys conflict even if the layout labelled the key differently.
+        let relabelled = KeyShortcut(keyCode: windowDefault.keyCode, modifiers: windowDefault.modifiers, key: "Ś")
+        XCTAssertEqual(bindings.action(using: relabelled, except: .captureArea), .captureWindow)
+        XCTAssertNil(bindings.action(using: relabelled, except: .captureWindow))
+        bindings.clear(.captureWindow)
+        XCTAssertNil(bindings.action(using: relabelled))
+
+        XCTAssertTrue(KeyShortcut(keyCode: 1, modifiers: [.control], key: "S").isAllowedAsGlobalShortcut)
+        XCTAssertTrue(KeyShortcut(keyCode: 1, modifiers: [.command, .shift], key: "S").isAllowedAsGlobalShortcut)
+        XCTAssertTrue(KeyShortcut(keyCode: 1, modifiers: [.command, .option], key: "S").isAllowedAsGlobalShortcut)
+        XCTAssertFalse(KeyShortcut(keyCode: 1, modifiers: [.command], key: "S").isAllowedAsGlobalShortcut)
+        XCTAssertFalse(KeyShortcut(keyCode: 1, modifiers: [.option, .shift], key: "S").isAllowedAsGlobalShortcut)
+        XCTAssertFalse(KeyShortcut(keyCode: 1, modifiers: [], key: "S").isAllowedAsGlobalShortcut)
+
+        XCTAssertTrue(KeyShortcut(keyCode: UInt32(kVK_ANSI_4), modifiers: [.command, .shift], key: "4").overlapsSystemScreenshotShortcut)
+        XCTAssertFalse(KeyShortcut(keyCode: UInt32(kVK_ANSI_4), modifiers: [.command, .option], key: "4").overlapsSystemScreenshotShortcut)
+    }
+
+    func testKeyShortcutDisplayAndCarbonModifiers() {
+        let shortcut = KeyShortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: [.command, .shift, .option, .control, .capsLock], key: "S")
+        XCTAssertEqual(shortcut.displayString, "⌃⌥⇧⌘S")
+        XCTAssertEqual(shortcut.carbonModifiers, UInt32(controlKey | optionKey | shiftKey | cmdKey))
+        XCTAssertEqual(shortcut.menuKeyEquivalent, "s")
+        XCTAssertEqual(KeyShortcut(keyCode: UInt32(kVK_F5), modifiers: [.control], key: "F5").menuKeyEquivalent?.unicodeScalars.first?.value, UInt32(NSF5FunctionKey))
+
+        // A function key, so the label doesn't depend on the active keyboard layout.
+        let f5 = String(Character(UnicodeScalar(UInt16(NSF5FunctionKey))!))
+        let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.control, .option, .capsLock], timestamp: 0, windowNumber: 0,
+            context: nil, characters: f5, charactersIgnoringModifiers: f5, isARepeat: false, keyCode: UInt16(kVK_F5)
+        )!
+        let recorded = KeyShortcut(event: event)
+        XCTAssertEqual(recorded?.keyCode, UInt32(kVK_F5))
+        XCTAssertEqual(recorded?.modifiers, [.control, .option])
+        XCTAssertEqual(recorded?.displayString, "⌃⌥F5")
+    }
+
+    func testOverlayPanelsCoverTheirOwnScreen() throws {
+        // Displays left of, above and right of a 1440×900 main display: each overlay must sit
+        // exactly on its display's global frame, with the origin applied once.
+        let secondaryFrames = [
+            CGRect(x: -1920, y: -180, width: 1920, height: 1080),
+            CGRect(x: 0, y: 900, width: 2560, height: 1440),
+            CGRect(x: 1440, y: 120, width: 1680, height: 1050),
+        ]
+        for frame in secondaryFrames {
+            XCTAssertEqual(RegionCaptureController.makeOverlayPanel(frame: frame).frame, frame)
+        }
+        try XCTSkipIf(NSScreen.screens.isEmpty, "The connected-display check needs at least one display.")
+        for screen in NSScreen.screens {
+            XCTAssertEqual(RegionCaptureController.makeOverlayPanel(for: screen).frame, screen.frame)
+        }
+    }
+
+    func testAutoCloseCountdownShrinksAndStaysFullWhilePaused() {
+        let now: TimeInterval = 5_000
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: nil, at: now, duration: 10), 10)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now + 4, at: now, duration: 10), 4, accuracy: 0.001)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now - 1, at: now, duration: 10), 0)
+        XCTAssertEqual(AutoCloseCountdownBar.remaining(until: now + 30, at: now, duration: 10), 10)
+    }
+
+    func testHoveringPausesAndLeavingRestartsTheAutoCloseCountdown() {
+        let controller = QuickAccessPanelController(appState: AppState(), autoCloseSeconds: { 5 })
+        let record = CaptureRecord(
+            id: UUID(), kind: .area, createdAt: Date(), fileURL: URL(fileURLWithPath: "/tmp/quick-access-test.png"),
+            projectURL: nil, thumbnailURL: nil, width: 10, height: 10, sourceApplication: nil, sourceWindow: nil,
+            cloudShareURL: nil, cloudID: nil, tags: [], isFavorite: false
+        )
+        defer { controller.hide() }
+        let before = ProcessInfo.processInfo.systemUptime
+        controller.show(record: record, image: nil)
+        XCTAssertEqual(controller.autoCloseDuration, 5)
+        let deadline = try? XCTUnwrap(controller.autoCloseDeadline)
+        XCTAssertEqual(deadline ?? 0, before + 5, accuracy: 1)
+
+        controller.setHovering(true)
+        XCTAssertNil(controller.autoCloseDeadline)
+
+        // Stay paused long enough that resuming the remaining time would end measurably earlier
+        // than a full restart.
+        Thread.sleep(forTimeInterval: 0.3)
+        let leftAt = ProcessInfo.processInfo.systemUptime
+        controller.setHovering(false)
+        XCTAssertNotNil(controller.autoCloseDeadline)
+        XCTAssertGreaterThanOrEqual(controller.autoCloseDeadline ?? 0, leftAt + 5)
+
+        controller.hide()
+        XCTAssertNil(controller.autoCloseDeadline)
+    }
+
+    func testQuickAccessOpensOnTheCapturedDisplay() {
+        let main = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let external = CGRect(x: -450, y: 982, width: 2560, height: 1440)
+        let frames = [main, external]
+        let pointerOnMain = CGPoint(x: 100, y: 100)
+        // A capture on the external display wins over the pointer position.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: CGRect(x: 0, y: 1500, width: 300, height: 200), pointer: pointerOnMain, frames: frames), 1)
+        // An area spanning both displays goes to the one holding most of it.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: CGRect(x: 0, y: 900, width: 200, height: 300), pointer: pointerOnMain, frames: frames), 1)
+        // No area: the display under the pointer.
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: nil, pointer: CGPoint(x: 0, y: 2000), frames: frames), 1)
+        XCTAssertEqual(QuickAccessPanelController.screenIndex(for: nil, pointer: pointerOnMain, frames: frames), 0)
     }
 }

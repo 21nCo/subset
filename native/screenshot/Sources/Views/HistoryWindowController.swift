@@ -63,7 +63,7 @@ private struct HistoryView: View {
                 ContentUnavailableView {
                     Label("No Captures Yet", systemImage: "camera.viewfinder")
                 } description: {
-                    Text("Screenshots and recordings appear here. Press ⌃⌥S to capture an area or ⌃⌥⇧S to capture a window.")
+                    Text("Screenshots and recordings appear here. " + captureShortcutsHint)
                 } actions: {
                     Button("Capture Area") { appState.captureArea() }
                 }
@@ -90,6 +90,16 @@ private struct HistoryView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// Names the current Capture Area and Capture Window shortcuts, which the user can rebind or clear.
+    private var captureShortcutsHint: String {
+        let bindings = appState.preferences.globalShortcuts
+        let parts = [
+            bindings.shortcut(for: .captureArea).map { "\($0.displayString) to capture an area" },
+            bindings.shortcut(for: .captureWindow).map { "\($0.displayString) to capture a window" },
+        ].compactMap { $0 }
+        return parts.isEmpty ? "Use Capture Area or the menu bar icon to capture." : "Press " + parts.joined(separator: " or ") + "."
     }
 
     private var filtered: [CaptureRecord] {

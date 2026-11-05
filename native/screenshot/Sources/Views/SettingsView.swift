@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 struct SettingsView: View {
@@ -6,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject private var preferences: AppPreferences
     /// Bumped by "Check Again" so permission rows re-read the live system state.
     @State private var permissionRefresh = 0
+    @StateObject private var shortcutRecorder = ShortcutRecorder()
 
     init(appState: AppState) {
         self.appState = appState
@@ -30,6 +32,8 @@ struct SettingsView: View {
             }
             .background(Color(nsColor: .windowBackgroundColor))
         }
+        .onChange(of: preferences.selectedSettingsTab) { _, _ in shortcutRecorder.stop() }
+        .onDisappear { shortcutRecorder.stop() }
     }
 
     @ViewBuilder
@@ -57,7 +61,7 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         permissionRow("Screen Recording", granted: screenRecordingGranted, pane: "Privacy_ScreenCapture")
                         permissionRow("Accessibility (scrolling capture and keystrokes only)", granted: accessibilityGranted, pane: "Privacy_Accessibility")
-                        Text("Try it: press ⌃⌥S to capture an area, or open the menu bar icon.")
+                        Text(captureAreaHint)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -104,21 +108,24 @@ struct SettingsView: View {
         VStack(spacing: 14) {
             settingsGroup("Global shortcuts") {
                 VStack(alignment: .leading, spacing: 0) {
-                    shortcutRow("Capture Area", "⌃⌥S")
-                    Divider()
-                    shortcutRow("Capture Window", "⌃⌥⇧S")
-                    Divider()
-                    shortcutRow("Record Screen", "⌃⌥⇧R")
-                    Divider()
-                    shortcutRow("Capture Text", "⌃⌥⇧O")
-                    Divider()
-                    shortcutRow("Capture History", "⌃⌥⇧H")
-                    Text("These shortcuts work from any app. They are fixed in this build; rebinding is not implemented yet.")
-                        .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
-                    if !appState.unavailableShortcuts.isEmpty {
-                        Text("Not registered (another app may use them): \(appState.unavailableShortcuts.joined(separator: ", ")).")
-                            .font(.caption).foregroundStyle(.orange).padding(.top, 4)
+                    ForEach(Array(GlobalShortcutAction.allCases.enumerated()), id: \.element) { index, action in
+                        if index > 0 { Divider() }
+                        globalShortcutRow(action)
                     }
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("These shortcuts work from any app. Click a shortcut and press the new keys; press Esc to cancel. A shortcut needs ⌃, or ⌘ with ⌥ or ⇧.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Reset All") {
+                            shortcutRecorder.stop()
+                            shortcutRecorder.clearMessage()
+                            preferences.globalShortcuts.resetAll()
+                            appState.registerGlobalShortcuts()
+                        }
+                        .disabled(preferences.globalShortcuts.isAllDefault)
+                    }
+                    .padding(.top, 8)
                 }
             }
             settingsGroup("Annotate editor") {
@@ -144,6 +151,73 @@ struct SettingsView: View {
         }
     }
 
+    private func globalShortcutRow(_ action: GlobalShortcutAction) -> some View {
+        let shortcut = preferences.globalShortcuts.shortcut(for: action)
+        let isRecording = shortcutRecorder.action == action
+        let pending = KeyShortcut.symbols(for: shortcutRecorder.pendingModifiers)
+        let label = isRecording ? (pending.isEmpty ? "Type shortcut…" : pending + "…") : (shortcut?.displayString ?? "None")
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(action.title)
+                Spacer()
+                Button {
+                    if isRecording {
+                        shortcutRecorder.stop()
+                        shortcutRecorder.clearMessage()
+                    } else {
+                        shortcutRecorder.start(action, appState: appState)
+                    }
+                } label: {
+                    Text(label)
+                        .font(.system(.body, design: .rounded))
+                        .foregroundStyle(shortcut == nil && !isRecording ? .secondary : .primary)
+                        .frame(minWidth: 120)
+                }
+                .buttonStyle(.bordered)
+                .tint(isRecording ? .accentColor : nil)
+                .help(isRecording ? "Press the new shortcut, or Esc to cancel" : "Click to record a new shortcut")
+                .accessibilityLabel("\(action.title) shortcut")
+                .accessibilityValue(isRecording ? "Recording" : (shortcut?.displayString ?? "None"))
+                .accessibilityHint(isRecording ? "Press the new shortcut, or Escape to cancel" : "Records a new shortcut")
+                Button {
+                    shortcutRecorder.stop()
+                    // Clearing can resolve a conflict reported on another row.
+                    shortcutRecorder.clearMessage()
+                    preferences.globalShortcuts.clear(action)
+                    appState.registerGlobalShortcuts()
+                } label: { Image(systemName: "xmark.circle") }
+                .buttonStyle(.borderless)
+                .disabled(shortcut == nil)
+                .help("Remove this shortcut")
+                .accessibilityLabel("Remove \(action.title) shortcut")
+                Button {
+                    shortcutRecorder.stop()
+                    if let conflict = preferences.globalShortcuts.reset(action) {
+                        shortcutRecorder.show("\(action.defaultShortcut.displayString) is already used by \(conflict.title). Change that shortcut first.", for: action)
+                    } else {
+                        shortcutRecorder.clearMessage()
+                        appState.registerGlobalShortcuts()
+                    }
+                } label: { Image(systemName: "arrow.counterclockwise") }
+                .buttonStyle(.borderless)
+                .disabled(preferences.globalShortcuts.isDefault(action))
+                .help("Reset to \(action.defaultShortcut.displayString)")
+                .accessibilityLabel("Reset \(action.title) shortcut to \(action.defaultShortcut.displayString)")
+            }
+            if let message = shortcutRecorder.message, message.action == action {
+                Text(message.text).font(.caption).foregroundStyle(.orange)
+            } else if appState.unavailableShortcuts.contains(action) {
+                Text("macOS did not accept this shortcut; another app may already use it. Choose another one.")
+                    .font(.caption).foregroundStyle(.orange)
+            } else if shortcut?.overlapsSystemScreenshotShortcut == true {
+                Text("macOS's own screenshot shortcut takes priority. Turn it off in System Settings > Keyboard > Keyboard Shortcuts > Screenshots.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 7)
+    }
+
     private var quickAccess: some View {
         VStack(spacing: 14) {
             settingsGroup("Overlay size") {
@@ -165,7 +239,7 @@ struct SettingsView: View {
                             Text("After 30 seconds").tag(30)
                         }.labelsHidden().frame(width: 170)
                     }
-                    Text("Hovering over the overlay pauses the countdown.")
+                    Text("A bar on the overlay shows the time left. Hovering over the overlay pauses the countdown; moving away starts it again.")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("The overlay supports drag-and-drop, context actions, upload progress, pinning, and reopening editable annotations.")
                         .foregroundStyle(.secondary)
@@ -348,6 +422,13 @@ struct SettingsView: View {
             .padding(.vertical, 9)
     }
 
+    private var captureAreaHint: String {
+        if let shortcut = preferences.globalShortcuts.shortcut(for: .captureArea) {
+            return "Try it: press \(shortcut.displayString) to capture an area, or open the menu bar icon."
+        }
+        return "Try it: open the menu bar icon and choose Capture Area."
+    }
+
     private var screenRecordingGranted: Bool {
         _ = permissionRefresh
         return appState.captureService.hasScreenCaptureAccess
@@ -381,5 +462,91 @@ struct SettingsView: View {
         panel.canChooseFiles = false
         panel.directoryURL = preferences.exportDirectory
         if panel.runModal() == .OK, let url = panel.url { preferences.exportDirectory = url }
+    }
+}
+
+/// Records a new global shortcut from the next key press in the Settings window. Global
+/// shortcuts are unregistered while recording so the keys being recorded don't trigger them.
+@MainActor
+final class ShortcutRecorder: ObservableObject {
+    struct Message {
+        let action: GlobalShortcutAction
+        let text: String
+    }
+
+    @Published private(set) var action: GlobalShortcutAction?
+    @Published private(set) var pendingModifiers: NSEvent.ModifierFlags = []
+    @Published private(set) var message: Message?
+
+    private var monitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private weak var appState: AppState?
+
+    func start(_ action: GlobalShortcutAction, appState: AppState) {
+        stop()
+        self.appState = appState
+        self.action = action
+        message = nil
+        pendingModifiers = []
+        appState.suspendGlobalShortcuts()
+        // Local event monitors run on the main thread.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            nonisolated(unsafe) let event = event
+            let consumed = MainActor.assumeIsolated { self?.handle(event) ?? false }
+            return consumed ? nil : event
+        }
+        // Clicking into another window or app ends recording and restores the shortcuts.
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stop() }
+        }
+    }
+
+    func show(_ text: String, for action: GlobalShortcutAction) {
+        message = Message(action: action, text: text)
+    }
+
+    func clearMessage() {
+        message = nil
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+        pendingModifiers = []
+        guard action != nil else { return }
+        action = nil
+        appState?.registerGlobalShortcuts()
+    }
+
+    /// Returns true when the event was consumed.
+    private func handle(_ event: NSEvent) -> Bool {
+        guard let action, let appState else { return false }
+        let modifiers = event.modifierFlags.intersection(KeyShortcut.relevantModifiers)
+        if event.type == .flagsChanged {
+            pendingModifiers = modifiers
+            return false
+        }
+        if event.keyCode == UInt16(kVK_Escape), modifiers.isEmpty {
+            message = nil
+            stop()
+            return true
+        }
+        guard let shortcut = KeyShortcut(event: event) else { return true }
+        guard shortcut.isAllowedAsGlobalShortcut else {
+            message = Message(action: action, text: "\(shortcut.displayString) can't be a global shortcut. Include ⌃, or ⌘ together with ⌥ or ⇧.")
+            return true
+        }
+        if let other = appState.preferences.globalShortcuts.action(using: shortcut, except: action) {
+            message = Message(action: action, text: "\(shortcut.displayString) is already used by \(other.title).")
+            return true
+        }
+        message = nil
+        appState.preferences.globalShortcuts.set(shortcut, for: action)
+        stop()
+        return true
     }
 }
