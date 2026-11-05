@@ -34,6 +34,10 @@ final class AppState: ObservableObject {
     private(set) var globalShortcutsSuspended = false
     /// The area being recorded, so Quick Access opens on that display when recording stops.
     private var recordingArea: CGRect?
+    /// From the chosen recording area until the recording has started (or failed).
+    private var isStartingRecording = false
+    /// From a stop request until the recording is saved; a second stop is ignored.
+    private var isStoppingRecording = false
     var presentsErrors = true
 
     /// Registers the current global shortcut bindings, replacing earlier registrations, and
@@ -188,16 +192,25 @@ final class AppState: ObservableObject {
     }
 
     func startRecording(format: RecordingFormat = .mp4) {
+        // A recording already starting or stopping ignores another Record request.
+        guard !isRecording, !isStartingRecording, !isStoppingRecording else { return }
         regionController.select(mode: .recording) { [weak self] rect in
-            guard let self, let rect else { return }
-            Task { await self.beginRecording(area: rect, format: format) }
+            guard let self, let rect, !self.isRecording, !self.isStartingRecording, !self.isStoppingRecording else { return }
+            self.isStartingRecording = true
+            Task {
+                await self.beginRecording(area: rect, format: format)
+                self.isStartingRecording = false
+            }
         }
     }
 
     func stopRecording() {
+        guard !isStoppingRecording else { return }
+        isStoppingRecording = true
         // Read before awaiting: a new recording may start before this one is saved.
         let area = recordingArea
         Task {
+            defer { isStoppingRecording = false }
             do {
                 let result = try await recordingService.stop()
                 tearDownRecordingUI()

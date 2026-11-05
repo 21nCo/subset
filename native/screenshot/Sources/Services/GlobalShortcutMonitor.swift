@@ -168,16 +168,19 @@ struct GlobalShortcutBindings: Codable, Equatable {
     private var unknownOverrides: [String: KeyShortcut] = [:]
     private var unknownCleared: Set<String> = []
 
-    /// True when every action this version knows uses its default shortcut.
-    var isAllDefault: Bool { overrides.isEmpty && cleared.isEmpty }
+    /// True when every action this version knows uses its default keys.
+    var isAllDefault: Bool { cleared.isEmpty && GlobalShortcutAction.allCases.allSatisfy(isDefault) }
 
     func shortcut(for action: GlobalShortcutAction) -> KeyShortcut? {
         if cleared.contains(action) { return nil }
         return overrides[action] ?? action.defaultShortcut
     }
 
+    /// True when the action uses its default keys. A default recorded on another keyboard
+    /// layout keeps that layout's label but still counts as the default.
     func isDefault(_ action: GlobalShortcutAction) -> Bool {
-        overrides[action] == nil && !cleared.contains(action)
+        guard !cleared.contains(action) else { return false }
+        return overrides[action].map(Self.sameKeys(action.defaultShortcut)) ?? true
     }
 
     /// The other action already using `shortcut`, if any.
@@ -189,7 +192,7 @@ struct GlobalShortcutBindings: Codable, Equatable {
 
     mutating func set(_ shortcut: KeyShortcut, for action: GlobalShortcutAction) {
         cleared.remove(action)
-        overrides[action] = Self.sameKeys(shortcut)(action.defaultShortcut) ? nil : shortcut
+        overrides[action] = shortcut == action.defaultShortcut ? nil : shortcut
     }
 
     mutating func clear(_ action: GlobalShortcutAction) {
@@ -253,6 +256,14 @@ struct GlobalShortcutBindings: Codable, Equatable {
             } else {
                 unknownCleared.insert(key)
             }
+        }
+        // An action that fell back to its default must not take keys another action now
+        // uses (only one of two identical hot keys registers); leave it without a shortcut.
+        for action in GlobalShortcutAction.allCases where overrides[action] == nil && !cleared.contains(action) {
+            let collides = overrides.contains { other, shortcut in
+                other != action && Self.sameKeys(shortcut)(action.defaultShortcut)
+            }
+            if collides { cleared.insert(action) }
         }
     }
 

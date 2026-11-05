@@ -407,6 +407,18 @@ final class ScreenshotTests: XCTestCase {
         bindings.set(KeyShortcut(keyCode: areaDefault.keyCode, modifiers: areaDefault.modifiers, key: "Ś"), for: .captureArea)
         XCTAssertTrue(bindings.isDefault(.captureArea))
         XCTAssertTrue(bindings.isAllDefault)
+        // The label the layout produced is what Settings and the menu show.
+        XCTAssertEqual(bindings.shortcut(for: .captureArea)?.displayString, "⌃⌥Ś")
+    }
+
+    func testFallbackDefaultDoesNotTakeAnotherActionsStoredKeys() throws {
+        // Capture Area's stored override is unusable (⌘ alone) and Capture Window uses ⌃⌥S,
+        // Capture Area's default: Capture Window keeps it and Capture Area gets no shortcut.
+        let json = #"{"overrides":{"captureArea":{"keyCode":8,"modifierFlags":1048576,"key":"C"},"captureWindow":{"keyCode":1,"modifierFlags":786432,"key":"S"}},"cleared":[]}"#
+        let bindings = try JSONDecoder().decode(GlobalShortcutBindings.self, from: Data(json.utf8))
+        XCTAssertEqual(bindings.shortcut(for: .captureWindow)?.displayString, "⌃⌥S")
+        XCTAssertNil(bindings.shortcut(for: .captureArea))
+        XCTAssertNil(bindings.action(using: GlobalShortcutAction.captureArea.defaultShortcut, except: .captureWindow))
     }
 
     func testShortcutLabelKeepsCharactersThatUppercaseToSeveral() {
