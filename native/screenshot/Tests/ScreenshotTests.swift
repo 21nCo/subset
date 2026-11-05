@@ -509,9 +509,13 @@ final class ScreenshotTests: XCTestCase {
         controller.setHovering(true)
         XCTAssertNil(controller.autoCloseDeadline)
 
+        // Stay paused long enough that resuming the remaining time would end measurably earlier
+        // than a full restart.
+        Thread.sleep(forTimeInterval: 0.3)
+        let leftAt = ProcessInfo.processInfo.systemUptime
         controller.setHovering(false)
         XCTAssertNotNil(controller.autoCloseDeadline)
-        XCTAssertGreaterThanOrEqual(controller.autoCloseDeadline ?? 0, deadline ?? .infinity)
+        XCTAssertGreaterThanOrEqual(controller.autoCloseDeadline ?? 0, leftAt + 5)
 
         controller.hide()
         XCTAssertNil(controller.autoCloseDeadline)
