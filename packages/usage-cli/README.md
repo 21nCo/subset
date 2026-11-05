@@ -78,4 +78,4 @@ From the repository root, `npm run build` builds `@subset.dev/usage-core`, the `
 
 ## Release
 
-Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes with the organization `NPM_TOKEN`. `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx @subset.dev/usage@<version> --version`, then a real `serve`) before listing it as available anywhere.
+Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes through the package's npm trusted publisher (OIDC); the organization `NPM_TOKEN` remains only as a fallback for a package's first release. `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx @subset.dev/usage@<version> --version`, then a real `serve`) before listing it as available anywhere.
