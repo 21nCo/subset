@@ -23,6 +23,8 @@ final class RegionCaptureController {
 
     private var panels: [NSPanel] = []
     private var completion: ((CGRect?) -> Void)?
+    /// Changes on every cancel, so a finished selection's delayed callback can tell it is stale.
+    private var selectionGeneration = 0
     private let screenCaptureService: ScreenCaptureService
 
     init(screenCaptureService: ScreenCaptureService) {
@@ -89,6 +91,7 @@ final class RegionCaptureController {
         panels.forEach { $0.orderOut(nil) }
         panels = []
         completion = nil
+        selectionGeneration &+= 1
     }
 
     private func finish(_ rect: CGRect?) {
@@ -96,7 +99,11 @@ final class RegionCaptureController {
         panels.forEach { $0.orderOut(nil) }
         panels = []
         completion = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        // A selection started in the meantime cancels this one, so its delayed result is dropped
+        // instead of capturing or recording under the new overlay.
+        let generation = selectionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, self.selectionGeneration == generation else { return }
             callback?(rect)
         }
     }
