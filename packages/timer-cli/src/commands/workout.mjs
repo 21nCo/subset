@@ -185,8 +185,8 @@ export function workoutSpec(workout) {
   return { spec, name: workout.name?.trim() };
 }
 
-// Strict UTF-8 that keeps a byte order mark, so malformed bytes are refused rather than replaced with U+FFFD.
-const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+// Strict UTF-8, so malformed bytes are refused rather than replaced with U+FFFD; one leading byte order mark is dropped.
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 /** How the CLI reads `--file -`: piped or redirected stdin, never an interactive terminal, which would wait silently for EOF. */
 export function stdinReader(stream) {

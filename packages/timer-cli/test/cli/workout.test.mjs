@@ -227,6 +227,37 @@ test('workout files and stdin keep UTF-8 labels whole, even split across reads',
   assert.deepEqual(saved.json().preset.timer.segments.map((segment) => segment.label), ['Café squats', 'Ćwiczenie']);
 });
 
+test('workout files and stdin may start with a UTF-8 byte order mark, as Windows editors write them', async (t) => {
+  const { run } = await cliDaemon(t);
+  const dir = workDir(t);
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const body = Buffer.concat([bom, Buffer.from(JSON.stringify({ name: 'Übungen', steps: [{ label: 'Café squats', duration: '40s' }] }))]);
+  const path = writeWorkout(dir, 'bom.json', body);
+  const labels = (definition) => [definition.name, ...definition.segments.map((segment) => segment.label)];
+
+  const fromFile = await run(['start', '--file', path, '--json']);
+  assert.equal(fromFile.code, 0, fromFile.stdout);
+  assert.deepEqual(labels(fromFile.json().timer.definition), ['Übungen', 'Café squats']);
+  // The mark arrives split across reads.
+  const fromStdin = await run(['start', '--file', '-', '--json'], { readStdin: stdinReader(Readable.from([body.subarray(0, 2), body.subarray(2)])) });
+  assert.equal(fromStdin.code, 0, fromStdin.stdout);
+  assert.deepEqual(labels(fromStdin.json().timer.definition), ['Übungen', 'Café squats']);
+
+  const savedFile = await run(['preset', 'save', 'Bom file', '--file', path, '--json']);
+  assert.equal(savedFile.code, 0, savedFile.stdout);
+  assert.deepEqual(savedFile.json().preset.timer.segments.map((segment) => segment.label), ['Café squats']);
+  const savedStdin = await run(['preset', 'save', 'Bom stdin', '--file', '-', '--json'], { readStdin: stdinReader(Readable.from([body])) });
+  assert.equal(savedStdin.code, 0, savedStdin.stdout);
+  assert.deepEqual(savedStdin.json().preset.timer.segments.map((segment) => segment.label), ['Café squats']);
+
+  // Only one mark is dropped, and malformed bytes after it are still refused.
+  for (const bytes of [Buffer.concat([bom, body]), Buffer.concat([bom, Buffer.from('{"steps": [{"label": "Caf\xe9", "duration": 10}]}', 'latin1')])]) {
+    const refused = await run(['start', '--file', writeWorkout(dir, 'bad-bom.json', bytes), '--json']);
+    assert.equal(refused.code, 2, refused.stdout);
+    assert.deepEqual(refused.json().error.issues.map((issue) => issue.path), ['(root)']);
+  }
+});
+
 test('the CLI reads a workout from its real stdin', (t) => {
   const dataDir = workDir(t);
   const cli = (input) => spawnSync(process.execPath, [join(PACKAGE_ROOT, 'src/cli.mjs'), 'start', '--file', '-', '--json'],
