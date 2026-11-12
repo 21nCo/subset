@@ -118,6 +118,18 @@ for (const name of ['@subset.dev/links', '@subset.dev/link-capture']) {
   assert.ok(isPublic(name), `${name} must be a published package`);
 }
 
+// `subset <tool>` (the subset.dev launcher) runs exactly the published CLIs: each tool names a public workspace and one
+// of its bins, and every public workspace with a bin (other than the launcher itself) is a tool.
+const { TOOLS: launcherTools } = await import(new URL('packages/subset-dev/src/tools.mjs', root));
+for (const [tool, { package: name, bin }] of Object.entries(launcherTools)) {
+  assert.ok(isPublic(name), `subset ${tool} runs ${name}, which is not a public workspace`);
+  assert.ok(Object.hasOwn(workspacesByName.get(name).bin ?? {}, bin), `subset ${tool} runs bin ${bin}, which ${name} does not declare`);
+}
+for (const manifest of publicPackages) {
+  if (manifest.bin === undefined || manifest.name === 'subset.dev') continue;
+  assert.ok(Object.values(launcherTools).some((tool) => tool.package === manifest.name), `${manifest.name} is a published CLI but not a subset.dev launcher tool`);
+}
+
 // Native targets reuse capability packages (for example by running their CLI); they do not carry a
 // second Node.js implementation with its own manifest or lockfile.
 const nativeRoot = new URL('native/', root);
