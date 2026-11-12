@@ -3,9 +3,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 import { HELP } from '../../src/commands/index.mjs';
-import { WORKOUT_FILE_LIMIT } from '../../src/commands/workout.mjs';
+import { WORKOUT_FILE_LIMIT, readStream, stdinReader } from '../../src/commands/workout.mjs';
 import { PACKAGE_ROOT, cliDaemon } from './helpers.mjs';
 
 process.env.TZ = 'UTC';
@@ -21,7 +22,7 @@ function workDir(t) {
 
 function writeWorkout(dir, name, body) {
   const path = join(dir, name);
-  writeFileSync(path, typeof body === 'string' ? body : JSON.stringify(body));
+  writeFileSync(path, typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   return path;
 }
 
@@ -170,9 +171,29 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
   const fifo = join(dir, 'fifo.json');
   execFileSync('mkfifo', [fifo]);
   refusals.push([['start', '--file', fifo], '--file', /fifo\.json is not a file\.$/]);
-  for (const [argv, path, message, io] of [...refusals,
+  // Bytes that are not UTF-8 (a Latin-1 "Café") are refused, not decoded with replacement characters.
+  const latin1 = Buffer.from('{"steps": [{"label": "Caf\xe9", "duration": 10}]}', 'latin1');
+  const latin1Path = writeWorkout(dir, 'latin1.json', latin1);
+  // A stdin that fails partway, as an interrupted read does.
+  const failing = () => readStream(new Readable({ read() {
+    this.push(Buffer.from('{"steps": ['));
+    this.destroy(Object.assign(new Error('read failed'), { code: 'EIO' }));
+  } }));
+  const stdinRefusals = [
     [['start', '--file', '-'], '--file', /stdin is larger than 1 MiB/, { readStdin: async () => 'x'.repeat(WORKOUT_FILE_LIMIT + 1) }],
-    [['preset', 'save', 'X', '--file', '-'], '(root)', /not valid JSON/, { readStdin: async () => 'steps: []' }]]) {
+    [['preset', 'save', 'X', '--file', '-'], '(root)', /not valid JSON/, { readStdin: async () => 'steps: []' }],
+    [['start', '--file', latin1Path], '(root)', /^Workout file: not valid UTF-8\.$/],
+    [['preset', 'save', 'X', '--file', latin1Path], '(root)', /^Workout file: not valid UTF-8\.$/],
+    [['start', '--file', '-'], '(root)', /not valid UTF-8/, { readStdin: stdinReader(Readable.from([latin1])) }],
+    [['preset', 'save', 'X', '--file', '-'], '(root)', /not valid UTF-8/, { readStdin: stdinReader(Readable.from([latin1])) }],
+    [['start', '--file', '-'], '--file', /cannot read stdin \(EIO\)/, { readStdin: failing }],
+    [['preset', 'save', 'X', '--file', '-'], '--file', /cannot read stdin \(EIO\)/, { readStdin: failing }],
+    [['start', '--file', '-'], '--file', /cannot read stdin \(closed\)/, { readStdin: async () => { throw 'closed'; } }],
+    // An interactive terminal would wait silently for end of input, so it is refused at once.
+    [['start', '--file', '-'], '--file', /--file - needs a workout piped to stdin, not a terminal/, { readStdin: stdinReader({ isTTY: true }) }],
+    [['preset', 'save', 'X', '--file', '-'], '--file', /--file - needs a workout piped to stdin, not a terminal/, { readStdin: stdinReader({ isTTY: true }) }]
+  ];
+  for (const [argv, path, message, io] of [...refusals, ...stdinRefusals]) {
     const result = await run([...argv, '--json'], io);
     assert.equal(result.code, 2, `${argv.join(' ')}: ${result.stdout}`);
     const { error } = result.json();
@@ -188,6 +209,22 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
 
   assert.equal((await client.timers()).body.structuredContent.timers.length, before + 1);
   assert.equal((await run(['presets', '--json'])).json().presets.filter((preset) => preset.name === 'X').length, 0);
+});
+
+test('workout files and stdin keep UTF-8 labels whole, even split across reads', async (t) => {
+  const { run } = await cliDaemon(t);
+  const dir = workDir(t);
+  const body = Buffer.from(JSON.stringify({ name: 'Übungen', steps: [{ label: 'Café squats', duration: '40s' }, { label: 'Ćwiczenie', duration: 20 }] }));
+  const started = await run(['start', '--file', writeWorkout(dir, 'utf8.json', body), '--json']);
+  assert.equal(started.code, 0, started.stdout);
+  const { definition } = started.json().timer;
+  assert.deepEqual([definition.name, ...definition.segments.map((segment) => segment.label)], ['Übungen', 'Café squats', 'Ćwiczenie']);
+
+  // The two bytes of "é" arrive in different chunks.
+  const at = body.indexOf(Buffer.from('é')) + 1;
+  const saved = await run(['preset', 'save', 'Cafe', '--file', '-', '--json'], { readStdin: stdinReader(Readable.from([body.subarray(0, at), body.subarray(at)])) });
+  assert.equal(saved.code, 0, saved.stdout);
+  assert.deepEqual(saved.json().preset.timer.segments.map((segment) => segment.label), ['Café squats', 'Ćwiczenie']);
 });
 
 test('the CLI reads a workout from its real stdin', (t) => {

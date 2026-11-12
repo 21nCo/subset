@@ -185,20 +185,37 @@ export function workoutSpec(workout) {
   return { spec, name: workout.name?.trim() };
 }
 
-async function readLimited(read) {
-  const text = await read();
-  if (Buffer.byteLength(text) > WORKOUT_FILE_LIMIT) {
+// Strict UTF-8 that keeps a byte order mark, so malformed bytes are refused rather than replaced with U+FFFD.
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** How the CLI reads `--file -`: piped or redirected stdin, never an interactive terminal, which would wait silently for EOF. */
+export function stdinReader(stream) {
+  return stream.isTTY ? undefined : () => readStream(stream);
+}
+
+async function readStdinBytes(readStdin) {
+  if (!readStdin) {
+    throw inputError('--file', '- needs a workout piped to stdin, not a terminal', '--file - needs a workout piped to stdin, not a terminal.');
+  }
+  let data;
+  try {
+    data = await readStdin();
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw inputError('--file', `cannot read stdin (${error?.code ?? error?.message ?? error})`);
+  }
+  const bytes = typeof data === 'string' ? Buffer.from(data) : data;
+  if (bytes.length > WORKOUT_FILE_LIMIT) {
     throw inputError('--file', 'the workout on stdin is larger than 1 MiB', 'The workout on stdin is larger than 1 MiB.');
   }
-  return text;
+  return bytes;
 }
 
 /** Reads and parses the workout `--file` names: a path (relative to `cwd`) or `-` for stdin. */
 export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {}) {
-  let text;
+  let bytes;
   if (file === '-') {
-    if (!readStdin) throw inputError('--file', '- needs a workout on stdin', '--file - needs a workout on stdin.');
-    text = await readLimited(readStdin);
+    bytes = await readStdinBytes(readStdin);
   } else {
     const path = resolve(cwd, file);
     let handle;
@@ -215,13 +232,19 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
         size += bytesRead;
         if (size > WORKOUT_FILE_LIMIT) throw inputError('--file', `${file} is larger than 1 MiB`);
       }
-      text = buffer.subarray(0, size).toString('utf8');
+      bytes = buffer.subarray(0, size);
     } catch (error) {
       if (error instanceof CliError) throw error;
       throw inputError('--file', `cannot read ${file} (${error.code ?? error.message})`);
     } finally {
       await handle?.close();
     }
+  }
+  let text;
+  try {
+    text = UTF8.decode(bytes);
+  } catch {
+    throw inputError('(root)', 'not valid UTF-8', 'Workout file: not valid UTF-8.');
   }
   try {
     return JSON.parse(text);
@@ -230,7 +253,7 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
   }
 }
 
-/** Reads all of `stream` (stdin) as UTF-8, stopping once it holds more than the workout limit. */
+/** Reads the bytes of `stream` (stdin), stopping once it holds more than the workout limit. */
 export async function readStream(stream) {
   const chunks = [];
   let size = 0;
@@ -239,5 +262,5 @@ export async function readStream(stream) {
     size += chunk.length;
     if (size > WORKOUT_FILE_LIMIT) break;
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
