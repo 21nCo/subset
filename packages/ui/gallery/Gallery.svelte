@@ -79,6 +79,8 @@
         <Menu icon={DotsThreeIcon} label="More actions">
           <MenuItem icon={ArrowCounterClockwiseIcon}>Reset</MenuItem>
           <MenuItem icon={TrashIcon} tone="danger">Remove</MenuItem>
+          <!-- aria-disabled: focusable but inert; if its handler ever ran, the dialog would open. -->
+          <MenuItem icon={SkipForwardIcon} aria-disabled="true" onclick={() => (dialogOpen = true)}>Skip (unavailable)</MenuItem>
         </Menu>
         <Button onclick={() => (dialogOpen = true)}>Open dialog</Button>
       </div>
