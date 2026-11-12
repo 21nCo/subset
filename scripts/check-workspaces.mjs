@@ -62,7 +62,7 @@ const bookmarksCore = workspaces.find((manifest) => manifest.name === '@subset.d
 assert.ok(bookmarksCore, 'Missing workspace @subset.dev/bookmarks-core');
 const bookmarksCoreDependencies = ['@datafn/core', '@subset.dev/links', '@superfunctions/db', 'entities'];
 assert.deepEqual(
-  Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort(),
+  Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort((a, b) => a.localeCompare(b)),
   bookmarksCoreDependencies,
   '@subset.dev/bookmarks-core may depend only on @datafn/core, @subset.dev/links, @superfunctions/db and entities'
 );
@@ -84,7 +84,7 @@ const linkCapture = workspaces.find((manifest) => manifest.name === '@subset.dev
 assert.ok(linkCapture, 'Missing workspace @subset.dev/link-capture');
 const linkCaptureDependencies = ['@extfn/core', '@subset.dev/links', 'svelte'];
 assert.deepEqual(
-  Object.keys({ ...linkCapture.dependencies, ...linkCapture.optionalDependencies, ...linkCapture.peerDependencies }).sort(),
+  Object.keys({ ...linkCapture.dependencies, ...linkCapture.optionalDependencies, ...linkCapture.peerDependencies }).sort((a, b) => a.localeCompare(b)),
   linkCaptureDependencies,
   '@subset.dev/link-capture may depend only on @extfn/core, @subset.dev/links and svelte'
 );
